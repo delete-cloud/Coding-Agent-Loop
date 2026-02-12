@@ -1,0 +1,11 @@
+# macOS
+.DS_Store
+
+# local agent metadata
+.agent/
+
+# reference-only directories/files (do not commit)
+eino-examples/
+eino-skills/
+opencode/
+nowledge_openai_agent_2026-02-12_2208.md

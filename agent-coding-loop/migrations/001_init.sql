@@ -1,0 +1,56 @@
+CREATE TABLE IF NOT EXISTS runs (
+  id TEXT PRIMARY KEY,
+  spec_json TEXT NOT NULL,
+  status TEXT NOT NULL,
+  branch TEXT NOT NULL DEFAULT '',
+  commit_hash TEXT NOT NULL DEFAULT '',
+  pr_url TEXT NOT NULL DEFAULT '',
+  summary TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS steps (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL,
+  iteration INTEGER NOT NULL,
+  agent TEXT NOT NULL,
+  decision TEXT NOT NULL,
+  status TEXT NOT NULL,
+  started_at INTEGER NOT NULL,
+  ended_at INTEGER NOT NULL,
+  FOREIGN KEY(run_id) REFERENCES runs(id)
+);
+
+CREATE TABLE IF NOT EXISTS tool_calls (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL,
+  iteration INTEGER NOT NULL,
+  tool TEXT NOT NULL,
+  input_text TEXT NOT NULL,
+  output_text TEXT NOT NULL,
+  status TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY(run_id) REFERENCES runs(id)
+);
+
+CREATE TABLE IF NOT EXISTS reviews (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL,
+  iteration INTEGER NOT NULL,
+  decision TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  findings_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY(run_id) REFERENCES runs(id)
+);
+
+CREATE TABLE IF NOT EXISTS artifacts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  path TEXT NOT NULL,
+  content TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY(run_id) REFERENCES runs(id)
+);
