@@ -1,3 +1,5 @@
+//go:build !eino
+
 package agent
 
 import (
@@ -5,10 +7,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/kina/agent-coding-loop/internal/skills"
+	"github.com/kina/agent-coding-loop/internal/tools"
 )
 
 type Coder struct {
 	client ClientConfig
+	runner *tools.Runner
+	skills *skills.Registry
 }
 
 type CoderInput struct {
@@ -28,8 +35,13 @@ type CoderOutput struct {
 	Notes    string   `json:"notes"`
 }
 
-func NewCoder(client ClientConfig) *Coder {
-	return &Coder{client: client}
+func NewCoder(client ClientConfig, opts ...Option) *Coder {
+	deps := applyOptions(opts)
+	return &Coder{
+		client: client,
+		runner: deps.runner,
+		skills: deps.skills,
+	}
 }
 
 func (c *Coder) Generate(ctx context.Context, in CoderInput) (CoderOutput, error) {

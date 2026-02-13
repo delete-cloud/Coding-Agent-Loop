@@ -1,3 +1,5 @@
+//go:build !eino
+
 package loop
 
 import (
@@ -204,6 +206,7 @@ func (e *Engine) run(ctx context.Context, spec model.RunSpec, existingRunID stri
 
 		reviewOut, err := e.reviewer.Review(ctx, agentpkg.ReviewInput{
 			Goal:          spec.Goal,
+			RepoRoot:      repoAbs,
 			Diff:          mustDiff(ctx, e.git, repoAbs),
 			CommandOutput: commandOutput.String(),
 			SkillsSummary: skillsSummary,

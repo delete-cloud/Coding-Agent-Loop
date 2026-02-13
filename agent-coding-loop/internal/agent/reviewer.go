@@ -1,3 +1,5 @@
+//go:build !eino
+
 package agent
 
 import (
@@ -7,14 +9,19 @@ import (
 	"strings"
 
 	"github.com/kina/agent-coding-loop/internal/model"
+	"github.com/kina/agent-coding-loop/internal/skills"
+	"github.com/kina/agent-coding-loop/internal/tools"
 )
 
 type Reviewer struct {
 	client ClientConfig
+	runner *tools.Runner
+	skills *skills.Registry
 }
 
 type ReviewInput struct {
 	Goal          string `json:"goal"`
+	RepoRoot      string `json:"repo_root"`
 	Diff          string `json:"diff"`
 	CommandOutput string `json:"command_output"`
 	SkillsSummary string `json:"skills_summary"`
@@ -27,8 +34,13 @@ type ReviewOutput struct {
 	Markdown string                `json:"review_markdown"`
 }
 
-func NewReviewer(client ClientConfig) *Reviewer {
-	return &Reviewer{client: client}
+func NewReviewer(client ClientConfig, opts ...Option) *Reviewer {
+	deps := applyOptions(opts)
+	return &Reviewer{
+		client: client,
+		runner: deps.runner,
+		skills: deps.skills,
+	}
 }
 
 func (r *Reviewer) Review(ctx context.Context, in ReviewInput) (ReviewOutput, error) {

@@ -49,12 +49,24 @@ go build ./cmd/agent-loop
 
 ## Eino Integration
 
-Default build uses a stdlib OpenAI-compatible client (`internal/agent/client.go`) for offline portability.
+Default build keeps the current non-Eino runtime for portability.
 
-An Eino-backed adapter is included behind build tag `eino`:
+Eino implementation is now available behind build tag `eino` for:
+
+- `Coder` orchestration (`internal/agent/coder_eino.go`)
+- `Reviewer` orchestration (`internal/agent/reviewer_eino.go`)
+- Agent tools (`internal/tools/eino_tools.go`) including:
+  - `repo_list`, `repo_read`, `repo_search`
+  - `git_diff`
+  - `run_command` (coder only)
+  - `list_skills`, `view_skill`
+- Loop engine orchestration (`internal/loop/engine_eino.go`) with:
+  - `compose.Graph` turn loop (`turn -> branch -> turn/finish/failed/blocked`)
+  - checkpoint wiring via `compose.WithCheckPointStore` + `compose.WithCheckPointID(runID)`
+
+Build and run with Eino:
 
 ```bash
+go get github.com/cloudwego/eino github.com/cloudwego/eino-ext/components/model/openai
 go build -tags eino ./cmd/agent-loop
 ```
-
-When using `-tags eino`, add Eino dependencies in `go.mod` and make sure your environment can download modules.

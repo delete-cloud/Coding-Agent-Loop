@@ -41,6 +41,7 @@ func New(cfg *config.Config) (*Service, error) {
 	}
 
 	runner := tools.NewRunner()
+	reviewerRunner := tools.NewRunner(tools.WithReadOnly(true))
 	store, err := sqlite.New(cfg.DBPath)
 	if err != nil {
 		return nil, err
@@ -63,8 +64,8 @@ func New(cfg *config.Config) (*Service, error) {
 		Runner:     runner,
 		Git:        gitpkg.NewClient(runner),
 		GitHub:     ghpkg.NewClient(runner),
-		Coder:      agentpkg.NewCoder(agentCfg),
-		Reviewer:   agentpkg.NewReviewer(agentCfg),
+		Coder:      agentpkg.NewCoder(agentCfg, agentpkg.WithRunner(runner), agentpkg.WithSkills(skillRegistry)),
+		Reviewer:   agentpkg.NewReviewer(agentCfg, agentpkg.WithRunner(reviewerRunner), agentpkg.WithSkills(skillRegistry)),
 		Skills:     skillRegistry,
 		Artifacts:  cfg.Artifacts,
 		DoomThresh: 3,
