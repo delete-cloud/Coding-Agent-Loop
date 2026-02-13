@@ -1,5 +1,3 @@
-//go:build eino
-
 package agent
 
 import (

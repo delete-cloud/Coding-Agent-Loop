@@ -1,5 +1,3 @@
-//go:build eino
-
 package loop
 
 import (

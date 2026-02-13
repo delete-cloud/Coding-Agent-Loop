@@ -49,9 +49,7 @@ go build ./cmd/agent-loop
 
 ## Eino Integration
 
-Default build keeps the current non-Eino runtime for portability.
-
-Eino implementation is now available behind build tag `eino` for:
+Default runtime uses Eino orchestration for:
 
 - `Coder` orchestration (`internal/agent/coder_eino.go`)
 - `Reviewer` orchestration (`internal/agent/reviewer_eino.go`)
@@ -64,9 +62,9 @@ Eino implementation is now available behind build tag `eino` for:
   - `compose.Graph` turn loop (`turn -> branch -> turn/finish/failed/blocked`)
   - checkpoint wiring via `compose.WithCheckPointStore` + `compose.WithCheckPointID(runID)`
 
-Build and run with Eino:
+Build and run:
 
 ```bash
 go get github.com/cloudwego/eino github.com/cloudwego/eino-ext/components/model/openai
-go build -tags eino ./cmd/agent-loop
+go build ./cmd/agent-loop
 ```
