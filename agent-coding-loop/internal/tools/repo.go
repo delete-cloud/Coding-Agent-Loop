@@ -9,6 +9,7 @@ import (
 )
 
 func RepoList(repoRoot, rel string) ([]string, error) {
+	rel = normalizeRelPath(rel)
 	base, err := securePath(repoRoot, rel)
 	if err != nil {
 		return nil, err
@@ -40,6 +41,7 @@ func RepoList(repoRoot, rel string) ([]string, error) {
 }
 
 func RepoRead(repoRoot, rel string, maxBytes int) (string, error) {
+	rel = normalizeRelPath(rel)
 	path, err := securePath(repoRoot, rel)
 	if err != nil {
 		return "", err
@@ -85,8 +87,19 @@ func securePath(repoRoot, rel string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if !strings.HasPrefix(clean, root) {
+	if clean != root && !strings.HasPrefix(clean, root+string(os.PathSeparator)) {
 		return "", fmt.Errorf("path escapes repo root")
 	}
 	return clean, nil
+}
+
+func normalizeRelPath(rel string) string {
+	rel = strings.TrimSpace(rel)
+	if rel == "" {
+		return "."
+	}
+	for strings.HasPrefix(rel, string(os.PathSeparator)) {
+		rel = strings.TrimPrefix(rel, string(os.PathSeparator))
+	}
+	return filepath.Clean(rel)
 }

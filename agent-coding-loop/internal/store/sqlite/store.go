@@ -160,6 +160,7 @@ func (s *Store) CreateRun(ctx context.Context, spec model.RunSpec, status model.
 
 func (s *Store) UpdateRunStatus(ctx context.Context, runID string, status model.RunStatus, summary string) error {
 	now := time.Now().UnixMilli()
+	summary = sanitizeInline(summary)
 	sql := fmt.Sprintf("UPDATE runs SET status=%s, summary=%s, updated_at=%d WHERE id=%s;", q(string(status)), q(summary), now, q(runID))
 	_, _, err := s.run(ctx, sql)
 	return err
@@ -184,6 +185,9 @@ func (s *Store) GetRun(ctx context.Context, runID string) (RunRecord, error) {
 		return RunRecord{}, fmt.Errorf("run not found: %s", runID)
 	}
 	r := rows[0]
+	if len(r) < 9 {
+		return RunRecord{}, fmt.Errorf("run row parse failed: expected 9 columns, got %d", len(r))
+	}
 	return RunRecord{
 		ID:         r[0],
 		SpecJSON:   r[1],
@@ -195,6 +199,13 @@ func (s *Store) GetRun(ctx context.Context, runID string) (RunRecord, error) {
 		CreatedAt:  parseInt64(r[7]),
 		UpdatedAt:  parseInt64(r[8]),
 	}, nil
+}
+
+func sanitizeInline(s string) string {
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\x1f", " ")
+	return strings.TrimSpace(s)
 }
 
 func (s *Store) InsertStep(ctx context.Context, rec StepRecord) error {
@@ -269,6 +280,17 @@ func (s *Store) GetRunEvents(ctx context.Context, runID string) ([]Event, error)
 
 func (s *Store) CountSteps(ctx context.Context, runID string) (int, error) {
 	rows, err := s.query(ctx, "SELECT COUNT(1) FROM steps WHERE run_id="+q(runID)+";")
+	if err != nil {
+		return 0, err
+	}
+	if len(rows) == 0 || len(rows[0]) == 0 {
+		return 0, nil
+	}
+	return int(parseInt64(rows[0][0])), nil
+}
+
+func (s *Store) MaxStepIteration(ctx context.Context, runID string) (int, error) {
+	rows, err := s.query(ctx, "SELECT MAX(iteration) FROM steps WHERE run_id="+q(runID)+";")
 	if err != nil {
 		return 0, err
 	}

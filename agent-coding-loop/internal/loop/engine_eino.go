@@ -2,8 +2,12 @@ package loop
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,7 +67,6 @@ type loopSession struct {
 	PreviousReview string
 	CommandOutput  string
 	Iteration      int
-	Offset         int
 
 	DoomLastTool  string
 	DoomLastInput string
@@ -106,6 +109,56 @@ func (m *memoryCheckpointStore) Set(_ context.Context, checkPointID string, chec
 	return nil
 }
 
+type fileCheckpointStore struct {
+	mu  sync.RWMutex
+	dir string
+}
+
+func newFileCheckpointStore(dir string) *fileCheckpointStore {
+	return &fileCheckpointStore{dir: dir}
+}
+
+func (f *fileCheckpointStore) Get(_ context.Context, checkPointID string) ([]byte, bool, error) {
+	path := f.pathForID(checkPointID)
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) || errors.Is(err, fs.ErrNotExist) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	out := make([]byte, len(b))
+	copy(out, b)
+	return out, true, nil
+}
+
+func (f *fileCheckpointStore) Set(_ context.Context, checkPointID string, checkPoint []byte) error {
+	path := f.pathForID(checkPointID)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp := path + fmt.Sprintf(".tmp.%d", time.Now().UnixNano())
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := os.WriteFile(tmp, checkPoint, 0o644); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+func (f *fileCheckpointStore) pathForID(checkPointID string) string {
+	sum := sha256.Sum256([]byte(checkPointID))
+	name := hex.EncodeToString(sum[:])
+	return filepath.Join(f.dir, name+".bin")
+}
+
 func NewEngine(deps EngineDeps) *Engine {
 	threshold := deps.DoomThresh
 	if threshold < 1 {
@@ -113,6 +166,11 @@ func NewEngine(deps EngineDeps) *Engine {
 	}
 	if deps.Artifacts == "" {
 		deps.Artifacts = ".agent-loop-artifacts"
+	}
+	checkpoints := compose.CheckPointStore(newMemoryCheckpointStore())
+	checkpointDir := filepath.Join(deps.Artifacts, "checkpoints")
+	if err := os.MkdirAll(checkpointDir, 0o755); err == nil {
+		checkpoints = newFileCheckpointStore(checkpointDir)
 	}
 	return &Engine{
 		store:       deps.Store,
@@ -124,7 +182,7 @@ func NewEngine(deps EngineDeps) *Engine {
 		skills:      deps.Skills,
 		artifacts:   deps.Artifacts,
 		doomThresh:  threshold,
-		checkpoints: newMemoryCheckpointStore(),
+		checkpoints: checkpoints,
 	}
 }
 
@@ -200,7 +258,7 @@ func (e *Engine) run(ctx context.Context, spec model.RunSpec, existingRunID stri
 		_ = e.git.CheckoutBranch(ctx, repoAbs, branch)
 	}
 
-	offset, _ := e.store.CountSteps(ctx, runID)
+	lastIteration, _ := e.store.MaxStepIteration(ctx, runID)
 	flowInput := &loopSession{
 		RunID:          runID,
 		Spec:           spec,
@@ -209,7 +267,7 @@ func (e *Engine) run(ctx context.Context, spec model.RunSpec, existingRunID stri
 		BaselineStatus: baselineStatus,
 		Commands:       commands,
 		SkillsSummary:  e.renderSkillsSummary(),
-		Offset:         offset,
+		Iteration:      lastIteration,
 		Status:         model.RunStatusRunning,
 	}
 
@@ -291,7 +349,7 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 	}
 
 	st.Iteration++
-	iteration := st.Offset + st.Iteration
+	iteration := st.Iteration
 	started := time.Now().UnixMilli()
 
 	coderIn := agentpkg.CoderInput{
@@ -305,9 +363,27 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 	}
 	coderOut, err := e.coder.Generate(ctx, coderIn)
 	if err != nil {
+		_ = e.store.InsertToolCall(ctx, sqlite.ToolCallRecord{
+			RunID:     st.RunID,
+			Iteration: iteration,
+			Tool:      "coder_generate",
+			Input:     truncateString(st.Spec.Goal, 500),
+			Output:    truncateString(err.Error(), 4000),
+			Status:    "error",
+			CreatedAt: time.Now().UnixMilli(),
+		})
+		_ = e.store.InsertStep(ctx, sqlite.StepRecord{
+			RunID:     st.RunID,
+			Iteration: iteration,
+			Agent:     "coder",
+			Decision:  string(model.LoopDecisionAbort),
+			Status:    string(model.RunStatusFailed),
+			StartedAt: started,
+			EndedAt:   time.Now().UnixMilli(),
+		})
 		st.Decision = model.LoopDecisionAbort
 		st.Status = model.RunStatusFailed
-		st.Summary = "coder failed"
+		st.Summary = truncateString("coder failed: "+err.Error(), 500)
 		_ = e.store.UpdateRunStatus(ctx, st.RunID, model.RunStatusFailed, st.Summary)
 		return st, nil
 	}
@@ -355,6 +431,7 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 	}
 
 	cmds := coderOut.Commands
+	cmds = sanitizeShellCommands(cmds)
 	if len(cmds) == 0 {
 		cmds = mergeCommands(st.Commands)
 	}
@@ -398,9 +475,27 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 		SkillsSummary: st.SkillsSummary,
 	})
 	if err != nil {
+		_ = e.store.InsertToolCall(ctx, sqlite.ToolCallRecord{
+			RunID:     st.RunID,
+			Iteration: iteration,
+			Tool:      "reviewer_review",
+			Input:     truncateString(st.Spec.Goal, 500),
+			Output:    truncateString(err.Error(), 4000),
+			Status:    "error",
+			CreatedAt: time.Now().UnixMilli(),
+		})
+		_ = e.store.InsertStep(ctx, sqlite.StepRecord{
+			RunID:     st.RunID,
+			Iteration: iteration,
+			Agent:     "reviewer",
+			Decision:  string(model.LoopDecisionAbort),
+			Status:    string(model.RunStatusFailed),
+			StartedAt: started,
+			EndedAt:   time.Now().UnixMilli(),
+		})
 		st.Decision = model.LoopDecisionAbort
 		st.Status = model.RunStatusFailed
-		st.Summary = "reviewer failed"
+		st.Summary = truncateString("reviewer failed: "+err.Error(), 500)
 		_ = e.store.UpdateRunStatus(ctx, st.RunID, model.RunStatusFailed, st.Summary)
 		return st, nil
 	}
@@ -568,16 +663,6 @@ func (e *Engine) finishRun(ctx context.Context, runID, repo, branch string, requ
 		_ = e.store.UpdateRunStatus(ctx, runID, model.RunStatusFailed, "git status failed")
 		return model.RunResult{RunID: runID, Status: model.RunStatusFailed}, err
 	}
-	commitHash := ""
-	paths := statusDeltaPaths(baselineStatus, status)
-	if len(paths) > 0 {
-		commitHash, err = e.git.CommitPaths(ctx, repo, paths, "feat: agent loop generated update")
-		if err != nil {
-			_ = e.store.UpdateRunStatus(ctx, runID, model.RunStatusFailed, "git commit failed")
-			return model.RunResult{RunID: runID, Status: model.RunStatusFailed}, err
-		}
-	}
-
 	remoteURL, _ := e.git.RemoteURL(ctx, repo)
 	effectiveMode := e.github.ResolvePRMode(ctx, requestedPRMode, remoteURL)
 	prURL := ""
@@ -586,6 +671,16 @@ func (e *Engine) finishRun(ctx context.Context, runID, repo, branch string, requ
 	reviewMD := review.Markdown
 	if strings.TrimSpace(reviewMD) == "" {
 		reviewMD = review.Summary
+	}
+
+	commitHash := ""
+	paths := statusDeltaPaths(baselineStatus, status)
+	if effectiveMode == model.PRModeLive && len(paths) > 0 {
+		commitHash, err = e.git.CommitPaths(ctx, repo, paths, "feat: agent loop generated update")
+		if err != nil {
+			_ = e.store.UpdateRunStatus(ctx, runID, model.RunStatusFailed, "git commit failed")
+			return model.RunResult{RunID: runID, Status: model.RunStatusFailed}, err
+		}
 	}
 	if effectiveMode == model.PRModeLive && strings.TrimSpace(commitHash) != "" {
 		if err := e.git.Push(ctx, repo, branch); err != nil {
@@ -606,6 +701,10 @@ func (e *Engine) finishRun(ctx context.Context, runID, repo, branch string, requ
 		artifactsDir, err = ghpkg.WriteDryRunArtifacts(repo, runID, "feat: agent loop run "+runID, "Automated by agent-loop", reviewMD)
 		if err != nil {
 			return model.RunResult{RunID: runID, Status: model.RunStatusFailed}, err
+		}
+		diff, _ := e.git.Diff(ctx, repo)
+		if strings.TrimSpace(diff) != "" {
+			_ = os.WriteFile(filepath.Join(artifactsDir, "diff.patch"), []byte(diff), 0o644)
 		}
 		_ = e.store.InsertArtifact(ctx, sqlite.ArtifactRecord{RunID: runID, Kind: "pr_dry_run", Path: artifactsDir, Content: reviewMD, CreatedAt: time.Now().UnixMilli()})
 	}
@@ -644,6 +743,42 @@ func mergeCommands(set model.CommandSet) []string {
 	out = append(out, set.Test...)
 	out = append(out, set.Lint...)
 	out = append(out, set.Build...)
+	return out
+}
+
+func sanitizeShellCommands(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	toolNames := map[string]struct{}{
+		"repo_list":   {},
+		"repo_read":   {},
+		"repo_search": {},
+		"git_diff":    {},
+		"list_skills": {},
+		"view_skill":  {},
+		"run_command": {},
+	}
+	out := make([]string, 0, len(in))
+	seen := make(map[string]struct{})
+	for _, raw := range in {
+		cmd := strings.TrimSpace(raw)
+		if cmd == "" {
+			continue
+		}
+		fields := strings.Fields(cmd)
+		if len(fields) == 0 {
+			continue
+		}
+		if _, ok := toolNames[strings.ToLower(fields[0])]; ok {
+			continue
+		}
+		if _, ok := seen[cmd]; ok {
+			continue
+		}
+		seen[cmd] = struct{}{}
+		out = append(out, cmd)
+	}
 	return out
 }
 
@@ -697,4 +832,12 @@ func statusLinePath(line string) string {
 		return strings.TrimSpace(items[len(items)-1])
 	}
 	return part
+}
+
+func truncateString(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if max < 1 || len(s) <= max {
+		return s
+	}
+	return s[:max]
 }

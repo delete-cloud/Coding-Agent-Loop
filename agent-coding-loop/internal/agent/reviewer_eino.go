@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/flow/agent/react"
 	"github.com/cloudwego/eino/schema"
@@ -81,11 +80,7 @@ func fallbackReview(in ReviewInput) ReviewOutput {
 }
 
 func (r *Reviewer) reviewWithEino(ctx context.Context, in ReviewInput) (ReviewOutput, error) {
-	chatModel, err := openai.NewChatModel(ctx, &openai.ChatModelConfig{
-		BaseURL: r.client.BaseURL,
-		Model:   r.client.Model,
-		APIKey:  r.client.APIKey,
-	})
+	chatModel, err := r.client.newToolCallingModel(ctx)
 	if err != nil {
 		return ReviewOutput{}, err
 	}
@@ -127,7 +122,8 @@ func (r *Reviewer) reviewWithEino(ctx context.Context, in ReviewInput) (ReviewOu
 	if msg != nil {
 		content = msg.Content
 	}
-	if err := json.Unmarshal([]byte(extractJSON(content)), &out); err != nil {
+	out, err = decodeReviewOutput(content)
+	if err != nil {
 		return ReviewOutput{}, fmt.Errorf("parse reviewer json failed: %w; content=%s", err, content)
 	}
 	normalizeReviewOutput(&out)
@@ -136,11 +132,65 @@ func (r *Reviewer) reviewWithEino(ctx context.Context, in ReviewInput) (ReviewOu
 
 func (r *Reviewer) reviewWithClient(ctx context.Context, in ReviewInput) (ReviewOutput, error) {
 	system, user := reviewerPrompts(in)
-	var out ReviewOutput
-	if err := r.client.CompleteJSON(ctx, system, user, &out); err != nil {
+	var wire any
+	if err := r.client.CompleteJSON(ctx, system, user, &wire); err != nil {
+		return ReviewOutput{}, err
+	}
+	b, _ := json.Marshal(wire)
+	out, err := decodeReviewOutput(string(b))
+	if err != nil {
 		return ReviewOutput{}, err
 	}
 	normalizeReviewOutput(&out)
+	return out, nil
+}
+
+func decodeReviewOutput(content string) (ReviewOutput, error) {
+	raw := extractJSON(content)
+	var m map[string]any
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		var out ReviewOutput
+		if err2 := json.Unmarshal([]byte(raw), &out); err2 == nil {
+			return out, nil
+		}
+		return ReviewOutput{}, err
+	}
+	out := ReviewOutput{}
+	if v, ok := m["decision"].(string); ok {
+		out.Decision = v
+	}
+	if v, ok := m["summary"].(string); ok {
+		out.Summary = v
+	}
+	if v, ok := m["review_markdown"].(string); ok {
+		out.Markdown = v
+	} else if v, ok := m["markdown"].(string); ok {
+		out.Markdown = v
+	}
+	if f, ok := m["findings"]; ok {
+		b, _ := json.Marshal(f)
+		var items []model.ReviewFinding
+		if err := json.Unmarshal(b, &items); err == nil {
+			out.Findings = items
+		} else {
+			var s string
+			if err2 := json.Unmarshal(b, &s); err2 == nil && strings.TrimSpace(s) != "" {
+				out.Findings = []model.ReviewFinding{{Severity: "high", File: "", Line: 0, Message: s}}
+			} else {
+				var ss []string
+				if err3 := json.Unmarshal(b, &ss); err3 == nil && len(ss) > 0 {
+					out.Findings = make([]model.ReviewFinding, 0, len(ss))
+					for _, it := range ss {
+						it = strings.TrimSpace(it)
+						if it == "" {
+							continue
+						}
+						out.Findings = append(out.Findings, model.ReviewFinding{Severity: "high", File: "", Line: 0, Message: it})
+					}
+				}
+			}
+		}
+	}
 	return out, nil
 }
 
