@@ -3,6 +3,7 @@
 
 # local agent metadata
 .agent/
+.worktrees/
 
 # reference-only directories/files (do not commit)
 eino-examples/
