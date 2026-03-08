@@ -1,0 +1,2 @@
+{"question_id":"qa1","answer":"Go supports goroutines","citations":["doc_retry","doc_api"],"is_faithful":true}
+{"question_id":"qa2","answer":"LanceDB supports vector and keyword search","citations":["doc_lancedb"],"is_faithful":true}

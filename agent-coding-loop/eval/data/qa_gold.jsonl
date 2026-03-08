@@ -1,0 +1,2 @@
+{"question_id":"qa1","answers":["Go supports goroutines"],"required_citations":["doc_api","doc_retry"]}
+{"question_id":"qa2","answers":["LanceDB supports hybrid search"],"required_citations":["doc_lancedb"]}

@@ -11,3 +11,10 @@ eino-skills/
 opencode/
 nowledge_openai_agent_2026-02-12_2208.md
 .agent-loop-artifacts/
+
+# local build outputs under agent-coding-loop
+agent-coding-loop/agent-loop
+agent-coding-loop/.agent-loop-last.patch
+agent-coding-loop/eval/reports/
+agent-coding-loop/eval/**/__pycache__/
+agent-coding-loop/kb/__pycache__/
