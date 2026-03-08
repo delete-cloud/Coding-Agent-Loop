@@ -10,6 +10,7 @@ import (
 
 	einotool "github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
+	"github.com/kina/agent-coding-loop/internal/kb"
 	"github.com/kina/agent-coding-loop/internal/skills"
 )
 
@@ -40,12 +41,19 @@ type viewSkillArgs struct {
 	TOC     bool   `json:"toc,omitempty"`
 }
 
-func BuildCoderTools(repoRoot string, reg *skills.Registry, runner *Runner) ([]einotool.BaseTool, error) {
+type kbSearchArgs struct {
+	Query     string `json:"query"`
+	TopK      int    `json:"top_k,omitempty"`
+	QueryType string `json:"query_type,omitempty"`
+	Where     string `json:"where,omitempty"`
+}
+
+func BuildCoderTools(repoRoot string, reg *skills.Registry, runner *Runner, kbClient *kb.Client) ([]einotool.BaseTool, error) {
 	repoRoot = normalizeRepoRoot(repoRoot)
 	if runner == nil {
 		runner = NewRunner()
 	}
-	common, err := buildReadOnlyTools(repoRoot, reg, runner)
+	common, err := buildReadOnlyTools(repoRoot, reg, runner, kbClient)
 	if err != nil {
 		return nil, err
 	}
@@ -77,15 +85,15 @@ func BuildCoderTools(repoRoot string, reg *skills.Registry, runner *Runner) ([]e
 	return append(common, runCommand), nil
 }
 
-func BuildReviewerTools(repoRoot string, reg *skills.Registry, runner *Runner) ([]einotool.BaseTool, error) {
+func BuildReviewerTools(repoRoot string, reg *skills.Registry, runner *Runner, kbClient *kb.Client) ([]einotool.BaseTool, error) {
 	repoRoot = normalizeRepoRoot(repoRoot)
 	if runner == nil {
 		runner = NewRunner(WithReadOnly(true))
 	}
-	return buildReadOnlyTools(repoRoot, reg, runner)
+	return buildReadOnlyTools(repoRoot, reg, runner, kbClient)
 }
 
-func buildReadOnlyTools(repoRoot string, reg *skills.Registry, runner *Runner) ([]einotool.BaseTool, error) {
+func buildReadOnlyTools(repoRoot string, reg *skills.Registry, runner *Runner, kbClient *kb.Client) ([]einotool.BaseTool, error) {
 	repoList, err := utils.InferTool(
 		"repo_list",
 		"List files under repository path. path is relative to repo root.",
@@ -124,9 +132,16 @@ func buildReadOnlyTools(repoRoot string, reg *skills.Registry, runner *Runner) (
 		"repo_search",
 		"Search files in repository containing the query string.",
 		func(_ context.Context, input searchArgs) (string, error) {
-			matches, err := RepoSearch(repoRoot, input.Query)
+			q := strings.TrimSpace(input.Query)
+			if q == "" {
+				return "query is required; provide a non-empty string for repo_search (e.g. \"WithCheckPointID\").", nil
+			}
+			matches, err := RepoSearch(repoRoot, q)
 			if err != nil {
 				return "", err
+			}
+			if len(matches) == 0 {
+				return "no matches", nil
 			}
 			return strings.Join(matches, "\n"), nil
 		},
@@ -190,11 +205,66 @@ func buildReadOnlyTools(repoRoot string, reg *skills.Registry, runner *Runner) (
 		return nil, err
 	}
 
+	kbSearch, err := utils.InferTool(
+		"kb_search",
+		"Search external knowledge base (LanceDB sidecar) for relevant context. Returns cited chunks with path and offsets.",
+		func(ctx context.Context, input kbSearchArgs) (string, error) {
+			q := strings.TrimSpace(input.Query)
+			if q == "" {
+				return "query is required; provide a short topic or question for kb_search (e.g. \"rag pipeline glossary\").", nil
+			}
+			if kbClient == nil || strings.TrimSpace(kbClient.BaseURL) == "" {
+				return "kb is not configured. Start kb/server.py and set AGENT_LOOP_KB_URL or use default http://127.0.0.1:8788.", nil
+			}
+			topK := input.TopK
+			if topK <= 0 {
+				topK = 8
+			}
+			resp, err := kbClient.Search(ctx, kb.SearchRequest{
+				Query:     q,
+				TopK:      topK,
+				QueryType: strings.TrimSpace(input.QueryType),
+				Where:     strings.TrimSpace(input.Where),
+			})
+			if err != nil {
+				return "", err
+			}
+			if len(resp.Hits) == 0 {
+				return "no hits", nil
+			}
+			var b strings.Builder
+			for i, h := range resp.Hits {
+				if i >= topK {
+					break
+				}
+				score := ""
+				if h.Score != nil {
+					score = fmt.Sprintf(" score=%.6f", *h.Score)
+				}
+				ref := strings.TrimSpace(h.Path)
+				if strings.TrimSpace(h.Heading) != "" {
+					ref = ref + "#" + strings.TrimSpace(h.Heading)
+				}
+				b.WriteString(fmt.Sprintf("[%d] %s (%d-%d)%s\n", i+1, ref, h.Start, h.End, score))
+				txt := strings.TrimSpace(h.Text)
+				if len(txt) > 1200 {
+					txt = txt[:1200]
+				}
+				b.WriteString(txt + "\n\n")
+			}
+			return strings.TrimSpace(b.String()), nil
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	return []einotool.BaseTool{
 		repoList,
 		repoRead,
 		repoSearch,
 		gitDiff,
+		kbSearch,
 		listSkillTool,
 		viewSkillTool,
 	}, nil

@@ -9,7 +9,7 @@ import (
 )
 
 func TestBuildCoderToolsIncludesRunCommand(t *testing.T) {
-	got, err := BuildCoderTools(t.TempDir(), nil, NewRunner())
+	got, err := BuildCoderTools(t.TempDir(), nil, NewRunner(), nil)
 	if err != nil {
 		t.Fatalf("BuildCoderTools: %v", err)
 	}
@@ -20,7 +20,7 @@ func TestBuildCoderToolsIncludesRunCommand(t *testing.T) {
 }
 
 func TestBuildReviewerToolsReadOnlySurface(t *testing.T) {
-	got, err := BuildReviewerTools(t.TempDir(), nil, NewRunner())
+	got, err := BuildReviewerTools(t.TempDir(), nil, NewRunner(), nil)
 	if err != nil {
 		t.Fatalf("BuildReviewerTools: %v", err)
 	}
@@ -54,4 +54,70 @@ func containsName(items []string, name string) bool {
 		}
 	}
 	return false
+}
+
+func TestKBSearchEmptyQueryDoesNotHardFail(t *testing.T) {
+	got, err := BuildReviewerTools(t.TempDir(), nil, NewRunner(), nil)
+	if err != nil {
+		t.Fatalf("BuildReviewerTools: %v", err)
+	}
+	var kbTool tool.InvokableTool
+	for _, item := range got {
+		info, infoErr := item.Info(context.Background())
+		if infoErr != nil || info == nil {
+			continue
+		}
+		if info.Name != "kb_search" {
+			continue
+		}
+		inv, ok := item.(tool.InvokableTool)
+		if !ok {
+			t.Fatalf("kb_search is not invokable")
+		}
+		kbTool = inv
+		break
+	}
+	if kbTool == nil {
+		t.Fatalf("kb_search not found")
+	}
+	out, err := kbTool.InvokableRun(context.Background(), `{"query":""}`)
+	if err != nil {
+		t.Fatalf("kb_search empty query should not return error: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(out), "query") {
+		t.Fatalf("expected guidance in output, got %q", out)
+	}
+}
+
+func TestRepoSearchEmptyQueryDoesNotHardFail(t *testing.T) {
+	got, err := BuildReviewerTools(t.TempDir(), nil, NewRunner(), nil)
+	if err != nil {
+		t.Fatalf("BuildReviewerTools: %v", err)
+	}
+	var repoSearchTool tool.InvokableTool
+	for _, item := range got {
+		info, infoErr := item.Info(context.Background())
+		if infoErr != nil || info == nil {
+			continue
+		}
+		if info.Name != "repo_search" {
+			continue
+		}
+		inv, ok := item.(tool.InvokableTool)
+		if !ok {
+			t.Fatalf("repo_search is not invokable")
+		}
+		repoSearchTool = inv
+		break
+	}
+	if repoSearchTool == nil {
+		t.Fatalf("repo_search not found")
+	}
+	out, err := repoSearchTool.InvokableRun(context.Background(), `{"query":""}`)
+	if err != nil {
+		t.Fatalf("repo_search empty query should not return error: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(out), "query") {
+		t.Fatalf("expected guidance in output, got %q", out)
+	}
 }

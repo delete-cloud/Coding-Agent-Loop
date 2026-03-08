@@ -12,6 +12,7 @@ import (
 	"github.com/kina/agent-coding-loop/internal/config"
 	gitpkg "github.com/kina/agent-coding-loop/internal/git"
 	ghpkg "github.com/kina/agent-coding-loop/internal/github"
+	"github.com/kina/agent-coding-loop/internal/kb"
 	"github.com/kina/agent-coding-loop/internal/loop"
 	"github.com/kina/agent-coding-loop/internal/model"
 	"github.com/kina/agent-coding-loop/internal/skills"
@@ -59,13 +60,15 @@ func New(cfg *config.Config) (*Service, error) {
 		Model:   cfg.Model.Model,
 		APIKey:  cfg.Model.APIKey,
 	}
+	kbClient := kb.NewClient(cfg.KB.BaseURL)
 	engine := loop.NewEngine(loop.EngineDeps{
 		Store:      store,
 		Runner:     runner,
 		Git:        gitpkg.NewClient(runner),
 		GitHub:     ghpkg.NewClient(runner),
-		Coder:      agentpkg.NewCoder(agentCfg, agentpkg.WithRunner(runner), agentpkg.WithSkills(skillRegistry)),
-		Reviewer:   agentpkg.NewReviewer(agentCfg, agentpkg.WithRunner(reviewerRunner), agentpkg.WithSkills(skillRegistry)),
+		KB:         kbClient,
+		Coder:      agentpkg.NewCoder(agentCfg, agentpkg.WithRunner(runner), agentpkg.WithSkills(skillRegistry), agentpkg.WithKB(kbClient)),
+		Reviewer:   agentpkg.NewReviewer(agentCfg, agentpkg.WithRunner(reviewerRunner), agentpkg.WithSkills(skillRegistry), agentpkg.WithKB(kbClient)),
 		Skills:     skillRegistry,
 		Artifacts:  cfg.Artifacts,
 		DoomThresh: 3,

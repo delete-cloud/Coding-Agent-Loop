@@ -10,6 +10,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +21,7 @@ import (
 	agentpkg "github.com/kina/agent-coding-loop/internal/agent"
 	gitpkg "github.com/kina/agent-coding-loop/internal/git"
 	ghpkg "github.com/kina/agent-coding-loop/internal/github"
+	kbpkg "github.com/kina/agent-coding-loop/internal/kb"
 	"github.com/kina/agent-coding-loop/internal/model"
 	"github.com/kina/agent-coding-loop/internal/skills"
 	sqlite "github.com/kina/agent-coding-loop/internal/store/sqlite"
@@ -35,6 +38,7 @@ type EngineDeps struct {
 	Runner     *tools.Runner
 	Git        *gitpkg.Client
 	GitHub     *ghpkg.Client
+	KB         *kbpkg.Client
 	Coder      *agentpkg.Coder
 	Reviewer   *agentpkg.Reviewer
 	Skills     *skills.Registry
@@ -47,6 +51,7 @@ type Engine struct {
 	runner     *tools.Runner
 	git        *gitpkg.Client
 	github     *ghpkg.Client
+	kb         *kbpkg.Client
 	coder      *agentpkg.Coder
 	reviewer   *agentpkg.Reviewer
 	skills     *skills.Registry
@@ -67,6 +72,10 @@ type loopSession struct {
 	PreviousReview string
 	CommandOutput  string
 	Iteration      int
+	KBPrefetched   bool
+	KBSearchCalls  int
+	RetrievedHits  []kbpkg.SearchHit
+	RetrievedQuery string
 
 	DoomLastTool  string
 	DoomLastInput string
@@ -78,6 +87,14 @@ type loopSession struct {
 	Review   agentpkg.ReviewOutput
 	Result   model.RunResult
 }
+
+const (
+	promptRetrievedContextMaxHits = 4
+	promptRetrievedTextMaxChars   = 500
+	coderRefreshReviewMaxChars    = 160
+)
+
+var goalPathHintRE = regexp.MustCompile(`[A-Za-z0-9_./\-]+\.[A-Za-z0-9_+-]+`)
 
 type memoryCheckpointStore struct {
 	mu   sync.RWMutex
@@ -177,6 +194,7 @@ func NewEngine(deps EngineDeps) *Engine {
 		runner:      deps.Runner,
 		git:         deps.Git,
 		github:      deps.GitHub,
+		kb:          deps.KB,
 		coder:       deps.Coder,
 		reviewer:    deps.Reviewer,
 		skills:      deps.Skills,
@@ -351,15 +369,12 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 	st.Iteration++
 	iteration := st.Iteration
 	started := time.Now().UnixMilli()
+	e.maybePreflightKBSearch(ctx, st, iteration)
 
-	coderIn := agentpkg.CoderInput{
-		Goal:           st.Spec.Goal,
-		RepoSummary:    st.RepoAbs,
-		PreviousReview: st.PreviousReview,
-		Diff:           mustDiff(ctx, e.git, st.RepoAbs),
-		TestOutput:     st.CommandOutput,
-		Commands:       mergeCommands(st.Commands),
-		SkillsSummary:  st.SkillsSummary,
+	currentDiff := mustDiff(ctx, e.git, st.RepoAbs)
+	coderIn := buildCoderInput(st, currentDiff)
+	if refreshedIn, refreshed := e.maybeRefreshCoderContext(ctx, st, iteration, coderIn); refreshed {
+		coderIn = refreshedIn
 	}
 	coderOut, err := e.coder.Generate(ctx, coderIn)
 	if err != nil {
@@ -387,6 +402,20 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 		_ = e.store.UpdateRunStatus(ctx, st.RunID, model.RunStatusFailed, st.Summary)
 		return st, nil
 	}
+	coderMetaJSON := mustJSON(map[string]any{
+		"used_fallback":   coderOut.UsedFallback,
+		"fallback_source": strings.TrimSpace(coderOut.FallbackSource),
+		"citations":       coderOut.Citations,
+	})
+	_ = e.store.InsertToolCall(ctx, sqlite.ToolCallRecord{
+		RunID:     st.RunID,
+		Iteration: iteration,
+		Tool:      "coder_meta",
+		Input:     "",
+		Output:    coderMetaJSON,
+		Status:    "completed",
+		CreatedAt: time.Now().UnixMilli(),
+	})
 
 	if strings.TrimSpace(coderOut.Patch) != "" {
 		if e.observeDoom(st, "git_apply", coderOut.Patch) {
@@ -466,14 +495,9 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 			CreatedAt: time.Now().UnixMilli(),
 		})
 	}
-
-	reviewOut, err := e.reviewer.Review(ctx, agentpkg.ReviewInput{
-		Goal:          st.Spec.Goal,
-		RepoRoot:      st.RepoAbs,
-		Diff:          mustDiff(ctx, e.git, st.RepoAbs),
-		CommandOutput: commandOutput.String(),
-		SkillsSummary: st.SkillsSummary,
-	})
+	statusShort, _ := e.git.StatusShort(ctx, st.RepoAbs)
+	reviewIn := buildReviewInput(st, mustDiff(ctx, e.git, st.RepoAbs), statusShort, coderOut.Patch, commandOutput.String())
+	reviewOut, err := e.reviewer.Review(ctx, reviewIn)
 	if err != nil {
 		_ = e.store.InsertToolCall(ctx, sqlite.ToolCallRecord{
 			RunID:     st.RunID,
@@ -499,6 +523,49 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 		_ = e.store.UpdateRunStatus(ctx, st.RunID, model.RunStatusFailed, st.Summary)
 		return st, nil
 	}
+	if refreshedIn, refreshed := e.maybeRefreshReviewerContext(ctx, st, iteration, reviewIn, reviewOut); refreshed {
+		reviewIn = refreshedIn
+		reviewOut, err = e.reviewer.Review(ctx, reviewIn)
+		if err != nil {
+			_ = e.store.InsertToolCall(ctx, sqlite.ToolCallRecord{
+				RunID:     st.RunID,
+				Iteration: iteration,
+				Tool:      "reviewer_review",
+				Input:     truncateString(st.Spec.Goal, 500),
+				Output:    truncateString(err.Error(), 4000),
+				Status:    "error",
+				CreatedAt: time.Now().UnixMilli(),
+			})
+			_ = e.store.InsertStep(ctx, sqlite.StepRecord{
+				RunID:     st.RunID,
+				Iteration: iteration,
+				Agent:     "reviewer",
+				Decision:  string(model.LoopDecisionAbort),
+				Status:    string(model.RunStatusFailed),
+				StartedAt: started,
+				EndedAt:   time.Now().UnixMilli(),
+			})
+			st.Decision = model.LoopDecisionAbort
+			st.Status = model.RunStatusFailed
+			st.Summary = truncateString("reviewer failed after refresh: "+err.Error(), 500)
+			_ = e.store.UpdateRunStatus(ctx, st.RunID, model.RunStatusFailed, st.Summary)
+			return st, nil
+		}
+	}
+	reviewerMetaJSON := mustJSON(map[string]any{
+		"used_fallback":   reviewOut.UsedFallback,
+		"fallback_source": strings.TrimSpace(reviewOut.FallbackSource),
+		"decision":        strings.TrimSpace(reviewOut.Decision),
+	})
+	_ = e.store.InsertToolCall(ctx, sqlite.ToolCallRecord{
+		RunID:     st.RunID,
+		Iteration: iteration,
+		Tool:      "reviewer_meta",
+		Input:     "",
+		Output:    reviewerMetaJSON,
+		Status:    "completed",
+		CreatedAt: time.Now().UnixMilli(),
+	})
 	findings, _ := json.Marshal(reviewOut.Findings)
 	_ = e.store.InsertReview(ctx, sqlite.ReviewRecord{
 		RunID:        st.RunID,
@@ -543,6 +610,497 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 	st.Status = model.RunStatusRunning
 	st.Summary = reviewOut.Summary
 	return st, nil
+}
+
+func buildCoderInput(st *loopSession, diff string) agentpkg.CoderInput {
+	if st == nil {
+		return agentpkg.CoderInput{}
+	}
+	return agentpkg.CoderInput{
+		Goal:             st.Spec.Goal,
+		RepoSummary:      st.RepoAbs,
+		PreviousReview:   st.PreviousReview,
+		Diff:             diff,
+		TestOutput:       st.CommandOutput,
+		Commands:         mergeCommands(st.Commands),
+		SkillsSummary:    st.SkillsSummary,
+		RetrievedContext: compactRetrievedContext(st.RetrievedHits),
+		RetrievedQuery:   st.RetrievedQuery,
+	}
+}
+
+func buildReviewInput(st *loopSession, diff, statusShort, patch, commandOutput string) agentpkg.ReviewInput {
+	if st == nil {
+		return agentpkg.ReviewInput{}
+	}
+	return agentpkg.ReviewInput{
+		Goal:             st.Spec.Goal,
+		RepoRoot:         st.RepoAbs,
+		Diff:             diff,
+		StatusShort:      statusShort,
+		AppliedPatch:     patch,
+		CommandOutput:    commandOutput,
+		SkillsSummary:    st.SkillsSummary,
+		KBSearchCalls:    st.KBSearchCalls,
+		RetrievalMode:    st.Spec.RetrievalMode,
+		RetrievedContext: compactRetrievedContext(st.RetrievedHits),
+		RetrievedQuery:   st.RetrievedQuery,
+	}
+}
+
+func compactRetrievedContext(hits []kbpkg.SearchHit) []kbpkg.SearchHit {
+	if len(hits) == 0 {
+		return nil
+	}
+	limit := len(hits)
+	if limit > promptRetrievedContextMaxHits {
+		limit = promptRetrievedContextMaxHits
+	}
+	out := make([]kbpkg.SearchHit, 0, limit)
+	for i := 0; i < limit; i++ {
+		hit := hits[i]
+		hit.Text = truncateString(hit.Text, promptRetrievedTextMaxChars)
+		out = append(out, hit)
+	}
+	return out
+}
+
+func shouldRefreshCoderContext(st *loopSession, iteration int) bool {
+	if st == nil {
+		return false
+	}
+	if iteration < 2 {
+		return false
+	}
+	if st.Spec.RetrievalMode != model.RetrievalModePrefetch {
+		return false
+	}
+	if st.Decision != model.LoopDecisionRequestChanges {
+		return false
+	}
+	if strings.TrimSpace(st.PreviousReview) == "" {
+		return false
+	}
+	return true
+}
+
+func (e *Engine) maybeRefreshCoderContext(ctx context.Context, st *loopSession, iteration int, in agentpkg.CoderInput) (agentpkg.CoderInput, bool) {
+	if st == nil || e.kb == nil || strings.TrimSpace(e.kb.BaseURL) == "" {
+		return in, false
+	}
+	if !shouldRefreshCoderContext(st, iteration) {
+		return in, false
+	}
+	query := coderRefreshQuery(in)
+	if query == "" {
+		return in, false
+	}
+	searchCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	defer cancel()
+	resp, err := e.kb.Search(searchCtx, kbpkg.SearchRequest{
+		Query: query,
+		TopK:  6,
+	})
+	status := "completed"
+	output := formatKBSearchPrefetchOutput(resp)
+	if err != nil {
+		status = "error"
+		output = truncateString(err.Error(), 4000)
+	} else {
+		st.RetrievedQuery = query
+		st.RetrievedHits = mergeRetrievedHits(st.RetrievedHits, resp.Hits)
+		st.KBSearchCalls++
+		in = buildCoderInput(st, in.Diff)
+	}
+	if e.store != nil {
+		_ = e.store.InsertToolCall(ctx, sqlite.ToolCallRecord{
+			RunID:     st.RunID,
+			Iteration: iteration,
+			Tool:      "coder_retrieval_refresh",
+			Input:     query,
+			Output:    output,
+			Status:    status,
+			CreatedAt: time.Now().UnixMilli(),
+		})
+	}
+	return in, status == "completed"
+}
+
+func coderRefreshQuery(in agentpkg.CoderInput) string {
+	base := strings.TrimSpace(in.RetrievedQuery)
+	if base == "" {
+		base = kbSearchQueryFromGoal(in.Goal)
+	}
+	parts := []string{base, "coder follow-up"}
+	if review := truncateString(strings.TrimSpace(in.PreviousReview), coderRefreshReviewMaxChars); review != "" {
+		parts = append(parts, review)
+	}
+	if hints := collectCoderPathHints(in); len(hints) > 0 {
+		parts = append(parts, strings.Join(hints, " "))
+	}
+	return trimQueryLength(strings.Join(parts, " "))
+}
+
+func collectCoderPathHints(in agentpkg.CoderInput) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, 6)
+	add := func(path string) {
+		path = normalizeHintPath(path)
+		if path == "" || !strings.Contains(path, ".") {
+			return
+		}
+		if _, ok := seen[path]; ok {
+			return
+		}
+		seen[path] = struct{}{}
+		out = append(out, path)
+	}
+	for _, line := range strings.Split(in.Diff, "\n") {
+		if strings.HasPrefix(line, "diff --git ") {
+			parts := strings.Fields(line)
+			if len(parts) >= 4 {
+				add(parts[3])
+			}
+			continue
+		}
+		if strings.HasPrefix(line, "+++ ") {
+			add(strings.TrimPrefix(line, "+++ "))
+		}
+	}
+	for _, path := range collectGoalPathHints(in.Goal) {
+		add(path)
+	}
+	sort.Strings(out)
+	if len(out) > 3 {
+		out = out[:3]
+	}
+	return out
+}
+
+func collectGoalPathHints(goal string) []string {
+	raw := goalPathHintRE.FindAllString(goal, -1)
+	if len(raw) == 0 {
+		return nil
+	}
+	allowedExt := map[string]struct{}{
+		".md": {}, ".go": {}, ".py": {}, ".rs": {}, ".ts": {}, ".tsx": {}, ".js": {}, ".jsx": {},
+		".json": {}, ".yaml": {}, ".yml": {}, ".toml": {}, ".txt": {}, ".sql": {}, ".proto": {},
+		".java": {}, ".kt": {}, ".swift": {}, ".c": {}, ".cc": {}, ".cpp": {}, ".h": {}, ".hpp": {},
+		".sh": {},
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(raw))
+	for _, token := range raw {
+		path := normalizeHintPath(token)
+		if path == "" {
+			continue
+		}
+		ext := strings.ToLower(filepath.Ext(path))
+		if _, ok := allowedExt[ext]; !ok {
+			continue
+		}
+		base := strings.ToLower(filepath.Base(path))
+		if !strings.Contains(path, "/") && !(base == "readme.md" || strings.HasPrefix(base, "readme.")) {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		out = append(out, path)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func shouldRefreshReviewerContext(in agentpkg.ReviewInput, out agentpkg.ReviewOutput) bool {
+	if in.RetrievalMode != model.RetrievalModePrefetch {
+		return false
+	}
+	if len(in.RetrievedContext) == 0 {
+		return true
+	}
+	if in.KBSearchCalls <= 0 {
+		return true
+	}
+	return reviewOutputSuggestsContextGap(out)
+}
+
+func reviewOutputSuggestsContextGap(out agentpkg.ReviewOutput) bool {
+	if reviewOutputMentionsMissingKBSearch(out) {
+		return true
+	}
+	low := strings.ToLower(strings.TrimSpace(out.Summary + "\n" + out.Markdown))
+	patterns := []string{
+		"retrieved_context",
+		"context gap",
+		"context missing",
+		"insufficient context",
+		"上下文不足",
+		"检索上下文不足",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(low, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+func reviewOutputMentionsMissingKBSearch(out agentpkg.ReviewOutput) bool {
+	low := strings.ToLower(strings.TrimSpace(out.Summary + "\n" + out.Markdown))
+	patterns := []string{
+		"未按要求先调用 kb_search",
+		"缺少 kb_search 调用证据",
+		"必须先通过 kb_search",
+		"missing kb_search",
+		"must call kb_search",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(low, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *Engine) maybeRefreshReviewerContext(ctx context.Context, st *loopSession, iteration int, in agentpkg.ReviewInput, out agentpkg.ReviewOutput) (agentpkg.ReviewInput, bool) {
+	if st == nil || e.kb == nil || strings.TrimSpace(e.kb.BaseURL) == "" {
+		return in, false
+	}
+	if !shouldRefreshReviewerContext(in, out) {
+		return in, false
+	}
+	query := reviewerRefreshQuery(in)
+	if query == "" {
+		return in, false
+	}
+	searchCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	defer cancel()
+	resp, err := e.kb.Search(searchCtx, kbpkg.SearchRequest{
+		Query: query,
+		TopK:  6,
+	})
+	status := "completed"
+	output := formatKBSearchPrefetchOutput(resp)
+	if err != nil {
+		status = "error"
+		output = truncateString(err.Error(), 4000)
+	} else {
+		st.RetrievedQuery = query
+		st.RetrievedHits = mergeRetrievedHits(st.RetrievedHits, resp.Hits)
+		st.KBSearchCalls++
+		in.KBSearchCalls = st.KBSearchCalls
+		in.RetrievedQuery = st.RetrievedQuery
+		in.RetrievedContext = compactRetrievedContext(st.RetrievedHits)
+	}
+	if e.store != nil {
+		_ = e.store.InsertToolCall(ctx, sqlite.ToolCallRecord{
+			RunID:     st.RunID,
+			Iteration: iteration,
+			Tool:      "reviewer_retrieval_refresh",
+			Input:     query,
+			Output:    output,
+			Status:    status,
+			CreatedAt: time.Now().UnixMilli(),
+		})
+	}
+	return in, status == "completed"
+}
+
+func reviewerRefreshQuery(in agentpkg.ReviewInput) string {
+	base := strings.TrimSpace(in.RetrievedQuery)
+	if base == "" {
+		base = kbSearchQueryFromGoal(in.Goal)
+	}
+	hints := collectReviewPathHints(in)
+	if len(hints) == 0 {
+		return trimQueryLength(strings.TrimSpace(base + " reviewer follow-up"))
+	}
+	return trimQueryLength(strings.TrimSpace(base + " reviewer follow-up " + strings.Join(hints, " ")))
+}
+
+func collectReviewPathHints(in agentpkg.ReviewInput) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, 6)
+	add := func(path string) {
+		path = normalizeHintPath(path)
+		if path == "" {
+			return
+		}
+		if _, ok := seen[path]; ok {
+			return
+		}
+		seen[path] = struct{}{}
+		out = append(out, path)
+	}
+	for _, text := range []string{in.Diff, in.AppliedPatch} {
+		for _, line := range strings.Split(text, "\n") {
+			if strings.HasPrefix(line, "diff --git ") {
+				parts := strings.Fields(line)
+				if len(parts) >= 4 {
+					add(parts[3])
+				}
+				continue
+			}
+			if strings.HasPrefix(line, "+++ ") {
+				add(strings.TrimPrefix(line, "+++ "))
+			}
+		}
+	}
+	for _, line := range strings.Split(in.StatusShort, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if idx := strings.Index(line, " -> "); idx >= 0 {
+			add(line[idx+4:])
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) > 0 {
+			add(fields[len(fields)-1])
+		}
+	}
+	sort.Strings(out)
+	if len(out) > 3 {
+		out = out[:3]
+	}
+	return out
+}
+
+func normalizeHintPath(path string) string {
+	path = strings.TrimSpace(path)
+	path = strings.TrimPrefix(path, "a/")
+	path = strings.TrimPrefix(path, "b/")
+	path = strings.TrimPrefix(path, "./")
+	if path == "" || path == "/dev/null" {
+		return ""
+	}
+	return path
+}
+
+func trimQueryLength(query string) string {
+	query = strings.TrimSpace(strings.ReplaceAll(query, "\n", " "))
+	if query == "" {
+		return "project review context"
+	}
+	runes := []rune(query)
+	if len(runes) > 240 {
+		return string(runes[:240])
+	}
+	return query
+}
+
+func mergeRetrievedHits(base, extra []kbpkg.SearchHit) []kbpkg.SearchHit {
+	if len(base) == 0 && len(extra) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	out := make([]kbpkg.SearchHit, 0, len(base)+len(extra))
+	appendHit := func(hit kbpkg.SearchHit) {
+		key := hit.ID
+		if key == "" {
+			key = fmt.Sprintf("%s:%d:%d", hit.Path, hit.Start, hit.End)
+		}
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, hit)
+	}
+	for _, hit := range base {
+		appendHit(hit)
+	}
+	for _, hit := range extra {
+		appendHit(hit)
+	}
+	return out
+}
+
+func (e *Engine) maybePreflightKBSearch(ctx context.Context, st *loopSession, iteration int) {
+	if st == nil || st.KBPrefetched {
+		return
+	}
+	if st.Spec.RetrievalMode != model.RetrievalModePrefetch {
+		return
+	}
+	st.KBPrefetched = true
+	if e.kb == nil || strings.TrimSpace(e.kb.BaseURL) == "" {
+		return
+	}
+	query := kbSearchQueryFromGoal(st.Spec.Goal)
+	st.RetrievedQuery = query
+	searchCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	defer cancel()
+	resp, err := e.kb.Search(searchCtx, kbpkg.SearchRequest{
+		Query: query,
+		TopK:  6,
+	})
+	status := "completed"
+	output := formatKBSearchPrefetchOutput(resp)
+	if err != nil {
+		status = "error"
+		output = truncateString(err.Error(), 4000)
+	} else {
+		st.RetrievedHits = resp.Hits
+	}
+	_ = e.store.InsertToolCall(ctx, sqlite.ToolCallRecord{
+		RunID:     st.RunID,
+		Iteration: iteration,
+		Tool:      "retrieval_preflight",
+		Input:     query,
+		Output:    output,
+		Status:    status,
+		CreatedAt: time.Now().UnixMilli(),
+	})
+	if status == "completed" {
+		st.KBSearchCalls++
+	}
+}
+
+func kbSearchQueryFromGoal(goal string) string {
+	q := strings.TrimSpace(goal)
+	if idx := strings.Index(q, "\n\n约束"); idx > 0 {
+		q = strings.TrimSpace(q[:idx])
+	}
+	q = strings.ReplaceAll(q, "\n", " ")
+	q = strings.TrimSpace(q)
+	if q == "" {
+		return "project task context"
+	}
+	runes := []rune(q)
+	if len(runes) > 240 {
+		return string(runes[:240])
+	}
+	return q
+}
+
+func formatKBSearchPrefetchOutput(resp kbpkg.SearchResponse) string {
+	if len(resp.Hits) == 0 {
+		return "no hits"
+	}
+	var b strings.Builder
+	limit := len(resp.Hits)
+	if limit > 6 {
+		limit = 6
+	}
+	for i := 0; i < limit; i++ {
+		h := resp.Hits[i]
+		ref := strings.TrimSpace(h.Path)
+		if heading := strings.TrimSpace(h.Heading); heading != "" {
+			ref = ref + "#" + heading
+		}
+		b.WriteString(fmt.Sprintf("[%d] %s (%d-%d)\n", i+1, ref, h.Start, h.End))
+		txt := strings.TrimSpace(h.Text)
+		if len(txt) > 280 {
+			txt = txt[:280]
+		}
+		if txt != "" {
+			b.WriteString(txt + "\n")
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func (e *Engine) branchAfterTurn(_ context.Context, st *loopSession) (string, error) {
@@ -736,6 +1294,14 @@ func (e *Engine) renderSkillsSummary() string {
 		b.WriteString("- " + s.Name + ": " + s.Description + "\n")
 	}
 	return b.String()
+}
+
+func mustJSON(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
 }
 
 func mergeCommands(set model.CommandSet) []string {
