@@ -64,7 +64,7 @@ func (c *Client) Diff(ctx context.Context, repo string) (string, error) {
 }
 
 func (c *Client) StatusShort(ctx context.Context, repo string) (string, error) {
-	stdout, _, err := c.runner.Run(ctx, "git status --short", repo)
+	stdout, _, err := c.runner.Run(ctx, "git status --short --untracked-files=all", repo)
 	if err != nil {
 		return "", err
 	}
@@ -73,18 +73,64 @@ func (c *Client) StatusShort(ctx context.Context, repo string) (string, error) {
 
 func (c *Client) ApplyPatch(ctx context.Context, repo, patch string) error {
 	patchPath := filepath.Join(repo, ".agent-loop-last.patch")
-	patch = normalizeUnifiedDiffForRepo(repo, patch)
-	if err := os.WriteFile(patchPath, []byte(patch), 0o644); err != nil {
+	patchRepoRelative := normalizeUnifiedDiffForRepo(repo, patch)
+	gitRepo := repo
+	repoPrefix := ""
+	if top, prefix, err := c.gitTopAndPrefix(ctx, repo); err == nil && strings.TrimSpace(top) != "" {
+		gitRepo = strings.TrimSpace(top)
+		repoPrefix = strings.TrimSpace(prefix)
+	}
+	patchForGit := rewriteUnifiedDiffPathsForGitRoot(repo, repoPrefix, patchRepoRelative)
+	if err := os.WriteFile(patchPath, []byte(patchForGit), 0o644); err != nil {
 		return err
 	}
-	_, stderr, err := c.runner.Run(ctx, "git apply "+shellQuote(patchPath), repo)
+	_, stderr, err := c.runner.Run(ctx, "git apply "+shellQuote(patchPath), gitRepo)
+	if err == nil {
+		return nil
+	}
+	firstErr := err
+	firstStderr := strings.TrimSpace(stderr)
+
+	_, stderr3way, err3way := c.runner.Run(ctx, "git apply --3way "+shellQuote(patchPath), gitRepo)
+	if err3way == nil {
+		return nil
+	}
+
+	// Narrow fallback: many LLM patches are add-only @@ -0,0 hunks against files that already exist.
+	// If parsing succeeds, materialize the add-only content directly.
+	if addOnlyErr := applyAddOnlyPatchFallback(repo, patchRepoRelative); addOnlyErr == nil {
+		return nil
+	}
+
+	if rewriteErr := applyControlledRewritePatch(repo, patchRepoRelative); rewriteErr == nil {
+		return nil
+	}
+
+	if firstStderr != "" {
+		return fmt.Errorf("%w: %s", firstErr, firstStderr)
+	}
+	stderr3 := strings.TrimSpace(stderr3way)
+	if stderr3 != "" {
+		return fmt.Errorf("%w: %s", firstErr, stderr3)
+	}
+	return firstErr
+}
+
+func (c *Client) gitTopAndPrefix(ctx context.Context, repo string) (string, string, error) {
+	stdoutTop, _, err := c.runner.Run(ctx, "git rev-parse --show-toplevel", repo)
 	if err != nil {
-		if strings.TrimSpace(stderr) != "" {
-			return fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr))
-		}
-		return err
+		return "", "", err
 	}
-	return nil
+	stdoutPrefix, _, err := c.runner.Run(ctx, "git rev-parse --show-prefix", repo)
+	if err != nil {
+		return strings.TrimSpace(stdoutTop), "", nil
+	}
+	top := strings.TrimSpace(stdoutTop)
+	prefix := filepath.ToSlash(strings.TrimSpace(stdoutPrefix))
+	if prefix != "" && !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	return top, prefix, nil
 }
 
 func (c *Client) CommitAll(ctx context.Context, repo, message string) (string, error) {
@@ -155,6 +201,85 @@ func normalizeUnifiedDiffForRepo(repo string, patch string) string {
 	return rewriteUnifiedDiffPaths(repo, patch)
 }
 
+func rewriteUnifiedDiffPathsForGitRoot(repo, prefix, patch string) string {
+	prefix = filepath.ToSlash(strings.TrimSpace(prefix))
+	prefix = strings.TrimPrefix(prefix, "./")
+	prefix = strings.Trim(prefix, "/")
+	if prefix == "" {
+		return patch
+	}
+	repoBase := filepath.Base(repo)
+	lines := strings.Split(patch, "\n")
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		if strings.HasPrefix(line, "diff --git ") {
+			rest := strings.TrimPrefix(line, "diff --git ")
+			parts := strings.SplitN(rest, " ", 2)
+			if len(parts) == 2 {
+				a := rewriteDiffPathTokenForGitRoot(parts[0], prefix, repoBase)
+				b := rewriteDiffPathTokenForGitRoot(parts[1], prefix, repoBase)
+				lines[i] = "diff --git " + a + " " + b
+			}
+			continue
+		}
+		if strings.HasPrefix(line, "--- ") || strings.HasPrefix(line, "+++ ") {
+			head := line[:4]
+			p := strings.TrimSpace(line[4:])
+			if p == "/dev/null" {
+				continue
+			}
+			lines[i] = head + " " + rewriteDiffPathTokenForGitRoot(p, prefix, repoBase)
+			continue
+		}
+		if strings.HasPrefix(line, "rename from ") {
+			p := strings.TrimPrefix(line, "rename from ")
+			lines[i] = "rename from " + ensureGitRootRelPath(p, prefix, repoBase)
+			continue
+		}
+		if strings.HasPrefix(line, "rename to ") {
+			p := strings.TrimPrefix(line, "rename to ")
+			lines[i] = "rename to " + ensureGitRootRelPath(p, prefix, repoBase)
+			continue
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func rewriteDiffPathTokenForGitRoot(tok string, prefix string, repoBase string) string {
+	tok = strings.TrimSpace(tok)
+	if tok == "" || tok == "/dev/null" {
+		return tok
+	}
+	switch {
+	case strings.HasPrefix(tok, "a/"):
+		return "a/" + ensureGitRootRelPath(strings.TrimPrefix(tok, "a/"), prefix, repoBase)
+	case strings.HasPrefix(tok, "b/"):
+		return "b/" + ensureGitRootRelPath(strings.TrimPrefix(tok, "b/"), prefix, repoBase)
+	}
+	return ensureGitRootRelPath(tok, prefix, repoBase)
+}
+
+func ensureGitRootRelPath(rel string, prefix string, repoBase string) string {
+	rel = strings.TrimSpace(strings.ReplaceAll(rel, "\\", "/"))
+	rel = strings.TrimPrefix(rel, "./")
+	rel = strings.TrimLeft(rel, "/")
+	prefix = strings.Trim(prefix, "/")
+	if prefix == "" {
+		return rel
+	}
+	pfx := prefix + "/"
+	if strings.HasPrefix(rel, pfx) {
+		return rel
+	}
+	if repoBase != "" {
+		basePrefix := filepath.ToSlash(strings.Trim(repoBase, "/")) + "/"
+		if strings.HasPrefix(rel, basePrefix) {
+			rel = strings.TrimPrefix(rel, basePrefix)
+		}
+	}
+	return pfx + rel
+}
+
 func rewriteUnifiedDiffPaths(repo string, patch string) string {
 	base := filepath.Base(repo)
 	if strings.TrimSpace(base) == "" || base == "." || base == string(os.PathSeparator) {
@@ -217,6 +342,442 @@ func rewriteRelPath(rel string, prefix string) string {
 		return strings.TrimPrefix(rel, prefix)
 	}
 	return rel
+}
+
+type addOnlyPatchFile struct {
+	Path    string
+	Content string
+}
+
+const (
+	controlledRewriteMaxPatchBytes = 256 * 1024
+	controlledRewriteMaxFiles      = 12
+	controlledRewriteSearchWindow  = 200
+)
+
+type unifiedHunk struct {
+	OldStart int
+	OldCount int
+	NewStart int
+	NewCount int
+	Lines    []string
+}
+
+type unifiedFilePatch struct {
+	Path  string
+	Hunks []unifiedHunk
+}
+
+func applyAddOnlyPatchFallback(repo string, patch string) error {
+	files, ok := parseAddOnlyPatchFiles(patch)
+	if !ok || len(files) == 0 {
+		return fmt.Errorf("not an add-only patch")
+	}
+	repoAbs, err := filepath.Abs(repo)
+	if err != nil {
+		return err
+	}
+	for _, file := range files {
+		rel := strings.TrimSpace(file.Path)
+		if rel == "" {
+			return fmt.Errorf("empty file path in add-only patch")
+		}
+		target := filepath.Clean(filepath.Join(repoAbs, filepath.FromSlash(rel)))
+		if target != repoAbs && !strings.HasPrefix(target, repoAbs+string(os.PathSeparator)) {
+			return fmt.Errorf("add-only patch path escapes repo: %s", rel)
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(target, []byte(file.Content), 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applyControlledRewritePatch(repo string, patch string) error {
+	if strings.TrimSpace(patch) == "" {
+		return fmt.Errorf("empty patch")
+	}
+	if len(patch) > controlledRewriteMaxPatchBytes {
+		return fmt.Errorf("patch too large for controlled rewrite")
+	}
+	files, err := parseUnifiedPatchForRewrite(patch)
+	if err != nil {
+		return err
+	}
+	if len(files) == 0 {
+		return fmt.Errorf("no rewrite-able file patch")
+	}
+	if len(files) > controlledRewriteMaxFiles {
+		return fmt.Errorf("too many files for controlled rewrite")
+	}
+
+	repoAbs, err := filepath.Abs(repo)
+	if err != nil {
+		return err
+	}
+	for _, fp := range files {
+		target, err := safeJoinRepoPath(repoAbs, fp.Path)
+		if err != nil {
+			return err
+		}
+		currentBytes, readErr := os.ReadFile(target)
+		if readErr != nil && !os.IsNotExist(readErr) {
+			return readErr
+		}
+		currentLines, hadFinalNewline := splitTextLines(string(currentBytes))
+		rewrittenLines, err := applyHunksWithFuzzy(currentLines, fp.Hunks)
+		if err != nil {
+			return fmt.Errorf("%s: %w", fp.Path, err)
+		}
+		text := strings.Join(rewrittenLines, "\n")
+		if hadFinalNewline || len(rewrittenLines) > 0 {
+			text += "\n"
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(target, []byte(text), 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func parseUnifiedPatchForRewrite(patch string) ([]unifiedFilePatch, error) {
+	lines := strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n")
+	out := make([]unifiedFilePatch, 0, 4)
+	i := 0
+	for i < len(lines) {
+		line := strings.TrimSpace(lines[i])
+		if line == "" || strings.HasPrefix(line, "diff --git ") || strings.HasPrefix(line, "index ") {
+			i++
+			continue
+		}
+		if line == "GIT binary patch" {
+			return nil, fmt.Errorf("binary patch is not supported")
+		}
+		if !strings.HasPrefix(line, "--- ") {
+			i++
+			continue
+		}
+		if i+1 >= len(lines) || !strings.HasPrefix(strings.TrimSpace(lines[i+1]), "+++ ") {
+			return nil, fmt.Errorf("invalid unified patch header")
+		}
+		rel := stripUnifiedDiffPathToken(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(lines[i+1]), "+++ ")))
+		if rel == "" {
+			return nil, fmt.Errorf("invalid patch path")
+		}
+		i += 2
+		fp := unifiedFilePatch{Path: rel}
+		for i < len(lines) {
+			cur := lines[i]
+			trim := strings.TrimSpace(cur)
+			if strings.HasPrefix(trim, "--- ") && i+1 < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[i+1]), "+++ ") {
+				break
+			}
+			if strings.HasPrefix(trim, "diff --git ") {
+				break
+			}
+			if strings.HasPrefix(trim, "index ") || strings.HasPrefix(trim, "new file mode") || strings.HasPrefix(trim, "deleted file mode") {
+				i++
+				continue
+			}
+			if strings.HasPrefix(trim, "@@ -") {
+				oldStart, oldCount, newStart, newCount, ok := parseHunkHeaderFull(trim)
+				if !ok {
+					return nil, fmt.Errorf("invalid hunk header")
+				}
+				h := unifiedHunk{
+					OldStart: oldStart,
+					OldCount: oldCount,
+					NewStart: newStart,
+					NewCount: newCount,
+					Lines:    make([]string, 0, oldCount+newCount+4),
+				}
+				i++
+				for i < len(lines) {
+					body := lines[i]
+					bodyTrim := strings.TrimSpace(body)
+					if strings.HasPrefix(bodyTrim, "@@ -") {
+						break
+					}
+					if strings.HasPrefix(bodyTrim, "--- ") && i+1 < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[i+1]), "+++ ") {
+						break
+					}
+					if strings.HasPrefix(bodyTrim, "diff --git ") {
+						break
+					}
+					if strings.HasPrefix(body, "\\ No newline at end of file") {
+						i++
+						continue
+					}
+					if body == "" {
+						i++
+						continue
+					}
+					switch body[0] {
+					case ' ', '+', '-':
+						h.Lines = append(h.Lines, body)
+					default:
+						return nil, fmt.Errorf("unsupported hunk line prefix: %q", body[:1])
+					}
+					i++
+				}
+				fp.Hunks = append(fp.Hunks, h)
+				continue
+			}
+			if trim == "" {
+				i++
+				continue
+			}
+			return nil, fmt.Errorf("unsupported patch line: %s", trim)
+		}
+		if len(fp.Hunks) == 0 {
+			return nil, fmt.Errorf("no hunks for file %s", fp.Path)
+		}
+		out = append(out, fp)
+	}
+	return out, nil
+}
+
+func applyHunksWithFuzzy(lines []string, hunks []unifiedHunk) ([]string, error) {
+	out := make([]string, len(lines))
+	copy(out, lines)
+	delta := 0
+	for _, h := range hunks {
+		oldChunk, newChunk := materializeHunkChunks(h.Lines)
+		hint := h.OldStart - 1 + delta
+		pos, ok := locateHunkPosition(out, oldChunk, hint)
+		if !ok {
+			return nil, fmt.Errorf("cannot locate hunk old_start=%d", h.OldStart)
+		}
+		out = replaceChunk(out, pos, len(oldChunk), newChunk)
+		delta += len(newChunk) - len(oldChunk)
+	}
+	return out, nil
+}
+
+func materializeHunkChunks(lines []string) ([]string, []string) {
+	oldChunk := make([]string, 0, len(lines))
+	newChunk := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		switch line[0] {
+		case ' ':
+			v := line[1:]
+			oldChunk = append(oldChunk, v)
+			newChunk = append(newChunk, v)
+		case '-':
+			oldChunk = append(oldChunk, line[1:])
+		case '+':
+			newChunk = append(newChunk, line[1:])
+		}
+	}
+	return oldChunk, newChunk
+}
+
+func locateHunkPosition(lines []string, oldChunk []string, hint int) (int, bool) {
+	if len(oldChunk) == 0 {
+		return clampInt(hint, 0, len(lines)), true
+	}
+	if hint >= 0 && hint+len(oldChunk) <= len(lines) && chunksEqual(lines[hint:hint+len(oldChunk)], oldChunk) {
+		return hint, true
+	}
+	low := clampInt(hint-controlledRewriteSearchWindow, 0, len(lines))
+	high := clampInt(hint+controlledRewriteSearchWindow, 0, len(lines))
+	for pos := low; pos+len(oldChunk) <= len(lines) && pos <= high; pos++ {
+		if chunksEqual(lines[pos:pos+len(oldChunk)], oldChunk) {
+			return pos, true
+		}
+	}
+	for pos := 0; pos+len(oldChunk) <= len(lines); pos++ {
+		if chunksEqual(lines[pos:pos+len(oldChunk)], oldChunk) {
+			return pos, true
+		}
+	}
+	return 0, false
+}
+
+func replaceChunk(lines []string, start int, oldLen int, newChunk []string) []string {
+	if start < 0 {
+		start = 0
+	}
+	if start > len(lines) {
+		start = len(lines)
+	}
+	end := start + oldLen
+	if end > len(lines) {
+		end = len(lines)
+	}
+	out := make([]string, 0, len(lines)-oldLen+len(newChunk))
+	out = append(out, lines[:start]...)
+	out = append(out, newChunk...)
+	out = append(out, lines[end:]...)
+	return out
+}
+
+func chunksEqual(a []string, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func safeJoinRepoPath(repoAbs, rel string) (string, error) {
+	rel = strings.TrimSpace(filepath.ToSlash(rel))
+	if rel == "" {
+		return "", fmt.Errorf("empty path")
+	}
+	target := filepath.Clean(filepath.Join(repoAbs, filepath.FromSlash(rel)))
+	if target != repoAbs && !strings.HasPrefix(target, repoAbs+string(os.PathSeparator)) {
+		return "", fmt.Errorf("path escapes repo: %s", rel)
+	}
+	return target, nil
+}
+
+func splitTextLines(text string) ([]string, bool) {
+	normalized := strings.ReplaceAll(text, "\r\n", "\n")
+	if normalized == "" {
+		return []string{}, false
+	}
+	hasFinalNewline := strings.HasSuffix(normalized, "\n")
+	if hasFinalNewline {
+		normalized = strings.TrimSuffix(normalized, "\n")
+	}
+	if normalized == "" {
+		return []string{}, hasFinalNewline
+	}
+	return strings.Split(normalized, "\n"), hasFinalNewline
+}
+
+func clampInt(v, low, high int) int {
+	if v < low {
+		return low
+	}
+	if v > high {
+		return high
+	}
+	return v
+}
+
+func parseAddOnlyPatchFiles(patch string) ([]addOnlyPatchFile, bool) {
+	lines := strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n")
+	out := make([]addOnlyPatchFile, 0, 2)
+	i := 0
+	for i < len(lines) {
+		line := strings.TrimSpace(lines[i])
+		if !strings.HasPrefix(line, "--- ") {
+			i++
+			continue
+		}
+		if i+1 >= len(lines) || !strings.HasPrefix(strings.TrimSpace(lines[i+1]), "+++ ") {
+			return nil, false
+		}
+		oldTok := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(lines[i]), "--- "))
+		newTok := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(lines[i+1]), "+++ "))
+		if oldTok == "/dev/null" {
+			// Allowed, but we still require added content only.
+		}
+		rel := stripUnifiedDiffPathToken(newTok)
+		if rel == "" {
+			return nil, false
+		}
+		i += 2
+		var content strings.Builder
+		seenHunk := false
+		for i < len(lines) {
+			cur := lines[i]
+			trim := strings.TrimSpace(cur)
+			if strings.HasPrefix(trim, "--- ") && i+1 < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[i+1]), "+++ ") {
+				break
+			}
+			if strings.HasPrefix(trim, "diff --git ") {
+				break
+			}
+			if strings.HasPrefix(trim, "@@ -") {
+				oldStart, oldCount, ok := parseOldRange(trim)
+				if !ok || oldStart != 0 || oldCount != 0 {
+					return nil, false
+				}
+				seenHunk = true
+				i++
+				continue
+			}
+			if strings.HasPrefix(cur, "\\ No newline at end of file") {
+				i++
+				continue
+			}
+			if cur == "" {
+				i++
+				continue
+			}
+			switch cur[0] {
+			case '+':
+				content.WriteString(strings.TrimPrefix(cur, "+"))
+				content.WriteByte('\n')
+			case ' ':
+				return nil, false
+			case '-':
+				return nil, false
+			default:
+				return nil, false
+			}
+			i++
+		}
+		if !seenHunk {
+			return nil, false
+		}
+		out = append(out, addOnlyPatchFile{
+			Path:    rel,
+			Content: content.String(),
+		})
+	}
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, true
+}
+
+func stripUnifiedDiffPathToken(tok string) string {
+	p := strings.TrimSpace(tok)
+	if p == "" || p == "/dev/null" {
+		return ""
+	}
+	p = strings.TrimPrefix(p, "a/")
+	p = strings.TrimPrefix(p, "b/")
+	p = strings.TrimPrefix(p, "./")
+	p = strings.ReplaceAll(p, "\\", "/")
+	p = filepath.ToSlash(filepath.Clean(p))
+	if p == "." || p == "/" || strings.HasPrefix(p, "../") {
+		return ""
+	}
+	return strings.TrimPrefix(p, "/")
+}
+
+func parseOldRange(header string) (int, int, bool) {
+	if !strings.HasPrefix(header, "@@ -") {
+		return 0, 0, false
+	}
+	rest := strings.TrimPrefix(header, "@@ -")
+	parts := strings.SplitN(rest, " +", 2)
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	start, count, ok := parseRange(parts[0])
+	if !ok {
+		return 0, 0, false
+	}
+	return start, count, true
 }
 
 func fixHunkCounts(patch string) string {
@@ -289,6 +850,32 @@ func parseHunkHeader(line string) (int, int, string, bool) {
 		return 0, 0, "", false
 	}
 	return oldStart, newStart, suffix, true
+}
+
+func parseHunkHeaderFull(line string) (int, int, int, int, bool) {
+	if !strings.HasPrefix(line, "@@ -") {
+		return 0, 0, 0, 0, false
+	}
+	rest := strings.TrimPrefix(line, "@@ -")
+	parts := strings.SplitN(rest, " +", 2)
+	if len(parts) != 2 {
+		return 0, 0, 0, 0, false
+	}
+	oldPart := parts[0]
+	parts2 := strings.SplitN(parts[1], " @@", 2)
+	if len(parts2) != 2 {
+		return 0, 0, 0, 0, false
+	}
+	newPart := parts2[0]
+	oldStart, oldCount, ok := parseRange(oldPart)
+	if !ok {
+		return 0, 0, 0, 0, false
+	}
+	newStart, newCount, ok := parseRange(newPart)
+	if !ok {
+		return 0, 0, 0, 0, false
+	}
+	return oldStart, oldCount, newStart, newCount, true
 }
 
 func parseRange(s string) (int, int, bool) {

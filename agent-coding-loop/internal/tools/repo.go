@@ -46,6 +46,35 @@ func RepoRead(repoRoot, rel string, maxBytes int) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		items, err := os.ReadDir(path)
+		if err != nil {
+			return "", err
+		}
+		lines := make([]string, 0, len(items)+1)
+		lines = append(lines, fmt.Sprintf("%s is a directory. Use one of these relative paths:", rel))
+		for _, it := range items {
+			name := it.Name()
+			if it.IsDir() {
+				name += "/"
+			}
+			if rel == "." {
+				lines = append(lines, name)
+				continue
+			}
+			lines = append(lines, filepath.ToSlash(filepath.Join(rel, name)))
+		}
+		sort.Strings(lines[1:])
+		out := strings.Join(lines, "\n")
+		if maxBytes > 0 && len(out) > maxBytes {
+			out = out[:maxBytes]
+		}
+		return out, nil
+	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return "", err

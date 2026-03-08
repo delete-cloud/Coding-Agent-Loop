@@ -18,6 +18,9 @@ type ClientConfig struct {
 	APIKey  string
 }
 
+const defaultModelTimeout = 90 * time.Second
+const maxJSONRepairAttempts = 3
+
 func (c ClientConfig) Ready() bool {
 	return strings.TrimSpace(c.BaseURL) != "" && strings.TrimSpace(c.Model) != ""
 }
@@ -27,6 +30,7 @@ func (c ClientConfig) newToolCallingModel(ctx context.Context) (modelpkg.ToolCal
 		BaseURL: c.BaseURL,
 		Model:   c.Model,
 		APIKey:  c.APIKey,
+		Timeout: defaultModelTimeout,
 	})
 	if err != nil {
 		return nil, err
@@ -47,29 +51,138 @@ func (c ClientConfig) CompleteJSON(ctx context.Context, systemPrompt, userPrompt
 	if err != nil {
 		return err
 	}
-	resp, err := cm.Generate(ctx, []*schema.Message{
+	return completeJSONWithModel(ctx, cm, systemPrompt, userPrompt, out)
+}
+
+func completeJSONWithModel(ctx context.Context, cm modelpkg.ToolCallingChatModel, systemPrompt, userPrompt string, out any) error {
+	if cm == nil {
+		return fmt.Errorf("llm model is nil")
+	}
+	base := []*schema.Message{
 		schema.SystemMessage(systemPrompt),
 		schema.UserMessage(userPrompt),
-	})
-	if err != nil {
-		return err
 	}
-	content := extractJSON(resp.Content)
-	if err := json.Unmarshal([]byte(content), out); err != nil {
-		return fmt.Errorf("parse llm json failed: %w; content=%s", err, resp.Content)
+	messages := append([]*schema.Message{}, base...)
+
+	lastRaw := ""
+	var lastErr error
+	for attempt := 0; attempt < maxJSONRepairAttempts; attempt++ {
+		resp, err := cm.Generate(ctx, messages)
+		if err != nil {
+			return err
+		}
+		lastRaw = ""
+		if resp != nil {
+			lastRaw = strings.TrimSpace(resp.Content)
+		}
+		content := extractJSON(lastRaw)
+		if err := json.Unmarshal([]byte(content), out); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+
+		if attempt >= maxJSONRepairAttempts-1 {
+			break
+		}
+		messages = append([]*schema.Message{}, base...)
+		if lastRaw != "" {
+			messages = append(messages, schema.AssistantMessage(lastRaw, nil))
+		}
+		messages = append(messages, schema.UserMessage(buildJSONRepairPrompt(lastRaw)))
 	}
-	return nil
+	return fmt.Errorf("parse llm json failed: %w; content=%s", lastErr, lastRaw)
+}
+
+func buildJSONRepairPrompt(previous string) string {
+	preview := strings.TrimSpace(previous)
+	if len(preview) > 2000 {
+		preview = preview[:2000]
+	}
+	if preview == "" {
+		return "Your previous response was empty or invalid JSON. Return ONLY a valid JSON object now. No markdown, no explanations."
+	}
+	return "Your previous response was not valid JSON. Rewrite it as valid JSON only.\n" +
+		"Rules:\n" +
+		"- Output only JSON.\n" +
+		"- No markdown fences.\n" +
+		"- No prose before or after JSON.\n" +
+		"Previous response:\n" + preview
 }
 
 func extractJSON(content string) string {
 	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return trimmed
+	}
 	if strings.HasPrefix(trimmed, "```") {
 		trimmed = strings.TrimPrefix(trimmed, "```json")
+		trimmed = strings.TrimPrefix(trimmed, "```JSON")
 		trimmed = strings.TrimPrefix(trimmed, "```")
-		trimmed = strings.TrimSuffix(trimmed, "```")
+		if idx := strings.LastIndex(trimmed, "```"); idx >= 0 {
+			trimmed = trimmed[:idx]
+		}
 		trimmed = strings.TrimSpace(trimmed)
 	}
+	if js, ok := findFirstJSONValue(trimmed); ok {
+		return js
+	}
 	return trimmed
+}
+
+func findFirstJSONValue(s string) (string, bool) {
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if ch != '{' && ch != '[' {
+			continue
+		}
+		if out, ok := extractBalancedJSON(s, i); ok {
+			return out, true
+		}
+	}
+	return "", false
+}
+
+func extractBalancedJSON(s string, start int) (string, bool) {
+	depth := 0
+	inString := false
+	escaped := false
+	for i := start; i < len(s); i++ {
+		ch := s[i]
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == '"' {
+				inString = false
+			}
+			continue
+		}
+		switch ch {
+		case '"':
+			inString = true
+		case '{', '[':
+			depth++
+		case '}', ']':
+			depth--
+			if depth < 0 {
+				return "", false
+			}
+			if depth == 0 {
+				candidate := strings.TrimSpace(s[start : i+1])
+				if json.Valid([]byte(candidate)) {
+					return candidate, true
+				}
+				return "", false
+			}
+		}
+	}
+	return "", false
 }
 
 type compatToolCallingModel struct {
@@ -180,6 +293,20 @@ func isRetryableLLMError(err error) bool {
 		return true
 	}
 	if strings.Contains(s, "temporary") {
+		return true
+	}
+	if strings.Contains(s, "unexpected eof") || strings.Contains(s, ": eof") || strings.HasSuffix(strings.TrimSpace(s), "eof") {
+		return true
+	}
+	for _, code := range []string{"520", "521", "522", "523", "524", "525", "526", "502", "503", "504"} {
+		if strings.Contains(s, "status code: "+code) || strings.Contains(s, "status: "+code) {
+			return true
+		}
+	}
+	if strings.Contains(s, "invalid character '<'") && strings.Contains(s, "looking for beginning of value") {
+		return true
+	}
+	if strings.Contains(s, "bad gateway") || strings.Contains(s, "gateway timeout") {
 		return true
 	}
 	return false
