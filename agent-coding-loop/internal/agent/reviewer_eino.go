@@ -524,15 +524,29 @@ func normalizePathForCompare(path string) string {
 }
 
 func reviewerPrompts(in ReviewInput) (string, string) {
+	targets := extractGoalTargetFiles(in.Goal)
+	singleFnConstraint := buildSingleTargetFunctionConstraint(in.Goal, targets)
+	testingConstraint := buildMinimalTestingConstraint(in.Goal, targets)
 	system := `You are a strict code reviewer.
-You may use read-only tools to inspect repository files, search code, inspect diff, query the knowledge base, and read skills.
+You may use read-only tools to inspect repository files, search code, inspect diff, and query the knowledge base.
 - retrieved_context in the review input contains pre-fetched knowledge base evidence; use it as the primary reference for domain rules. Call kb_search only for supplementary checks.
+- when kb_scope_contract is present, review only the requested KB-backed rule(s) and target files. Do not request adjacent rules from the same knowledge-base document unless they are explicitly named in kb_scope_contract.identifiers.
 Return JSON only with fields: decision, summary, findings, review_markdown.
 - decision must be one of: approve, request_changes, comment
 - If tests/checks fail, decision must be request_changes.
 - findings must include concrete file/line risk when possible.
 - never return markdown outside JSON.`
-	payload, _ := json.MarshalIndent(in, "", "  ")
-	user := fmt.Sprintf("Review input:\n%s\nUse tools when needed, then return strict JSON only.", string(payload))
+	if singleFnConstraint != "" {
+		system = strings.TrimSpace(system + "\n- for this single-target-function review, do not require signature or call-site changes unless the goal explicitly requires that broader edit.\n- " + singleFnConstraint)
+	}
+	if testingConstraint != "" {
+		system = strings.TrimSpace(system + "\n- " + testingConstraint)
+	}
+	payload := map[string]any{
+		"review_input":      in,
+		"kb_scope_contract": buildKBScopeContract(in.Goal, targets),
+	}
+	payloadJSON, _ := json.MarshalIndent(payload, "", "  ")
+	user := fmt.Sprintf("Review input:\n%s\nUse tools when needed, then return strict JSON only.", string(payloadJSON))
 	return system, user
 }

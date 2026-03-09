@@ -20,15 +20,15 @@ class EvaluateTemplateTests(unittest.TestCase):
         self._write_jsonl(
             self.qrels,
             [
-                {"query_id": "q1", "relevant_ids": ["d1", "d2"]},
-                {"query_id": "q2", "relevant_ids": ["d3"]},
+                {"query_id": "q1", "query": "where is d2", "relevant_ids": ["docs/a.md:1:2", "docs/b.md:3:4"]},
+                {"query_id": "q2", "query": "where is d3", "relevant_ids": ["docs/c.md:5:6"]},
             ],
         )
         self._write_jsonl(
             self.retrieval,
             [
-                {"query_id": "q1", "retrieved_ids": ["d0", "d2", "d9"]},
-                {"query_id": "q2", "retrieved_ids": ["d8", "d7", "d3"]},
+                {"query_id": "q1", "retrieved_ids": ["docs/x.md:9:10", "docs/b.md:3:4", "docs/y.md:11:12"]},
+                {"query_id": "q2", "retrieved_ids": ["docs/m.md:13:14", "docs/n.md:15:16", "docs/c.md:5:6"]},
             ],
         )
         self._write_jsonl(
@@ -37,12 +37,12 @@ class EvaluateTemplateTests(unittest.TestCase):
                 {
                     "question_id": "qa1",
                     "answers": ["Go supports goroutines"],
-                    "required_citations": ["d2", "d3"],
+                    "required_citations": ["docs/api.md:1:2", "docs/retry.md:3:4"],
                 },
                 {
                     "question_id": "qa2",
                     "answers": ["LanceDB supports hybrid search"],
-                    "required_citations": ["d1"],
+                    "required_citations": ["docs/lancedb.md:5:6"],
                 },
             ],
         )
@@ -52,13 +52,13 @@ class EvaluateTemplateTests(unittest.TestCase):
                 {
                     "question_id": "qa1",
                     "answer": "Go supports goroutines",
-                    "citations": ["d2"],
+                    "citations": ["docs/retry.md:3:4"],
                     "is_faithful": True,
                 },
                 {
                     "question_id": "qa2",
                     "answer": "LanceDB supports vector and keyword search",
-                    "citations": ["d1"],
+                    "citations": ["docs/lancedb.md:5:6"],
                     "is_faithful": True,
                 },
             ],
@@ -120,6 +120,108 @@ class EvaluateTemplateTests(unittest.TestCase):
         self.assertAlmostEqual(coding["pass_rate"], 0.5)
         self.assertAlmostEqual(coding["avg_latency_sec"], 17.5)
         self.assertAlmostEqual(coding["avg_cost_usd"], 0.205)
+
+    def test_cli_fails_fast_when_qrels_missing_query(self):
+        self._write_jsonl(
+            self.qrels,
+            [{"query_id": "q1", "relevant_ids": ["docs/a.md:1:2"]}],
+        )
+        script = Path(__file__).resolve().parents[1] / "evaluate.py"
+        proc = subprocess.run(
+            [
+                "python3",
+                str(script),
+                "--qrels",
+                str(self.qrels),
+                "--retrieval",
+                str(self.retrieval),
+                "--out",
+                str(self.out),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("missing query", proc.stderr)
+
+    def test_cli_fails_fast_when_query_ids_do_not_match(self):
+        self._write_jsonl(
+            self.retrieval,
+            [{"query_id": "q9", "retrieved_ids": ["docs/a.md:1:2"]}],
+        )
+        script = Path(__file__).resolve().parents[1] / "evaluate.py"
+        proc = subprocess.run(
+            [
+                "python3",
+                str(script),
+                "--qrels",
+                str(self.qrels),
+                "--retrieval",
+                str(self.retrieval),
+                "--out",
+                str(self.out),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("query_id", proc.stderr)
+
+    def test_cli_fails_fast_on_invalid_chunk_id(self):
+        self._write_jsonl(
+            self.retrieval,
+            [{"query_id": "q1", "retrieved_ids": ["docs-a-md"]}, {"query_id": "q2", "retrieved_ids": ["docs/c.md:5:6"]}],
+        )
+        script = Path(__file__).resolve().parents[1] / "evaluate.py"
+        proc = subprocess.run(
+            [
+                "python3",
+                str(script),
+                "--qrels",
+                str(self.qrels),
+                "--retrieval",
+                str(self.retrieval),
+                "--out",
+                str(self.out),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("path:start:end", proc.stderr)
+
+    def test_cli_fails_fast_on_sample_bench_mixing(self):
+        sample_root = self.root / "eval" / "data" / "sample"
+        bench_root = self.root / "eval" / "data" / "bench"
+        sample_root.mkdir(parents=True, exist_ok=True)
+        bench_root.mkdir(parents=True, exist_ok=True)
+        sample_qrels = sample_root / "qrels.jsonl"
+        bench_retrieval = bench_root / "retrieval_predictions.jsonl"
+        self._write_jsonl(sample_qrels, [{"query_id": "q1", "query": "demo", "relevant_ids": ["docs/a.md:1:2"]}])
+        self._write_jsonl(bench_retrieval, [{"query_id": "q1", "retrieved_ids": ["docs/a.md:1:2"]}])
+
+        script = Path(__file__).resolve().parents[1] / "evaluate.py"
+        proc = subprocess.run(
+            [
+                "python3",
+                str(script),
+                "--qrels",
+                str(sample_qrels),
+                "--retrieval",
+                str(bench_retrieval),
+                "--out",
+                str(self.out),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("sample", proc.stderr)
+        self.assertIn("bench", proc.stderr)
 
 
 if __name__ == "__main__":

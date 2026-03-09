@@ -127,6 +127,12 @@ func normalizeRelPath(rel string) string {
 	if rel == "" {
 		return "."
 	}
+	rel = strings.TrimLeft(rel, "`'\"([{<")
+	rel = strings.TrimRight(rel, "`'\"`)]}>,;:!?，。；：！、")
+	rel = strings.TrimSpace(rel)
+	if rel == "" {
+		return "."
+	}
 	for strings.HasPrefix(rel, string(os.PathSeparator)) {
 		rel = strings.TrimPrefix(rel, string(os.PathSeparator))
 	}

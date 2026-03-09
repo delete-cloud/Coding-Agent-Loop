@@ -17,6 +17,9 @@ func TestBuildCoderToolsIncludesRunCommand(t *testing.T) {
 	if !containsName(names, "run_command") {
 		t.Fatalf("expected run_command in coder tools, got %v", names)
 	}
+	if containsName(names, "list_skills") || containsName(names, "view_skill") {
+		t.Fatalf("expected coder tools to exclude skill tools, got %v", names)
+	}
 }
 
 func TestBuildReviewerToolsReadOnlySurface(t *testing.T) {
@@ -30,6 +33,9 @@ func TestBuildReviewerToolsReadOnlySurface(t *testing.T) {
 	}
 	if !containsName(names, "repo_read") {
 		t.Fatalf("expected repo_read in reviewer tools, got %v", names)
+	}
+	if containsName(names, "list_skills") || containsName(names, "view_skill") {
+		t.Fatalf("expected reviewer tools to exclude skill tools, got %v", names)
 	}
 }
 

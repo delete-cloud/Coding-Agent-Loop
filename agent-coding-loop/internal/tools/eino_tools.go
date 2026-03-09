@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	einotool "github.com/cloudwego/eino/components/tool"
@@ -169,42 +168,6 @@ func buildReadOnlyTools(repoRoot string, reg *skills.Registry, runner *Runner, k
 		return nil, err
 	}
 
-	listSkillTool, err := utils.InferTool(
-		"list_skills",
-		"List available skills with short metadata.",
-		func(_ context.Context, input listSkillsArgs) (string, error) {
-			items := ListSkills(reg)
-			filter := strings.ToLower(strings.TrimSpace(input.Filter))
-			names := make([]string, 0, len(items))
-			for _, item := range items {
-				line := fmt.Sprintf("%s: %s", item.Name, item.Description)
-				if filter != "" && !strings.Contains(strings.ToLower(line), filter) {
-					continue
-				}
-				names = append(names, line)
-			}
-			sort.Strings(names)
-			if len(names) == 0 {
-				return "No skills available.", nil
-			}
-			return strings.Join(names, "\n"), nil
-		},
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	viewSkillTool, err := utils.InferTool(
-		"view_skill",
-		"View a skill body, TOC, or one section from SKILL.md.",
-		func(_ context.Context, input viewSkillArgs) (string, error) {
-			return ViewSkill(reg, input.Name, input.Section, input.TOC)
-		},
-	)
-	if err != nil {
-		return nil, err
-	}
-
 	kbSearch, err := utils.InferTool(
 		"kb_search",
 		"Search external knowledge base (LanceDB sidecar) for relevant context. Returns cited chunks with path and offsets.",
@@ -265,8 +228,6 @@ func buildReadOnlyTools(repoRoot string, reg *skills.Registry, runner *Runner, k
 		repoSearch,
 		gitDiff,
 		kbSearch,
-		listSkillTool,
-		viewSkillTool,
 	}, nil
 }
 

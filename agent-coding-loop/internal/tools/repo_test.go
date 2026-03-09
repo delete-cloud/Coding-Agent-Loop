@@ -65,3 +65,37 @@ func TestRepoReadDirectoryReturnsEntries(t *testing.T) {
 		t.Fatalf("expected a.txt in output, got %q", out)
 	}
 }
+
+func TestRepoListSanitizesModelPollutedDotPath(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("a"), 0o644); err != nil {
+		t.Fatalf("write a.txt: %v", err)
+	}
+
+	got, err := RepoList(root, ".}")
+	if err != nil {
+		t.Fatalf("RepoList(.}): %v", err)
+	}
+	if len(got) != 1 || got[0] != "a.txt" {
+		t.Fatalf("unexpected RepoList result: %v", got)
+	}
+}
+
+func TestRepoReadSanitizesWrappedRelativePath(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "internal", "config"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	path := filepath.Join(root, "internal", "config", "config.go")
+	if err := os.WriteFile(path, []byte("package config"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	got, err := RepoRead(root, "`./internal/config/config.go`}", 1024)
+	if err != nil {
+		t.Fatalf("RepoRead wrapped path: %v", err)
+	}
+	if got != "package config" {
+		t.Fatalf("unexpected RepoRead content: %q", got)
+	}
+}

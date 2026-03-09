@@ -14,6 +14,7 @@ import (
 )
 
 const schemaSQL = `
+PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY,
   spec_json TEXT NOT NULL,
@@ -71,6 +72,8 @@ CREATE TABLE IF NOT EXISTS artifacts (
   FOREIGN KEY(run_id) REFERENCES runs(id)
 );
 `
+
+const sqliteBusyTimeoutMS = 5000
 
 type Store struct {
 	path string
@@ -301,7 +304,7 @@ func (s *Store) MaxStepIteration(ctx context.Context, runID string) (int, error)
 }
 
 func (s *Store) run(ctx context.Context, sql string) (string, string, error) {
-	cmd := exec.CommandContext(ctx, "sqlite3", s.path, sql)
+	cmd := exec.CommandContext(ctx, "sqlite3", "-cmd", fmt.Sprintf(".timeout %d", sqliteBusyTimeoutMS), s.path, sql)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", string(out), fmt.Errorf("sqlite3 failed: %w: %s", err, string(out))
@@ -310,7 +313,7 @@ func (s *Store) run(ctx context.Context, sql string) (string, string, error) {
 }
 
 func (s *Store) query(ctx context.Context, sql string) ([][]string, error) {
-	cmd := exec.CommandContext(ctx, "sqlite3", "-separator", "\x1f", "-noheader", s.path, sql)
+	cmd := exec.CommandContext(ctx, "sqlite3", "-cmd", fmt.Sprintf(".timeout %d", sqliteBusyTimeoutMS), "-separator", "\x1f", "-noheader", s.path, sql)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("sqlite3 query failed: %w: %s", err, string(out))

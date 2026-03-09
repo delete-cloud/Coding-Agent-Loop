@@ -375,6 +375,10 @@ def safe_mean(values: list[float]) -> float:
     return sum(values) / len(values)
 
 
+def is_terminal_run_status(status: str) -> bool:
+    return str(status or "").strip() in {"completed", "failed", "needs_changes", "blocked"}
+
+
 def aggregate_metrics(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     by_exp: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
@@ -421,12 +425,28 @@ def read_run_context(db_path: str, run_id: str) -> tuple[float, str, dict[str, A
             "kb_search_calls": 0,
         }
     conn = sqlite3.connect(db_path)
+    conn.text_factory = lambda b: b.decode("utf-8", "replace") if isinstance(b, (bytes, bytearray)) else str(b)
     conn.row_factory = sqlite3.Row
     try:
-        run = conn.execute(
-            "select summary, created_at, updated_at from runs where id = ? limit 1",
-            (run_id,),
-        ).fetchone()
+        try:
+            run = conn.execute(
+                "select status, summary, created_at, updated_at from runs where id = ? limit 1",
+                (run_id,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            legacy = conn.execute(
+                "select summary, created_at, updated_at from runs where id = ? limit 1",
+                (run_id,),
+            ).fetchone()
+            if not legacy:
+                run = None
+            else:
+                run = {
+                    "status": "",
+                    "summary": legacy["summary"],
+                    "created_at": legacy["created_at"],
+                    "updated_at": legacy["updated_at"],
+                }
         if not run:
             return 0.0, "", {
                 "meta_present": False,
@@ -435,6 +455,8 @@ def read_run_context(db_path: str, run_id: str) -> tuple[float, str, dict[str, A
                 "reviewer_decision": "",
                 "citations": [],
                 "kb_search_calls": 0,
+                "run_status": "",
+                "run_summary": "",
             }
 
         created = float(run["created_at"] or 0.0)
@@ -448,6 +470,8 @@ def read_run_context(db_path: str, run_id: str) -> tuple[float, str, dict[str, A
             "reviewer_decision": "",
             "citations": [],
             "kb_search_calls": 0,
+            "run_status": str(run["status"] or "").strip(),
+            "run_summary": str(run["summary"] or "").strip(),
         }
 
         reviews = conn.execute(
@@ -483,10 +507,40 @@ def read_run_context(db_path: str, run_id: str) -> tuple[float, str, dict[str, A
                         trace["reviewer_used_fallback"] = bool(payload.get("used_fallback", False))
                         trace["reviewer_decision"] = str(payload.get("decision", "")).strip().lower()
             tool_status = str(row["status"] or "").strip().lower()
-            if tool_key == "kb_search" and tool_status == "completed":
+            if tool_key in {"kb_search", "retrieval_preflight", "coder_retrieval_refresh", "reviewer_retrieval_refresh"} and tool_status == "completed":
                 trace["kb_search_calls"] = int(trace.get("kb_search_calls", 0) or 0) + 1
 
         return duration, "\n".join(pieces), trace
+    finally:
+        conn.close()
+
+
+def recover_run_id_from_db(db_path: str, repo: str, goal: str) -> str:
+    repo = str(repo or "").strip()
+    goal = str(goal or "").strip()
+    if not repo or not goal or not os.path.exists(db_path):
+        return ""
+    conn = sqlite3.connect(db_path)
+    conn.text_factory = lambda b: b.decode("utf-8", "replace") if isinstance(b, (bytes, bytearray)) else str(b)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "select id, spec_json from runs order by created_at desc limit 50"
+        ).fetchall()
+        for row in rows:
+            spec_raw = str(row["spec_json"] or "").strip()
+            if not spec_raw:
+                continue
+            try:
+                spec = json.loads(spec_raw)
+            except json.JSONDecodeError:
+                continue
+            if str(spec.get("repo", "")).strip() != repo:
+                continue
+            if str(spec.get("goal", "")).strip() != goal:
+                continue
+            return str(row["id"] or "").strip()
+        return ""
     finally:
         conn.close()
 
@@ -635,6 +689,7 @@ def run_one(
         return row
 
     env = os.environ.copy()
+    env["AGENT_LOOP_DB_PATH"] = db_path
     if rag_enabled:
         env["AGENT_LOOP_KB_URL"] = kb_url
     else:
@@ -653,24 +708,30 @@ def run_one(
         wall_duration = max(0.0, time.time() - t0)
         parsed = parse_result(e.stdout or "")
         run_id = str(parsed.get("run_id", "")).strip()
+        if not run_id:
+            run_id = recover_run_id_from_db(db_path=db_path, repo=run_repo, goal=goal)
         summary = str(parsed.get("summary", "")).strip()
-        if not summary:
-            summary = f"task timed out after {task_timeout_sec}s"
         db_duration, corpus, trace = read_run_context(db_path=db_path, run_id=run_id)
+        db_status = str(trace.get("run_status", "")).strip()
+        status = db_status if is_terminal_run_status(db_status) else "failed"
+        if not summary:
+            summary = str(trace.get("run_summary", "")).strip() or f"task timed out after {task_timeout_sec}s"
         duration = db_duration if db_duration > 0 else wall_duration
         checks = evaluate_expectations(task, corpus_text=corpus + "\n" + summary, trace=trace)
         strict_reasons = evaluate_strict_reasons(
             strict_mode=bool(strict_mode),
-            status="failed",
+            status=status,
             checks=checks,
             summary_text=summary,
             corpus_text=corpus,
             trace=trace,
         )
+        if strict_reasons and status == "completed":
+            status = "failed"
         row = {
             "experiment": experiment,
             "task_id": task_id,
-            "status": "failed",
+            "status": status,
             "duration_sec": duration,
             "run_id": run_id,
             "summary": summary,
@@ -697,10 +758,17 @@ def run_one(
     wall_duration = max(0.0, time.time() - t0)
     parsed = parse_result(proc.stdout)
     run_id = str(parsed.get("run_id", "")).strip()
+    if not run_id:
+        run_id = recover_run_id_from_db(db_path=db_path, repo=run_repo, goal=goal)
     status = str(parsed.get("status", "")).strip() or "failed"
     summary = str(parsed.get("summary", "")).strip()
 
     db_duration, corpus, trace = read_run_context(db_path=db_path, run_id=run_id)
+    db_status = str(trace.get("run_status", "")).strip()
+    if is_terminal_run_status(db_status):
+        status = db_status
+        if not summary:
+            summary = str(trace.get("run_summary", "")).strip()
     duration = db_duration if db_duration > 0 else wall_duration
     checks = evaluate_expectations(task, corpus_text=corpus + "\n" + summary, trace=trace)
     strict_reasons = evaluate_strict_reasons(

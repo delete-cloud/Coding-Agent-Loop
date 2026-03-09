@@ -428,7 +428,7 @@ func applyControlledRewritePatch(repo string, patch string) error {
 			return readErr
 		}
 		currentLines, hadFinalNewline := splitTextLines(string(currentBytes))
-		rewrittenLines, err := applyHunksWithFuzzy(currentLines, fp.Hunks)
+		rewrittenLines, err := applyHunksWithFuzzy(fp.Path, currentLines, fp.Hunks)
 		if err != nil {
 			return fmt.Errorf("%s: %w", fp.Path, err)
 		}
@@ -485,7 +485,7 @@ func parseUnifiedPatchForRewrite(patch string) ([]unifiedFilePatch, error) {
 				i++
 				continue
 			}
-			if strings.HasPrefix(trim, "@@ -") {
+			if isUnifiedHunkHeader(trim) {
 				oldStart, oldCount, newStart, newCount, ok := parseHunkHeaderFull(trim)
 				if !ok {
 					return nil, fmt.Errorf("invalid hunk header")
@@ -501,7 +501,7 @@ func parseUnifiedPatchForRewrite(patch string) ([]unifiedFilePatch, error) {
 				for i < len(lines) {
 					body := lines[i]
 					bodyTrim := strings.TrimSpace(body)
-					if strings.HasPrefix(bodyTrim, "@@ -") {
+					if isUnifiedHunkHeader(bodyTrim) {
 						break
 					}
 					if strings.HasPrefix(bodyTrim, "--- ") && i+1 < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[i+1]), "+++ ") {
@@ -515,6 +515,10 @@ func parseUnifiedPatchForRewrite(patch string) ([]unifiedFilePatch, error) {
 						continue
 					}
 					if body == "" {
+						if i == len(lines)-1 {
+							break
+						}
+						h.Lines = append(h.Lines, " ")
 						i++
 						continue
 					}
@@ -543,15 +547,23 @@ func parseUnifiedPatchForRewrite(patch string) ([]unifiedFilePatch, error) {
 	return out, nil
 }
 
-func applyHunksWithFuzzy(lines []string, hunks []unifiedHunk) ([]string, error) {
+func applyHunksWithFuzzy(path string, lines []string, hunks []unifiedHunk) ([]string, error) {
 	out := make([]string, len(lines))
 	copy(out, lines)
 	delta := 0
 	for _, h := range hunks {
 		oldChunk, newChunk := materializeHunkChunks(h.Lines)
 		hint := h.OldStart - 1 + delta
-		pos, ok := locateHunkPosition(out, oldChunk, hint)
+		pos, ok := locateHunkPosition(out, h.Lines, oldChunk, hint)
 		if !ok {
+			if hunkAlreadyApplied(out, newChunk, hint) {
+				continue
+			}
+			if rewritten, applied := applyInsertOnlyMarkdownHunkFallback(path, out, h.Lines); applied {
+				out = rewritten
+				delta += len(newChunk) - len(oldChunk)
+				continue
+			}
 			return nil, fmt.Errorf("cannot locate hunk old_start=%d", h.OldStart)
 		}
 		out = replaceChunk(out, pos, len(oldChunk), newChunk)
@@ -565,6 +577,8 @@ func materializeHunkChunks(lines []string) ([]string, []string) {
 	newChunk := make([]string, 0, len(lines))
 	for _, line := range lines {
 		if line == "" {
+			oldChunk = append(oldChunk, "")
+			newChunk = append(newChunk, "")
 			continue
 		}
 		switch line[0] {
@@ -581,26 +595,296 @@ func materializeHunkChunks(lines []string) ([]string, []string) {
 	return oldChunk, newChunk
 }
 
-func locateHunkPosition(lines []string, oldChunk []string, hint int) (int, bool) {
+func locateHunkPosition(lines []string, hunkLines []string, oldChunk []string, hint int) (int, bool) {
 	if len(oldChunk) == 0 {
 		return clampInt(hint, 0, len(lines)), true
 	}
 	if hint >= 0 && hint+len(oldChunk) <= len(lines) && chunksEqual(lines[hint:hint+len(oldChunk)], oldChunk) {
 		return hint, true
 	}
-	low := clampInt(hint-controlledRewriteSearchWindow, 0, len(lines))
-	high := clampInt(hint+controlledRewriteSearchWindow, 0, len(lines))
-	for pos := low; pos+len(oldChunk) <= len(lines) && pos <= high; pos++ {
-		if chunksEqual(lines[pos:pos+len(oldChunk)], oldChunk) {
+	if hint >= 0 && hint <= len(lines) {
+		low := clampInt(hint-controlledRewriteSearchWindow, 0, len(lines))
+		high := clampInt(hint+controlledRewriteSearchWindow, 0, len(lines))
+		if pos, ok := findNearestChunkPosition(lines, oldChunk, hint, low, high); ok {
 			return pos, true
 		}
 	}
-	for pos := 0; pos+len(oldChunk) <= len(lines); pos++ {
-		if chunksEqual(lines[pos:pos+len(oldChunk)], oldChunk) {
-			return pos, true
+	if pos, ok := findUniqueChunkPosition(lines, oldChunk); ok {
+		return pos, true
+	}
+	return locateHunkPositionByUniqueAnchor(lines, hunkLines, len(oldChunk))
+}
+
+func hunkAlreadyApplied(lines []string, newChunk []string, hint int) bool {
+	if len(newChunk) == 0 {
+		return false
+	}
+	if hint >= 0 && hint+len(newChunk) <= len(lines) && chunksEqual(lines[hint:hint+len(newChunk)], newChunk) {
+		return true
+	}
+	_, ok := findUniqueChunkPosition(lines, newChunk)
+	return ok
+}
+
+func findNearestChunkPosition(lines []string, chunk []string, hint int, low int, high int) (int, bool) {
+	if len(chunk) == 0 {
+		return clampInt(hint, 0, len(lines)), true
+	}
+	matches := make([]int, 0, 2)
+	for pos := low; pos+len(chunk) <= len(lines) && pos <= high; pos++ {
+		if chunksEqual(lines[pos:pos+len(chunk)], chunk) {
+			matches = append(matches, pos)
+		}
+	}
+	if len(matches) != 1 {
+		return 0, false
+	}
+	return matches[0], true
+}
+
+func findUniqueChunkPosition(lines []string, chunk []string) (int, bool) {
+	matches := findChunkMatches(lines, chunk)
+	if len(matches) != 1 {
+		return 0, false
+	}
+	return matches[0], true
+}
+
+func findChunkMatches(lines []string, chunk []string) []int {
+	if len(chunk) == 0 {
+		return []int{0}
+	}
+	matches := make([]int, 0, 2)
+	for pos := 0; pos+len(chunk) <= len(lines); pos++ {
+		if chunksEqual(lines[pos:pos+len(chunk)], chunk) {
+			matches = append(matches, pos)
+		}
+	}
+	return matches
+}
+
+type hunkContextBlock struct {
+	OldOffset int
+	Lines     []string
+}
+
+func locateHunkPositionByUniqueAnchor(lines []string, hunkLines []string, oldChunkLen int) (int, bool) {
+	blocks := buildHunkContextBlocks(hunkLines)
+	bestLen := 0
+	for _, block := range blocks {
+		if len(block.Lines) > bestLen {
+			bestLen = len(block.Lines)
+		}
+	}
+	if bestLen == 0 {
+		return 0, false
+	}
+	for blockLen := bestLen; blockLen >= 1; blockLen-- {
+		for _, block := range blocks {
+			if len(block.Lines) != blockLen {
+				continue
+			}
+			pos, ok := findUniqueChunkPosition(lines, block.Lines)
+			if !ok {
+				continue
+			}
+			start := pos - block.OldOffset
+			if !hunkContextMatchesAt(lines, hunkLines, start, oldChunkLen) {
+				continue
+			}
+			return start, true
 		}
 	}
 	return 0, false
+}
+
+func applyInsertOnlyMarkdownHunkFallback(path string, lines []string, hunkLines []string) ([]string, bool) {
+	if !isMarkdownPath(path) || !isInsertOnlyHunk(hunkLines) {
+		return nil, false
+	}
+	anchor := trailingNonEmptyContextBlock(hunkLines)
+	if len(anchor) == 0 {
+		return nil, false
+	}
+	pos, ok := findUniqueNormalizedChunkPosition(lines, anchor, normalizeMarkdownContextLine)
+	if !ok {
+		return nil, false
+	}
+	added := addedLinesFromHunk(hunkLines)
+	if len(added) == 0 {
+		return nil, false
+	}
+	for i := 0; i < trailingBlankContextLineCount(hunkLines); i++ {
+		added = append([]string{""}, added...)
+	}
+	insertPos := pos + len(anchor)
+	out := make([]string, 0, len(lines)+len(added))
+	out = append(out, lines[:insertPos]...)
+	out = append(out, added...)
+	out = append(out, lines[insertPos:]...)
+	return out, true
+}
+
+func buildHunkContextBlocks(hunkLines []string) []hunkContextBlock {
+	blocks := make([]hunkContextBlock, 0, 4)
+	oldOffset := 0
+	for i := 0; i < len(hunkLines); {
+		line := hunkLines[i]
+		if line == "" {
+			line = " "
+		}
+		if line[0] != ' ' {
+			if line[0] == '-' {
+				oldOffset++
+			}
+			i++
+			continue
+		}
+		block := hunkContextBlock{
+			OldOffset: oldOffset,
+			Lines:     make([]string, 0, 4),
+		}
+		for i < len(hunkLines) {
+			cur := hunkLines[i]
+			if cur == "" {
+				cur = " "
+			}
+			if cur[0] != ' ' {
+				break
+			}
+			block.Lines = append(block.Lines, cur[1:])
+			oldOffset++
+			i++
+		}
+		if len(block.Lines) > 0 {
+			blocks = append(blocks, block)
+		}
+	}
+	return blocks
+}
+
+func hunkContextMatchesAt(lines []string, hunkLines []string, start int, oldChunkLen int) bool {
+	if start < 0 || start+oldChunkLen > len(lines) {
+		return false
+	}
+	oldOffset := 0
+	for _, line := range hunkLines {
+		if line == "" {
+			line = " "
+		}
+		switch line[0] {
+		case ' ':
+			if lines[start+oldOffset] != line[1:] {
+				return false
+			}
+			oldOffset++
+		case '-':
+			oldOffset++
+		case '+':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func isInsertOnlyHunk(hunkLines []string) bool {
+	hasAddition := false
+	for _, line := range hunkLines {
+		if line == "" {
+			line = " "
+		}
+		switch line[0] {
+		case '-':
+			return false
+		case '+':
+			hasAddition = true
+		}
+	}
+	return hasAddition
+}
+
+func trailingNonEmptyContextBlock(hunkLines []string) []string {
+	oldChunk, _ := materializeHunkChunks(hunkLines)
+	for len(oldChunk) > 0 && strings.TrimSpace(oldChunk[len(oldChunk)-1]) == "" {
+		oldChunk = oldChunk[:len(oldChunk)-1]
+	}
+	if len(oldChunk) == 0 {
+		return nil
+	}
+	start := len(oldChunk) - 1
+	for start >= 0 && strings.TrimSpace(oldChunk[start]) != "" {
+		start--
+	}
+	block := make([]string, len(oldChunk[start+1:]))
+	copy(block, oldChunk[start+1:])
+	return block
+}
+
+func trailingBlankContextLineCount(hunkLines []string) int {
+	oldChunk, _ := materializeHunkChunks(hunkLines)
+	count := 0
+	for i := len(oldChunk) - 1; i >= 0; i-- {
+		if strings.TrimSpace(oldChunk[i]) != "" {
+			break
+		}
+		count++
+	}
+	return count
+}
+
+func addedLinesFromHunk(hunkLines []string) []string {
+	out := make([]string, 0, len(hunkLines))
+	for _, line := range hunkLines {
+		if line == "" {
+			continue
+		}
+		if line[0] == '+' {
+			out = append(out, line[1:])
+		}
+	}
+	return out
+}
+
+func findUniqueNormalizedChunkPosition(lines []string, chunk []string, normalize func(string) string) (int, bool) {
+	if len(chunk) == 0 {
+		return 0, false
+	}
+	match := -1
+	for pos := 0; pos+len(chunk) <= len(lines); pos++ {
+		if !chunksEqualNormalized(lines[pos:pos+len(chunk)], chunk, normalize) {
+			continue
+		}
+		if match != -1 {
+			return 0, false
+		}
+		match = pos
+	}
+	if match == -1 {
+		return 0, false
+	}
+	return match, true
+}
+
+func chunksEqualNormalized(a []string, b []string, normalize func(string) string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if normalize(a[i]) != normalize(b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeMarkdownContextLine(line string) string {
+	line = strings.ReplaceAll(line, "`", "")
+	return strings.Join(strings.Fields(strings.TrimSpace(line)), " ")
+}
+
+func isMarkdownPath(path string) bool {
+	return strings.EqualFold(filepath.Ext(path), ".md")
 }
 
 func replaceChunk(lines []string, start int, oldLen int, newChunk []string) []string {
@@ -704,7 +988,7 @@ func parseAddOnlyPatchFiles(patch string) ([]addOnlyPatchFile, bool) {
 			if strings.HasPrefix(trim, "diff --git ") {
 				break
 			}
-			if strings.HasPrefix(trim, "@@ -") {
+			if isUnifiedHunkHeader(trim) {
 				oldStart, oldCount, ok := parseOldRange(trim)
 				if !ok || oldStart != 0 || oldCount != 0 {
 					return nil, false
@@ -794,7 +1078,7 @@ func fixHunkCounts(patch string) string {
 		j := i + 1
 		for ; j < len(lines); j++ {
 			l := lines[j]
-			if strings.HasPrefix(l, "@@ -") || strings.HasPrefix(l, "diff --git ") {
+			if isUnifiedHunkHeader(strings.TrimSpace(l)) || strings.HasPrefix(l, "diff --git ") {
 				break
 			}
 			if strings.HasPrefix(l, "--- ") && j > 0 && strings.HasPrefix(lines[j-1], "diff --git ") {
@@ -826,6 +1110,10 @@ func fixHunkCounts(patch string) string {
 }
 
 func parseHunkHeader(line string) (int, int, string, bool) {
+	line = strings.TrimSpace(line)
+	if line == "@@" {
+		return 1, 1, "", true
+	}
 	if !strings.HasPrefix(line, "@@ -") {
 		return 0, 0, "", false
 	}
@@ -853,6 +1141,10 @@ func parseHunkHeader(line string) (int, int, string, bool) {
 }
 
 func parseHunkHeaderFull(line string) (int, int, int, int, bool) {
+	line = strings.TrimSpace(line)
+	if line == "@@" {
+		return 1, 0, 1, 0, true
+	}
 	if !strings.HasPrefix(line, "@@ -") {
 		return 0, 0, 0, 0, false
 	}
@@ -897,4 +1189,9 @@ func parseRange(s string) (int, int, bool) {
 		count = n
 	}
 	return start, count, true
+}
+
+func isUnifiedHunkHeader(line string) bool {
+	line = strings.TrimSpace(line)
+	return line == "@@" || strings.HasPrefix(line, "@@ -")
 }

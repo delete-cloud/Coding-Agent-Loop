@@ -289,6 +289,24 @@ class KB:
                 tbl.add(rows)
         return {"indexed": len(rows), "db_path": self._db_path, "table": self._table_name}
 
+    def _collect_rows(self, searcher, top_k, where):
+        if searcher is None:
+            raise RuntimeError("searcher is required")
+        if where:
+            try:
+                searcher = searcher.where(where)
+            except Exception:
+                pass
+        try:
+            arrow = searcher.limit(int(top_k)).to_arrow()
+            return arrow.to_pylist()
+        except Exception as first_err:
+            try:
+                df = searcher.limit(int(top_k)).to_pandas()
+                return df.to_dict(orient="records")
+            except Exception:
+                raise first_err
+
     def search(self, query, top_k, query_type, where, timeout_s):
         query = (query or "").strip()
         if not query:
@@ -300,31 +318,25 @@ class KB:
         qtype = (query_type or "").strip().lower()
         if qtype not in {"auto", "hybrid", "vector", "text"}:
             qtype = "auto"
-        searcher = None
+
+        attempts = []
         if qtype in {"auto", "hybrid"}:
+            attempts.append(lambda: tbl.search(query, query_type="hybrid"))
+        if qtype in {"auto", "vector"}:
+            attempts.append(lambda: tbl.search(self._embedder.embed([query], timeout_s)[0]))
+        if qtype in {"auto", "text"}:
+            attempts.append(lambda: tbl.search(query))
+
+        rows = []
+        for make_searcher in attempts:
             try:
-                searcher = tbl.search(query, query_type="hybrid")
-            except Exception:
-                searcher = None
-        if searcher is None and qtype in {"auto", "vector"}:
-            vec = self._embedder.embed([query], timeout_s)[0]
-            searcher = tbl.search(vec)
-        if searcher is None:
-            searcher = tbl.search(query)
-        if where:
-            try:
-                searcher = searcher.where(where)
-            except Exception:
-                pass
-        try:
-            arrow = searcher.limit(int(top_k)).to_arrow()
-            rows = arrow.to_pylist()
-        except Exception:
-            try:
-                df = searcher.limit(int(top_k)).to_pandas()
-                rows = df.to_dict(orient="records")
+                rows = self._collect_rows(make_searcher(), top_k, where)
             except Exception:
                 rows = []
+                continue
+            if rows:
+                break
+
         hits = []
         for r in rows:
             hits.append(

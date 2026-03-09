@@ -3,10 +3,12 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	openaiext "github.com/cloudwego/eino-ext/components/model/openai"
 	modelpkg "github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 )
@@ -80,11 +82,21 @@ func TestReviewerFallsBackWhenModelUnavailable(t *testing.T) {
 
 type fakeToolCallingModel struct {
 	responses []string
+	errs      []error
 	calls     int
 }
 
 func (f *fakeToolCallingModel) Generate(_ context.Context, _ []*schema.Message, _ ...modelpkg.Option) (*schema.Message, error) {
 	f.calls++
+	if len(f.errs) > 0 {
+		idx := f.calls - 1
+		if idx >= len(f.errs) {
+			idx = len(f.errs) - 1
+		}
+		if f.errs[idx] != nil {
+			return nil, f.errs[idx]
+		}
+	}
 	if len(f.responses) == 0 {
 		return schema.AssistantMessage("", nil), nil
 	}
@@ -142,5 +154,143 @@ func TestCompleteJSONFailsAfterRepairAttempts(t *testing.T) {
 	}
 	if model.calls != 3 {
 		t.Fatalf("expected 3 attempts, got %d", model.calls)
+	}
+}
+
+type emptyToolCallingModelError struct{}
+
+func (emptyToolCallingModelError) Error() string { return "" }
+
+func TestCompleteJSONFormatsGenerateError(t *testing.T) {
+	model := &fakeToolCallingModel{
+		errs: []error{errors.New("rate limit exceeded")},
+	}
+	var out map[string]any
+	err := completeJSONWithModel(context.Background(), model, "system", "user", &out)
+	if err == nil {
+		t.Fatalf("expected generate error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "model_generate") {
+		t.Fatalf("expected model_generate stage in %q", msg)
+	}
+	if !strings.Contains(msg, "attempt=1") {
+		t.Fatalf("expected attempt number in %q", msg)
+	}
+	if !strings.Contains(msg, "rate limit exceeded") {
+		t.Fatalf("expected original error message in %q", msg)
+	}
+}
+
+func TestCompleteJSONFormatsEmptyGenerateError(t *testing.T) {
+	model := &fakeToolCallingModel{
+		errs: []error{emptyToolCallingModelError{}},
+	}
+	var out map[string]any
+	err := completeJSONWithModel(context.Background(), model, "system", "user", &out)
+	if err == nil {
+		t.Fatalf("expected generate error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "empty model error") {
+		t.Fatalf("expected empty model error fallback in %q", msg)
+	}
+	if !strings.Contains(msg, "agent.emptyToolCallingModelError") {
+		t.Fatalf("expected type name in %q", msg)
+	}
+}
+
+func TestCompleteJSONFormatsWrappedGenerateErrorCauseChain(t *testing.T) {
+	model := &fakeToolCallingModel{
+		errs: []error{fmt.Errorf("tool-calling chat failed: %w", errors.New("upstream 429"))},
+	}
+	var out map[string]any
+	err := completeJSONWithModel(context.Background(), model, "system", "user", &out)
+	if err == nil {
+		t.Fatalf("expected generate error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "tool-calling chat failed") {
+		t.Fatalf("expected wrapped error message in %q", msg)
+	}
+	if !strings.Contains(msg, "upstream 429") {
+		t.Fatalf("expected unwrapped cause in %q", msg)
+	}
+}
+
+func TestCompleteJSONTruncatesParseFailureContent(t *testing.T) {
+	long := strings.Repeat("x", 3000)
+	model := &fakeToolCallingModel{
+		responses: []string{long, long, long},
+	}
+	var out map[string]any
+	err := completeJSONWithModel(context.Background(), model, "system", "user", &out)
+	if err == nil {
+		t.Fatalf("expected parse error after retries")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "content=") {
+		t.Fatalf("expected content preview in %q", msg)
+	}
+	if strings.Contains(msg, strings.Repeat("x", 2500)) {
+		t.Fatalf("expected parse failure content to be truncated, got %q", msg)
+	}
+}
+
+func TestFormatDiagnosticErrorIncludesOpenAIAPIErrorFields(t *testing.T) {
+	err := &openaiext.APIError{
+		Code:           "invalid_api_key",
+		Message:        "bad api key",
+		Type:           "invalid_request_error",
+		HTTPStatus:     "401 Unauthorized",
+		HTTPStatusCode: 401,
+	}
+	msg := formatDiagnosticError(err)
+	for _, want := range []string{
+		"type=*openai.APIError",
+		"http_status_code=401",
+		"http_status=\"401 Unauthorized\"",
+		"api_error_type=\"invalid_request_error\"",
+		"api_error_code=\"invalid_api_key\"",
+		"message=\"bad api key\"",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("expected %q in %q", want, msg)
+		}
+	}
+}
+
+func TestFormatDiagnosticErrorKeepsWrapperAndFormatsInnerAPIErrorSeparately(t *testing.T) {
+	err := fmt.Errorf("node wrapper: %w", &openaiext.APIError{
+		Message:        "bad api key",
+		Type:           "invalid_request_error",
+		HTTPStatus:     "401 Unauthorized",
+		HTTPStatusCode: 401,
+	})
+	msg := formatDiagnosticError(err)
+	if !strings.Contains(msg, "causes=node wrapper: error, status code: 401, status: 401 Unauthorized, message: bad api key -> openai_api_error(") {
+		t.Fatalf("expected wrapper message followed by structured API error, got %q", msg)
+	}
+	if strings.Contains(msg, "openai_api_error(type=*fmt.wrapError") {
+		t.Fatalf("did not expect wrapper type to be formatted as APIError, got %q", msg)
+	}
+}
+
+func TestCompleteJSONRequiresAPIKeyForRemoteBaseURL(t *testing.T) {
+	cfg := ClientConfig{
+		BaseURL: "https://right.codes/claude/v1",
+		Model:   "claude-haiku-4-5",
+	}
+	var out map[string]any
+	err := cfg.CompleteJSON(context.Background(), "system", "user", &out)
+	if err == nil {
+		t.Fatal("expected missing api key error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "OPENAI_API_KEY") {
+		t.Fatalf("expected OPENAI_API_KEY guidance, got %q", msg)
+	}
+	if !strings.Contains(msg, "remote") {
+		t.Fatalf("expected remote base url guidance, got %q", msg)
 	}
 }

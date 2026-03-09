@@ -1,3 +1,8 @@
+import json
+import sqlite3
+import subprocess
+from types import SimpleNamespace
+from unittest import mock
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +14,8 @@ from eval.ab.run_ab import (
     evaluate_expectations,
     extract_goal_target_files,
     retrieval_mode_for_task,
+    read_run_context,
+    run_one,
     should_copy_overlay_path,
 )
 
@@ -141,6 +148,220 @@ class RunABTests(unittest.TestCase):
                     {"docs/eino-agent-loop.md"},
                 )
             )
+
+    def test_read_run_context_tolerates_invalid_utf8_output_text(self):
+        with tempfile.TemporaryDirectory() as d:
+            db_path = Path(d) / "state.db"
+            conn = sqlite3.connect(db_path)
+            conn.executescript(
+                """
+                create table runs (id text primary key, summary text, created_at integer, updated_at integer);
+                create table reviews (run_id text, summary text, findings_json text);
+                create table tool_calls (run_id text, tool text, input_text text, output_text text, status text);
+                """
+            )
+            conn.execute(
+                "insert into runs(id, summary, created_at, updated_at) values (?, ?, ?, ?)",
+                ("r1", "summary", 0, 1000),
+            )
+            conn.execute(
+                "insert into tool_calls(run_id, tool, input_text, output_text, status) values (?, ?, ?, CAST(X'5b315d20ff' AS TEXT), ?)",
+                ("r1", "kb_search", "", "completed"),
+            )
+            conn.commit()
+            conn.close()
+
+            duration, corpus, trace = read_run_context(str(db_path), "r1")
+
+            self.assertAlmostEqual(duration, 1.0)
+            self.assertIn("summary", corpus)
+            self.assertIn("kb_search", corpus)
+            self.assertEqual(trace["kb_search_calls"], 1)
+
+    def test_read_run_context_counts_retrieval_preflight_as_real_kb_search(self):
+        with tempfile.TemporaryDirectory() as d:
+            db_path = Path(d) / "state.db"
+            conn = sqlite3.connect(db_path)
+            conn.executescript(
+                """
+                create table runs (id text primary key, summary text, created_at integer, updated_at integer);
+                create table reviews (run_id text, summary text, findings_json text);
+                create table tool_calls (run_id text, tool text, input_text text, output_text text, status text);
+                """
+            )
+            conn.execute(
+                "insert into runs(id, summary, created_at, updated_at) values (?, ?, ?, ?)",
+                ("r1", "summary", 0, 1000),
+            )
+            conn.execute(
+                "insert into tool_calls(run_id, tool, input_text, output_text, status) values (?, ?, ?, ?, ?)",
+                ("r1", "retrieval_preflight", "", "[]", "completed"),
+            )
+            conn.commit()
+            conn.close()
+
+            _, _, trace = read_run_context(str(db_path), "r1")
+
+            self.assertEqual(trace["kb_search_calls"], 1)
+
+    @mock.patch("eval.ab.run_ab.subprocess.run")
+    def test_run_one_sets_agent_loop_db_path_env(self, mock_run):
+        mock_run.return_value = SimpleNamespace(stdout='{"run_id":"","status":"completed","summary":"ok"}', stderr='', returncode=0)
+
+        row = run_one(
+            experiment="rag",
+            rag_enabled=True,
+            task={"task_id": "repo_only_001", "goal": "fix", "requires_kb": False},
+            agent_loop_bin="./agent-loop",
+            repo="/tmp/repo",
+            db_path="/tmp/state.db",
+            pr_mode="dry-run",
+            max_iterations=1,
+            kb_url="http://127.0.0.1:8788",
+            dry_run=False,
+            task_timeout_sec=60,
+            strict_mode=False,
+            isolate_worktree=False,
+        )
+
+        self.assertEqual(row["status"], "completed")
+        self.assertEqual(mock_run.call_args.kwargs["env"]["AGENT_LOOP_DB_PATH"], "/tmp/state.db")
+
+    @mock.patch("eval.ab.run_ab.subprocess.run")
+    def test_run_one_recovers_run_id_from_db_on_timeout_without_stdout_json(self, mock_run):
+        with tempfile.TemporaryDirectory() as d:
+            db_path = Path(d) / "state.db"
+            conn = sqlite3.connect(db_path)
+            conn.executescript(
+                """
+                create table runs (id text primary key, spec_json text, status text, branch text, commit_hash text, pr_url text, summary text, created_at integer, updated_at integer);
+                create table reviews (run_id text, summary text, findings_json text);
+                create table tool_calls (run_id text, tool text, input_text text, output_text text, status text);
+                """
+            )
+            spec = '{"goal":' + json.dumps(build_goal("fix readme", rag_enabled=True, requires_kb=False)) + ',"repo":"/tmp/repo"}'
+            conn.execute(
+                "insert into runs(id, spec_json, status, branch, commit_hash, pr_url, summary, created_at, updated_at) values (?, ?, ?, '', '', '', ?, ?, ?)",
+                ("run_123", spec, "running", "run started", 1000, 4000),
+            )
+            conn.execute(
+                "insert into tool_calls(run_id, tool, input_text, output_text, status) values (?, ?, ?, ?, ?)",
+                ("run_123", "coder_meta", "", '{"citations":[],"used_fallback":false}', "completed"),
+            )
+            conn.commit()
+            conn.close()
+
+            mock_run.side_effect = subprocess.TimeoutExpired(cmd=["agent-loop"], timeout=1, output="", stderr="")
+
+            row = run_one(
+                experiment="rag",
+                rag_enabled=True,
+                task={"task_id": "repo_only_003", "goal": "fix readme", "requires_kb": False},
+                agent_loop_bin="./agent-loop",
+                repo="/tmp/repo",
+                db_path=str(db_path),
+                pr_mode="dry-run",
+                max_iterations=1,
+                kb_url="http://127.0.0.1:8788",
+                dry_run=False,
+                task_timeout_sec=60,
+                strict_mode=False,
+                isolate_worktree=False,
+            )
+
+            self.assertEqual(row["run_id"], "run_123")
+            self.assertEqual(row["duration_sec"], 3.0)
+
+    @mock.patch("eval.ab.run_ab.subprocess.run")
+    def test_run_one_recovers_run_id_from_db_when_process_returns_without_result_json(self, mock_run):
+        with tempfile.TemporaryDirectory() as d:
+            db_path = Path(d) / "state.db"
+            conn = sqlite3.connect(db_path)
+            conn.executescript(
+                """
+                create table runs (id text primary key, spec_json text, status text, branch text, commit_hash text, pr_url text, summary text, created_at integer, updated_at integer);
+                create table reviews (run_id text, summary text, findings_json text);
+                create table tool_calls (run_id text, tool text, input_text text, output_text text, status text);
+                """
+            )
+            spec = '{"goal":' + json.dumps(build_goal("fix readme", rag_enabled=False, requires_kb=False)) + ',"repo":"/tmp/repo"}'
+            conn.execute(
+                "insert into runs(id, spec_json, status, branch, commit_hash, pr_url, summary, created_at, updated_at) values (?, ?, ?, '', '', '', ?, ?, ?)",
+                ("run_456", spec, "completed", "done", 1000, 5000),
+            )
+            conn.commit()
+            conn.close()
+
+            mock_run.return_value = SimpleNamespace(stdout='', stderr='', returncode=0)
+
+            row = run_one(
+                experiment="no_rag",
+                rag_enabled=False,
+                task={"task_id": "repo_only_003", "goal": "fix readme", "requires_kb": False},
+                agent_loop_bin="./agent-loop",
+                repo="/tmp/repo",
+                db_path=str(db_path),
+                pr_mode="dry-run",
+                max_iterations=1,
+                kb_url="http://127.0.0.1:8788",
+                dry_run=False,
+                task_timeout_sec=60,
+                strict_mode=False,
+                isolate_worktree=False,
+            )
+
+            self.assertEqual(row["run_id"], "run_456")
+            self.assertEqual(row["duration_sec"], 4.0)
+            self.assertEqual(row["status"], "completed")
+            self.assertEqual(row["summary"], "done")
+
+    @mock.patch("eval.ab.run_ab.subprocess.run")
+    def test_run_one_timeout_prefers_terminal_db_state(self, mock_run):
+        with tempfile.TemporaryDirectory() as d:
+            db_path = Path(d) / "state.db"
+            conn = sqlite3.connect(db_path)
+            conn.executescript(
+                """
+                create table runs (id text primary key, spec_json text, status text, branch text, commit_hash text, pr_url text, summary text, created_at integer, updated_at integer);
+                create table reviews (run_id text, summary text, findings_json text);
+                create table tool_calls (run_id text, tool text, input_text text, output_text text, status text);
+                """
+            )
+            spec = '{"goal":' + json.dumps(build_goal("fix readme", rag_enabled=True, requires_kb=False)) + ',"repo":"/tmp/repo"}'
+            conn.execute(
+                "insert into runs(id, spec_json, status, branch, commit_hash, pr_url, summary, created_at, updated_at) values (?, ?, ?, '', '', '', ?, ?, ?)",
+                ("run_789", spec, "needs_changes", "review requested changes", 1000, 7000),
+            )
+            conn.execute(
+                "insert into tool_calls(run_id, tool, input_text, output_text, status) values (?, ?, ?, ?, ?)",
+                ("run_789", "reviewer_meta", "", '{"decision":"request_changes","used_fallback":false}', "completed"),
+            )
+            conn.commit()
+            conn.close()
+
+            mock_run.side_effect = subprocess.TimeoutExpired(cmd=["agent-loop"], timeout=1, output="", stderr="")
+
+            row = run_one(
+                experiment="rag",
+                rag_enabled=True,
+                task={"task_id": "repo_only_003", "goal": "fix readme", "requires_kb": False},
+                agent_loop_bin="./agent-loop",
+                repo="/tmp/repo",
+                db_path=str(db_path),
+                pr_mode="dry-run",
+                max_iterations=1,
+                kb_url="http://127.0.0.1:8788",
+                dry_run=False,
+                task_timeout_sec=60,
+                strict_mode=False,
+                isolate_worktree=False,
+            )
+
+            self.assertEqual(row["run_id"], "run_789")
+            self.assertEqual(row["status"], "needs_changes")
+            self.assertEqual(row["summary"], "review requested changes")
+            self.assertTrue(row["timed_out"])
+            self.assertEqual(row["duration_sec"], 6.0)
 
     def test_retrieval_mode_for_task(self):
         self.assertEqual("prefetch", retrieval_mode_for_task(rag_enabled=True, requires_kb=True))

@@ -12,23 +12,16 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
-def load_jsonl(path: str | None) -> list[dict[str, Any]]:
-    if not path:
-        return []
-    rows: list[dict[str, Any]] = []
-    with Path(path).open("r", encoding="utf-8") as f:
-        for line in f:
-            text = line.strip()
-            if not text:
-                continue
-            rows.append(json.loads(text))
-    return rows
+try:
+    from eval.validate_eval_inputs import EvalValidationError, load_jsonl, validate_eval_inputs
+except ModuleNotFoundError:  # pragma: no cover - script entrypoint fallback
+    from validate_eval_inputs import EvalValidationError, load_jsonl, validate_eval_inputs
 
 
 def mean(values: list[float]) -> float:
@@ -213,7 +206,7 @@ def eval_coding(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Evaluate RAG + Agent metrics from JSONL inputs.")
     p.add_argument("--qrels", help="Path to retrieval ground-truth JSONL")
     p.add_argument("--retrieval", help="Path to retrieval prediction JSONL")
@@ -222,12 +215,24 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--coding", help="Path to coding results JSONL")
     p.add_argument("--k", type=int, default=5, help="Top-k used for retrieval metrics")
     p.add_argument("--out", required=True, help="Output report path (JSON)")
-    return p.parse_args()
+    return p.parse_args(argv)
 
 
-def main() -> int:
-    args = parse_args()
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     k = max(1, int(args.k))
+
+    try:
+        validate_eval_inputs(
+            qrels=args.qrels,
+            retrieval=args.retrieval,
+            qa_gold=args.qa_gold,
+            qa_pred=args.qa_pred,
+            coding=args.coding,
+        )
+    except EvalValidationError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
 
     retrieval = eval_retrieval(
         qrels_rows=load_jsonl(args.qrels),

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -20,12 +21,16 @@ type ClientConfig struct {
 
 const defaultModelTimeout = 90 * time.Second
 const maxJSONRepairAttempts = 3
+const maxDiagnosticContentPreview = 512
 
 func (c ClientConfig) Ready() bool {
 	return strings.TrimSpace(c.BaseURL) != "" && strings.TrimSpace(c.Model) != ""
 }
 
 func (c ClientConfig) newToolCallingModel(ctx context.Context) (modelpkg.ToolCallingChatModel, error) {
+	if err := c.validateAuth(); err != nil {
+		return nil, err
+	}
 	cm, err := openai.NewChatModel(ctx, &openai.ChatModelConfig{
 		BaseURL: c.BaseURL,
 		Model:   c.Model,
@@ -54,6 +59,20 @@ func (c ClientConfig) CompleteJSON(ctx context.Context, systemPrompt, userPrompt
 	return completeJSONWithModel(ctx, cm, systemPrompt, userPrompt, out)
 }
 
+func (c ClientConfig) validateAuth() error {
+	baseURL := strings.TrimSpace(c.BaseURL)
+	if baseURL == "" {
+		return nil
+	}
+	if strings.TrimSpace(c.APIKey) != "" {
+		return nil
+	}
+	if isLikelyLocalBaseURL(baseURL) {
+		return nil
+	}
+	return fmt.Errorf("OPENAI_API_KEY is required for remote openai-compatible base URL %q", baseURL)
+}
+
 func completeJSONWithModel(ctx context.Context, cm modelpkg.ToolCallingChatModel, systemPrompt, userPrompt string, out any) error {
 	if cm == nil {
 		return fmt.Errorf("llm model is nil")
@@ -69,7 +88,7 @@ func completeJSONWithModel(ctx context.Context, cm modelpkg.ToolCallingChatModel
 	for attempt := 0; attempt < maxJSONRepairAttempts; attempt++ {
 		resp, err := cm.Generate(ctx, messages)
 		if err != nil {
-			return err
+			return fmt.Errorf("model_generate attempt=%d: %s", attempt+1, formatDiagnosticError(err))
 		}
 		lastRaw = ""
 		if resp != nil {
@@ -91,7 +110,7 @@ func completeJSONWithModel(ctx context.Context, cm modelpkg.ToolCallingChatModel
 		}
 		messages = append(messages, schema.UserMessage(buildJSONRepairPrompt(lastRaw)))
 	}
-	return fmt.Errorf("parse llm json failed: %w; content=%s", lastErr, lastRaw)
+	return fmt.Errorf("parse llm json failed: %w; content=%s", lastErr, truncateDiagnosticPreview(lastRaw))
 }
 
 func buildJSONRepairPrompt(previous string) string {
@@ -108,6 +127,65 @@ func buildJSONRepairPrompt(previous string) string {
 		"- No markdown fences.\n" +
 		"- No prose before or after JSON.\n" +
 		"Previous response:\n" + preview
+}
+
+func formatDiagnosticError(err error) string {
+	if err == nil {
+		return "unknown error"
+	}
+	return fmt.Sprintf("type=%T; causes=%s", err, strings.Join(flattenDiagnosticErrorMessages(err), " -> "))
+}
+
+func flattenDiagnosticErrorMessages(err error) []string {
+	if err == nil {
+		return []string{"unknown error"}
+	}
+	out := make([]string, 0, 4)
+	for current := err; current != nil; current = errors.Unwrap(current) {
+		out = append(out, summarizeSingleDiagnosticError(current))
+	}
+	if len(out) == 0 {
+		return []string{fmt.Sprintf("empty model error (type=%T)", err)}
+	}
+	return out
+}
+
+func summarizeSingleDiagnosticError(err error) string {
+	if err == nil {
+		return "unknown error"
+	}
+	if apiErr, ok := err.(*openai.APIError); ok {
+		return fmt.Sprintf(
+			"openai_api_error(type=%T, http_status_code=%d, http_status=%q, api_error_type=%q, api_error_code=%q, param=%q, message=%q)",
+			err,
+			apiErr.HTTPStatusCode,
+			apiErr.HTTPStatus,
+			apiErr.Type,
+			fmt.Sprint(apiErr.Code),
+			stringPtrValue(apiErr.Param),
+			strings.TrimSpace(apiErr.Message),
+		)
+	}
+	msg := strings.TrimSpace(err.Error())
+	if msg == "" {
+		return fmt.Sprintf("empty model error (type=%T)", err)
+	}
+	return msg
+}
+
+func truncateDiagnosticPreview(raw string) string {
+	preview := strings.TrimSpace(raw)
+	if len(preview) <= maxDiagnosticContentPreview {
+		return preview
+	}
+	return preview[:maxDiagnosticContentPreview] + "...(truncated)"
+}
+
+func stringPtrValue(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
 }
 
 func extractJSON(content string) string {
@@ -232,6 +310,14 @@ func normalizeChatMessages(in []*schema.Message) []*schema.Message {
 
 func isDeepSeekBaseURL(baseURL string) bool {
 	return strings.Contains(strings.ToLower(baseURL), "deepseek")
+}
+
+func isLikelyLocalBaseURL(baseURL string) bool {
+	lower := strings.ToLower(strings.TrimSpace(baseURL))
+	return strings.Contains(lower, "127.0.0.1") ||
+		strings.Contains(lower, "localhost") ||
+		strings.Contains(lower, "[::1]") ||
+		strings.HasPrefix(lower, "http://0.0.0.0")
 }
 
 type retryToolCallingModel struct {

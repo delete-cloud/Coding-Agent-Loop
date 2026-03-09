@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -43,6 +44,38 @@ func TestRunnerExecutesSafeCommand(t *testing.T) {
 	}
 	if out == "" {
 		t.Fatal("expected stdout")
+	}
+}
+
+func TestRunnerFiltersAgentOrchestrationEnv(t *testing.T) {
+	t.Setenv("AGENT_LOOP_DB_PATH", "/tmp/state.db")
+	t.Setenv("OPENAI_MODEL", "claude-haiku-4-5")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "secret")
+	t.Setenv("KB_DB_PATH", "/tmp/kb")
+	t.Setenv("KEEP_ME", "visible")
+
+	r := NewRunner()
+	out, _, err := r.Run(context.Background(), "env | sort", t.TempDir())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if strings.Contains(out, "AGENT_LOOP_DB_PATH=") {
+		t.Fatalf("expected AGENT_LOOP_DB_PATH to be filtered, got:\n%s", out)
+	}
+	if strings.Contains(out, "OPENAI_MODEL=") {
+		t.Fatalf("expected OPENAI_MODEL to be filtered, got:\n%s", out)
+	}
+	if strings.Contains(out, "ANTHROPIC_AUTH_TOKEN=") {
+		t.Fatalf("expected ANTHROPIC_AUTH_TOKEN to be filtered, got:\n%s", out)
+	}
+	if strings.Contains(out, "KB_DB_PATH=") {
+		t.Fatalf("expected KB_DB_PATH to be filtered, got:\n%s", out)
+	}
+	if !strings.Contains(out, "KEEP_ME=visible") {
+		t.Fatalf("expected regular env to be preserved, got:\n%s", out)
+	}
+	if !strings.Contains(out, "PATH=") {
+		t.Fatalf("expected PATH to be preserved, got:\n%s", out)
 	}
 }
 

@@ -34,29 +34,31 @@ func init() {
 }
 
 type EngineDeps struct {
-	Store      *sqlite.Store
-	Runner     *tools.Runner
-	Git        *gitpkg.Client
-	GitHub     *ghpkg.Client
-	KB         *kbpkg.Client
-	Coder      *agentpkg.Coder
-	Reviewer   *agentpkg.Reviewer
-	Skills     *skills.Registry
-	Artifacts  string
-	DoomThresh int
+	Store           *sqlite.Store
+	Runner          *tools.Runner
+	Git             *gitpkg.Client
+	GitHub          *ghpkg.Client
+	KB              *kbpkg.Client
+	Coder           *agentpkg.Coder
+	Reviewer        *agentpkg.Reviewer
+	Skills          *skills.Registry
+	Artifacts       string
+	DoomThresh      int
+	ReviewerTimeout time.Duration
 }
 
 type Engine struct {
-	store      *sqlite.Store
-	runner     *tools.Runner
-	git        *gitpkg.Client
-	github     *ghpkg.Client
-	kb         *kbpkg.Client
-	coder      *agentpkg.Coder
-	reviewer   *agentpkg.Reviewer
-	skills     *skills.Registry
-	artifacts  string
-	doomThresh int
+	store           *sqlite.Store
+	runner          *tools.Runner
+	git             *gitpkg.Client
+	github          *ghpkg.Client
+	kb              *kbpkg.Client
+	coder           *agentpkg.Coder
+	reviewer        *agentpkg.Reviewer
+	skills          *skills.Registry
+	artifacts       string
+	doomThresh      int
+	reviewerTimeout time.Duration
 
 	checkpoints compose.CheckPointStore
 }
@@ -92,6 +94,7 @@ const (
 	promptRetrievedContextMaxHits = 4
 	promptRetrievedTextMaxChars   = 500
 	coderRefreshReviewMaxChars    = 160
+	defaultReviewerTimeout        = 60 * time.Second
 )
 
 var goalPathHintRE = regexp.MustCompile(`[A-Za-z0-9_./\-]+\.[A-Za-z0-9_+-]+`)
@@ -184,23 +187,28 @@ func NewEngine(deps EngineDeps) *Engine {
 	if deps.Artifacts == "" {
 		deps.Artifacts = ".agent-loop-artifacts"
 	}
+	reviewerTimeout := deps.ReviewerTimeout
+	if reviewerTimeout <= 0 {
+		reviewerTimeout = defaultReviewerTimeout
+	}
 	checkpoints := compose.CheckPointStore(newMemoryCheckpointStore())
 	checkpointDir := filepath.Join(deps.Artifacts, "checkpoints")
 	if err := os.MkdirAll(checkpointDir, 0o755); err == nil {
 		checkpoints = newFileCheckpointStore(checkpointDir)
 	}
 	return &Engine{
-		store:       deps.Store,
-		runner:      deps.Runner,
-		git:         deps.Git,
-		github:      deps.GitHub,
-		kb:          deps.KB,
-		coder:       deps.Coder,
-		reviewer:    deps.Reviewer,
-		skills:      deps.Skills,
-		artifacts:   deps.Artifacts,
-		doomThresh:  threshold,
-		checkpoints: checkpoints,
+		store:           deps.Store,
+		runner:          deps.Runner,
+		git:             deps.Git,
+		github:          deps.GitHub,
+		kb:              deps.KB,
+		coder:           deps.Coder,
+		reviewer:        deps.Reviewer,
+		skills:          deps.Skills,
+		artifacts:       deps.Artifacts,
+		doomThresh:      threshold,
+		reviewerTimeout: reviewerTimeout,
+		checkpoints:     checkpoints,
 	}
 }
 
@@ -406,6 +414,15 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 		"used_fallback":   coderOut.UsedFallback,
 		"fallback_source": strings.TrimSpace(coderOut.FallbackSource),
 		"citations":       coderOut.Citations,
+		"notes":           strings.TrimSpace(coderOut.Notes),
+		"patch_empty":     strings.TrimSpace(coderOut.Patch) == "",
+		"patch_touches_target": func() bool {
+			targets := loopExtractGoalTargetFiles(st.Spec.Goal)
+			if len(targets) == 0 {
+				return false
+			}
+			return loopPatchTouchesTargets(coderOut.Patch, targets, len(targets) > 1)
+		}(),
 	})
 	_ = e.store.InsertToolCall(ctx, sqlite.ToolCallRecord{
 		RunID:     st.RunID,
@@ -497,7 +514,9 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 	}
 	statusShort, _ := e.git.StatusShort(ctx, st.RepoAbs)
 	reviewIn := buildReviewInput(st, mustDiff(ctx, e.git, st.RepoAbs), statusShort, coderOut.Patch, commandOutput.String())
-	reviewOut, err := e.reviewer.Review(ctx, reviewIn)
+	reviewCtx, cancelReview := context.WithTimeout(ctx, e.reviewerTimeout)
+	reviewOut, err := e.reviewer.Review(reviewCtx, reviewIn)
+	cancelReview()
 	if err != nil {
 		_ = e.store.InsertToolCall(ctx, sqlite.ToolCallRecord{
 			RunID:     st.RunID,
@@ -525,7 +544,9 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 	}
 	if refreshedIn, refreshed := e.maybeRefreshReviewerContext(ctx, st, iteration, reviewIn, reviewOut); refreshed {
 		reviewIn = refreshedIn
-		reviewOut, err = e.reviewer.Review(ctx, reviewIn)
+		reviewCtx, cancelReview = context.WithTimeout(ctx, e.reviewerTimeout)
+		reviewOut, err = e.reviewer.Review(reviewCtx, reviewIn)
+		cancelReview()
 		if err != nil {
 			_ = e.store.InsertToolCall(ctx, sqlite.ToolCallRecord{
 				RunID:     st.RunID,
@@ -652,17 +673,25 @@ func compactRetrievedContext(hits []kbpkg.SearchHit) []kbpkg.SearchHit {
 	if len(hits) == 0 {
 		return nil
 	}
-	limit := len(hits)
-	if limit > promptRetrievedContextMaxHits {
-		limit = promptRetrievedContextMaxHits
-	}
-	out := make([]kbpkg.SearchHit, 0, limit)
-	for i := 0; i < limit; i++ {
-		hit := hits[i]
+	out := make([]kbpkg.SearchHit, 0, min(len(hits), promptRetrievedContextMaxHits))
+	seen := make(map[string]struct{}, len(hits))
+	for _, hit := range hits {
+		key := retrievedContextChunkKey(hit)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
 		hit.Text = truncateString(hit.Text, promptRetrievedTextMaxChars)
 		out = append(out, hit)
+		if len(out) == promptRetrievedContextMaxHits {
+			break
+		}
 	}
 	return out
+}
+
+func retrievedContextChunkKey(hit kbpkg.SearchHit) string {
+	return fmt.Sprintf("%s:%d:%d", hit.Path, hit.Start, hit.End)
 }
 
 func shouldRefreshCoderContext(st *loopSession, iteration int) bool {
@@ -1069,11 +1098,36 @@ func kbSearchQueryFromGoal(goal string) string {
 	if q == "" {
 		return "project task context"
 	}
+	if goalSuggestsTestingKnowledge(q) {
+		q = strings.TrimSpace(q + " testing standards table-driven positive negative cases")
+	}
 	runes := []rune(q)
 	if len(runes) > 240 {
 		return string(runes[:240])
 	}
 	return q
+}
+
+func goalSuggestsTestingKnowledge(goal string) bool {
+	low := strings.ToLower(strings.TrimSpace(goal))
+	if low == "" {
+		return false
+	}
+	if strings.Contains(low, "_test.go") {
+		return true
+	}
+	needles := []string{
+		"测试",
+		"test case",
+		"unit test",
+		"table-driven",
+	}
+	for _, needle := range needles {
+		if strings.Contains(low, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func formatKBSearchPrefetchOutput(resp kbpkg.SearchResponse) string {
@@ -1406,4 +1460,109 @@ func truncateString(s string, max int) string {
 		return s
 	}
 	return s[:max]
+}
+
+var loopGoalFileTokenRE = regexp.MustCompile(`[A-Za-z0-9_./\\-]+\.[A-Za-z0-9_+-]+`)
+
+func loopExtractGoalTargetFiles(goal string) []string {
+	raw := loopGoalFileTokenRE.FindAllString(goal, -1)
+	if len(raw) == 0 {
+		return []string{}
+	}
+	allowedExt := map[string]struct{}{
+		".md": {}, ".go": {}, ".py": {}, ".rs": {}, ".ts": {}, ".tsx": {}, ".js": {}, ".jsx": {},
+		".json": {}, ".yaml": {}, ".yml": {}, ".toml": {}, ".txt": {}, ".sql": {}, ".proto": {},
+		".java": {}, ".kt": {}, ".swift": {}, ".c": {}, ".cc": {}, ".cpp": {}, ".h": {}, ".hpp": {},
+		".sh": {},
+	}
+	out := make([]string, 0, len(raw))
+	seen := make(map[string]struct{}, len(raw))
+	for _, token := range raw {
+		p := loopNormalizePathForCompare(token)
+		if p == "" {
+			continue
+		}
+		if _, ok := allowedExt[strings.ToLower(filepath.Ext(p))]; !ok {
+			continue
+		}
+		base := strings.ToLower(filepath.Base(p))
+		if !strings.Contains(p, "/") && !(base == "readme.md" || strings.HasPrefix(base, "readme.")) {
+			continue
+		}
+		if strings.Contains(strings.ToLower(p), "xxx.") {
+			continue
+		}
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func loopPatchTouchesTargets(patch string, targets []string, requireAll bool) bool {
+	if strings.TrimSpace(patch) == "" || len(targets) == 0 {
+		return false
+	}
+	changed := loopExtractChangedFiles(patch)
+	if len(changed) == 0 {
+		return false
+	}
+	if requireAll {
+		for _, target := range targets {
+			if _, ok := changed[target]; !ok {
+				return false
+			}
+		}
+		return true
+	}
+	for _, target := range targets {
+		if _, ok := changed[target]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func loopExtractChangedFiles(diff string) map[string]struct{} {
+	out := make(map[string]struct{})
+	for _, line := range strings.Split(strings.ReplaceAll(diff, "\r\n", "\n"), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "+++ ") {
+			p := loopNormalizePathForCompare(strings.TrimSpace(strings.TrimPrefix(line, "+++ ")))
+			if p != "" {
+				out[p] = struct{}{}
+			}
+			continue
+		}
+		if strings.HasPrefix(line, "diff --git ") {
+			fields := strings.Fields(line)
+			if len(fields) >= 4 {
+				p := loopNormalizePathForCompare(fields[3])
+				if p != "" {
+					out[p] = struct{}{}
+				}
+			}
+		}
+	}
+	return out
+}
+
+func loopNormalizePathForCompare(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" || path == "/dev/null" {
+		return ""
+	}
+	path = strings.Trim(path, "`'\"()[]{}<>.,;:!?，。；：！、）】》”")
+	path = strings.ReplaceAll(path, "\\", "/")
+	path = strings.TrimPrefix(path, "a/")
+	path = strings.TrimPrefix(path, "b/")
+	path = strings.TrimPrefix(path, "./")
+	path = filepath.ToSlash(filepath.Clean(path))
+	if path == "." || path == "/" {
+		return ""
+	}
+	return path
 }

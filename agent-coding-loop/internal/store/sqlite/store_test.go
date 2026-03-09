@@ -61,3 +61,29 @@ func TestStoreRunLifecycle(t *testing.T) {
 		t.Fatalf("expected >= 4 events, got %d", len(events))
 	}
 }
+
+func TestMigrateConfiguresWALAndBusyTimeout(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	s, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	journalRows, err := s.query(ctx, "PRAGMA journal_mode;")
+	if err != nil {
+		t.Fatalf("journal_mode query: %v", err)
+	}
+	if len(journalRows) == 0 || len(journalRows[0]) == 0 || journalRows[0][0] != "wal" {
+		t.Fatalf("expected wal journal mode, got %v", journalRows)
+	}
+	busyRows, err := s.query(ctx, "PRAGMA busy_timeout;")
+	if err != nil {
+		t.Fatalf("busy_timeout query: %v", err)
+	}
+	if len(busyRows) == 0 || len(busyRows[0]) == 0 || parseInt64(busyRows[0][0]) <= 0 {
+		t.Fatalf("expected busy_timeout > 0, got %v", busyRows)
+	}
+}

@@ -52,3 +52,18 @@ func TestLoadEnvOverrides(t *testing.T) {
 		t.Fatalf("unexpected db path: %s", cfg.DBPath)
 	}
 }
+
+func TestLoadFallsBackToAnthropicAuthTokenForAPIKey(t *testing.T) {
+	t.Setenv("OPENAI_BASE_URL", "https://right.codes/claude/v1")
+	t.Setenv("OPENAI_MODEL", "claude-haiku-4-5")
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "anthropic-secret")
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Model.APIKey != "anthropic-secret" {
+		t.Fatalf("expected anthropic auth token fallback, got %q", cfg.Model.APIKey)
+	}
+}
