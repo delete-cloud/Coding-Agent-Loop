@@ -5,7 +5,7 @@ import "testing"
 func TestBuildCoderToolsAvailableInDefaultBuild(t *testing.T) {
 	t.Parallel()
 
-	got, err := BuildCoderTools(t.TempDir(), nil, NewRunner())
+	got, err := BuildCoderTools(t.TempDir(), nil, NewRunner(), nil)
 	if err != nil {
 		t.Fatalf("BuildCoderTools: %v", err)
 	}

@@ -48,6 +48,24 @@ func ParsePRMode(v string) (PRMode, error) {
 	}
 }
 
+type RetrievalMode string
+
+const (
+	RetrievalModeOff      RetrievalMode = "off"
+	RetrievalModePrefetch RetrievalMode = "prefetch"
+)
+
+func ParseRetrievalMode(v string) (RetrievalMode, error) {
+	switch strings.TrimSpace(strings.ToLower(v)) {
+	case "", "off", "none", "disabled":
+		return RetrievalModeOff, nil
+	case "prefetch", "on", "enabled":
+		return RetrievalModePrefetch, nil
+	default:
+		return "", fmt.Errorf("unsupported retrieval mode: %s", v)
+	}
+}
+
 type ReviewDecision string
 
 const (
@@ -70,19 +88,23 @@ type ModelSpec struct {
 }
 
 type RunSpec struct {
-	Goal               string     `json:"goal" yaml:"goal"`
-	Repo               string     `json:"repo" yaml:"repo"`
-	Commands           CommandSet `json:"commands" yaml:"commands"`
-	PRMode             PRMode     `json:"pr_mode" yaml:"pr_mode"`
-	MaxIterations      int        `json:"max_iterations" yaml:"max_iterations"`
-	Provider           string     `json:"provider" yaml:"provider"`
-	Model              string     `json:"model" yaml:"model"`
-	ContinueLoopOnDeny bool       `json:"continue_loop_on_deny" yaml:"continue_loop_on_deny"`
+	Goal               string        `json:"goal" yaml:"goal"`
+	Repo               string        `json:"repo" yaml:"repo"`
+	Commands           CommandSet    `json:"commands" yaml:"commands"`
+	PRMode             PRMode        `json:"pr_mode" yaml:"pr_mode"`
+	RetrievalMode      RetrievalMode `json:"retrieval_mode" yaml:"retrieval_mode"`
+	MaxIterations      int           `json:"max_iterations" yaml:"max_iterations"`
+	Provider           string        `json:"provider" yaml:"provider"`
+	Model              string        `json:"model" yaml:"model"`
+	ContinueLoopOnDeny bool          `json:"continue_loop_on_deny" yaml:"continue_loop_on_deny"`
 }
 
 func (s *RunSpec) Normalize() {
 	if s.PRMode == "" {
 		s.PRMode = PRModeAuto
+	}
+	if s.RetrievalMode == "" {
+		s.RetrievalMode = RetrievalModeOff
 	}
 	if s.MaxIterations <= 0 {
 		s.MaxIterations = 5
@@ -102,9 +124,14 @@ func (s *RunSpec) Validate() error {
 	}
 	switch s.PRMode {
 	case PRModeAuto, PRModeLive, PRModeDryRun:
-		return nil
 	default:
 		return fmt.Errorf("invalid pr_mode: %s", s.PRMode)
+	}
+	switch s.RetrievalMode {
+	case RetrievalModeOff, RetrievalModePrefetch:
+		return nil
+	default:
+		return fmt.Errorf("invalid retrieval_mode: %s", s.RetrievalMode)
 	}
 }
 

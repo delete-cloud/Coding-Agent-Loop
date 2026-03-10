@@ -41,7 +41,7 @@ func main() {
 
 func printUsage() {
 	fmt.Println(`agent-loop commands:
-  run --goal "..." [--repo PATH] [--config FILE] [--pr-mode auto|live|dry-run]
+  run --goal "..." [--repo PATH] [--config FILE] [--pr-mode auto|live|dry-run] [--retrieval-mode off|prefetch]
   serve [--listen 127.0.0.1:8787] [--config FILE]
   resume --run-id ID [--config FILE]
   inspect --run-id ID [--config FILE]`)
@@ -53,6 +53,7 @@ func runCmd(ctx context.Context, args []string) {
 	repo := fs.String("repo", "", "target repo")
 	cfgPath := fs.String("config", "", "config file")
 	prMode := fs.String("pr-mode", "auto", "auto|live|dry-run")
+	retrievalMode := fs.String("retrieval-mode", "off", "off|prefetch")
 	maxIterations := fs.Int("max-iterations", 5, "max iterations")
 	testCmd := fs.String("test-cmd", "", "explicit test command")
 	lintCmd := fs.String("lint-cmd", "", "explicit lint command")
@@ -68,10 +69,15 @@ func runCmd(ctx context.Context, args []string) {
 	if err != nil {
 		fatal(err)
 	}
+	retrieval, err := model.ParseRetrievalMode(*retrievalMode)
+	if err != nil {
+		fatal(err)
+	}
 	spec := model.RunSpec{
 		Goal:          *goal,
 		Repo:          *repo,
 		PRMode:        mode,
+		RetrievalMode: retrieval,
 		MaxIterations: *maxIterations,
 		Provider:      cfg.Model.Provider,
 		Model:         cfg.Model.Model,

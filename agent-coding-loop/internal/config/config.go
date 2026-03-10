@@ -13,6 +13,7 @@ type Config struct {
 	DBPath     string      `json:"db_path"`
 	Artifacts  string      `json:"artifacts_dir"`
 	Model      ModelConfig `json:"model"`
+	KB         KBConfig    `json:"kb"`
 }
 
 type ModelConfig struct {
@@ -20,6 +21,10 @@ type ModelConfig struct {
 	BaseURL  string `json:"base_url"`
 	Model    string `json:"model"`
 	APIKey   string `json:"api_key"`
+}
+
+type KBConfig struct {
+	BaseURL string `json:"base_url"`
 }
 
 func Load(path string) (*Config, error) {
@@ -31,8 +36,14 @@ func Load(path string) (*Config, error) {
 			Provider: "openai-compatible",
 			BaseURL:  strings.TrimRight(os.Getenv("OPENAI_BASE_URL"), "/"),
 			Model:    os.Getenv("OPENAI_MODEL"),
-			APIKey:   os.Getenv("OPENAI_API_KEY"),
+			APIKey:   firstNonEmptyEnv("OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
 		},
+		KB: KBConfig{
+			BaseURL: strings.TrimRight(os.Getenv("AGENT_LOOP_KB_URL"), "/"),
+		},
+	}
+	if strings.TrimSpace(cfg.KB.BaseURL) == "" {
+		cfg.KB.BaseURL = "http://127.0.0.1:8788"
 	}
 	if path != "" {
 		if err := loadFile(path, cfg); err != nil {
@@ -98,6 +109,8 @@ func parseSimpleYAML(raw string, cfg *Config) error {
 			cfg.Model.Model = v
 		case "api_key":
 			cfg.Model.APIKey = v
+		case "kb_base_url", "kb_url":
+			cfg.KB.BaseURL = strings.TrimRight(v, "/")
 		}
 	}
 	return nil
@@ -122,7 +135,19 @@ func overrideFromEnv(cfg *Config) {
 	if v := strings.TrimSpace(os.Getenv("OPENAI_MODEL")); v != "" {
 		cfg.Model.Model = v
 	}
-	if v := strings.TrimSpace(os.Getenv("OPENAI_API_KEY")); v != "" {
+	if v := strings.TrimSpace(firstNonEmptyEnv("OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN")); v != "" {
 		cfg.Model.APIKey = v
 	}
+	if v := strings.TrimSpace(os.Getenv("AGENT_LOOP_KB_URL")); v != "" {
+		cfg.KB.BaseURL = strings.TrimRight(v, "/")
+	}
+}
+
+func firstNonEmptyEnv(keys ...string) string {
+	for _, key := range keys {
+		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+			return v
+		}
+	}
+	return ""
 }

@@ -14,6 +14,7 @@ import (
 )
 
 const schemaSQL = `
+PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY,
   spec_json TEXT NOT NULL,
@@ -71,6 +72,8 @@ CREATE TABLE IF NOT EXISTS artifacts (
   FOREIGN KEY(run_id) REFERENCES runs(id)
 );
 `
+
+const sqliteBusyTimeoutMS = 5000
 
 type Store struct {
 	path string
@@ -160,6 +163,7 @@ func (s *Store) CreateRun(ctx context.Context, spec model.RunSpec, status model.
 
 func (s *Store) UpdateRunStatus(ctx context.Context, runID string, status model.RunStatus, summary string) error {
 	now := time.Now().UnixMilli()
+	summary = sanitizeInline(summary)
 	sql := fmt.Sprintf("UPDATE runs SET status=%s, summary=%s, updated_at=%d WHERE id=%s;", q(string(status)), q(summary), now, q(runID))
 	_, _, err := s.run(ctx, sql)
 	return err
@@ -184,6 +188,9 @@ func (s *Store) GetRun(ctx context.Context, runID string) (RunRecord, error) {
 		return RunRecord{}, fmt.Errorf("run not found: %s", runID)
 	}
 	r := rows[0]
+	if len(r) < 9 {
+		return RunRecord{}, fmt.Errorf("run row parse failed: expected 9 columns, got %d", len(r))
+	}
 	return RunRecord{
 		ID:         r[0],
 		SpecJSON:   r[1],
@@ -195,6 +202,13 @@ func (s *Store) GetRun(ctx context.Context, runID string) (RunRecord, error) {
 		CreatedAt:  parseInt64(r[7]),
 		UpdatedAt:  parseInt64(r[8]),
 	}, nil
+}
+
+func sanitizeInline(s string) string {
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\x1f", " ")
+	return strings.TrimSpace(s)
 }
 
 func (s *Store) InsertStep(ctx context.Context, rec StepRecord) error {
@@ -278,8 +292,19 @@ func (s *Store) CountSteps(ctx context.Context, runID string) (int, error) {
 	return int(parseInt64(rows[0][0])), nil
 }
 
+func (s *Store) MaxStepIteration(ctx context.Context, runID string) (int, error) {
+	rows, err := s.query(ctx, "SELECT MAX(iteration) FROM steps WHERE run_id="+q(runID)+";")
+	if err != nil {
+		return 0, err
+	}
+	if len(rows) == 0 || len(rows[0]) == 0 {
+		return 0, nil
+	}
+	return int(parseInt64(rows[0][0])), nil
+}
+
 func (s *Store) run(ctx context.Context, sql string) (string, string, error) {
-	cmd := exec.CommandContext(ctx, "sqlite3", s.path, sql)
+	cmd := exec.CommandContext(ctx, "sqlite3", "-cmd", fmt.Sprintf(".timeout %d", sqliteBusyTimeoutMS), s.path, sql)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", string(out), fmt.Errorf("sqlite3 failed: %w: %s", err, string(out))
@@ -288,7 +313,7 @@ func (s *Store) run(ctx context.Context, sql string) (string, string, error) {
 }
 
 func (s *Store) query(ctx context.Context, sql string) ([][]string, error) {
-	cmd := exec.CommandContext(ctx, "sqlite3", "-separator", "\x1f", "-noheader", s.path, sql)
+	cmd := exec.CommandContext(ctx, "sqlite3", "-cmd", fmt.Sprintf(".timeout %d", sqliteBusyTimeoutMS), "-separator", "\x1f", "-noheader", s.path, sql)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("sqlite3 query failed: %w: %s", err, string(out))

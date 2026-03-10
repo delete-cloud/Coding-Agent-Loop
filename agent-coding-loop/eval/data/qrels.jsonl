@@ -1,0 +1,30 @@
+{"query_id":"q01","query":"What validation rules apply to DBPath in config?","relevant_ids":["eval/ab/kb/config_validation.md:11:16"]}
+{"query_id":"q02","query":"What is the valid range for doom_threshold?","relevant_ids":["eval/ab/kb/loop_safety.md:5:9"]}
+{"query_id":"q03","query":"How should error responses be formatted in the HTTP API?","relevant_ids":["eval/ab/kb/api_conventions.md:10:14"]}
+{"query_id":"q04","query":"What is the default overlap value when chunk_size is not configured?","relevant_ids":["eval/ab/kb/embedding_config.md:10:14"]}
+{"query_id":"q05","query":"How should I validate chunk_size parameter on startup?","relevant_ids":["eval/ab/kb/embedding_config.md:6:9"]}
+{"query_id":"q06","query":"What is the required PR title format?","relevant_ids":["eval/ab/kb/pr_workflow.md:6:11"]}
+{"query_id":"q07","query":"What sections must a PR body include?","relevant_ids":["eval/ab/kb/pr_workflow.md:12:17"]}
+{"query_id":"q08","query":"What naming convention should test functions follow?","relevant_ids":["eval/ab/kb/testing_standards.md:11:15"]}
+{"query_id":"q09","query":"When should table-driven tests be used?","relevant_ids":["eval/ab/kb/testing_standards.md:17:21"]}
+{"query_id":"q10","query":"What happens when Model.APIKey is set but Model.BaseURL is empty?","relevant_ids":["eval/ab/kb/config_validation.md:17:21"]}
+{"query_id":"q11","query":"What are the stages of a RAG pipeline?","relevant_ids":["eval/ab/kb/rag_pipeline.md:1:12"]}
+{"query_id":"q12","query":"How should citations be formatted in agent answers?","relevant_ids":["eval/ab/kb/citation_policy.md:1:10"]}
+{"query_id":"q13","query":"What metrics should be tracked for A/B evaluation?","relevant_ids":["eval/ab/kb/ab_eval_rules.md:1:13"]}
+{"query_id":"q14","query":"What is the maximum allowed embedding API timeout?","relevant_ids":["eval/ab/kb/embedding_config.md:22:27"]}
+{"query_id":"q15","query":"How should checkpoint cleanup work in the agent loop?","relevant_ids":["eval/ab/kb/loop_safety.md:23:28"]}
+{"query_id":"q16","query":"What branch naming convention should the agent use?","relevant_ids":["eval/ab/kb/pr_workflow.md:25:28"]}
+{"query_id":"q17","query":"What is the health check endpoint response format?","relevant_ids":["eval/ab/kb/api_conventions.md:16:20"]}
+{"query_id":"q18","query":"How should external dependencies be mocked in tests?","relevant_ids":["eval/ab/kb/testing_standards.md:23:28"]}
+{"query_id":"q19","query":"What happens when ListenAddr port is below 1024?","relevant_ids":["eval/ab/kb/config_validation.md:5:9"]}
+{"query_id":"q20","query":"What should the agent do when PRMode is live but there are no changes?","relevant_ids":["eval/ab/kb/pr_workflow.md:19:23"]}
+{"query_id":"q21","query":"What is the format of the blocked run summary prefix?","relevant_ids":["eval/ab/kb/loop_safety.md:17:21"]}
+{"query_id":"q22","query":"What are the rules for config validation and testing new validation logic?","relevant_ids":["eval/ab/kb/config_validation.md:1:9","eval/ab/kb/testing_standards.md:6:9"]}
+{"query_id":"q23","query":"How should I add a config validation for APIKey and write tests for it?","relevant_ids":["eval/ab/kb/config_validation.md:17:21","eval/ab/kb/testing_standards.md:17:21"]}
+{"query_id":"q24","query":"What pagination parameters are required for list endpoints?","relevant_ids":["eval/ab/kb/api_conventions.md:22:27"]}
+{"query_id":"q25","query":"What logging is required when loading a local embedding model?","relevant_ids":["eval/ab/kb/embedding_config.md:16:20"]}
+{"query_id":"q26","query":"What is the hard upper limit for MaxIterations in the agent loop?","relevant_ids":["eval/ab/kb/loop_safety.md:11:15"]}
+{"query_id":"q27","query":"What header must be included in every HTTP response?","relevant_ids":["eval/ab/kb/api_conventions.md:5:9"]}
+{"query_id":"q28","query":"What error should be returned when ArtifactsDir is a parent of repo root?","relevant_ids":["eval/ab/kb/config_validation.md:23:28"]}
+{"query_id":"q29","query":"What coverage requirements exist for exported Go functions?","relevant_ids":["eval/ab/kb/testing_standards.md:6:9"]}
+{"query_id":"q30","query":"How do embedding chunk_size validation and API error format relate to config correctness?","relevant_ids":["eval/ab/kb/embedding_config.md:6:9","eval/ab/kb/api_conventions.md:10:14"]}

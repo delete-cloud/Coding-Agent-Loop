@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"github.com/kina/agent-coding-loop/internal/kb"
 	"github.com/kina/agent-coding-loop/internal/skills"
 	"github.com/kina/agent-coding-loop/internal/tools"
 )
@@ -10,6 +11,7 @@ type Option func(*deps)
 type deps struct {
 	runner *tools.Runner
 	skills *skills.Registry
+	kb     *kb.Client
 }
 
 func WithRunner(r *tools.Runner) Option {
@@ -21,6 +23,12 @@ func WithRunner(r *tools.Runner) Option {
 func WithSkills(reg *skills.Registry) Option {
 	return func(d *deps) {
 		d.skills = reg
+	}
+}
+
+func WithKB(client *kb.Client) Option {
+	return func(d *deps) {
+		d.kb = client
 	}
 }
 

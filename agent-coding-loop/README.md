@@ -68,3 +68,11 @@ Build and run:
 go get github.com/cloudwego/eino github.com/cloudwego/eino-ext/components/model/openai
 go build ./cmd/agent-loop
 ```
+
+## Git commit message limit
+
+To enforce a short commit subject line (<= 50 words) locally, enable repository hooks:
+
+```bash
+git config core.hooksPath .githooks
+```

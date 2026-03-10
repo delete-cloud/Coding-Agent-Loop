@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -42,6 +43,7 @@ func (r *Runner) Run(ctx context.Context, cmd string, dir string) (string, strin
 	}
 	execCmd := exec.CommandContext(ctx, "sh", "-lc", cmd)
 	execCmd.Dir = cleanDir
+	execCmd.Env = filteredCommandEnv(os.Environ())
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	execCmd.Stdout = &stdout
@@ -51,6 +53,32 @@ func (r *Runner) Run(ctx context.Context, cmd string, dir string) (string, strin
 		return stdout.String(), stderr.String(), fmt.Errorf("run command failed: %w", err)
 	}
 	return stdout.String(), stderr.String(), nil
+}
+
+func filteredCommandEnv(env []string) []string {
+	if len(env) == 0 {
+		return nil
+	}
+	blockedPrefixes := []string{
+		"AGENT_LOOP_",
+		"OPENAI_",
+		"ANTHROPIC_",
+		"KB_",
+	}
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		blocked := false
+		for _, prefix := range blockedPrefixes {
+			if strings.HasPrefix(entry, prefix) {
+				blocked = true
+				break
+			}
+		}
+		if !blocked {
+			out = append(out, entry)
+		}
+	}
+	return out
 }
 
 func IsDangerousCommand(cmd string) bool {

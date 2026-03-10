@@ -9,6 +9,7 @@ import (
 )
 
 func RepoList(repoRoot, rel string) ([]string, error) {
+	rel = normalizeRelPath(repoRoot, rel)
 	base, err := securePath(repoRoot, rel)
 	if err != nil {
 		return nil, err
@@ -40,9 +41,39 @@ func RepoList(repoRoot, rel string) ([]string, error) {
 }
 
 func RepoRead(repoRoot, rel string, maxBytes int) (string, error) {
+	rel = normalizeRelPath(repoRoot, rel)
 	path, err := securePath(repoRoot, rel)
 	if err != nil {
 		return "", err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		items, err := os.ReadDir(path)
+		if err != nil {
+			return "", err
+		}
+		lines := make([]string, 0, len(items)+1)
+		lines = append(lines, fmt.Sprintf("%s is a directory. Use one of these relative paths:", rel))
+		for _, it := range items {
+			name := it.Name()
+			if it.IsDir() {
+				name += "/"
+			}
+			if rel == "." {
+				lines = append(lines, name)
+				continue
+			}
+			lines = append(lines, filepath.ToSlash(filepath.Join(rel, name)))
+		}
+		sort.Strings(lines[1:])
+		out := strings.Join(lines, "\n")
+		if maxBytes > 0 && len(out) > maxBytes {
+			out = out[:maxBytes]
+		}
+		return out, nil
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -85,8 +116,60 @@ func securePath(repoRoot, rel string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if !strings.HasPrefix(clean, root) {
+	if clean != root && !strings.HasPrefix(clean, root+string(os.PathSeparator)) {
 		return "", fmt.Errorf("path escapes repo root")
 	}
 	return clean, nil
+}
+
+func normalizeRelPath(repoRoot, rel string) string {
+	rel = strings.TrimSpace(strings.ReplaceAll(rel, "\\", "/"))
+	if rel == "" {
+		return "."
+	}
+	rel = strings.TrimLeft(rel, "`'\"([{<")
+	rel = strings.TrimRight(rel, "`'\"`)]}>,;:!?，。；：！、")
+	rel = strings.TrimSpace(rel)
+	if rel == "" {
+		return "."
+	}
+	rootBase := filepath.Base(filepath.Clean(strings.TrimSpace(repoRoot)))
+	if rootBase != "" && rootBase != "." {
+		rel = stripEmbeddedRepoPrefix(rel, rootBase)
+	}
+	for strings.HasPrefix(rel, string(os.PathSeparator)) {
+		rel = strings.TrimPrefix(rel, string(os.PathSeparator))
+	}
+	clean := filepath.Clean(filepath.FromSlash(rel))
+	if rootBase != "" && rootBase != "." {
+		prefix := rootBase + string(os.PathSeparator)
+		for clean == rootBase || strings.HasPrefix(clean, prefix) {
+			if clean == rootBase {
+				return "."
+			}
+			clean = strings.TrimPrefix(clean, prefix)
+		}
+	}
+	if clean == "" {
+		return "."
+	}
+	return clean
+}
+
+func stripEmbeddedRepoPrefix(rel string, repoBase string) string {
+	trimmed := strings.TrimSpace(strings.ReplaceAll(rel, "\\", "/"))
+	if trimmed == "" || repoBase == "" || repoBase == "." {
+		return trimmed
+	}
+	segments := strings.Split(strings.TrimLeft(trimmed, "/"), "/")
+	for i, seg := range segments {
+		if seg != repoBase {
+			continue
+		}
+		if i == len(segments)-1 {
+			return "."
+		}
+		return strings.Join(segments[i+1:], "/")
+	}
+	return trimmed
 }
