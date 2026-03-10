@@ -384,7 +384,31 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 	if refreshedIn, refreshed := e.maybeRefreshCoderContext(ctx, st, iteration, coderIn); refreshed {
 		coderIn = refreshedIn
 	}
-	coderOut, err := e.coder.Generate(ctx, coderIn)
+	_ = e.store.InsertToolCall(ctx, sqlite.ToolCallRecord{
+		RunID:     st.RunID,
+		Iteration: iteration,
+		Tool:      "coder_start",
+		Input:     truncateString(st.Spec.Goal, 500),
+		Output:    "starting coder generate",
+		Status:    "started",
+		CreatedAt: time.Now().UnixMilli(),
+	})
+	coderCtx := agentpkg.WithAgentStageRecorder(ctx, func(stage string) {
+		stage = strings.TrimSpace(stage)
+		if stage == "" {
+			return
+		}
+		_ = e.store.InsertToolCall(ctx, sqlite.ToolCallRecord{
+			RunID:     st.RunID,
+			Iteration: iteration,
+			Tool:      "coder_stage",
+			Input:     "",
+			Output:    stage,
+			Status:    "progress",
+			CreatedAt: time.Now().UnixMilli(),
+		})
+	})
+	coderOut, err := e.coder.Generate(coderCtx, coderIn)
 	if err != nil {
 		_ = e.store.InsertToolCall(ctx, sqlite.ToolCallRecord{
 			RunID:     st.RunID,
@@ -514,6 +538,15 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 	}
 	statusShort, _ := e.git.StatusShort(ctx, st.RepoAbs)
 	reviewIn := buildReviewInput(st, mustDiff(ctx, e.git, st.RepoAbs), statusShort, coderOut.Patch, commandOutput.String())
+	_ = e.store.InsertToolCall(ctx, sqlite.ToolCallRecord{
+		RunID:     st.RunID,
+		Iteration: iteration,
+		Tool:      "reviewer_start",
+		Input:     truncateString(st.Spec.Goal, 500),
+		Output:    "starting reviewer review",
+		Status:    "started",
+		CreatedAt: time.Now().UnixMilli(),
+	})
 	reviewCtx, cancelReview := context.WithTimeout(ctx, e.reviewerTimeout)
 	reviewOut, err := e.reviewer.Review(reviewCtx, reviewIn)
 	cancelReview()

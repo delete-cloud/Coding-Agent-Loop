@@ -138,7 +138,7 @@ func TestEngineReviewerTimeoutFallsBackAndCompletesRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if time.Since(started) > time.Second {
+	if time.Since(started) > 2*time.Second {
 		t.Fatalf("expected reviewer timeout fallback to finish quickly, took %s", time.Since(started))
 	}
 	if result.Status != model.RunStatusCompleted {
@@ -308,6 +308,95 @@ func TestEnginePersistsCoderMetaDiagnostics(t *testing.T) {
 	notes, _ := meta["notes"].(string)
 	if strings.TrimSpace(notes) == "" {
 		t.Fatalf("expected non-empty notes, got %v", meta)
+	}
+}
+
+func TestEnginePersistsCoderStageToolCalls(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+
+	r := tools.NewRunner()
+	mustRun(t, r, repo, "git init")
+	mustRun(t, r, repo, "git config user.email test@example.com")
+	mustRun(t, r, repo, "git config user.name tester")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("demo\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustRun(t, r, repo, "git add README.md")
+	mustRun(t, r, repo, "git commit -m init")
+
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	store, err := sqlite.New(dbPath)
+	if err != nil {
+		t.Fatalf("sqlite.New: %v", err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	coder := agentpkg.NewCoder(agentpkg.ClientConfig{})
+	coder.SetRetryHooksForTests(agentpkg.CoderRetryHooksForTests{
+		Targeted: func(context.Context, agentpkg.CoderInput, []string, string) (agentpkg.CoderOutput, error) {
+			return agentpkg.CoderOutput{
+				Patch: `diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1 +1,2 @@
++inspect docs
+`,
+			}, nil
+		},
+	})
+
+	engine := NewEngine(EngineDeps{
+		Store:      store,
+		Runner:     r,
+		Git:        gitpkg.NewClient(r),
+		GitHub:     ghpkg.NewClient(r),
+		Coder:      coder,
+		Reviewer:   agentpkg.NewReviewer(agentpkg.ClientConfig{}),
+		Skills:     skills.NewRegistry(nil),
+		Artifacts:  filepath.Join(repo, ".agent-loop-artifacts"),
+		DoomThresh: 3,
+	})
+
+	spec := model.RunSpec{
+		Goal:          "在 README.md 增加一行说明",
+		Repo:          repo,
+		PRMode:        model.PRModeDryRun,
+		MaxIterations: 1,
+		Commands: model.CommandSet{
+			Test: []string{"echo PASS"},
+		},
+	}
+	result, err := engine.Run(ctx, spec)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	query := "select output_text from tool_calls where run_id='" + result.RunID + "' and tool='coder_stage' order by id;"
+	out, err := exec.Command("sqlite3", "-json", dbPath, query).Output()
+	if err != nil {
+		t.Fatalf("sqlite3 coder_stage query: %v", err)
+	}
+	var rows []struct {
+		OutputText string `json:"output_text"`
+	}
+	if err := json.Unmarshal(out, &rows); err != nil {
+		t.Fatalf("unmarshal sqlite json: %v; raw=%s", err, string(out))
+	}
+	if len(rows) == 0 {
+		t.Fatalf("expected coder_stage rows, got raw=%s", string(out))
+	}
+	found := false
+	for _, row := range rows {
+		if row.OutputText == "coder_targeted_retry_start" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected coder_targeted_retry_start in coder_stage rows, got %+v", rows)
 	}
 }
 

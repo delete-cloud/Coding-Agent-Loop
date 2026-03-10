@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	kbpkg "github.com/kina/agent-coding-loop/internal/kb"
 	"github.com/kina/agent-coding-loop/internal/model"
@@ -64,7 +65,7 @@ func TestReviewerFallbackApprovesOnPass(t *testing.T) {
 }
 
 func TestCoderFallback(t *testing.T) {
-	c := NewCoder(ClientConfig{})
+	c := NewCoder(ClientConfig{BaseURL: "http://example.com", Model: "test-model"})
 	out, err := c.Generate(context.Background(), CoderInput{Goal: "demo", PreviousReview: "fix"})
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
@@ -278,11 +279,99 @@ func TestCoderPromptsIncludeMinimalTestingConstraint(t *testing.T) {
 	}
 }
 
+func TestCoderPromptsForMultiTargetTaskRequireNonEmptyPatch(t *testing.T) {
+	in := CoderInput{
+		Goal: "根据知识库中的配置校验规则，在 internal/config/config.go 中增加校验：DBPath 必须以 .db 结尾，否则返回错误。同时在 internal/config/config_test.go 中添加一个测试用例验证该校验。",
+	}
+
+	system, _ := coderPrompts(in)
+
+	if !strings.Contains(system, "valid answer must return a non-empty patch touching all target files") {
+		t.Fatalf("expected multi-target coder prompt to forbid empty patch, got %q", system)
+	}
+}
+
+func TestCoderPromptsForMultiTargetTaskRequirePerTargetPatchSections(t *testing.T) {
+	in := CoderInput{
+		Goal: "根据知识库中的配置校验规则，在 internal/config/config.go 中增加校验：DBPath 必须以 .db 结尾，否则返回错误。同时在 internal/config/config_test.go 中添加一个测试用例验证该校验。",
+	}
+
+	system, _ := coderPrompts(in)
+
+	if !strings.Contains(system, "exactly one file patch section for each target file") {
+		t.Fatalf("expected multi-target coder prompt to require one patch section per target, got %q", system)
+	}
+	if !strings.Contains(system, "exact repo-relative target file paths") {
+		t.Fatalf("expected multi-target coder prompt to require exact repo-relative target paths, got %q", system)
+	}
+}
+
+func TestCoderPromptsForMixedTaskPreferInlineEditsOverNewHelpers(t *testing.T) {
+	in := CoderInput{
+		Goal: "根据知识库中的配置校验规则，在 internal/config/config.go 中增加校验：DBPath 必须以 .db 结尾，否则返回错误。同时在 internal/config/config_test.go 中添加一个测试用例验证该校验。",
+	}
+
+	system, _ := coderPrompts(in)
+
+	if !strings.Contains(system, "prefer inline edits to existing functions") {
+		t.Fatalf("expected mixed-task prompt to prefer inline edits, got %q", system)
+	}
+	if !strings.Contains(system, "Do not introduce new top-level helpers") {
+		t.Fatalf("expected mixed-task prompt to forbid new helpers by default, got %q", system)
+	}
+}
+
+func TestBuildDefinitionIssueRecoveryConstraintMentionsExistingTestNames(t *testing.T) {
+	in := CoderInput{
+		DefinitionIssues:        []string{"duplicate test name: TestLoadValidatesDBPathSuffix"},
+		ExistingTestNamesByFile: map[string][]string{"internal/config/config_test.go": {"TestLoadValidatesDBPathSuffix"}},
+	}
+
+	got := buildDefinitionIssueRecoveryConstraint(in, []string{"internal/config/config.go", "internal/config/config_test.go"})
+
+	if !strings.Contains(got, "definition_issues") {
+		t.Fatalf("expected recovery constraint to mention definition_issues, got %q", got)
+	}
+	if !strings.Contains(got, "existing_test_names_by_file") {
+		t.Fatalf("expected recovery constraint to mention existing test names, got %q", got)
+	}
+	if !strings.Contains(got, "prefer extending existing table-driven tests") {
+		t.Fatalf("expected recovery constraint to prefer extending existing tests, got %q", got)
+	}
+}
+
 func TestReviewerPromptsIncludeMinimalTestingConstraint(t *testing.T) {
 	in := ReviewInput{Goal: "在 internal/config/config.go 增加 DBPath 校验，并在 internal/config/config_test.go 中添加测试用例"}
 	system, _ := reviewerPrompts(in)
 	if !strings.Contains(system, "table-driven") || !strings.Contains(system, "one positive and one negative case") {
 		t.Fatalf("expected reviewer prompt to include minimal testing constraint, got %q", system)
+	}
+}
+
+func TestReviewerPromptsForValidationTaskForbidExtraAssertions(t *testing.T) {
+	in := ReviewInput{
+		Goal: "根据知识库中的配置校验规则，在 internal/config/config.go 中增加校验：DBPath 必须以 .db 结尾，否则返回错误。同时在 internal/config/config_test.go 中添加一个测试用例验证该校验。校验规则和错误信息需通过 kb_search 获取。",
+	}
+
+	system, _ := reviewerPrompts(in)
+
+	if !strings.Contains(system, "do not require extra constants, helper names, or assertions") {
+		t.Fatalf("expected reviewer prompt to forbid extra validation-specific assertions, got %q", system)
+	}
+}
+
+func TestReviewerPromptsForMixedTaskPreferInlineEditsOverNewHelpers(t *testing.T) {
+	in := ReviewInput{
+		Goal: "根据知识库中的配置校验规则，在 internal/config/config.go 中增加校验：DBPath 必须以 .db 结尾，否则返回错误。同时在 internal/config/config_test.go 中添加一个测试用例验证该校验。校验规则和错误信息需通过 kb_search 获取。",
+	}
+
+	system, _ := reviewerPrompts(in)
+
+	if !strings.Contains(system, "prefer inline edits to existing functions") {
+		t.Fatalf("expected reviewer mixed-task prompt to prefer inline edits, got %q", system)
+	}
+	if !strings.Contains(system, "Do not introduce new top-level helpers") {
+		t.Fatalf("expected reviewer mixed-task prompt to forbid new helpers by default, got %q", system)
 	}
 }
 
@@ -322,6 +411,68 @@ func TestReviewerPromptsDoNotMentionSkillTools(t *testing.T) {
 	}
 	if strings.Contains(system, "list_skills") || strings.Contains(system, "view_skill") {
 		t.Fatalf("expected reviewer prompt to stop mentioning skill tools, got %q", system)
+	}
+}
+
+func TestEnforceReorderOnlyReviewConsistencyDowngradesOutdatedGoalReading(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "internal", "tools", "eino_tools.go")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir tools dir: %v", err)
+	}
+	body := `package tools
+
+func buildReadOnlyTools() []string {
+	return []string{
+		gitDiff,
+		kbSearch,
+		repoList,
+		repoRead,
+		repoSearch,
+	}
+}
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write eino_tools.go: %v", err)
+	}
+	diff := `diff --git a/internal/tools/eino_tools.go b/internal/tools/eino_tools.go
+--- a/internal/tools/eino_tools.go
++++ b/internal/tools/eino_tools.go
+@@ -1,7 +1,7 @@
+ 	return []string{
+-		repoList,
+-		repoRead,
+-		repoSearch,
+-		gitDiff,
+-		kbSearch,
++		gitDiff,
++		kbSearch,
++		repoList,
++		repoRead,
++		repoSearch,
+ 	}
+ `
+	out := ReviewOutput{
+		Decision: "request_changes",
+		Summary:  "The function still depends on kbSearch and must remove it.",
+		Markdown: "Remove kbSearch from the return slice.",
+		Findings: []model.ReviewFinding{{Severity: "medium", Message: "remove kbSearch"}},
+	}
+	in := ReviewInput{
+		Goal:          "仅基于仓库代码，在 internal/tools/eino_tools.go 的 buildReadOnlyTools 函数中，将返回的工具列表按字母顺序排列（当前顺序是 repoList, repoRead, repoSearch, gitDiff, kbSearch, listSkillTool, viewSkillTool）。禁止调用 kb_search。",
+		RepoRoot:      root,
+		Diff:          diff,
+		AppliedPatch:  diff,
+		CommandOutput: "ok\tgithub.com/kina/agent-coding-loop/internal/tools\t0.42s",
+	}
+
+	enforceReorderOnlyReviewConsistency(in, &out)
+
+	if out.Decision == "request_changes" {
+		t.Fatalf("expected reorder-only review consistency to downgrade stale request_changes, got %+v", out)
+	}
+	if !strings.Contains(out.Summary, "sorted correctly") {
+		t.Fatalf("expected summary to mention sorted reorder-only result, got %q", out.Summary)
 	}
 }
 
@@ -368,6 +519,63 @@ func TestPatchTouchesOnlyTargets(t *testing.T) {
 	patch2 := patch + "\ndiff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-a\n+b\n"
 	if patchTouchesOnlyTargets(patch2, []string{"internal/loop/processor.go"}) {
 		t.Fatalf("did not expect patch touching README.md to pass repo-only target constraint")
+	}
+}
+
+func TestExtractChangedFilesCanonicalizesRepoPrefixedTargetPaths(t *testing.T) {
+	patch := "diff --git a/agent-coding-loop/internal/config/config.go b/agent-coding-loop/internal/config/config.go\n" +
+		"--- a/agent-coding-loop/internal/config/config.go\n" +
+		"+++ b/agent-coding-loop/internal/config/config.go\n" +
+		"@@ -1 +1 @@\n-a\n+b\n"
+
+	changed := extractChangedFiles(patch, "internal/config/config.go")
+	if _, ok := changed["internal/config/config.go"]; !ok {
+		t.Fatalf("expected target-relative changed file, got %v", changed)
+	}
+	if _, ok := changed["agent-coding-loop/internal/config/config.go"]; ok {
+		t.Fatalf("did not expect repo-prefixed key to remain, got %v", changed)
+	}
+}
+
+func TestPatchTouchesTargetsCanonicalizesRepoPrefixedMultiTargetPaths(t *testing.T) {
+	patch := "diff --git a/agent-coding-loop/internal/config/config.go b/agent-coding-loop/internal/config/config.go\n" +
+		"--- a/agent-coding-loop/internal/config/config.go\n" +
+		"+++ b/agent-coding-loop/internal/config/config.go\n" +
+		"@@ -1 +1 @@\n-a\n+b\n" +
+		"diff --git a/agent-coding-loop/internal/config/config_test.go b/agent-coding-loop/internal/config/config_test.go\n" +
+		"--- a/agent-coding-loop/internal/config/config_test.go\n" +
+		"+++ b/agent-coding-loop/internal/config/config_test.go\n" +
+		"@@ -1 +1 @@\n-a\n+b\n"
+
+	targets := []string{"internal/config/config.go", "internal/config/config_test.go"}
+	if !patchTouchesTargets(patch, targets, true) {
+		t.Fatalf("expected repo-prefixed multi-target patch to satisfy target coverage")
+	}
+	if !patchTouchesOnlyTargets(patch, targets) {
+		t.Fatalf("expected repo-prefixed multi-target patch to satisfy target-only constraint")
+	}
+}
+
+func TestPatchTouchesOnlyTargetsRejectsExtraFilesWhileStillTouchingTargets(t *testing.T) {
+	patch := "diff --git a/agent-coding-loop/internal/config/config.go b/agent-coding-loop/internal/config/config.go\n" +
+		"--- a/agent-coding-loop/internal/config/config.go\n" +
+		"+++ b/agent-coding-loop/internal/config/config.go\n" +
+		"@@ -1 +1 @@\n-a\n+b\n" +
+		"diff --git a/agent-coding-loop/internal/config/config_test.go b/agent-coding-loop/internal/config/config_test.go\n" +
+		"--- a/agent-coding-loop/internal/config/config_test.go\n" +
+		"+++ b/agent-coding-loop/internal/config/config_test.go\n" +
+		"@@ -1 +1 @@\n-a\n+b\n" +
+		"diff --git a/README.md b/README.md\n" +
+		"--- a/README.md\n" +
+		"+++ b/README.md\n" +
+		"@@ -1 +1 @@\n-a\n+b\n"
+
+	targets := []string{"internal/config/config.go", "internal/config/config_test.go"}
+	if !patchTouchesTargets(patch, targets, true) {
+		t.Fatalf("expected patch to still touch all declared targets despite extra file")
+	}
+	if patchTouchesOnlyTargets(patch, targets) {
+		t.Fatalf("did not expect extra README.md change to satisfy target-only constraint")
 	}
 }
 
@@ -432,6 +640,146 @@ func TestEnforceKBSearchConsistencyKeepsRealFailures(t *testing.T) {
 	enforceKBSearchConsistency(in, &out)
 	if out.Decision != "request_changes" {
 		t.Fatalf("expected request_changes preserved when command fails, got %s", out.Decision)
+	}
+}
+
+func TestEnforceMarkdownDuplicateReviewConsistencyDowngradesFalsePositive(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "docs", "eino-agent-loop.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir docs dir: %v", err)
+	}
+	body := `# Agent Loop
+
+## RAG Pipeline Glossary
+
+Chunking splits long text into retrieval units.
+
+Embedding maps chunks into vectors.
+
+Hybrid Search blends vector similarity and keyword matching.
+
+Rerank reorders top-k candidates before generation.
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write markdown: %v", err)
+	}
+
+	in := ReviewInput{
+		Goal:     "在 docs/eino-agent-loop.md 新增一个 `## RAG Pipeline Glossary` 小节。",
+		RepoRoot: root,
+	}
+	out := ReviewOutput{
+		Decision: "request_changes",
+		Summary:  "The new `## RAG Pipeline Glossary` section is duplicated and appears twice back-to-back.",
+		Markdown: "The glossary block is duplicated; keep only one copy.",
+		Findings: []model.ReviewFinding{{
+			Severity: "high",
+			File:     "docs/eino-agent-loop.md",
+			Message:  "duplicate glossary section",
+		}},
+	}
+
+	enforceMarkdownDuplicateReviewConsistency(in, &out)
+
+	if out.Decision != "comment" {
+		t.Fatalf("expected duplicate false positive to downgrade to comment, got %+v", out)
+	}
+	if len(out.Findings) != 0 {
+		t.Fatalf("expected duplicate finding removed, got %+v", out.Findings)
+	}
+	if strings.Contains(strings.ToLower(out.Summary), "duplicat") {
+		t.Fatalf("expected duplicate wording removed from summary, got %q", out.Summary)
+	}
+}
+
+func TestEnforceMarkdownDuplicateReviewConsistencyKeepsRealDuplicateHeading(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "docs", "eino-agent-loop.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir docs dir: %v", err)
+	}
+	body := `# Agent Loop
+
+## RAG Pipeline Glossary
+
+Chunking splits long text into retrieval units.
+
+## RAG Pipeline Glossary
+
+Chunking splits long text into retrieval units.
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write markdown: %v", err)
+	}
+
+	in := ReviewInput{
+		Goal:     "在 docs/eino-agent-loop.md 新增一个 `## RAG Pipeline Glossary` 小节。",
+		RepoRoot: root,
+	}
+	out := ReviewOutput{
+		Decision: "request_changes",
+		Summary:  "The new `## RAG Pipeline Glossary` section is duplicated and appears twice back-to-back.",
+		Markdown: "The glossary block is duplicated; keep only one copy.",
+		Findings: []model.ReviewFinding{{
+			Severity: "high",
+			File:     "docs/eino-agent-loop.md",
+			Message:  "duplicate glossary section",
+		}},
+	}
+
+	enforceMarkdownDuplicateReviewConsistency(in, &out)
+
+	if out.Decision != "request_changes" {
+		t.Fatalf("expected real duplicate to remain request_changes, got %+v", out)
+	}
+	if len(out.Findings) != 1 {
+		t.Fatalf("expected duplicate finding kept, got %+v", out.Findings)
+	}
+}
+
+func TestEnforceMarkdownDuplicateReviewConsistencyKeepsOtherFindings(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "docs", "eino-agent-loop.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir docs dir: %v", err)
+	}
+	body := `# Agent Loop
+
+## RAG Pipeline Glossary
+
+Chunking splits long text into retrieval units.
+
+Embedding maps chunks into vectors.
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write markdown: %v", err)
+	}
+
+	in := ReviewInput{
+		Goal:     "在 docs/eino-agent-loop.md 新增一个 `## RAG Pipeline Glossary` 小节。",
+		RepoRoot: root,
+	}
+	out := ReviewOutput{
+		Decision: "request_changes",
+		Summary:  "The glossary section is duplicated, and the new section is missing citations.",
+		Markdown: "Duplicate glossary section. Also missing citations.",
+		Findings: []model.ReviewFinding{
+			{Severity: "high", File: "docs/eino-agent-loop.md", Message: "duplicate glossary section"},
+			{Severity: "high", File: "docs/eino-agent-loop.md", Message: "missing citation for glossary terms"},
+		},
+	}
+
+	enforceMarkdownDuplicateReviewConsistency(in, &out)
+
+	if out.Decision != "request_changes" {
+		t.Fatalf("expected other findings to keep request_changes, got %+v", out)
+	}
+	if len(out.Findings) != 1 {
+		t.Fatalf("expected duplicate finding removed and remaining finding preserved, got %+v", out.Findings)
+	}
+	if !strings.Contains(strings.ToLower(out.Findings[0].Message), "missing citation") {
+		t.Fatalf("expected remaining finding to be the citation issue, got %+v", out.Findings)
 	}
 }
 
@@ -897,6 +1245,151 @@ func TestDetectTargetedPatchDefinitionIssuesFlagsDuplicatesWithinPatch(t *testin
 	}
 }
 
+func TestDetectTargetedPatchDefinitionIssuesFlagsReorderOnlyIdentifierDrift(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "internal", "tools", "eino_tools.go")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir tools dir: %v", err)
+	}
+	body := `package tools
+
+import "fmt"
+
+func buildReadOnlyTools() []any {
+	repoList := "repoList"
+	repoRead := "repoRead"
+	repoSearch := "repoSearch"
+	gitDiff := "gitDiff"
+	kbSearch := "kbSearch"
+	_ = fmt.Sprintf("%s", repoList)
+	return []any{
+		repoList,
+		repoRead,
+		repoSearch,
+		gitDiff,
+		kbSearch,
+	}
+}
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write eino_tools.go: %v", err)
+	}
+	patch := `diff --git a/internal/tools/eino_tools.go b/internal/tools/eino_tools.go
+--- a/internal/tools/eino_tools.go
++++ b/internal/tools/eino_tools.go
+@@ -1,5 +1,3 @@
+-import "fmt"
+-
+@@ -10,6 +8,5 @@
+ 		repoRead,
+ 		repoSearch,
+ 		gitDiff,
+-		kbSearch,
+ 	}
+ }
+`
+
+	got := detectTargetedPatchDefinitionIssues(
+		"仅基于仓库代码，在 internal/tools/eino_tools.go 的 buildReadOnlyTools 函数中，将返回的工具列表按字母顺序排列（当前顺序是 repoList, repoRead, repoSearch, gitDiff, kbSearch, listSkillTool, viewSkillTool）。禁止调用 kb_search。",
+		root,
+		patch,
+		[]string{"internal/tools/eino_tools.go"},
+	)
+
+	if !containsString(got, "reorder-only identifier drift: kbSearch") {
+		t.Fatalf("expected reorder-only identifier drift for kbSearch, got %v", got)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected only kbSearch drift to be reported, got %v", got)
+	}
+}
+
+func TestDetectTargetedPatchDefinitionIssuesFlagsDeletedRequiredMarkdownHeading(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "docs", "eino-agent-loop.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir docs dir: %v", err)
+	}
+	body := `# Agent Loop
+
+## RAG Pipeline Glossary
+
+Chunking ...
+Embedding ...
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write markdown: %v", err)
+	}
+	patch := `diff --git a/docs/eino-agent-loop.md b/docs/eino-agent-loop.md
+--- a/docs/eino-agent-loop.md
++++ b/docs/eino-agent-loop.md
+@@ -3,4 +3,0 @@
+-## RAG Pipeline Glossary
+-
+-Chunking ...
+-Embedding ...
+`
+
+	got := detectTargetedPatchDefinitionIssues(
+		"在 docs/eino-agent-loop.md 新增一个 `## RAG Pipeline Glossary` 小节，解释 Chunking、Embedding、Hybrid Search、Rerank 四个术语（每个 1 句）。",
+		root,
+		patch,
+		[]string{"docs/eino-agent-loop.md"},
+	)
+
+	if !containsString(got, "deleted required heading without replacement: ## RAG Pipeline Glossary") {
+		t.Fatalf("expected deleted heading issue, got %v", got)
+	}
+}
+
+func TestDetectTargetedPatchDefinitionIssuesIgnoresNonEntryStringsForReorderOnly(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "internal", "tools", "eino_tools.go")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir tools dir: %v", err)
+	}
+	body := `package tools
+
+func buildReadOnlyTools() []string {
+	return []string{
+		"repoList",
+		"repoRead",
+		"repoSearch",
+		"gitDiff",
+		"kbSearch",
+	}
+}
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write eino_tools.go: %v", err)
+	}
+	patch := `diff --git a/internal/tools/eino_tools.go b/internal/tools/eino_tools.go
+--- a/internal/tools/eino_tools.go
++++ b/internal/tools/eino_tools.go
+@@ -1,8 +1,5 @@
+-		"Search external knowledge base (LanceDB sidecar) for relevant context. Returns cited chunks with path and offsets.",
+-		"github.com/kina/agent-coding-loop/internal/kb",
+ 		return []string{
+ 			"repoList",
+ 			"repoRead",
+ 			"repoSearch",
+ 			"gitDiff",
+-			"kbSearch",
+ 		}
+ `
+
+	got := detectTargetedPatchDefinitionIssues(
+		"仅基于仓库代码，在 internal/tools/eino_tools.go 的 buildReadOnlyTools 函数中，将返回的工具列表按字母顺序排列（当前顺序是 repoList, repoRead, repoSearch, gitDiff, kbSearch）。禁止调用 kb_search。",
+		root,
+		patch,
+		[]string{"internal/tools/eino_tools.go"},
+	)
+
+	if len(got) != 1 || got[0] != "reorder-only identifier drift: kbSearch" {
+		t.Fatalf("expected only kbSearch reorder drift, got %v", got)
+	}
+}
+
 func TestEnsureGoalTargetPatchUsesRetryPatchForSingleTargetDoc(t *testing.T) {
 	c := NewCoder(ClientConfig{})
 	c.retryHooks = &coderRetryHooks{
@@ -958,6 +1451,30 @@ func TestEnsureGoalTargetPatchReportsEmptyRetryDiagnostics(t *testing.T) {
 	}
 }
 
+func TestEnsureGoalTargetPatchRejectsEmptyPatchForMultiTargetTask(t *testing.T) {
+	c := NewCoder(ClientConfig{})
+	c.retryHooks = &coderRetryHooks{
+		targeted: func(context.Context, CoderInput, []string, string) (CoderOutput, error) {
+			return CoderOutput{Patch: "", Notes: "config.go and config_test.go already appear complete"}, nil
+		},
+		targetedStrict: func(context.Context, CoderInput, []string, string) (CoderOutput, error) {
+			return CoderOutput{Patch: "", Notes: "strict retry also believes both targets are already satisfied"}, nil
+		},
+	}
+
+	out := CoderOutput{}
+	c.ensureGoalTargetPatch(context.Background(), CoderInput{
+		Goal: "根据知识库中的配置校验规则，在 internal/config/config.go 中增加校验：DBPath 必须以 .db 结尾，否则返回错误。同时在 internal/config/config_test.go 中添加一个测试用例验证该校验。",
+	}, &out)
+
+	if !strings.Contains(out.Notes, "empty patch is invalid for multi-target goal") {
+		t.Fatalf("expected multi-target empty patch diagnostic, got %q", out.Notes)
+	}
+	if !strings.Contains(out.Notes, "Unable to produce patch touching required goal target files.") {
+		t.Fatalf("expected final goal-target failure note, got %q", out.Notes)
+	}
+}
+
 func TestEnsureGoalTargetPatchUsesStrictRetryPatchWhenFirstRetryEmpty(t *testing.T) {
 	c := NewCoder(ClientConfig{})
 	c.retryHooks = &coderRetryHooks{
@@ -991,6 +1508,309 @@ func TestEnsureGoalTargetPatchUsesStrictRetryPatchWhenFirstRetryEmpty(t *testing
 	}
 	if !strings.Contains(out.Notes, "targeted_strict_retry") {
 		t.Fatalf("expected strict retry diagnostics in notes, got %q", out.Notes)
+	}
+}
+
+func TestEnsureGoalTargetPatchPassesMissingTargetFilesToStrictRetry(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "internal", "config", "config.go")
+	testPath := filepath.Join(root, "internal", "config", "config_test.go")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	if err := os.WriteFile(configPath, []byte("package config\n\nfunc Load(path string) error {\n\treturn nil\n}\n"), 0o644); err != nil {
+		t.Fatalf("write config.go: %v", err)
+	}
+	if err := os.WriteFile(testPath, []byte("package config\n\nimport \"testing\"\n\nfunc TestLoadDefaults(t *testing.T) {}\n"), 0o644); err != nil {
+		t.Fatalf("write config_test.go: %v", err)
+	}
+
+	c := NewCoder(ClientConfig{})
+	var seenMissingTargets []string
+	c.retryHooks = &coderRetryHooks{
+		targeted: func(context.Context, CoderInput, []string, string) (CoderOutput, error) {
+			return CoderOutput{Patch: "", Notes: "first retry could not build missing test patch"}, nil
+		},
+		targetedStrict: func(_ context.Context, in CoderInput, targets []string, priorPatch string) (CoderOutput, error) {
+			seenMissingTargets = append([]string{}, in.MissingTargetFiles...)
+			return CoderOutput{
+				Patch: `diff --git a/internal/config/config_test.go b/internal/config/config_test.go
+--- a/internal/config/config_test.go
++++ b/internal/config/config_test.go
+@@ -3,3 +3,7 @@
+ import "testing"
+ 
+ func TestLoadDefaults(t *testing.T) {}
++
++func TestLoadRejectsInvalidDBPathSuffix(t *testing.T) {
++	t.Fatal("added")
++}
+`,
+				Notes: "strict retry focused on missing test target",
+			}, nil
+		},
+	}
+
+	out := CoderOutput{
+		Patch: `diff --git a/internal/config/config.go b/internal/config/config.go
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -1,5 +1,8 @@
+ package config
+ 
+ func Load(path string) error {
++	if path == "" {
++		return errors.New("db_path must end with .db")
++	}
+ 	return nil
+ }
+`,
+	}
+
+	c.ensureGoalTargetPatch(context.Background(), CoderInput{
+		Goal:        "根据知识库中的配置校验规则，在 internal/config/config.go 中增加校验：DBPath 必须以 .db 结尾，否则返回错误。同时在 internal/config/config_test.go 中添加一个测试用例验证该校验。校验规则和错误信息需通过 kb_search 获取。",
+		RepoSummary: root,
+	}, &out)
+
+	if !containsString(seenMissingTargets, "internal/config/config_test.go") {
+		t.Fatalf("expected missing target files to include config_test.go, got %v", seenMissingTargets)
+	}
+	if containsString(seenMissingTargets, "internal/config/config.go") {
+		t.Fatalf("expected already covered config.go to be excluded, got %v", seenMissingTargets)
+	}
+	if !strings.Contains(out.Patch, "diff --git a/internal/config/config.go b/internal/config/config.go") {
+		t.Fatalf("expected merged patch to keep code target, got %q", out.Patch)
+	}
+	if !strings.Contains(out.Patch, "diff --git a/internal/config/config_test.go b/internal/config/config_test.go") {
+		t.Fatalf("expected merged patch to add missing test target, got %q", out.Patch)
+	}
+	if !strings.Contains(out.Notes, "filled missing target files: internal/config/config_test.go") {
+		t.Fatalf("expected missing target recovery note, got %q", out.Notes)
+	}
+}
+
+func TestEnsureGoalTargetPatchReportsMissingTargetFilesWhenRecoveryStillMisses(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "internal", "config", "config.go")
+	testPath := filepath.Join(root, "internal", "config", "config_test.go")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	if err := os.WriteFile(configPath, []byte("package config\n\nfunc Load(path string) error {\n\treturn nil\n}\n"), 0o644); err != nil {
+		t.Fatalf("write config.go: %v", err)
+	}
+	if err := os.WriteFile(testPath, []byte("package config\n\nimport \"testing\"\n\nfunc TestLoadDefaults(t *testing.T) {}\n"), 0o644); err != nil {
+		t.Fatalf("write config_test.go: %v", err)
+	}
+
+	c := NewCoder(ClientConfig{})
+	c.retryHooks = &coderRetryHooks{
+		targeted: func(context.Context, CoderInput, []string, string) (CoderOutput, error) {
+			return CoderOutput{Patch: "", Notes: "first retry could not build missing test patch"}, nil
+		},
+		targetedStrict: func(context.Context, CoderInput, []string, string) (CoderOutput, error) {
+			return CoderOutput{
+				Patch: `diff --git a/internal/config/config.go b/internal/config/config.go
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -1,5 +1,8 @@
+ package config
+ 
+ func Load(path string) error {
++	if path == "" {
++		return errors.New("db_path must end with .db")
++	}
+ 	return nil
+ }
+`,
+				Notes: "strict retry still only touched config.go",
+			}, nil
+		},
+	}
+
+	out := CoderOutput{
+		Patch: `diff --git a/internal/config/config.go b/internal/config/config.go
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -1,5 +1,8 @@
+ package config
+ 
+ func Load(path string) error {
++	if path == "" {
++		return errors.New("db_path must end with .db")
++	}
+ 	return nil
+ }
+`,
+	}
+
+	c.ensureGoalTargetPatch(context.Background(), CoderInput{
+		Goal:        "根据知识库中的配置校验规则，在 internal/config/config.go 中增加校验：DBPath 必须以 .db 结尾，否则返回错误。同时在 internal/config/config_test.go 中添加一个测试用例验证该校验。校验规则和错误信息需通过 kb_search 获取。",
+		RepoSummary: root,
+	}, &out)
+
+	if !strings.Contains(out.Notes, "missing target files: internal/config/config_test.go") {
+		t.Fatalf("expected missing target diagnostic, got %q", out.Notes)
+	}
+}
+
+func TestEnsureGoalTargetPatchAppliesHardTimeoutToStrictRetry(t *testing.T) {
+	oldTimeout := targetPatchHardRetryTimeout
+	targetPatchHardRetryTimeout = 50 * time.Millisecond
+	defer func() { targetPatchHardRetryTimeout = oldTimeout }()
+
+	c := NewCoder(ClientConfig{})
+	c.retryHooks = &coderRetryHooks{
+		targeted: func(context.Context, CoderInput, []string, string) (CoderOutput, error) {
+			return CoderOutput{Patch: "", Notes: "first retry could not build patch"}, nil
+		},
+		targetedStrict: func(context.Context, CoderInput, []string, string) (CoderOutput, error) {
+			select {}
+		},
+	}
+
+	out := CoderOutput{}
+	done := make(chan struct{})
+	go func() {
+		c.ensureGoalTargetPatch(context.Background(), CoderInput{
+			Goal: "根据知识库规范，修改 kb/server.py 增加 chunk_size 校验。",
+		}, &out)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("expected targeted strict retry to respect hard timeout")
+	}
+	if !strings.Contains(out.Notes, "targeted_strict_retry failed:") {
+		t.Fatalf("expected strict retry timeout diagnostic, got %q", out.Notes)
+	}
+}
+
+func TestDetectMissingTargetSnapshotContextFlagsHallucinatedGoDecls(t *testing.T) {
+	root := t.TempDir()
+	cfgPath := filepath.Join(root, "internal", "config", "config.go")
+	testPath := filepath.Join(root, "internal", "config", "config_test.go")
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(cfgPath, []byte(`package config
+
+func Load(path string) (*Config, error) {
+	return &Config{}, nil
+}
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(testPath, []byte(`package config
+
+import "testing"
+
+func TestLoadDefaults(t *testing.T) {}
+`), 0o644); err != nil {
+		t.Fatalf("write test: %v", err)
+	}
+	patch := `diff --git a/internal/config/config.go b/internal/config/config.go
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -1,3 +1,5 @@
+ func (c *Config) Validate() error {
++    return nil
+ }
+diff --git a/internal/config/config_test.go b/internal/config/config_test.go
+--- a/internal/config/config_test.go
++++ b/internal/config/config_test.go
+@@ -1,3 +1,5 @@
+ func TestConfigValidate(t *testing.T) {
++    t.Parallel()
+ }`
+
+	got := detectMissingTargetSnapshotContext(root, patch, []string{"internal/config/config.go", "internal/config/config_test.go"})
+	if len(got) != 2 {
+		t.Fatalf("expected 2 missing context issues, got %v", got)
+	}
+	if !containsString(got, "internal/config/config.go: func (c *Config) Validate() error {") {
+		t.Fatalf("expected missing Validate context, got %v", got)
+	}
+	if !containsString(got, "internal/config/config_test.go: func TestConfigValidate(t *testing.T) {") {
+		t.Fatalf("expected missing TestConfigValidate context, got %v", got)
+	}
+}
+
+func TestEnsureGoalTargetPatchRejectsHallucinatedContextAndUsesRetryPatch(t *testing.T) {
+	root := t.TempDir()
+	cfgPath := filepath.Join(root, "internal", "config", "config.go")
+	testPath := filepath.Join(root, "internal", "config", "config_test.go")
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(cfgPath, []byte(`package config
+
+func Load(path string) (*Config, error) {
+	return &Config{}, nil
+}
+`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(testPath, []byte(`package config
+
+import "testing"
+
+func TestLoadDefaults(t *testing.T) {}
+`), 0o644); err != nil {
+		t.Fatalf("write test: %v", err)
+	}
+
+	initialPatch := `diff --git a/internal/config/config.go b/internal/config/config.go
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -1,3 +1,5 @@
+ func (c *Config) Validate() error {
++    return nil
+ }
+diff --git a/internal/config/config_test.go b/internal/config/config_test.go
+--- a/internal/config/config_test.go
++++ b/internal/config/config_test.go
+@@ -1,3 +1,5 @@
+ func TestConfigValidate(t *testing.T) {
++    t.Parallel()
+ }`
+	retryPatch := `diff --git a/internal/config/config.go b/internal/config/config.go
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -1,3 +1,4 @@
+ func Load(path string) (*Config, error) {
++    _ = path
+ 	return &Config{}, nil
+ }
+diff --git a/internal/config/config_test.go b/internal/config/config_test.go
+--- a/internal/config/config_test.go
++++ b/internal/config/config_test.go
+@@ -1,4 +1,5 @@
+ import "testing"
+ func TestLoadDefaults(t *testing.T) {}
++func TestLoadDBPathValidation(t *testing.T) {}`
+
+	c := NewCoder(ClientConfig{})
+	c.retryHooks = &coderRetryHooks{
+		targeted: func(context.Context, CoderInput, []string, string) (CoderOutput, error) {
+			return CoderOutput{Patch: retryPatch, Summary: "retry patch"}, nil
+		},
+	}
+	out := CoderOutput{Patch: initialPatch}
+	in := CoderInput{
+		Goal:        "根据知识库中的配置校验规则，在 internal/config/config.go 中增加校验：DBPath 必须以 .db 结尾，否则返回错误。同时在 internal/config/config_test.go 中添加一个测试用例验证该校验。",
+		RepoSummary: root,
+	}
+
+	c.ensureGoalTargetPatch(context.Background(), in, &out)
+
+	if strings.TrimSpace(out.Patch) != strings.TrimSpace(retryPatch) {
+		t.Fatalf("expected retry patch to replace hallucinated-context patch, got %q", out.Patch)
+	}
+	if !strings.Contains(out.Notes, "missing from snapshots") {
+		t.Fatalf("expected missing snapshot context note, got %q", out.Notes)
 	}
 }
 
@@ -1059,7 +1879,14 @@ func writeErr(code int, msg string) string {
 
 func TestEnsureSingleTargetOutputConstraintsUsesStrictRetryForDuplicateTestName(t *testing.T) {
 	root := t.TempDir()
+	configPath := filepath.Join(root, "internal", "config", "config.go")
 	path := filepath.Join(root, "internal", "config", "config_test.go")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	if err := os.WriteFile(configPath, []byte("package config\n\nfunc Load(path string) (*Config, error) { return nil, nil }\n"), 0o644); err != nil {
+		t.Fatalf("write config.go: %v", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir test dir: %v", err)
 	}
@@ -1116,6 +1943,203 @@ diff --git a/internal/config/config_test.go b/internal/config/config_test.go
 	}
 	if !strings.Contains(out.Patch, "TestLoadRejectsInvalidDBPathSuffix") {
 		t.Fatalf("expected strict retry patch to survive, got %q", out.Patch)
+	}
+}
+
+func TestEnsureSingleTargetOutputConstraintsPassesDefinitionIssueRecoveryContextToStrictRetry(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "internal", "config", "config.go")
+	testPath := filepath.Join(root, "internal", "config", "config_test.go")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	if err := os.WriteFile(configPath, []byte("package config\n\nfunc Load(path string) (*Config, error) { return nil, nil }\n"), 0o644); err != nil {
+		t.Fatalf("write config.go: %v", err)
+	}
+	if err := os.WriteFile(testPath, []byte("package config\n\nfunc TestLoadValidatesDBPathSuffix(t *testing.T) {}\n"), 0o644); err != nil {
+		t.Fatalf("write config_test.go: %v", err)
+	}
+
+	c := NewCoder(ClientConfig{})
+	c.retryHooks = &coderRetryHooks{
+		targetedStrict: func(_ context.Context, in CoderInput, targets []string, priorPatch string) (CoderOutput, error) {
+			if !containsString(in.DefinitionIssues, "duplicate test name: TestLoadValidatesDBPathSuffix") {
+				t.Fatalf("expected duplicate test definition issue, got %v", in.DefinitionIssues)
+			}
+			if !containsString(in.ExistingTestNamesByFile["internal/config/config_test.go"], "TestLoadValidatesDBPathSuffix") {
+				t.Fatalf("expected existing test names in retry payload, got %#v", in.ExistingTestNamesByFile)
+			}
+			if !containsString(in.ExistingTopLevelNamesByFile["internal/config/config.go"], "Load") {
+				t.Fatalf("expected existing top-level names in retry payload, got %#v", in.ExistingTopLevelNamesByFile)
+			}
+			if !containsString(in.AllowedGoalFunctions, "Load") {
+				t.Fatalf("expected allowed goal functions in retry payload, got %v", in.AllowedGoalFunctions)
+			}
+			return CoderOutput{
+				Patch: `diff --git a/internal/config/config.go b/internal/config/config.go
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -1,3 +1,6 @@
++if !strings.HasSuffix(cfg.DBPath, ".db") {
++	return nil, errors.New("db_path must end with .db")
++}
+diff --git a/internal/config/config_test.go b/internal/config/config_test.go
+--- a/internal/config/config_test.go
++++ b/internal/config/config_test.go
+@@ -1,3 +1,8 @@
++func TestLoadRejectsInvalidDBPathSuffix(t *testing.T) {
++	t.Fatal("new unique name")
++}
+ `,
+				Notes: "strict retry resolved duplicate test",
+			}, nil
+		},
+	}
+
+	out := CoderOutput{
+		Patch: `diff --git a/internal/config/config_test.go b/internal/config/config_test.go
+--- a/internal/config/config_test.go
++++ b/internal/config/config_test.go
+@@ -1,3 +1,7 @@
++func TestLoadValidatesDBPathSuffix(t *testing.T) {
++	t.Fatal("duplicate")
++}
+ `,
+	}
+
+	c.ensureSingleTargetOutputConstraints(context.Background(), CoderInput{
+		Goal:        "根据知识库中的配置校验规则，修改 internal/config/config.go 中的 Load 函数增加 DBPath 以 .db 结尾的校验，并在 internal/config/config_test.go 中补充测试。必须先调用 kb_search。",
+		RepoSummary: root,
+	}, &out)
+
+	if strings.Contains(out.Patch, "func TestLoadValidatesDBPathSuffix") {
+		t.Fatalf("expected duplicate retry patch to be replaced, got %q", out.Patch)
+	}
+	if !strings.Contains(out.Patch, "TestLoadRejectsInvalidDBPathSuffix") {
+		t.Fatalf("expected recovered retry patch to survive, got %q", out.Patch)
+	}
+}
+
+func TestEnsureSingleTargetOutputConstraintsKeepsDuplicateIssueNotesWhenRetryStillConflicts(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "internal", "config", "config.go")
+	testPath := filepath.Join(root, "internal", "config", "config_test.go")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	if err := os.WriteFile(configPath, []byte("package config\n\nfunc Load(path string) (*Config, error) { return nil, nil }\n"), 0o644); err != nil {
+		t.Fatalf("write config.go: %v", err)
+	}
+	if err := os.WriteFile(testPath, []byte("package config\n\nfunc TestLoadValidatesDBPathSuffix(t *testing.T) {}\n"), 0o644); err != nil {
+		t.Fatalf("write config_test.go: %v", err)
+	}
+
+	c := NewCoder(ClientConfig{})
+	c.retryHooks = &coderRetryHooks{
+		targetedStrict: func(_ context.Context, in CoderInput, targets []string, priorPatch string) (CoderOutput, error) {
+			return CoderOutput{
+				Patch: `diff --git a/internal/config/config.go b/internal/config/config.go
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -1,3 +1,6 @@
++if !strings.HasSuffix(cfg.DBPath, ".db") {
++	return nil, errors.New("db_path must end with .db")
++}
+diff --git a/internal/config/config_test.go b/internal/config/config_test.go
+--- a/internal/config/config_test.go
++++ b/internal/config/config_test.go
+@@ -1,3 +1,7 @@
++func TestLoadValidatesDBPathSuffix(t *testing.T) {
++	t.Fatal("duplicate again")
++}
+ `,
+				Notes: "retry kept duplicate test name",
+			}, nil
+		},
+	}
+
+	out := CoderOutput{
+		Patch: `diff --git a/internal/config/config_test.go b/internal/config/config_test.go
+--- a/internal/config/config_test.go
++++ b/internal/config/config_test.go
+@@ -1,3 +1,7 @@
++func TestLoadValidatesDBPathSuffix(t *testing.T) {
++	t.Fatal("duplicate")
++}
+ `,
+	}
+
+	c.ensureSingleTargetOutputConstraints(context.Background(), CoderInput{
+		Goal:        "根据知识库中的配置校验规则，修改 internal/config/config.go 中的 Load 函数增加 DBPath 以 .db 结尾的校验，并在 internal/config/config_test.go 中补充测试。必须先调用 kb_search。",
+		RepoSummary: root,
+	}, &out)
+
+	if !strings.Contains(out.Notes, "single_target_patch_retry still has definition issues: duplicate test name: TestLoadValidatesDBPathSuffix") {
+		t.Fatalf("expected duplicate issue to remain in notes, got %q", out.Notes)
+	}
+}
+
+func TestEnsureSingleTargetOutputConstraintsAppliesHardTimeoutToStrictRetry(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "internal", "http", "server.go")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir server dir: %v", err)
+	}
+	body := `package http
+
+func toMachineCode(code int) string { return "OLD" }
+
+func writeErr(code int, msg string) string {
+	return msg
+}
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write server.go: %v", err)
+	}
+
+	oldTimeout := targetPatchHardRetryTimeout
+	targetPatchHardRetryTimeout = 50 * time.Millisecond
+	defer func() { targetPatchHardRetryTimeout = oldTimeout }()
+
+	c := NewCoder(ClientConfig{})
+	c.retryHooks = &coderRetryHooks{
+		targetedStrict: func(context.Context, CoderInput, []string, string) (CoderOutput, error) {
+			select {}
+		},
+	}
+
+	out := CoderOutput{
+		Patch: `diff --git a/internal/http/server.go b/internal/http/server.go
+--- a/internal/http/server.go
++++ b/internal/http/server.go
+@@ -1,6 +1,13 @@
++func toMachineCode(code int) string {
++	return "NEW"
++}
++
+ func writeErr(code int, msg string) string {
+-	return msg
++	return toMachineCode(code) + ":" + msg
+ }
+`,
+	}
+
+	done := make(chan struct{})
+	go func() {
+		c.ensureSingleTargetOutputConstraints(context.Background(), CoderInput{
+			Goal:        "根据知识库中的 HTTP API 规范，修改 internal/http/server.go 中的 writeErr 函数，使错误响应同时包含 error 和 code 两个字段（code 为大写下划线格式的机器可读错误码）。需先调用 kb_search 查询 API 规范，并在说明中引用来源。",
+			RepoSummary: root,
+		}, &out)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("expected strict retry to respect hard timeout")
+	}
+	if !strings.Contains(out.Notes, "single_target_patch_retry failed:") {
+		t.Fatalf("expected timeout diagnostic in notes, got %q", out.Notes)
 	}
 }
 
@@ -1203,6 +2227,464 @@ func TestEnsureRepoOnlyMinimalModeReportsEmptyRetryDiagnostics(t *testing.T) {
 	}
 }
 
+func TestEnsureRepoOnlyMinimalModePassesDefinitionIssueRecoveryContextToRetry(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "internal", "config", "config.go")
+	testPath := filepath.Join(root, "internal", "config", "config_test.go")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	if err := os.WriteFile(configPath, []byte("package config\n\nfunc Load(path string) (*Config, error) { return nil, nil }\n"), 0o644); err != nil {
+		t.Fatalf("write config.go: %v", err)
+	}
+	if err := os.WriteFile(testPath, []byte("package config\n\nfunc TestLoadValidatesDBPathSuffix(t *testing.T) {}\n"), 0o644); err != nil {
+		t.Fatalf("write config_test.go: %v", err)
+	}
+
+	c := NewCoder(ClientConfig{})
+	c.retryHooks = &coderRetryHooks{
+		repoOnly: func(_ context.Context, in CoderInput, targets []string, priorPatch string) (CoderOutput, error) {
+			if !containsString(in.DefinitionIssues, "duplicate test name: TestLoadValidatesDBPathSuffix") {
+				t.Fatalf("expected duplicate test definition issue, got %v", in.DefinitionIssues)
+			}
+			if !containsString(in.ExistingTestNamesByFile["internal/config/config_test.go"], "TestLoadValidatesDBPathSuffix") {
+				t.Fatalf("expected existing test names in repo-only retry payload, got %#v", in.ExistingTestNamesByFile)
+			}
+			return CoderOutput{
+				Patch: `diff --git a/internal/config/config.go b/internal/config/config.go
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -1,3 +1,6 @@
++if !strings.HasSuffix(cfg.DBPath, ".db") {
++	return nil, errors.New("db_path must end with .db")
++}
+diff --git a/internal/config/config_test.go b/internal/config/config_test.go
+--- a/internal/config/config_test.go
++++ b/internal/config/config_test.go
+@@ -1,3 +1,8 @@
++func TestLoadRejectsInvalidDBPathSuffix(t *testing.T) {
++	t.Fatal("new unique name")
++}
+ `,
+				Notes: "repo-only retry resolved duplicate test",
+			}, nil
+		},
+	}
+
+	out := CoderOutput{
+		Patch: `diff --git a/internal/config/config_test.go b/internal/config/config_test.go
+--- a/internal/config/config_test.go
++++ b/internal/config/config_test.go
+@@ -1,3 +1,7 @@
++func TestLoadValidatesDBPathSuffix(t *testing.T) {
++	t.Fatal("duplicate")
++}
+ `,
+		UsedFallback: true,
+	}
+
+	c.ensureRepoOnlyMinimalMode(context.Background(), CoderInput{
+		Goal:        "仅基于仓库代码，修改 internal/config/config.go 中的 Load 函数增加 DBPath 以 .db 结尾的校验，并在 internal/config/config_test.go 中补充测试。不要调用 kb_search。",
+		RepoSummary: root,
+		Commands:    []string{"go test ./internal/config/..."},
+	}, &out)
+
+	if strings.Contains(out.Patch, "func TestLoadValidatesDBPathSuffix") {
+		t.Fatalf("expected duplicate retry patch to be replaced, got %q", out.Patch)
+	}
+	if !strings.Contains(out.Patch, "TestLoadRejectsInvalidDBPathSuffix") {
+		t.Fatalf("expected repo-only recovered patch to survive, got %q", out.Patch)
+	}
+}
+
+func TestEnsureRepoOnlyMinimalModeRejectsReorderOnlyIdentifierDrift(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "internal", "tools", "eino_tools.go")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir tools dir: %v", err)
+	}
+	body := `package tools
+
+func buildReadOnlyTools() []string {
+	return []string{
+		"repoList",
+		"repoRead",
+		"repoSearch",
+		"gitDiff",
+		"kbSearch",
+		"listSkillTool",
+		"viewSkillTool",
+	}
+}
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write eino_tools.go: %v", err)
+	}
+
+	c := NewCoder(ClientConfig{})
+	c.retryHooks = &coderRetryHooks{
+		repoOnly: func(context.Context, CoderInput, []string, string) (CoderOutput, error) {
+			return CoderOutput{
+				Patch: `diff --git a/internal/tools/eino_tools.go b/internal/tools/eino_tools.go
+--- a/internal/tools/eino_tools.go
++++ b/internal/tools/eino_tools.go
+@@ -1,11 +1,10 @@
+ func buildReadOnlyTools() []string {
+ 	return []string{
+-		"repoList",
+-		"repoRead",
+-		"repoSearch",
+ 		"gitDiff",
+-		"kbSearch",
++		"repoList",
++		"repoRead",
++		"repoSearch",
+ 		"listSkillTool",
+ 		"viewSkillTool",
+ 	}
+ }
+`,
+				Notes: "reordered the slice alphabetically",
+			}, nil
+		},
+	}
+
+	out := CoderOutput{UsedFallback: true}
+	c.ensureRepoOnlyMinimalMode(context.Background(), CoderInput{
+		Goal:        "仅基于仓库代码，在 internal/tools/eino_tools.go 的 buildReadOnlyTools 函数中，将返回的工具列表按字母顺序排列（当前顺序是 repoList, repoRead, repoSearch, gitDiff, kbSearch, listSkillTool, viewSkillTool）。禁止调用 kb_search。",
+		RepoSummary: root,
+	}, &out)
+
+	if !strings.Contains(out.Notes, "repo_only_retry definition issues: reorder-only identifier drift: kbSearch") {
+		t.Fatalf("expected reorder-only drift diagnostic, got %q", out.Notes)
+	}
+	if !strings.Contains(out.Notes, "synthesized reorder-only patch from snapshots") {
+		t.Fatalf("expected synthesized fallback note, got %q", out.Notes)
+	}
+	if !strings.Contains(out.Patch, "+\t\t\"kbSearch\",") {
+		t.Fatalf("expected synthesized patch to preserve kbSearch, got %q", out.Patch)
+	}
+}
+
+func TestEnsureRepoOnlyMinimalModeClearsUnsafeReorderOnlyPatch(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "internal", "tools", "eino_tools.go")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir tools dir: %v", err)
+	}
+	body := `package tools
+
+func buildReadOnlyTools() []string {
+	return []string{
+		repoList,
+		repoRead,
+		repoSearch,
+		gitDiff,
+		kbSearch,
+		listSkillTool,
+		viewSkillTool,
+	}
+}
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write eino_tools.go: %v", err)
+	}
+
+	badPatch := `diff --git a/internal/tools/eino_tools.go b/internal/tools/eino_tools.go
+--- a/internal/tools/eino_tools.go
++++ b/internal/tools/eino_tools.go
+@@ -1,11 +1,10 @@
+ func buildReadOnlyTools() []string {
+ 	return []string{
+-		repoList,
+-		repoRead,
+-		repoSearch,
+ 		gitDiff,
+-		kbSearch,
++		repoList,
++		repoRead,
++		repoSearch,
+ 		listSkillTool,
+ 		viewSkillTool,
+ 	}
+ }
+`
+
+	c := NewCoder(ClientConfig{})
+	c.retryHooks = &coderRetryHooks{
+		repoOnly: func(context.Context, CoderInput, []string, string) (CoderOutput, error) {
+			return CoderOutput{
+				Patch: badPatch,
+				Notes: "reordered the slice alphabetically",
+			}, nil
+		},
+	}
+
+	out := CoderOutput{Patch: badPatch, UsedFallback: true}
+	c.ensureRepoOnlyMinimalMode(context.Background(), CoderInput{
+		Goal:        "仅基于仓库代码，在 internal/tools/eino_tools.go 的 buildReadOnlyTools 函数中，将返回的工具列表按字母顺序排列（当前顺序是 repoList, repoRead, repoSearch, gitDiff, kbSearch, listSkillTool, viewSkillTool）。禁止调用 kb_search。",
+		RepoSummary: root,
+	}, &out)
+
+	if !strings.Contains(out.Patch, "+\t\tkbSearch,") {
+		t.Fatalf("expected synthesized reorder-only patch to preserve kbSearch, got %q", out.Patch)
+	}
+	if !strings.Contains(out.Notes, "synthesized reorder-only patch from snapshots") {
+		t.Fatalf("expected synthesis note, got %q", out.Notes)
+	}
+}
+
+func TestEnsureSingleTargetOutputConstraintsClearsUnsafeReorderOnlyPatch(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "internal", "tools", "eino_tools.go")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir tools dir: %v", err)
+	}
+	body := `package tools
+
+func buildReadOnlyTools() []string {
+	return []string{
+		repoList,
+		repoRead,
+		repoSearch,
+		gitDiff,
+		kbSearch,
+	}
+}
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write eino_tools.go: %v", err)
+	}
+
+	badPatch := `diff --git a/internal/tools/eino_tools.go b/internal/tools/eino_tools.go
+--- a/internal/tools/eino_tools.go
++++ b/internal/tools/eino_tools.go
+@@ -1,9 +1,10 @@
+ func buildReadOnlyTools() []string {
+ 	return []string{
+-		repoList,
+-		repoRead,
+-		repoSearch,
+ 		gitDiff,
+-		kbSearch,
++		listSkillTool,
++		repoList,
++		repoRead,
++		repoSearch,
++		viewSkillTool,
+ 	}
+ }
+`
+
+	c := NewCoder(ClientConfig{})
+	c.retryHooks = &coderRetryHooks{
+		targetedStrict: func(context.Context, CoderInput, []string, string) (CoderOutput, error) {
+			return CoderOutput{Patch: ""}, nil
+		},
+	}
+
+	out := CoderOutput{Patch: badPatch}
+	c.ensureSingleTargetOutputConstraints(context.Background(), CoderInput{
+		Goal:        "仅基于仓库代码，在 internal/tools/eino_tools.go 的 buildReadOnlyTools 函数中，将返回的工具列表按字母顺序排列（当前顺序是 repoList, repoRead, repoSearch, gitDiff, kbSearch, listSkillTool, viewSkillTool）。禁止调用 kb_search。",
+		RepoSummary: root,
+	}, &out)
+
+	if strings.TrimSpace(out.Patch) != "" {
+		t.Fatalf("expected unsafe single-target reorder-only patch to be cleared, got %q", out.Patch)
+	}
+	if !strings.Contains(out.Notes, "rejected unsafe reorder-only patch") {
+		t.Fatalf("expected rejection note, got %q", out.Notes)
+	}
+}
+
+func TestEnsureRepoOnlyMinimalModeSynthesizesReorderOnlyPatchFromSnapshots(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "internal", "tools", "eino_tools.go")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir tools dir: %v", err)
+	}
+	body := `package tools
+
+func buildReadOnlyTools() []string {
+	return []string{
+		repoList,
+		repoRead,
+		repoSearch,
+		gitDiff,
+		kbSearch,
+	}
+}
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write eino_tools.go: %v", err)
+	}
+
+	c := NewCoder(ClientConfig{})
+	c.retryHooks = &coderRetryHooks{
+		repoOnly: func(context.Context, CoderInput, []string, string) (CoderOutput, error) {
+			return CoderOutput{Patch: ""}, nil
+		},
+	}
+
+	out := CoderOutput{Patch: "", UsedFallback: true}
+	c.ensureRepoOnlyMinimalMode(context.Background(), CoderInput{
+		Goal:        "仅基于仓库代码，在 internal/tools/eino_tools.go 的 buildReadOnlyTools 函数中，将返回的工具列表按字母顺序排列（当前顺序是 repoList, repoRead, repoSearch, gitDiff, kbSearch, listSkillTool, viewSkillTool）。禁止调用 kb_search。",
+		RepoSummary: root,
+	}, &out)
+
+	if !strings.Contains(out.Patch, "diff --git a/internal/tools/eino_tools.go b/internal/tools/eino_tools.go") {
+		t.Fatalf("expected synthesized patch, got %q", out.Patch)
+	}
+	if !strings.Contains(out.Patch, "+\t\tgitDiff,") || !strings.Contains(out.Patch, "+\t\tkbSearch,") {
+		t.Fatalf("expected alphabetical reorder entries in patch, got %q", out.Patch)
+	}
+	if strings.Contains(out.Patch, "listSkillTool") || strings.Contains(out.Patch, "viewSkillTool") {
+		t.Fatalf("expected synthesized patch to use snapshot entries only, got %q", out.Patch)
+	}
+	if !strings.Contains(out.Notes, "synthesized reorder-only patch from snapshots") {
+		t.Fatalf("expected synthesis note, got %q", out.Notes)
+	}
+}
+
+func TestRetryStageRecorderEmitsSubstages(t *testing.T) {
+	root := t.TempDir()
+	readmePath := filepath.Join(root, "README.md")
+	serverPath := filepath.Join(root, "internal", "http", "server.go")
+	configPath := filepath.Join(root, "internal", "config", "config.go")
+	if err := os.MkdirAll(filepath.Dir(serverPath), 0o755); err != nil {
+		t.Fatalf("mkdir server dir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	if err := os.WriteFile(readmePath, []byte("# demo\n"), 0o644); err != nil {
+		t.Fatalf("write readme: %v", err)
+	}
+	if err := os.WriteFile(serverPath, []byte("package http\n\nfunc writeErr(code int, msg string) string {\n\treturn msg\n}\n"), 0o644); err != nil {
+		t.Fatalf("write server.go: %v", err)
+	}
+	if err := os.WriteFile(configPath, []byte("package config\n\nfunc Load(path string) (*Config, error) {\n\treturn &Config{}, nil\n}\n"), 0o644); err != nil {
+		t.Fatalf("write config.go: %v", err)
+	}
+
+	var stages []string
+	ctx := withAgentStageRecorder(context.Background(), func(stage string) {
+		stages = append(stages, stage)
+	})
+
+	c := NewCoder(ClientConfig{})
+	c.retryHooks = &coderRetryHooks{
+		targeted: func(context.Context, CoderInput, []string, string) (CoderOutput, error) {
+			return CoderOutput{
+				Patch: `diff --git a/docs/eino-agent-loop.md b/docs/eino-agent-loop.md
+--- a/docs/eino-agent-loop.md
++++ b/docs/eino-agent-loop.md
+@@ -1 +1,2 @@
++glossary
+`,
+			}, nil
+		},
+		targetedStrict: func(context.Context, CoderInput, []string, string) (CoderOutput, error) {
+			return CoderOutput{
+				Patch: `diff --git a/internal/http/server.go b/internal/http/server.go
+--- a/internal/http/server.go
++++ b/internal/http/server.go
+@@ -1,4 +1,4 @@
+-func writeErr(code int, msg string) string {
++func writeErr(code int, msg string) string {
+ 	return "NOT_FOUND:" + msg
+ }
+`,
+			}, nil
+		},
+		scopedStrict: func(context.Context, CoderInput, []string, string, []string) (CoderOutput, error) {
+			return CoderOutput{
+				Patch: `diff --git a/internal/config/config.go b/internal/config/config.go
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -1,4 +1,4 @@
+ func Load(path string) (*Config, error) {
+-	return &Config{}, nil
++	return nil, errors.New("model.base_url is required when api_key is set")
+ }
+`,
+			}, nil
+		},
+		repoOnly: func(context.Context, CoderInput, []string, string) (CoderOutput, error) {
+			return CoderOutput{
+				Patch: `diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1 +1,2 @@
++inspect docs
+`,
+			}, nil
+		},
+	}
+
+	targetOut := CoderOutput{}
+	c.ensureGoalTargetPatch(ctx, CoderInput{
+		Goal: "在 docs/eino-agent-loop.md 新增一行 glossary。",
+	}, &targetOut)
+
+	scopeOut := CoderOutput{
+		Patch: `diff --git a/internal/config/config.go b/internal/config/config.go
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -1,4 +1,8 @@
+ func Load(path string) (*Config, error) {
++if cfg.Model.APIKey != "" && cfg.Model.BaseURL == "" {
++    return nil, errors.New("model.base_url is required when api_key is set")
++}
++if cfg.Model.Model == "" {
++    return nil, errors.New("model.model is required when base_url is set")
++}
+ 	return &Config{}, nil
+ }
+`,
+	}
+	c.ensureKBTaskScope(ctx, CoderInput{
+		Goal:        "根据项目知识库中的配置校验规范，在 internal/config/config.go 的 Load 函数末尾（return 之前）增加校验：如果 Model.APIKey 非空但 Model.BaseURL 为空，返回错误。校验规则和错误信息必须先通过 kb_search 查询获取，并在最终说明中给出引用路径。",
+		RepoSummary: root,
+	}, &scopeOut)
+
+	singleTargetOut := CoderOutput{
+		Patch: `diff --git a/internal/http/server.go b/internal/http/server.go
+--- a/internal/http/server.go
++++ b/internal/http/server.go
+@@ -1,4 +1,8 @@
++func toMachineCode(code int) string { return "NEW" }
+ func writeErr(code int, msg string) string {
+ 	return toMachineCode(code) + ":" + msg
+ }
+`,
+	}
+	c.ensureSingleTargetOutputConstraints(ctx, CoderInput{
+		Goal:        "根据知识库中的 HTTP API 规范，修改 internal/http/server.go 中的 writeErr 函数，使错误响应同时包含 error 和 code 两个字段。",
+		RepoSummary: root,
+	}, &singleTargetOut)
+
+	repoOnlyOut := CoderOutput{UsedFallback: true}
+	c.ensureRepoOnlyMinimalMode(ctx, CoderInput{
+		Goal:        "仅基于仓库代码，在 README.md 中补一行 inspect 说明。不要调用 kb_search。",
+		RepoSummary: root,
+	}, &repoOnlyOut)
+
+	expected := []string{
+		"coder_targeted_retry_start",
+		"coder_targeted_retry_done",
+		"coder_single_target_retry_start",
+		"coder_single_target_retry_done",
+		"coder_repo_only_retry_start",
+		"coder_repo_only_retry_done",
+	}
+	for _, stage := range expected {
+		if !containsString(stages, stage) {
+			t.Fatalf("expected stage %q, got %v", stage, stages)
+		}
+	}
+}
+
 type emptyDiagnosticError struct{}
 
 func (emptyDiagnosticError) Error() string { return "" }
@@ -1231,5 +2713,113 @@ func TestPatchAttemptDiagnosticFormatsEmptyErrorBody(t *testing.T) {
 	}
 	if !strings.Contains(note, "empty model error") {
 		t.Fatalf("expected empty model error fallback, got %q", note)
+	}
+}
+
+func TestPatchAttemptDiagnosticMarksMultiTargetEmptyPatchInvalid(t *testing.T) {
+	note := patchAttemptDiagnostic("targeted_patch_retry", CoderOutput{Notes: "claimed already satisfied"}, nil, []string{"internal/config/config.go", "internal/config/config_test.go"}, true, false, false)
+	if !strings.Contains(note, "empty patch is invalid for multi-target goal") {
+		t.Fatalf("expected multi-target invalid note, got %q", note)
+	}
+	if !strings.Contains(note, "claimed already satisfied") {
+		t.Fatalf("expected retry note to survive, got %q", note)
+	}
+}
+
+func TestWithCoderToolCallingTimeoutShortensLongParentContext(t *testing.T) {
+	prev := coderToolCallingTimeout
+	coderToolCallingTimeout = 50 * time.Millisecond
+	defer func() { coderToolCallingTimeout = prev }()
+
+	ctx, cancel := withCoderToolCallingTimeout(context.Background())
+	defer cancel()
+
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("expected deadline on coder tool-calling context")
+	}
+	remaining := time.Until(deadline)
+	if remaining > 250*time.Millisecond {
+		t.Fatalf("expected shortened coder deadline, got %s", remaining)
+	}
+}
+
+func TestWithCoderToolCallingTimeoutPreservesShorterParentDeadline(t *testing.T) {
+	prev := coderToolCallingTimeout
+	coderToolCallingTimeout = 5 * time.Second
+	defer func() { coderToolCallingTimeout = prev }()
+
+	parent, cancelParent := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancelParent()
+	ctx, cancel := withCoderToolCallingTimeout(parent)
+	defer cancel()
+
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("expected deadline on derived context")
+	}
+	remaining := time.Until(deadline)
+	if remaining > 200*time.Millisecond {
+		t.Fatalf("expected parent deadline to win, got %s", remaining)
+	}
+}
+
+func TestWithReviewerTimeoutShortensLongParentContext(t *testing.T) {
+	ctx, cancel := withReviewerTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("expected deadline on reviewer context")
+	}
+	remaining := time.Until(deadline)
+	if remaining > 250*time.Millisecond {
+		t.Fatalf("expected shortened reviewer deadline, got %s", remaining)
+	}
+}
+
+func TestWithReviewerTimeoutPreservesShorterParentDeadline(t *testing.T) {
+	parent, cancelParent := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancelParent()
+	ctx, cancel := withReviewerTimeout(parent, 5*time.Second)
+	defer cancel()
+
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("expected deadline on derived reviewer context")
+	}
+	remaining := time.Until(deadline)
+	if remaining > 200*time.Millisecond {
+		t.Fatalf("expected parent reviewer deadline to win, got %s", remaining)
+	}
+}
+
+func TestRunWithHardTimeoutReturnsDeadlineExceededWhenFnIgnoresContext(t *testing.T) {
+	start := time.Now()
+	_, err := runWithHardTimeout(context.Background(), 30*time.Millisecond, func(context.Context) (string, error) {
+		time.Sleep(200 * time.Millisecond)
+		return "late", nil
+	})
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline exceeded, got %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 150*time.Millisecond {
+		t.Fatalf("expected hard timeout to return quickly, got %s", elapsed)
+	}
+}
+
+func TestRunWithHardTimeoutPreservesShorterParentDeadline(t *testing.T) {
+	parent, cancelParent := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancelParent()
+	start := time.Now()
+	_, err := runWithHardTimeout(parent, time.Second, func(context.Context) (string, error) {
+		time.Sleep(200 * time.Millisecond)
+		return "late", nil
+	})
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline exceeded, got %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 150*time.Millisecond {
+		t.Fatalf("expected shorter parent deadline to win quickly, got %s", elapsed)
 	}
 }

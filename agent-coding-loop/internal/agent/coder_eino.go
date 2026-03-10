@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,22 +27,37 @@ type Coder struct {
 	retryHooks *coderRetryHooks
 }
 
+type agentStageRecorderKey struct{}
+
 type coderRetryHooks struct {
 	targeted       func(context.Context, CoderInput, []string, string) (CoderOutput, error)
 	targetedStrict func(context.Context, CoderInput, []string, string) (CoderOutput, error)
+	scopedStrict   func(context.Context, CoderInput, []string, string, []string) (CoderOutput, error)
 	repoOnly       func(context.Context, CoderInput, []string, string) (CoderOutput, error)
 }
 
+type CoderRetryHooksForTests struct {
+	Targeted       func(context.Context, CoderInput, []string, string) (CoderOutput, error)
+	TargetedStrict func(context.Context, CoderInput, []string, string) (CoderOutput, error)
+	ScopedStrict   func(context.Context, CoderInput, []string, string, []string) (CoderOutput, error)
+	RepoOnly       func(context.Context, CoderInput, []string, string) (CoderOutput, error)
+}
+
 type CoderInput struct {
-	Goal             string
-	RepoSummary      string
-	PreviousReview   string
-	Diff             string
-	TestOutput       string
-	Commands         []string
-	SkillsSummary    string
-	RetrievedContext []kb.SearchHit `json:"retrieved_context,omitempty"`
-	RetrievedQuery   string         `json:"retrieved_query,omitempty"`
+	Goal                        string
+	RepoSummary                 string
+	PreviousReview              string
+	Diff                        string
+	TestOutput                  string
+	Commands                    []string
+	SkillsSummary               string
+	RetrievedContext            []kb.SearchHit      `json:"retrieved_context,omitempty"`
+	RetrievedQuery              string              `json:"retrieved_query,omitempty"`
+	DefinitionIssues            []string            `json:"definition_issues,omitempty"`
+	MissingTargetFiles          []string            `json:"missing_target_files,omitempty"`
+	ExistingTopLevelNamesByFile map[string][]string `json:"existing_top_level_names_by_file,omitempty"`
+	ExistingTestNamesByFile     map[string][]string `json:"existing_test_names_by_file,omitempty"`
+	AllowedGoalFunctions        []string            `json:"allowed_goal_functions,omitempty"`
 }
 
 type CoderOutput struct {
@@ -55,9 +71,14 @@ type CoderOutput struct {
 }
 
 const citationBackfillTimeout = 8 * time.Second
-const targetPatchRetryTimeout = 20 * time.Second
-const targetPatchHardRetryTimeout = 30 * time.Second
 const repoOnlySnapshotMaxBytes = 96 * 1024
+
+var (
+	coderToolCallingTimeout     = 90 * time.Second
+	coderCompletionTimeout      = 90 * time.Second
+	targetPatchRetryTimeout     = 90 * time.Second
+	targetPatchHardRetryTimeout = 120 * time.Second
+)
 
 var (
 	scopeChainRegexp       = regexp.MustCompile(`\b[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+\b`)
@@ -69,6 +90,8 @@ var (
 	pyFuncScopeRegexp      = regexp.MustCompile(`^\s*def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(`)
 	backtickContentRegexp  = regexp.MustCompile("`([^`]+)`")
 	httpStatusRegexp       = regexp.MustCompile(`^Status[A-Z][A-Za-z0-9_]*$`)
+	unifiedHunkHeaderRegex = regexp.MustCompile(`^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@(?: .*)?$`)
+	plainIdentifierRegexp  = regexp.MustCompile(`\b[A-Za-z_][A-Za-z0-9_]*\b`)
 )
 
 var scopeIgnoredIdentifiers = map[string]struct{}{
@@ -109,7 +132,13 @@ func (c *Coder) Generate(ctx context.Context, in CoderInput) (CoderOutput, error
 		return out, nil
 	}
 
-	out, err := c.generateWithEino(ctx, in)
+	emitAgentStage(ctx, "coder_eino_start")
+	einoCtx, cancelEino := withCoderToolCallingTimeout(ctx)
+	out, err := runWithHardTimeout(einoCtx, coderToolCallingTimeout, func(callCtx context.Context) (CoderOutput, error) {
+		return c.generateWithEino(callCtx, in)
+	})
+	cancelEino()
+	emitAgentStage(ctx, "coder_eino_done")
 	if err == nil {
 		recordPatchAttemptDiagnostic(&out, "eino_generate", out, nil, targets, requireAllTargets, isRepoOnlyGoal(in.Goal), false)
 		c.ensureCitations(ctx, in, &out)
@@ -120,7 +149,11 @@ func (c *Coder) Generate(ctx context.Context, in CoderInput) (CoderOutput, error
 		return out, nil
 	}
 
-	fallback, fallbackErr := c.generateWithClient(ctx, in)
+	emitAgentStage(ctx, "coder_client_completion_start")
+	fallback, fallbackErr := runWithHardTimeout(ctx, coderCompletionTimeout, func(callCtx context.Context) (CoderOutput, error) {
+		return c.generateWithClient(callCtx, in)
+	})
+	emitAgentStage(ctx, "coder_client_completion_done")
 	if fallbackErr != nil {
 		out := fallbackCoder(in)
 		out.UsedFallback = true
@@ -144,6 +177,75 @@ func (c *Coder) Generate(ctx context.Context, in CoderInput) (CoderOutput, error
 	c.ensureSingleTargetOutputConstraints(ctx, in, &fallback)
 	c.ensureRepoOnlyMinimalMode(ctx, in, &fallback)
 	return fallback, nil
+}
+
+func withCoderToolCallingTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	timeout := coderToolCallingTimeout
+	if timeout <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
+func withAgentStageRecorder(ctx context.Context, record func(string)) context.Context {
+	if record == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, agentStageRecorderKey{}, record)
+}
+
+func WithAgentStageRecorder(ctx context.Context, record func(string)) context.Context {
+	return withAgentStageRecorder(ctx, record)
+}
+
+func emitAgentStage(ctx context.Context, stage string) {
+	if strings.TrimSpace(stage) == "" {
+		return
+	}
+	record, _ := ctx.Value(agentStageRecorderKey{}).(func(string))
+	if record != nil {
+		record(stage)
+	}
+}
+
+func (c *Coder) SetRetryHooksForTests(hooks CoderRetryHooksForTests) {
+	c.retryHooks = &coderRetryHooks{
+		targeted:       hooks.Targeted,
+		targetedStrict: hooks.TargetedStrict,
+		scopedStrict:   hooks.ScopedStrict,
+		repoOnly:       hooks.RepoOnly,
+	}
+}
+
+func runWithHardTimeout[T any](ctx context.Context, timeout time.Duration, fn func(context.Context) (T, error)) (T, error) {
+	type result struct {
+		value T
+		err   error
+	}
+	var zero T
+	if timeout <= 0 {
+		return fn(ctx)
+	}
+	ch := make(chan result, 1)
+	callCtx, cancel := context.WithCancel(ctx)
+	go func() {
+		value, err := fn(callCtx)
+		select {
+		case ch <- result{value: value, err: err}:
+		case <-callCtx.Done():
+		}
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	defer cancel()
+	select {
+	case res := <-ch:
+		return res.value, res.err
+	case <-ctx.Done():
+		return zero, ctx.Err()
+	case <-timer.C:
+		return zero, context.DeadlineExceeded
+	}
 }
 
 func fallbackCoder(in CoderInput) CoderOutput {
@@ -190,6 +292,12 @@ func patchAttemptDiagnostic(stage string, attempt CoderOutput, err error, target
 	}
 	patch := strings.TrimSpace(attempt.Patch)
 	if patch == "" {
+		if requireAll && len(targets) > 1 {
+			if note := strings.TrimSpace(attempt.Notes); note != "" {
+				return fmt.Sprintf("%s returned empty patch (empty patch is invalid for multi-target goal); notes: %s", stage, note)
+			}
+			return fmt.Sprintf("%s returned empty patch (empty patch is invalid for multi-target goal)", stage)
+		}
 		if note := strings.TrimSpace(attempt.Notes); note != "" {
 			return fmt.Sprintf("%s returned empty patch; notes: %s", stage, note)
 		}
@@ -266,31 +374,72 @@ func (c *Coder) ensureGoalTargetPatch(ctx context.Context, in CoderInput, out *C
 		return
 	}
 	if patchTouchesTargets(out.Patch, targets, requireAllTargets) {
-		return
+		if issues := detectMissingTargetSnapshotContext(strings.TrimSpace(in.RepoSummary), out.Patch, targets); len(issues) == 0 {
+			return
+		} else {
+			out.Notes = appendCoderNote(out.Notes, "target patch referenced target-file context missing from snapshots: "+strings.Join(issues, ", "))
+		}
 	}
-	retry, err := c.generateTargetedPatchWithClient(ctx, in, targets, out.Patch)
+	missingTargets := missingTargetFiles(out.Patch, targets)
+	retryInput := buildDefinitionIssueRecoveryInput(in, targets, out.Patch)
+	retry, err := runWithHardTimeout(ctx, targetPatchRetryTimeout, func(callCtx context.Context) (CoderOutput, error) {
+		emitAgentStage(callCtx, "coder_targeted_retry_start")
+		return c.generateTargetedPatchWithClient(callCtx, retryInput, targets, out.Patch)
+	})
+	emitAgentStage(ctx, "coder_targeted_retry_done")
 	if err != nil {
 		recordPatchAttemptDiagnostic(out, "targeted_patch_retry", CoderOutput{}, err, targets, requireAllTargets, false, false)
-	} else if patchTouchesTargets(retry.Patch, targets, requireAllTargets) {
+	} else if patchTouchesTargets(retry.Patch, targets, requireAllTargets) && len(detectMissingTargetSnapshotContext(strings.TrimSpace(in.RepoSummary), retry.Patch, targets)) == 0 {
 		recordPatchAttemptDiagnostic(&retry, "targeted_patch_retry", retry, nil, targets, requireAllTargets, false, true)
 		mergeCoderRetryOutput(out, retry)
 		return
+	} else if len(missingTargets) > 0 && patchTouchesTargets(retry.Patch, missingTargets, true) {
+		if combined := combinePatchForMissingTargets(strings.TrimSpace(in.RepoSummary), out.Patch, retry.Patch, targets, false); combined != "" && len(detectMissingTargetSnapshotContext(strings.TrimSpace(in.RepoSummary), combined, targets)) == 0 {
+			retry.Patch = combined
+			recordPatchAttemptDiagnostic(&retry, "targeted_patch_retry", retry, nil, targets, requireAllTargets, false, true)
+			mergeCoderRetryOutput(out, retry)
+			out.Notes = appendCoderNote(out.Notes, "targeted_patch_retry filled missing target files: "+strings.Join(missingTargets, ", "))
+			return
+		}
 	} else {
+		if issues := detectMissingTargetSnapshotContext(strings.TrimSpace(in.RepoSummary), retry.Patch, targets); len(issues) > 0 {
+			retry.Notes = appendCoderNote(retry.Notes, "missing target snapshot context: "+strings.Join(issues, ", "))
+		}
 		recordPatchAttemptDiagnostic(out, "targeted_patch_retry", retry, nil, targets, requireAllTargets, false, false)
 	}
 
-	hardRetry, hardErr := c.generateTargetedPatchWithClientStrict(ctx, in, targets, out.Patch)
+	strictBasePatch := bestCoveragePatchForRecovery(out.Patch, retry.Patch, targets)
+	strictRetryInput := buildDefinitionIssueRecoveryInput(in, targets, strictBasePatch)
+	hardRetry, hardErr := runWithHardTimeout(ctx, targetPatchHardRetryTimeout, func(callCtx context.Context) (CoderOutput, error) {
+		emitAgentStage(callCtx, "coder_targeted_strict_retry_start")
+		return c.generateTargetedPatchWithClientStrict(callCtx, strictRetryInput, targets, strictBasePatch)
+	})
+	emitAgentStage(ctx, "coder_targeted_strict_retry_done")
 	if hardErr != nil {
 		recordPatchAttemptDiagnostic(out, "targeted_strict_retry", CoderOutput{}, hardErr, targets, requireAllTargets, false, false)
-	} else if patchTouchesTargets(hardRetry.Patch, targets, requireAllTargets) {
+	} else if patchTouchesTargets(hardRetry.Patch, targets, requireAllTargets) && len(detectMissingTargetSnapshotContext(strings.TrimSpace(in.RepoSummary), hardRetry.Patch, targets)) == 0 {
 		recordPatchAttemptDiagnostic(&hardRetry, "targeted_strict_retry", hardRetry, nil, targets, requireAllTargets, false, true)
 		mergeCoderRetryOutput(out, hardRetry)
 		return
+	} else if len(missingTargets) > 0 && patchTouchesTargets(hardRetry.Patch, missingTargets, true) {
+		if combined := combinePatchForMissingTargets(strings.TrimSpace(in.RepoSummary), out.Patch, hardRetry.Patch, targets, false); combined != "" && len(detectMissingTargetSnapshotContext(strings.TrimSpace(in.RepoSummary), combined, targets)) == 0 {
+			hardRetry.Patch = combined
+			recordPatchAttemptDiagnostic(&hardRetry, "targeted_strict_retry", hardRetry, nil, targets, requireAllTargets, false, true)
+			mergeCoderRetryOutput(out, hardRetry)
+			out.Notes = appendCoderNote(out.Notes, "targeted_strict_retry filled missing target files: "+strings.Join(missingTargets, ", "))
+			return
+		}
 	} else {
+		if issues := detectMissingTargetSnapshotContext(strings.TrimSpace(in.RepoSummary), hardRetry.Patch, targets); len(issues) > 0 {
+			hardRetry.Notes = appendCoderNote(hardRetry.Notes, "missing target snapshot context: "+strings.Join(issues, ", "))
+		}
 		recordPatchAttemptDiagnostic(out, "targeted_strict_retry", hardRetry, nil, targets, requireAllTargets, false, false)
 	}
+	if remaining := missingTargetFiles(bestCoveragePatchForRecovery(out.Patch, hardRetry.Patch, targets), targets); len(remaining) > 0 {
+		out.Notes = appendCoderNote(out.Notes, "missing target files: "+strings.Join(remaining, ", "))
+	}
 
-	// Deterministic last resort for known benchmark tasks.
+	// Narrow fallback retained for legacy compatibility only. Do not extend with new task shapes.
 	if patch, ok := maybeAutoPatch(in); ok && patchTouchesTargets(patch, targets, requireAllTargets) {
 		out.Patch = strings.TrimSpace(patch)
 		if strings.TrimSpace(out.Summary) == "" {
@@ -318,7 +467,11 @@ func (c *Coder) ensureKBTaskScope(ctx context.Context, in CoderInput, out *Coder
 	if !c.client.Ready() {
 		return
 	}
-	retry, err := c.generateScopedPatchWithClientStrict(ctx, in, targets, out.Patch, violations)
+	retry, err := runWithHardTimeout(ctx, targetPatchHardRetryTimeout, func(callCtx context.Context) (CoderOutput, error) {
+		emitAgentStage(callCtx, "coder_kb_scope_retry_start")
+		return c.generateScopedPatchWithClientStrict(callCtx, in, targets, out.Patch, violations)
+	})
+	emitAgentStage(ctx, "coder_kb_scope_retry_done")
 	if err != nil {
 		out.Notes = strings.TrimSpace(strings.TrimSpace(out.Notes) + "\nKB scope retry skipped: " + err.Error())
 		return
@@ -360,20 +513,56 @@ func (c *Coder) ensureRepoOnlyMinimalMode(ctx context.Context, in CoderInput, ou
 		return
 	}
 	requireAllTargets := len(targets) > 1
-	patchValid := patchTouchesOnlyTargets(out.Patch, targets) && patchTouchesTargets(out.Patch, targets, requireAllTargets)
+	issues := detectTargetedPatchDefinitionIssues(in.Goal, strings.TrimSpace(in.RepoSummary), out.Patch, targets)
+	patchValid := patchTouchesOnlyTargets(out.Patch, targets) && patchTouchesTargets(out.Patch, targets, requireAllTargets) && len(issues) == 0
 	if patchValid {
 		return
 	}
-	retry, err := c.generateRepoOnlyPatchWithClient(ctx, in, targets, out.Patch)
+	trySnapshotReorderFallback := func() bool {
+		synth, ok := trySynthesizeReorderOnlyPatch(in.Goal, strings.TrimSpace(in.RepoSummary), targets)
+		if !ok {
+			return false
+		}
+		out.Patch = synth.Patch
+		out.Notes = appendCoderNote(out.Notes, synth.Notes)
+		if len(in.Commands) > 0 {
+			out.Commands = append([]string{}, in.Commands...)
+		}
+		out.Citations = []string{}
+		return true
+	}
+	retryInput := buildDefinitionIssueRecoveryInput(in, targets, out.Patch)
+	retry, err := runWithHardTimeout(ctx, coderCompletionTimeout, func(callCtx context.Context) (CoderOutput, error) {
+		emitAgentStage(callCtx, "coder_repo_only_retry_start")
+		return c.generateRepoOnlyPatchWithClient(callCtx, retryInput, targets, out.Patch)
+	})
+	emitAgentStage(ctx, "coder_repo_only_retry_done")
 	if err != nil {
 		if !patchValid {
 			recordPatchAttemptDiagnostic(out, "repo_only_retry", CoderOutput{}, err, targets, requireAllTargets, true, false)
 		}
+		_ = trySnapshotReorderFallback()
 		return
 	}
 	if !patchTouchesOnlyTargets(retry.Patch, targets) || !patchTouchesTargets(retry.Patch, targets, requireAllTargets) {
 		if !patchValid {
 			recordPatchAttemptDiagnostic(out, "repo_only_retry", retry, nil, targets, requireAllTargets, true, false)
+		}
+		_ = trySnapshotReorderFallback()
+		return
+	}
+	retryIssues := detectTargetedPatchDefinitionIssues(in.Goal, strings.TrimSpace(in.RepoSummary), retry.Patch, targets)
+	if len(retryIssues) > 0 {
+		out.Notes = appendCoderNote(out.Notes, "repo_only_retry definition issues: "+strings.Join(retryIssues, ", "))
+		if strings.TrimSpace(retry.Notes) != "" {
+			out.Notes = appendCoderNote(out.Notes, retry.Notes)
+		}
+		if trySnapshotReorderFallback() {
+			return
+		}
+		if isReorderOnlyGoal(in.Goal) && len(issues) > 0 {
+			out.Patch = ""
+			out.Notes = appendCoderNote(out.Notes, "rejected unsafe reorder-only patch after repo-only retry")
 		}
 		return
 	}
@@ -413,15 +602,73 @@ func mergeCoderRetryOutput(out *CoderOutput, retry CoderOutput) {
 	out.Citations = normalizeCitationList(append(out.Citations, retry.Citations...))
 }
 
+func mergePatchStrings(basePatch, extraPatch string) string {
+	basePatch = strings.TrimSpace(basePatch)
+	extraPatch = strings.TrimSpace(extraPatch)
+	switch {
+	case basePatch == "":
+		return extraPatch
+	case extraPatch == "":
+		return basePatch
+	default:
+		return basePatch + "\n" + extraPatch
+	}
+}
+
+func missingTargetFiles(patch string, targets []string) []string {
+	targets = normalizeCitationList(targets)
+	if len(targets) == 0 {
+		return nil
+	}
+	changed := extractChangedFiles(patch, targets...)
+	var missing []string
+	for _, target := range targets {
+		if _, ok := changed[target]; !ok {
+			missing = append(missing, target)
+		}
+	}
+	return missing
+}
+
+func combinePatchForMissingTargets(repoRoot string, basePatch string, retryPatch string, targets []string, requireOnlyTargets bool) string {
+	combined := mergePatchStrings(basePatch, retryPatch)
+	if strings.TrimSpace(combined) == "" {
+		return ""
+	}
+	return normalizeCoderPatchForContract(strings.TrimSpace(repoRoot), combined, targets, len(normalizeCitationList(targets)) > 1, requireOnlyTargets)
+}
+
+func bestCoveragePatchForRecovery(basePatch string, retryPatch string, targets []string) string {
+	best := strings.TrimSpace(basePatch)
+	bestMissing := len(missingTargetFiles(best, targets))
+	candidates := []string{
+		strings.TrimSpace(retryPatch),
+		strings.TrimSpace(mergePatchStrings(basePatch, retryPatch)),
+	}
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		missing := len(missingTargetFiles(candidate, targets))
+		if best == "" || missing < bestMissing {
+			best = candidate
+			bestMissing = missing
+		}
+	}
+	return best
+}
+
 func patchTouchesOnlyTargets(patch string, targets []string) bool {
 	if strings.TrimSpace(patch) == "" || len(targets) == 0 {
 		return false
 	}
 	allowed := make(map[string]struct{}, len(targets))
 	for _, t := range targets {
-		allowed[t] = struct{}{}
+		if normalized := normalizePathForCompare(t, targets...); normalized != "" {
+			allowed[normalized] = struct{}{}
+		}
 	}
-	changed := extractChangedFiles(patch)
+	changed := extractChangedFiles(patch, targets...)
 	if len(changed) == 0 {
 		return false
 	}
@@ -444,6 +691,10 @@ func (c *Coder) generateRepoOnlyPatchWithClient(ctx context.Context, in CoderInp
 	if len(targets) == 0 {
 		return CoderOutput{}, fmt.Errorf("no target files")
 	}
+	reorderOnlyConstraint := ""
+	if isReorderOnlyGoal(in.Goal) {
+		reorderOnlyConstraint = "- reorder-only task: preserve every existing identifier, tool, import, and helper exactly once; only reorder existing entries in place. Do not add or remove tools.\n- a prohibition on calling a tool means do not invoke it during task solving; it does not authorize deleting that tool's definition or registration.\n"
+	}
 	system := `You are a coding agent fixing a repo-only patch.
 Return JSON only with fields: summary, patch, commands, notes, citations.
 - patch must be unified diff text or empty string.
@@ -456,9 +707,14 @@ Return JSON only with fields: summary, patch, commands, notes, citations.
 - for a single target file task, empty patch is allowed only when target_file_snapshots already satisfy the goal; notes must quote the exact line, section, or snippet proving that.
 - when possible, keep changes minimal and line-anchored to reduce patch apply failures.
 - if you cannot produce a reliable patch from snapshots, return empty patch and explain why in notes.
+- for reorder-only tasks, modify ordering only; do not delete, add, or rename existing entries.
 - commands must be deterministic shell commands only.
 - do not call kb_search or include kb citations.
 - never return markdown outside JSON.`
+	system += "\n" + reorderOnlyConstraint
+	if recoveryConstraint := buildDefinitionIssueRecoveryConstraint(in, targets); recoveryConstraint != "" {
+		system = strings.TrimSpace(system + "\n- " + recoveryConstraint)
+	}
 	snapshots := buildRepoOnlyTargetSnapshots(strings.TrimSpace(in.RepoSummary), targets)
 	payload := map[string]any{
 		"task_input":             in,
@@ -467,6 +723,7 @@ Return JSON only with fields: summary, patch, commands, notes, citations.
 		"previous_patch":         strings.TrimSpace(priorPatch),
 		"repo_only_requirements": "only modify target files; do not add kb usage/imports; keep commands deterministic",
 	}
+	addDefinitionIssueRecoveryPayload(payload, in)
 	b, _ := json.MarshalIndent(payload, "", "  ")
 	user := fmt.Sprintf("Retry with strict repo-only minimal-change constraints.\n%s", string(b))
 	retryCtx, cancel := context.WithTimeout(ctx, targetPatchRetryTimeout)
@@ -480,7 +737,7 @@ Return JSON only with fields: summary, patch, commands, notes, citations.
 	if err != nil {
 		return CoderOutput{}, err
 	}
-	out.Patch = normalizeCoderPatchForTargets(out.Patch, targets)
+	out.Patch = normalizeCoderPatchForContract(strings.TrimSpace(in.RepoSummary), out.Patch, targets, len(targets) > 1, true)
 	out.Citations = []string{}
 	return out, nil
 }
@@ -502,13 +759,26 @@ func (c *Coder) ensureSingleTargetOutputConstraints(ctx context.Context, in Code
 		return
 	}
 	requireAllTargets := len(targets) > 1
-	retry, err := c.generateTargetedPatchWithClientStrict(ctx, in, targets, out.Patch)
+	emitAgentStage(ctx, "coder_single_target_retry_start")
+	retryInput := buildDefinitionIssueRecoveryInput(in, targets, out.Patch)
+	retry, err := runWithHardTimeout(ctx, targetPatchHardRetryTimeout, func(callCtx context.Context) (CoderOutput, error) {
+		return c.generateTargetedPatchWithClientStrict(callCtx, retryInput, targets, out.Patch)
+	})
+	emitAgentStage(ctx, "coder_single_target_retry_done")
 	if err != nil {
 		recordPatchAttemptDiagnostic(out, "single_target_patch_retry", CoderOutput{}, err, targets, requireAllTargets, false, false)
+		if isReorderOnlyGoal(in.Goal) {
+			out.Patch = ""
+			out.Notes = appendCoderNote(out.Notes, "rejected unsafe reorder-only patch after single-target retry")
+		}
 		return
 	}
 	if !patchTouchesTargets(retry.Patch, targets, requireAllTargets) {
 		recordPatchAttemptDiagnostic(out, "single_target_patch_retry", retry, nil, targets, requireAllTargets, false, false)
+		if isReorderOnlyGoal(in.Goal) {
+			out.Patch = ""
+			out.Notes = appendCoderNote(out.Notes, "rejected unsafe reorder-only patch after single-target retry")
+		}
 		return
 	}
 	retryIssues := detectTargetedPatchDefinitionIssues(in.Goal, strings.TrimSpace(in.RepoSummary), retry.Patch, targets)
@@ -517,6 +787,10 @@ func (c *Coder) ensureSingleTargetOutputConstraints(ctx context.Context, in Code
 		mergeCoderRetryOutput(out, retry)
 		out.Notes = appendCoderNote(out.Notes, "single_target_patch_retry removed duplicate definition issues")
 		return
+	}
+	if isReorderOnlyGoal(in.Goal) {
+		out.Patch = ""
+		out.Notes = appendCoderNote(out.Notes, "rejected unsafe reorder-only patch after single-target retry")
 	}
 	out.Notes = appendCoderNote(out.Notes, "single_target_patch_retry still has definition issues: "+strings.Join(retryIssues, ", "))
 }
@@ -541,11 +815,149 @@ func buildRepoOnlyTargetSnapshots(repoRoot string, targets []string) map[string]
 	return out
 }
 
+func trySynthesizeReorderOnlyPatch(goal string, repoRoot string, targets []string) (CoderOutput, bool) {
+	// Narrow fallback retained for legacy reorder-only recovery. Do not extend with new task shapes.
+	if !isReorderOnlyGoal(goal) || strings.TrimSpace(repoRoot) == "" {
+		return CoderOutput{}, false
+	}
+	targets = normalizeCitationList(targets)
+	if len(targets) != 1 {
+		return CoderOutput{}, false
+	}
+	target := targets[0]
+	if !strings.HasSuffix(strings.ToLower(target), ".go") {
+		return CoderOutput{}, false
+	}
+	functions := extractGoalFunctionIdentifiers(goal)
+	if len(functions) != 1 {
+		return CoderOutput{}, false
+	}
+	snapshot := buildRepoOnlyTargetSnapshots(repoRoot, []string{target})[target]
+	if strings.TrimSpace(snapshot) == "" || strings.HasPrefix(snapshot, "[repo_read_error]") {
+		return CoderOutput{}, false
+	}
+	patch, ok := synthesizeReorderOnlyPatchFromSnapshot(target, snapshot, functions[0])
+	if !ok {
+		return CoderOutput{}, false
+	}
+	return CoderOutput{
+		Patch: patch,
+		Notes: "synthesized reorder-only patch from snapshots",
+	}, true
+}
+
+func synthesizeReorderOnlyPatchFromSnapshot(target string, snapshot string, functionName string) (string, bool) {
+	lines := strings.Split(strings.ReplaceAll(snapshot, "\r\n", "\n"), "\n")
+	start, end, ok := findGoFunctionBounds(lines, functionName)
+	if !ok {
+		return "", false
+	}
+	returnLine, entriesStart, entriesEnd, closeLine, ok := findReorderableReturnSlice(lines[start:end])
+	if !ok {
+		return "", false
+	}
+	returnLine += start
+	entriesStart += start
+	entriesEnd += start
+	closeLine += start
+	type entry struct {
+		name string
+		line string
+	}
+	entries := make([]entry, 0, entriesEnd-entriesStart)
+	for _, line := range lines[entriesStart:entriesEnd] {
+		name, ok := extractReorderOnlyEntryIdentifier(line)
+		if !ok {
+			return "", false
+		}
+		entries = append(entries, entry{name: name, line: line})
+	}
+	if len(entries) < 2 {
+		return "", false
+	}
+	sortedEntries := append([]entry(nil), entries...)
+	sort.SliceStable(sortedEntries, func(i, j int) bool {
+		return sortedEntries[i].name < sortedEntries[j].name
+	})
+	alreadySorted := true
+	for i := range entries {
+		if entries[i].line != sortedEntries[i].line {
+			alreadySorted = false
+			break
+		}
+	}
+	if alreadySorted {
+		return "", false
+	}
+	oldStart := returnLine + 1
+	oldCount := closeLine - returnLine + 1
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("diff --git a/%s b/%s\n", target, target))
+	b.WriteString(fmt.Sprintf("--- a/%s\n", target))
+	b.WriteString(fmt.Sprintf("+++ b/%s\n", target))
+	b.WriteString(fmt.Sprintf("@@ -%d,%d +%d,%d @@\n", oldStart, oldCount, oldStart, oldCount))
+	b.WriteString(" " + lines[returnLine] + "\n")
+	for _, line := range lines[entriesStart:entriesEnd] {
+		b.WriteString("-" + line + "\n")
+	}
+	for _, item := range sortedEntries {
+		b.WriteString("+" + item.line + "\n")
+	}
+	b.WriteString(" " + lines[closeLine] + "\n")
+	return strings.TrimRight(b.String(), "\n"), true
+}
+
+func findGoFunctionBounds(lines []string, functionName string) (int, int, bool) {
+	start := -1
+	braceDepth := 0
+	seenOpen := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if start == -1 {
+			m := goFuncScopeRegexp.FindStringSubmatch(trimmed)
+			if len(m) != 2 || m[1] != functionName {
+				continue
+			}
+			start = i
+		}
+		braceDepth += strings.Count(line, "{")
+		if strings.Contains(line, "{") {
+			seenOpen = true
+		}
+		braceDepth -= strings.Count(line, "}")
+		if start != -1 && seenOpen && braceDepth == 0 {
+			return start, i + 1, true
+		}
+	}
+	return 0, 0, false
+}
+
+func findReorderableReturnSlice(lines []string) (returnLine int, entriesStart int, entriesEnd int, closeLine int, ok bool) {
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "return []") || !strings.HasSuffix(trimmed, "{") {
+			continue
+		}
+		j := i + 1
+		for ; j < len(lines); j++ {
+			next := strings.TrimSpace(lines[j])
+			if strings.HasPrefix(next, "}") {
+				break
+			}
+		}
+		if j >= len(lines) || j <= i+1 {
+			return 0, 0, 0, 0, false
+		}
+		return i, i + 1, j, j, true
+	}
+	return 0, 0, 0, 0, false
+}
+
 func patchTouchesAnyTarget(patch string, targets []string) bool {
 	if strings.TrimSpace(patch) == "" || len(targets) == 0 {
 		return false
 	}
-	changed := extractChangedFiles(patch)
+	changed := extractChangedFiles(patch, targets...)
 	for _, target := range targets {
 		if _, ok := changed[target]; ok {
 			return true
@@ -558,7 +970,7 @@ func patchTouchesAllTargets(patch string, targets []string) bool {
 	if strings.TrimSpace(patch) == "" || len(targets) == 0 {
 		return false
 	}
-	changed := extractChangedFiles(patch)
+	changed := extractChangedFiles(patch, targets...)
 	for _, target := range targets {
 		if _, ok := changed[target]; !ok {
 			return false
@@ -578,7 +990,7 @@ func diffTouchesTargets(diff string, targets []string, requireAll bool) bool {
 	if strings.TrimSpace(diff) == "" || len(targets) == 0 {
 		return false
 	}
-	changed := extractChangedFiles(diff)
+	changed := extractChangedFiles(diff, targets...)
 	if len(changed) == 0 {
 		return false
 	}
@@ -615,6 +1027,9 @@ func (c *Coder) generateTargetedPatchWithClient(ctx context.Context, in CoderInp
 	}
 	singleFnConstraint := buildSingleTargetFunctionConstraint(in.Goal, targets)
 	testingConstraint := buildMinimalTestingConstraint(in.Goal, targets)
+	inlineEditConstraint := buildMixedTaskInlineEditConstraint(in.Goal, targets)
+	multiTargetPatchConstraint := buildMultiTargetPatchSectionConstraint(targets)
+	reorderOnlyConstraint := buildReorderOnlySnapshotConstraint(in.Goal)
 	system := `You are a coding agent fixing a previous patch attempt.
 Return JSON only with fields: summary, patch, commands, notes, citations.
 - patch must be unified diff text or empty string.
@@ -630,11 +1045,26 @@ Return JSON only with fields: summary, patch, commands, notes, citations.
 - if patch is empty, notes must explain why the goal is already satisfied in current files.
 - commands must be deterministic shell commands only.
 - never return markdown outside JSON.`
+	if len(targets) > 1 {
+		system = strings.TrimSpace(system + "\n- this is a multi-target goal: a valid answer must return a non-empty patch touching all target files; do not claim the goal is already satisfied unless every target_file_snapshot contains direct quoted evidence for the requested behavior.")
+	}
+	if multiTargetPatchConstraint != "" {
+		system = strings.TrimSpace(system + "\n- " + multiTargetPatchConstraint)
+	}
 	if singleFnConstraint != "" {
 		system = strings.TrimSpace(system + "\n- " + singleFnConstraint)
 	}
 	if testingConstraint != "" {
 		system = strings.TrimSpace(system + "\n- " + testingConstraint)
+	}
+	if inlineEditConstraint != "" {
+		system = strings.TrimSpace(system + "\n- " + inlineEditConstraint)
+	}
+	if reorderOnlyConstraint != "" {
+		system = strings.TrimSpace(system + "\n- " + reorderOnlyConstraint)
+	}
+	if recoveryConstraint := buildDefinitionIssueRecoveryConstraint(in, targets); recoveryConstraint != "" {
+		system = strings.TrimSpace(system + "\n- " + recoveryConstraint)
 	}
 	snapshots := buildRepoOnlyTargetSnapshots(strings.TrimSpace(in.RepoSummary), targets)
 	payload := map[string]any{
@@ -644,6 +1074,7 @@ Return JSON only with fields: summary, patch, commands, notes, citations.
 		"previous_patch":        strings.TrimSpace(priorPatch),
 		"kb_scope_contract":     buildKBScopeContract(in.Goal, targets),
 	}
+	addDefinitionIssueRecoveryPayload(payload, in)
 	b, _ := json.MarshalIndent(payload, "", "  ")
 	user := fmt.Sprintf("Retry with strict target-file constraint.\n%s", string(b))
 	retryCtx, cancel := context.WithTimeout(ctx, targetPatchRetryTimeout)
@@ -660,7 +1091,7 @@ Return JSON only with fields: summary, patch, commands, notes, citations.
 	if len(out.Commands) == 0 {
 		out.Commands = in.Commands
 	}
-	out.Patch = normalizeCoderPatchForTargets(out.Patch, targets)
+	out.Patch = normalizeCoderPatchForContract(strings.TrimSpace(in.RepoSummary), out.Patch, targets, len(targets) > 1, false)
 	return out, nil
 }
 
@@ -681,6 +1112,9 @@ func (c *Coder) generateTargetedPatchWithClientStrict(ctx context.Context, in Co
 	}
 	singleFnConstraint := buildSingleTargetFunctionConstraint(in.Goal, targets)
 	testingConstraint := buildMinimalTestingConstraint(in.Goal, targets)
+	inlineEditConstraint := buildMixedTaskInlineEditConstraint(in.Goal, targets)
+	multiTargetPatchConstraint := buildMultiTargetPatchSectionConstraint(targets)
+	reorderOnlyConstraint := buildReorderOnlySnapshotConstraint(in.Goal)
 	system := `You are a coding agent doing a final strict patch retry.
 Return JSON only with fields: summary, patch, commands, notes, citations.
 - patch must be unified diff text.
@@ -692,11 +1126,26 @@ Return JSON only with fields: summary, patch, commands, notes, citations.
 - do not define the same top-level helper or Test* name more than once in the patch; inspect target_file_snapshots and reuse existing names.
 - for a single target file task, empty patch is invalid unless target_file_snapshots already satisfy the goal; notes must quote the exact line, section, or snippet proving that.
 - no markdown. no prose. JSON only.`
+	if len(targets) > 1 {
+		system = strings.TrimSpace(system + "\n- this is a multi-target goal: empty patch is invalid. Return a non-empty unified diff touching all target files, or fail explicitly in notes if snapshot evidence is contradictory.")
+	}
+	if multiTargetPatchConstraint != "" {
+		system = strings.TrimSpace(system + "\n- " + multiTargetPatchConstraint)
+	}
 	if singleFnConstraint != "" {
 		system = strings.TrimSpace(system + "\n- " + singleFnConstraint)
 	}
 	if testingConstraint != "" {
 		system = strings.TrimSpace(system + "\n- " + testingConstraint)
+	}
+	if inlineEditConstraint != "" {
+		system = strings.TrimSpace(system + "\n- " + inlineEditConstraint)
+	}
+	if reorderOnlyConstraint != "" {
+		system = strings.TrimSpace(system + "\n- " + reorderOnlyConstraint)
+	}
+	if recoveryConstraint := buildDefinitionIssueRecoveryConstraint(in, targets); recoveryConstraint != "" {
+		system = strings.TrimSpace(system + "\n- " + recoveryConstraint)
 	}
 	snapshots := buildRepoOnlyTargetSnapshots(strings.TrimSpace(in.RepoSummary), targets)
 	payload := map[string]any{
@@ -707,6 +1156,7 @@ Return JSON only with fields: summary, patch, commands, notes, citations.
 		"kb_scope_contract":          buildKBScopeContract(in.Goal, targets),
 		"required_output_constraint": "non-empty unified diff touching required target files",
 	}
+	addDefinitionIssueRecoveryPayload(payload, in)
 	b, _ := json.MarshalIndent(payload, "", "  ")
 	user := fmt.Sprintf("Return strict JSON now.\n%s", string(b))
 	retryCtx, cancel := context.WithTimeout(ctx, targetPatchHardRetryTimeout)
@@ -723,11 +1173,14 @@ Return JSON only with fields: summary, patch, commands, notes, citations.
 	if len(out.Commands) == 0 {
 		out.Commands = in.Commands
 	}
-	out.Patch = normalizeCoderPatchForTargets(out.Patch, targets)
+	out.Patch = normalizeCoderPatchForContract(strings.TrimSpace(in.RepoSummary), out.Patch, targets, len(targets) > 1, false)
 	return out, nil
 }
 
 func (c *Coder) generateScopedPatchWithClientStrict(ctx context.Context, in CoderInput, targets []string, priorPatch string, violations []string) (CoderOutput, error) {
+	if c.retryHooks != nil && c.retryHooks.scopedStrict != nil {
+		return c.retryHooks.scopedStrict(ctx, in, targets, priorPatch, violations)
+	}
 	if !c.client.Ready() {
 		return CoderOutput{}, fmt.Errorf("llm client not configured")
 	}
@@ -738,6 +1191,8 @@ func (c *Coder) generateScopedPatchWithClientStrict(ctx context.Context, in Code
 	contract := buildKBScopeContract(in.Goal, targets)
 	singleFnConstraint := buildSingleTargetFunctionConstraint(in.Goal, targets)
 	testingConstraint := buildMinimalTestingConstraint(in.Goal, targets)
+	inlineEditConstraint := buildMixedTaskInlineEditConstraint(in.Goal, targets)
+	multiTargetPatchConstraint := buildMultiTargetPatchSectionConstraint(targets)
 	system := `You are a coding agent doing a final strict patch retry.
 Return JSON only with fields: summary, patch, commands, notes, citations.
 - patch must be unified diff text.
@@ -748,11 +1203,20 @@ Return JSON only with fields: summary, patch, commands, notes, citations.
 - knowledge-base evidence explains the requested rule; it does not authorize adjacent validation rules, cleanup, or extra checks.
 - remove any changes related to scope_creep_identifiers.
 - no markdown. no prose. JSON only.`
+	if len(targets) > 1 {
+		system = strings.TrimSpace(system + "\n- this is a multi-target goal: empty patch is invalid. Return a non-empty unified diff touching all target files.")
+	}
+	if multiTargetPatchConstraint != "" {
+		system = strings.TrimSpace(system + "\n- " + multiTargetPatchConstraint)
+	}
 	if singleFnConstraint != "" {
 		system = strings.TrimSpace(system + "\n- " + singleFnConstraint)
 	}
 	if testingConstraint != "" {
 		system = strings.TrimSpace(system + "\n- " + testingConstraint)
+	}
+	if inlineEditConstraint != "" {
+		system = strings.TrimSpace(system + "\n- " + inlineEditConstraint)
 	}
 	snapshots := buildRepoOnlyTargetSnapshots(strings.TrimSpace(in.RepoSummary), targets)
 	payload := map[string]any{
@@ -780,7 +1244,7 @@ Return JSON only with fields: summary, patch, commands, notes, citations.
 	if len(out.Commands) == 0 {
 		out.Commands = in.Commands
 	}
-	out.Patch = normalizeCoderPatchForTargets(out.Patch, targets)
+	out.Patch = normalizeCoderPatchForContract(strings.TrimSpace(in.RepoSummary), out.Patch, targets, len(targets) > 1, true)
 	return out, nil
 }
 
@@ -905,7 +1369,8 @@ func (c *Coder) generateWithEino(ctx context.Context, in CoderInput) (CoderOutpu
 	if out.Summary == "" {
 		out.Summary = "Coder generated output."
 	}
-	out.Patch = normalizeCoderPatchForTargets(out.Patch, extractGoalTargetFiles(in.Goal))
+	targets := extractGoalTargetFiles(in.Goal)
+	out.Patch = normalizeCoderPatchForContract(strings.TrimSpace(in.RepoSummary), out.Patch, targets, len(targets) > 1, false)
 	return out, nil
 }
 
@@ -926,7 +1391,8 @@ func (c *Coder) generateWithClient(ctx context.Context, in CoderInput) (CoderOut
 	if out.Summary == "" {
 		out.Summary = "Coder generated output."
 	}
-	out.Patch = normalizeCoderPatchForTargets(out.Patch, extractGoalTargetFiles(in.Goal))
+	targets := extractGoalTargetFiles(in.Goal)
+	out.Patch = normalizeCoderPatchForContract(strings.TrimSpace(in.RepoSummary), out.Patch, targets, len(targets) > 1, false)
 	return out, nil
 }
 
@@ -934,6 +1400,9 @@ func coderPrompts(in CoderInput) (string, string) {
 	targets := extractGoalTargetFiles(in.Goal)
 	singleFnConstraint := buildSingleTargetFunctionConstraint(in.Goal, targets)
 	testingConstraint := buildMinimalTestingConstraint(in.Goal, targets)
+	inlineEditConstraint := buildMixedTaskInlineEditConstraint(in.Goal, targets)
+	multiTargetPatchConstraint := buildMultiTargetPatchSectionConstraint(targets)
+	reorderOnlyConstraint := buildReorderOnlySnapshotConstraint(in.Goal)
 	system := `You are a coding agent operating in a local git repository.
 	You may call tools to inspect repository files, search code, inspect diff, query the knowledge base, and run safe commands.
 	Return JSON only with fields: summary, patch, commands, notes, citations.
@@ -952,11 +1421,23 @@ func coderPrompts(in CoderInput) (string, string) {
 	- patch file paths must be relative to repo root; do not include the repo directory name as a prefix.
 	- commands must not include tool invocations (repo_read/repo_search/repo_list/git_diff/run_command).
 - never return markdown outside JSON.`
+	if len(targets) > 1 {
+		system = strings.TrimSpace(system + "\n\t- this is a multi-target goal: a valid answer must return a non-empty patch touching all target files; do not claim success or goal satisfaction without changing each required target file.")
+	}
+	if multiTargetPatchConstraint != "" {
+		system = strings.TrimSpace(system + "\n\t- " + multiTargetPatchConstraint)
+	}
 	if singleFnConstraint != "" {
 		system = strings.TrimSpace(system + "\n\t- " + singleFnConstraint)
 	}
 	if testingConstraint != "" {
 		system = strings.TrimSpace(system + "\n\t- " + testingConstraint)
+	}
+	if inlineEditConstraint != "" {
+		system = strings.TrimSpace(system + "\n\t- " + inlineEditConstraint)
+	}
+	if reorderOnlyConstraint != "" {
+		system = strings.TrimSpace(system + "\n\t- " + reorderOnlyConstraint)
 	}
 	payload := map[string]any{
 		"task_input":        in,
@@ -965,6 +1446,42 @@ func coderPrompts(in CoderInput) (string, string) {
 	b, _ := json.MarshalIndent(payload, "", "  ")
 	user := fmt.Sprintf("Task input:\n%s\nUse tools when needed, then return strict JSON only.", string(b))
 	return system, user
+}
+
+func buildMixedTaskInlineEditConstraint(goal string, targets []string) string {
+	if len(targets) < 2 {
+		return ""
+	}
+	hasCode := false
+	hasTest := false
+	for _, target := range targets {
+		lower := strings.ToLower(strings.TrimSpace(target))
+		if strings.HasSuffix(lower, "_test.go") {
+			hasTest = true
+			continue
+		}
+		if strings.HasSuffix(lower, ".go") {
+			hasCode = true
+		}
+	}
+	if !hasCode || !hasTest {
+		return ""
+	}
+	return "for mixed code+test tasks, prefer inline edits to existing functions and tests. Do not introduce new top-level helpers or duplicate Test* names unless target_file_snapshots show no equivalent structure to extend."
+}
+
+func buildMultiTargetPatchSectionConstraint(targets []string) string {
+	if len(targets) < 2 {
+		return ""
+	}
+	return "for a multi-target task, emit exactly one file patch section for each target file in target_files, use those exact repo-relative target file paths in diff headers, and do not omit any required target from the final patch."
+}
+
+func buildReorderOnlySnapshotConstraint(goal string) string {
+	if !isReorderOnlyGoal(goal) {
+		return ""
+	}
+	return "for reorder-only tasks, treat target_file_snapshots as the sole source of truth for the entries that exist today. Reorder only the entries already present in snapshots, preserve each existing entry exactly once, and do not synthesize or delete entries just because the goal text mentions an outdated list. A prohibition on calling a tool means do not invoke it during task solving; it does not authorize deleting that tool's definition or registration."
 }
 
 func decodeCoderOutput(content string) (CoderOutput, error) {
@@ -1030,8 +1547,17 @@ func normalizeCoderPatch(patch string) string {
 		patch = extracted
 	}
 	patch = normalizePatchStructuralLines(patch)
+	patch = normalizeBareHunkHeaders(patch)
+	patch = normalizeBareHunkContextLines(patch)
+	patch = normalizeIndentedHunkChangeLines(patch)
 	patch = ensureDiffSectionFileHeaders(patch)
 	patch = ensureDiffGitHeaderForPatch(patch)
+	if !patchHasConsistentUnifiedHunks(patch) {
+		return ""
+	}
+	if !patchContainsRealChanges(patch) {
+		return ""
+	}
 	return strings.TrimSpace(patch)
 }
 
@@ -1041,6 +1567,7 @@ func normalizeCoderPatchForTargets(patch string, targets []string) string {
 		return ""
 	}
 	targets = normalizeCitationList(targets)
+	patch = rewritePatchPathsForTargets(patch, targets)
 	if len(targets) != 1 {
 		return patch
 	}
@@ -1063,9 +1590,187 @@ func normalizeCoderPatchForTargets(patch string, targets []string) string {
 	return strings.Join(append(header, lines...), "\n")
 }
 
+func normalizeCoderPatchForRepoTargets(repoRoot string, patch string, targets []string) string {
+	patch = normalizeCoderPatchForTargets(patch, targets)
+	if patch == "" {
+		return ""
+	}
+	if strings.TrimSpace(repoRoot) == "" || len(normalizeCitationList(targets)) != 1 {
+		return patch
+	}
+	if recounted := recountSingleTargetPatchAgainstSnapshot(strings.TrimSpace(repoRoot), patch, normalizeCitationList(targets)[0]); strings.TrimSpace(recounted) != "" {
+		return recounted
+	}
+	return patch
+}
+
+func normalizeCoderPatchForContract(repoRoot string, patch string, targets []string, requireAll bool, requireOnlyTargets bool) string {
+	patch = normalizeCoderPatchForRepoTargets(repoRoot, patch, targets)
+	if patch == "" {
+		return ""
+	}
+	targets = normalizeCitationList(targets)
+	if len(targets) == 0 {
+		return patch
+	}
+	if !patchTouchesTargets(patch, targets, requireAll) {
+		return ""
+	}
+	if requireOnlyTargets && !patchTouchesOnlyTargets(patch, targets) {
+		return ""
+	}
+	if patchHasDuplicateAddedBlocks(patch, 2) {
+		return ""
+	}
+	return patch
+}
+
+func patchHasDuplicateAddedBlocks(patch string, minLines int) bool {
+	if strings.TrimSpace(patch) == "" || minLines <= 0 {
+		return false
+	}
+	lines := strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n")
+	currentFile := ""
+	inHunk := false
+	currentBlock := make([]string, 0)
+	blocksByFile := make(map[string]map[string]int)
+	flush := func() bool {
+		if currentFile == "" || len(currentBlock) < minLines {
+			currentBlock = currentBlock[:0]
+			return false
+		}
+		key := strings.Join(currentBlock, "\n")
+		fileBlocks := blocksByFile[currentFile]
+		if fileBlocks == nil {
+			fileBlocks = make(map[string]int)
+			blocksByFile[currentFile] = fileBlocks
+		}
+		fileBlocks[key]++
+		currentBlock = currentBlock[:0]
+		return fileBlocks[key] > 1
+	}
+	for _, line := range lines {
+		trim := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(trim, "+++ "):
+			if flush() {
+				return true
+			}
+			currentFile = stripPatchPathToken(strings.TrimSpace(strings.TrimPrefix(trim, "+++ ")))
+			inHunk = false
+		case strings.HasPrefix(trim, "@@ -"):
+			if flush() {
+				return true
+			}
+			inHunk = currentFile != ""
+		default:
+			if !inHunk || line == "" {
+				if flush() {
+					return true
+				}
+				continue
+			}
+			switch line[0] {
+			case '+':
+				currentBlock = append(currentBlock, line[1:])
+			default:
+				if flush() {
+					return true
+				}
+			}
+		}
+	}
+	return flush()
+}
+
+func rewritePatchPathsForTargets(patch string, targets []string) string {
+	if len(targets) == 0 {
+		return patch
+	}
+	lines := strings.Split(strings.TrimSpace(patch), "\n")
+	if len(lines) == 0 {
+		return patch
+	}
+	for i, line := range lines {
+		trim := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(trim, "diff --git "):
+			oldPath, newPath := parseDiffGitPaths(trim)
+			oldPath = matchPatchPathToTarget(oldPath, targets)
+			newPath = matchPatchPathToTarget(newPath, targets)
+			if oldPath != "" && newPath != "" {
+				lines[i] = "diff --git a/" + oldPath + " b/" + newPath
+			}
+		case strings.HasPrefix(trim, "--- "):
+			path := normalizePatchHeaderPath(strings.TrimSpace(strings.TrimPrefix(trim, "--- ")), targets)
+			if path != "" {
+				lines[i] = "--- " + path
+			}
+		case strings.HasPrefix(trim, "+++ "):
+			path := normalizePatchHeaderPath(strings.TrimSpace(strings.TrimPrefix(trim, "+++ ")), targets)
+			if path != "" {
+				lines[i] = "+++ " + path
+			}
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func normalizePatchHeaderPath(raw string, targets []string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "/dev/null" {
+		return raw
+	}
+	path := matchPatchPathToTarget(stripPatchPathToken(raw), targets)
+	if path == "" {
+		return raw
+	}
+	if strings.HasPrefix(raw, "b/") {
+		return "b/" + path
+	}
+	if strings.HasPrefix(raw, "a/") {
+		return "a/" + path
+	}
+	return path
+}
+
+func matchPatchPathToTarget(path string, targets []string) string {
+	path = strings.TrimSpace(strings.ReplaceAll(path, "\\", "/"))
+	if path == "" {
+		return ""
+	}
+	if path == "/dev/null" {
+		return path
+	}
+	var match string
+	for _, target := range targets {
+		target = strings.TrimSpace(strings.ReplaceAll(target, "\\", "/"))
+		if target == "" {
+			continue
+		}
+		if path == target || strings.HasSuffix(path, "/"+target) {
+			if match != "" && match != target {
+				return path
+			}
+			match = target
+		}
+	}
+	if match != "" {
+		return match
+	}
+	return path
+}
+
 func extractPatchLikeBlock(text string) (string, bool) {
 	if block, ok := extractPatchLikeFence(text); ok {
 		return block, true
+	}
+	trimmed := strings.TrimSpace(strings.ReplaceAll(text, "\r\n", "\n"))
+	if trimmed != "" {
+		lines := strings.Split(trimmed, "\n")
+		if len(lines) > 0 && isPatchStartLine(strings.TrimSpace(lines[0])) {
+			return trimmed, true
+		}
 	}
 	return slicePatchLikeLines(text)
 }
@@ -1189,6 +1894,246 @@ func ensureDiffGitHeaderForPatch(patch string) string {
 	return strings.Join(append([]string{header}, lines...), "\n")
 }
 
+func normalizeBareHunkHeaders(patch string) string {
+	lines := strings.Split(strings.TrimSpace(patch), "\n")
+	if len(lines) == 0 {
+		return patch
+	}
+	out := make([]string, 0, len(lines))
+	for i := 0; i < len(lines); {
+		trim := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(trim, "@@") && !unifiedHunkHeaderRegex.MatchString(trim) {
+			j := i + 1
+			for j < len(lines) {
+				if isHunkBoundaryLine(lines[j]) {
+					break
+				}
+				j++
+			}
+			oldCount, newCount, hasChange := summarizeHunkBody(lines[i+1 : j])
+			if hasChange {
+				out = append(out, synthesizeUnifiedHunkHeader(oldCount, newCount))
+				out = append(out, lines[i+1:j]...)
+			}
+			i = j
+			continue
+		}
+		out = append(out, lines[i])
+		i++
+	}
+	return strings.Join(out, "\n")
+}
+
+func isHunkBoundaryLine(line string) bool {
+	trim := strings.TrimSpace(line)
+	if trim == "" {
+		return false
+	}
+	if strings.HasPrefix(trim, "@@") || strings.HasPrefix(trim, "diff --git ") {
+		return true
+	}
+	if !isPatchStructuralLine(trim) {
+		return false
+	}
+	if line == "" {
+		return true
+	}
+	switch line[0] {
+	case ' ', '+', '-', '\\':
+		return false
+	default:
+		return true
+	}
+}
+
+func summarizeHunkBody(lines []string) (oldCount int, newCount int, hasChange bool) {
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		switch line[0] {
+		case ' ':
+			oldCount++
+			newCount++
+		case '-':
+			oldCount++
+			hasChange = true
+		case '+':
+			newCount++
+			hasChange = true
+		case '\\':
+			continue
+		}
+	}
+	return oldCount, newCount, hasChange
+}
+
+func synthesizeUnifiedHunkHeader(oldCount int, newCount int) string {
+	oldStart := 1
+	newStart := 1
+	if oldCount == 0 {
+		oldStart = 0
+	}
+	if newCount == 0 {
+		newStart = 0
+	}
+	return fmt.Sprintf("@@ -%d,%d +%d,%d @@", oldStart, oldCount, newStart, newCount)
+}
+
+func patchContainsRealChanges(patch string) bool {
+	lines := strings.Split(strings.TrimSpace(patch), "\n")
+	for _, line := range lines {
+		trim := strings.TrimSpace(line)
+		if trim == "" || strings.HasPrefix(trim, "--- ") || strings.HasPrefix(trim, "+++ ") {
+			continue
+		}
+		if line == "" {
+			continue
+		}
+		switch line[0] {
+		case '+', '-':
+			return true
+		}
+	}
+	return false
+}
+
+func patchHasConsistentUnifiedHunks(patch string) bool {
+	lines := strings.Split(strings.TrimSpace(patch), "\n")
+	for i := 0; i < len(lines); i++ {
+		trim := strings.TrimSpace(lines[i])
+		if !unifiedHunkHeaderRegex.MatchString(trim) {
+			continue
+		}
+		wantOld, wantNew, ok := parseUnifiedHunkCounts(trim)
+		if !ok {
+			return false
+		}
+		j := i + 1
+		for j < len(lines) && !isHunkBoundaryLine(lines[j]) {
+			j++
+		}
+		gotOld, gotNew, _ := summarizeHunkBody(lines[i+1 : j])
+		if gotOld != wantOld || gotNew != wantNew {
+			return false
+		}
+		i = j - 1
+	}
+	return true
+}
+
+func parseUnifiedHunkCounts(header string) (oldCount int, newCount int, ok bool) {
+	fields := strings.Fields(strings.TrimSpace(header))
+	if len(fields) < 3 {
+		return 0, 0, false
+	}
+	oldCount, ok = parseUnifiedHunkRangeCount(fields[1], '-')
+	if !ok {
+		return 0, 0, false
+	}
+	newCount, ok = parseUnifiedHunkRangeCount(fields[2], '+')
+	if !ok {
+		return 0, 0, false
+	}
+	return oldCount, newCount, true
+}
+
+func parseUnifiedHunkRangeCount(token string, prefix byte) (int, bool) {
+	token = strings.TrimSpace(token)
+	if token == "" || token[0] != prefix {
+		return 0, false
+	}
+	body := token[1:]
+	if body == "" {
+		return 0, false
+	}
+	if !strings.Contains(body, ",") {
+		return 1, true
+	}
+	parts := strings.SplitN(body, ",", 2)
+	if len(parts) != 2 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(parts[1])
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+func normalizeIndentedHunkChangeLines(patch string) string {
+	lines := strings.Split(strings.TrimSpace(patch), "\n")
+	if len(lines) == 0 {
+		return patch
+	}
+	inHunk := false
+	for i, line := range lines {
+		trim := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(trim, "diff --git "):
+			inHunk = false
+		case strings.HasPrefix(trim, "@@"):
+			inHunk = unifiedHunkHeaderRegex.MatchString(trim)
+		}
+		if !inHunk || len(line) < 3 || line[0] != ' ' {
+			continue
+		}
+		if (line[1] == '+' || line[1] == '-') && line[2] != ' ' {
+			lines[i] = line[1:]
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func normalizeBareHunkContextLines(patch string) string {
+	lines := strings.Split(strings.TrimSpace(patch), "\n")
+	if len(lines) == 0 {
+		return patch
+	}
+	inHunk := false
+	for i, line := range lines {
+		trim := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(trim, "diff --git "):
+			inHunk = false
+		case unifiedHunkHeaderRegex.MatchString(trim):
+			inHunk = true
+		case strings.HasPrefix(trim, "@@"):
+			inHunk = false
+		}
+		if !inHunk {
+			continue
+		}
+		if line == "" {
+			next := nextNonEmptyPatchLine(lines, i+1)
+			if next != "" && isHunkBoundaryLine(next) {
+				continue
+			}
+			lines[i] = " "
+			continue
+		}
+		switch line[0] {
+		case ' ', '+', '-', '\\':
+			continue
+		default:
+			if !isPatchStructuralLine(trim) {
+				lines[i] = " " + line
+			}
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func nextNonEmptyPatchLine(lines []string, start int) string {
+	for i := start; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) == "" {
+			continue
+		}
+		return lines[i]
+	}
+	return ""
+}
+
 func normalizePatchStructuralLines(patch string) string {
 	lines := strings.Split(strings.ReplaceAll(strings.TrimSpace(patch), "\r\n", "\n"), "\n")
 	for i, line := range lines {
@@ -1198,6 +2143,161 @@ func normalizePatchStructuralLines(patch string) string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+func recountSingleTargetPatchAgainstSnapshot(repoRoot, patch, target string) string {
+	target = strings.TrimSpace(strings.ReplaceAll(target, "\\", "/"))
+	if target == "" {
+		return patch
+	}
+	snapshots := buildRepoOnlyTargetSnapshots(repoRoot, []string{target})
+	snapshot := snapshots[target]
+	if strings.TrimSpace(snapshot) == "" || strings.HasPrefix(snapshot, "[repo_read_error]") {
+		return patch
+	}
+	snapshotLines := strings.Split(strings.ReplaceAll(snapshot, "\r\n", "\n"), "\n")
+	lines := strings.Split(strings.TrimSpace(patch), "\n")
+	if len(lines) == 0 {
+		return patch
+	}
+	currentFile := ""
+	searchStart := 0
+	delta := 0
+	for i := 0; i < len(lines); i++ {
+		trim := strings.TrimSpace(lines[i])
+		switch {
+		case strings.HasPrefix(trim, "+++ "):
+			currentFile = stripPatchPathToken(strings.TrimSpace(strings.TrimPrefix(trim, "+++ ")))
+		case unifiedHunkHeaderRegex.MatchString(trim):
+			if currentFile != target {
+				continue
+			}
+			j := i + 1
+			for j < len(lines) && !isHunkBoundaryLine(lines[j]) {
+				j++
+			}
+			body := lines[i+1 : j]
+			oldCount, newCount, _ := summarizeHunkBody(body)
+			oldChunk := extractOldHunkSequence(body)
+			if len(oldChunk) == 0 {
+				delta += newCount - oldCount
+				i = j - 1
+				continue
+			}
+			idx, ok := locateUniqueSequenceFrom(snapshotLines, oldChunk, searchStart)
+			if !ok {
+				trimmedBody, trimmedIdx, trimmedOldCount, trimmedNewCount, trimmedOK := trimHunkBodyToUniqueMatchingSuffix(body, snapshotLines, searchStart)
+				if !trimmedOK {
+					return patch
+				}
+				body = trimmedBody
+				oldCount = trimmedOldCount
+				newCount = trimmedNewCount
+				idx = trimmedIdx
+				lines = append(append([]string{}, lines[:i+1]...), append(body, lines[j:]...)...)
+				j = i + 1 + len(body)
+			}
+			oldStart := idx + 1
+			newStart := oldStart + delta
+			suffix := unifiedHunkHeaderSuffix(trim)
+			lines[i] = fmt.Sprintf("@@ -%d,%d +%d,%d @@%s", oldStart, oldCount, newStart, newCount, suffix)
+			searchStart = idx + max(oldCount, 1)
+			delta += newCount - oldCount
+			i = j - 1
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func trimHunkBodyToUniqueMatchingSuffix(body, snapshotLines []string, searchStart int) ([]string, int, int, int, bool) {
+	oldLinePositions := make([]int, 0, len(body))
+	oldChunk := make([]string, 0, len(body))
+	for i, line := range body {
+		if line == "" {
+			continue
+		}
+		switch line[0] {
+		case ' ', '-':
+			oldLinePositions = append(oldLinePositions, i)
+			oldChunk = append(oldChunk, line[1:])
+		}
+	}
+	for start := 1; start < len(oldChunk); start++ {
+		candidate := oldChunk[start:]
+		idx, ok := locateUniqueSequenceFrom(snapshotLines, candidate, searchStart)
+		if !ok {
+			continue
+		}
+		trimmedBody := append([]string{}, body[oldLinePositions[start]:]...)
+		oldCount, newCount, _ := summarizeHunkBody(trimmedBody)
+		if oldCount == 0 || newCount == 0 {
+			continue
+		}
+		return trimmedBody, idx, oldCount, newCount, true
+	}
+	return nil, 0, 0, 0, false
+}
+
+func extractOldHunkSequence(body []string) []string {
+	out := make([]string, 0, len(body))
+	for _, line := range body {
+		if line == "" {
+			continue
+		}
+		switch line[0] {
+		case ' ', '-':
+			out = append(out, line[1:])
+		case '\\':
+			continue
+		}
+	}
+	return out
+}
+
+func locateUniqueSequenceFrom(lines, seq []string, start int) (int, bool) {
+	if len(seq) == 0 || len(lines) < len(seq) {
+		return 0, false
+	}
+	if start < 0 {
+		start = 0
+	}
+	match := -1
+	for i := start; i <= len(lines)-len(seq); i++ {
+		ok := true
+		for j := 0; j < len(seq); j++ {
+			if lines[i+j] != seq[j] {
+				ok = false
+				break
+			}
+		}
+		if !ok {
+			continue
+		}
+		if match != -1 {
+			return 0, false
+		}
+		match = i
+	}
+	if match == -1 {
+		return 0, false
+	}
+	return match, true
+}
+
+func unifiedHunkHeaderSuffix(header string) string {
+	header = strings.TrimSpace(header)
+	if header == "" {
+		return ""
+	}
+	last := strings.LastIndex(header, "@@")
+	if last < 0 {
+		return ""
+	}
+	suffix := strings.TrimSpace(header[last+2:])
+	if suffix == "" {
+		return ""
+	}
+	return " " + suffix
 }
 
 func isPatchStructuralLine(trim string) bool {
@@ -1369,6 +2469,115 @@ func buildMinimalTestingConstraint(goal string, targets []string) string {
 		return ""
 	}
 	return "when modifying a target _test.go file for a KB-guided validation task, keep the test scope minimal: use a table-driven test with one positive and one negative case for the requested rule, do not add extra edge cases unless the goal or KB evidence explicitly requires them, and inspect target_file_snapshots to avoid redefining an existing Test* name."
+}
+
+func buildDefinitionIssueRecoveryConstraint(in CoderInput, targets []string) string {
+	if len(in.DefinitionIssues) == 0 && len(in.MissingTargetFiles) == 0 {
+		return ""
+	}
+	var parts []string
+	if len(in.DefinitionIssues) > 0 {
+		parts = append(parts,
+			"definition_issues in the payload are blocking validation failures from the previous patch; resolve every listed issue before returning a patch",
+			"do not return a top-level helper or Test* whose name appears in existing_top_level_names_by_file unless you are editing that existing definition in place",
+		)
+	}
+	if len(in.MissingTargetFiles) > 0 {
+		parts = append(parts,
+			"missing_target_files in the payload are target files still untouched by previous_patch; prioritize adding valid patch sections for those files",
+			"if previous_patch already covers some target files, you may return a retry patch that focuses only on missing_target_files instead of rewriting the already-covered files",
+		)
+	}
+	for _, target := range normalizeCitationList(targets) {
+		if strings.HasSuffix(strings.ToLower(target), "_test.go") {
+			parts = append(parts, "for _test.go targets, prefer extending existing table-driven tests; if you must add a new Test* function, its name must not appear in existing_test_names_by_file")
+			break
+		}
+	}
+	if len(normalizeCitationList(targets)) > 1 {
+		parts = append(parts, "for mixed code+test tasks, the patch must still touch every target file while resolving the duplicate definition issues")
+	}
+	return strings.Join(parts, "; ")
+}
+
+func addDefinitionIssueRecoveryPayload(payload map[string]any, in CoderInput) {
+	if len(in.DefinitionIssues) > 0 {
+		payload["definition_issues"] = in.DefinitionIssues
+	}
+	if len(in.MissingTargetFiles) > 0 {
+		payload["missing_target_files"] = in.MissingTargetFiles
+	}
+	if len(in.ExistingTopLevelNamesByFile) > 0 {
+		payload["existing_top_level_names_by_file"] = in.ExistingTopLevelNamesByFile
+	}
+	if len(in.ExistingTestNamesByFile) > 0 {
+		payload["existing_test_names_by_file"] = in.ExistingTestNamesByFile
+	}
+	if len(in.AllowedGoalFunctions) > 0 {
+		payload["allowed_goal_functions"] = in.AllowedGoalFunctions
+	}
+}
+
+func buildDefinitionIssueRecoveryInput(in CoderInput, targets []string, patch string) CoderInput {
+	out := in
+	issues := detectTargetedPatchDefinitionIssues(in.Goal, strings.TrimSpace(in.RepoSummary), patch, targets)
+	missing := missingTargetFiles(patch, targets)
+	if len(issues) == 0 && len(missing) == 0 {
+		return out
+	}
+	if len(issues) > 0 {
+		out.DefinitionIssues = append([]string{}, issues...)
+	}
+	if len(missing) > 0 {
+		out.MissingTargetFiles = append([]string{}, missing...)
+	}
+	out.AllowedGoalFunctions = mergeUniqueStrings(extractGoalFunctionIdentifiers(in.Goal))
+
+	snapshots := buildRepoOnlyTargetSnapshots(strings.TrimSpace(in.RepoSummary), targets)
+	existingTop := make(map[string][]string)
+	existingTests := make(map[string][]string)
+	for _, target := range normalizeCitationList(targets) {
+		if !strings.HasSuffix(strings.ToLower(target), ".go") {
+			continue
+		}
+		snapshot := strings.TrimSpace(snapshots[target])
+		if snapshot == "" || strings.HasPrefix(snapshot, "[repo_read_error]") {
+			continue
+		}
+		names := sortedStringSetKeys(extractGoTopLevelFunctionNames(snapshot))
+		if len(names) == 0 {
+			continue
+		}
+		existingTop[target] = names
+		var tests []string
+		for _, name := range names {
+			if strings.HasPrefix(name, "Test") {
+				tests = append(tests, name)
+			}
+		}
+		if len(tests) > 0 {
+			existingTests[target] = tests
+		}
+	}
+	if len(existingTop) > 0 {
+		out.ExistingTopLevelNamesByFile = existingTop
+	}
+	if len(existingTests) > 0 {
+		out.ExistingTestNamesByFile = existingTests
+	}
+	return out
+}
+
+func sortedStringSetKeys(items map[string]struct{}) []string {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for item := range items {
+		out = append(out, item)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func goalNeedsMinimalTableDrivenTesting(goal string, targets []string) bool {
@@ -1571,9 +2780,6 @@ func detectTargetedPatchDefinitionIssues(goal string, repoRoot string, patch str
 	snapshots := buildRepoOnlyTargetSnapshots(strings.TrimSpace(repoRoot), targets)
 	addedByFile := extractAddedGoTopLevelFunctionNamesByFile(patch, targets)
 	duplicatedByFile := extractDuplicateAddedGoTopLevelFunctionNamesByFile(patch, targets)
-	if len(addedByFile) == 0 {
-		return nil
-	}
 	issues := make(map[string]struct{})
 	singleTargetFunction := len(targets) == 1 && len(allowedFunctions) == 1
 	for _, target := range targets {
@@ -1619,6 +2825,274 @@ func detectTargetedPatchDefinitionIssues(goal string, repoRoot string, patch str
 					issues["new helper definition: "+name] = struct{}{}
 				}
 			}
+		}
+	}
+	if isReorderOnlyGoal(goal) {
+		for _, target := range targets {
+			if !strings.HasSuffix(strings.ToLower(target), ".go") {
+				continue
+			}
+			for _, id := range detectReorderOnlyIdentifierDrift(patch, target) {
+				issues["reorder-only identifier drift: "+id] = struct{}{}
+			}
+		}
+	}
+	for _, target := range targets {
+		if !strings.HasSuffix(strings.ToLower(target), ".md") {
+			continue
+		}
+		for _, heading := range extractRequiredMarkdownHeadings(goal) {
+			if patchDeletesRequiredHeadingWithoutReplacement(patch, target, heading) {
+				issues["deleted required heading without replacement: "+heading] = struct{}{}
+			}
+		}
+	}
+	if len(issues) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(issues))
+	for issue := range issues {
+		out = append(out, issue)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func isReorderOnlyGoal(goal string) bool {
+	goal = strings.TrimSpace(goal)
+	if goal == "" {
+		return false
+	}
+	return strings.Contains(goal, "按字母顺序排列") || strings.Contains(strings.ToLower(goal), "alphabet")
+}
+
+func detectReorderOnlyIdentifierDrift(patch string, target string) []string {
+	target = strings.TrimSpace(target)
+	if target == "" || strings.TrimSpace(patch) == "" {
+		return nil
+	}
+	added := map[string]int{}
+	removed := map[string]int{}
+	entryAdded := map[string]int{}
+	entryRemoved := map[string]int{}
+	currentFile := ""
+	inHunk := false
+	for _, line := range strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n") {
+		trim := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(trim, "+++ "):
+			currentFile = stripPatchPathToken(strings.TrimSpace(strings.TrimPrefix(trim, "+++ ")))
+			inHunk = false
+		case strings.HasPrefix(trim, "@@ -"):
+			inHunk = currentFile == target
+		default:
+			if !inHunk || currentFile != target || line == "" {
+				continue
+			}
+			switch line[0] {
+			case '+':
+				if id, ok := extractReorderOnlyEntryIdentifier(line[1:]); ok {
+					entryAdded[id]++
+					continue
+				}
+				for _, id := range extractPlainIdentifiers(line[1:]) {
+					added[id]++
+				}
+			case '-':
+				if id, ok := extractReorderOnlyEntryIdentifier(line[1:]); ok {
+					entryRemoved[id]++
+					continue
+				}
+				for _, id := range extractPlainIdentifiers(line[1:]) {
+					removed[id]++
+				}
+			}
+		}
+	}
+	if len(entryAdded) > 0 || len(entryRemoved) > 0 {
+		added = entryAdded
+		removed = entryRemoved
+	}
+	var out []string
+	seen := map[string]struct{}{}
+	for id, n := range removed {
+		if n > added[id] {
+			if _, ok := seen[id]; !ok {
+				out = append(out, id)
+				seen[id] = struct{}{}
+			}
+		}
+	}
+	for id, n := range added {
+		if n > removed[id] {
+			if _, ok := seen[id]; !ok {
+				out = append(out, id)
+				seen[id] = struct{}{}
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func extractReorderOnlyEntryIdentifier(text string) (string, bool) {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" || strings.HasPrefix(trimmed, "//") {
+		return "", false
+	}
+	if idx := strings.Index(trimmed, "//"); idx >= 0 {
+		trimmed = strings.TrimSpace(trimmed[:idx])
+	}
+	if !strings.HasSuffix(trimmed, ",") {
+		return "", false
+	}
+	trimmed = strings.TrimSuffix(trimmed, ",")
+	trimmed = strings.TrimSpace(trimmed)
+	if trimmed == "" {
+		return "", false
+	}
+	if matched, _ := regexp.MatchString(`^[A-Za-z_][A-Za-z0-9_]*$`, trimmed); matched {
+		return trimmed, true
+	}
+	if strings.HasPrefix(trimmed, "\"") && strings.HasSuffix(trimmed, "\"") && len(trimmed) >= 2 {
+		name := strings.TrimSpace(trimmed[1 : len(trimmed)-1])
+		if matched, _ := regexp.MatchString(`^[A-Za-z_][A-Za-z0-9_]*$`, name); matched {
+			return name, true
+		}
+	}
+	return "", false
+}
+
+func extractPlainIdentifiers(text string) []string {
+	seen := map[string]struct{}{}
+	for _, id := range plainIdentifierRegexp.FindAllString(text, -1) {
+		if _, ignored := scopeIgnoredIdentifiers[id]; ignored {
+			continue
+		}
+		switch id {
+		case "package", "import", "func", "return", "var", "const", "type", "if", "else", "for", "range", "switch", "case", "default", "go", "defer", "nil", "true", "false", "any":
+			continue
+		}
+		seen[id] = struct{}{}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(seen))
+	for id := range seen {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func extractRequiredMarkdownHeadings(goal string) []string {
+	seen := map[string]struct{}{}
+	for _, m := range backtickContentRegexp.FindAllStringSubmatch(goal, -1) {
+		if len(m) < 2 {
+			continue
+		}
+		v := strings.TrimSpace(m[1])
+		if strings.HasPrefix(v, "#") {
+			seen[v] = struct{}{}
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(seen))
+	for v := range seen {
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func patchDeletesRequiredHeadingWithoutReplacement(patch string, target string, heading string) bool {
+	target = strings.TrimSpace(target)
+	heading = strings.TrimSpace(heading)
+	if target == "" || heading == "" || strings.TrimSpace(patch) == "" {
+		return false
+	}
+	currentFile := ""
+	inHunk := false
+	deleted := false
+	added := false
+	for _, line := range strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n") {
+		trim := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(trim, "+++ "):
+			currentFile = stripPatchPathToken(strings.TrimSpace(strings.TrimPrefix(trim, "+++ ")))
+			inHunk = false
+		case strings.HasPrefix(trim, "@@ -"):
+			inHunk = currentFile == target
+		default:
+			if !inHunk || currentFile != target || line == "" {
+				continue
+			}
+			switch line[0] {
+			case '-':
+				if strings.TrimSpace(line[1:]) == heading {
+					deleted = true
+				}
+			case '+':
+				if strings.TrimSpace(line[1:]) == heading {
+					added = true
+				}
+			}
+		}
+	}
+	return deleted && !added
+}
+
+func detectMissingTargetSnapshotContext(repoRoot string, patch string, targets []string) []string {
+	if strings.TrimSpace(repoRoot) == "" || strings.TrimSpace(patch) == "" || len(targets) == 0 {
+		return nil
+	}
+	snapshots := buildRepoOnlyTargetSnapshots(strings.TrimSpace(repoRoot), targets)
+	if len(snapshots) == 0 {
+		return nil
+	}
+	snapshotDecls := make(map[string]map[string]struct{}, len(targets))
+	for _, target := range normalizeCitationList(targets) {
+		if !strings.HasSuffix(strings.ToLower(target), ".go") {
+			continue
+		}
+		decls := make(map[string]struct{})
+		for _, line := range strings.Split(strings.ReplaceAll(snapshots[target], "\r\n", "\n"), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if goFuncScopeRegexp.MatchString(trimmed) {
+				decls[trimmed] = struct{}{}
+			}
+		}
+		snapshotDecls[target] = decls
+	}
+	if len(snapshotDecls) == 0 {
+		return nil
+	}
+	issues := make(map[string]struct{})
+	currentFile := ""
+	inHunk := false
+	for _, line := range strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n") {
+		trim := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(trim, "+++ "):
+			currentFile = stripPatchPathToken(strings.TrimSpace(strings.TrimPrefix(trim, "+++ ")))
+			_, inHunk = snapshotDecls[currentFile]
+		case strings.HasPrefix(trim, "@@ -"):
+			_, inHunk = snapshotDecls[currentFile]
+		default:
+			if !inHunk || currentFile == "" || line == "" || line[0] != ' ' {
+				continue
+			}
+			contextLine := strings.TrimSpace(line[1:])
+			if !goFuncScopeRegexp.MatchString(contextLine) {
+				continue
+			}
+			if _, ok := snapshotDecls[currentFile][contextLine]; ok {
+				continue
+			}
+			issues[currentFile+": "+contextLine] = struct{}{}
 		}
 	}
 	if len(issues) == 0 {

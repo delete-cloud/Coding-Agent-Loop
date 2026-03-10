@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/flow/agent/react"
@@ -50,6 +51,11 @@ type ReviewOutput struct {
 
 var goalFileTokenRE = regexp.MustCompile(`[A-Za-z0-9_./\-]+\.[A-Za-z0-9_+-]+`)
 
+var (
+	reviewerToolCallingTimeout = 60 * time.Second
+	reviewerCompletionTimeout  = 60 * time.Second
+)
+
 func NewReviewer(client ClientConfig, opts ...Option) *Reviewer {
 	deps := applyOptions(opts)
 	return &Reviewer{
@@ -69,17 +75,29 @@ func (r *Reviewer) Review(ctx context.Context, in ReviewInput) (ReviewOutput, er
 		enforceFallbackNoApprove(&out)
 		enforceKBSearchConsistency(in, &out)
 		enforceGoalTargetCoverage(in, &out)
+		enforceMarkdownDuplicateReviewConsistency(in, &out)
+		enforceReorderOnlyReviewConsistency(in, &out)
 		return out, nil
 	}
 
-	out, err := r.reviewWithEino(ctx, in)
+	einoCtx, cancelEino := withReviewerTimeout(ctx, reviewerToolCallingTimeout)
+	out, err := runWithHardTimeout(einoCtx, reviewerToolCallingTimeout, func(callCtx context.Context) (ReviewOutput, error) {
+		return r.reviewWithEino(callCtx, in)
+	})
+	cancelEino()
 	if err == nil {
 		enforceKBSearchConsistency(in, &out)
 		enforceGoalTargetCoverage(in, &out)
+		enforceMarkdownDuplicateReviewConsistency(in, &out)
+		enforceReorderOnlyReviewConsistency(in, &out)
 		return out, nil
 	}
 
-	fallback, fallbackErr := r.reviewWithClient(ctx, in)
+	fallbackCtx, cancelFallback := withReviewerTimeout(ctx, reviewerCompletionTimeout)
+	fallback, fallbackErr := runWithHardTimeout(fallbackCtx, reviewerCompletionTimeout, func(callCtx context.Context) (ReviewOutput, error) {
+		return r.reviewWithClient(callCtx, in)
+	})
+	cancelFallback()
 	if fallbackErr != nil {
 		out := fallbackReview(in)
 		out.UsedFallback = true
@@ -90,6 +108,8 @@ func (r *Reviewer) Review(ctx context.Context, in ReviewInput) (ReviewOutput, er
 		enforceFallbackNoApprove(&out)
 		enforceKBSearchConsistency(in, &out)
 		enforceGoalTargetCoverage(in, &out)
+		enforceMarkdownDuplicateReviewConsistency(in, &out)
+		enforceReorderOnlyReviewConsistency(in, &out)
 		return out, nil
 	}
 	fallback.UsedFallback = true
@@ -99,7 +119,22 @@ func (r *Reviewer) Review(ctx context.Context, in ReviewInput) (ReviewOutput, er
 	enforceFallbackNoApprove(&fallback)
 	enforceKBSearchConsistency(in, &fallback)
 	enforceGoalTargetCoverage(in, &fallback)
+	enforceMarkdownDuplicateReviewConsistency(in, &fallback)
+	enforceReorderOnlyReviewConsistency(in, &fallback)
 	return fallback, nil
+}
+
+func withReviewerTimeout(ctx context.Context, max time.Duration) (context.Context, context.CancelFunc) {
+	if max <= 0 {
+		return context.WithCancel(ctx)
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining > 0 && remaining < max {
+			return context.WithCancel(ctx)
+		}
+	}
+	return context.WithTimeout(ctx, max)
 }
 
 func fallbackReview(in ReviewInput) ReviewOutput {
@@ -280,8 +315,8 @@ func enforceGoalTargetCoverage(in ReviewInput, out *ReviewOutput) {
 	if len(targets) == 0 {
 		return
 	}
-	changed := extractChangedFiles(in.Diff)
-	for p := range extractChangedFiles(in.AppliedPatch) {
+	changed := extractChangedFiles(in.Diff, targets...)
+	for p := range extractChangedFiles(in.AppliedPatch, targets...) {
 		changed[p] = struct{}{}
 	}
 	for p := range extractStatusFiles(in.StatusShort) {
@@ -313,6 +348,119 @@ func enforceGoalTargetCoverage(in ReviewInput, out *ReviewOutput) {
 			Message:  "Target file required by goal is not modified in the current diff.",
 		})
 	}
+}
+
+func enforceReorderOnlyReviewConsistency(in ReviewInput, out *ReviewOutput) {
+	// Narrow fallback retained for legacy reorder-only review recovery. Do not extend with new task shapes.
+	if out == nil || !isReorderOnlyGoal(in.Goal) {
+		return
+	}
+	if strings.Contains(strings.ToUpper(in.CommandOutput), "FAIL") {
+		return
+	}
+	targets := extractGoalTargetFiles(in.Goal)
+	if len(targets) != 1 {
+		return
+	}
+	if !diffTouchesTargets(in.Diff, targets, false) && !patchTouchesTargets(in.AppliedPatch, targets, false) {
+		return
+	}
+	if strings.TrimSpace(in.RepoRoot) == "" {
+		return
+	}
+	if !isReorderOnlySnapshotSorted(strings.TrimSpace(in.RepoRoot), in.Goal, targets) {
+		return
+	}
+	out.Decision = string(model.ReviewDecisionComment)
+	out.Summary = "Reorder-only target file is sorted correctly according to the current snapshot and validation passed."
+	out.Markdown = "Reorder-only target file is sorted correctly according to the current snapshot and validation passed."
+	out.Findings = nil
+}
+
+func enforceMarkdownDuplicateReviewConsistency(in ReviewInput, out *ReviewOutput) {
+	if out == nil {
+		return
+	}
+	if strings.TrimSpace(strings.ToLower(out.Decision)) != string(model.ReviewDecisionRequestChanges) {
+		return
+	}
+	if strings.TrimSpace(in.RepoRoot) == "" || !reviewMentionsMarkdownDuplicate(out) {
+		return
+	}
+	targets := extractGoalTargetFiles(in.Goal)
+	if len(targets) == 0 {
+		return
+	}
+	headings := extractRequiredMarkdownHeadings(in.Goal)
+	if len(headings) == 0 {
+		return
+	}
+	duplicateSupported := false
+	for _, target := range targets {
+		if strings.ToLower(filepath.Ext(target)) != ".md" {
+			continue
+		}
+		content, err := tools.RepoRead(strings.TrimSpace(in.RepoRoot), target, repoOnlySnapshotMaxBytes)
+		if err != nil || strings.TrimSpace(content) == "" {
+			continue
+		}
+		for _, heading := range headings {
+			if markdownSnapshotShowsDuplicateSection(content, heading) {
+				duplicateSupported = true
+				break
+			}
+		}
+		if duplicateSupported {
+			break
+		}
+	}
+	if duplicateSupported {
+		return
+	}
+
+	filtered := make([]model.ReviewFinding, 0, len(out.Findings))
+	for _, finding := range out.Findings {
+		if findingMentionsMarkdownDuplicate(finding) {
+			continue
+		}
+		filtered = append(filtered, finding)
+	}
+	out.Findings = filtered
+
+	otherBlockers := hasCommandFailure(in.CommandOutput) ||
+		hasNonKBFindings(out.Findings) ||
+		reviewMentionsMissingKBSearch(out) ||
+		reviewMentionsGoalTargetUntouched(out)
+
+	note := "Removed unsupported markdown repetition finding after snapshot check."
+	if !otherBlockers {
+		out.Decision = string(model.ReviewDecisionComment)
+		out.Summary = note
+		out.Markdown = note
+		return
+	}
+	if len(out.Findings) > 0 {
+		msgs := make([]string, 0, len(out.Findings))
+		seen := map[string]struct{}{}
+		for _, finding := range out.Findings {
+			msg := strings.TrimSpace(finding.Message)
+			if msg == "" {
+				continue
+			}
+			if _, ok := seen[msg]; ok {
+				continue
+			}
+			seen[msg] = struct{}{}
+			msgs = append(msgs, msg)
+		}
+		if len(msgs) > 0 {
+			out.Summary = "Reviewer found remaining issues: " + strings.Join(msgs, "; ")
+			out.Markdown = out.Summary + "\n\n" + note
+			return
+		}
+	}
+	out.Summary = strings.TrimSpace(note + " Remaining issues still require changes.")
+	out.Markdown = out.Summary
 }
 
 func enforceKBSearchConsistency(in ReviewInput, out *ReviewOutput) {
@@ -373,6 +521,126 @@ func reviewMentionsMissingKBSearch(out *ReviewOutput) bool {
 		}
 	}
 	return false
+}
+
+func reviewMentionsMarkdownDuplicate(out *ReviewOutput) bool {
+	if out == nil {
+		return false
+	}
+	low := strings.ToLower(strings.TrimSpace(out.Summary + "\n" + out.Markdown))
+	patterns := []string{
+		"duplicated",
+		"duplicate glossary",
+		"appears twice",
+		"appears two times",
+		"repeated paragraphs",
+		"keep only one copy",
+		"section is duplicated",
+	}
+	for _, p := range patterns {
+		if strings.Contains(low, p) {
+			return true
+		}
+	}
+	for _, finding := range out.Findings {
+		if findingMentionsMarkdownDuplicate(finding) {
+			return true
+		}
+	}
+	return false
+}
+
+func reviewMentionsGoalTargetUntouched(out *ReviewOutput) bool {
+	if out == nil {
+		return false
+	}
+	low := strings.ToLower(strings.TrimSpace(out.Summary + "\n" + out.Markdown))
+	return strings.Contains(low, "goal-target file(s) not touched")
+}
+
+func findingMentionsMarkdownDuplicate(finding model.ReviewFinding) bool {
+	low := strings.ToLower(strings.TrimSpace(finding.Message))
+	if low == "" {
+		return false
+	}
+	patterns := []string{
+		"duplicated",
+		"duplicate glossary",
+		"appears twice",
+		"repeated paragraphs",
+		"keep only one copy",
+		"duplicate section",
+	}
+	for _, p := range patterns {
+		if strings.Contains(low, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func markdownSnapshotShowsDuplicateSection(content string, heading string) bool {
+	heading = strings.TrimSpace(heading)
+	if heading == "" {
+		return false
+	}
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	headingCount := 0
+	for _, line := range lines {
+		if strings.TrimSpace(line) == heading {
+			headingCount++
+		}
+	}
+	if headingCount > 1 {
+		return true
+	}
+	paragraphs := extractMarkdownSectionParagraphs(lines, heading)
+	if len(paragraphs) == 0 {
+		return false
+	}
+	seen := make(map[string]int, len(paragraphs))
+	for _, block := range paragraphs {
+		seen[block]++
+		if seen[block] > 1 {
+			return true
+		}
+	}
+	return false
+}
+
+func extractMarkdownSectionParagraphs(lines []string, heading string) []string {
+	start := -1
+	for i, line := range lines {
+		if strings.TrimSpace(line) == heading {
+			start = i + 1
+			break
+		}
+	}
+	if start < 0 || start >= len(lines) {
+		return nil
+	}
+	blocks := make([]string, 0)
+	current := make([]string, 0)
+	flush := func() {
+		if len(current) == 0 {
+			return
+		}
+		blocks = append(blocks, strings.Join(current, "\n"))
+		current = current[:0]
+	}
+	for _, raw := range lines[start:] {
+		trim := strings.TrimSpace(raw)
+		if strings.HasPrefix(trim, "#") {
+			break
+		}
+		if trim == "" {
+			flush()
+			continue
+		}
+		current = append(current, trim)
+	}
+	flush()
+	return blocks
 }
 
 func hasCommandFailure(output string) bool {
@@ -452,12 +720,12 @@ func extractGoalTargetFiles(goal string) []string {
 	return out
 }
 
-func extractChangedFiles(diff string) map[string]struct{} {
+func extractChangedFiles(diff string, targets ...string) map[string]struct{} {
 	out := make(map[string]struct{})
 	for _, line := range strings.Split(strings.ReplaceAll(diff, "\r\n", "\n"), "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "+++ ") {
-			p := normalizePathForCompare(strings.TrimSpace(strings.TrimPrefix(line, "+++ ")))
+			p := normalizePathForCompare(strings.TrimSpace(strings.TrimPrefix(line, "+++ ")), targets...)
 			if p == "" {
 				continue
 			}
@@ -469,7 +737,7 @@ func extractChangedFiles(diff string) map[string]struct{} {
 			if len(fields) < 4 {
 				continue
 			}
-			p := normalizePathForCompare(fields[3])
+			p := normalizePathForCompare(fields[3], targets...)
 			if p == "" {
 				continue
 			}
@@ -506,7 +774,7 @@ func extractStatusFiles(status string) map[string]struct{} {
 	return out
 }
 
-func normalizePathForCompare(path string) string {
+func normalizePathForCompare(path string, targets ...string) string {
 	path = strings.TrimSpace(path)
 	if path == "" || path == "/dev/null" {
 		return ""
@@ -520,6 +788,9 @@ func normalizePathForCompare(path string) string {
 	if path == "." || path == "/" {
 		return ""
 	}
+	if len(targets) > 0 {
+		path = matchPatchPathToTarget(path, targets)
+	}
 	return path
 }
 
@@ -527,6 +798,8 @@ func reviewerPrompts(in ReviewInput) (string, string) {
 	targets := extractGoalTargetFiles(in.Goal)
 	singleFnConstraint := buildSingleTargetFunctionConstraint(in.Goal, targets)
 	testingConstraint := buildMinimalTestingConstraint(in.Goal, targets)
+	inlineEditConstraint := buildMixedTaskInlineEditConstraint(in.Goal, targets)
+	reorderOnlyConstraint := buildReorderOnlySnapshotConstraint(in.Goal)
 	system := `You are a strict code reviewer.
 You may use read-only tools to inspect repository files, search code, inspect diff, and query the knowledge base.
 - retrieved_context in the review input contains pre-fetched knowledge base evidence; use it as the primary reference for domain rules. Call kb_search only for supplementary checks.
@@ -541,6 +814,13 @@ Return JSON only with fields: decision, summary, findings, review_markdown.
 	}
 	if testingConstraint != "" {
 		system = strings.TrimSpace(system + "\n- " + testingConstraint)
+		system = strings.TrimSpace(system + "\n- for KB-guided validation tasks, do not require extra constants, helper names, or assertions beyond what the goal and KB evidence explicitly require.")
+	}
+	if inlineEditConstraint != "" {
+		system = strings.TrimSpace(system + "\n- " + inlineEditConstraint)
+	}
+	if reorderOnlyConstraint != "" {
+		system = strings.TrimSpace(system + "\n- " + reorderOnlyConstraint)
 	}
 	payload := map[string]any{
 		"review_input":      in,
@@ -549,4 +829,56 @@ Return JSON only with fields: decision, summary, findings, review_markdown.
 	payloadJSON, _ := json.MarshalIndent(payload, "", "  ")
 	user := fmt.Sprintf("Review input:\n%s\nUse tools when needed, then return strict JSON only.", string(payloadJSON))
 	return system, user
+}
+
+func isReorderOnlySnapshotSorted(repoRoot string, goal string, targets []string) bool {
+	if !isReorderOnlyGoal(goal) || strings.TrimSpace(repoRoot) == "" {
+		return false
+	}
+	targets = normalizeCitationList(targets)
+	if len(targets) != 1 {
+		return false
+	}
+	target := targets[0]
+	if !strings.HasSuffix(strings.ToLower(target), ".go") {
+		return false
+	}
+	functions := extractGoalFunctionIdentifiers(goal)
+	if len(functions) != 1 {
+		return false
+	}
+	snapshot := buildRepoOnlyTargetSnapshots(repoRoot, []string{target})[target]
+	if strings.TrimSpace(snapshot) == "" || strings.HasPrefix(snapshot, "[repo_read_error]") {
+		return false
+	}
+	lines := strings.Split(strings.ReplaceAll(snapshot, "\r\n", "\n"), "\n")
+	start, end, ok := findGoFunctionBounds(lines, functions[0])
+	if !ok {
+		return false
+	}
+	_, entriesStart, entriesEnd, _, ok := findReorderableReturnSlice(lines[start:end])
+	if !ok {
+		return false
+	}
+	entriesStart += start
+	entriesEnd += start
+	names := make([]string, 0, entriesEnd-entriesStart)
+	for _, line := range lines[entriesStart:entriesEnd] {
+		name, ok := extractReorderOnlyEntryIdentifier(line)
+		if !ok {
+			return false
+		}
+		names = append(names, name)
+	}
+	if len(names) < 2 {
+		return false
+	}
+	sortedNames := append([]string(nil), names...)
+	sort.Strings(sortedNames)
+	for i := range names {
+		if names[i] != sortedNames[i] {
+			return false
+		}
+	}
+	return true
 }

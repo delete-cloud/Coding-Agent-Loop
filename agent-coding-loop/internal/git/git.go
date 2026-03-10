@@ -91,6 +91,11 @@ func (c *Client) ApplyPatch(ctx context.Context, repo, patch string) error {
 	firstErr := err
 	firstStderr := strings.TrimSpace(stderr)
 
+	_, stderrRecount, errRecount := c.runner.Run(ctx, "git apply --recount "+shellQuote(patchPath), gitRepo)
+	if errRecount == nil {
+		return nil
+	}
+
 	_, stderr3way, err3way := c.runner.Run(ctx, "git apply --3way "+shellQuote(patchPath), gitRepo)
 	if err3way == nil {
 		return nil
@@ -108,6 +113,10 @@ func (c *Client) ApplyPatch(ctx context.Context, repo, patch string) error {
 
 	if firstStderr != "" {
 		return fmt.Errorf("%w: %s", firstErr, firstStderr)
+	}
+	stderrRecount = strings.TrimSpace(stderrRecount)
+	if stderrRecount != "" {
+		return fmt.Errorf("%w: %s", firstErr, stderrRecount)
 	}
 	stderr3 := strings.TrimSpace(stderr3way)
 	if stderr3 != "" {
@@ -564,6 +573,11 @@ func applyHunksWithFuzzy(path string, lines []string, hunks []unifiedHunk) ([]st
 				delta += len(newChunk) - len(oldChunk)
 				continue
 			}
+			if rewritten, applied := applyLeadingWhitespaceNormalizedHunkFallback(path, out, oldChunk, newChunk); applied {
+				out = rewritten
+				delta += len(newChunk) - len(oldChunk)
+				continue
+			}
 			return nil, fmt.Errorf("cannot locate hunk old_start=%d", h.OldStart)
 		}
 		out = replaceChunk(out, pos, len(oldChunk), newChunk)
@@ -881,6 +895,30 @@ func chunksEqualNormalized(a []string, b []string, normalize func(string) string
 func normalizeMarkdownContextLine(line string) string {
 	line = strings.ReplaceAll(line, "`", "")
 	return strings.Join(strings.Fields(strings.TrimSpace(line)), " ")
+}
+
+func applyLeadingWhitespaceNormalizedHunkFallback(path string, lines []string, oldChunk []string, newChunk []string) ([]string, bool) {
+	if !isLeadingWhitespaceNormalizedPath(path) || len(oldChunk) == 0 {
+		return nil, false
+	}
+	pos, ok := findUniqueNormalizedChunkPosition(lines, oldChunk, normalizeLeadingWhitespaceContextLine)
+	if !ok {
+		return nil, false
+	}
+	return replaceChunk(lines, pos, len(oldChunk), newChunk), true
+}
+
+func normalizeLeadingWhitespaceContextLine(line string) string {
+	return strings.TrimLeft(line, " \t")
+}
+
+func isLeadingWhitespaceNormalizedPath(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".go", ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".rb", ".rs":
+		return true
+	default:
+		return false
+	}
 }
 
 func isMarkdownPath(path string) bool {

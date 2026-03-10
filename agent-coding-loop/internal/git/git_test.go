@@ -108,6 +108,51 @@ func Load(path string) (*Config, error) {
 	}
 }
 
+func TestApplyPatchRecountFallbackRepairsWrongSubsequentHunkStart(t *testing.T) {
+	repo := t.TempDir()
+	r := tools.NewRunner()
+	_, _, err := r.Run(context.Background(), "git init", repo)
+	if err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	_, _, _ = r.Run(context.Background(), "git config user.email test@example.com", repo)
+	_, _, _ = r.Run(context.Background(), "git config user.name tester", repo)
+	target := filepath.Join(repo, "sample.txt")
+	if err := os.WriteFile(target, []byte("line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n"), 0o644); err != nil {
+		t.Fatalf("write sample: %v", err)
+	}
+	_, _, err = r.Run(context.Background(), "git add -A && git commit -m init", repo)
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	patch := `--- a/sample.txt
++++ b/sample.txt
+@@ -1,3 +1,4 @@
+ line1
++ADD
+ line2
+ line3
+@@ -6,2 +6,3 @@
+ line8
+-line9
++LINE9
+ line10
+`
+
+	c := NewClient(r)
+	if err := c.ApplyPatch(context.Background(), repo, patch); err != nil {
+		t.Fatalf("ApplyPatch recount fallback: %v", err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read sample: %v", err)
+	}
+	want := "line1\nADD\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nLINE9\nline10\n"
+	if string(got) != want {
+		t.Fatalf("unexpected sample content\nwant:\n%s\ngot:\n%s", want, string(got))
+	}
+}
 func TestApplyPatchAddOnlyFallbackOverwritesExistingFile(t *testing.T) {
 	repo := t.TempDir()
 	r := tools.NewRunner()

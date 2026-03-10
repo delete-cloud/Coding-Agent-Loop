@@ -9,7 +9,7 @@ import (
 )
 
 func RepoList(repoRoot, rel string) ([]string, error) {
-	rel = normalizeRelPath(rel)
+	rel = normalizeRelPath(repoRoot, rel)
 	base, err := securePath(repoRoot, rel)
 	if err != nil {
 		return nil, err
@@ -41,7 +41,7 @@ func RepoList(repoRoot, rel string) ([]string, error) {
 }
 
 func RepoRead(repoRoot, rel string, maxBytes int) (string, error) {
-	rel = normalizeRelPath(rel)
+	rel = normalizeRelPath(repoRoot, rel)
 	path, err := securePath(repoRoot, rel)
 	if err != nil {
 		return "", err
@@ -122,8 +122,8 @@ func securePath(repoRoot, rel string) (string, error) {
 	return clean, nil
 }
 
-func normalizeRelPath(rel string) string {
-	rel = strings.TrimSpace(rel)
+func normalizeRelPath(repoRoot, rel string) string {
+	rel = strings.TrimSpace(strings.ReplaceAll(rel, "\\", "/"))
 	if rel == "" {
 		return "."
 	}
@@ -133,8 +133,43 @@ func normalizeRelPath(rel string) string {
 	if rel == "" {
 		return "."
 	}
+	rootBase := filepath.Base(filepath.Clean(strings.TrimSpace(repoRoot)))
+	if rootBase != "" && rootBase != "." {
+		rel = stripEmbeddedRepoPrefix(rel, rootBase)
+	}
 	for strings.HasPrefix(rel, string(os.PathSeparator)) {
 		rel = strings.TrimPrefix(rel, string(os.PathSeparator))
 	}
-	return filepath.Clean(rel)
+	clean := filepath.Clean(filepath.FromSlash(rel))
+	if rootBase != "" && rootBase != "." {
+		prefix := rootBase + string(os.PathSeparator)
+		for clean == rootBase || strings.HasPrefix(clean, prefix) {
+			if clean == rootBase {
+				return "."
+			}
+			clean = strings.TrimPrefix(clean, prefix)
+		}
+	}
+	if clean == "" {
+		return "."
+	}
+	return clean
+}
+
+func stripEmbeddedRepoPrefix(rel string, repoBase string) string {
+	trimmed := strings.TrimSpace(strings.ReplaceAll(rel, "\\", "/"))
+	if trimmed == "" || repoBase == "" || repoBase == "." {
+		return trimmed
+	}
+	segments := strings.Split(strings.TrimLeft(trimmed, "/"), "/")
+	for i, seg := range segments {
+		if seg != repoBase {
+			continue
+		}
+		if i == len(segments)-1 {
+			return "."
+		}
+		return strings.Join(segments[i+1:], "/")
+	}
+	return trimmed
 }

@@ -99,3 +99,59 @@ func TestRepoReadSanitizesWrappedRelativePath(t *testing.T) {
 		t.Fatalf("unexpected RepoRead content: %q", got)
 	}
 }
+
+func TestRepoReadStripsRepoNamePrefixFromModelPath(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "agent-coding-loop")
+	if err := os.MkdirAll(filepath.Join(root, "internal", "config"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	path := filepath.Join(root, "internal", "config", "config.go")
+	if err := os.WriteFile(path, []byte("package config"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	got, err := RepoRead(root, "agent-coding-loop/internal/config/config.go", 1024)
+	if err != nil {
+		t.Fatalf("RepoRead repo-prefixed path: %v", err)
+	}
+	if got != "package config" {
+		t.Fatalf("unexpected RepoRead content: %q", got)
+	}
+}
+
+func TestRepoListStripsRepoNamePrefixFromModelPath(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "agent-coding-loop")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write README.md: %v", err)
+	}
+
+	got, err := RepoList(root, "agent-coding-loop/.}")
+	if err != nil {
+		t.Fatalf("RepoList repo-prefixed polluted path: %v", err)
+	}
+	if len(got) != 1 || got[0] != "README.md" {
+		t.Fatalf("unexpected RepoList result: %v", got)
+	}
+}
+
+func TestRepoReadStripsEmbeddedAbsoluteRepoPrefix(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "agent-coding-loop")
+	if err := os.MkdirAll(filepath.Join(root, "internal", "config"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	path := filepath.Join(root, "internal", "config", "config.go")
+	if err := os.WriteFile(path, []byte("package config"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	got, err := RepoRead(root, path+"}", 1024)
+	if err != nil {
+		t.Fatalf("RepoRead embedded absolute path: %v", err)
+	}
+	if got != "package config" {
+		t.Fatalf("unexpected RepoRead content: %q", got)
+	}
+}
