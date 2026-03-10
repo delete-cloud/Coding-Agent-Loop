@@ -365,11 +365,24 @@ func isRetryableLLMError(err error) bool {
 	if err == nil {
 		return false
 	}
+	var apiErr *openai.APIError
+	if errors.As(err, &apiErr) && apiErr != nil {
+		if apiErr.HTTPStatusCode == 0 &&
+			strings.TrimSpace(apiErr.HTTPStatus) == "" &&
+			strings.TrimSpace(apiErr.Type) == "" &&
+			strings.TrimSpace(apiErr.Message) == "" &&
+			strings.TrimSpace(stringPtrValue(apiErr.Param)) == "" {
+			return true
+		}
+	}
 	s := strings.ToLower(err.Error())
 	if strings.Contains(s, "tls: bad record mac") {
 		return true
 	}
 	if strings.Contains(s, "connection reset") {
+		return true
+	}
+	if strings.Contains(s, "can't assign requested address") {
 		return true
 	}
 	if strings.Contains(s, "broken pipe") {

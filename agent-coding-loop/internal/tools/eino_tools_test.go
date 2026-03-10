@@ -127,3 +127,139 @@ func TestRepoSearchEmptyQueryDoesNotHardFail(t *testing.T) {
 		t.Fatalf("expected guidance in output, got %q", out)
 	}
 }
+
+func TestRepoListMissingPathDoesNotHardFail(t *testing.T) {
+	repo := t.TempDir()
+	got, err := BuildReviewerTools(repo, nil, NewRunner(), nil)
+	if err != nil {
+		t.Fatalf("BuildReviewerTools: %v", err)
+	}
+	var repoListTool tool.InvokableTool
+	for _, item := range got {
+		info, infoErr := item.Info(context.Background())
+		if infoErr != nil || info == nil {
+			continue
+		}
+		if info.Name != "repo_list" {
+			continue
+		}
+		inv, ok := item.(tool.InvokableTool)
+		if !ok {
+			t.Fatalf("repo_list is not invokable")
+		}
+		repoListTool = inv
+		break
+	}
+	if repoListTool == nil {
+		t.Fatalf("repo_list not found")
+	}
+	out, err := repoListTool.InvokableRun(context.Background(), `{"path":".agent-loop-artifacts"}`)
+	if err != nil {
+		t.Fatalf("repo_list missing path should not return error: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(out), "not found") {
+		t.Fatalf("expected not-found guidance, got %q", out)
+	}
+}
+
+func TestRepoReadMissingPathDoesNotHardFail(t *testing.T) {
+	repo := t.TempDir()
+	got, err := BuildReviewerTools(repo, nil, NewRunner(), nil)
+	if err != nil {
+		t.Fatalf("BuildReviewerTools: %v", err)
+	}
+	var repoReadTool tool.InvokableTool
+	for _, item := range got {
+		info, infoErr := item.Info(context.Background())
+		if infoErr != nil || info == nil {
+			continue
+		}
+		if info.Name != "repo_read" {
+			continue
+		}
+		inv, ok := item.(tool.InvokableTool)
+		if !ok {
+			t.Fatalf("repo_read is not invokable")
+		}
+		repoReadTool = inv
+		break
+	}
+	if repoReadTool == nil {
+		t.Fatalf("repo_read not found")
+	}
+	out, err := repoReadTool.InvokableRun(context.Background(), `{"path":"missing/file.go"}`)
+	if err != nil {
+		t.Fatalf("repo_read missing path should not return error: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(out), "not found") {
+		t.Fatalf("expected not-found guidance, got %q", out)
+	}
+}
+
+func TestRepoListEscapePathReturnsStructuredError(t *testing.T) {
+	repo := t.TempDir()
+	got, err := BuildReviewerTools(repo, nil, NewRunner(), nil)
+	if err != nil {
+		t.Fatalf("BuildReviewerTools: %v", err)
+	}
+	var repoListTool tool.InvokableTool
+	for _, item := range got {
+		info, infoErr := item.Info(context.Background())
+		if infoErr != nil || info == nil {
+			continue
+		}
+		if info.Name != "repo_list" {
+			continue
+		}
+		inv, ok := item.(tool.InvokableTool)
+		if !ok {
+			t.Fatalf("repo_list is not invokable")
+		}
+		repoListTool = inv
+		break
+	}
+	if repoListTool == nil {
+		t.Fatalf("repo_list not found")
+	}
+	out, err := repoListTool.InvokableRun(context.Background(), `{"path":"../etc/passwd"}`)
+	if err != nil {
+		t.Fatalf("repo_list escape path should not return error: %v", err)
+	}
+	if !strings.Contains(out, "repo_list error") || !strings.Contains(out, "path escapes repo root") {
+		t.Fatalf("expected structured repo_list error, got %q", out)
+	}
+}
+
+func TestRepoReadEscapePathReturnsStructuredError(t *testing.T) {
+	repo := t.TempDir()
+	got, err := BuildReviewerTools(repo, nil, NewRunner(), nil)
+	if err != nil {
+		t.Fatalf("BuildReviewerTools: %v", err)
+	}
+	var repoReadTool tool.InvokableTool
+	for _, item := range got {
+		info, infoErr := item.Info(context.Background())
+		if infoErr != nil || info == nil {
+			continue
+		}
+		if info.Name != "repo_read" {
+			continue
+		}
+		inv, ok := item.(tool.InvokableTool)
+		if !ok {
+			t.Fatalf("repo_read is not invokable")
+		}
+		repoReadTool = inv
+		break
+	}
+	if repoReadTool == nil {
+		t.Fatalf("repo_read not found")
+	}
+	out, err := repoReadTool.InvokableRun(context.Background(), `{"path":"../etc/passwd"}`)
+	if err != nil {
+		t.Fatalf("repo_read escape path should not return error: %v", err)
+	}
+	if !strings.Contains(out, "repo_read error") || !strings.Contains(out, "path escapes repo root") {
+		t.Fatalf("expected structured repo_read error, got %q", out)
+	}
+}

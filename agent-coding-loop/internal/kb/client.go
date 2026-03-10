@@ -10,6 +10,8 @@ import (
 	"time"
 )
 
+const kbSearchMaxAttempts = 3
+
 type Client struct {
 	BaseURL    string
 	HTTPClient *http.Client
@@ -62,9 +64,27 @@ func (c *Client) Search(ctx context.Context, req SearchRequest) (SearchResponse,
 		return SearchResponse{}, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	resp, err := c.HTTPClient.Do(httpReq)
-	if err != nil {
-		return SearchResponse{}, err
+	var resp *http.Response
+	for attempt := 0; attempt < kbSearchMaxAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return SearchResponse{}, ctx.Err()
+			case <-time.After(time.Duration(attempt) * 250 * time.Millisecond):
+			}
+			httpReq, err = http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/search", bytes.NewReader(b))
+			if err != nil {
+				return SearchResponse{}, err
+			}
+			httpReq.Header.Set("Content-Type", "application/json")
+		}
+		resp, err = c.HTTPClient.Do(httpReq)
+		if err == nil {
+			break
+		}
+		if !isRetryableKBTransportError(err) || attempt >= kbSearchMaxAttempts-1 {
+			return SearchResponse{}, err
+		}
 	}
 	defer resp.Body.Close()
 	body, _ := readAllLimit(resp, 2<<20)
@@ -76,6 +96,26 @@ func (c *Client) Search(ctx context.Context, req SearchRequest) (SearchResponse,
 		return SearchResponse{}, fmt.Errorf("decode kb search response failed: %w; body=%s", err, strings.TrimSpace(string(body)))
 	}
 	return out, nil
+}
+
+func isRetryableKBTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(strings.TrimSpace(err.Error()))
+	if strings.Contains(s, "can't assign requested address") {
+		return true
+	}
+	if strings.Contains(s, "unexpected eof") || strings.Contains(s, ": eof") || strings.HasSuffix(s, "eof") {
+		return true
+	}
+	if strings.Contains(s, "connection reset") || strings.Contains(s, "broken pipe") {
+		return true
+	}
+	if strings.Contains(s, "timeout") || strings.Contains(s, "temporary") {
+		return true
+	}
+	return false
 }
 
 type IndexRequest struct {

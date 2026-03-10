@@ -3,7 +3,9 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -103,7 +105,10 @@ func buildReadOnlyTools(repoRoot string, reg *skills.Registry, runner *Runner, k
 			}
 			entries, err := RepoList(repoRoot, path)
 			if err != nil {
-				return "", err
+				if errors.Is(err, os.ErrNotExist) {
+					return fmt.Sprintf("path not found: %s", path), nil
+				}
+				return formatToolError("repo_list", path, err), nil
 			}
 			return strings.Join(entries, "\n"), nil
 		},
@@ -120,7 +125,14 @@ func buildReadOnlyTools(repoRoot string, reg *skills.Registry, runner *Runner, k
 			if maxBytes <= 0 {
 				maxBytes = 64 * 1024
 			}
-			return RepoRead(repoRoot, input.Path, maxBytes)
+			out, err := RepoRead(repoRoot, input.Path, maxBytes)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					return fmt.Sprintf("path not found: %s", strings.TrimSpace(input.Path)), nil
+				}
+				return formatToolError("repo_read", strings.TrimSpace(input.Path), err), nil
+			}
+			return out, nil
 		},
 	)
 	if err != nil {
@@ -137,7 +149,7 @@ func buildReadOnlyTools(repoRoot string, reg *skills.Registry, runner *Runner, k
 			}
 			matches, err := RepoSearch(repoRoot, q)
 			if err != nil {
-				return "", err
+				return formatToolError("repo_search", q, err), nil
 			}
 			if len(matches) == 0 {
 				return "no matches", nil
@@ -190,7 +202,7 @@ func buildReadOnlyTools(repoRoot string, reg *skills.Registry, runner *Runner, k
 				Where:     strings.TrimSpace(input.Where),
 			})
 			if err != nil {
-				return "", err
+				return formatToolError("kb_search", q, err), nil
 			}
 			if len(resp.Hits) == 0 {
 				return "no hits", nil
@@ -241,6 +253,18 @@ func normalizeRepoRoot(repoRoot string) string {
 		return "."
 	}
 	return clean
+}
+
+func formatToolError(toolName string, input string, err error) string {
+	msg := strings.TrimSpace(fmt.Sprint(err))
+	if msg == "" {
+		msg = "unknown error"
+	}
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return fmt.Sprintf("%s error: %s (type=%T)", toolName, msg, err)
+	}
+	return fmt.Sprintf("%s error: %s (type=%T, input=%q)", toolName, msg, err, input)
 }
 
 func toolNamesForDebug(items []einotool.BaseTool) string {

@@ -32,6 +32,7 @@ func TestExtractJSONCodeFence(t *testing.T) {
 func TestIsRetryableLLMErrorGatewayAndEOF(t *testing.T) {
 	cases := []error{
 		errors.New("Post \"https://x/v1/chat/completions\": EOF"),
+		errors.New("Post \"https://x/v1/chat/completions\": dial tcp 198.18.0.171:443: connect: can't assign requested address"),
 		errors.New("status code: 520, body: <html>..."),
 		errors.New("status code: 524, body: <html>..."),
 		errors.New("invalid character '<' looking for beginning of value"),
@@ -43,6 +44,13 @@ func TestIsRetryableLLMErrorGatewayAndEOF(t *testing.T) {
 	}
 	if isRetryableLLMError(errors.New("invalid api key")) {
 		t.Fatalf("invalid api key should not be retryable")
+	}
+}
+
+func TestIsRetryableLLMErrorTreatsEmptyOpenAIAPIErrorAsTransportFlake(t *testing.T) {
+	err := &openaiext.APIError{}
+	if !isRetryableLLMError(err) {
+		t.Fatalf("expected empty APIError shell to be retryable")
 	}
 }
 
