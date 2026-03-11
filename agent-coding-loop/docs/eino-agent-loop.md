@@ -12,12 +12,12 @@
 
 ## 2. 关键代码入口
 
-- Loop 引擎：`/Users/kina/Code/Agent/Coding-Agent-Loop/agent-coding-loop/internal/loop/engine_eino.go`
-- Coder Agent：`/Users/kina/Code/Agent/Coding-Agent-Loop/agent-coding-loop/internal/agent/coder_eino.go`
-- Reviewer Agent：`/Users/kina/Code/Agent/Coding-Agent-Loop/agent-coding-loop/internal/agent/reviewer_eino.go`
-- 模型适配：`/Users/kina/Code/Agent/Coding-Agent-Loop/agent-coding-loop/internal/agent/client_eino.go`
-- Eino Tools：`/Users/kina/Code/Agent/Coding-Agent-Loop/agent-coding-loop/internal/tools/eino_tools.go`
-- 服务入口：`/Users/kina/Code/Agent/Coding-Agent-Loop/agent-coding-loop/internal/service/service.go`
+- Loop 引擎：`internal/loop/engine_eino.go`
+- Coder Agent：`internal/agent/coder_eino.go`
+- Reviewer Agent：`internal/agent/reviewer_eino.go`
+- 模型适配：`internal/agent/client_eino.go`
+- Eino Tools：`internal/tools/eino_tools.go`
+- 服务入口：`internal/service/service.go`
 
 ## 3. 编排分层
 
@@ -25,13 +25,13 @@
 
 通过 Eino OpenAI ChatModel 适配 OpenAI-compatible 接口：
 - `openai.NewChatModel(...)`
-- 位置：`/Users/kina/Code/Agent/Coding-Agent-Loop/agent-coding-loop/internal/agent/client_eino.go:27`
+- 位置：`internal/agent/client_eino.go:27`
 
 ### 3.2 Agent 层
 
 Coder/Reviewer 都通过 `react.NewAgent(...)` 构造：
-- Coder：`/Users/kina/Code/Agent/Coding-Agent-Loop/agent-coding-loop/internal/agent/coder_eino.go:99`
-- Reviewer：`/Users/kina/Code/Agent/Coding-Agent-Loop/agent-coding-loop/internal/agent/reviewer_eino.go:106`
+- Coder：`internal/agent/coder_eino.go:99`
+- Reviewer：`internal/agent/reviewer_eino.go:106`
 
 特点：
 - Coder 挂载可执行工具集（含 `run_command`）。
@@ -42,8 +42,8 @@ Coder/Reviewer 都通过 `react.NewAgent(...)` 构造：
 
 Loop 使用 Eino Graph：
 - 建图：`turn -> (branch) -> turn/finish/failed/blocked`
-- 位置：`/Users/kina/Code/Agent/Coding-Agent-Loop/agent-coding-loop/internal/loop/engine_eino.go:245`
-- 路由：`/Users/kina/Code/Agent/Coding-Agent-Loop/agent-coding-loop/internal/loop/engine_eino.go:453`
+- 位置：`internal/loop/engine_eino.go:245`
+- 路由：`internal/loop/engine_eino.go:453`
 
 核心思想：
 - `turnNode` 只负责“单轮业务”。
@@ -59,18 +59,18 @@ Eino 工具通过 `utils.InferTool` 构建：
 - `run_command`（仅 coder）
 
 代码位置：
-- `/Users/kina/Code/Agent/Coding-Agent-Loop/agent-coding-loop/internal/tools/eino_tools.go`
+- `internal/tools/eino_tools.go`
 
 安全边界：
 - 危险命令拦截：`IsDangerousCommand`
-  - `/Users/kina/Code/Agent/Coding-Agent-Loop/agent-coding-loop/internal/tools/command.go:56`
+  - `internal/tools/command.go:56`
 - 只读模式拦截写命令：`IsWriteCommand`
-  - `/Users/kina/Code/Agent/Coding-Agent-Loop/agent-coding-loop/internal/tools/command.go:74`
+  - `internal/tools/command.go:74`
 
 ## 4.1 外部知识库（LanceDB Sidecar）
 
 知识库检索通过本仓库内的 Python sidecar 提供 HTTP API：
-- 路径：`Coding-Agent-Loop/agent-coding-loop/kb/server.py`
+- 路径：`kb/server.py`
 - 端口：默认 `127.0.0.1:8788`
 - 环境变量：`AGENT_LOOP_KB_URL`（Go 侧 KB URL）、`OPENAI_BASE_URL`、`OPENAI_EMBEDDING_MODEL`、`OPENAI_API_KEY`、`KB_EMBEDDING_PROVIDER`、`KB_LOCAL_EMBED_MODEL`、`KB_EMBEDDING_SOURCE`
 
@@ -92,18 +92,18 @@ Eino 工具通过 `utils.InferTool` 构建：
 - 阻塞态 -> `blockedNode`
 
 参考代码：
-- `/Users/kina/Code/Agent/Coding-Agent-Loop/agent-coding-loop/internal/loop/engine_eino.go:282`
-- `/Users/kina/Code/Agent/Coding-Agent-Loop/agent-coding-loop/internal/loop/engine_eino.go:453`
+- `internal/loop/engine_eino.go:282`
+- `internal/loop/engine_eino.go:453`
 
 ## 6. Checkpoint 与恢复
 
 Graph 调用时注入 checkpoint：
 - `compose.WithCheckPointStore(...)`
 - `compose.WithCheckPointID(runID)`
-- 位置：`/Users/kina/Code/Agent/Coding-Agent-Loop/agent-coding-loop/internal/loop/engine_eino.go:225`
+- 位置：`internal/loop/engine_eino.go:225`
 
 当前 checkpoint store 为进程内存实现：
-- `/Users/kina/Code/Agent/Coding-Agent-Loop/agent-coding-loop/internal/loop/engine_eino.go:79`
+- `internal/loop/engine_eino.go:79`
 
 恢复语义：
 - 运行状态与事件时间线落 SQLite（`runs/steps/tool_calls/reviews/artifacts`）。
@@ -219,8 +219,8 @@ sequenceDiagram
 
 ## 9. 建议阅读顺序
 
-1. `/Users/kina/Code/Agent/Coding-Agent-Loop/agent-coding-loop/internal/tools/eino_tools.go`
-2. `/Users/kina/Code/Agent/Coding-Agent-Loop/agent-coding-loop/internal/agent/coder_eino.go`
-3. `/Users/kina/Code/Agent/Coding-Agent-Loop/agent-coding-loop/internal/agent/reviewer_eino.go`
-4. `/Users/kina/Code/Agent/Coding-Agent-Loop/agent-coding-loop/internal/loop/engine_eino.go`
-5. `/Users/kina/Code/Agent/Coding-Agent-Loop/agent-coding-loop/internal/service/service.go`
+1. `internal/tools/eino_tools.go`
+2. `internal/agent/coder_eino.go`
+3. `internal/agent/reviewer_eino.go`
+4. `internal/loop/engine_eino.go`
+5. `internal/service/service.go`

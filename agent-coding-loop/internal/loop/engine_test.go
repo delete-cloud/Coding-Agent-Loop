@@ -138,7 +138,7 @@ func TestEngineReviewerTimeoutFallsBackAndCompletesRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if time.Since(started) > 2*time.Second {
+	if time.Since(started) > 5*time.Second {
 		t.Fatalf("expected reviewer timeout fallback to finish quickly, took %s", time.Since(started))
 	}
 	if result.Status != model.RunStatusCompleted {

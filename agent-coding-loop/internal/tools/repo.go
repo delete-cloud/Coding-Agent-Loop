@@ -137,6 +137,7 @@ func normalizeRelPath(repoRoot, rel string) string {
 	if rootBase != "" && rootBase != "." {
 		rel = stripEmbeddedRepoPrefix(rel, rootBase)
 	}
+	rel = strings.TrimLeft(rel, "/")
 	for strings.HasPrefix(rel, string(os.PathSeparator)) {
 		rel = strings.TrimPrefix(rel, string(os.PathSeparator))
 	}

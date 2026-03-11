@@ -182,11 +182,13 @@ def _iter_files(roots):
 
 def _load_text_file(path: pathlib.Path, max_bytes):
     try:
-        b = path.read_bytes()
+        with path.open("rb") as f:
+            if max_bytes > 0:
+                b = f.read(max_bytes)
+            else:
+                b = f.read()
     except Exception:
         return None
-    if max_bytes > 0 and len(b) > max_bytes:
-        b = b[:max_bytes]
     try:
         return b.decode("utf-8")
     except Exception:
@@ -194,6 +196,65 @@ def _load_text_file(path: pathlib.Path, max_bytes):
             return b.decode("utf-8", errors="ignore")
         except Exception:
             return None
+
+
+def _stable_doc_path(path: pathlib.Path, roots):
+    fp = pathlib.Path(path).resolve()
+    cwd = pathlib.Path.cwd().resolve()
+    try:
+        return fp.relative_to(cwd).as_posix()
+    except ValueError:
+        pass
+
+    resolved_roots = []
+    for root in roots or []:
+        try:
+            resolved_roots.append(pathlib.Path(root).resolve())
+        except Exception:
+            continue
+    if len(resolved_roots) > 1:
+        try:
+            common_base = pathlib.Path(os.path.commonpath([str(rp) for rp in resolved_roots]))
+            return fp.relative_to(common_base).as_posix()
+        except Exception:
+            pass
+    elif len(resolved_roots) == 1:
+        stable_base = _detect_project_base(resolved_roots[0])
+        if stable_base is not None:
+            try:
+                return fp.relative_to(stable_base).as_posix()
+            except Exception:
+                pass
+
+    best_rel = None
+    best_len = -1
+    best_root = None
+    for rp in resolved_roots:
+        try:
+            rel = fp.relative_to(rp)
+        except Exception:
+            continue
+        if len(rp.parts) > best_len:
+            best_len = len(rp.parts)
+            best_root = rp
+            best_rel = rel.as_posix()
+    if best_rel:
+        if best_root is not None:
+            return f"{best_root.name}/{best_rel}"
+        return best_rel
+    return fp.name
+
+
+def _detect_project_base(path: pathlib.Path):
+    markers = ("go.mod", "pyproject.toml", "package.json", "Cargo.toml", ".git")
+    current = path.resolve()
+    for candidate in (current, *current.parents):
+        try:
+            if any((candidate / marker).exists() for marker in markers):
+                return candidate
+        except Exception:
+            continue
+    return None
 
 
 def _extract_md_heading(text):
@@ -245,7 +306,7 @@ class KB:
                 continue
             heading = _extract_md_heading(txt) if ext == "md" else ""
             for start, end, chunk in _chunk_text(txt, chunk_size, overlap):
-                rel = str(fp)
+                rel = _stable_doc_path(fp, roots)
                 docs.append(
                     {
                         "id": f"{rel}:{start}:{end}",

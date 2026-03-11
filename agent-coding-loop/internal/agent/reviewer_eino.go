@@ -77,6 +77,7 @@ func (r *Reviewer) Review(ctx context.Context, in ReviewInput) (ReviewOutput, er
 		enforceGoalTargetCoverage(in, &out)
 		enforceMarkdownDuplicateReviewConsistency(in, &out)
 		enforceReorderOnlyReviewConsistency(in, &out)
+		ensureActionableFindings(&out)
 		return out, nil
 	}
 
@@ -90,6 +91,7 @@ func (r *Reviewer) Review(ctx context.Context, in ReviewInput) (ReviewOutput, er
 		enforceGoalTargetCoverage(in, &out)
 		enforceMarkdownDuplicateReviewConsistency(in, &out)
 		enforceReorderOnlyReviewConsistency(in, &out)
+		ensureActionableFindings(&out)
 		return out, nil
 	}
 
@@ -110,6 +112,7 @@ func (r *Reviewer) Review(ctx context.Context, in ReviewInput) (ReviewOutput, er
 		enforceGoalTargetCoverage(in, &out)
 		enforceMarkdownDuplicateReviewConsistency(in, &out)
 		enforceReorderOnlyReviewConsistency(in, &out)
+		ensureActionableFindings(&out)
 		return out, nil
 	}
 	fallback.UsedFallback = true
@@ -121,6 +124,7 @@ func (r *Reviewer) Review(ctx context.Context, in ReviewInput) (ReviewOutput, er
 	enforceGoalTargetCoverage(in, &fallback)
 	enforceMarkdownDuplicateReviewConsistency(in, &fallback)
 	enforceReorderOnlyReviewConsistency(in, &fallback)
+	ensureActionableFindings(&fallback)
 	return fallback, nil
 }
 
@@ -285,6 +289,41 @@ func normalizeReviewOutput(out *ReviewOutput) {
 	if out.Markdown == "" {
 		out.Markdown = out.Summary
 	}
+}
+
+func ensureActionableFindings(out *ReviewOutput) {
+	if out == nil {
+		return
+	}
+	if strings.TrimSpace(strings.ToLower(out.Decision)) != string(model.ReviewDecisionRequestChanges) {
+		return
+	}
+	fallbackMsg := strings.TrimSpace(out.Summary)
+	if fallbackMsg == "" {
+		fallbackMsg = strings.TrimSpace(out.Markdown)
+	}
+	if fallbackMsg == "" {
+		fallbackMsg = "Reviewer requested changes without a specific finding."
+	}
+	hasActionable := false
+	for i := range out.Findings {
+		if strings.TrimSpace(out.Findings[i].Severity) == "" {
+			out.Findings[i].Severity = "high"
+		}
+		if strings.TrimSpace(out.Findings[i].Message) == "" {
+			out.Findings[i].Message = fallbackMsg
+		}
+		if strings.TrimSpace(out.Findings[i].Message) != "" {
+			hasActionable = true
+		}
+	}
+	if hasActionable {
+		return
+	}
+	out.Findings = append(out.Findings, model.ReviewFinding{
+		Severity: "high",
+		Message:  fallbackMsg,
+	})
 }
 
 func enforceFallbackNoApprove(out *ReviewOutput) {

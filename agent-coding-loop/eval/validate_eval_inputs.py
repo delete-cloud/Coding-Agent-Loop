@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
 import re
 import sys
@@ -49,7 +50,7 @@ def _validate_chunk_ids(ids: list[Any], label: str) -> None:
 
 
 def _validate_unique_ids(ids: list[str], label: str) -> None:
-    dupes = sorted({qid for qid in ids if ids.count(qid) > 1})
+    dupes = sorted(qid for qid, count in Counter(ids).items() if count > 1)
     if dupes:
         raise EvalValidationError(f"{label} contains duplicate query_id values: {', '.join(dupes)}")
 

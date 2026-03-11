@@ -25,6 +25,14 @@ func TestRepoReadAcceptsLeadingSlash(t *testing.T) {
 	}
 }
 
+func TestNormalizeRelPathStripsForwardSlashOnWindowsStyleInputs(t *testing.T) {
+	root := filepath.Join(`C:\Users\kina`, "agent-coding-loop")
+	got := normalizeRelPath(root, "/internal/config/config.go")
+	if got != filepath.Join("internal", "config", "config.go") {
+		t.Fatalf("unexpected normalized path: %q", got)
+	}
+}
+
 func TestSecurePathBlocksEscape(t *testing.T) {
 	root := t.TempDir()
 	if _, err := securePath(root, "../etc/passwd"); err == nil {
