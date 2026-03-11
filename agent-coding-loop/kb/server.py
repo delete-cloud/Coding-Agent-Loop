@@ -206,18 +206,34 @@ def _stable_doc_path(path: pathlib.Path, roots):
     except ValueError:
         pass
 
-    best_rel = None
-    best_len = -1
+    resolved_roots = []
     for root in roots or []:
         try:
-            rp = pathlib.Path(root).resolve()
+            resolved_roots.append(pathlib.Path(root).resolve())
+        except Exception:
+            continue
+    if resolved_roots:
+        try:
+            common_base = pathlib.Path(os.path.commonpath([str(rp) for rp in resolved_roots]))
+            return fp.relative_to(common_base).as_posix()
+        except Exception:
+            pass
+
+    best_rel = None
+    best_len = -1
+    best_root = None
+    for rp in resolved_roots:
+        try:
             rel = fp.relative_to(rp)
         except Exception:
             continue
         if len(rp.parts) > best_len:
             best_len = len(rp.parts)
+            best_root = rp
             best_rel = rel.as_posix()
     if best_rel:
+        if best_root is not None:
+            return f"{best_root.name}/{best_rel}"
         return best_rel
     return fp.name
 

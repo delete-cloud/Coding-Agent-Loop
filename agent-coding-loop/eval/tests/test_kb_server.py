@@ -117,6 +117,24 @@ class KBSearchFallbackTests(unittest.TestCase):
 
             self.assertEqual("eval/ab/kb/rules.md", got)
 
+    def test_stable_doc_path_uses_common_root_when_cwd_is_outside_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            target = repo / "docs" / "guide.md"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("# Guide\n", encoding="utf-8")
+
+            old_cwd = Path.cwd()
+            outside = Path(tmp) / "outside"
+            outside.mkdir(parents=True, exist_ok=True)
+            try:
+                os.chdir(outside)
+                got = _stable_doc_path(target, [str(repo / "docs"), str(repo / "eval" / "ab" / "kb")])
+            finally:
+                os.chdir(old_cwd)
+
+            self.assertEqual("docs/guide.md", got)
+
     def test_load_text_file_respects_max_bytes(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "big.txt"
