@@ -135,6 +135,26 @@ class KBSearchFallbackTests(unittest.TestCase):
 
             self.assertEqual("docs/guide.md", got)
 
+    def test_stable_doc_path_preserves_root_prefix_for_single_root_outside_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir(parents=True, exist_ok=True)
+            (repo / "go.mod").write_text("module example.com/repo\n", encoding="utf-8")
+            target = repo / "eval" / "ab" / "kb" / "rules.md"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("# Rules\n", encoding="utf-8")
+
+            old_cwd = Path.cwd()
+            outside = Path(tmp) / "outside"
+            outside.mkdir(parents=True, exist_ok=True)
+            try:
+                os.chdir(outside)
+                got = _stable_doc_path(target, [str(repo / "eval" / "ab" / "kb")])
+            finally:
+                os.chdir(old_cwd)
+
+            self.assertEqual("eval/ab/kb/rules.md", got)
+
     def test_load_text_file_respects_max_bytes(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "big.txt"

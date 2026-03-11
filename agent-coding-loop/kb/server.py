@@ -212,12 +212,19 @@ def _stable_doc_path(path: pathlib.Path, roots):
             resolved_roots.append(pathlib.Path(root).resolve())
         except Exception:
             continue
-    if resolved_roots:
+    if len(resolved_roots) > 1:
         try:
             common_base = pathlib.Path(os.path.commonpath([str(rp) for rp in resolved_roots]))
             return fp.relative_to(common_base).as_posix()
         except Exception:
             pass
+    elif len(resolved_roots) == 1:
+        stable_base = _detect_project_base(resolved_roots[0])
+        if stable_base is not None:
+            try:
+                return fp.relative_to(stable_base).as_posix()
+            except Exception:
+                pass
 
     best_rel = None
     best_len = -1
@@ -236,6 +243,18 @@ def _stable_doc_path(path: pathlib.Path, roots):
             return f"{best_root.name}/{best_rel}"
         return best_rel
     return fp.name
+
+
+def _detect_project_base(path: pathlib.Path):
+    markers = ("go.mod", "pyproject.toml", "package.json", "Cargo.toml", ".git")
+    current = path.resolve()
+    for candidate in (current, *current.parents):
+        try:
+            if any((candidate / marker).exists() for marker in markers):
+                return candidate
+        except Exception:
+            continue
+    return None
 
 
 def _extract_md_heading(text):
