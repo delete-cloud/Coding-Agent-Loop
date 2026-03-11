@@ -11,7 +11,7 @@ Task mix:
 ## 1) Prepare KB sidecar (for RAG arm)
 
 ```bash
-cd /Users/kina/Code/Agent/Coding-Agent-Loop/agent-coding-loop
+cd "$(git rev-parse --show-toplevel)"
 pip install -r kb/requirements-local-embedding.txt
 export KB_EMBEDDING_PROVIDER="local"
 export KB_LOCAL_EMBED_MODEL="Qwen/Qwen3-Embedding-0.6B"
@@ -26,8 +26,8 @@ curl -sS -X POST http://127.0.0.1:8788/index \
   -H 'Content-Type: application/json' \
   -d '{
     "roots": [
-      "/Users/kina/Code/Agent/Coding-Agent-Loop/agent-coding-loop/docs",
-      "/Users/kina/Code/Agent/Coding-Agent-Loop/agent-coding-loop/eval/ab/kb"
+      "docs",
+      "eval/ab/kb"
     ],
     "exts": ["md"],
     "chunk_size": 900,
@@ -38,11 +38,11 @@ curl -sS -X POST http://127.0.0.1:8788/index \
 ## 2) Run A/B
 
 ```bash
-cd /Users/kina/Code/Agent/Coding-Agent-Loop/agent-coding-loop
+cd "$(git rev-parse --show-toplevel)"
 python3 eval/ab/run_ab.py \
   --tasks eval/ab/minimal_tasks.jsonl \
   --agent-loop-bin ./agent-loop \
-  --repo /Users/kina/Code/Agent/Coding-Agent-Loop/agent-coding-loop \
+  --repo "$(git rev-parse --show-toplevel)" \
   --db-path .agent-loop-artifacts/state.db \
   --kb-url http://127.0.0.1:8788 \
   --output-dir eval/reports/ab \
@@ -64,7 +64,7 @@ Use strict mode to avoid false positives from fallback approvals:
 python3 eval/ab/run_ab.py \
   --tasks eval/ab/minimal_tasks.jsonl \
   --agent-loop-bin ./agent-loop \
-  --repo /Users/kina/Code/Agent/Coding-Agent-Loop/agent-coding-loop \
+  --repo "$(git rev-parse --show-toplevel)" \
   --db-path .agent-loop-artifacts/state.db \
   --kb-url http://127.0.0.1:8788 \
   --output-dir eval/reports/ab-strict \
@@ -85,7 +85,7 @@ python3 eval/ab/run_ab.py \
 python3 eval/ab/run_ab.py \
   --tasks eval/ab/minimal_tasks.jsonl \
   --agent-loop-bin ./agent-loop \
-  --repo /Users/kina/Code/Agent/Coding-Agent-Loop/agent-coding-loop \
+  --repo "$(git rev-parse --show-toplevel)" \
   --db-path .agent-loop-artifacts/state.db \
   --dry-run
 ```

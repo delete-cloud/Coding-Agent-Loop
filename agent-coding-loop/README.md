@@ -25,7 +25,7 @@ A local coding loop runtime that executes:
 ## Build
 
 ```bash
-cd /Users/kina/Code/Agent/Coding-Agent-Loop/agent-coding-loop
+cd "$(git rev-parse --show-toplevel)"
 go test ./...
 go build ./cmd/agent-loop
 ```

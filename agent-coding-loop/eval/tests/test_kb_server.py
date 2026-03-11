@@ -1,6 +1,9 @@
+import os
+import tempfile
 import unittest
+from pathlib import Path
 
-from kb.server import KB
+from kb.server import KB, _load_text_file, _stable_doc_path
 
 
 class _FakeArrow:
@@ -97,6 +100,29 @@ class KBSearchFallbackTests(unittest.TestCase):
         self.assertEqual(("RAG pipeline", "hybrid"), table.calls[0])
         self.assertIsInstance(table.calls[1][0], list)
         self.assertIsNone(table.calls[1][1])
+
+    def test_stable_doc_path_uses_repo_relative_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            target = repo / "eval" / "ab" / "kb" / "rules.md"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("# Rules\n", encoding="utf-8")
+
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(repo)
+                got = _stable_doc_path(target, [str(repo / "eval" / "ab" / "kb")])
+            finally:
+                os.chdir(old_cwd)
+
+            self.assertEqual("eval/ab/kb/rules.md", got)
+
+    def test_load_text_file_respects_max_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "big.txt"
+            path.write_text("abcdefg", encoding="utf-8")
+            got = _load_text_file(path, 4)
+            self.assertEqual("abcd", got)
 
 
 if __name__ == "__main__":

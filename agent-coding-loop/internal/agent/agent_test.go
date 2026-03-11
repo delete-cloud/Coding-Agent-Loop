@@ -213,6 +213,42 @@ func TestReviewerGoalTargetCoverage(t *testing.T) {
 	}
 }
 
+func TestEnsureActionableFindingsAddsSyntheticFinding(t *testing.T) {
+	out := ReviewOutput{
+		Decision: "request_changes",
+		Summary:  "Tests passed, but the implementation is incomplete.",
+	}
+
+	ensureActionableFindings(&out)
+
+	if len(out.Findings) != 1 {
+		t.Fatalf("expected synthetic finding, got %+v", out.Findings)
+	}
+	if out.Findings[0].Message != out.Summary {
+		t.Fatalf("expected synthetic finding message from summary, got %+v", out.Findings[0])
+	}
+}
+
+func TestEnsureActionableFindingsFillsEmptyMessages(t *testing.T) {
+	out := ReviewOutput{
+		Decision: "request_changes",
+		Summary:  "Need to update the failing test case.",
+		Findings: []model.ReviewFinding{{Severity: "", File: "internal/config/config_test.go", Line: 42, Message: ""}},
+	}
+
+	ensureActionableFindings(&out)
+
+	if len(out.Findings) != 1 {
+		t.Fatalf("expected one finding, got %+v", out.Findings)
+	}
+	if out.Findings[0].Severity != "high" {
+		t.Fatalf("expected default severity, got %+v", out.Findings[0])
+	}
+	if out.Findings[0].Message != out.Summary {
+		t.Fatalf("expected empty message filled from summary, got %+v", out.Findings[0])
+	}
+}
+
 func TestReviewerPromptsIncludeKBScopeContract(t *testing.T) {
 	in := ReviewInput{
 		Goal:          "根据知识库中的 HTTP API 规范，修改 internal/http/server.go 中的 writeErr 函数，使错误响应同时包含 error 和 code 两个字段（code 为大写下划线格式的机器可读错误码）。需先调用 kb_search 查询 API 规范，并在说明中引用来源。",

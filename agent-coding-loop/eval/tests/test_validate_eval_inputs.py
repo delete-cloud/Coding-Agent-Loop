@@ -56,6 +56,21 @@ class ValidateEvalInputsTests(unittest.TestCase):
         with self.assertRaises(EvalValidationError):
             validate_eval_inputs(qrels=str(sample_qrels), retrieval=str(bench_retrieval))
 
+    def test_rejects_duplicate_query_ids(self):
+        qrels = self.root / "qrels.jsonl"
+        retrieval = self.root / "retrieval_predictions.jsonl"
+        self._write_jsonl(
+            qrels,
+            [
+                {"query_id": "q1", "query": "demo", "relevant_ids": ["docs/a.md:1:2"]},
+                {"query_id": "q1", "query": "demo2", "relevant_ids": ["docs/b.md:1:2"]},
+            ],
+        )
+        self._write_jsonl(retrieval, [{"query_id": "q1", "retrieved_ids": ["docs/a.md:1:2"]}])
+
+        with self.assertRaises(EvalValidationError):
+            validate_eval_inputs(qrels=str(qrels), retrieval=str(retrieval))
+
 
 if __name__ == "__main__":
     unittest.main()

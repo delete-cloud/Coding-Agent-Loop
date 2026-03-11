@@ -182,11 +182,13 @@ def _iter_files(roots):
 
 def _load_text_file(path: pathlib.Path, max_bytes):
     try:
-        b = path.read_bytes()
+        with path.open("rb") as f:
+            if max_bytes > 0:
+                b = f.read(max_bytes)
+            else:
+                b = f.read()
     except Exception:
         return None
-    if max_bytes > 0 and len(b) > max_bytes:
-        b = b[:max_bytes]
     try:
         return b.decode("utf-8")
     except Exception:
@@ -194,6 +196,30 @@ def _load_text_file(path: pathlib.Path, max_bytes):
             return b.decode("utf-8", errors="ignore")
         except Exception:
             return None
+
+
+def _stable_doc_path(path: pathlib.Path, roots):
+    fp = pathlib.Path(path).resolve()
+    cwd = pathlib.Path.cwd().resolve()
+    try:
+        return fp.relative_to(cwd).as_posix()
+    except ValueError:
+        pass
+
+    best_rel = None
+    best_len = -1
+    for root in roots or []:
+        try:
+            rp = pathlib.Path(root).resolve()
+            rel = fp.relative_to(rp)
+        except Exception:
+            continue
+        if len(rp.parts) > best_len:
+            best_len = len(rp.parts)
+            best_rel = rel.as_posix()
+    if best_rel:
+        return best_rel
+    return fp.name
 
 
 def _extract_md_heading(text):
@@ -245,7 +271,7 @@ class KB:
                 continue
             heading = _extract_md_heading(txt) if ext == "md" else ""
             for start, end, chunk in _chunk_text(txt, chunk_size, overlap):
-                rel = str(fp)
+                rel = _stable_doc_path(fp, roots)
                 docs.append(
                     {
                         "id": f"{rel}:{start}:{end}",
