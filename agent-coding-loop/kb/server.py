@@ -271,6 +271,10 @@ class KBRebuildRequired(ValueError):
     pass
 
 
+class KBRebuildInProgress(ValueError):
+    pass
+
+
 def _is_rebuild_required_error(err):
     text = str(err or "").strip().lower()
     if not text:
@@ -287,6 +291,14 @@ def _is_rebuild_required_error(err):
     return any(needle in text for needle in needles)
 
 
+def _flag_is_set(flag):
+    if flag is None:
+        return False
+    if hasattr(flag, "is_set"):
+        return bool(flag.is_set())
+    return bool(flag)
+
+
 class KB:
     def __init__(self, db_path, table_name, embedder):
         import lancedb
@@ -295,6 +307,7 @@ class KB:
         self._table_name = table_name
         self._embedder = embedder
         self._lock = threading.Lock()
+        self._rebuild_in_progress = threading.Event()
         self._db = lancedb.connect(db_path)
 
     def _get_table(self):
@@ -310,6 +323,8 @@ class KB:
         return self._db.create_table(self._table_name, sample_rows, mode="overwrite")
 
     def index(self, roots, exts, chunk_size, overlap, max_file_bytes, timeout_s):
+        if _flag_is_set(getattr(self, "_rebuild_in_progress", None)):
+            raise KBRebuildInProgress("rebuild already in progress")
         exts = [e.lower().lstrip(".") for e in (exts or []) if e]
         if not exts:
             exts = ["md", "txt", "go", "rs", "py", "js", "ts", "tsx", "java", "cpp", "h", "hpp", "c", "yaml", "yml", "json", "toml", "typ"]
@@ -369,6 +384,11 @@ class KB:
                     raise KBRebuildRequired(str(e)) from e
                 raise
         return {"indexed": len(rows), "db_path": self._db_path, "table": self._table_name}
+
+    def rebuild(self, roots, exts, chunk_size, overlap, max_file_bytes, timeout_s):
+        if _flag_is_set(getattr(self, "_rebuild_in_progress", None)):
+            raise KBRebuildInProgress("rebuild already in progress")
+        raise NotImplementedError("explicit rebuild not implemented yet")
 
     def _collect_rows(self, searcher, top_k, where):
         if searcher is None:

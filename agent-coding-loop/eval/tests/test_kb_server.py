@@ -1,8 +1,10 @@
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
+import kb.server as kb_server
 from kb.server import KB, _load_text_file, _stable_doc_path
 
 
@@ -129,11 +131,29 @@ class KBSearchFallbackTests(unittest.TestCase):
             kb._db = _FakeDB()
             kb._db.tables["chunks"] = _FakeTable(add_error=ValueError("schema mismatch"))
 
-            with self.assertRaises(ValueError):
+            with self.assertRaises(kb_server.KBRebuildRequired):
                 kb.index([str(docs)], ["md"], 50, 0, 4096, 30)
 
             self.assertEqual([], kb._db.drop_calls)
             self.assertIn("chunks", kb._db.tables)
+
+    def test_index_rejects_when_rebuild_is_in_progress(self):
+        kb = KB.__new__(KB)
+        flag = threading.Event()
+        flag.set()
+        kb._rebuild_in_progress = flag
+
+        with self.assertRaises(kb_server.KBRebuildInProgress):
+            kb.index(["docs"], ["md"], 50, 0, 4096, 30)
+
+    def test_second_rebuild_rejects_when_rebuild_is_in_progress(self):
+        kb = KB.__new__(KB)
+        flag = threading.Event()
+        flag.set()
+        kb._rebuild_in_progress = flag
+
+        with self.assertRaises(kb_server.KBRebuildInProgress):
+            kb.rebuild(["docs"], ["md"], 50, 0, 4096, 30)
 
     def test_auto_search_falls_back_to_vector_when_hybrid_execution_fails(self):
         kb = KB.__new__(KB)
