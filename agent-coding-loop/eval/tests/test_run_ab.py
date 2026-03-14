@@ -15,6 +15,7 @@ from eval.ab.run_ab import (
     collect_overlay_paths,
     evaluate_expectations,
     extract_goal_target_files,
+    render_markdown,
     retrieval_mode_for_task,
     read_run_context,
     run_one,
@@ -293,6 +294,94 @@ class RunABTests(unittest.TestCase):
             ],
             report["paired_analysis"]["integrity"]["excluded_invalid_task_id_rows"],
         )
+
+    def test_render_markdown_includes_paired_analysis_section(self):
+        report = {
+            "metrics": {
+                "no_rag": {
+                    "pass_rate": 0.5,
+                    "avg_duration_sec": 10.0,
+                    "kb_signal_rate": 0.0,
+                    "citation_recall_avg": 0.0,
+                    "kb_search_calls_avg": 0.0,
+                    "repo_kb_overuse_rate": 0.0,
+                },
+                "rag": {
+                    "pass_rate": 1.0,
+                    "avg_duration_sec": 12.0,
+                    "kb_signal_rate": 1.0,
+                    "citation_recall_avg": 1.0,
+                    "kb_search_calls_avg": 2.0,
+                    "repo_kb_overuse_rate": 0.0,
+                },
+            },
+            "paired_analysis": {
+                "baseline_experiment": "no_rag",
+                "candidate_experiment": "rag",
+                "available": True,
+                "reason": "",
+                "counts": {
+                    "both_pass": 1,
+                    "both_fail": 0,
+                    "baseline_only_pass": 0,
+                    "candidate_only_pass": 1,
+                },
+                "integrity": {
+                    "valid_pair_count": 2,
+                    "excluded_invalid_task_id_count": 0,
+                    "excluded_missing_pair_count": 1,
+                    "excluded_duplicate_pair_count": 0,
+                    "excluded_non_terminal_count": 0,
+                },
+                "significance": {
+                    "applied": True,
+                    "test": "exact_mcnemar",
+                    "p_value": 1.0,
+                    "discordant_pair_count": 1,
+                },
+            },
+        }
+
+        md = render_markdown(report)
+
+        self.assertIn("## Paired Analysis", md)
+        self.assertIn("exact_mcnemar", md)
+        self.assertIn("excluded missing pairs", md)
+
+    def test_render_markdown_marks_unavailable_paired_analysis(self):
+        report = {
+            "metrics": {},
+            "paired_analysis": {
+                "baseline_experiment": "no_rag",
+                "candidate_experiment": "rag",
+                "available": False,
+                "reason": "no_valid_pairs",
+                "counts": {
+                    "both_pass": 0,
+                    "both_fail": 0,
+                    "baseline_only_pass": 0,
+                    "candidate_only_pass": 0,
+                },
+                "integrity": {
+                    "valid_pair_count": 0,
+                    "excluded_invalid_task_id_count": 0,
+                    "excluded_missing_pair_count": 0,
+                    "excluded_duplicate_pair_count": 0,
+                    "excluded_non_terminal_count": 2,
+                },
+                "significance": {
+                    "applied": False,
+                    "test": "exact_mcnemar",
+                    "p_value": None,
+                    "discordant_pair_count": 0,
+                },
+            },
+        }
+
+        md = render_markdown(report)
+
+        self.assertIn("Paired analysis unavailable", md)
+        self.assertIn("no_valid_pairs", md)
 
     def test_extract_goal_target_files(self):
         goal = "更新 docs/eino-agent-loop.md，并补充 README.md，同时忽略 pkg/xxx.go。"

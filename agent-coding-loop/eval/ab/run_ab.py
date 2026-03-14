@@ -706,6 +706,46 @@ def render_markdown(report: dict[str, Any]) -> str:
             f"{item['repo_kb_overuse_rate']:.3f} |"
         )
     lines.append("")
+    paired = report.get("paired_analysis", {})
+    if paired:
+        lines.append("## Paired Analysis")
+        lines.append("")
+        lines.append(f"Baseline: `{paired.get('baseline_experiment', 'no_rag')}`")
+        lines.append(f"Candidate: `{paired.get('candidate_experiment', 'rag')}`")
+        lines.append("")
+        if bool(paired.get("available", False)):
+            counts = paired.get("counts", {})
+            lines.append("| Pair Outcome | Count |")
+            lines.append("|---|---:|")
+            lines.append(f"| both_pass | {int(counts.get('both_pass', 0) or 0)} |")
+            lines.append(f"| both_fail | {int(counts.get('both_fail', 0) or 0)} |")
+            lines.append(f"| baseline_only_pass | {int(counts.get('baseline_only_pass', 0) or 0)} |")
+            lines.append(f"| candidate_only_pass | {int(counts.get('candidate_only_pass', 0) or 0)} |")
+            lines.append("")
+            significance = paired.get("significance", {})
+            if bool(significance.get("applied", False)):
+                p_value = float(significance.get("p_value", 0.0) or 0.0)
+                discordant = int(significance.get("discordant_pair_count", 0) or 0)
+                lines.append(
+                    f"Significance: `{significance.get('test', 'exact_mcnemar')}`, "
+                    f"p=`{p_value:.4f}`, discordant pairs=`{discordant}`"
+                )
+            else:
+                lines.append(
+                    f"Significance: unavailable (`{significance.get('reason', '') or 'not_applied'}`)"
+                )
+            lines.append("")
+        else:
+            lines.append(f"Paired analysis unavailable: `{paired.get('reason', '') or 'unknown'}`")
+            lines.append("")
+        integrity = paired.get("integrity", {})
+        lines.append("### Pair Integrity")
+        lines.append(f"- valid pairs: {int(integrity.get('valid_pair_count', 0) or 0)}")
+        lines.append(f"- excluded invalid task id rows: {int(integrity.get('excluded_invalid_task_id_count', 0) or 0)}")
+        lines.append(f"- excluded missing pairs: {int(integrity.get('excluded_missing_pair_count', 0) or 0)}")
+        lines.append(f"- excluded duplicate pairs: {int(integrity.get('excluded_duplicate_pair_count', 0) or 0)}")
+        lines.append(f"- excluded non-terminal pairs: {int(integrity.get('excluded_non_terminal_count', 0) or 0)}")
+        lines.append("")
     lines.append("## Notes")
     lines.append("- Strict mode prefers structured `coder_meta` / `reviewer_meta` records from state.db.")
     lines.append("- Citation matching prioritizes structured `citations[]`, with text as backward-compatible fallback.")
