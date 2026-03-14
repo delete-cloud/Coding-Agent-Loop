@@ -9,6 +9,7 @@ from pathlib import Path
 
 from eval.ab.run_ab import (
     aggregate_metrics,
+    build_paired_analysis,
     build_goal,
     collect_overlay_paths,
     evaluate_expectations,
@@ -17,6 +18,7 @@ from eval.ab.run_ab import (
     read_run_context,
     run_one,
     should_copy_overlay_path,
+    status_to_pair_outcome,
 )
 
 
@@ -95,6 +97,64 @@ class RunABTests(unittest.TestCase):
         self.assertAlmostEqual(rag["avg_duration_sec"], 20.0)
         self.assertAlmostEqual(rag["kb_signal_rate"], 0.5)
         self.assertAlmostEqual(rag["citation_recall_avg"], 0.5)
+
+    def test_status_to_pair_outcome_maps_terminal_statuses(self):
+        self.assertEqual("pass", status_to_pair_outcome("completed"))
+        self.assertEqual("fail", status_to_pair_outcome("failed"))
+        self.assertEqual("fail", status_to_pair_outcome("needs_changes"))
+        self.assertEqual("fail", status_to_pair_outcome("blocked"))
+        self.assertIsNone(status_to_pair_outcome("dry_run"))
+
+    def test_build_paired_analysis_excludes_missing_duplicate_and_non_terminal_pairs(self):
+        rows = [
+            {"experiment": "no_rag", "task_id": "t1", "status": "completed"},
+            {"experiment": "rag", "task_id": "t1", "status": "failed"},
+            {"experiment": "no_rag", "task_id": "t2", "status": "completed"},
+            {"experiment": "no_rag", "task_id": "t3", "status": "failed"},
+            {"experiment": "rag", "task_id": "t3", "status": "completed"},
+            {"experiment": "rag", "task_id": "t3", "status": "failed"},
+            {"experiment": "no_rag", "task_id": "t4", "status": "dry_run"},
+            {"experiment": "rag", "task_id": "t4", "status": "completed"},
+        ]
+
+        paired = build_paired_analysis(rows)
+
+        self.assertEqual(1, paired["integrity"]["valid_pair_count"])
+        self.assertEqual(1, paired["integrity"]["excluded_missing_pair_count"])
+        self.assertEqual(1, paired["integrity"]["excluded_duplicate_pair_count"])
+        self.assertEqual(1, paired["integrity"]["excluded_non_terminal_count"])
+        self.assertEqual(["t1"], [x["task_id"] for x in paired["pairs"]])
+
+    def test_build_paired_analysis_excludes_invalid_task_id_rows_before_grouping(self):
+        rows = [
+            {"experiment": "no_rag", "task_id": "", "status": "completed"},
+            {"experiment": "rag", "task_id": "   ", "status": "failed"},
+        ]
+
+        paired = build_paired_analysis(rows)
+
+        self.assertEqual(2, paired["integrity"]["excluded_invalid_task_id_count"])
+        self.assertEqual(
+            [
+                {"row_index": 0, "experiment": "no_rag", "task_id": "", "status": "completed"},
+                {"row_index": 1, "experiment": "rag", "task_id": "   ", "status": "failed"},
+            ],
+            paired["integrity"]["excluded_invalid_task_id_rows"],
+        )
+        self.assertEqual([], paired["pairs"])
+
+    def test_build_paired_analysis_uses_single_bucket_exclusion_precedence(self):
+        rows = [
+            {"experiment": "no_rag", "task_id": "t5", "status": "completed"},
+            {"experiment": "no_rag", "task_id": "t5", "status": "failed"},
+            {"experiment": "rag", "task_id": "t5", "status": "dry_run"},
+        ]
+
+        paired = build_paired_analysis(rows)
+
+        self.assertEqual(1, paired["integrity"]["excluded_duplicate_pair_count"])
+        self.assertEqual(0, paired["integrity"]["excluded_missing_pair_count"])
+        self.assertEqual(0, paired["integrity"]["excluded_non_terminal_count"])
 
     def test_extract_goal_target_files(self):
         goal = "更新 docs/eino-agent-loop.md，并补充 README.md，同时忽略 pkg/xxx.go。"
