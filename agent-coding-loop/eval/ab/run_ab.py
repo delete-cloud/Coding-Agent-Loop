@@ -712,6 +712,15 @@ def render_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def build_report(*, meta: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "meta": meta,
+        "metrics": aggregate_metrics(rows),
+        "paired_analysis": build_paired_analysis(rows),
+        "rows": rows,
+    }
+
+
 def parse_result(stdout: str) -> dict[str, Any]:
     text = (stdout or "").strip()
     if not text:
@@ -1073,9 +1082,8 @@ def main() -> int:
 
     log.info("all %d jobs finished", total)
 
-    metrics = aggregate_metrics(rows)
-    report = {
-        "meta": {
+    report = build_report(
+        meta={
             "tasks": args.tasks,
             "agent_loop_bin": args.agent_loop_bin,
             "repo": args.repo,
@@ -1090,9 +1098,9 @@ def main() -> int:
             "launch_interval": launch_interval,
             "dry_run": bool(args.dry_run),
         },
-        "metrics": metrics,
-        "rows": rows,
-    }
+        rows=rows,
+    )
+    metrics = report["metrics"]
 
     raw_path = output_dir / "ab_raw_runs.jsonl"
     json_path = output_dir / "ab_report.json"
