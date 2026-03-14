@@ -519,13 +519,15 @@ class KB:
                 raise first_err
 
     def search(self, query, top_k, query_type, where, timeout_s):
+        self._ensure_runtime_state()
         query = (query or "").strip()
         if not query:
             return {"hits": []}
-        with self._lock:
-            tbl = self._get_table()
-            if tbl is None:
-                return {"hits": []}
+        with self._swap_lock:
+            with self._lock:
+                tbl = self._get_table()
+                if tbl is None:
+                    return {"hits": []}
         qtype = (query_type or "").strip().lower()
         if qtype not in {"auto", "hybrid", "vector", "text"}:
             qtype = "auto"
@@ -576,6 +578,9 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
 
+    def _send_conflict(self, code, message):
+        self._send(409, {"code": code, "error": message})
+
     def do_GET(self):
         if self.path == "/health":
             self._send(200, {"ok": True})
@@ -596,6 +601,37 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 out = self.kb.index(roots, exts, chunk_size, overlap, max_file_bytes, self.timeout_s)
                 self._send(200, out)
+            except KBRebuildInProgress as e:
+                self._send_conflict("rebuild_in_progress", str(e))
+            except KBRebuildRequired as e:
+                self._send_conflict("rebuild_required", str(e))
+            except urllib.error.HTTPError as e:
+                try:
+                    msg = e.read().decode("utf-8")
+                except Exception:
+                    msg = str(e)
+                self._send(500, {"error": msg})
+            except Exception as e:
+                self._send(500, {"error": str(e)})
+            return
+        if self.path == "/rebuild":
+            body = _read_json(self)
+            roots = body.get("roots") or []
+            roots = [r.strip() for r in roots if r and r.strip()]
+            if not roots:
+                self._send(400, {"error": "rebuild requires explicit non-empty roots"})
+                return
+            exts = body.get("exts") or None
+            chunk_size = int(body.get("chunk_size") or int(os.getenv("KB_CHUNK_SIZE", "1200")))
+            overlap = int(body.get("overlap") or int(os.getenv("KB_CHUNK_OVERLAP", "200")))
+            max_file_bytes = int(body.get("max_file_bytes") or int(os.getenv("KB_MAX_FILE_BYTES", str(512 * 1024))))
+            try:
+                out = self.kb.rebuild(roots, exts, chunk_size, overlap, max_file_bytes, self.timeout_s)
+                self._send(200, out)
+            except KBRebuildInProgress as e:
+                self._send_conflict("rebuild_in_progress", str(e))
+            except KBRebuildRequired as e:
+                self._send_conflict("rebuild_required", str(e))
             except urllib.error.HTTPError as e:
                 try:
                     msg = e.read().decode("utf-8")

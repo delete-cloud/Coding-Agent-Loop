@@ -1,6 +1,9 @@
+import io
+import json
 import os
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -129,6 +132,57 @@ class _FakeLock:
         return False
 
 
+class _FakeKBAPI:
+    def __init__(self):
+        self.index_response = {"indexed": 0}
+        self.rebuild_response = {"rebuilt": True}
+        self.index_error = None
+        self.rebuild_error = None
+
+    def index(self, roots, exts, chunk_size, overlap, max_file_bytes, timeout_s):
+        _ = (roots, exts, chunk_size, overlap, max_file_bytes, timeout_s)
+        if self.index_error is not None:
+            raise self.index_error
+        return dict(self.index_response)
+
+    def rebuild(self, roots, exts, chunk_size, overlap, max_file_bytes, timeout_s):
+        _ = (roots, exts, chunk_size, overlap, max_file_bytes, timeout_s)
+        if self.rebuild_error is not None:
+            raise self.rebuild_error
+        return dict(self.rebuild_response)
+
+
+def _make_handler(path, body, kb=None):
+    payload = json.dumps(body).encode("utf-8")
+    handler = kb_server.Handler.__new__(kb_server.Handler)
+    handler.path = path
+    handler.headers = {"Content-Length": str(len(payload))}
+    handler.rfile = io.BytesIO(payload)
+    handler.wfile = io.BytesIO()
+    handler.kb = kb or _FakeKBAPI()
+    handler.timeout_s = 30
+    handler.status_code = None
+    handler.response_headers = {}
+
+    def send_response(code):
+        handler.status_code = code
+
+    def send_header(name, value):
+        handler.response_headers[name] = value
+
+    def end_headers():
+        return None
+
+    handler.send_response = send_response
+    handler.send_header = send_header
+    handler.end_headers = end_headers
+    return handler
+
+
+def _read_response_json(handler):
+    return json.loads(handler.wfile.getvalue().decode("utf-8"))
+
+
 class KBSearchFallbackTests(unittest.TestCase):
     def test_index_preserves_existing_table_when_add_requires_rebuild(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -252,6 +306,37 @@ class KBSearchFallbackTests(unittest.TestCase):
             self.assertIs(kb._db.tables["chunks__backup"], old_table)
             self.assertNotIn(older_backup, kb._db.tables.values())
 
+    def test_search_waits_for_swap_and_never_observes_missing_formal_table(self):
+        kb = KB.__new__(KB)
+        kb._table_name = "chunks"
+        kb._lock = _FakeLock()
+        kb._swap_lock = threading.Lock()
+        kb._rebuild_in_progress = threading.Event()
+        kb._embedder = _FakeEmbedder()
+        kb._db = _FakeDB()
+        kb._db.tables["chunks"] = _FakeTable()
+
+        results = []
+        errors = []
+
+        kb._swap_lock.acquire()
+        try:
+            worker = threading.Thread(
+                target=lambda: results.append(kb.search("RAG pipeline", 3, "auto", "", 30)),
+                daemon=True,
+            )
+            worker.start()
+            time.sleep(0.05)
+            self.assertTrue(worker.is_alive(), "search should wait until swap lock is released")
+        finally:
+            kb._swap_lock.release()
+
+        worker.join(timeout=1.0)
+        self.assertFalse(worker.is_alive(), "search did not resume after swap lock release")
+        self.assertEqual([], errors)
+        self.assertEqual(1, len(results))
+        self.assertEqual("eval/ab/kb/rag_pipeline.md", results[0]["hits"][0]["path"])
+
     def test_auto_search_falls_back_to_vector_when_hybrid_execution_fails(self):
         kb = KB.__new__(KB)
         kb._embedder = _FakeEmbedder()
@@ -327,6 +412,56 @@ class KBSearchFallbackTests(unittest.TestCase):
             path.write_text("abcdefg", encoding="utf-8")
             got = _load_text_file(path, 4)
             self.assertEqual("abcd", got)
+
+
+class KBHTTPContractTests(unittest.TestCase):
+    def test_index_returns_409_rebuild_in_progress(self):
+        kb = _FakeKBAPI()
+        kb.index_error = kb_server.KBRebuildInProgress("rebuild already in progress")
+        handler = _make_handler("/index", {"roots": ["docs"]}, kb=kb)
+
+        handler.do_POST()
+
+        self.assertEqual(409, handler.status_code)
+        self.assertEqual("rebuild_in_progress", _read_response_json(handler)["code"])
+
+    def test_index_returns_409_rebuild_required(self):
+        kb = _FakeKBAPI()
+        kb.index_error = kb_server.KBRebuildRequired("schema mismatch")
+        handler = _make_handler("/index", {"roots": ["docs"]}, kb=kb)
+
+        handler.do_POST()
+
+        self.assertEqual(409, handler.status_code)
+        self.assertEqual("rebuild_required", _read_response_json(handler)["code"])
+
+    def test_rebuild_returns_400_when_roots_missing(self):
+        handler = _make_handler("/rebuild", {}, kb=_FakeKBAPI())
+
+        handler.do_POST()
+
+        self.assertEqual(400, handler.status_code)
+
+    def test_rebuild_success_returns_audit_payload(self):
+        kb = _FakeKBAPI()
+        kb.rebuild_response = {
+            "rebuilt": True,
+            "table": "chunks",
+            "backup_table": "chunks__backup",
+            "roots": ["docs", "eval/ab/kb"],
+            "indexed": 42,
+            "db_path": "/tmp/kb",
+        }
+        handler = _make_handler("/rebuild", {"roots": ["docs", "eval/ab/kb"]}, kb=kb)
+
+        handler.do_POST()
+
+        body = _read_response_json(handler)
+        self.assertEqual(200, handler.status_code)
+        self.assertTrue(body["rebuilt"])
+        self.assertEqual("chunks__backup", body["backup_table"])
+        self.assertEqual(["docs", "eval/ab/kb"], body["roots"])
+        self.assertEqual(42, body["indexed"])
 
 
 if __name__ == "__main__":
