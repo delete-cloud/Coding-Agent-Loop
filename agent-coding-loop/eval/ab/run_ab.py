@@ -379,6 +379,89 @@ def is_terminal_run_status(status: str) -> bool:
     return str(status or "").strip() in {"completed", "failed", "needs_changes", "blocked"}
 
 
+def status_to_pair_outcome(status: str) -> str | None:
+    normalized = str(status or "").strip()
+    if normalized == "completed":
+        return "pass"
+    if normalized in {"failed", "needs_changes", "blocked"}:
+        return "fail"
+    return None
+
+
+def build_paired_analysis(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    baseline_experiment = "no_rag"
+    candidate_experiment = "rag"
+    integrity = {
+        "valid_pair_count": 0,
+        "excluded_invalid_task_id_count": 0,
+        "excluded_invalid_task_id_rows": [],
+        "excluded_missing_pair_count": 0,
+        "excluded_duplicate_pair_count": 0,
+        "excluded_non_terminal_count": 0,
+        "excluded_task_ids": {
+            "duplicate_pair": [],
+            "missing_pair": [],
+            "non_terminal": [],
+        },
+    }
+    grouped: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for idx, row in enumerate(rows):
+        task_id = str(row.get("task_id", ""))
+        if not task_id.strip():
+            integrity["excluded_invalid_task_id_count"] += 1
+            integrity["excluded_invalid_task_id_rows"].append(
+                {
+                    "row_index": idx,
+                    "experiment": str(row.get("experiment", "")).strip(),
+                    "task_id": task_id,
+                    "status": str(row.get("status", "")).strip(),
+                }
+            )
+            continue
+        exp = str(row.get("experiment", "")).strip()
+        if exp not in {baseline_experiment, candidate_experiment}:
+            continue
+        grouped.setdefault(task_id, {baseline_experiment: [], candidate_experiment: []})[exp].append(row)
+
+    pairs: list[dict[str, Any]] = []
+    for task_id in sorted(grouped):
+        exp_rows = grouped[task_id]
+        baseline_rows = exp_rows[baseline_experiment]
+        candidate_rows = exp_rows[candidate_experiment]
+
+        if len(baseline_rows) != 1 or len(candidate_rows) != 1:
+            if len(baseline_rows) > 1 or len(candidate_rows) > 1:
+                integrity["excluded_duplicate_pair_count"] += 1
+                integrity["excluded_task_ids"]["duplicate_pair"].append(task_id)
+            else:
+                integrity["excluded_missing_pair_count"] += 1
+                integrity["excluded_task_ids"]["missing_pair"].append(task_id)
+            continue
+
+        baseline_outcome = status_to_pair_outcome(str(baseline_rows[0].get("status", "")))
+        candidate_outcome = status_to_pair_outcome(str(candidate_rows[0].get("status", "")))
+        if baseline_outcome is None or candidate_outcome is None:
+            integrity["excluded_non_terminal_count"] += 1
+            integrity["excluded_task_ids"]["non_terminal"].append(task_id)
+            continue
+
+        pairs.append(
+            {
+                "task_id": task_id,
+                "baseline_outcome": baseline_outcome,
+                "candidate_outcome": candidate_outcome,
+            }
+        )
+
+    integrity["valid_pair_count"] = len(pairs)
+    return {
+        "baseline_experiment": baseline_experiment,
+        "candidate_experiment": candidate_experiment,
+        "pairs": pairs,
+        "integrity": integrity,
+    }
+
+
 def aggregate_metrics(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     by_exp: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
