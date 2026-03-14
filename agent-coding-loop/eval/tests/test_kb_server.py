@@ -85,6 +85,8 @@ class _FakeDB:
         self.tables = {}
         self.drop_calls = []
         self.create_calls = []
+        self.rename_calls = []
+        self.rename_errors = {}
 
     def open_table(self, name):
         if name not in self.tables:
@@ -94,12 +96,23 @@ class _FakeDB:
     def create_table(self, name, sample_rows, mode="create"):
         self.create_calls.append((name, list(sample_rows), mode))
         table = _FakeTable()
+        table.rows_added.extend(list(sample_rows))
         self.tables[name] = table
         return table
 
     def drop_table(self, name):
         self.drop_calls.append(name)
         self.tables.pop(name, None)
+
+    def rename_table(self, cur_name, new_name, cur_namespace=None, new_namespace=None):
+        _ = (cur_namespace, new_namespace)
+        self.rename_calls.append((cur_name, new_name))
+        err = self.rename_errors.get((cur_name, new_name))
+        if err is not None:
+            raise err
+        if cur_name not in self.tables:
+            raise RuntimeError(f"missing table: {cur_name}")
+        self.tables[new_name] = self.tables.pop(cur_name)
 
 
 class _FakeEmbedder:
@@ -154,6 +167,90 @@ class KBSearchFallbackTests(unittest.TestCase):
 
         with self.assertRaises(kb_server.KBRebuildInProgress):
             kb.rebuild(["docs"], ["md"], 50, 0, 4096, 30)
+
+    def test_rebuild_requires_explicit_roots(self):
+        kb = KB.__new__(KB)
+        kb._rebuild_in_progress = threading.Event()
+
+        with self.assertRaises(ValueError):
+            kb.rebuild([], ["md"], 50, 0, 4096, 30)
+
+    def test_rebuild_writes_temp_then_swaps_to_formal_table(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            docs = Path(tmp) / "docs"
+            docs.mkdir(parents=True, exist_ok=True)
+            (docs / "guide.md").write_text("# Guide\nhello world\n", encoding="utf-8")
+
+            kb = KB.__new__(KB)
+            kb._db_path = "/tmp/kb"
+            kb._table_name = "chunks"
+            kb._lock = _FakeLock()
+            kb._swap_lock = _FakeLock()
+            kb._rebuild_in_progress = threading.Event()
+            kb._embedder = _FakeEmbedder()
+            kb._db = _FakeDB()
+            old_table = _FakeTable()
+            kb._db.tables["chunks"] = old_table
+
+            out = kb.rebuild([str(docs)], ["md"], 50, 0, 4096, 30)
+
+            self.assertTrue(out["rebuilt"])
+            self.assertEqual("chunks", out["table"])
+            self.assertEqual("chunks__backup", out["backup_table"])
+            self.assertEqual([str(docs)], out["roots"])
+            self.assertIn("chunks", kb._db.tables)
+            self.assertIn("chunks__backup", kb._db.tables)
+            self.assertIs(kb._db.tables["chunks__backup"], old_table)
+            self.assertNotIn("chunks__rebuild_tmp", kb._db.tables)
+            self.assertGreater(len(kb._db.tables["chunks"].rows_added), 0)
+
+    def test_rebuild_rolls_formal_table_back_when_promote_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            docs = Path(tmp) / "docs"
+            docs.mkdir(parents=True, exist_ok=True)
+            (docs / "guide.md").write_text("# Guide\nhello world\n", encoding="utf-8")
+
+            kb = KB.__new__(KB)
+            kb._db_path = "/tmp/kb"
+            kb._table_name = "chunks"
+            kb._lock = _FakeLock()
+            kb._swap_lock = _FakeLock()
+            kb._rebuild_in_progress = threading.Event()
+            kb._embedder = _FakeEmbedder()
+            kb._db = _FakeDB()
+            old_table = _FakeTable()
+            kb._db.tables["chunks"] = old_table
+            kb._db.rename_errors[("chunks__rebuild_tmp", "chunks")] = RuntimeError("promote failed")
+
+            with self.assertRaises(RuntimeError):
+                kb.rebuild([str(docs)], ["md"], 50, 0, 4096, 30)
+
+            self.assertIs(kb._db.tables["chunks"], old_table)
+            self.assertNotIn("chunks__backup", kb._db.tables)
+
+    def test_rebuild_keeps_only_latest_backup_slot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            docs = Path(tmp) / "docs"
+            docs.mkdir(parents=True, exist_ok=True)
+            (docs / "guide.md").write_text("# Guide\nhello world\n", encoding="utf-8")
+
+            kb = KB.__new__(KB)
+            kb._db_path = "/tmp/kb"
+            kb._table_name = "chunks"
+            kb._lock = _FakeLock()
+            kb._swap_lock = _FakeLock()
+            kb._rebuild_in_progress = threading.Event()
+            kb._embedder = _FakeEmbedder()
+            kb._db = _FakeDB()
+            old_table = _FakeTable()
+            older_backup = _FakeTable()
+            kb._db.tables["chunks"] = old_table
+            kb._db.tables["chunks__backup"] = older_backup
+
+            kb.rebuild([str(docs)], ["md"], 50, 0, 4096, 30)
+
+            self.assertIs(kb._db.tables["chunks__backup"], old_table)
+            self.assertNotIn(older_backup, kb._db.tables.values())
 
     def test_auto_search_falls_back_to_vector_when_hybrid_execution_fails(self):
         kb = KB.__new__(KB)

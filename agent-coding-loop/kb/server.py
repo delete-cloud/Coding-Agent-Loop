@@ -307,24 +307,76 @@ class KB:
         self._table_name = table_name
         self._embedder = embedder
         self._lock = threading.Lock()
+        self._swap_lock = threading.Lock()
+        self._rebuild_state_lock = threading.Lock()
         self._rebuild_in_progress = threading.Event()
         self._db = lancedb.connect(db_path)
 
-    def _get_table(self):
+    def _ensure_runtime_state(self):
+        if not hasattr(self, "_lock") or self._lock is None:
+            self._lock = threading.Lock()
+        if not hasattr(self, "_swap_lock") or self._swap_lock is None:
+            self._swap_lock = threading.Lock()
+        if not hasattr(self, "_rebuild_state_lock") or self._rebuild_state_lock is None:
+            self._rebuild_state_lock = threading.Lock()
+        if not hasattr(self, "_rebuild_in_progress") or self._rebuild_in_progress is None:
+            self._rebuild_in_progress = threading.Event()
+
+    def _formal_table_name(self):
+        return self._table_name
+
+    def _temp_table_name(self):
+        return f"{self._table_name}__rebuild_tmp"
+
+    def _backup_table_name(self):
+        return f"{self._table_name}__backup"
+
+    def _stale_backup_table_name(self):
+        return f"{self._table_name}__backup_stale"
+
+    def _get_table_named(self, name):
         try:
-            return self._db.open_table(self._table_name)
+            return self._db.open_table(name)
         except Exception:
             return None
 
-    def _ensure_table(self, sample_rows):
-        tbl = self._get_table()
+    def _get_table(self):
+        return self._get_table_named(self._formal_table_name())
+
+    def _ensure_table(self, sample_rows, table_name=None):
+        tbl = self._get_table_named(table_name or self._formal_table_name())
         if tbl is not None:
             return tbl
-        return self._db.create_table(self._table_name, sample_rows, mode="overwrite")
+        return self._db.create_table(table_name or self._formal_table_name(), sample_rows, mode="overwrite")
 
-    def index(self, roots, exts, chunk_size, overlap, max_file_bytes, timeout_s):
-        if _flag_is_set(getattr(self, "_rebuild_in_progress", None)):
-            raise KBRebuildInProgress("rebuild already in progress")
+    def _drop_table_if_exists(self, name):
+        if self._get_table_named(name) is None:
+            return False
+        try:
+            self._db.drop_table(name, ignore_missing=True)
+        except TypeError:
+            self._db.drop_table(name)
+        return True
+
+    def _create_table_overwrite(self, name, rows):
+        return self._db.create_table(name, rows, mode="overwrite")
+
+    def _rename_table(self, cur_name, new_name):
+        self._db.rename_table(cur_name, new_name)
+
+    def _begin_rebuild(self):
+        self._ensure_runtime_state()
+        with self._rebuild_state_lock:
+            if _flag_is_set(self._rebuild_in_progress):
+                raise KBRebuildInProgress("rebuild already in progress")
+            self._rebuild_in_progress.set()
+
+    def _end_rebuild(self):
+        self._ensure_runtime_state()
+        with self._rebuild_state_lock:
+            self._rebuild_in_progress.clear()
+
+    def _prepare_rows(self, roots, exts, chunk_size, overlap, max_file_bytes, timeout_s):
         exts = [e.lower().lstrip(".") for e in (exts or []) if e]
         if not exts:
             exts = ["md", "txt", "go", "rs", "py", "js", "ts", "tsx", "java", "cpp", "h", "hpp", "c", "yaml", "yml", "json", "toml", "typ"]
@@ -354,7 +406,7 @@ class KB:
                     }
                 )
         if not docs:
-            return {"indexed": 0, "db_path": self._db_path, "table": self._table_name}
+            return []
         vectors = []
         batch = 64
         for i in range(0, len(docs), batch):
@@ -375,6 +427,15 @@ class KB:
                     "updated_at": d["updated_at"],
                 }
             )
+        return rows
+
+    def index(self, roots, exts, chunk_size, overlap, max_file_bytes, timeout_s):
+        self._ensure_runtime_state()
+        if _flag_is_set(getattr(self, "_rebuild_in_progress", None)):
+            raise KBRebuildInProgress("rebuild already in progress")
+        rows = self._prepare_rows(roots, exts, chunk_size, overlap, max_file_bytes, timeout_s)
+        if not rows:
+            return {"indexed": 0, "db_path": self._db_path, "table": self._table_name}
         with self._lock:
             tbl = self._ensure_table(rows[:1])
             try:
@@ -386,9 +447,58 @@ class KB:
         return {"indexed": len(rows), "db_path": self._db_path, "table": self._table_name}
 
     def rebuild(self, roots, exts, chunk_size, overlap, max_file_bytes, timeout_s):
-        if _flag_is_set(getattr(self, "_rebuild_in_progress", None)):
-            raise KBRebuildInProgress("rebuild already in progress")
-        raise NotImplementedError("explicit rebuild not implemented yet")
+        self._ensure_runtime_state()
+        roots = [str(r).strip() for r in (roots or []) if str(r).strip()]
+        if not roots:
+            raise ValueError("rebuild requires explicit non-empty roots")
+
+        self._begin_rebuild()
+        formal_name = self._formal_table_name()
+        temp_name = self._temp_table_name()
+        backup_name = self._backup_table_name()
+        stale_backup_name = self._stale_backup_table_name()
+        try:
+            with self._swap_lock:
+                if self._drop_table_if_exists(temp_name) is False and self._get_table_named(temp_name) is not None:
+                    raise RuntimeError(f"failed to clear leftover temp table {temp_name}")
+
+            rows = self._prepare_rows(roots, exts, chunk_size, overlap, max_file_bytes, timeout_s)
+            if not rows:
+                raise ValueError("rebuild produced no rows")
+
+            self._create_table_overwrite(temp_name, rows)
+
+            with self._swap_lock:
+                stale_backup_present = self._get_table_named(backup_name) is not None
+                if stale_backup_present:
+                    self._drop_table_if_exists(stale_backup_name)
+                    self._rename_table(backup_name, stale_backup_name)
+
+                promoted_backup = False
+                try:
+                    if self._get_table_named(formal_name) is not None:
+                        self._rename_table(formal_name, backup_name)
+                        promoted_backup = True
+                    self._rename_table(temp_name, formal_name)
+                except Exception:
+                    if promoted_backup and self._get_table_named(backup_name) is not None:
+                        self._rename_table(backup_name, formal_name)
+                    if stale_backup_present and self._get_table_named(stale_backup_name) is not None:
+                        self._rename_table(stale_backup_name, backup_name)
+                    raise
+
+                self._drop_table_if_exists(stale_backup_name)
+
+            return {
+                "rebuilt": True,
+                "indexed": len(rows),
+                "db_path": self._db_path,
+                "table": formal_name,
+                "backup_table": backup_name,
+                "roots": list(roots),
+            }
+        finally:
+            self._end_rebuild()
 
     def _collect_rows(self, searcher, top_k, where):
         if searcher is None:
