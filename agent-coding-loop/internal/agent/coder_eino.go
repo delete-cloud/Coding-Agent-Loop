@@ -1355,13 +1355,18 @@ func (c *Coder) generateWithEino(ctx context.Context, in CoderInput) (CoderOutpu
 	if err != nil {
 		return CoderOutput{}, err
 	}
-	var out CoderOutput
-	content := ""
+	raw := ""
 	if msg != nil {
-		content = msg.Content
+		raw = msg.Content
 	}
-	if err := json.Unmarshal([]byte(extractJSON(content)), &out); err != nil {
-		return CoderOutput{}, fmt.Errorf("parse coder json failed: %w; content=%s", err, content)
+	var wire map[string]any
+	if err := decodeJSONWithRepair(ctx, raw, &wire, c.client.RepairJSON); err != nil {
+		return CoderOutput{}, err
+	}
+	b, _ := json.Marshal(wire)
+	out, err := decodeCoderOutput(string(b))
+	if err != nil {
+		return CoderOutput{}, err
 	}
 	if len(out.Commands) == 0 {
 		out.Commands = in.Commands

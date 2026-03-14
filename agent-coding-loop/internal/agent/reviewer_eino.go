@@ -196,14 +196,18 @@ func (r *Reviewer) reviewWithEino(ctx context.Context, in ReviewInput) (ReviewOu
 	if err != nil {
 		return ReviewOutput{}, err
 	}
-	var out ReviewOutput
-	content := ""
+	raw := ""
 	if msg != nil {
-		content = msg.Content
+		raw = msg.Content
 	}
-	out, err = decodeReviewOutput(content)
+	var wire map[string]any
+	if err := decodeJSONWithRepair(ctx, raw, &wire, r.client.RepairJSON); err != nil {
+		return ReviewOutput{}, err
+	}
+	b, _ := json.Marshal(wire)
+	out, err := decodeReviewOutput(string(b))
 	if err != nil {
-		return ReviewOutput{}, fmt.Errorf("parse reviewer json failed: %w; content=%s", err, content)
+		return ReviewOutput{}, err
 	}
 	normalizeReviewOutput(&out)
 	return out, nil
