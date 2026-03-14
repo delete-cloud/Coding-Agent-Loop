@@ -10,6 +10,7 @@ from pathlib import Path
 from eval.ab.run_ab import (
     aggregate_metrics,
     build_paired_analysis,
+    build_report,
     build_goal,
     collect_overlay_paths,
     evaluate_expectations,
@@ -207,6 +208,91 @@ class RunABTests(unittest.TestCase):
 
         self.assertFalse(paired["available"])
         self.assertEqual("no_valid_pairs", paired["reason"])
+
+    def test_build_paired_analysis_uses_final_row_status_after_strict_mode(self):
+        rows = [
+            {
+                "experiment": "no_rag",
+                "task_id": "strict_1",
+                "status": "completed",
+                "strict_mode": True,
+                "strict_reasons": [],
+            },
+            {
+                "experiment": "rag",
+                "task_id": "strict_1",
+                "status": "failed",
+                "strict_mode": True,
+                "strict_reasons": ["missing_citation"],
+            },
+        ]
+
+        paired = build_paired_analysis(rows)
+
+        self.assertEqual(1, paired["counts"]["baseline_only_pass"])
+        self.assertEqual(0, paired["counts"]["candidate_only_pass"])
+
+    def test_build_report_includes_paired_analysis_payload(self):
+        rows = [
+            {
+                "experiment": "no_rag",
+                "task_id": "t1",
+                "status": "completed",
+                "duration_sec": 1.0,
+                "requires_kb": False,
+                "kb_signal": False,
+                "citation_recall": 0.0,
+            },
+            {
+                "experiment": "rag",
+                "task_id": "t1",
+                "status": "failed",
+                "duration_sec": 2.0,
+                "requires_kb": False,
+                "kb_signal": False,
+                "citation_recall": 0.0,
+            },
+        ]
+
+        report = build_report(meta={"strict_mode": True}, rows=rows)
+
+        self.assertIn("paired_analysis", report)
+        self.assertEqual("no_rag", report["paired_analysis"]["baseline_experiment"])
+        self.assertEqual("rag", report["paired_analysis"]["candidate_experiment"])
+        self.assertTrue(report["paired_analysis"]["available"])
+        self.assertIn("excluded_invalid_task_id_rows", report["paired_analysis"]["integrity"])
+
+    def test_build_report_preserves_invalid_task_id_payload(self):
+        rows = [
+            {
+                "experiment": "no_rag",
+                "task_id": "",
+                "status": "completed",
+                "duration_sec": 1.0,
+                "requires_kb": False,
+                "kb_signal": False,
+                "citation_recall": 0.0,
+            },
+            {
+                "experiment": "rag",
+                "task_id": "   ",
+                "status": "failed",
+                "duration_sec": 2.0,
+                "requires_kb": False,
+                "kb_signal": False,
+                "citation_recall": 0.0,
+            },
+        ]
+
+        report = build_report(meta={"strict_mode": False}, rows=rows)
+
+        self.assertEqual(
+            [
+                {"row_index": 0, "experiment": "no_rag", "task_id": "", "status": "completed"},
+                {"row_index": 1, "experiment": "rag", "task_id": "   ", "status": "failed"},
+            ],
+            report["paired_analysis"]["integrity"]["excluded_invalid_task_id_rows"],
+        )
 
     def test_extract_goal_target_files(self):
         goal = "更新 docs/eino-agent-loop.md，并补充 README.md，同时忽略 pkg/xxx.go。"
