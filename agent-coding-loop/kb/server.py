@@ -267,6 +267,26 @@ def _extract_md_heading(text):
 DEFAULT_LOCAL_EMBED_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 
 
+class KBRebuildRequired(ValueError):
+    pass
+
+
+def _is_rebuild_required_error(err):
+    text = str(err or "").strip().lower()
+    if not text:
+        return False
+    needles = (
+        "schema",
+        "mismatch",
+        "incompatible",
+        "column",
+        "field",
+        "type",
+        "vector",
+    )
+    return any(needle in text for needle in needles)
+
+
 class KB:
     def __init__(self, db_path, table_name, embedder):
         import lancedb
@@ -344,10 +364,10 @@ class KB:
             tbl = self._ensure_table(rows[:1])
             try:
                 tbl.add(rows)
-            except Exception:
-                self._db.drop_table(self._table_name)
-                tbl = self._ensure_table(rows)
-                tbl.add(rows)
+            except Exception as e:
+                if _is_rebuild_required_error(e):
+                    raise KBRebuildRequired(str(e)) from e
+                raise
         return {"indexed": len(rows), "db_path": self._db_path, "table": self._table_name}
 
     def _collect_rows(self, searcher, top_k, where):

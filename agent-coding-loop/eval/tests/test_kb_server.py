@@ -47,8 +47,10 @@ class _FakeSearcher:
 
 
 class _FakeTable:
-    def __init__(self):
+    def __init__(self, *, add_error=None):
         self.calls = []
+        self.rows_added = []
+        self._add_error = add_error
 
     def search(self, query, query_type=None):
         self.calls.append((query, query_type))
@@ -70,6 +72,33 @@ class _FakeTable:
             )
         return _FakeSearcher(rows=[])
 
+    def add(self, rows):
+        if self._add_error is not None:
+            raise self._add_error
+        self.rows_added.extend(rows)
+
+
+class _FakeDB:
+    def __init__(self):
+        self.tables = {}
+        self.drop_calls = []
+        self.create_calls = []
+
+    def open_table(self, name):
+        if name not in self.tables:
+            raise RuntimeError("missing table")
+        return self.tables[name]
+
+    def create_table(self, name, sample_rows, mode="create"):
+        self.create_calls.append((name, list(sample_rows), mode))
+        table = _FakeTable()
+        self.tables[name] = table
+        return table
+
+    def drop_table(self, name):
+        self.drop_calls.append(name)
+        self.tables.pop(name, None)
+
 
 class _FakeEmbedder:
     def embed(self, texts, timeout_s):
@@ -86,6 +115,26 @@ class _FakeLock:
 
 
 class KBSearchFallbackTests(unittest.TestCase):
+    def test_index_preserves_existing_table_when_add_requires_rebuild(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            docs = Path(tmp) / "docs"
+            docs.mkdir(parents=True, exist_ok=True)
+            (docs / "guide.md").write_text("# Guide\nhello world\n", encoding="utf-8")
+
+            kb = KB.__new__(KB)
+            kb._db_path = "/tmp/kb"
+            kb._table_name = "chunks"
+            kb._lock = _FakeLock()
+            kb._embedder = _FakeEmbedder()
+            kb._db = _FakeDB()
+            kb._db.tables["chunks"] = _FakeTable(add_error=ValueError("schema mismatch"))
+
+            with self.assertRaises(ValueError):
+                kb.index([str(docs)], ["md"], 50, 0, 4096, 30)
+
+            self.assertEqual([], kb._db.drop_calls)
+            self.assertIn("chunks", kb._db.tables)
+
     def test_auto_search_falls_back_to_vector_when_hybrid_execution_fails(self):
         kb = KB.__new__(KB)
         kb._embedder = _FakeEmbedder()
