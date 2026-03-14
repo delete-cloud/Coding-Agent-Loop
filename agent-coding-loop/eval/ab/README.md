@@ -79,6 +79,10 @@ python3 eval/ab/run_ab.py \
 - `eval/reports/ab/ab_report.json`
 - `eval/reports/ab/ab_report.md`
 
+`ab_report.json` now includes `paired_analysis`, which joins `no_rag` and `rag` rows by `task_id`. Paired outcomes use the final row status after strict-mode normalization: `completed` counts as pass, while `failed`, `needs_changes`, and `blocked` count as fail. Blank `task_id` rows are excluded before pairing and counted separately from task-level integrity issues. Task-level exclusions use a single precedence order (`duplicate_pair` before `missing_pair` before `non_terminal`) so the integrity counters remain stable. If one experiment arm is absent or exclusions leave zero valid pairs, `paired_analysis` remains present but is marked `available=false` with a machine-readable reason instead of being conflated with `no_discordant_pairs`.
+
+`ab_report.md` now renders the same paired-analysis section for humans, including integrity counters and an explicit `Paired analysis unavailable: <reason>` note for `--only`, `--dry-run`, or otherwise unpaired outputs.
+
 ## 4) Dry-run sanity check
 
 ```bash
