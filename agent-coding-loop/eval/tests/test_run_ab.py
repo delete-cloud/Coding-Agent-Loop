@@ -13,6 +13,7 @@ from eval.ab.run_ab import (
     build_report,
     build_goal,
     collect_overlay_paths,
+    exact_mcnemar_p_value,
     evaluate_expectations,
     extract_goal_target_files,
     render_markdown,
@@ -158,6 +159,19 @@ class RunABTests(unittest.TestCase):
         self.assertEqual(0, paired["integrity"]["excluded_missing_pair_count"])
         self.assertEqual(0, paired["integrity"]["excluded_non_terminal_count"])
 
+    def test_build_paired_analysis_normalizes_task_id_whitespace_for_grouping(self):
+        rows = [
+            {"experiment": "no_rag", "task_id": " task-1 ", "status": "completed"},
+            {"experiment": "rag", "task_id": "task-1", "status": "failed"},
+        ]
+
+        paired = build_paired_analysis(rows)
+
+        self.assertTrue(paired["available"])
+        self.assertEqual(1, paired["integrity"]["valid_pair_count"])
+        self.assertEqual(0, paired["integrity"]["excluded_missing_pair_count"])
+        self.assertEqual("task-1", paired["pairs"][0]["task_id"])
+
     def test_build_paired_analysis_reports_exact_mcnemar_result(self):
         rows = [
             {"experiment": "no_rag", "task_id": "t1", "status": "failed"},
@@ -209,6 +223,9 @@ class RunABTests(unittest.TestCase):
 
         self.assertFalse(paired["available"])
         self.assertEqual("no_valid_pairs", paired["reason"])
+
+    def test_exact_mcnemar_p_value_handles_large_balanced_discordant_counts(self):
+        self.assertAlmostEqual(1.0, exact_mcnemar_p_value(600, 600))
 
     def test_build_paired_analysis_uses_final_row_status_after_strict_mode(self):
         rows = [

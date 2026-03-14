@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from fractions import Fraction
 import json
 import logging
 import math
@@ -394,7 +395,8 @@ def exact_mcnemar_p_value(b: int, c: int) -> float:
     if n <= 0:
         return 1.0
     tail = sum(math.comb(n, k) for k in range(0, min(b, c) + 1))
-    return min(1.0, 2.0 * tail / float(2**n))
+    numerator = min(2 * tail, 2**n)
+    return float(Fraction(numerator, 2**n))
 
 
 def build_paired_analysis(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -419,14 +421,15 @@ def build_paired_analysis(rows: list[dict[str, Any]]) -> dict[str, Any]:
         exp = str(row.get("experiment", "")).strip()
         if exp in {baseline_experiment, candidate_experiment}:
             seen_experiments.add(exp)
-        task_id = str(row.get("task_id", ""))
-        if not task_id.strip():
+        raw_task_id = str(row.get("task_id", ""))
+        task_id = raw_task_id.strip()
+        if not task_id:
             integrity["excluded_invalid_task_id_count"] += 1
             integrity["excluded_invalid_task_id_rows"].append(
                 {
                     "row_index": idx,
                     "experiment": exp,
-                    "task_id": task_id,
+                    "task_id": raw_task_id,
                     "status": str(row.get("status", "")).strip(),
                 }
             )
