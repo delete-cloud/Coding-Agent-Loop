@@ -204,6 +204,25 @@ class KBSearchFallbackTests(unittest.TestCase):
             self.assertEqual([], kb._db.drop_calls)
             self.assertIn("chunks", kb._db.tables)
 
+    def test_index_does_not_misclassify_generic_type_errors_as_rebuild_required(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            docs = Path(tmp) / "docs"
+            docs.mkdir(parents=True, exist_ok=True)
+            (docs / "guide.md").write_text("# Guide\nhello world\n", encoding="utf-8")
+
+            kb = KB.__new__(KB)
+            kb._db_path = "/tmp/kb"
+            kb._table_name = "chunks"
+            kb._lock = _FakeLock()
+            kb._swap_lock = _FakeLock()
+            kb._embedder = _FakeEmbedder()
+            kb._db = _FakeDB()
+            err = TypeError("drop_table() got an unexpected keyword argument 'type'")
+            kb._db.tables["chunks"] = _FakeTable(add_error=err)
+
+            with self.assertRaisesRegex(TypeError, "unexpected keyword argument 'type'"):
+                kb.index([str(docs)], ["md"], 50, 0, 4096, 30)
+
     def test_index_rejects_when_rebuild_is_in_progress(self):
         kb = KB.__new__(KB)
         flag = threading.Event()
@@ -336,6 +355,38 @@ class KBSearchFallbackTests(unittest.TestCase):
         self.assertEqual([], errors)
         self.assertEqual(1, len(results))
         self.assertEqual("eval/ab/kb/rag_pipeline.md", results[0]["hits"][0]["path"])
+
+    def test_index_waits_for_swap_and_only_adds_after_window_closes(self):
+        kb = KB.__new__(KB)
+        kb._db_path = "/tmp/kb"
+        kb._table_name = "chunks"
+        kb._lock = _FakeLock()
+        kb._swap_lock = threading.Lock()
+        kb._rebuild_in_progress = threading.Event()
+        kb._embedder = _FakeEmbedder()
+        table = _FakeTable()
+        kb._prepare_rows = lambda *args: [{"id": "doc:0:1", "vector": [0.1, 0.2, 0.3]}]
+        kb._ensure_table = lambda sample_rows: table
+
+        results = []
+
+        kb._swap_lock.acquire()
+        try:
+            worker = threading.Thread(
+                target=lambda: results.append(kb.index(["docs"], ["md"], 50, 0, 4096, 30)),
+                daemon=True,
+            )
+            worker.start()
+            time.sleep(0.05)
+            self.assertTrue(worker.is_alive(), "index should wait until swap lock is released")
+            self.assertEqual([], table.rows_added)
+        finally:
+            kb._swap_lock.release()
+
+        worker.join(timeout=1.0)
+        self.assertFalse(worker.is_alive(), "index did not resume after swap lock release")
+        self.assertEqual(1, len(results))
+        self.assertEqual(1, len(table.rows_added))
 
     def test_auto_search_falls_back_to_vector_when_hybrid_execution_fails(self):
         kb = KB.__new__(KB)

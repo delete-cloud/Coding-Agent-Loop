@@ -279,16 +279,31 @@ def _is_rebuild_required_error(err):
     text = str(err or "").strip().lower()
     if not text:
         return False
-    needles = (
-        "schema",
-        "mismatch",
-        "incompatible",
-        "column",
-        "field",
-        "type",
-        "vector",
+    exact_phrases = (
+        "schema mismatch",
+        "mismatched schema",
+        "schema does not match",
+        "incompatible schema",
+        "type mismatch",
+        "mismatched type",
+        "incompatible type",
+        "vector dimension mismatch",
+        "vector size mismatch",
+        "vector shape mismatch",
     )
-    return any(needle in text for needle in needles)
+    if any(phrase in text for phrase in exact_phrases):
+        return True
+    if "schema" in text and any(token in text for token in ("mismatch", "incompatible", "conflict")):
+        return True
+    if ("column" in text or "field" in text) and any(
+        token in text for token in ("type mismatch", "mismatched type", "incompatible type")
+    ):
+        return True
+    if "vector" in text and any(
+        token in text for token in ("dimension mismatch", "size mismatch", "shape mismatch", "incompatible")
+    ):
+        return True
+    return False
 
 
 def _flag_is_set(flag):
@@ -436,14 +451,17 @@ class KB:
         rows = self._prepare_rows(roots, exts, chunk_size, overlap, max_file_bytes, timeout_s)
         if not rows:
             return {"indexed": 0, "db_path": self._db_path, "table": self._table_name}
-        with self._lock:
-            tbl = self._ensure_table(rows[:1])
-            try:
-                tbl.add(rows)
-            except Exception as e:
-                if _is_rebuild_required_error(e):
-                    raise KBRebuildRequired(str(e)) from e
-                raise
+        with self._swap_lock:
+            if _flag_is_set(getattr(self, "_rebuild_in_progress", None)):
+                raise KBRebuildInProgress("rebuild already in progress")
+            with self._lock:
+                tbl = self._ensure_table(rows[:1])
+                try:
+                    tbl.add(rows)
+                except Exception as e:
+                    if _is_rebuild_required_error(e):
+                        raise KBRebuildRequired(str(e)) from e
+                    raise
         return {"indexed": len(rows), "db_path": self._db_path, "table": self._table_name}
 
     def rebuild(self, roots, exts, chunk_size, overlap, max_file_bytes, timeout_s):
