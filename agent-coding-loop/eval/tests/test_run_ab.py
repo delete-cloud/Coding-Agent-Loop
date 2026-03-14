@@ -156,6 +156,58 @@ class RunABTests(unittest.TestCase):
         self.assertEqual(0, paired["integrity"]["excluded_missing_pair_count"])
         self.assertEqual(0, paired["integrity"]["excluded_non_terminal_count"])
 
+    def test_build_paired_analysis_reports_exact_mcnemar_result(self):
+        rows = [
+            {"experiment": "no_rag", "task_id": "t1", "status": "failed"},
+            {"experiment": "rag", "task_id": "t1", "status": "completed"},
+            {"experiment": "no_rag", "task_id": "t2", "status": "failed"},
+            {"experiment": "rag", "task_id": "t2", "status": "completed"},
+            {"experiment": "no_rag", "task_id": "t3", "status": "failed"},
+            {"experiment": "rag", "task_id": "t3", "status": "completed"},
+        ]
+
+        paired = build_paired_analysis(rows)
+
+        self.assertEqual(0, paired["counts"]["baseline_only_pass"])
+        self.assertEqual(3, paired["counts"]["candidate_only_pass"])
+        self.assertTrue(paired["significance"]["applied"])
+        self.assertEqual("exact_mcnemar", paired["significance"]["test"])
+        self.assertAlmostEqual(0.25, paired["significance"]["p_value"])
+
+    def test_build_paired_analysis_skips_significance_without_discordant_pairs(self):
+        rows = [
+            {"experiment": "no_rag", "task_id": "t1", "status": "completed"},
+            {"experiment": "rag", "task_id": "t1", "status": "completed"},
+            {"experiment": "no_rag", "task_id": "t2", "status": "failed"},
+            {"experiment": "rag", "task_id": "t2", "status": "failed"},
+        ]
+
+        paired = build_paired_analysis(rows)
+
+        self.assertFalse(paired["significance"]["applied"])
+        self.assertEqual("no_discordant_pairs", paired["significance"]["reason"])
+
+    def test_build_paired_analysis_marks_missing_experiment_arm_as_unavailable(self):
+        rows = [
+            {"experiment": "rag", "task_id": "t1", "status": "completed"},
+        ]
+
+        paired = build_paired_analysis(rows)
+
+        self.assertFalse(paired["available"])
+        self.assertEqual("missing_experiment_arm", paired["reason"])
+
+    def test_build_paired_analysis_marks_no_valid_pairs_as_unavailable(self):
+        rows = [
+            {"experiment": "no_rag", "task_id": "t1", "status": "dry_run"},
+            {"experiment": "rag", "task_id": "t1", "status": "dry_run"},
+        ]
+
+        paired = build_paired_analysis(rows)
+
+        self.assertFalse(paired["available"])
+        self.assertEqual("no_valid_pairs", paired["reason"])
+
     def test_extract_goal_target_files(self):
         goal = "更新 docs/eino-agent-loop.md，并补充 README.md，同时忽略 pkg/xxx.go。"
         got = extract_goal_target_files(goal)
