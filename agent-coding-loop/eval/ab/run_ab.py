@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -388,6 +389,14 @@ def status_to_pair_outcome(status: str) -> str | None:
     return None
 
 
+def exact_mcnemar_p_value(b: int, c: int) -> float:
+    n = b + c
+    if n <= 0:
+        return 1.0
+    tail = sum(math.comb(n, k) for k in range(0, min(b, c) + 1))
+    return min(1.0, 2.0 * tail / float(2**n))
+
+
 def build_paired_analysis(rows: list[dict[str, Any]]) -> dict[str, Any]:
     baseline_experiment = "no_rag"
     candidate_experiment = "rag"
@@ -405,20 +414,23 @@ def build_paired_analysis(rows: list[dict[str, Any]]) -> dict[str, Any]:
         },
     }
     grouped: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    seen_experiments: set[str] = set()
     for idx, row in enumerate(rows):
+        exp = str(row.get("experiment", "")).strip()
+        if exp in {baseline_experiment, candidate_experiment}:
+            seen_experiments.add(exp)
         task_id = str(row.get("task_id", ""))
         if not task_id.strip():
             integrity["excluded_invalid_task_id_count"] += 1
             integrity["excluded_invalid_task_id_rows"].append(
                 {
                     "row_index": idx,
-                    "experiment": str(row.get("experiment", "")).strip(),
+                    "experiment": exp,
                     "task_id": task_id,
                     "status": str(row.get("status", "")).strip(),
                 }
             )
             continue
-        exp = str(row.get("experiment", "")).strip()
         if exp not in {baseline_experiment, candidate_experiment}:
             continue
         grouped.setdefault(task_id, {baseline_experiment: [], candidate_experiment: []})[exp].append(row)
@@ -450,14 +462,63 @@ def build_paired_analysis(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 "task_id": task_id,
                 "baseline_outcome": baseline_outcome,
                 "candidate_outcome": candidate_outcome,
-            }
-        )
+                }
+            )
 
     integrity["valid_pair_count"] = len(pairs)
+    counts = {
+        "both_pass": 0,
+        "both_fail": 0,
+        "baseline_only_pass": 0,
+        "candidate_only_pass": 0,
+    }
+    for pair in pairs:
+        baseline_outcome = pair["baseline_outcome"]
+        candidate_outcome = pair["candidate_outcome"]
+        if baseline_outcome == "pass" and candidate_outcome == "pass":
+            counts["both_pass"] += 1
+        elif baseline_outcome == "fail" and candidate_outcome == "fail":
+            counts["both_fail"] += 1
+        elif baseline_outcome == "pass":
+            counts["baseline_only_pass"] += 1
+        else:
+            counts["candidate_only_pass"] += 1
+
+    available = True
+    reason = ""
+    if baseline_experiment not in seen_experiments or candidate_experiment not in seen_experiments:
+        available = False
+        reason = "missing_experiment_arm"
+    elif not pairs:
+        available = False
+        reason = "no_valid_pairs"
+
+    discordant_pair_count = counts["baseline_only_pass"] + counts["candidate_only_pass"]
+    significance = {
+        "applied": False,
+        "test": "exact_mcnemar",
+        "p_value": None,
+        "discordant_pair_count": discordant_pair_count,
+        "reason": "",
+    }
+    if available:
+        if discordant_pair_count > 0:
+            significance["applied"] = True
+            significance["p_value"] = exact_mcnemar_p_value(
+                counts["baseline_only_pass"],
+                counts["candidate_only_pass"],
+            )
+        else:
+            significance["reason"] = "no_discordant_pairs"
+
     return {
         "baseline_experiment": baseline_experiment,
         "candidate_experiment": candidate_experiment,
+        "available": available,
+        "reason": reason,
         "pairs": pairs,
+        "counts": counts,
+        "significance": significance,
         "integrity": integrity,
     }
 
