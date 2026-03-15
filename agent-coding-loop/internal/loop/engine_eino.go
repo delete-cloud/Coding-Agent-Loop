@@ -304,6 +304,13 @@ func (e *Engine) run(ctx context.Context, spec model.RunSpec, existingRunID stri
 	if err := e.store.UpdateRunStatus(ctx, runID, model.RunStatusRunning, "run started"); err != nil {
 		return model.RunResult{RunID: runID, Status: model.RunStatusFailed}, err
 	}
+	reason := "fresh_run"
+	if existingRunID != "" {
+		reason = "resume"
+	}
+	e.emitProgress(ctx, runID, 0, model.ProgressEventRunStarted, model.ProgressStatusStarted, "run started", map[string]any{
+		"reason": reason,
+	})
 
 	runRecord, err := e.store.GetRun(ctx, runID)
 	if err != nil {
@@ -338,6 +345,9 @@ func (e *Engine) run(ctx context.Context, spec model.RunSpec, existingRunID stri
 	runner, err := e.buildLoopRunner(ctx)
 	if err != nil {
 		_ = e.store.UpdateRunStatus(ctx, runID, model.RunStatusFailed, "compile eino loop failed")
+		e.emitProgress(ctx, runID, 0, model.ProgressEventRunFailed, model.ProgressStatusError, "compile eino loop failed", map[string]any{
+			"error": "compile eino loop failed",
+		})
 		return model.RunResult{RunID: runID, Status: model.RunStatusFailed}, err
 	}
 
@@ -348,10 +358,16 @@ func (e *Engine) run(ctx context.Context, spec model.RunSpec, existingRunID stri
 	output, err := runner.Invoke(ctx, flowInput, invokeOpts...)
 	if err != nil {
 		_ = e.store.UpdateRunStatus(ctx, runID, model.RunStatusFailed, "eino invoke failed: "+err.Error())
+		e.emitProgress(ctx, runID, 0, model.ProgressEventRunFailed, model.ProgressStatusError, "eino invoke failed", map[string]any{
+			"error": truncateString(err.Error(), 500),
+		})
 		return model.RunResult{RunID: runID, Status: model.RunStatusFailed}, err
 	}
 	if output == nil {
 		_ = e.store.UpdateRunStatus(ctx, runID, model.RunStatusFailed, "eino loop returned nil output")
+		e.emitProgress(ctx, runID, 0, model.ProgressEventRunFailed, model.ProgressStatusError, "eino loop returned nil output", map[string]any{
+			"error": "eino loop returned nil output",
+		})
 		return model.RunResult{RunID: runID, Status: model.RunStatusFailed}, fmt.Errorf("eino loop returned nil output")
 	}
 	if output.Result.RunID == "" {
@@ -414,6 +430,7 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 	st.Iteration++
 	iteration := st.Iteration
 	started := time.Now().UnixMilli()
+	e.emitProgress(ctx, st.RunID, iteration, model.ProgressEventIterationStarted, model.ProgressStatusStarted, fmt.Sprintf("iteration %d started", iteration), nil)
 	e.maybePreflightKBSearch(ctx, st, iteration)
 
 	currentDiff := mustDiff(ctx, e.git, st.RepoAbs)
@@ -445,8 +462,12 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 			CreatedAt: time.Now().UnixMilli(),
 		})
 	})
+	e.emitProgress(ctx, st.RunID, iteration, model.ProgressEventCoderGenerating, model.ProgressStatusStarted, "coder generating", nil)
 	coderOut, err := e.coder.Generate(coderCtx, coderIn)
 	if err != nil {
+		e.emitProgress(ctx, st.RunID, iteration, model.ProgressEventCoderGenerating, model.ProgressStatusError, "coder failed", map[string]any{
+			"error": truncateString(err.Error(), 500),
+		})
 		_ = e.store.InsertToolCall(ctx, sqlite.ToolCallRecord{
 			RunID:     st.RunID,
 			Iteration: iteration,
@@ -471,6 +492,7 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 		_ = e.store.UpdateRunStatus(ctx, st.RunID, model.RunStatusFailed, st.Summary)
 		return st, nil
 	}
+	e.emitProgress(ctx, st.RunID, iteration, model.ProgressEventCoderGenerating, model.ProgressStatusCompleted, "coder generated patch", nil)
 	coderMetaJSON := mustJSON(map[string]any{
 		"used_fallback":   coderOut.UsedFallback,
 		"fallback_source": strings.TrimSpace(coderOut.FallbackSource),
@@ -503,6 +525,7 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 			_ = e.store.UpdateRunStatus(ctx, st.RunID, model.RunStatusBlocked, st.Summary)
 			return st, nil
 		}
+		e.emitProgress(ctx, st.RunID, iteration, model.ProgressEventPatchApplying, model.ProgressStatusStarted, "applying patch", nil)
 		err := e.git.ApplyPatch(ctx, st.RepoAbs, coderOut.Patch)
 		callStatus := "completed"
 		callOutput := "patch applied"
@@ -520,6 +543,10 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 			CreatedAt: time.Now().UnixMilli(),
 		})
 		if err != nil {
+			e.emitProgress(ctx, st.RunID, iteration, model.ProgressEventPatchFailed, model.ProgressStatusError, "patch apply failed", map[string]any{
+				"error":  truncateString(err.Error(), 500),
+				"reason": "will_retry",
+			})
 			_ = e.store.InsertStep(ctx, sqlite.StepRecord{
 				RunID:     st.RunID,
 				Iteration: iteration,
@@ -533,8 +560,12 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 			st.PreviousReview = "Patch apply failed: " + err.Error()
 			st.Summary = st.PreviousReview
 			_ = e.store.UpdateRunStatus(ctx, st.RunID, model.RunStatusNeedsChange, st.Summary)
+			e.emitProgress(ctx, st.RunID, iteration, model.ProgressEventIterationComplete, model.ProgressStatusCompleted, "iteration completed: request changes", map[string]any{
+				"decision": string(model.LoopDecisionRequestChanges),
+			})
 			return st, nil
 		}
+		e.emitProgress(ctx, st.RunID, iteration, model.ProgressEventPatchApplying, model.ProgressStatusCompleted, "patch applied", nil)
 	}
 
 	cmds := coderOut.Commands
@@ -552,6 +583,10 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 			_ = e.store.UpdateRunStatus(ctx, st.RunID, model.RunStatusBlocked, st.Summary)
 			return st, nil
 		}
+		e.emitProgress(ctx, st.RunID, iteration, model.ProgressEventCommandRunning, model.ProgressStatusStarted, "running command: "+cmd, map[string]any{
+			"command_kind": progressCommandKind(st.Commands, cmd),
+			"command":      cmd,
+		})
 		stdout, stderr, err := e.runner.Run(ctx, cmd, st.RepoAbs)
 		callStatus := "completed"
 		combined := strings.TrimSpace(stdout + "\n" + stderr)
@@ -572,6 +607,18 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 			Status:    callStatus,
 			CreatedAt: time.Now().UnixMilli(),
 		})
+		progressStatus := model.ProgressStatusCompleted
+		progressSummary := "command completed: " + cmd
+		progressDetail := map[string]any{
+			"command_kind": progressCommandKind(st.Commands, cmd),
+			"command":      cmd,
+		}
+		if err != nil {
+			progressStatus = model.ProgressStatusError
+			progressSummary = "command failed: " + cmd
+			progressDetail["error"] = truncateString(err.Error(), 500)
+		}
+		e.emitProgress(ctx, st.RunID, iteration, model.ProgressEventCommandRunning, progressStatus, progressSummary, progressDetail)
 	}
 	statusShort, _ := e.git.StatusShort(ctx, st.RepoAbs)
 	reviewIn := buildReviewInput(st, mustDiff(ctx, e.git, st.RepoAbs), statusShort, coderOut.Patch, commandOutput.String())
@@ -584,10 +631,14 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 		Status:    "started",
 		CreatedAt: time.Now().UnixMilli(),
 	})
+	e.emitProgress(ctx, st.RunID, iteration, model.ProgressEventReviewerReviewing, model.ProgressStatusStarted, "reviewer reviewing", nil)
 	reviewCtx, cancelReview := context.WithTimeout(ctx, e.reviewerTimeout)
 	reviewOut, err := e.reviewer.Review(reviewCtx, reviewIn)
 	cancelReview()
 	if err != nil {
+		e.emitProgress(ctx, st.RunID, iteration, model.ProgressEventReviewerReviewing, model.ProgressStatusError, "reviewer failed", map[string]any{
+			"error": truncateString(err.Error(), 500),
+		})
 		_ = e.store.InsertToolCall(ctx, sqlite.ToolCallRecord{
 			RunID:     st.RunID,
 			Iteration: iteration,
@@ -618,6 +669,9 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 		reviewOut, err = e.reviewer.Review(reviewCtx, reviewIn)
 		cancelReview()
 		if err != nil {
+			e.emitProgress(ctx, st.RunID, iteration, model.ProgressEventReviewerReviewing, model.ProgressStatusError, "reviewer failed after refresh", map[string]any{
+				"error": truncateString(err.Error(), 500),
+			})
 			_ = e.store.InsertToolCall(ctx, sqlite.ToolCallRecord{
 				RunID:     st.RunID,
 				Iteration: iteration,
@@ -643,6 +697,9 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 			return st, nil
 		}
 	}
+	e.emitProgress(ctx, st.RunID, iteration, model.ProgressEventReviewerReviewing, model.ProgressStatusCompleted, "reviewer completed", map[string]any{
+		"decision": strings.TrimSpace(reviewOut.Decision),
+	})
 	reviewerMetaJSON := mustJSON(map[string]any{
 		"used_fallback":   reviewOut.UsedFallback,
 		"fallback_source": strings.TrimSpace(reviewOut.FallbackSource),
@@ -685,6 +742,9 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 		st.PreviousReview = reviewOut.Summary
 		st.Summary = reviewOut.Summary
 		st.Status = model.RunStatusNeedsChange
+		e.emitProgress(ctx, st.RunID, iteration, model.ProgressEventIterationComplete, model.ProgressStatusCompleted, "iteration completed: request changes", map[string]any{
+			"decision": string(model.LoopDecisionRequestChanges),
+		})
 		return st, nil
 	}
 
@@ -700,6 +760,9 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 	st.Decision = model.LoopDecisionComplete
 	st.Status = model.RunStatusRunning
 	st.Summary = reviewOut.Summary
+	e.emitProgress(ctx, st.RunID, iteration, model.ProgressEventIterationComplete, model.ProgressStatusCompleted, "iteration completed: complete", map[string]any{
+		"decision": string(model.LoopDecisionComplete),
+	})
 	return st, nil
 }
 
@@ -1263,6 +1326,9 @@ func (e *Engine) finishNode(ctx context.Context, st *loopSession) (*loopSession,
 	if err != nil {
 		st.Status = model.RunStatusFailed
 		st.Summary = err.Error()
+		e.emitProgress(ctx, st.RunID, 0, model.ProgressEventRunFailed, model.ProgressStatusError, "run failed", map[string]any{
+			"error": truncateString(err.Error(), 500),
+		})
 		st.Result = model.RunResult{
 			RunID:   st.RunID,
 			Status:  model.RunStatusFailed,
@@ -1274,6 +1340,12 @@ func (e *Engine) finishNode(ctx context.Context, st *loopSession) (*loopSession,
 	st.Status = result.Status
 	st.Summary = result.Summary
 	st.Result = result
+	e.emitProgress(ctx, st.RunID, 0, model.ProgressEventRunCompleted, model.ProgressStatusCompleted, "run completed", map[string]any{
+		"branch":        result.Branch,
+		"commit":        result.Commit,
+		"pr_url":        result.PRURL,
+		"artifacts_dir": result.ArtifactsDir,
+	})
 	return st, nil
 }
 
@@ -1288,6 +1360,11 @@ func (e *Engine) blockedNode(ctx context.Context, st *loopSession) (*loopSession
 		}
 		_ = e.store.UpdateRunStatus(ctx, st.RunID, model.RunStatusBlocked, st.Summary)
 	}
+	e.emitProgress(ctx, st.RunID, 0, model.ProgressEventRunBlocked, model.ProgressStatusError, st.Summary, map[string]any{
+		"reason":        "doom_loop",
+		"blocked_tool":  st.DoomLastTool,
+		"blocked_count": st.DoomCount,
+	})
 	st.Result = model.RunResult{
 		RunID:   st.RunID,
 		Status:  model.RunStatusBlocked,
@@ -1310,6 +1387,9 @@ func (e *Engine) failedNode(ctx context.Context, st *loopSession) (*loopSession,
 	}
 	st.Status = model.RunStatusFailed
 	_ = e.store.UpdateRunStatus(ctx, st.RunID, model.RunStatusFailed, st.Summary)
+	e.emitProgress(ctx, st.RunID, 0, model.ProgressEventRunFailed, model.ProgressStatusError, st.Summary, map[string]any{
+		"error": truncateString(st.Summary, 500),
+	})
 	st.Result = model.RunResult{
 		RunID:   st.RunID,
 		Status:  model.RunStatusFailed,

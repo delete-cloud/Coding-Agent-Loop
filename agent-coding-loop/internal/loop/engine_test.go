@@ -414,6 +414,290 @@ func TestEnginePersistsCoderStageToolCalls(t *testing.T) {
 	}
 }
 
+func TestEngineEmitsProgressEventsForSuccessfulRun(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+
+	r := tools.NewRunner()
+	mustRun(t, r, repo, "git init")
+	mustRun(t, r, repo, "git config user.email test@example.com")
+	mustRun(t, r, repo, "git config user.name tester")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("demo\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustRun(t, r, repo, "git add README.md")
+	mustRun(t, r, repo, "git commit -m init")
+
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	store, err := sqlite.New(dbPath)
+	if err != nil {
+		t.Fatalf("sqlite.New: %v", err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	coder := agentpkg.NewCoder(agentpkg.ClientConfig{})
+	coder.SetRetryHooksForTests(agentpkg.CoderRetryHooksForTests{
+		Targeted: func(context.Context, agentpkg.CoderInput, []string, string) (agentpkg.CoderOutput, error) {
+			return agentpkg.CoderOutput{
+				Patch: `diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1 +1,2 @@
+ demo
++inspect docs
+`,
+			}, nil
+		},
+	})
+
+	engine := NewEngine(EngineDeps{
+		Store:      store,
+		Runner:     r,
+		Git:        gitpkg.NewClient(r),
+		GitHub:     ghpkg.NewClient(r),
+		Coder:      coder,
+		Reviewer:   agentpkg.NewReviewer(agentpkg.ClientConfig{}),
+		Skills:     skills.NewRegistry(nil),
+		Artifacts:  filepath.Join(repo, ".agent-loop-artifacts"),
+		DoomThresh: 3,
+	})
+
+	result, err := engine.Run(ctx, model.RunSpec{
+		Goal:          "在 README.md 增加一行说明",
+		Repo:          repo,
+		PRMode:        model.PRModeDryRun,
+		MaxIterations: 1,
+		Commands: model.CommandSet{
+			Test: []string{"echo PASS"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Status != model.RunStatusCompleted {
+		t.Fatalf("expected completed, got %s", result.Status)
+	}
+
+	events := mustListProgressEvents(t, ctx, store, result.RunID)
+	assertProgressContainsOrderedTypes(t, events,
+		model.ProgressEventRunStarted,
+		model.ProgressEventIterationStarted,
+		model.ProgressEventCoderGenerating,
+		model.ProgressEventReviewerReviewing,
+		model.ProgressEventIterationComplete,
+		model.ProgressEventRunCompleted,
+	)
+}
+
+func TestEngineEmitsPatchFailedWithoutMarkingRunFailed(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+
+	r := tools.NewRunner()
+	mustRun(t, r, repo, "git init")
+	mustRun(t, r, repo, "git config user.email test@example.com")
+	mustRun(t, r, repo, "git config user.name tester")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("demo\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustRun(t, r, repo, "git add README.md")
+	mustRun(t, r, repo, "git commit -m init")
+
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	store, err := sqlite.New(dbPath)
+	if err != nil {
+		t.Fatalf("sqlite.New: %v", err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	badPatch := `diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -9 +9,2 @@
+-missing
++missing
++inspect docs
+`
+	goodPatch := `diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1 +1,2 @@
+ demo
++inspect docs
+`
+	attempt := 0
+	coder := agentpkg.NewCoder(agentpkg.ClientConfig{})
+	coder.SetRetryHooksForTests(agentpkg.CoderRetryHooksForTests{
+		Targeted: func(context.Context, agentpkg.CoderInput, []string, string) (agentpkg.CoderOutput, error) {
+			attempt++
+			if attempt == 1 {
+				return agentpkg.CoderOutput{Patch: badPatch}, nil
+			}
+			return agentpkg.CoderOutput{Patch: goodPatch}, nil
+		},
+	})
+
+	engine := NewEngine(EngineDeps{
+		Store:      store,
+		Runner:     r,
+		Git:        gitpkg.NewClient(r),
+		GitHub:     ghpkg.NewClient(r),
+		Coder:      coder,
+		Reviewer:   agentpkg.NewReviewer(agentpkg.ClientConfig{}),
+		Skills:     skills.NewRegistry(nil),
+		Artifacts:  filepath.Join(repo, ".agent-loop-artifacts"),
+		DoomThresh: 3,
+	})
+
+	result, err := engine.Run(ctx, model.RunSpec{
+		Goal:          "在 README.md 增加一行说明",
+		Repo:          repo,
+		PRMode:        model.PRModeDryRun,
+		MaxIterations: 2,
+		Commands: model.CommandSet{
+			Test: []string{"echo PASS"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Status == model.RunStatusFailed {
+		t.Fatalf("expected non-failed terminal result, got %s", result.Status)
+	}
+
+	events := mustListProgressEvents(t, ctx, store, result.RunID)
+	assertProgressContainsType(t, events, model.ProgressEventPatchFailed)
+	assertProgressLacksType(t, events, model.ProgressEventRunFailed)
+}
+
+func TestEngineEmitsRunBlockedForDoomLoop(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+
+	r := tools.NewRunner()
+	mustRun(t, r, repo, "git init")
+	mustRun(t, r, repo, "git config user.email test@example.com")
+	mustRun(t, r, repo, "git config user.name tester")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("demo\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustRun(t, r, repo, "git add README.md")
+	mustRun(t, r, repo, "git commit -m init")
+
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	store, err := sqlite.New(dbPath)
+	if err != nil {
+		t.Fatalf("sqlite.New: %v", err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	badPatch := `diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -9 +9,2 @@
+-missing
++missing
++inspect docs
+`
+	coder := agentpkg.NewCoder(agentpkg.ClientConfig{})
+	coder.SetRetryHooksForTests(agentpkg.CoderRetryHooksForTests{
+		Targeted: func(context.Context, agentpkg.CoderInput, []string, string) (agentpkg.CoderOutput, error) {
+			return agentpkg.CoderOutput{Patch: badPatch}, nil
+		},
+	})
+
+	engine := NewEngine(EngineDeps{
+		Store:      store,
+		Runner:     r,
+		Git:        gitpkg.NewClient(r),
+		GitHub:     ghpkg.NewClient(r),
+		Coder:      coder,
+		Reviewer:   agentpkg.NewReviewer(agentpkg.ClientConfig{}),
+		Skills:     skills.NewRegistry(nil),
+		Artifacts:  filepath.Join(repo, ".agent-loop-artifacts"),
+		DoomThresh: 2,
+	})
+
+	result, err := engine.Run(ctx, model.RunSpec{
+		Goal:          "在 README.md 增加一行说明",
+		Repo:          repo,
+		PRMode:        model.PRModeDryRun,
+		MaxIterations: 3,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Status != model.RunStatusBlocked {
+		t.Fatalf("expected blocked, got %s", result.Status)
+	}
+
+	events := mustListProgressEvents(t, ctx, store, result.RunID)
+	assertProgressContainsType(t, events, model.ProgressEventRunBlocked)
+	assertProgressLacksType(t, events, model.ProgressEventRunFailed)
+}
+
+func mustListProgressEvents(t *testing.T, ctx context.Context, store *sqlite.Store, runID string) []model.ProgressEvent {
+	t.Helper()
+
+	events, err := store.ListProgressEventsAfter(ctx, runID, 0, 100)
+	if err != nil {
+		t.Fatalf("ListProgressEventsAfter(%s): %v", runID, err)
+	}
+	if len(events) == 0 {
+		t.Fatalf("expected progress events for run %s", runID)
+	}
+	return events
+}
+
+func assertProgressContainsOrderedTypes(t *testing.T, events []model.ProgressEvent, want ...model.ProgressEventType) {
+	t.Helper()
+
+	idx := 0
+	for _, event := range events {
+		if idx < len(want) && event.EventType == want[idx] {
+			idx++
+		}
+	}
+	if idx != len(want) {
+		t.Fatalf("expected ordered progress types %v, got %#v", want, collectProgressEventTypes(events))
+	}
+}
+
+func assertProgressContainsType(t *testing.T, events []model.ProgressEvent, want model.ProgressEventType) {
+	t.Helper()
+
+	for _, event := range events {
+		if event.EventType == want {
+			return
+		}
+	}
+	t.Fatalf("expected progress type %q, got %#v", want, collectProgressEventTypes(events))
+}
+
+func assertProgressLacksType(t *testing.T, events []model.ProgressEvent, unwanted model.ProgressEventType) {
+	t.Helper()
+
+	for _, event := range events {
+		if event.EventType == unwanted {
+			t.Fatalf("did not expect progress type %q, got %#v", unwanted, collectProgressEventTypes(events))
+		}
+	}
+}
+
+func collectProgressEventTypes(events []model.ProgressEvent) []model.ProgressEventType {
+	out := make([]model.ProgressEventType, 0, len(events))
+	for _, event := range events {
+		out = append(out, event.EventType)
+	}
+	return out
+}
+
 func TestEngineRunDryRunDoesNotRequireCommitIdentity(t *testing.T) {
 	ctx := context.Background()
 	repo := t.TempDir()
