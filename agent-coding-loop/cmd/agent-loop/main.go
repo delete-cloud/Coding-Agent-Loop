@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -87,11 +86,9 @@ func runCmd(ctx context.Context, args []string) {
 			Build: splitCommand(*buildCmd),
 		},
 	}
-	result, err := svc.Run(ctx, spec)
-	if err != nil {
+	if err := runWithProgressCmd(ctx, svc, spec, os.Stdout, os.Stderr, 0); err != nil {
 		fatal(err)
 	}
-	printJSON(result)
 }
 
 func serveCmd(ctx context.Context, args []string) {
@@ -124,11 +121,9 @@ func resumeCmd(ctx context.Context, args []string) {
 		fatal(fmt.Errorf("--run-id is required"))
 	}
 	_, svc := mustService(*cfgPath)
-	result, err := svc.Resume(ctx, *runID)
-	if err != nil {
+	if err := resumeWithProgressCmd(ctx, svc, *runID, os.Stdout, os.Stderr, 0); err != nil {
 		fatal(err)
 	}
-	printJSON(result)
 }
 
 func inspectCmd(ctx context.Context, args []string) {
@@ -170,9 +165,7 @@ func mustService(cfgPath string) (*config.Config, *service.Service) {
 }
 
 func printJSON(v any) {
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	_ = enc.Encode(v)
+	_ = printJSONTo(os.Stdout, v)
 }
 
 func fatal(err error) {
