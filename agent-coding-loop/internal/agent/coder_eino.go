@@ -1363,10 +1363,13 @@ func (c *Coder) generateWithEino(ctx context.Context, in CoderInput) (CoderOutpu
 	if err := decodeJSONWithRepair(ctx, raw, &wire, c.client.RepairJSON); err != nil {
 		return CoderOutput{}, err
 	}
-	b, _ := json.Marshal(wire)
+	b, err := json.Marshal(wire)
+	if err != nil {
+		return CoderOutput{}, wrapStructuredOutputStageError("encode repaired coder json failed", raw, err)
+	}
 	out, err := decodeCoderOutput(string(b))
 	if err != nil {
-		return CoderOutput{}, err
+		return CoderOutput{}, wrapStructuredOutputStageError("parse coder json failed", raw, err)
 	}
 	if len(out.Commands) == 0 {
 		out.Commands = in.Commands

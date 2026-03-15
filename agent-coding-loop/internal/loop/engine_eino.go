@@ -244,11 +244,12 @@ func (e *Engine) Resume(ctx context.Context, runID string) (model.RunResult, err
 
 func (e *Engine) failClosedResume(ctx context.Context, runID, summary string, cause error) (model.RunResult, error) {
 	if updateErr := e.store.UpdateRunStatus(ctx, runID, model.RunStatusFailed, summary); updateErr != nil {
+		joinedErr := errors.Join(cause, fmt.Errorf("failed to persist failed status: %w", updateErr))
 		return model.RunResult{
 			RunID:   runID,
 			Status:  model.RunStatusFailed,
 			Summary: summary,
-		}, fmt.Errorf("%s; failed to persist failed status: %w", summary, updateErr)
+		}, fmt.Errorf("%s: %w", summary, joinedErr)
 	}
 	return model.RunResult{
 		RunID:   runID,

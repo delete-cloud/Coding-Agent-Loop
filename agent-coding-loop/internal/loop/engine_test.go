@@ -714,6 +714,36 @@ func TestEngineResumeCheckpointReadErrorFailsClosed(t *testing.T) {
 	}
 }
 
+func TestEngineFailClosedResumePreservesCauseWhenPersistingFailedStatusFails(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlite.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("sqlite.New: %v", err)
+	}
+	engine := &Engine{store: store}
+	cause := errors.New("checkpoint read failed")
+
+	result, err := engine.failClosedResume(ctx, "run_123", "resume failed closed", cause)
+	if err == nil {
+		t.Fatalf("expected failClosedResume error")
+	}
+	if result.RunID != "run_123" {
+		t.Fatalf("expected run id to be preserved, got %q", result.RunID)
+	}
+	if result.Status != model.RunStatusFailed {
+		t.Fatalf("expected failed status, got %s", result.Status)
+	}
+	if result.Summary != "resume failed closed" {
+		t.Fatalf("expected summary to be preserved, got %q", result.Summary)
+	}
+	msg := err.Error()
+	for _, want := range []string{"resume failed closed", "checkpoint read failed", "failed to persist failed status"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("expected %q in %q", want, msg)
+		}
+	}
+}
+
 func TestEngineResumeRunningWithCheckpointUsesCheckpointState(t *testing.T) {
 	ctx := context.Background()
 	repo := t.TempDir()

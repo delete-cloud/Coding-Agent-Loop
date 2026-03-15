@@ -95,6 +95,12 @@ type fakeToolCallingModel struct {
 	calls     int
 }
 
+type badJSONMarshaler struct{}
+
+func (badJSONMarshaler) MarshalJSON() ([]byte, error) {
+	return nil, errors.New("bad json value")
+}
+
 func (f *fakeToolCallingModel) Generate(_ context.Context, _ []*schema.Message, _ ...modelpkg.Option) (*schema.Message, error) {
 	f.calls++
 	if len(f.errs) > 0 {
@@ -265,6 +271,156 @@ func TestReviewerReviewInvalidToolCallingJSONDoesNotRegenerateAgent(t *testing.T
 	}
 	if strings.TrimSpace(out.Summary) != "ok" {
 		t.Fatalf("expected repaired summary, got %+v", out)
+	}
+}
+
+func TestCoderGenerateWithEinoWrapsStructuredOutputStageAndPreview(t *testing.T) {
+	long := strings.Repeat("x", 3000)
+	model := &fakeToolCallingModel{
+		responses: []string{long},
+	}
+	c := NewCoder(ClientConfig{
+		BaseURL: "http://example.com",
+		Model:   "test-model",
+		newToolCallingModelForTest: func(context.Context) (modelpkg.ToolCallingChatModel, error) {
+			return model, nil
+		},
+		completeJSONForTest: func(_ context.Context, _, _ string, out any) error {
+			wire, ok := out.(*map[string]any)
+			if !ok {
+				return fmt.Errorf("unexpected out type %T", out)
+			}
+			*wire = map[string]any{"summary": badJSONMarshaler{}}
+			return nil
+		},
+	})
+
+	_, err := c.generateWithEino(context.Background(), CoderInput{
+		Goal:        "touch README.md",
+		RepoSummary: t.TempDir(),
+	})
+	if err == nil {
+		t.Fatalf("expected structured output error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "encode repaired coder json failed") {
+		t.Fatalf("expected encode stage label in %q", msg)
+	}
+	if !strings.Contains(msg, "content=") {
+		t.Fatalf("expected content preview in %q", msg)
+	}
+	if strings.Contains(msg, strings.Repeat("x", 2500)) {
+		t.Fatalf("expected truncated content preview, got %q", msg)
+	}
+}
+
+func TestReviewerReviewWithEinoWrapsStructuredOutputStageAndPreview(t *testing.T) {
+	long := strings.Repeat("y", 3000)
+	model := &fakeToolCallingModel{
+		responses: []string{long},
+	}
+	r := NewReviewer(ClientConfig{
+		BaseURL: "http://example.com",
+		Model:   "test-model",
+		newToolCallingModelForTest: func(context.Context) (modelpkg.ToolCallingChatModel, error) {
+			return model, nil
+		},
+		completeJSONForTest: func(_ context.Context, _, _ string, out any) error {
+			wire, ok := out.(*map[string]any)
+			if !ok {
+				return fmt.Errorf("unexpected out type %T", out)
+			}
+			*wire = map[string]any{"decision": badJSONMarshaler{}}
+			return nil
+		},
+	})
+
+	_, err := r.reviewWithEino(context.Background(), ReviewInput{
+		Goal:          "check",
+		RepoRoot:      t.TempDir(),
+		CommandOutput: "PASS",
+	})
+	if err == nil {
+		t.Fatalf("expected structured output error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "encode repaired reviewer json failed") {
+		t.Fatalf("expected encode stage label in %q", msg)
+	}
+	if !strings.Contains(msg, "content=") {
+		t.Fatalf("expected content preview in %q", msg)
+	}
+	if strings.Contains(msg, strings.Repeat("y", 2500)) {
+		t.Fatalf("expected truncated content preview, got %q", msg)
+	}
+}
+
+func TestReviewerFallbackCompletionPreservesEinoStructuredOutputDiagnostics(t *testing.T) {
+	long := strings.Repeat("z", 3000)
+	model := &fakeToolCallingModel{
+		responses: []string{long},
+	}
+	var completeCalls int
+	r := NewReviewer(ClientConfig{
+		BaseURL: "http://example.com",
+		Model:   "test-model",
+		newToolCallingModelForTest: func(context.Context) (modelpkg.ToolCallingChatModel, error) {
+			return model, nil
+		},
+		completeJSONForTest: func(_ context.Context, system, _ string, out any) error {
+			completeCalls++
+			if strings.Contains(system, "repair invalid JSON responses") {
+				wire, ok := out.(*map[string]any)
+				if !ok {
+					return fmt.Errorf("unexpected repair out type %T", out)
+				}
+				*wire = map[string]any{"decision": badJSONMarshaler{}}
+				return nil
+			}
+			switch v := out.(type) {
+			case *interface{}:
+				*v = map[string]any{
+					"decision":        "comment",
+					"summary":         "fallback ok",
+					"review_markdown": "fallback markdown",
+					"findings":        []map[string]any{},
+				}
+				return nil
+			case *map[string]any:
+				*v = map[string]any{
+					"decision":        "comment",
+					"summary":         "fallback ok",
+					"review_markdown": "fallback markdown",
+					"findings":        []map[string]any{},
+				}
+				return nil
+			}
+			return fmt.Errorf("unexpected completion out type %T", out)
+		},
+	})
+
+	out, err := r.Review(context.Background(), ReviewInput{
+		Goal:          "check",
+		RepoRoot:      t.TempDir(),
+		CommandOutput: "PASS",
+	})
+	if err != nil {
+		t.Fatalf("Review: %v", err)
+	}
+	if !out.UsedFallback || out.FallbackSource != "client_completion" {
+		t.Fatalf("expected client completion fallback, got %+v", out)
+	}
+	if completeCalls < 2 {
+		t.Fatalf("expected repair and fallback completion calls, got %d", completeCalls)
+	}
+	if !strings.Contains(out.Markdown, "encode repaired reviewer json failed") {
+		t.Fatalf("expected reviewer markdown to preserve eino diagnostics, got %q", out.Markdown)
+	}
+	if !strings.Contains(out.Markdown, "content=") {
+		t.Fatalf("expected reviewer markdown to preserve content preview, got %q", out.Markdown)
+	}
+	if strings.Contains(out.Markdown, strings.Repeat("z", 2500)) {
+		t.Fatalf("expected reviewer markdown preview to be truncated, got %q", out.Markdown)
 	}
 }
 
