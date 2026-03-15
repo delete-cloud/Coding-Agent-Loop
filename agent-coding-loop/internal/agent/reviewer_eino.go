@@ -117,7 +117,7 @@ func (r *Reviewer) Review(ctx context.Context, in ReviewInput) (ReviewOutput, er
 	}
 	fallback.UsedFallback = true
 	fallback.FallbackSource = "client_completion"
-	fallback.Markdown = strings.TrimSpace(strings.TrimSpace(fallback.Markdown) + "\n\n(Eino tool-call path failed, fallback completion used.)")
+	fallback.Markdown = strings.TrimSpace(strings.TrimSpace(fallback.Markdown) + "\n\n(Eino tool-call path failed: " + err.Error() + ")\n(Fallback completion used.)")
 	normalizeReviewOutput(&fallback)
 	enforceFallbackNoApprove(&fallback)
 	enforceKBSearchConsistency(in, &fallback)
@@ -196,14 +196,21 @@ func (r *Reviewer) reviewWithEino(ctx context.Context, in ReviewInput) (ReviewOu
 	if err != nil {
 		return ReviewOutput{}, err
 	}
-	var out ReviewOutput
-	content := ""
+	raw := ""
 	if msg != nil {
-		content = msg.Content
+		raw = msg.Content
 	}
-	out, err = decodeReviewOutput(content)
+	var wire map[string]any
+	if err := decodeJSONWithRepair(ctx, raw, &wire, r.client.RepairJSON); err != nil {
+		return ReviewOutput{}, err
+	}
+	b, err := json.Marshal(wire)
 	if err != nil {
-		return ReviewOutput{}, fmt.Errorf("parse reviewer json failed: %w; content=%s", err, content)
+		return ReviewOutput{}, wrapStructuredOutputStageError("encode repaired reviewer json failed", raw, err)
+	}
+	out, err := decodeReviewOutput(string(b))
+	if err != nil {
+		return ReviewOutput{}, wrapStructuredOutputStageError("parse reviewer json failed", raw, err)
 	}
 	normalizeReviewOutput(&out)
 	return out, nil
@@ -277,6 +284,10 @@ func decodeReviewOutput(content string) (ReviewOutput, error) {
 		}
 	}
 	return out, nil
+}
+
+func wrapStructuredOutputStageError(stage, raw string, err error) error {
+	return fmt.Errorf("%s: %w; content=%s", stage, err, truncateDiagnosticPreview(raw))
 }
 
 func normalizeReviewOutput(out *ReviewOutput) {

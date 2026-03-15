@@ -3,6 +3,7 @@ package loop
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cloudwego/eino/compose"
 	agentpkg "github.com/kina/agent-coding-loop/internal/agent"
 	gitpkg "github.com/kina/agent-coding-loop/internal/git"
 	ghpkg "github.com/kina/agent-coding-loop/internal/github"
@@ -21,6 +23,18 @@ import (
 	sqlite "github.com/kina/agent-coding-loop/internal/store/sqlite"
 	"github.com/kina/agent-coding-loop/internal/tools"
 )
+
+type errCheckpointStore struct {
+	err error
+}
+
+func (e errCheckpointStore) Get(context.Context, string) ([]byte, bool, error) {
+	return nil, false, e.err
+}
+
+func (e errCheckpointStore) Set(context.Context, string, []byte) error {
+	return nil
+}
 
 func TestEngineRunDryRun(t *testing.T) {
 	ctx := context.Background()
@@ -451,7 +465,76 @@ func TestEngineRunDryRunDoesNotRequireCommitIdentity(t *testing.T) {
 	}
 }
 
-func TestEngineResumeRespectsMaxIterations(t *testing.T) {
+func TestEngineResumeRejectsNonRunningRun(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+
+	r := tools.NewRunner()
+	mustRun(t, r, repo, "git init")
+	mustRun(t, r, repo, "git config user.email test@example.com")
+	mustRun(t, r, repo, "git config user.name tester")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("demo"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustRun(t, r, repo, "git add README.md")
+	mustRun(t, r, repo, "git commit -m init")
+
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	store, err := sqlite.New(dbPath)
+	if err != nil {
+		t.Fatalf("sqlite.New: %v", err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	engine := NewEngine(EngineDeps{
+		Store:      store,
+		Runner:     r,
+		Git:        gitpkg.NewClient(r),
+		GitHub:     ghpkg.NewClient(r),
+		Coder:      agentpkg.NewCoder(agentpkg.ClientConfig{}),
+		Reviewer:   agentpkg.NewReviewer(agentpkg.ClientConfig{}),
+		Skills:     skills.NewRegistry(nil),
+		Artifacts:  filepath.Join(repo, ".agent-loop-artifacts"),
+		DoomThresh: 3,
+	})
+
+	spec := model.RunSpec{
+		Goal:          "validate repo",
+		Repo:          repo,
+		PRMode:        model.PRModeDryRun,
+		MaxIterations: 2,
+		Commands: model.CommandSet{
+			Test: []string{"echo PASS"},
+		},
+	}
+
+	for _, status := range []model.RunStatus{
+		model.RunStatusQueued,
+		model.RunStatusNeedsChange,
+		model.RunStatusBlocked,
+		model.RunStatusCompleted,
+		model.RunStatusFailed,
+	} {
+		runID, err := store.CreateRun(ctx, spec, status)
+		if err != nil {
+			t.Fatalf("CreateRun(%s): %v", status, err)
+		}
+		result, err := engine.Resume(ctx, runID)
+		if err == nil {
+			t.Fatalf("expected Resume error for status %s", status)
+		}
+		if !strings.Contains(err.Error(), "interrupted running runs") {
+			t.Fatalf("expected interrupted running runs guidance, got %v", err)
+		}
+		if result.RunID != runID {
+			t.Fatalf("expected result run id %s, got %s", runID, result.RunID)
+		}
+	}
+}
+
+func TestEngineResumeRunningWithoutCheckpointFailsClosed(t *testing.T) {
 	ctx := context.Background()
 	repo := t.TempDir()
 
@@ -499,6 +582,9 @@ func TestEngineResumeRespectsMaxIterations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
+	if err := store.UpdateRunStatus(ctx, runID, model.RunStatusRunning, "stale running"); err != nil {
+		t.Fatalf("UpdateRunStatus: %v", err)
+	}
 
 	now := time.Now().UnixMilli()
 	if err := store.InsertStep(ctx, sqlite.StepRecord{
@@ -525,14 +611,290 @@ func TestEngineResumeRespectsMaxIterations(t *testing.T) {
 	}
 
 	result, err := engine.Resume(ctx, runID)
+	if err == nil {
+		t.Fatalf("expected Resume error when checkpoint is missing")
+	}
+	if !strings.Contains(err.Error(), "checkpoint missing") {
+		t.Fatalf("expected checkpoint missing guidance, got %v", err)
+	}
+	if result.Status != model.RunStatusFailed {
+		t.Fatalf("expected failed result after fail-closed resume, got %s", result.Status)
+	}
+	run, getErr := store.GetRun(ctx, runID)
+	if getErr != nil {
+		t.Fatalf("GetRun: %v", getErr)
+	}
+	if run.Status != string(model.RunStatusFailed) {
+		t.Fatalf("expected stored status failed, got %s", run.Status)
+	}
+	if !strings.Contains(run.Summary, "checkpoint missing") {
+		t.Fatalf("expected stored summary to mention checkpoint missing, got %q", run.Summary)
+	}
+	lastIteration, getIterErr := store.MaxStepIteration(ctx, runID)
+	if getIterErr != nil {
+		t.Fatalf("MaxStepIteration: %v", getIterErr)
+	}
+	if lastIteration != 2 {
+		t.Fatalf("expected no fresh rerun steps, got max iteration %d", lastIteration)
+	}
+}
+
+func TestEngineResumeCheckpointReadErrorFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+
+	r := tools.NewRunner()
+	mustRun(t, r, repo, "git init")
+	mustRun(t, r, repo, "git config user.email test@example.com")
+	mustRun(t, r, repo, "git config user.name tester")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("demo"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustRun(t, r, repo, "git add README.md")
+	mustRun(t, r, repo, "git commit -m init")
+
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	store, err := sqlite.New(dbPath)
+	if err != nil {
+		t.Fatalf("sqlite.New: %v", err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	engine := NewEngine(EngineDeps{
+		Store:      store,
+		Runner:     r,
+		Git:        gitpkg.NewClient(r),
+		GitHub:     ghpkg.NewClient(r),
+		Coder:      agentpkg.NewCoder(agentpkg.ClientConfig{}),
+		Reviewer:   agentpkg.NewReviewer(agentpkg.ClientConfig{}),
+		Skills:     skills.NewRegistry(nil),
+		Artifacts:  filepath.Join(repo, ".agent-loop-artifacts"),
+		DoomThresh: 3,
+	})
+	engine.checkpoints = errCheckpointStore{err: errors.New("checkpoint read failed")}
+
+	spec := model.RunSpec{
+		Goal:          "validate repo",
+		Repo:          repo,
+		PRMode:        model.PRModeDryRun,
+		MaxIterations: 2,
+		Commands: model.CommandSet{
+			Test: []string{"echo PASS"},
+		},
+	}
+	runID, err := store.CreateRun(ctx, spec, model.RunStatusQueued)
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if err := store.UpdateRunStatus(ctx, runID, model.RunStatusRunning, "stale running"); err != nil {
+		t.Fatalf("UpdateRunStatus: %v", err)
+	}
+
+	result, err := engine.Resume(ctx, runID)
+	if err == nil {
+		t.Fatalf("expected Resume error when checkpoint read fails")
+	}
+	if !strings.Contains(err.Error(), "checkpoint") {
+		t.Fatalf("expected checkpoint guidance, got %v", err)
+	}
+	if result.Status != model.RunStatusFailed {
+		t.Fatalf("expected failed result after checkpoint read error, got %s", result.Status)
+	}
+	run, getErr := store.GetRun(ctx, runID)
+	if getErr != nil {
+		t.Fatalf("GetRun: %v", getErr)
+	}
+	if run.Status != string(model.RunStatusFailed) {
+		t.Fatalf("expected stored status failed, got %s", run.Status)
+	}
+	if !strings.Contains(run.Summary, "checkpoint") {
+		t.Fatalf("expected stored summary to mention checkpoint failure, got %q", run.Summary)
+	}
+}
+
+func TestEngineFailClosedResumePreservesCauseWhenPersistingFailedStatusFails(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlite.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("sqlite.New: %v", err)
+	}
+	engine := &Engine{store: store}
+	cause := errors.New("checkpoint read failed")
+
+	result, err := engine.failClosedResume(ctx, "run_123", "resume failed closed", cause)
+	if err == nil {
+		t.Fatalf("expected failClosedResume error")
+	}
+	if result.RunID != "run_123" {
+		t.Fatalf("expected run id to be preserved, got %q", result.RunID)
+	}
+	if result.Status != model.RunStatusFailed {
+		t.Fatalf("expected failed status, got %s", result.Status)
+	}
+	if result.Summary != "resume failed closed" {
+		t.Fatalf("expected summary to be preserved, got %q", result.Summary)
+	}
+	msg := err.Error()
+	for _, want := range []string{"resume failed closed", "checkpoint read failed", "failed to persist failed status"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("expected %q in %q", want, msg)
+		}
+	}
+}
+
+func TestEngineResumeRunningWithCheckpointUsesCheckpointState(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+
+	r := tools.NewRunner()
+	mustRun(t, r, repo, "git init")
+	mustRun(t, r, repo, "git config user.email test@example.com")
+	mustRun(t, r, repo, "git config user.name tester")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("demo"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustRun(t, r, repo, "git add README.md")
+	mustRun(t, r, repo, "git commit -m init")
+
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	store, err := sqlite.New(dbPath)
+	if err != nil {
+		t.Fatalf("sqlite.New: %v", err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	engine := NewEngine(EngineDeps{
+		Store:      store,
+		Runner:     r,
+		Git:        gitpkg.NewClient(r),
+		GitHub:     ghpkg.NewClient(r),
+		Coder:      agentpkg.NewCoder(agentpkg.ClientConfig{}),
+		Reviewer:   agentpkg.NewReviewer(agentpkg.ClientConfig{}),
+		Skills:     skills.NewRegistry(nil),
+		Artifacts:  filepath.Join(repo, ".agent-loop-artifacts"),
+		DoomThresh: 3,
+	})
+
+	spec := model.RunSpec{
+		Goal:          "validate repo",
+		Repo:          repo,
+		PRMode:        model.PRModeDryRun,
+		MaxIterations: 1,
+		Commands: model.CommandSet{
+			Test: []string{"echo PASS"},
+		},
+	}
+	runID, err := store.CreateRun(ctx, spec, model.RunStatusQueued)
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if err := store.UpdateRunStatus(ctx, runID, model.RunStatusRunning, "interrupted run"); err != nil {
+		t.Fatalf("UpdateRunStatus: %v", err)
+	}
+	g := compose.NewGraph[*loopSession, *loopSession]()
+	if err := g.AddLambdaNode("turn", compose.InvokableLambda(engine.turnNode)); err != nil {
+		t.Fatalf("AddLambdaNode(turn): %v", err)
+	}
+	if err := g.AddLambdaNode("finish", compose.InvokableLambda(engine.finishNode)); err != nil {
+		t.Fatalf("AddLambdaNode(finish): %v", err)
+	}
+	if err := g.AddLambdaNode("failed", compose.InvokableLambda(engine.failedNode)); err != nil {
+		t.Fatalf("AddLambdaNode(failed): %v", err)
+	}
+	if err := g.AddLambdaNode("blocked", compose.InvokableLambda(engine.blockedNode)); err != nil {
+		t.Fatalf("AddLambdaNode(blocked): %v", err)
+	}
+	if err := g.AddEdge(compose.START, "turn"); err != nil {
+		t.Fatalf("AddEdge(start): %v", err)
+	}
+	if err := g.AddBranch("turn", compose.NewGraphBranch(engine.branchAfterTurn, map[string]bool{
+		"turn":    true,
+		"finish":  true,
+		"failed":  true,
+		"blocked": true,
+	})); err != nil {
+		t.Fatalf("AddBranch: %v", err)
+	}
+	if err := g.AddEdge("finish", compose.END); err != nil {
+		t.Fatalf("AddEdge(finish): %v", err)
+	}
+	if err := g.AddEdge("failed", compose.END); err != nil {
+		t.Fatalf("AddEdge(failed): %v", err)
+	}
+	if err := g.AddEdge("blocked", compose.END); err != nil {
+		t.Fatalf("AddEdge(blocked): %v", err)
+	}
+	interruptRunner, err := g.Compile(
+		ctx,
+		compose.WithCheckPointStore(engine.checkpoints),
+		compose.WithGraphName("agent_loop_eino"),
+		compose.WithInterruptAfterNodes([]string{"turn"}),
+	)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	commands, err := tools.ResolveCommands(spec, repo)
+	if err != nil {
+		t.Fatalf("ResolveCommands: %v", err)
+	}
+	baselineStatus, err := engine.git.StatusShort(ctx, repo)
+	if err != nil {
+		t.Fatalf("StatusShort: %v", err)
+	}
+	branch, err := engine.git.CreateFeatureBranch(ctx, repo)
+	if err != nil {
+		t.Fatalf("CreateFeatureBranch: %v", err)
+	}
+	if err := store.UpdateRunMeta(ctx, runID, branch, "", ""); err != nil {
+		t.Fatalf("UpdateRunMeta: %v", err)
+	}
+	_, err = interruptRunner.Invoke(ctx, &loopSession{
+		RunID:          runID,
+		Spec:           spec,
+		RepoAbs:        repo,
+		Branch:         branch,
+		BaselineStatus: baselineStatus,
+		Commands:       commands,
+		SkillsSummary:  engine.renderSkillsSummary(),
+		Iteration:      0,
+		Status:         model.RunStatusRunning,
+	}, compose.WithCheckPointID(runID))
+	if err == nil {
+		t.Fatalf("expected interrupting runner to stop after turn")
+	}
+	hasCheckpoint, err := engine.hasCheckpoint(ctx, runID)
+	if err != nil {
+		t.Fatalf("hasCheckpoint: %v", err)
+	}
+	if !hasCheckpoint {
+		t.Fatalf("expected checkpoint for run %s", runID)
+	}
+	if err := store.UpdateRunStatus(ctx, runID, model.RunStatusRunning, "stale running"); err != nil {
+		t.Fatalf("UpdateRunStatus: %v", err)
+	}
+	now := time.Now().UnixMilli()
+	if err := store.InsertStep(ctx, sqlite.StepRecord{
+		RunID:     runID,
+		Iteration: 99,
+		Agent:     "reviewer",
+		Decision:  string(model.LoopDecisionRequestChanges),
+		Status:    string(model.RunStatusNeedsChange),
+		StartedAt: now,
+		EndedAt:   now,
+	}); err != nil {
+		t.Fatalf("InsertStep: %v", err)
+	}
+
+	resumed, err := engine.Resume(ctx, runID)
 	if err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
-	if result.Status != model.RunStatusFailed {
-		t.Fatalf("expected failed, got %s", result.Status)
-	}
-	if result.Summary != "max iterations reached" {
-		t.Fatalf("expected max iterations reached, got %q", result.Summary)
+	if resumed.Status != model.RunStatusCompleted {
+		t.Fatalf("expected checkpoint-backed resume to stay completed, got %s", resumed.Status)
 	}
 }
 

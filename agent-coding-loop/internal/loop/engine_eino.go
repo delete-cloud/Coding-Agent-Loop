@@ -225,7 +225,45 @@ func (e *Engine) Resume(ctx context.Context, runID string) (model.RunResult, err
 	if err := json.Unmarshal([]byte(run.SpecJSON), &spec); err != nil {
 		return model.RunResult{Status: model.RunStatusFailed}, err
 	}
+	if model.RunStatus(strings.TrimSpace(run.Status)) != model.RunStatusRunning {
+		return model.RunResult{
+			RunID:   runID,
+			Status:  model.RunStatus(strings.TrimSpace(run.Status)),
+			Summary: run.Summary,
+		}, fmt.Errorf("resume only supports interrupted running runs; run %s is %s", runID, strings.TrimSpace(run.Status))
+	}
+	hasCheckpoint, err := e.hasCheckpoint(ctx, runID)
+	if err != nil {
+		return e.failClosedResume(ctx, runID, "resume failed closed: checkpoint lookup failed for interrupted running run", err)
+	}
+	if !hasCheckpoint {
+		return e.failClosedResume(ctx, runID, "resume failed closed: checkpoint missing for interrupted running run", fmt.Errorf("checkpoint missing for interrupted running run %s", runID))
+	}
 	return e.run(ctx, spec, runID)
+}
+
+func (e *Engine) failClosedResume(ctx context.Context, runID, summary string, cause error) (model.RunResult, error) {
+	if updateErr := e.store.UpdateRunStatus(ctx, runID, model.RunStatusFailed, summary); updateErr != nil {
+		joinedErr := errors.Join(cause, fmt.Errorf("failed to persist failed status: %w", updateErr))
+		return model.RunResult{
+			RunID:   runID,
+			Status:  model.RunStatusFailed,
+			Summary: summary,
+		}, fmt.Errorf("%s: %w", summary, joinedErr)
+	}
+	return model.RunResult{
+		RunID:   runID,
+		Status:  model.RunStatusFailed,
+		Summary: summary,
+	}, fmt.Errorf("%s: %w", summary, cause)
+}
+
+func (e *Engine) hasCheckpoint(ctx context.Context, runID string) (bool, error) {
+	if e.checkpoints == nil {
+		return false, nil
+	}
+	_, ok, err := e.checkpoints.Get(ctx, runID)
+	return ok, err
 }
 
 func (e *Engine) run(ctx context.Context, spec model.RunSpec, existingRunID string) (model.RunResult, error) {
@@ -303,12 +341,11 @@ func (e *Engine) run(ctx context.Context, spec model.RunSpec, existingRunID stri
 		return model.RunResult{RunID: runID, Status: model.RunStatusFailed}, err
 	}
 
-	output, err := runner.Invoke(
-		ctx,
-		flowInput,
+	invokeOpts := []compose.Option{
 		compose.WithCheckPointID(runID),
 		compose.WithRuntimeMaxSteps(maxRuntimeSteps(spec.MaxIterations)),
-	)
+	}
+	output, err := runner.Invoke(ctx, flowInput, invokeOpts...)
 	if err != nil {
 		_ = e.store.UpdateRunStatus(ctx, runID, model.RunStatusFailed, "eino invoke failed: "+err.Error())
 		return model.RunResult{RunID: runID, Status: model.RunStatusFailed}, err
