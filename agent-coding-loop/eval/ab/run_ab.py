@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+from fractions import Fraction
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -379,6 +381,151 @@ def is_terminal_run_status(status: str) -> bool:
     return str(status or "").strip() in {"completed", "failed", "needs_changes", "blocked"}
 
 
+def status_to_pair_outcome(status: str) -> str | None:
+    normalized = str(status or "").strip()
+    if normalized == "completed":
+        return "pass"
+    if normalized in {"failed", "needs_changes", "blocked"}:
+        return "fail"
+    return None
+
+
+def exact_mcnemar_p_value(b: int, c: int) -> float:
+    n = b + c
+    if n <= 0:
+        return 1.0
+    tail = sum(math.comb(n, k) for k in range(0, min(b, c) + 1))
+    numerator = min(2 * tail, 2**n)
+    return float(Fraction(numerator, 2**n))
+
+
+def build_paired_analysis(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    baseline_experiment = "no_rag"
+    candidate_experiment = "rag"
+    integrity = {
+        "valid_pair_count": 0,
+        "excluded_invalid_task_id_count": 0,
+        "excluded_invalid_task_id_rows": [],
+        "excluded_missing_pair_count": 0,
+        "excluded_duplicate_pair_count": 0,
+        "excluded_non_terminal_count": 0,
+        "excluded_task_ids": {
+            "duplicate_pair": [],
+            "missing_pair": [],
+            "non_terminal": [],
+        },
+    }
+    grouped: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    seen_experiments: set[str] = set()
+    for idx, row in enumerate(rows):
+        exp = str(row.get("experiment", "")).strip()
+        if exp in {baseline_experiment, candidate_experiment}:
+            seen_experiments.add(exp)
+        raw_task_id = str(row.get("task_id", ""))
+        task_id = raw_task_id.strip()
+        if not task_id:
+            integrity["excluded_invalid_task_id_count"] += 1
+            integrity["excluded_invalid_task_id_rows"].append(
+                {
+                    "row_index": idx,
+                    "experiment": exp,
+                    "task_id": raw_task_id,
+                    "status": str(row.get("status", "")).strip(),
+                }
+            )
+            continue
+        if exp not in {baseline_experiment, candidate_experiment}:
+            continue
+        grouped.setdefault(task_id, {baseline_experiment: [], candidate_experiment: []})[exp].append(row)
+
+    pairs: list[dict[str, Any]] = []
+    for task_id in sorted(grouped):
+        exp_rows = grouped[task_id]
+        baseline_rows = exp_rows[baseline_experiment]
+        candidate_rows = exp_rows[candidate_experiment]
+
+        if len(baseline_rows) != 1 or len(candidate_rows) != 1:
+            if len(baseline_rows) > 1 or len(candidate_rows) > 1:
+                integrity["excluded_duplicate_pair_count"] += 1
+                integrity["excluded_task_ids"]["duplicate_pair"].append(task_id)
+            else:
+                integrity["excluded_missing_pair_count"] += 1
+                integrity["excluded_task_ids"]["missing_pair"].append(task_id)
+            continue
+
+        baseline_outcome = status_to_pair_outcome(str(baseline_rows[0].get("status", "")))
+        candidate_outcome = status_to_pair_outcome(str(candidate_rows[0].get("status", "")))
+        if baseline_outcome is None or candidate_outcome is None:
+            integrity["excluded_non_terminal_count"] += 1
+            integrity["excluded_task_ids"]["non_terminal"].append(task_id)
+            continue
+
+        pairs.append(
+            {
+                "task_id": task_id,
+                "baseline_outcome": baseline_outcome,
+                "candidate_outcome": candidate_outcome,
+                }
+            )
+
+    integrity["valid_pair_count"] = len(pairs)
+    counts = {
+        "both_pass": 0,
+        "both_fail": 0,
+        "baseline_only_pass": 0,
+        "candidate_only_pass": 0,
+    }
+    for pair in pairs:
+        baseline_outcome = pair["baseline_outcome"]
+        candidate_outcome = pair["candidate_outcome"]
+        if baseline_outcome == "pass" and candidate_outcome == "pass":
+            counts["both_pass"] += 1
+        elif baseline_outcome == "fail" and candidate_outcome == "fail":
+            counts["both_fail"] += 1
+        elif baseline_outcome == "pass":
+            counts["baseline_only_pass"] += 1
+        else:
+            counts["candidate_only_pass"] += 1
+
+    available = True
+    reason = ""
+    if baseline_experiment not in seen_experiments or candidate_experiment not in seen_experiments:
+        available = False
+        reason = "missing_experiment_arm"
+    elif not pairs:
+        available = False
+        reason = "no_valid_pairs"
+
+    discordant_pair_count = counts["baseline_only_pass"] + counts["candidate_only_pass"]
+    significance = {
+        "applied": False,
+        "test": "exact_mcnemar",
+        "p_value": None,
+        "discordant_pair_count": discordant_pair_count,
+        "reason": "",
+    }
+    if available:
+        if discordant_pair_count > 0:
+            significance["applied"] = True
+            significance["p_value"] = exact_mcnemar_p_value(
+                counts["baseline_only_pass"],
+                counts["candidate_only_pass"],
+            )
+        else:
+            significance["reason"] = "no_discordant_pairs"
+
+    return {
+        "baseline_experiment": baseline_experiment,
+        "candidate_experiment": candidate_experiment,
+        "available": available,
+        "reason": reason,
+        "pairs": pairs,
+        "counts": counts,
+        "significance": significance,
+        "integrity": integrity,
+    }
+
+
 def aggregate_metrics(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     by_exp: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
@@ -562,10 +709,59 @@ def render_markdown(report: dict[str, Any]) -> str:
             f"{item['repo_kb_overuse_rate']:.3f} |"
         )
     lines.append("")
+    paired = report.get("paired_analysis", {})
+    if paired:
+        lines.append("## Paired Analysis")
+        lines.append("")
+        lines.append(f"Baseline: `{paired.get('baseline_experiment', 'no_rag')}`")
+        lines.append(f"Candidate: `{paired.get('candidate_experiment', 'rag')}`")
+        lines.append("")
+        if bool(paired.get("available", False)):
+            counts = paired.get("counts", {})
+            lines.append("| Pair Outcome | Count |")
+            lines.append("|---|---:|")
+            lines.append(f"| both_pass | {int(counts.get('both_pass', 0) or 0)} |")
+            lines.append(f"| both_fail | {int(counts.get('both_fail', 0) or 0)} |")
+            lines.append(f"| baseline_only_pass | {int(counts.get('baseline_only_pass', 0) or 0)} |")
+            lines.append(f"| candidate_only_pass | {int(counts.get('candidate_only_pass', 0) or 0)} |")
+            lines.append("")
+            significance = paired.get("significance", {})
+            if bool(significance.get("applied", False)):
+                p_value = float(significance.get("p_value", 0.0) or 0.0)
+                discordant = int(significance.get("discordant_pair_count", 0) or 0)
+                lines.append(
+                    f"Significance: `{significance.get('test', 'exact_mcnemar')}`, "
+                    f"p=`{p_value:.4f}`, discordant pairs=`{discordant}`"
+                )
+            else:
+                lines.append(
+                    f"Significance: unavailable (`{significance.get('reason', '') or 'not_applied'}`)"
+                )
+            lines.append("")
+        else:
+            lines.append(f"Paired analysis unavailable: `{paired.get('reason', '') or 'unknown'}`")
+            lines.append("")
+        integrity = paired.get("integrity", {})
+        lines.append("### Pair Integrity")
+        lines.append(f"- valid pairs: {int(integrity.get('valid_pair_count', 0) or 0)}")
+        lines.append(f"- excluded invalid task id rows: {int(integrity.get('excluded_invalid_task_id_count', 0) or 0)}")
+        lines.append(f"- excluded missing pairs: {int(integrity.get('excluded_missing_pair_count', 0) or 0)}")
+        lines.append(f"- excluded duplicate pairs: {int(integrity.get('excluded_duplicate_pair_count', 0) or 0)}")
+        lines.append(f"- excluded non-terminal pairs: {int(integrity.get('excluded_non_terminal_count', 0) or 0)}")
+        lines.append("")
     lines.append("## Notes")
     lines.append("- Strict mode prefers structured `coder_meta` / `reviewer_meta` records from state.db.")
     lines.append("- Citation matching prioritizes structured `citations[]`, with text as backward-compatible fallback.")
     return "\n".join(lines) + "\n"
+
+
+def build_report(*, meta: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "meta": meta,
+        "metrics": aggregate_metrics(rows),
+        "paired_analysis": build_paired_analysis(rows),
+        "rows": rows,
+    }
 
 
 def parse_result(stdout: str) -> dict[str, Any]:
@@ -929,9 +1125,8 @@ def main() -> int:
 
     log.info("all %d jobs finished", total)
 
-    metrics = aggregate_metrics(rows)
-    report = {
-        "meta": {
+    report = build_report(
+        meta={
             "tasks": args.tasks,
             "agent_loop_bin": args.agent_loop_bin,
             "repo": args.repo,
@@ -946,9 +1141,9 @@ def main() -> int:
             "launch_interval": launch_interval,
             "dry_run": bool(args.dry_run),
         },
-        "metrics": metrics,
-        "rows": rows,
-    }
+        rows=rows,
+    )
+    metrics = report["metrics"]
 
     raw_path = output_dir / "ab_raw_runs.jsonl"
     json_path = output_dir / "ab_report.json"
