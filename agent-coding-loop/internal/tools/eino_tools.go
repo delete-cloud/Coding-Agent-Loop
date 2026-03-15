@@ -52,7 +52,7 @@ type kbSearchArgs struct {
 func BuildCoderTools(repoRoot string, reg *skills.Registry, runner *Runner, kbClient *kb.Client) ([]einotool.BaseTool, error) {
 	repoRoot = normalizeRepoRoot(repoRoot)
 	if runner == nil {
-		runner = NewRunner()
+		runner = NewRunner(WithReadOnly(true))
 	}
 	common, err := buildReadOnlyTools(repoRoot, reg, runner, kbClient)
 	if err != nil {

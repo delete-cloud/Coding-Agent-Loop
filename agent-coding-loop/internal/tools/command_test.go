@@ -36,6 +36,92 @@ func TestRunnerRejectsWriteInReadonlyMode(t *testing.T) {
 	}
 }
 
+func TestIsWriteCommandCoversCommonBypasses(t *testing.T) {
+	shouldBlock := []string{
+		"git commit -m x",
+		"git apply patch.diff",
+		"echo hello > file.go",
+		"cat > file.go",
+		"sed -i 's/a/b/' file.go",
+		"tee file.go",
+		"mv a.go b.go",
+		"cp a.go b.go",
+		"touch new.go",
+		`printf 'package main' > file.go`,
+		"patch -p1 < fix.patch",
+		"bash -c 'echo hi'",
+		"sh -c 'echo hi'",
+		"python3 -c 'open(\"f\",\"w\")'",
+		"python -c 'import os'",
+		"node -e 'fs.writeFileSync()'",
+		"chmod +x script.sh",
+		"ln -s a b",
+		"mkdir -p new/dir",
+		"cat file >> other.go",
+		"go test ./... > output.txt",
+		"echo data >> append.log",
+	}
+	for _, cmd := range shouldBlock {
+		if !IsWriteCommand(cmd) {
+			t.Errorf("expected IsWriteCommand(%q) = true", cmd)
+		}
+	}
+
+	shouldAllow := []string{
+		"go test ./...",
+		"go build ./...",
+		"go vet ./...",
+		"go doc fmt.Println",
+		"grep -r handleHealthz .",
+		"cat file.go",
+		"head -20 file.go",
+		"tail -10 file.go",
+		"wc -l file.go",
+		"git diff -- .",
+		"git log --oneline -5",
+		"git status",
+		"ls -la",
+		"find . -name '*.go'",
+	}
+	for _, cmd := range shouldAllow {
+		if IsWriteCommand(cmd) {
+			t.Errorf("expected IsWriteCommand(%q) = false", cmd)
+		}
+	}
+}
+
+func TestReadOnlyRunnerBlocksFileWrite(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "victim.go")
+	if err := os.WriteFile(target, []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := NewRunner(WithReadOnly(true))
+
+	writeAttempts := []string{
+		"echo 'func Bad(){}' >> victim.go",
+		"printf 'func Bad(){}' > victim.go",
+		"cat > victim.go <<'EOF'\nfunc Bad(){}\nEOF",
+		"python3 -c \"open('victim.go','a').write('func Bad(){}')\"",
+		"bash -c 'echo bad > victim.go'",
+	}
+	for _, cmd := range writeAttempts {
+		_, _, err := r.Run(context.Background(), cmd, dir)
+		if err == nil {
+			t.Errorf("read-only runner should block: %s", cmd)
+		}
+	}
+
+	content, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "package main\n" {
+		t.Fatalf("file was modified despite read-only runner: %q", string(content))
+	}
+}
+
 func TestRunnerExecutesSafeCommand(t *testing.T) {
 	r := NewRunner()
 	out, _, err := r.Run(context.Background(), "echo hello", t.TempDir())

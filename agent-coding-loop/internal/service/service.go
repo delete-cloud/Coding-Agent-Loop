@@ -38,6 +38,7 @@ func New(cfg *config.Config) (*Service, error) {
 	}
 
 	runner := tools.NewRunner()
+	coderRunner := tools.NewRunner(tools.WithReadOnly(true))
 	reviewerRunner := tools.NewRunner(tools.WithReadOnly(true))
 	store, err := sqlite.New(cfg.DBPath)
 	if err != nil {
@@ -63,7 +64,7 @@ func New(cfg *config.Config) (*Service, error) {
 		Git:        gitpkg.NewClient(runner),
 		GitHub:     ghpkg.NewClient(runner),
 		KB:         kbClient,
-		Coder:      agentpkg.NewCoder(agentCfg, agentpkg.WithRunner(runner), agentpkg.WithSkills(skillRegistry), agentpkg.WithKB(kbClient)),
+		Coder:      agentpkg.NewCoder(agentCfg, agentpkg.WithRunner(coderRunner), agentpkg.WithSkills(skillRegistry), agentpkg.WithKB(kbClient)),
 		Reviewer:   agentpkg.NewReviewer(agentCfg, agentpkg.WithRunner(reviewerRunner), agentpkg.WithSkills(skillRegistry), agentpkg.WithKB(kbClient)),
 		Skills:     skillRegistry,
 		Artifacts:  cfg.Artifacts,

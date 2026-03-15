@@ -101,11 +101,18 @@ func IsDangerousCommand(cmd string) bool {
 
 func IsWriteCommand(cmd string) bool {
 	v := strings.ToLower(strings.TrimSpace(cmd))
-	writePrefixes := []string{
+	// Check for shell output redirections (>, >>).
+	if containsShellRedirect(v) {
+		return true
+	}
+	writePatterns := []string{
 		"git commit",
 		"git push",
 		"git add",
 		"git apply",
+		"git stash",
+		"git revert",
+		"git cherry-pick",
 		"echo ",
 		"cat >",
 		"sed -i",
@@ -113,9 +120,60 @@ func IsWriteCommand(cmd string) bool {
 		"mv ",
 		"cp ",
 		"touch ",
+		"printf ",
+		"patch ",
+		"patch -",
+		"install ",
+		"chmod ",
+		"chown ",
+		"ln ",
+		"mkdir ",
+		"rmdir ",
+		"truncate ",
+		"bash -c",
+		"sh -c",
+		"zsh -c",
+		"python ",
+		"python3 ",
+		"ruby ",
+		"perl ",
+		"node -e",
+		"node --eval",
 	}
-	for _, p := range writePrefixes {
+	for _, p := range writePatterns {
 		if strings.Contains(v, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// containsShellRedirect detects >, >> output redirections that are not
+// inside quotes or part of comparison operators (e.g. 2>&1 is allowed
+// since it redirects stderr to stdout, not to a file).
+func containsShellRedirect(cmd string) bool {
+	inSingle := false
+	inDouble := false
+	for i := 0; i < len(cmd); i++ {
+		ch := cmd[i]
+		if ch == '\'' && !inDouble {
+			inSingle = !inSingle
+			continue
+		}
+		if ch == '"' && !inSingle {
+			inDouble = !inDouble
+			continue
+		}
+		if inSingle || inDouble {
+			continue
+		}
+		if ch == '>' {
+			// Allow 2>&1, >&2, etc. (fd-to-fd redirections).
+			rest := cmd[i+1:]
+			trimmed := strings.TrimLeft(rest, "> ")
+			if len(trimmed) > 0 && trimmed[0] == '&' {
+				continue
+			}
 			return true
 		}
 	}

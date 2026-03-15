@@ -1329,7 +1329,7 @@ func (c *Coder) generateWithEino(ctx context.Context, in CoderInput) (CoderOutpu
 
 	runner := c.runner
 	if runner == nil {
-		runner = tools.NewRunner()
+		runner = tools.NewRunner(tools.WithReadOnly(true))
 	}
 	toolset, err := tools.BuildCoderTools(in.RepoSummary, c.skills, runner, c.kb)
 	if err != nil {
