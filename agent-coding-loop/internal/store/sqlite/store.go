@@ -71,6 +71,21 @@ CREATE TABLE IF NOT EXISTS artifacts (
   created_at INTEGER NOT NULL,
   FOREIGN KEY(run_id) REFERENCES runs(id)
 );
+
+CREATE TABLE IF NOT EXISTS progress_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL,
+  iteration INTEGER NOT NULL DEFAULT 0,
+  event_type TEXT NOT NULL,
+  status TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  detail_json TEXT NOT NULL DEFAULT '{}',
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY(run_id) REFERENCES runs(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_progress_events_run_id_id
+  ON progress_events(run_id, id);
 `
 
 const sqliteBusyTimeoutMS = 5000

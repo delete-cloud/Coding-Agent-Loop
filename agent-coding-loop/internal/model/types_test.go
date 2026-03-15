@@ -2,6 +2,40 @@ package model
 
 import "testing"
 
+func TestProgressEventTypeValidate(t *testing.T) {
+	valid := []ProgressEventType{
+		ProgressEventRunStarted,
+		ProgressEventRunBlocked,
+	}
+	for _, eventType := range valid {
+		if err := eventType.Validate(); err != nil {
+			t.Fatalf("Validate(%q): %v", eventType, err)
+		}
+	}
+
+	if err := ProgressEventType("unknown").Validate(); err == nil {
+		t.Fatal("expected unknown progress event type to fail validation")
+	}
+}
+
+func TestProgressStatusValidate(t *testing.T) {
+	valid := []ProgressStatus{
+		ProgressStatusStarted,
+		ProgressStatusProgress,
+		ProgressStatusCompleted,
+		ProgressStatusError,
+	}
+	for _, status := range valid {
+		if err := status.Validate(); err != nil {
+			t.Fatalf("Validate(%q): %v", status, err)
+		}
+	}
+
+	if err := ProgressStatus("unknown").Validate(); err == nil {
+		t.Fatal("expected unknown progress status to fail validation")
+	}
+}
+
 func TestParseRetrievalMode(t *testing.T) {
 	mode, err := ParseRetrievalMode("prefetch")
 	if err != nil {
