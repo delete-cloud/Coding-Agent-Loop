@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
 
 	agentpkg "github.com/kina/agent-coding-loop/internal/agent"
 	"github.com/kina/agent-coding-loop/internal/config"
@@ -25,9 +24,6 @@ type Service struct {
 	store  *sqlite.Store
 	engine *loop.Engine
 	skills *skills.Registry
-
-	mu      sync.Mutex
-	results map[string]model.RunResult
 }
 
 func New(cfg *config.Config) (*Service, error) {
@@ -75,11 +71,10 @@ func New(cfg *config.Config) (*Service, error) {
 	})
 
 	return &Service{
-		cfg:     cfg,
-		store:   store,
-		engine:  engine,
-		skills:  skillRegistry,
-		results: map[string]model.RunResult{},
+		cfg:    cfg,
+		store:  store,
+		engine: engine,
+		skills: skillRegistry,
 	}, nil
 }
 
@@ -96,13 +91,7 @@ func (s *Service) RunAsync(ctx context.Context, spec model.RunSpec) (string, err
 		return "", err
 	}
 	go func() {
-		result, runErr := s.engine.Resume(context.Background(), runID)
-		if runErr != nil {
-			result = model.RunResult{RunID: runID, Status: model.RunStatusFailed, Summary: runErr.Error()}
-		}
-		s.mu.Lock()
-		s.results[runID] = result
-		s.mu.Unlock()
+		_, _ = s.engine.RunWithID(context.Background(), runID, spec)
 	}()
 	return runID, nil
 }

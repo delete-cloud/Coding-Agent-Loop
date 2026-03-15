@@ -77,6 +77,16 @@ func (s *Server) handleRunByID(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"run_id": runID, "events": events})
 		return
 	}
+	if strings.HasSuffix(path, "/progress") {
+		runID := strings.TrimSuffix(path, "/progress")
+		s.handleRunProgress(w, r, runID)
+		return
+	}
+	if strings.HasSuffix(path, "/stream") {
+		runID := strings.TrimSuffix(path, "/stream")
+		s.handleRunStream(w, r, runID)
+		return
+	}
 	if strings.HasSuffix(path, "/resume") {
 		if r.Method != http.MethodPost {
 			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
