@@ -1,6 +1,6 @@
 # Progress Visibility And Streaming Design
 
-Status: proposed
+Status: implemented
 Last updated: 2026-03-15
 
 ## Goal

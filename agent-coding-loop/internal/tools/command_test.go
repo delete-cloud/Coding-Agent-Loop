@@ -60,6 +60,17 @@ func TestIsWriteCommandCoversCommonBypasses(t *testing.T) {
 		"cat file >> other.go",
 		"go test ./... > output.txt",
 		"echo data >> append.log",
+		// Shell launcher bypasses (P1 fix)
+		"sh -lc 'echo bad > file'",
+		"bash --login -c 'tee file'",
+		"env FOO=1 sh -c 'cat >> file'",
+		"/usr/bin/bash -c 'echo hi'",
+		"env -i bash -c 'rm x'",
+		"dash -c 'echo test'",
+		"go test ./... | bash -c 'cat > out'",
+		"true && sh -c 'echo bad'",
+		"true & sh -c 'echo bad > file'",
+		"printf ok\nsh -c 'echo bad > file'",
 	}
 	for _, cmd := range shouldBlock {
 		if !IsWriteCommand(cmd) {
@@ -82,6 +93,10 @@ func TestIsWriteCommandCoversCommonBypasses(t *testing.T) {
 		"git status",
 		"ls -la",
 		"find . -name '*.go'",
+		// Must not false-positive on these (P1 fix)
+		"ssh host ls",
+		"go test -shuffle on",
+		"git show HEAD:file.go",
 	}
 	for _, cmd := range shouldAllow {
 		if IsWriteCommand(cmd) {

@@ -105,6 +105,10 @@ func IsWriteCommand(cmd string) bool {
 	if containsShellRedirect(v) {
 		return true
 	}
+	// Check for nested shell launchers (sh -lc, bash --login -c, env sh -c, etc).
+	if containsShellLauncher(v) {
+		return true
+	}
 	writePatterns := []string{
 		"git commit",
 		"git push",
@@ -130,9 +134,6 @@ func IsWriteCommand(cmd string) bool {
 		"mkdir ",
 		"rmdir ",
 		"truncate ",
-		"bash -c",
-		"sh -c",
-		"zsh -c",
 		"python ",
 		"python3 ",
 		"ruby ",
@@ -146,6 +147,169 @@ func IsWriteCommand(cmd string) bool {
 		}
 	}
 	return false
+}
+
+// shellLaunchers are executables that spawn a nested shell and can execute
+// arbitrary commands, bypassing the read-only write-command check.
+var shellLaunchers = map[string]struct{}{
+	"sh": {}, "bash": {}, "zsh": {}, "dash": {}, "ksh": {}, "fish": {},
+}
+
+// containsShellLauncher detects nested shell invocations like "sh -lc ...",
+// "bash --login -c ...", "env FOO=1 sh -c ...", "/usr/bin/bash -c ...", etc.
+// It splits the command into segments on unquoted |, &&, ||, ;, &, and \n,
+// then checks whether the first real executable token in each segment is a
+// known shell.
+func containsShellLauncher(cmd string) bool {
+	// Process each segment separated by unquoted pipe/logic operators.
+	segStart := 0
+	inSingle := false
+	inDouble := false
+	escaped := false
+	for i := 0; i < len(cmd); i++ {
+		if escaped {
+			escaped = false
+			continue
+		}
+		ch := cmd[i]
+		if ch == '\\' {
+			escaped = true
+			continue
+		}
+		if ch == '\'' && !inDouble {
+			inSingle = !inSingle
+			continue
+		}
+		if ch == '"' && !inSingle {
+			inDouble = !inDouble
+			continue
+		}
+		if inSingle || inDouble {
+			continue
+		}
+		isSep := false
+		skip := 0
+		switch {
+		case ch == '|' && i+1 < len(cmd) && cmd[i+1] == '|': // ||
+			isSep = true
+			skip = 2
+		case ch == '&' && i+1 < len(cmd) && cmd[i+1] == '&': // &&
+			isSep = true
+			skip = 2
+		case ch == '|': // pipe
+			isSep = true
+			skip = 1
+		case ch == '&': // background
+			isSep = true
+			skip = 1
+		case ch == ';':
+			isSep = true
+			skip = 1
+		case ch == '\n':
+			isSep = true
+			skip = 1
+		}
+		if isSep {
+			if segmentStartsWithShell(cmd[segStart:i]) {
+				return true
+			}
+			segStart = i + skip
+			i += skip - 1
+		}
+	}
+	return segmentStartsWithShell(cmd[segStart:])
+}
+
+// segmentStartsWithShell extracts the first real executable token from a
+// command segment, skipping "env", env flags (-i, -u, etc), and KEY=VALUE
+// assignments. Returns true if that token's basename is a known shell.
+func segmentStartsWithShell(seg string) bool {
+	tokens := quoteAwareTokenize(strings.TrimSpace(seg))
+	skippedEnv := false
+	for _, tok := range tokens {
+		if !skippedEnv && tok == "env" {
+			skippedEnv = true
+			continue
+		}
+		// After "env", skip flags like -i, -u, --ignore-environment.
+		if skippedEnv && len(tok) > 0 && tok[0] == '-' {
+			continue
+		}
+		// Skip KEY=VALUE assignments (valid shell: ^[A-Za-z_][A-Za-z0-9_]*=).
+		if looksLikeEnvAssignment(tok) {
+			skippedEnv = true // env implied
+			continue
+		}
+		base := filepath.Base(tok)
+		_, isShell := shellLaunchers[base]
+		return isShell
+	}
+	return false
+}
+
+// looksLikeEnvAssignment returns true for tokens like "FOO=bar", "PATH=/usr/bin".
+// Only accepts valid shell variable names before the '='.
+func looksLikeEnvAssignment(tok string) bool {
+	eq := strings.IndexByte(tok, '=')
+	if eq <= 0 {
+		return false
+	}
+	name := tok[:eq]
+	for i, ch := range name {
+		if i == 0 {
+			if !((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || ch == '_') {
+				return false
+			}
+		} else {
+			if !((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// quoteAwareTokenize splits a string on unquoted whitespace, handling single
+// quotes, double quotes, and backslash escapes. Quotes are stripped from
+// the returned tokens.
+func quoteAwareTokenize(s string) []string {
+	var tokens []string
+	var cur []byte
+	inSingle := false
+	inDouble := false
+	escaped := false
+	for i := 0; i < len(s); i++ {
+		if escaped {
+			cur = append(cur, s[i])
+			escaped = false
+			continue
+		}
+		ch := s[i]
+		if ch == '\\' && !inSingle {
+			escaped = true
+			continue
+		}
+		if ch == '\'' && !inDouble {
+			inSingle = !inSingle
+			continue
+		}
+		if ch == '"' && !inSingle {
+			inDouble = !inDouble
+			continue
+		}
+		if (ch == ' ' || ch == '\t') && !inSingle && !inDouble {
+			if len(cur) > 0 {
+				tokens = append(tokens, string(cur))
+				cur = cur[:0]
+			}
+			continue
+		}
+		cur = append(cur, ch)
+	}
+	if len(cur) > 0 {
+		tokens = append(tokens, string(cur))
+	}
+	return tokens
 }
 
 // containsShellRedirect detects >, >> output redirections that are not

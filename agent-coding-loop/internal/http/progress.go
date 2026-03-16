@@ -53,6 +53,11 @@ func (s *Server) handleRunStream(w http.ResponseWriter, r *http.Request, runID s
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	// Verify run exists before opening the stream.
+	if _, err := s.svc.GetRun(r.Context(), runID); err != nil {
+		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeErr(w, http.StatusInternalServerError, "streaming unsupported")
@@ -76,6 +81,11 @@ func (s *Server) handleRunStream(w http.ResponseWriter, r *http.Request, runID s
 	keepAliveTicker := time.NewTicker(streamKeepAliveInterval)
 	defer keepAliveTicker.Stop()
 
+	// Check run status as fallback every ~5 seconds (20 poll cycles) in case
+	// the terminal progress event failed to persist.
+	pollCount := 0
+	const runStatusCheckInterval = 20
+
 	for {
 		events, err := s.svc.GetProgressEventsAfter(r.Context(), runID, afterID, defaultProgressLimit)
 		if err != nil {
@@ -94,6 +104,23 @@ func (s *Server) handleRunStream(w http.ResponseWriter, r *http.Request, runID s
 			}
 		}
 
+		// Fallback: if no terminal progress event, periodically check whether
+		// the run itself has reached a terminal status.
+		pollCount++
+		if pollCount%runStatusCheckInterval == 0 {
+			if run, err := s.svc.GetRun(r.Context(), runID); err == nil {
+				if isTerminalRunStatus(run.Status) {
+					// Flush any last events that arrived between polls.
+					remaining, _ := s.svc.GetProgressEventsAfter(r.Context(), runID, afterID, defaultProgressLimit)
+					for _, event := range remaining {
+						_ = writeSSEProgressEvent(w, event)
+						flusher.Flush()
+					}
+					return
+				}
+			}
+		}
+
 		select {
 		case <-r.Context().Done():
 			return
@@ -104,6 +131,15 @@ func (s *Server) handleRunStream(w http.ResponseWriter, r *http.Request, runID s
 			flusher.Flush()
 		case <-pollTicker.C:
 		}
+	}
+}
+
+func isTerminalRunStatus(status string) bool {
+	switch model.RunStatus(status) {
+	case model.RunStatusCompleted, model.RunStatusFailed, model.RunStatusBlocked:
+		return true
+	default:
+		return false
 	}
 }
 

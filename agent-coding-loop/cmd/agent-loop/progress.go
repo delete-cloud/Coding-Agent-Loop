@@ -30,38 +30,45 @@ func runWithProgressCmd(ctx context.Context, svc progressService, spec model.Run
 	if err != nil {
 		return err
 	}
-	if err := tailProgress(ctx, svc.GetProgressEventsAfter, runID, stderr, tailTimeout); err != nil {
+	// Relay goroutine: wait for run result, cache it, then signal done so
+	// tailProgress can exit even if the terminal progress event was lost.
+	done := make(chan struct{})
+	var result model.RunResult
+	var resultOK bool
+	go func() {
+		result, resultOK = <-resultCh
+		close(done)
+	}()
+	if err := tailProgress(ctx, svc.GetProgressEventsAfter, runID, stderr, tailTimeout, done); err != nil {
 		return err
 	}
-	result, ok := <-resultCh
-	if !ok {
+	<-done // ensure relay finished
+	if !resultOK {
 		return fmt.Errorf("run result channel closed")
 	}
 	return printJSONTo(stdout, result)
 }
 
 func resumeWithProgressCmd(ctx context.Context, svc progressService, runID string, stdout, stderr io.Writer, tailTimeout time.Duration) error {
-	resultCh := make(chan model.RunResult, 1)
+	done := make(chan struct{})
+	var result model.RunResult
 	go func() {
-		defer close(resultCh)
-		result, err := svc.Resume(ctx, runID)
+		res, err := svc.Resume(ctx, runID)
 		if err != nil {
-			result = model.RunResult{RunID: runID, Status: model.RunStatusFailed, Summary: err.Error()}
+			res = model.RunResult{RunID: runID, Status: model.RunStatusFailed, Summary: err.Error()}
 		}
-		resultCh <- result
+		result = res
+		close(done)
 	}()
 
-	if err := tailProgress(ctx, svc.GetProgressEventsAfter, runID, stderr, tailTimeout); err != nil {
+	if err := tailProgress(ctx, svc.GetProgressEventsAfter, runID, stderr, tailTimeout, done); err != nil {
 		return err
 	}
-	result, ok := <-resultCh
-	if !ok {
-		return fmt.Errorf("resume result channel closed")
-	}
+	<-done // ensure goroutine finished
 	return printJSONTo(stdout, result)
 }
 
-func tailProgress(ctx context.Context, fetch fetchProgressFunc, runID string, stderr io.Writer, tailTimeout time.Duration) error {
+func tailProgress(ctx context.Context, fetch fetchProgressFunc, runID string, stderr io.Writer, tailTimeout time.Duration, done <-chan struct{}) error {
 	if fetch == nil {
 		return fmt.Errorf("fetch progress function is required")
 	}
@@ -99,6 +106,14 @@ func tailProgress(ctx context.Context, fetch fetchProgressFunc, runID string, st
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("tail progress timed out for run %s: %w", runID, ctx.Err())
+		case <-done:
+			// Run finished but no terminal progress event seen (e.g. write
+			// to progress_events failed). Flush any remaining events.
+			remaining, _ := fetch(ctx, runID, afterID, progressFetchLimit)
+			for _, event := range remaining {
+				_ = renderProgressEvent(stderr, event)
+			}
+			return nil
 		case <-ticker.C:
 		}
 	}

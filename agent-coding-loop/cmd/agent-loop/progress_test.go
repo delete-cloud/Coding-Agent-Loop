@@ -13,6 +13,10 @@ import (
 	"github.com/kina/agent-coding-loop/internal/model"
 )
 
+// neverDone returns a channel that is never closed, for tests where
+// tailProgress should exit via terminal event or timeout.
+func neverDone() <-chan struct{} { return make(chan struct{}) }
+
 func TestTailProgressStopsOnRunCompleted(t *testing.T) {
 	var stderr bytes.Buffer
 	err := tailProgress(context.Background(), func(context.Context, string, int64, int) ([]model.ProgressEvent, error) {
@@ -20,7 +24,7 @@ func TestTailProgressStopsOnRunCompleted(t *testing.T) {
 			{ID: 1, RunID: "run_123", Iteration: 0, EventType: model.ProgressEventRunStarted, Status: model.ProgressStatusStarted, Summary: "run started"},
 			{ID: 2, RunID: "run_123", Iteration: 0, EventType: model.ProgressEventRunCompleted, Status: model.ProgressStatusCompleted, Summary: "run completed"},
 		}, nil
-	}, "run_123", &stderr, 100*time.Millisecond)
+	}, "run_123", &stderr, 100*time.Millisecond, neverDone())
 	if err != nil {
 		t.Fatalf("tailProgress: %v", err)
 	}
@@ -38,7 +42,7 @@ func TestTailProgressStopsOnRunBlocked(t *testing.T) {
 		return []model.ProgressEvent{
 			{ID: 1, RunID: "run_123", Iteration: 0, EventType: model.ProgressEventRunBlocked, Status: model.ProgressStatusError, Summary: "doom-loop detected on git_apply"},
 		}, nil
-	}, "run_123", &stderr, 100*time.Millisecond)
+	}, "run_123", &stderr, 100*time.Millisecond, neverDone())
 	if err != nil {
 		t.Fatalf("tailProgress: %v", err)
 	}
@@ -53,9 +57,39 @@ func TestTailProgressTimesOutWithoutTerminalEvent(t *testing.T) {
 		return []model.ProgressEvent{
 			{ID: 1, RunID: "run_123", Iteration: 1, EventType: model.ProgressEventCoderGenerating, Status: model.ProgressStatusStarted, Summary: "coder generating"},
 		}, nil
-	}, "run_123", &stderr, 20*time.Millisecond)
+	}, "run_123", &stderr, 20*time.Millisecond, neverDone())
 	if err == nil {
 		t.Fatal("expected timeout error")
+	}
+}
+
+func TestTailProgressExitsOnDoneWhenTerminalEventMissing(t *testing.T) {
+	callCount := 0
+	var stderr bytes.Buffer
+	done := make(chan struct{})
+
+	// Simulate: first fetch returns non-terminal event, then run finishes
+	// (done closes) without a terminal progress event being written.
+	fetch := func(_ context.Context, _ string, afterID int64, _ int) ([]model.ProgressEvent, error) {
+		callCount++
+		if callCount == 1 {
+			return []model.ProgressEvent{
+				{ID: 1, RunID: "run_123", Iteration: 1, EventType: model.ProgressEventCoderGenerating, Status: model.ProgressStatusStarted, Summary: "coder generating"},
+			}, nil
+		}
+		if callCount == 2 {
+			// Simulate run completing without writing terminal event.
+			close(done)
+		}
+		return nil, nil
+	}
+
+	err := tailProgress(context.Background(), fetch, "run_123", &stderr, 5*time.Second, done)
+	if err != nil {
+		t.Fatalf("expected nil error from done fallback, got: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "coder generating") {
+		t.Fatalf("expected progress output, got %q", stderr.String())
 	}
 }
 
