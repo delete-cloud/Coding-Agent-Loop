@@ -90,6 +90,11 @@ type loopSession struct {
 	Result   model.RunResult
 }
 
+type runOptions struct {
+	initialIteration *int
+	forceNewRun      bool
+}
+
 const (
 	promptRetrievedContextMaxHits = 4
 	promptRetrievedTextMaxChars   = 500
@@ -213,7 +218,7 @@ func NewEngine(deps EngineDeps) *Engine {
 }
 
 func (e *Engine) Run(ctx context.Context, spec model.RunSpec) (model.RunResult, error) {
-	return e.run(ctx, spec, "")
+	return e.run(ctx, spec, "", runOptions{})
 }
 
 func (e *Engine) RunWithID(ctx context.Context, runID string, spec model.RunSpec) (model.RunResult, error) {
@@ -246,7 +251,7 @@ func (e *Engine) Resume(ctx context.Context, runID string) (model.RunResult, err
 	if !hasCheckpoint {
 		return e.failClosedResume(ctx, runID, "resume failed closed: checkpoint missing for interrupted running run", fmt.Errorf("checkpoint missing for interrupted running run %s", runID))
 	}
-	return e.run(ctx, spec, runID)
+	return e.run(ctx, spec, runID, runOptions{})
 }
 
 func (e *Engine) failClosedResume(ctx context.Context, runID, summary string, cause error) (model.RunResult, error) {
@@ -265,6 +270,7 @@ func (e *Engine) failClosedResume(ctx context.Context, runID, summary string, ca
 	}, fmt.Errorf("%s: %w", summary, cause)
 }
 
+
 func (e *Engine) hasCheckpoint(ctx context.Context, runID string) (bool, error) {
 	if e.checkpoints == nil {
 		return false, nil
@@ -273,7 +279,7 @@ func (e *Engine) hasCheckpoint(ctx context.Context, runID string) (bool, error) 
 	return ok, err
 }
 
-func (e *Engine) run(ctx context.Context, spec model.RunSpec, existingRunID string) (model.RunResult, error) {
+func (e *Engine) run(ctx context.Context, spec model.RunSpec, existingRunID string, opts runOptions) (model.RunResult, error) {
 	if err := spec.Validate(); err != nil {
 		return model.RunResult{Status: model.RunStatusFailed}, err
 	}
@@ -337,6 +343,10 @@ func (e *Engine) run(ctx context.Context, spec model.RunSpec, existingRunID stri
 	}
 
 	lastIteration, _ := e.store.MaxStepIteration(ctx, runID)
+	iteration := lastIteration
+	if opts.initialIteration != nil {
+		iteration = *opts.initialIteration
+	}
 	flowInput := &loopSession{
 		RunID:          runID,
 		Spec:           spec,
@@ -345,7 +355,7 @@ func (e *Engine) run(ctx context.Context, spec model.RunSpec, existingRunID stri
 		BaselineStatus: baselineStatus,
 		Commands:       commands,
 		SkillsSummary:  e.renderSkillsSummary(),
-		Iteration:      lastIteration,
+		Iteration:      iteration,
 		Status:         model.RunStatusRunning,
 	}
 
@@ -361,6 +371,9 @@ func (e *Engine) run(ctx context.Context, spec model.RunSpec, existingRunID stri
 	invokeOpts := []compose.Option{
 		compose.WithCheckPointID(runID),
 		compose.WithRuntimeMaxSteps(maxRuntimeSteps(spec.MaxIterations)),
+	}
+	if opts.forceNewRun {
+		invokeOpts = append(invokeOpts, compose.WithForceNewRun())
 	}
 	output, err := runner.Invoke(ctx, flowInput, invokeOpts...)
 	if err != nil {
