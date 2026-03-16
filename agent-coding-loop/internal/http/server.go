@@ -13,11 +13,12 @@ import (
 )
 
 type Server struct {
-	svc *service.Service
+	svc                    *service.Service
+	runStatusCheckInterval int
 }
 
 func NewServer(svc *service.Service) *Server {
-	return &Server{svc: svc}
+	return &Server{svc: svc, runStatusCheckInterval: 20}
 }
 
 func (s *Server) Handler() http.Handler {

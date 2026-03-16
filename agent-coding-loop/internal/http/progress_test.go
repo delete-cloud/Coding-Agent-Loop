@@ -15,6 +15,7 @@ import (
 	"github.com/kina/agent-coding-loop/internal/config"
 	"github.com/kina/agent-coding-loop/internal/model"
 	"github.com/kina/agent-coding-loop/internal/service"
+	sqlite "github.com/kina/agent-coding-loop/internal/store/sqlite"
 	"github.com/kina/agent-coding-loop/internal/tools"
 )
 
@@ -191,10 +192,17 @@ func newHTTPProgressFixture(t *testing.T) (*service.Service, string) {
 
 func newHTTPTestService(t *testing.T) *service.Service {
 	t.Helper()
+	svc, _ := newHTTPTestServiceWithDBPath(t)
+	return svc
+}
+
+func newHTTPTestServiceWithDBPath(t *testing.T) (*service.Service, string) {
+	t.Helper()
 
 	root := t.TempDir()
+	dbPath := filepath.Join(root, "state.db")
 	cfg := &config.Config{
-		DBPath:     filepath.Join(root, "state.db"),
+		DBPath:     dbPath,
 		Artifacts:  filepath.Join(root, "artifacts"),
 		ListenAddr: "127.0.0.1:0",
 	}
@@ -202,7 +210,7 @@ func newHTTPTestService(t *testing.T) *service.Service {
 	if err != nil {
 		t.Fatalf("service.New: %v", err)
 	}
-	return svc
+	return svc, dbPath
 }
 
 func newHTTPTestRepo(t *testing.T) string {
@@ -223,6 +231,80 @@ func mustRunHTTPTest(t *testing.T, runner *tools.Runner, repo, cmd string) {
 	t.Helper()
 	if _, _, err := runner.Run(context.Background(), cmd, repo); err != nil {
 		t.Fatalf("runner.Run(%q): %v", cmd, err)
+	}
+}
+
+func TestStreamEndpointFallsBackToRunStatusWhenTerminalEventMissing(t *testing.T) {
+	ctx := context.Background()
+	svc, dbPath := newHTTPTestServiceWithDBPath(t)
+
+	// Open a second store handle on the same DB to seed data directly.
+	store, err := sqlite.New(dbPath)
+	if err != nil {
+		t.Fatalf("sqlite.New: %v", err)
+	}
+
+	runID, err := store.CreateRun(ctx, model.RunSpec{
+		Goal:          "test fallback",
+		Repo:          t.TempDir(),
+		PRMode:        model.PRModeDryRun,
+		MaxIterations: 1,
+		Commands:      model.CommandSet{Test: []string{"echo PASS"}},
+	}, model.RunStatusRunning)
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	// Insert a non-terminal event only — no terminal progress event.
+	if err := store.InsertProgressEvent(ctx, model.ProgressEvent{
+		RunID:     runID,
+		EventType: model.ProgressEventRunStarted,
+		Status:    model.ProgressStatusStarted,
+		Summary:   "run started",
+		CreatedAt: time.Now().UnixMilli(),
+	}); err != nil {
+		t.Fatalf("InsertProgressEvent: %v", err)
+	}
+
+	// Mark the run as completed without emitting a terminal progress event.
+	if err := store.UpdateRunStatus(ctx, runID, model.RunStatusCompleted, "done"); err != nil {
+		t.Fatalf("UpdateRunStatus: %v", err)
+	}
+
+	server := NewServer(svc)
+	server.runStatusCheckInterval = 1 // check run status every poll cycle
+
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/v1/runs/%s/stream", runID), nil)
+	rec := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		server.Handler().ServeHTTP(rec, req)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stream handler did not return; run-status fallback failed")
+	}
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	body := rec.Body.String()
+
+	// Should contain the non-terminal event.
+	if !strings.Contains(body, "event: progress") {
+		t.Fatalf("expected SSE progress event in body, got %q", body)
+	}
+
+	// Should NOT contain any terminal progress event type.
+	for _, terminal := range []string{"run_completed", "run_failed", "run_blocked"} {
+		if strings.Contains(body, terminal) {
+			t.Fatalf("did not expect terminal event type %q in body, got %q", terminal, body)
+		}
 	}
 }
 

@@ -81,10 +81,13 @@ func (s *Server) handleRunStream(w http.ResponseWriter, r *http.Request, runID s
 	keepAliveTicker := time.NewTicker(streamKeepAliveInterval)
 	defer keepAliveTicker.Stop()
 
-	// Check run status as fallback every ~5 seconds (20 poll cycles) in case
-	// the terminal progress event failed to persist.
+	// Check run status as fallback every N poll cycles (default 20 ≈ 5s) in
+	// case the terminal progress event failed to persist.
 	pollCount := 0
-	const runStatusCheckInterval = 20
+	runStatusCheckInterval := s.runStatusCheckInterval
+	if runStatusCheckInterval <= 0 {
+		runStatusCheckInterval = 20
+	}
 
 	for {
 		events, err := s.svc.GetProgressEventsAfter(r.Context(), runID, afterID, defaultProgressLimit)
