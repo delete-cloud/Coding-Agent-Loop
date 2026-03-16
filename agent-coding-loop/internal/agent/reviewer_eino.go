@@ -230,7 +230,7 @@ func decodeReviewOutput(content string) (ReviewOutput, error) {
 		if err2 := json.Unmarshal([]byte(raw), &out); err2 == nil {
 			return out, nil
 		}
-		return ReviewOutput{}, err
+		return ReviewOutput{}, fmt.Errorf("parse reviewer json failed: %w; content=%s", err, truncateDiagnosticPreview(raw))
 	}
 	out := ReviewOutput{}
 	if v, ok := m["decision"].(string); ok {

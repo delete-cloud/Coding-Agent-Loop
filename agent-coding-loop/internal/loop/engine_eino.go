@@ -231,11 +231,11 @@ func (e *Engine) RunWithID(ctx context.Context, runID string, spec model.RunSpec
 func (e *Engine) Resume(ctx context.Context, runID string) (model.RunResult, error) {
 	run, err := e.store.GetRun(ctx, runID)
 	if err != nil {
-		return model.RunResult{Status: model.RunStatusFailed}, err
+		return model.RunResult{RunID: runID, Status: model.RunStatusFailed}, err
 	}
 	var spec model.RunSpec
 	if err := json.Unmarshal([]byte(run.SpecJSON), &spec); err != nil {
-		return model.RunResult{Status: model.RunStatusFailed}, err
+		return model.RunResult{RunID: runID, Status: model.RunStatusFailed}, err
 	}
 	if model.RunStatus(strings.TrimSpace(run.Status)) != model.RunStatusRunning {
 		return model.RunResult{

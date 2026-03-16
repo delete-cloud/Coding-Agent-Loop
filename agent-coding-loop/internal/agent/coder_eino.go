@@ -1491,7 +1491,7 @@ func decodeCoderOutput(content string) (CoderOutput, error) {
 		if err2 := json.Unmarshal([]byte(raw), &out); err2 == nil {
 			return out, nil
 		}
-		return CoderOutput{}, err
+		return CoderOutput{}, fmt.Errorf("parse coder json failed: %w; content=%s", err, truncateDiagnosticPreview(raw))
 	}
 	out := CoderOutput{}
 	if v, ok := m["summary"].(string); ok {
