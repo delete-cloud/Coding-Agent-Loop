@@ -424,6 +424,7 @@ func TestReviewerFallbackCompletionPreservesEinoStructuredOutputDiagnostics(t *t
 	}
 }
 
+
 func TestCompleteJSONFailsAfterRepairAttempts(t *testing.T) {
 	model := &fakeToolCallingModel{
 		responses: []string{

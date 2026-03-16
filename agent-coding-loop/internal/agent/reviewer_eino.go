@@ -189,28 +189,19 @@ func (r *Reviewer) reviewWithEino(ctx context.Context, in ReviewInput) (ReviewOu
 	}
 
 	systemPrompt, userPrompt := reviewerPrompts(in)
-	msg, err := rAgent.Generate(ctx, []*schema.Message{
-		schema.SystemMessage(systemPrompt),
-		schema.UserMessage(userPrompt),
-	})
-	if err != nil {
-		return ReviewOutput{}, err
-	}
-	raw := ""
-	if msg != nil {
-		raw = msg.Content
-	}
-	var wire map[string]any
-	if err := decodeJSONWithRepair(ctx, raw, &wire, r.client.RepairJSON); err != nil {
+	var wire any
+	if err := completeJSONWithGenerator(ctx, func(ctx context.Context, messages []*schema.Message) (*schema.Message, error) {
+		return rAgent.Generate(ctx, messages)
+	}, systemPrompt, userPrompt, &wire); err != nil {
 		return ReviewOutput{}, err
 	}
 	b, err := json.Marshal(wire)
 	if err != nil {
-		return ReviewOutput{}, wrapStructuredOutputStageError("encode repaired reviewer json failed", raw, err)
+		return ReviewOutput{}, wrapStructuredOutputStageError("encode repaired reviewer json failed", fmt.Sprintf("%v", wire), err)
 	}
 	out, err := decodeReviewOutput(string(b))
 	if err != nil {
-		return ReviewOutput{}, wrapStructuredOutputStageError("parse reviewer json failed", raw, err)
+		return ReviewOutput{}, wrapStructuredOutputStageError("parse reviewer json failed", string(b), err)
 	}
 	normalizeReviewOutput(&out)
 	return out, nil
@@ -239,7 +230,7 @@ func decodeReviewOutput(content string) (ReviewOutput, error) {
 		if err2 := json.Unmarshal([]byte(raw), &out); err2 == nil {
 			return out, nil
 		}
-		return ReviewOutput{}, err
+		return ReviewOutput{}, fmt.Errorf("parse reviewer json failed: %w; content=%s", err, truncateDiagnosticPreview(raw))
 	}
 	out := ReviewOutput{}
 	if v, ok := m["decision"].(string); ok {
