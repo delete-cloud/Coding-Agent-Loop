@@ -1348,15 +1348,24 @@ func (c *Coder) generateWithEino(ctx context.Context, in CoderInput) (CoderOutpu
 	}
 
 	systemPrompt, userPrompt := coderPrompts(in)
-	var wire any
-	if err := completeJSONWithGenerator(ctx, func(ctx context.Context, messages []*schema.Message) (*schema.Message, error) {
-		return rAgent.Generate(ctx, messages)
-	}, systemPrompt, userPrompt, &wire); err != nil {
+	msg, err := rAgent.Generate(ctx, []*schema.Message{
+		schema.SystemMessage(systemPrompt),
+		schema.UserMessage(userPrompt),
+	})
+	if err != nil {
+		return CoderOutput{}, err
+	}
+	raw := ""
+	if msg != nil {
+		raw = msg.Content
+	}
+	var wire map[string]any
+	if err := decodeJSONWithRepair(ctx, raw, &wire, c.client.RepairJSON); err != nil {
 		return CoderOutput{}, err
 	}
 	b, err := json.Marshal(wire)
 	if err != nil {
-		return CoderOutput{}, wrapStructuredOutputStageError("encode repaired coder json failed", fmt.Sprintf("%v", wire), err)
+		return CoderOutput{}, wrapStructuredOutputStageError("encode repaired coder json failed", raw, err)
 	}
 	out, err := decodeCoderOutput(string(b))
 	if err != nil {

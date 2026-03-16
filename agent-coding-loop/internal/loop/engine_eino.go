@@ -225,7 +225,7 @@ func (e *Engine) RunWithID(ctx context.Context, runID string, spec model.RunSpec
 	if strings.TrimSpace(runID) == "" {
 		return model.RunResult{Status: model.RunStatusFailed}, fmt.Errorf("run id is required")
 	}
-	return e.run(ctx, spec, runID)
+	return e.run(ctx, spec, runID, runOptions{})
 }
 
 func (e *Engine) Resume(ctx context.Context, runID string) (model.RunResult, error) {
