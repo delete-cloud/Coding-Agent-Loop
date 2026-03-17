@@ -1,6 +1,6 @@
 import unittest
 
-from run_ab import evaluate_strict_reasons
+from eval.ab.run_ab import evaluate_strict_reasons
 
 
 class StrictEvalTests(unittest.TestCase):
