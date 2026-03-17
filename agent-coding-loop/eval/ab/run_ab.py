@@ -62,6 +62,15 @@ def load_jsonl(path: str) -> list[dict[str, Any]]:
     return rows
 
 
+def _ensure_str(value: str | bytes | None) -> str:
+    """Coerce *value* to ``str``, handling ``bytes`` and ``None``."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return str(value)
+
+
 def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
@@ -764,8 +773,8 @@ def build_report(*, meta: dict[str, Any], rows: list[dict[str, Any]]) -> dict[st
     }
 
 
-def parse_result(stdout: str) -> dict[str, Any]:
-    text = (stdout or "").strip()
+def parse_result(stdout: str | bytes | None) -> dict[str, Any]:
+    text = _ensure_str(stdout).strip()
     if not text:
         return {}
     try:
@@ -902,7 +911,11 @@ def run_one(
         if rate_limiter is not None:
             rate_limiter.release()
         wall_duration = max(0.0, time.time() - t0)
-        parsed = parse_result(e.stdout or "")
+        # TimeoutExpired.stdout/stderr may be bytes even when text=True was
+        # passed to subprocess.run — normalise to str at the boundary.
+        _te_stdout = _ensure_str(e.stdout)
+        _te_stderr = _ensure_str(e.stderr)
+        parsed = parse_result(_te_stdout)
         run_id = str(parsed.get("run_id", "")).strip()
         if not run_id:
             run_id = recover_run_id_from_db(db_path=db_path, repo=run_repo, goal=goal)
@@ -933,7 +946,7 @@ def run_one(
             "summary": summary,
             "exit_code": 124,
             "timed_out": True,
-            "stderr_preview": (e.stderr or "").strip()[:600],
+            "stderr_preview": _te_stderr.strip()[:600],
             "requires_kb": checks["requires_kb"],
             "kb_signal": checks["kb_signal"],
             "citation_recall": checks["citation_recall"],

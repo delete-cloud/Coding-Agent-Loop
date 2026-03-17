@@ -672,6 +672,50 @@ class RunABTests(unittest.TestCase):
         self.assertEqual("off", retrieval_mode_for_task(rag_enabled=True, requires_kb=False))
         self.assertEqual("off", retrieval_mode_for_task(rag_enabled=False, requires_kb=True))
 
+    @mock.patch("eval.ab.run_ab.subprocess.run")
+    def test_run_one_timeout_with_bytes_stdout_stderr_is_json_serializable(self, mock_run):
+        """TimeoutExpired.stdout/stderr may be bytes; row must be JSON-safe."""
+        mock_run.side_effect = subprocess.TimeoutExpired(
+            cmd=["agent-loop"], timeout=1,
+            output=b'some log lines\n{"status":"running"}',
+            stderr=b"killed by signal 9",
+        )
+        row = run_one(
+            experiment="no_rag",
+            rag_enabled=False,
+            task={"task_id": "t_bytes", "goal": "fix readme", "requires_kb": False},
+            agent_loop_bin="./agent-loop",
+            repo="/tmp/repo",
+            db_path="/tmp/nonexistent.db",
+            pr_mode="dry-run",
+            max_iterations=1,
+            kb_url="http://127.0.0.1:0",
+            dry_run=False,
+            task_timeout_sec=60,
+            strict_mode=False,
+            isolate_worktree=False,
+        )
+        # Must not raise — the row is JSON-serializable.
+        serialized = json.dumps(row, ensure_ascii=False)
+        self.assertIsInstance(serialized, str)
+        self.assertTrue(row.get("timed_out", False))
+        self.assertIn("killed by signal 9", row["stderr_preview"])
+
+    def test_parse_result_handles_bytes_with_prefix(self):
+        """parse_result must handle bytes input including log-prefix + JSON."""
+        from eval.ab.run_ab import parse_result
+        # Pure bytes JSON
+        self.assertEqual(parse_result(b'{"status":"completed"}'), {"status": "completed"})
+        # Bytes with log prefix before trailing JSON
+        self.assertEqual(
+            parse_result(b'[run] started\n{"status":"completed","run_id":"r1"}'),
+            {"status": "completed", "run_id": "r1"},
+        )
+        # None
+        self.assertEqual(parse_result(None), {})
+        # Empty bytes
+        self.assertEqual(parse_result(b""), {})
+
 
 if __name__ == "__main__":
     unittest.main()
