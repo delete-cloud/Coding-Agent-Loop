@@ -108,6 +108,7 @@ def create_test_git_repo():
 # ---------------------------------------------------------------------------
 
 
+@unittest.skipUnless(shutil.which("git"), "git CLI required")
 class RunOneWorktreeIntegrationTests(unittest.TestCase):
     def setUp(self):
         self.repo, self._cleanup = create_test_git_repo()

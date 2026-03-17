@@ -129,7 +129,7 @@ def create_test_git_repo():
 
 - [ ] **Step 2: Verify the file is importable**
 
-Run: `cd /Users/kina/Code/Agent/Coding-Agent-Loop/.worktrees/eval-run-one-e2e/agent-coding-loop && python3 -c "from eval.tests.test_run_one_integration import selective_subprocess_mock, create_test_git_repo; print('OK')"`
+Run (from repo root): `python3 -c "from eval.tests.test_run_one_integration import selective_subprocess_mock, create_test_git_repo; print('OK')"`
 
 Expected: `OK`
 
@@ -216,7 +216,7 @@ class RunOneWorktreeIntegrationTests(unittest.TestCase):
 
 - [ ] **Step 2: Run test to verify it passes**
 
-Run: `cd /Users/kina/Code/Agent/Coding-Agent-Loop/.worktrees/eval-run-one-e2e/agent-coding-loop && python3 -m unittest eval.tests.test_run_one_integration.RunOneWorktreeIntegrationTests.test_isolate_worktree_creates_and_cleans_up -v`
+Run: `python3 -m unittest eval.tests.test_run_one_integration.RunOneWorktreeIntegrationTests.test_isolate_worktree_creates_and_cleans_up -v`
 
 Expected: PASS
 
@@ -304,7 +304,7 @@ Add to `RunOneWorktreeIntegrationTests`:
 
 - [ ] **Step 2: Run test to verify it passes**
 
-Run: `cd /Users/kina/Code/Agent/Coding-Agent-Loop/.worktrees/eval-run-one-e2e/agent-coding-loop && python3 -m unittest eval.tests.test_run_one_integration.RunOneWorktreeIntegrationTests.test_isolate_worktree_materializes_overlay -v`
+Run: `python3 -m unittest eval.tests.test_run_one_integration.RunOneWorktreeIntegrationTests.test_isolate_worktree_materializes_overlay -v`
 
 Expected: PASS
 
@@ -371,7 +371,7 @@ Add to `RunOneWorktreeIntegrationTests`:
 
 - [ ] **Step 2: Run test to verify it passes**
 
-Run: `cd /Users/kina/Code/Agent/Coding-Agent-Loop/.worktrees/eval-run-one-e2e/agent-coding-loop && python3 -m unittest eval.tests.test_run_one_integration.RunOneWorktreeIntegrationTests.test_isolate_worktree_cleans_up_on_timeout -v`
+Run: `python3 -m unittest eval.tests.test_run_one_integration.RunOneWorktreeIntegrationTests.test_isolate_worktree_cleans_up_on_timeout -v`
 
 Expected: PASS
 
@@ -422,7 +422,7 @@ Add to `RunOneWorktreeIntegrationTests`:
 
 - [ ] **Step 2: Run test to verify it passes**
 
-Run: `cd /Users/kina/Code/Agent/Coding-Agent-Loop/.worktrees/eval-run-one-e2e/agent-coding-loop && python3 -m unittest eval.tests.test_run_one_integration.RunOneWorktreeIntegrationTests.test_isolate_worktree_fails_gracefully_on_prepare_error -v`
+Run: `python3 -m unittest eval.tests.test_run_one_integration.RunOneWorktreeIntegrationTests.test_isolate_worktree_fails_gracefully_on_prepare_error -v`
 
 Expected: PASS
 
@@ -479,23 +479,23 @@ Add to `RunOneWorktreeIntegrationTests`:
 
 - [ ] **Step 2: Run test to verify it passes**
 
-Run: `cd /Users/kina/Code/Agent/Coding-Agent-Loop/.worktrees/eval-run-one-e2e/agent-coding-loop && python3 -m unittest eval.tests.test_run_one_integration.RunOneWorktreeIntegrationTests.test_rate_limiter_released_on_timeout -v`
+Run: `python3 -m unittest eval.tests.test_run_one_integration.RunOneWorktreeIntegrationTests.test_rate_limiter_released_on_timeout -v`
 
 Expected: PASS
 
 - [ ] **Step 3: Run all integration tests together**
 
-Run: `cd /Users/kina/Code/Agent/Coding-Agent-Loop/.worktrees/eval-run-one-e2e/agent-coding-loop && python3 -m unittest eval.tests.test_run_one_integration -v`
+Run: `python3 -m unittest eval.tests.test_run_one_integration -v`
 
 Expected: 5 tests, all PASS
 
 - [ ] **Step 4: Run existing tests to verify no regression**
 
-Run: `cd /Users/kina/Code/Agent/Coding-Agent-Loop/.worktrees/eval-run-one-e2e/agent-coding-loop && python3 -m unittest eval.tests.test_run_ab -v`
+Run: `python3 -m unittest eval.tests.test_run_ab -v`
 
 Expected: 31 tests, all PASS
 
-Run: `cd /Users/kina/Code/Agent/Coding-Agent-Loop/.worktrees/eval-run-one-e2e/agent-coding-loop/eval/ab && python3 -m unittest test_run_ab_strict -v`
+Run: `cd eval/ab && python3 -m unittest test_run_ab_strict -v`
 
 Expected: 9 tests, all PASS
 
@@ -522,7 +522,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Run full suite one last time**
 
-Run: `cd /Users/kina/Code/Agent/Coding-Agent-Loop/.worktrees/eval-run-one-e2e/agent-coding-loop && python3 -m unittest eval.tests.test_run_one_integration -v`
+Run: `python3 -m unittest eval.tests.test_run_one_integration -v`
 
 Expected: 5 tests, all PASS
 
