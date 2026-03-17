@@ -925,7 +925,9 @@ def run_one(
         status = db_status if is_terminal_run_status(db_status) else "failed"
         if not summary:
             summary = str(trace.get("run_summary", "")).strip() or f"task timed out after {task_timeout_sec}s"
-        duration = db_duration if db_duration > 0 else wall_duration
+        # Only trust db_duration when the run reached a terminal state;
+        # a "running" row has a near-zero delta that would hide the real wall time.
+        duration = db_duration if (db_duration > 0 and is_terminal_run_status(db_status)) else wall_duration
         checks = evaluate_expectations(task, corpus_text=corpus + "\n" + summary, trace=trace)
         strict_reasons = evaluate_strict_reasons(
             strict_mode=bool(strict_mode),
@@ -978,7 +980,8 @@ def run_one(
         status = db_status
         if not summary:
             summary = str(trace.get("run_summary", "")).strip()
-    duration = db_duration if db_duration > 0 else wall_duration
+    # Only trust db_duration when the run reached a terminal state.
+    duration = db_duration if (db_duration > 0 and is_terminal_run_status(db_status)) else wall_duration
     checks = evaluate_expectations(task, corpus_text=corpus + "\n" + summary, trace=trace)
     strict_reasons = evaluate_strict_reasons(
         strict_mode=bool(strict_mode),

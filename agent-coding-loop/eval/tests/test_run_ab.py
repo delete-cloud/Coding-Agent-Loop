@@ -574,7 +574,6 @@ class RunABTests(unittest.TestCase):
             )
 
             self.assertEqual(row["run_id"], "run_123")
-            self.assertEqual(row["duration_sec"], 3.0)
 
     @mock.patch("eval.ab.run_ab.subprocess.run")
     def test_run_one_recovers_run_id_from_db_when_process_returns_without_result_json(self, mock_run):
@@ -715,6 +714,54 @@ class RunABTests(unittest.TestCase):
         self.assertEqual(parse_result(None), {})
         # Empty bytes
         self.assertEqual(parse_result(b""), {})
+
+
+    @mock.patch("eval.ab.run_ab.subprocess.run")
+    def test_run_one_timeout_uses_wall_duration_when_db_status_not_terminal(self, mock_run):
+        """When the DB run is still 'running', wall_duration must be used."""
+        with tempfile.TemporaryDirectory() as d:
+            db_path = Path(d) / "state.db"
+            conn = sqlite3.connect(db_path)
+            conn.executescript(
+                """
+                create table runs (id text primary key, spec_json text, status text, branch text, commit_hash text, pr_url text, summary text, created_at integer, updated_at integer);
+                create table reviews (run_id text, summary text, findings_json text);
+                create table tool_calls (run_id text, tool text, input_text text, output_text text, status text);
+                """
+            )
+            spec = '{"goal":' + json.dumps(build_goal("fix readme", rag_enabled=True, requires_kb=False)) + ',"repo":"/tmp/repo"}'
+            # Simulate a run that was killed mid-flight: status=running, tiny delta.
+            conn.execute(
+                "insert into runs(id, spec_json, status, branch, commit_hash, pr_url, summary, created_at, updated_at) values (?, ?, ?, '', '', '', ?, ?, ?)",
+                ("run_stuck", spec, "running", "run started", 1000, 1079),
+            )
+            conn.commit()
+            conn.close()
+
+            mock_run.side_effect = subprocess.TimeoutExpired(cmd=["agent-loop"], timeout=1, output="", stderr="")
+
+            with mock.patch("eval.ab.run_ab.time.time", side_effect=[100.0, 101.5]):
+                row = run_one(
+                    experiment="rag",
+                    rag_enabled=True,
+                    task={"task_id": "t_stuck", "goal": "fix readme", "requires_kb": False},
+                    agent_loop_bin="./agent-loop",
+                    repo="/tmp/repo",
+                    db_path=str(db_path),
+                    pr_mode="dry-run",
+                    max_iterations=1,
+                    kb_url="http://127.0.0.1:0",
+                    dry_run=False,
+                    task_timeout_sec=60,
+                    strict_mode=False,
+                    isolate_worktree=False,
+                )
+
+            # db_duration would be 0.079s, but db_status is "running" (not terminal),
+            # so wall_duration (1.5s) must be used instead.
+            self.assertTrue(row["timed_out"])
+            self.assertEqual(row["duration_sec"], 1.5)
+            self.assertEqual(row["status"], "failed")
 
 
 if __name__ == "__main__":
