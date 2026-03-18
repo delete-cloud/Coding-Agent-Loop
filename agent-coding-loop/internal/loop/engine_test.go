@@ -1129,7 +1129,7 @@ func TestEngineResumeRunningWithCheckpointUsesCheckpointState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StatusShort: %v", err)
 	}
-	branch, err := engine.git.CreateFeatureBranch(ctx, repo)
+	branch, err := engine.git.CreateFeatureBranch(ctx, repo, runID)
 	if err != nil {
 		t.Fatalf("CreateFeatureBranch: %v", err)
 	}

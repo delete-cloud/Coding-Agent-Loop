@@ -332,7 +332,7 @@ func (e *Engine) run(ctx context.Context, spec model.RunSpec, existingRunID stri
 	}
 	branch := runRecord.Branch
 	if strings.TrimSpace(branch) == "" {
-		branch, err = e.git.CreateFeatureBranch(ctx, repoAbs)
+		branch, err = e.git.CreateFeatureBranch(ctx, repoAbs, runID)
 		if err != nil {
 			_ = e.store.UpdateRunStatus(ctx, runID, model.RunStatusFailed, "create branch failed")
 			return model.RunResult{RunID: runID, Status: model.RunStatusFailed}, err

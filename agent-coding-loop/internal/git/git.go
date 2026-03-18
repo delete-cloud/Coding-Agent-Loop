@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/kina/agent-coding-loop/internal/tools"
 )
@@ -41,8 +40,8 @@ func (c *Client) RemoteURL(ctx context.Context, repo string) (string, error) {
 	return strings.TrimSpace(stdout), nil
 }
 
-func (c *Client) CreateFeatureBranch(ctx context.Context, repo string) (string, error) {
-	branch := fmt.Sprintf("agent-loop/%d", time.Now().Unix())
+func (c *Client) CreateFeatureBranch(ctx context.Context, repo string, runID string) (string, error) {
+	branch := fmt.Sprintf("agent-loop/%s", runID)
 	_, _, err := c.runner.Run(ctx, "git checkout -b "+branch, repo)
 	if err != nil {
 		return "", err

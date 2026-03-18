@@ -10,6 +10,86 @@ import (
 	"github.com/kina/agent-coding-loop/internal/tools"
 )
 
+func initTestRepo(t *testing.T) string {
+	t.Helper()
+	repo := t.TempDir()
+	r := tools.NewRunner()
+	ctx := context.Background()
+	if _, _, err := r.Run(ctx, "git init -b main", repo); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	_, _, _ = r.Run(ctx, "git config user.email test@example.com", repo)
+	_, _, _ = r.Run(ctx, "git config user.name tester", repo)
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := r.Run(ctx, "git add -A && git commit -m init", repo); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	return repo
+}
+
+func TestCreateFeatureBranch_UsesRunID(t *testing.T) {
+	repo := initTestRepo(t)
+	c := NewClient(tools.NewRunner())
+	ctx := context.Background()
+
+	branch, err := c.CreateFeatureBranch(ctx, repo, "run_1234567890")
+	if err != nil {
+		t.Fatalf("CreateFeatureBranch: %v", err)
+	}
+	want := "agent-loop/run_1234567890"
+	if branch != want {
+		t.Errorf("branch = %q, want %q", branch, want)
+	}
+
+	stdout, _, err := tools.NewRunner().Run(ctx, "git rev-parse --abbrev-ref HEAD", repo)
+	if err != nil {
+		t.Fatalf("rev-parse: %v", err)
+	}
+	if got := strings.TrimSpace(stdout); got != want {
+		t.Errorf("HEAD = %q, want %q", got, want)
+	}
+}
+
+func TestCreateFeatureBranch_DifferentRunIDs_NeverCollide(t *testing.T) {
+	repo := initTestRepo(t)
+	r := tools.NewRunner()
+	c := NewClient(r)
+	ctx := context.Background()
+
+	if _, err := c.CreateFeatureBranch(ctx, repo, "run_aaa"); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if _, _, err := r.Run(ctx, "git checkout main", repo); err != nil {
+		t.Fatalf("checkout main: %v", err)
+	}
+	branch2, err := c.CreateFeatureBranch(ctx, repo, "run_bbb")
+	if err != nil {
+		t.Fatalf("second: %v", err)
+	}
+	if branch2 != "agent-loop/run_bbb" {
+		t.Errorf("branch2 = %q, want %q", branch2, "agent-loop/run_bbb")
+	}
+}
+
+func TestCreateFeatureBranch_DuplicateRunID_Fails(t *testing.T) {
+	repo := initTestRepo(t)
+	r := tools.NewRunner()
+	c := NewClient(r)
+	ctx := context.Background()
+
+	if _, err := c.CreateFeatureBranch(ctx, repo, "run_dup"); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if _, _, err := r.Run(ctx, "git checkout main", repo); err != nil {
+		t.Fatalf("checkout main: %v", err)
+	}
+	if _, err := c.CreateFeatureBranch(ctx, repo, "run_dup"); err == nil {
+		t.Fatal("expected error for duplicate runID, got nil")
+	}
+}
+
 func TestApplyPatchRepairsHunkCounts(t *testing.T) {
 	repo := t.TempDir()
 	r := tools.NewRunner()
