@@ -17,10 +17,11 @@ type Config struct {
 }
 
 type ModelConfig struct {
-	Provider string `json:"provider"`
-	BaseURL  string `json:"base_url"`
-	Model    string `json:"model"`
-	APIKey   string `json:"api_key"`
+	Provider     string `json:"provider"`
+	BaseURL      string `json:"base_url"`
+	Model        string `json:"model"`
+	APIKey       string `json:"api_key"`
+	ResponsesAPI bool   `json:"responses_api"`
 }
 
 type KBConfig struct {
@@ -109,6 +110,8 @@ func parseSimpleYAML(raw string, cfg *Config) error {
 			cfg.Model.Model = v
 		case "api_key":
 			cfg.Model.APIKey = v
+		case "responses_api":
+			cfg.Model.ResponsesAPI = v == "true" || v == "1" || v == "yes"
 		case "kb_base_url", "kb_url":
 			cfg.KB.BaseURL = strings.TrimRight(v, "/")
 		}
@@ -137,6 +140,9 @@ func overrideFromEnv(cfg *Config) {
 	}
 	if v := strings.TrimSpace(firstNonEmptyEnv("OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN")); v != "" {
 		cfg.Model.APIKey = v
+	}
+	if v := strings.TrimSpace(os.Getenv("OPENAI_RESPONSES_API")); v != "" {
+		cfg.Model.ResponsesAPI = v == "true" || v == "1" || v == "yes"
 	}
 	if v := strings.TrimSpace(os.Getenv("AGENT_LOOP_KB_URL")); v != "" {
 		cfg.KB.BaseURL = strings.TrimRight(v, "/")

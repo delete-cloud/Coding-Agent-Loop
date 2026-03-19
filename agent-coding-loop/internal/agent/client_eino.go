@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -14,9 +15,10 @@ import (
 )
 
 type ClientConfig struct {
-	BaseURL string
-	Model   string
-	APIKey  string
+	BaseURL      string
+	Model        string
+	APIKey       string
+	ResponsesAPI bool // Use /v1/responses instead of /v1/chat/completions
 
 	newToolCallingModelForTest func(context.Context) (modelpkg.ToolCallingChatModel, error)
 	completeJSONForTest        func(context.Context, string, string, any) error
@@ -39,12 +41,19 @@ func (c ClientConfig) newToolCallingModel(ctx context.Context) (modelpkg.ToolCal
 	if err := c.validateAuth(); err != nil {
 		return nil, err
 	}
-	cm, err := openai.NewChatModel(ctx, &openai.ChatModelConfig{
+	chatModelCfg := &openai.ChatModelConfig{
 		BaseURL: c.BaseURL,
 		Model:   c.Model,
 		APIKey:  c.APIKey,
 		Timeout: defaultModelTimeout,
-	})
+	}
+	if c.ResponsesAPI {
+		chatModelCfg.HTTPClient = &http.Client{
+			Timeout:   defaultModelTimeout,
+			Transport: newResponsesTransport(http.DefaultTransport),
+		}
+	}
+	cm, err := openai.NewChatModel(ctx, chatModelCfg)
 	if err != nil {
 		return nil, err
 	}

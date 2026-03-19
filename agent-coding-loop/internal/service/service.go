@@ -53,9 +53,10 @@ func New(cfg *config.Config) (*Service, error) {
 	_ = skillRegistry.Load()
 
 	agentCfg := agentpkg.ClientConfig{
-		BaseURL: cfg.Model.BaseURL,
-		Model:   cfg.Model.Model,
-		APIKey:  cfg.Model.APIKey,
+		BaseURL:      cfg.Model.BaseURL,
+		Model:        cfg.Model.Model,
+		APIKey:       cfg.Model.APIKey,
+		ResponsesAPI: cfg.Model.ResponsesAPI,
 	}
 	kbClient := kb.NewClient(cfg.KB.BaseURL)
 	engine := loop.NewEngine(loop.EngineDeps{
