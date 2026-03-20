@@ -98,6 +98,22 @@ func TestCoderPlanFallback(t *testing.T) {
 	}
 }
 
+func TestCoderRepairFallback(t *testing.T) {
+	c := NewCoder(ClientConfig{BaseURL: "http://example.com", Model: "test-model"})
+	out, err := c.Repair(context.Background(), RepairInput{
+		Goal:           "修复 internal/config/config_test.go 中的测试编译失败",
+		RepoSummary:    t.TempDir(),
+		FailedCommands: []string{"go test ./..."},
+		CommandOutput:  "undefined: Config",
+	})
+	if err != nil {
+		t.Fatalf("Repair: %v", err)
+	}
+	if strings.TrimSpace(out.Patch) != "" {
+		t.Fatalf("expected fallback repair to leave patch empty, got %q", out.Patch)
+	}
+}
+
 func TestShouldBackfillCitations(t *testing.T) {
 	if !shouldBackfillCitations("你必须先调用 kb_search 获取上下文，再修改代码。") {
 		t.Fatalf("expected kb-required goal to enable citation backfill")
@@ -483,6 +499,38 @@ func TestPlannerPromptsForbidPatchAndCommands(t *testing.T) {
 	}
 	if !strings.Contains(user, "\"task_input\"") {
 		t.Fatalf("expected planner prompt payload to include task_input, got %q", user)
+	}
+}
+
+func TestRepairPromptsForbidFullRewrite(t *testing.T) {
+	system, _ := repairPrompts(RepairInput{
+		Goal:          "修复 internal/config/config_test.go 中的失败测试",
+		RepoSummary:   "/tmp/repo",
+		CommandOutput: "undefined: Config",
+	})
+
+	if !strings.Contains(system, "Do NOT rewrite from scratch") {
+		t.Fatalf("expected repair prompt to forbid full rewrite, got %q", system)
+	}
+}
+
+func TestRepairPromptsIncludeFailedCommands(t *testing.T) {
+	_, user := repairPrompts(RepairInput{
+		Goal:           "修复 internal/config/config_test.go 中的失败测试",
+		RepoSummary:    "/tmp/repo",
+		PreviousReview: "reviewer said the target file is still incomplete",
+		FailedCommands: []string{"go test ./..."},
+		CommandOutput:  "undefined: Config",
+	})
+
+	if !strings.Contains(user, "\"failed_commands\"") {
+		t.Fatalf("expected repair prompt payload to include failed_commands, got %q", user)
+	}
+	if !strings.Contains(user, "\"command_output\"") {
+		t.Fatalf("expected repair prompt payload to include command_output, got %q", user)
+	}
+	if !strings.Contains(user, "\"previous_review\"") {
+		t.Fatalf("expected repair prompt payload to include previous_review, got %q", user)
 	}
 }
 

@@ -20,12 +20,13 @@ import (
 )
 
 type Coder struct {
-	client           ClientConfig
-	runner           *tools.Runner
-	skills           *skills.Registry
-	kb               *kb.Client
-	retryHooks       *coderRetryHooks
-	planHookForTests func(context.Context, PlanInput) (PlanOutput, error)
+	client             ClientConfig
+	runner             *tools.Runner
+	skills             *skills.Registry
+	kb                 *kb.Client
+	retryHooks         *coderRetryHooks
+	planHookForTests   func(context.Context, PlanInput) (PlanOutput, error)
+	repairHookForTests func(context.Context, RepairInput) (CoderOutput, error)
 }
 
 type agentStageRecorderKey struct{}
@@ -88,6 +89,19 @@ type PlanOutput struct {
 	Steps     []string `json:"steps"`
 	Risks     []string `json:"risks"`
 	Citations []string `json:"citations"`
+}
+
+type RepairInput struct {
+	Goal             string         `json:"goal"`
+	RepoSummary      string         `json:"repo_summary"`
+	CurrentDiff      string         `json:"current_diff"`
+	PreviousReview   string         `json:"previous_review,omitempty"`
+	FailedCommands   []string       `json:"failed_commands"`
+	CommandOutput    string         `json:"command_output"`
+	PlanSummary      string         `json:"plan_summary,omitempty"`
+	PlanSteps        []string       `json:"plan_steps,omitempty"`
+	RetrievedContext []kb.SearchHit `json:"retrieved_context,omitempty"`
+	RetrievedQuery   string         `json:"retrieved_query,omitempty"`
 }
 
 const citationBackfillTimeout = 8 * time.Second
@@ -229,6 +243,46 @@ func (c *Coder) Plan(ctx context.Context, in PlanInput) (PlanOutput, error) {
 	return normalizePlanOutput(fallback, nil)
 }
 
+func (c *Coder) Repair(ctx context.Context, in RepairInput) (CoderOutput, error) {
+	if c.repairHookForTests != nil {
+		return c.repairHookForTests(ctx, in)
+	}
+	if !c.client.Ready() {
+		out := fallbackRepair(in)
+		out.UsedFallback = true
+		out.FallbackSource = "offline"
+		return out, nil
+	}
+
+	emitAgentStage(ctx, "repair_eino_start")
+	einoCtx, cancelEino := withCoderToolCallingTimeout(ctx)
+	out, err := runWithHardTimeout(einoCtx, coderToolCallingTimeout, func(callCtx context.Context) (CoderOutput, error) {
+		return c.repairWithEino(callCtx, in)
+	})
+	cancelEino()
+	emitAgentStage(ctx, "repair_eino_done")
+	if err == nil {
+		return out, nil
+	}
+
+	emitAgentStage(ctx, "repair_client_completion_start")
+	fallback, fallbackErr := runWithHardTimeout(ctx, coderCompletionTimeout, func(callCtx context.Context) (CoderOutput, error) {
+		return c.repairWithClient(callCtx, in)
+	})
+	emitAgentStage(ctx, "repair_client_completion_done")
+	if fallbackErr != nil {
+		out := fallbackRepair(in)
+		out.UsedFallback = true
+		out.FallbackSource = "repair_fallback"
+		out.Notes = appendCoderNote(out.Notes, "repair tool-calling path failed: "+err.Error())
+		out.Notes = appendCoderNote(out.Notes, "repair completion path failed: "+fallbackErr.Error())
+		return out, nil
+	}
+	fallback.UsedFallback = true
+	fallback.FallbackSource = "repair_client_completion"
+	return fallback, nil
+}
+
 func withCoderToolCallingTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	timeout := coderToolCallingTimeout
 	if timeout <= 0 {
@@ -246,6 +300,45 @@ func withAgentStageRecorder(ctx context.Context, record func(string)) context.Co
 
 func WithAgentStageRecorder(ctx context.Context, record func(string)) context.Context {
 	return withAgentStageRecorder(ctx, record)
+}
+
+func (c *Coder) runStructuredAgent(ctx context.Context, repoRoot string, toolMode tools.ToolMode, systemPrompt, userPrompt string, maxStep int) (string, error) {
+	chatModel, err := c.client.newToolCallingModel(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	runner := c.runner
+	if runner == nil {
+		runner = tools.NewRunner(tools.WithReadOnly(true))
+	}
+	toolset, err := tools.BuildToolsForMode(repoRoot, toolMode, c.skills, runner, c.kb)
+	if err != nil {
+		return "", err
+	}
+
+	rAgent, err := react.NewAgent(ctx, &react.AgentConfig{
+		ToolCallingModel: chatModel,
+		ToolsConfig: compose.ToolsNodeConfig{
+			Tools: toolset,
+		},
+		MaxStep: maxStep,
+	})
+	if err != nil {
+		return "", err
+	}
+
+	msg, err := rAgent.Generate(ctx, []*schema.Message{
+		schema.SystemMessage(systemPrompt),
+		schema.UserMessage(userPrompt),
+	})
+	if err != nil {
+		return "", err
+	}
+	if msg == nil {
+		return "", nil
+	}
+	return msg.Content, nil
 }
 
 func emitAgentStage(ctx context.Context, stage string) {
@@ -269,6 +362,10 @@ func (c *Coder) SetRetryHooksForTests(hooks CoderRetryHooksForTests) {
 
 func (c *Coder) SetPlanHookForTests(hook func(context.Context, PlanInput) (PlanOutput, error)) {
 	c.planHookForTests = hook
+}
+
+func (c *Coder) SetRepairHookForTests(hook func(context.Context, RepairInput) (CoderOutput, error)) {
+	c.repairHookForTests = hook
 }
 
 func runWithHardTimeout[T any](ctx context.Context, timeout time.Duration, fn func(context.Context) (T, error)) (T, error) {
@@ -335,6 +432,16 @@ func fallbackPlan(in PlanInput) PlanOutput {
 		Steps:     steps,
 		Risks:     risks,
 		Citations: fallbackCitationPaths(in.RepoSummary),
+	}
+}
+
+func fallbackRepair(in RepairInput) CoderOutput {
+	return CoderOutput{
+		Summary:   "Repair agent unavailable; leaving the current diff unchanged for the normal retry path.",
+		Patch:     "",
+		Commands:  nil,
+		Notes:     "Repair fallback returns an empty patch instead of rewriting from scratch.",
+		Citations: normalizeCitationList(citationPathsFromHits(in.RetrievedContext)),
 	}
 }
 
@@ -1437,42 +1544,10 @@ func fallbackCitationPaths(repoRoot string) []string {
 }
 
 func (c *Coder) generateWithEino(ctx context.Context, in CoderInput) (CoderOutput, error) {
-	chatModel, err := c.client.newToolCallingModel(ctx)
-	if err != nil {
-		return CoderOutput{}, err
-	}
-
-	runner := c.runner
-	if runner == nil {
-		runner = tools.NewRunner(tools.WithReadOnly(true))
-	}
-	toolset, err := tools.BuildCoderTools(in.RepoSummary, c.skills, runner, c.kb)
-	if err != nil {
-		return CoderOutput{}, err
-	}
-
-	rAgent, err := react.NewAgent(ctx, &react.AgentConfig{
-		ToolCallingModel: chatModel,
-		ToolsConfig: compose.ToolsNodeConfig{
-			Tools: toolset,
-		},
-		MaxStep: 32,
-	})
-	if err != nil {
-		return CoderOutput{}, err
-	}
-
 	systemPrompt, userPrompt := coderPrompts(in)
-	msg, err := rAgent.Generate(ctx, []*schema.Message{
-		schema.SystemMessage(systemPrompt),
-		schema.UserMessage(userPrompt),
-	})
+	raw, err := c.runStructuredAgent(ctx, in.RepoSummary, tools.ToolModeCode, systemPrompt, userPrompt, 32)
 	if err != nil {
 		return CoderOutput{}, err
-	}
-	raw := ""
-	if msg != nil {
-		raw = msg.Content
 	}
 	var wire map[string]any
 	if err := decodeJSONWithRepair(ctx, raw, &wire, c.client.RepairJSON); err != nil {
@@ -1520,42 +1595,10 @@ func (c *Coder) generateWithClient(ctx context.Context, in CoderInput) (CoderOut
 }
 
 func (c *Coder) planWithEino(ctx context.Context, in PlanInput) (PlanOutput, error) {
-	chatModel, err := c.client.newToolCallingModel(ctx)
-	if err != nil {
-		return PlanOutput{}, err
-	}
-
-	runner := c.runner
-	if runner == nil {
-		runner = tools.NewRunner(tools.WithReadOnly(true))
-	}
-	toolset, err := tools.BuildPlannerTools(in.RepoSummary, c.skills, runner, c.kb)
-	if err != nil {
-		return PlanOutput{}, err
-	}
-
-	rAgent, err := react.NewAgent(ctx, &react.AgentConfig{
-		ToolCallingModel: chatModel,
-		ToolsConfig: compose.ToolsNodeConfig{
-			Tools: toolset,
-		},
-		MaxStep: 16,
-	})
-	if err != nil {
-		return PlanOutput{}, err
-	}
-
 	systemPrompt, userPrompt := plannerPrompts(in)
-	msg, err := rAgent.Generate(ctx, []*schema.Message{
-		schema.SystemMessage(systemPrompt),
-		schema.UserMessage(userPrompt),
-	})
+	raw, err := c.runStructuredAgent(ctx, in.RepoSummary, tools.ToolModePlan, systemPrompt, userPrompt, 16)
 	if err != nil {
 		return PlanOutput{}, err
-	}
-	raw := ""
-	if msg != nil {
-		raw = msg.Content
 	}
 	var wire map[string]any
 	if err := decodeJSONWithRepair(ctx, raw, &wire, c.client.RepairJSON); err != nil {
@@ -1582,6 +1625,51 @@ func (c *Coder) planWithClient(ctx context.Context, in PlanInput) (PlanOutput, e
 	out, err := decodePlanOutput(string(b))
 	if err != nil {
 		return PlanOutput{}, err
+	}
+	return out, nil
+}
+
+func (c *Coder) repairWithEino(ctx context.Context, in RepairInput) (CoderOutput, error) {
+	systemPrompt, userPrompt := repairPrompts(in)
+	raw, err := c.runStructuredAgent(ctx, in.RepoSummary, tools.ToolModeRepair, systemPrompt, userPrompt, 12)
+	if err != nil {
+		return CoderOutput{}, err
+	}
+	var wire map[string]any
+	if err := decodeJSONWithRepair(ctx, raw, &wire, c.client.RepairJSON); err != nil {
+		return CoderOutput{}, err
+	}
+	b, err := json.Marshal(wire)
+	if err != nil {
+		return CoderOutput{}, wrapStructuredOutputStageError("encode repaired repair json failed", raw, err)
+	}
+	out, err := decodeCoderOutput(string(b))
+	if err != nil {
+		return CoderOutput{}, wrapStructuredOutputStageError("parse repair json failed", string(b), err)
+	}
+	targets := extractGoalTargetFiles(in.Goal)
+	out.Patch = normalizeCoderPatchForContract(strings.TrimSpace(in.RepoSummary), out.Patch, targets, len(targets) > 1, false)
+	if out.Summary == "" {
+		out.Summary = "Repair agent generated output."
+	}
+	return out, nil
+}
+
+func (c *Coder) repairWithClient(ctx context.Context, in RepairInput) (CoderOutput, error) {
+	system, user := repairPrompts(in)
+	var wire any
+	if err := c.client.CompleteJSON(ctx, system, user, &wire); err != nil {
+		return CoderOutput{}, err
+	}
+	b, _ := json.Marshal(wire)
+	out, err := decodeCoderOutput(string(b))
+	if err != nil {
+		return CoderOutput{}, err
+	}
+	targets := extractGoalTargetFiles(in.Goal)
+	out.Patch = normalizeCoderPatchForContract(strings.TrimSpace(in.RepoSummary), out.Patch, targets, len(targets) > 1, false)
+	if out.Summary == "" {
+		out.Summary = "Repair agent generated output."
 	}
 	return out, nil
 }
@@ -1659,6 +1747,28 @@ func plannerPrompts(in PlanInput) (string, string) {
 	}
 	b, _ := json.MarshalIndent(payload, "", "  ")
 	user := fmt.Sprintf("Task input:\n%s\nUse tools when needed, then return strict JSON only.", string(b))
+	return system, user
+}
+
+func repairPrompts(in RepairInput) (string, string) {
+	system := `You are a repair-focused coding agent operating in a local git repository.
+	You may call read-only tools to inspect repository files, search code, inspect diff, and query the knowledge base.
+	Return JSON only with fields: summary, patch, commands, notes, citations.
+	- The current diff already contains correct progress. Do NOT rewrite from scratch.
+	- previous_review contains reviewer feedback from the prior turn; treat it as an additional constraint, not optional context.
+	- Only fix the specific compilation or test failures shown in command_output.
+	- patch must be unified diff text or empty string.
+	- patch must be incremental and limited to the files/functions causing the failure.
+	- do not add unrelated helpers, cleanup, refactoring, or adjacent behavior changes.
+	- do not change code that is already passing tests.
+	- commands may be empty; the engine controls verification and will rerun the task commands.
+	- citations must contain only repository-relative paths.
+	- never return markdown outside JSON.`
+	payload := map[string]any{
+		"task_input": in,
+	}
+	b, _ := json.MarshalIndent(payload, "", "  ")
+	user := fmt.Sprintf("Repair input:\n%s\nUse tools when needed, then return strict JSON only.", string(b))
 	return system, user
 }
 

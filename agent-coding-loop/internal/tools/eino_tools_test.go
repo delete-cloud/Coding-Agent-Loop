@@ -75,6 +75,20 @@ func TestBuildToolsForModePlanExcludesRunCommand(t *testing.T) {
 	}
 }
 
+func TestBuildToolsForModeRepairExcludesRunCommand(t *testing.T) {
+	got, err := BuildToolsForMode(t.TempDir(), ToolModeRepair, nil, NewRunner(), nil)
+	if err != nil {
+		t.Fatalf("BuildToolsForMode(repair): %v", err)
+	}
+	names := toolNames(t, got)
+	if containsName(names, "run_command") {
+		t.Fatalf("repair mode tools must not include run_command, got %v", names)
+	}
+	if !containsName(names, "repo_read") {
+		t.Fatalf("expected repo_read in repair mode tools, got %v", names)
+	}
+}
+
 func toolNames(t *testing.T, items []tool.BaseTool) []string {
 	t.Helper()
 	out := make([]string, 0, len(items))

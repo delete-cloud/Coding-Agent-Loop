@@ -54,6 +54,7 @@ type ToolMode string
 const (
 	ToolModePlan   ToolMode = "plan"
 	ToolModeCode   ToolMode = "code"
+	ToolModeRepair ToolMode = "repair"
 	ToolModeReview ToolMode = "review"
 )
 
@@ -67,7 +68,7 @@ func BuildToolsForMode(repoRoot string, mode ToolMode, reg *skills.Registry, run
 		return nil, err
 	}
 	switch mode {
-	case ToolModePlan, ToolModeReview:
+	case ToolModePlan, ToolModeRepair, ToolModeReview:
 		return common, nil
 	case ToolModeCode:
 		runCommand, err := utils.InferTool(
