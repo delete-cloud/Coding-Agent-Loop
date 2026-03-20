@@ -462,6 +462,10 @@ func (e *Engine) planNode(ctx context.Context, st *loopSession) (*loopSession, e
 	if st.Phase == loopPhaseCode || st.Phase == loopPhaseReview {
 		return st, nil
 	}
+	if st.Spec.PlanMode == model.PlanModeOff {
+		st.Phase = loopPhaseCode
+		return st, nil
+	}
 
 	st.Phase = loopPhasePlan
 	e.maybePreflightKBSearch(ctx, st, st.Iteration)

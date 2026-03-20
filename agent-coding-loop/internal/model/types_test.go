@@ -77,3 +77,52 @@ func TestRunSpecValidateRejectsInvalidRetrievalMode(t *testing.T) {
 		t.Fatal("expected invalid retrieval_mode error")
 	}
 }
+
+func TestParsePlanMode(t *testing.T) {
+	cases := []struct {
+		input string
+		want  PlanMode
+	}{
+		{"on", PlanModeOn},
+		{"off", PlanModeOff},
+		{"", PlanModeOn},
+		{"true", PlanModeOn},
+		{"false", PlanModeOff},
+		{"1", PlanModeOn},
+		{"0", PlanModeOff},
+		{"enabled", PlanModeOn},
+		{"disabled", PlanModeOff},
+	}
+	for _, tc := range cases {
+		got, err := ParsePlanMode(tc.input)
+		if err != nil {
+			t.Fatalf("ParsePlanMode(%q): %v", tc.input, err)
+		}
+		if got != tc.want {
+			t.Fatalf("ParsePlanMode(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+	if _, err := ParsePlanMode("bogus"); err == nil {
+		t.Fatal("expected error for invalid plan mode")
+	}
+}
+
+func TestRunSpecValidateAcceptsPlanMode(t *testing.T) {
+	spec := RunSpec{
+		Goal:          "demo",
+		PRMode:        PRModeDryRun,
+		PlanMode:      PlanModeOff,
+		MaxIterations: 1,
+	}
+	if err := spec.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
+
+func TestRunSpecNormalizeDefaultsPlanModeOn(t *testing.T) {
+	spec := RunSpec{Goal: "demo", MaxIterations: 1}
+	spec.Normalize()
+	if spec.PlanMode != PlanModeOn {
+		t.Fatalf("expected default plan_mode=on, got %q", spec.PlanMode)
+	}
+}

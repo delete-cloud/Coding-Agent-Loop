@@ -1583,6 +1583,35 @@ func TestPlanNodeResumeAfterPlanCompletedPreservesExistingPlan(t *testing.T) {
 	}
 }
 
+func TestPlanNodeSkipsWhenPlanModeOff(t *testing.T) {
+	var calls int
+	coder := agentpkg.NewCoder(agentpkg.ClientConfig{})
+	coder.SetPlanHookForTests(func(context.Context, agentpkg.PlanInput) (agentpkg.PlanOutput, error) {
+		calls++
+		return agentpkg.PlanOutput{Summary: "should not be called"}, nil
+	})
+	e := NewEngine(EngineDeps{Coder: coder})
+	st := &loopSession{
+		Spec:    model.RunSpec{Goal: "task with plan off", PlanMode: model.PlanModeOff},
+		RepoAbs: t.TempDir(),
+		Phase:   loopPhasePlan,
+	}
+
+	got, err := e.planNode(context.Background(), st)
+	if err != nil {
+		t.Fatalf("planNode: %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("expected planner to be skipped when plan_mode=off, got %d calls", calls)
+	}
+	if got.Phase != loopPhaseCode {
+		t.Fatalf("expected phase to advance to code, got %s", got.Phase)
+	}
+	if got.PlanSummary != "" {
+		t.Fatalf("expected empty plan summary when plan_mode=off, got %q", got.PlanSummary)
+	}
+}
+
 func TestMaybeRefreshCoderContextFetchesFollowupHits(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "state.db")

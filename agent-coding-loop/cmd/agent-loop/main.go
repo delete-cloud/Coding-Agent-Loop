@@ -40,7 +40,7 @@ func main() {
 
 func printUsage() {
 	fmt.Println(`agent-loop commands:
-  run --goal "..." [--repo PATH] [--config FILE] [--pr-mode auto|live|dry-run] [--retrieval-mode off|prefetch]
+  run --goal "..." [--repo PATH] [--config FILE] [--pr-mode auto|live|dry-run] [--retrieval-mode off|prefetch] [--plan-mode on|off]
   serve [--listen 127.0.0.1:8787] [--config FILE]
   resume --run-id ID [--config FILE]
   inspect --run-id ID [--config FILE]`)
@@ -53,6 +53,7 @@ func runCmd(ctx context.Context, args []string) {
 	cfgPath := fs.String("config", "", "config file")
 	prMode := fs.String("pr-mode", "auto", "auto|live|dry-run")
 	retrievalMode := fs.String("retrieval-mode", "off", "off|prefetch")
+	planMode := fs.String("plan-mode", "", "on|off (default: on, or from config/env)")
 	maxIterations := fs.Int("max-iterations", 5, "max iterations")
 	testCmd := fs.String("test-cmd", "", "explicit test command")
 	lintCmd := fs.String("lint-cmd", "", "explicit lint command")
@@ -72,11 +73,20 @@ func runCmd(ctx context.Context, args []string) {
 	if err != nil {
 		fatal(err)
 	}
+	planModeRaw := *planMode
+	if planModeRaw == "" {
+		planModeRaw = cfg.PlanMode
+	}
+	plan, err := model.ParsePlanMode(planModeRaw)
+	if err != nil {
+		fatal(err)
+	}
 	spec := model.RunSpec{
 		Goal:          *goal,
 		Repo:          *repo,
 		PRMode:        mode,
 		RetrievalMode: retrieval,
+		PlanMode:      plan,
 		MaxIterations: *maxIterations,
 		Provider:      cfg.Model.Provider,
 		Model:         cfg.Model.Model,

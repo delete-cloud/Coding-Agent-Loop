@@ -55,6 +55,24 @@ const (
 	RetrievalModePrefetch RetrievalMode = "prefetch"
 )
 
+type PlanMode string
+
+const (
+	PlanModeOff PlanMode = "off"
+	PlanModeOn  PlanMode = "on"
+)
+
+func ParsePlanMode(v string) (PlanMode, error) {
+	switch strings.TrimSpace(strings.ToLower(v)) {
+	case "", "on", "enabled", "true", "1", "yes":
+		return PlanModeOn, nil
+	case "off", "disabled", "false", "0", "no":
+		return PlanModeOff, nil
+	default:
+		return "", fmt.Errorf("unsupported plan mode: %s", v)
+	}
+}
+
 func ParseRetrievalMode(v string) (RetrievalMode, error) {
 	switch strings.TrimSpace(strings.ToLower(v)) {
 	case "", "off", "none", "disabled":
@@ -94,6 +112,7 @@ type RunSpec struct {
 	PRMode             PRMode        `json:"pr_mode" yaml:"pr_mode"`
 	RetrievalMode      RetrievalMode `json:"retrieval_mode" yaml:"retrieval_mode"`
 	MaxIterations      int           `json:"max_iterations" yaml:"max_iterations"`
+	PlanMode           PlanMode      `json:"plan_mode" yaml:"plan_mode"`
 	Provider           string        `json:"provider" yaml:"provider"`
 	Model              string        `json:"model" yaml:"model"`
 	ContinueLoopOnDeny bool          `json:"continue_loop_on_deny" yaml:"continue_loop_on_deny"`
@@ -105,6 +124,9 @@ func (s *RunSpec) Normalize() {
 	}
 	if s.RetrievalMode == "" {
 		s.RetrievalMode = RetrievalModeOff
+	}
+	if s.PlanMode == "" {
+		s.PlanMode = PlanModeOn
 	}
 	if s.MaxIterations <= 0 {
 		s.MaxIterations = 5
@@ -126,6 +148,11 @@ func (s *RunSpec) Validate() error {
 	case PRModeAuto, PRModeLive, PRModeDryRun:
 	default:
 		return fmt.Errorf("invalid pr_mode: %s", s.PRMode)
+	}
+	switch s.PlanMode {
+	case PlanModeOff, PlanModeOn:
+	default:
+		return fmt.Errorf("invalid plan_mode: %s", s.PlanMode)
 	}
 	switch s.RetrievalMode {
 	case RetrievalModeOff, RetrievalModePrefetch:
