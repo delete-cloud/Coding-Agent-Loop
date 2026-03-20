@@ -63,6 +63,14 @@ type Engine struct {
 	checkpoints compose.CheckPointStore
 }
 
+type loopPhase string
+
+const (
+	loopPhasePlan   loopPhase = "plan"
+	loopPhaseCode   loopPhase = "code"
+	loopPhaseReview loopPhase = "review"
+)
+
 type loopSession struct {
 	RunID          string
 	Spec           model.RunSpec
@@ -82,6 +90,11 @@ type loopSession struct {
 	DoomLastTool  string
 	DoomLastInput string
 	DoomCount     int
+
+	Phase       loopPhase
+	PlanSummary string
+	PlanSteps   []string
+	PlanRisks   []string
 
 	Decision model.LoopDecision
 	Status   model.RunStatus
@@ -270,7 +283,6 @@ func (e *Engine) failClosedResume(ctx context.Context, runID, summary string, ca
 	}, fmt.Errorf("%s: %w", summary, cause)
 }
 
-
 func (e *Engine) hasCheckpoint(ctx context.Context, runID string) (bool, error) {
 	if e.checkpoints == nil {
 		return false, nil
@@ -356,6 +368,7 @@ func (e *Engine) run(ctx context.Context, spec model.RunSpec, existingRunID stri
 		Commands:       commands,
 		SkillsSummary:  e.renderSkillsSummary(),
 		Iteration:      iteration,
+		Phase:          loopPhasePlan,
 		Status:         model.RunStatusRunning,
 	}
 
@@ -401,6 +414,9 @@ func (e *Engine) run(ctx context.Context, spec model.RunSpec, existingRunID stri
 
 func (e *Engine) buildLoopRunner(ctx context.Context) (compose.Runnable[*loopSession, *loopSession], error) {
 	g := compose.NewGraph[*loopSession, *loopSession]()
+	if err := g.AddLambdaNode("plan", compose.InvokableLambda(e.planNode)); err != nil {
+		return nil, err
+	}
 	if err := g.AddLambdaNode("turn", compose.InvokableLambda(e.turnNode)); err != nil {
 		return nil, err
 	}
@@ -413,7 +429,10 @@ func (e *Engine) buildLoopRunner(ctx context.Context) (compose.Runnable[*loopSes
 	if err := g.AddLambdaNode("blocked", compose.InvokableLambda(e.blockedNode)); err != nil {
 		return nil, err
 	}
-	if err := g.AddEdge(compose.START, "turn"); err != nil {
+	if err := g.AddEdge(compose.START, "plan"); err != nil {
+		return nil, err
+	}
+	if err := g.AddEdge("plan", "turn"); err != nil {
 		return nil, err
 	}
 	if err := g.AddBranch("turn", compose.NewGraphBranch(e.branchAfterTurn, map[string]bool{
@@ -436,6 +455,57 @@ func (e *Engine) buildLoopRunner(ctx context.Context) (compose.Runnable[*loopSes
 	return g.Compile(ctx, compose.WithCheckPointStore(e.checkpoints), compose.WithGraphName("agent_loop_eino"))
 }
 
+func (e *Engine) planNode(ctx context.Context, st *loopSession) (*loopSession, error) {
+	if st == nil {
+		return nil, fmt.Errorf("loop state is nil")
+	}
+	if st.Phase == loopPhaseCode || st.Phase == loopPhaseReview {
+		return st, nil
+	}
+
+	st.Phase = loopPhasePlan
+	e.maybePreflightKBSearch(ctx, st, st.Iteration)
+
+	currentDiff := ""
+	if e.git != nil {
+		currentDiff = mustDiff(ctx, e.git, st.RepoAbs)
+	}
+	in := buildPlanInput(st, currentDiff)
+	out := heuristicPlanOutput(st)
+	status := "completed"
+	if e.coder != nil {
+		planned, err := e.coder.Plan(ctx, in)
+		if err != nil {
+			status = "fallback"
+		} else {
+			out = planned
+		}
+	}
+
+	st.PlanSummary = strings.TrimSpace(out.Summary)
+	st.PlanSteps = append([]string(nil), out.Steps...)
+	st.PlanRisks = append([]string(nil), out.Risks...)
+	st.Phase = loopPhaseCode
+
+	if e.store != nil {
+		_ = e.store.InsertToolCall(ctx, sqlite.ToolCallRecord{
+			RunID:     st.RunID,
+			Iteration: st.Iteration,
+			Tool:      "planner_meta",
+			Input:     truncateString(st.Spec.Goal, 500),
+			Output: truncateString(mustJSON(map[string]any{
+				"summary":   st.PlanSummary,
+				"steps":     st.PlanSteps,
+				"risks":     st.PlanRisks,
+				"citations": out.Citations,
+			}), 4000),
+			Status:    status,
+			CreatedAt: time.Now().UnixMilli(),
+		})
+	}
+	return st, nil
+}
+
 func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, error) {
 	if st == nil {
 		return nil, fmt.Errorf("loop state is nil")
@@ -446,6 +516,7 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 		st.Summary = "max iterations reached"
 		return st, nil
 	}
+	st.Phase = loopPhaseCode
 
 	st.Iteration++
 	iteration := st.Iteration
@@ -641,6 +712,7 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 		e.emitProgress(ctx, st.RunID, iteration, model.ProgressEventCommandRunning, progressStatus, progressSummary, progressDetail)
 	}
 	statusShort, _ := e.git.StatusShort(ctx, st.RepoAbs)
+	st.Phase = loopPhaseReview
 	reviewIn := buildReviewInput(st, mustDiff(ctx, e.git, st.RepoAbs), statusShort, coderOut.Patch, commandOutput.String())
 	_ = e.store.InsertToolCall(ctx, sqlite.ToolCallRecord{
 		RunID:     st.RunID,
@@ -794,9 +866,26 @@ func buildCoderInput(st *loopSession, diff string) agentpkg.CoderInput {
 		Goal:             st.Spec.Goal,
 		RepoSummary:      st.RepoAbs,
 		PreviousReview:   st.PreviousReview,
+		PlanSummary:      st.PlanSummary,
+		PlanSteps:        append([]string(nil), st.PlanSteps...),
 		Diff:             diff,
 		TestOutput:       st.CommandOutput,
 		Commands:         mergeCommands(st.Commands),
+		SkillsSummary:    st.SkillsSummary,
+		RetrievedContext: compactRetrievedContext(st.RetrievedHits),
+		RetrievedQuery:   st.RetrievedQuery,
+	}
+}
+
+func buildPlanInput(st *loopSession, diff string) agentpkg.PlanInput {
+	if st == nil {
+		return agentpkg.PlanInput{}
+	}
+	return agentpkg.PlanInput{
+		Goal:             st.Spec.Goal,
+		RepoSummary:      st.RepoAbs,
+		PreviousReview:   st.PreviousReview,
+		Diff:             diff,
 		SkillsSummary:    st.SkillsSummary,
 		RetrievedContext: compactRetrievedContext(st.RetrievedHits),
 		RetrievedQuery:   st.RetrievedQuery,
@@ -841,6 +930,27 @@ func compactRetrievedContext(hits []kbpkg.SearchHit) []kbpkg.SearchHit {
 		}
 	}
 	return out
+}
+
+func heuristicPlanOutput(st *loopSession) agentpkg.PlanOutput {
+	targets := loopExtractGoalTargetFiles(st.Spec.Goal)
+	steps := []string{
+		"Inspect the existing implementation and identify the exact code path to change.",
+		"Apply the minimal change in the current code path instead of adding unrelated helpers or cleanup.",
+		"Run the focused validation commands after the code change.",
+	}
+	if len(targets) > 0 {
+		steps[0] = "Inspect the existing implementation in the goal target files and identify the exact code path to change."
+	}
+	risks := []string{"Avoid unrelated file changes or adjacent validation rules not required by the goal."}
+	if len(targets) > 1 {
+		risks = append(risks, "Make sure every required target file is updated consistently.")
+	}
+	return agentpkg.PlanOutput{
+		Summary: "Inspect the existing code path first and apply the minimal change required by the goal.",
+		Steps:   steps,
+		Risks:   risks,
+	}
 }
 
 func retrievedContextChunkKey(hit kbpkg.SearchHit) string {

@@ -1374,6 +1374,32 @@ func TestBuildCoderInputDeduplicatesRetrievedContextByChunk(t *testing.T) {
 	}
 }
 
+func TestBuildCoderInputIncludesPlanContext(t *testing.T) {
+	st := &loopSession{
+		Spec:        model.RunSpec{Goal: "update config validation"},
+		RepoAbs:     "/tmp/repo",
+		Phase:       loopPhaseCode,
+		PlanSummary: "Update config validation in the existing load path.",
+		PlanSteps: []string{
+			"Inspect config load path and existing validation.",
+			"Apply the minimal change in the current validation branch.",
+		},
+	}
+
+	got := buildCoderInput(st, "diff --git a/internal/config/config.go b/internal/config/config.go")
+	if got.PlanSummary != st.PlanSummary {
+		t.Fatalf("expected plan summary %q, got %q", st.PlanSummary, got.PlanSummary)
+	}
+	if len(got.PlanSteps) != len(st.PlanSteps) {
+		t.Fatalf("expected %d plan steps, got %+v", len(st.PlanSteps), got.PlanSteps)
+	}
+	for i, want := range st.PlanSteps {
+		if got.PlanSteps[i] != want {
+			t.Fatalf("expected plan step %d to be %q, got %+v", i, want, got.PlanSteps)
+		}
+	}
+}
+
 func TestBuildReviewInputIncludesRetrievedContext(t *testing.T) {
 	st := &loopSession{
 		Spec: model.RunSpec{
@@ -1405,6 +1431,155 @@ func TestBuildReviewInputIncludesRetrievedContext(t *testing.T) {
 	}
 	if got.RetrievedContext[0].Path != "eval/ab/kb/rag_pipeline.md" {
 		t.Fatalf("expected review hit metadata preserved, got %+v", got.RetrievedContext[0])
+	}
+}
+
+func TestPlanNodeTransitionsToCodeAndStoresPlan(t *testing.T) {
+	coder := agentpkg.NewCoder(agentpkg.ClientConfig{})
+	coder.SetPlanHookForTests(func(_ context.Context, in agentpkg.PlanInput) (agentpkg.PlanOutput, error) {
+		if in.Goal == "" {
+			t.Fatal("expected goal in planner input")
+		}
+		return agentpkg.PlanOutput{
+			Summary: "Inspect config loading path, then add the validation in place.",
+			Steps: []string{
+				"Read the current config loader and validation path.",
+				"Apply the minimal validation change in the existing branch.",
+			},
+			Risks: []string{"Avoid changing unrelated validation rules."},
+		}, nil
+	})
+	e := NewEngine(EngineDeps{Coder: coder})
+	st := &loopSession{
+		Spec:    model.RunSpec{Goal: "在 internal/config/config.go 增加 DBPath 校验"},
+		RepoAbs: t.TempDir(),
+		Phase:   loopPhasePlan,
+	}
+
+	got, err := e.planNode(context.Background(), st)
+	if err != nil {
+		t.Fatalf("planNode: %v", err)
+	}
+	if got.Phase != loopPhaseCode {
+		t.Fatalf("expected phase to advance to code, got %s", got.Phase)
+	}
+	if got.PlanSummary == "" || len(got.PlanSteps) != 2 {
+		t.Fatalf("expected stored plan output, got %+v", got)
+	}
+}
+
+func TestPlanNodePlannerFallbackPersistsFallbackStatus(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	store, err := sqlite.New(dbPath)
+	if err != nil {
+		t.Fatalf("sqlite.New: %v", err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	spec := model.RunSpec{
+		Goal:          "在 internal/config/config.go 增加 DBPath 校验",
+		MaxIterations: 1,
+	}
+	runID, err := store.CreateRun(ctx, spec, model.RunStatusQueued)
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	coder := agentpkg.NewCoder(agentpkg.ClientConfig{})
+	coder.SetPlanHookForTests(func(context.Context, agentpkg.PlanInput) (agentpkg.PlanOutput, error) {
+		return agentpkg.PlanOutput{}, errors.New("planner unavailable")
+	})
+	e := NewEngine(EngineDeps{Store: store, Coder: coder})
+	st := &loopSession{
+		RunID:   runID,
+		Spec:    spec,
+		RepoAbs: t.TempDir(),
+		Phase:   loopPhasePlan,
+	}
+
+	got, err := e.planNode(ctx, st)
+	if err != nil {
+		t.Fatalf("planNode: %v", err)
+	}
+	if strings.TrimSpace(got.PlanSummary) == "" || len(got.PlanSteps) == 0 {
+		t.Fatalf("expected heuristic plan fallback, got %+v", got)
+	}
+
+	events, err := store.GetRunEvents(ctx, runID)
+	if err != nil {
+		t.Fatalf("GetRunEvents: %v", err)
+	}
+	text := make([]string, 0, len(events))
+	for _, ev := range events {
+		text = append(text, ev.Summary)
+	}
+	if !strings.Contains(strings.Join(text, "\n"), "planner_meta:fallback") {
+		t.Fatalf("expected planner_meta fallback status in events, got %q", strings.Join(text, "\n"))
+	}
+}
+
+func TestPlanNodeSkipsWhenPhaseAlreadyCode(t *testing.T) {
+	var calls int
+	coder := agentpkg.NewCoder(agentpkg.ClientConfig{})
+	coder.SetPlanHookForTests(func(context.Context, agentpkg.PlanInput) (agentpkg.PlanOutput, error) {
+		calls++
+		return agentpkg.PlanOutput{Summary: "unexpected"}, nil
+	})
+	e := NewEngine(EngineDeps{Coder: coder})
+	st := &loopSession{
+		Spec:        model.RunSpec{Goal: "keep current plan"},
+		RepoAbs:     t.TempDir(),
+		Phase:       loopPhaseCode,
+		PlanSummary: "existing plan",
+	}
+
+	got, err := e.planNode(context.Background(), st)
+	if err != nil {
+		t.Fatalf("planNode: %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("expected planner hook to be skipped, got %d calls", calls)
+	}
+	if got.PlanSummary != "existing plan" {
+		t.Fatalf("expected existing plan to be preserved, got %+v", got)
+	}
+}
+
+func TestPlanNodeResumeAfterPlanCompletedPreservesExistingPlan(t *testing.T) {
+	var calls int
+	coder := agentpkg.NewCoder(agentpkg.ClientConfig{})
+	coder.SetPlanHookForTests(func(context.Context, agentpkg.PlanInput) (agentpkg.PlanOutput, error) {
+		calls++
+		return agentpkg.PlanOutput{Summary: "should not be called"}, nil
+	})
+	e := NewEngine(EngineDeps{Coder: coder})
+	st := &loopSession{
+		Spec:        model.RunSpec{Goal: "resumed task"},
+		RepoAbs:     t.TempDir(),
+		Phase:       loopPhaseCode,
+		PlanSummary: "original plan from before interrupt",
+		PlanSteps:   []string{"step 1", "step 2"},
+		PlanRisks:   []string{"risk 1"},
+	}
+
+	got, err := e.planNode(context.Background(), st)
+	if err != nil {
+		t.Fatalf("planNode on resume: %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("planner should not re-run on resume, got %d calls", calls)
+	}
+	if got.PlanSummary != "original plan from before interrupt" {
+		t.Fatalf("expected original plan preserved, got %q", got.PlanSummary)
+	}
+	if len(got.PlanSteps) != 2 {
+		t.Fatalf("expected original plan steps preserved, got %v", got.PlanSteps)
+	}
+	if len(got.PlanRisks) != 1 || got.PlanRisks[0] != "risk 1" {
+		t.Fatalf("expected original plan risks preserved, got %v", got.PlanRisks)
 	}
 }
 

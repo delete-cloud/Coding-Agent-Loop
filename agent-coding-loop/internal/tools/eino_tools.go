@@ -49,7 +49,15 @@ type kbSearchArgs struct {
 	Where     string `json:"where,omitempty"`
 }
 
-func BuildCoderTools(repoRoot string, reg *skills.Registry, runner *Runner, kbClient *kb.Client) ([]einotool.BaseTool, error) {
+type ToolMode string
+
+const (
+	ToolModePlan   ToolMode = "plan"
+	ToolModeCode   ToolMode = "code"
+	ToolModeReview ToolMode = "review"
+)
+
+func BuildToolsForMode(repoRoot string, mode ToolMode, reg *skills.Registry, runner *Runner, kbClient *kb.Client) ([]einotool.BaseTool, error) {
 	repoRoot = normalizeRepoRoot(repoRoot)
 	if runner == nil {
 		runner = NewRunner(WithReadOnly(true))
@@ -58,40 +66,51 @@ func BuildCoderTools(repoRoot string, reg *skills.Registry, runner *Runner, kbCl
 	if err != nil {
 		return nil, err
 	}
-	runCommand, err := utils.InferTool(
-		"run_command",
-		"Run a safe shell command in the repository root and return combined stdout/stderr.",
-		func(ctx context.Context, input commandArgs) (string, error) {
-			cmd := strings.TrimSpace(input.Command)
-			if cmd == "" {
-				return "", fmt.Errorf("command is required")
-			}
-			stdout, stderr, err := runner.Run(ctx, cmd, repoRoot)
-			combined := strings.TrimSpace(stdout + "\n" + stderr)
-			if err != nil {
-				if combined == "" {
-					return err.Error(), nil
+	switch mode {
+	case ToolModePlan, ToolModeReview:
+		return common, nil
+	case ToolModeCode:
+		runCommand, err := utils.InferTool(
+			"run_command",
+			"Run a safe shell command in the repository root and return combined stdout/stderr.",
+			func(ctx context.Context, input commandArgs) (string, error) {
+				cmd := strings.TrimSpace(input.Command)
+				if cmd == "" {
+					return "", fmt.Errorf("command is required")
 				}
-				return strings.TrimSpace(combined + "\nERROR: " + err.Error()), nil
-			}
-			if combined == "" {
-				return "command completed with no output", nil
-			}
-			return combined, nil
-		},
-	)
-	if err != nil {
-		return nil, err
+				stdout, stderr, err := runner.Run(ctx, cmd, repoRoot)
+				combined := strings.TrimSpace(stdout + "\n" + stderr)
+				if err != nil {
+					if combined == "" {
+						return err.Error(), nil
+					}
+					return strings.TrimSpace(combined + "\nERROR: " + err.Error()), nil
+				}
+				if combined == "" {
+					return "command completed with no output", nil
+				}
+				return combined, nil
+			},
+		)
+		if err != nil {
+			return nil, err
+		}
+		return append(common, runCommand), nil
+	default:
+		return nil, fmt.Errorf("unknown tool mode: %s", mode)
 	}
-	return append(common, runCommand), nil
+}
+
+func BuildCoderTools(repoRoot string, reg *skills.Registry, runner *Runner, kbClient *kb.Client) ([]einotool.BaseTool, error) {
+	return BuildToolsForMode(repoRoot, ToolModeCode, reg, runner, kbClient)
+}
+
+func BuildPlannerTools(repoRoot string, reg *skills.Registry, runner *Runner, kbClient *kb.Client) ([]einotool.BaseTool, error) {
+	return BuildToolsForMode(repoRoot, ToolModePlan, reg, runner, kbClient)
 }
 
 func BuildReviewerTools(repoRoot string, reg *skills.Registry, runner *Runner, kbClient *kb.Client) ([]einotool.BaseTool, error) {
-	repoRoot = normalizeRepoRoot(repoRoot)
-	if runner == nil {
-		runner = NewRunner(WithReadOnly(true))
-	}
-	return buildReadOnlyTools(repoRoot, reg, runner, kbClient)
+	return BuildToolsForMode(repoRoot, ToolModeReview, reg, runner, kbClient)
 }
 
 func buildReadOnlyTools(repoRoot string, reg *skills.Registry, runner *Runner, kbClient *kb.Client) ([]einotool.BaseTool, error) {
