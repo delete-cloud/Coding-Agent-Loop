@@ -39,6 +39,56 @@ func TestBuildReviewerToolsReadOnlySurface(t *testing.T) {
 	}
 }
 
+func TestBuildPlannerToolsReadOnlySurface(t *testing.T) {
+	got, err := BuildPlannerTools(t.TempDir(), nil, NewRunner(), nil)
+	if err != nil {
+		t.Fatalf("BuildPlannerTools: %v", err)
+	}
+	names := toolNames(t, got)
+	if containsName(names, "run_command") {
+		t.Fatalf("planner tools must not include run_command, got %v", names)
+	}
+	if !containsName(names, "kb_search") {
+		t.Fatalf("expected kb_search in planner tools, got %v", names)
+	}
+}
+
+func TestBuildToolsForModeCodeIncludesRunCommand(t *testing.T) {
+	got, err := BuildToolsForMode(t.TempDir(), ToolModeCode, nil, NewRunner(), nil)
+	if err != nil {
+		t.Fatalf("BuildToolsForMode(code): %v", err)
+	}
+	names := toolNames(t, got)
+	if !containsName(names, "run_command") {
+		t.Fatalf("expected run_command in code mode tools, got %v", names)
+	}
+}
+
+func TestBuildToolsForModePlanExcludesRunCommand(t *testing.T) {
+	got, err := BuildToolsForMode(t.TempDir(), ToolModePlan, nil, NewRunner(), nil)
+	if err != nil {
+		t.Fatalf("BuildToolsForMode(plan): %v", err)
+	}
+	names := toolNames(t, got)
+	if containsName(names, "run_command") {
+		t.Fatalf("plan mode tools must not include run_command, got %v", names)
+	}
+}
+
+func TestBuildToolsForModeRepairExcludesRunCommand(t *testing.T) {
+	got, err := BuildToolsForMode(t.TempDir(), ToolModeRepair, nil, NewRunner(), nil)
+	if err != nil {
+		t.Fatalf("BuildToolsForMode(repair): %v", err)
+	}
+	names := toolNames(t, got)
+	if containsName(names, "run_command") {
+		t.Fatalf("repair mode tools must not include run_command, got %v", names)
+	}
+	if !containsName(names, "repo_read") {
+		t.Fatalf("expected repo_read in repair mode tools, got %v", names)
+	}
+}
+
 func toolNames(t *testing.T, items []tool.BaseTool) []string {
 	t.Helper()
 	out := make([]string, 0, len(items))

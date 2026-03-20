@@ -801,6 +801,7 @@ def run_one(
     pr_mode: str,
     max_iterations: int,
     kb_url: str,
+    plan_mode: str = "on",
     dry_run: bool,
     task_timeout_sec: int,
     strict_mode: bool,
@@ -867,6 +868,8 @@ def run_one(
         retrieval_mode_for_task(rag_enabled=rag_enabled, requires_kb=requires_kb),
         "--max-iterations",
         str(max_iterations),
+        "--plan-mode",
+        plan_mode,
     ]
     if str(task.get("test_cmd", "")).strip():
         cmd += ["--test-cmd", str(task["test_cmd"]).strip()]
@@ -1040,6 +1043,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--concurrency", type=int, default=1, help="Max parallel tasks (default: 1 = serial)")
     p.add_argument("--launch-interval", type=float, default=2.0, help="Min seconds between launching tasks (rate-limit friendly)")
+    p.add_argument("--plan-mode", default="on", choices=["on", "off"], help="Plan mode for agent-loop run (default: on)")
     p.add_argument("--only", choices=["no_rag", "rag"], help="Run only one experiment")
     p.add_argument("--dry-run", action="store_true", help="Only print commands, do not execute")
     return p.parse_args()
@@ -1087,6 +1091,7 @@ def main() -> int:
                 pr_mode=args.pr_mode,
                 max_iterations=args.max_iterations,
                 kb_url=args.kb_url,
+                plan_mode=args.plan_mode,
                 dry_run=bool(args.dry_run),
                 task_timeout_sec=args.task_timeout_sec,
                 strict_mode=bool(args.strict_mode),
@@ -1114,6 +1119,7 @@ def main() -> int:
                     pr_mode=args.pr_mode,
                     max_iterations=args.max_iterations,
                     kb_url=args.kb_url,
+                    plan_mode=args.plan_mode,
                     dry_run=bool(args.dry_run),
                     task_timeout_sec=args.task_timeout_sec,
                     strict_mode=bool(args.strict_mode),
@@ -1151,6 +1157,7 @@ def main() -> int:
             "pr_mode": args.pr_mode,
             "max_iterations": args.max_iterations,
             "task_timeout_sec": args.task_timeout_sec,
+            "plan_mode": args.plan_mode,
             "strict_mode": bool(args.strict_mode),
             "isolate_worktree": bool(args.isolate_worktree),
             "concurrency": concurrency,

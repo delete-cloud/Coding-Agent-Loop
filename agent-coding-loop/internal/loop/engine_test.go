@@ -1210,6 +1210,68 @@ func mustRun(t *testing.T, r *tools.Runner, repo, cmd string) {
 	}
 }
 
+func newTurnNodeRepairHarness(t *testing.T, commands model.CommandSet) (*Engine, *loopSession, string, func()) {
+	return newTurnNodeRepairHarnessWithGoal(t, "修复 internal/config/config_test.go 的编译失败", commands)
+}
+
+func newTurnNodeRepairHarnessWithGoal(t *testing.T, goal string, commands model.CommandSet) (*Engine, *loopSession, string, func()) {
+	t.Helper()
+	ctx := context.Background()
+	repo := t.TempDir()
+	r := tools.NewRunner()
+	mustRun(t, r, repo, "git init")
+	mustRun(t, r, repo, "git config user.email test@example.com")
+	mustRun(t, r, repo, "git config user.name tester")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("demo\n"), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	mustRun(t, r, repo, "git add README.md")
+	mustRun(t, r, repo, "git commit -m init")
+
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	store, err := sqlite.New(dbPath)
+	if err != nil {
+		t.Fatalf("sqlite.New: %v", err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	spec := model.RunSpec{
+		Goal:          goal,
+		Repo:          repo,
+		PRMode:        model.PRModeDryRun,
+		MaxIterations: 3,
+		Commands:      commands,
+	}
+	runID, err := store.CreateRun(ctx, spec, model.RunStatusQueued)
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if err := store.UpdateRunStatus(ctx, runID, model.RunStatusRunning, "running"); err != nil {
+		t.Fatalf("UpdateRunStatus: %v", err)
+	}
+
+	coder := agentpkg.NewCoder(agentpkg.ClientConfig{})
+	engine := NewEngine(EngineDeps{
+		Store:    store,
+		Runner:   r,
+		Git:      gitpkg.NewClient(r),
+		GitHub:   ghpkg.NewClient(r),
+		Coder:    coder,
+		Reviewer: agentpkg.NewReviewer(agentpkg.ClientConfig{}),
+		Skills:   skills.NewRegistry(nil),
+	})
+	st := &loopSession{
+		RunID:    runID,
+		Spec:     spec,
+		RepoAbs:  repo,
+		Commands: commands,
+		Status:   model.RunStatusRunning,
+	}
+	return engine, st, dbPath, func() {}
+}
+
 func TestEngineKBPrefetchInsertsToolCallOnce(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "state.db")
@@ -1374,6 +1436,32 @@ func TestBuildCoderInputDeduplicatesRetrievedContextByChunk(t *testing.T) {
 	}
 }
 
+func TestBuildCoderInputIncludesPlanContext(t *testing.T) {
+	st := &loopSession{
+		Spec:        model.RunSpec{Goal: "update config validation"},
+		RepoAbs:     "/tmp/repo",
+		Phase:       loopPhaseCode,
+		PlanSummary: "Update config validation in the existing load path.",
+		PlanSteps: []string{
+			"Inspect config load path and existing validation.",
+			"Apply the minimal change in the current validation branch.",
+		},
+	}
+
+	got := buildCoderInput(st, "diff --git a/internal/config/config.go b/internal/config/config.go")
+	if got.PlanSummary != st.PlanSummary {
+		t.Fatalf("expected plan summary %q, got %q", st.PlanSummary, got.PlanSummary)
+	}
+	if len(got.PlanSteps) != len(st.PlanSteps) {
+		t.Fatalf("expected %d plan steps, got %+v", len(st.PlanSteps), got.PlanSteps)
+	}
+	for i, want := range st.PlanSteps {
+		if got.PlanSteps[i] != want {
+			t.Fatalf("expected plan step %d to be %q, got %+v", i, want, got.PlanSteps)
+		}
+	}
+}
+
 func TestBuildReviewInputIncludesRetrievedContext(t *testing.T) {
 	st := &loopSession{
 		Spec: model.RunSpec{
@@ -1405,6 +1493,402 @@ func TestBuildReviewInputIncludesRetrievedContext(t *testing.T) {
 	}
 	if got.RetrievedContext[0].Path != "eval/ab/kb/rag_pipeline.md" {
 		t.Fatalf("expected review hit metadata preserved, got %+v", got.RetrievedContext[0])
+	}
+}
+
+func TestPlanNodeTransitionsToCodeAndStoresPlan(t *testing.T) {
+	coder := agentpkg.NewCoder(agentpkg.ClientConfig{})
+	coder.SetPlanHookForTests(func(_ context.Context, in agentpkg.PlanInput) (agentpkg.PlanOutput, error) {
+		if in.Goal == "" {
+			t.Fatal("expected goal in planner input")
+		}
+		return agentpkg.PlanOutput{
+			Summary: "Inspect config loading path, then add the validation in place.",
+			Steps: []string{
+				"Read the current config loader and validation path.",
+				"Apply the minimal validation change in the existing branch.",
+			},
+			Risks: []string{"Avoid changing unrelated validation rules."},
+		}, nil
+	})
+	e := NewEngine(EngineDeps{Coder: coder})
+	st := &loopSession{
+		Spec:    model.RunSpec{Goal: "在 internal/config/config.go 增加 DBPath 校验"},
+		RepoAbs: t.TempDir(),
+		Phase:   loopPhasePlan,
+	}
+
+	got, err := e.planNode(context.Background(), st)
+	if err != nil {
+		t.Fatalf("planNode: %v", err)
+	}
+	if got.Phase != loopPhaseCode {
+		t.Fatalf("expected phase to advance to code, got %s", got.Phase)
+	}
+	if got.PlanSummary == "" || len(got.PlanSteps) != 2 {
+		t.Fatalf("expected stored plan output, got %+v", got)
+	}
+}
+
+func TestPlanNodePlannerFallbackPersistsFallbackStatus(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	store, err := sqlite.New(dbPath)
+	if err != nil {
+		t.Fatalf("sqlite.New: %v", err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	spec := model.RunSpec{
+		Goal:          "在 internal/config/config.go 增加 DBPath 校验",
+		MaxIterations: 1,
+	}
+	runID, err := store.CreateRun(ctx, spec, model.RunStatusQueued)
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	coder := agentpkg.NewCoder(agentpkg.ClientConfig{})
+	coder.SetPlanHookForTests(func(context.Context, agentpkg.PlanInput) (agentpkg.PlanOutput, error) {
+		return agentpkg.PlanOutput{}, errors.New("planner unavailable")
+	})
+	e := NewEngine(EngineDeps{Store: store, Coder: coder})
+	st := &loopSession{
+		RunID:   runID,
+		Spec:    spec,
+		RepoAbs: t.TempDir(),
+		Phase:   loopPhasePlan,
+	}
+
+	got, err := e.planNode(ctx, st)
+	if err != nil {
+		t.Fatalf("planNode: %v", err)
+	}
+	if strings.TrimSpace(got.PlanSummary) == "" || len(got.PlanSteps) == 0 {
+		t.Fatalf("expected heuristic plan fallback, got %+v", got)
+	}
+
+	events, err := store.GetRunEvents(ctx, runID)
+	if err != nil {
+		t.Fatalf("GetRunEvents: %v", err)
+	}
+	text := make([]string, 0, len(events))
+	for _, ev := range events {
+		text = append(text, ev.Summary)
+	}
+	if !strings.Contains(strings.Join(text, "\n"), "planner_meta:fallback") {
+		t.Fatalf("expected planner_meta fallback status in events, got %q", strings.Join(text, "\n"))
+	}
+}
+
+func TestPlanNodeSkipsWhenPhaseAlreadyCode(t *testing.T) {
+	var calls int
+	coder := agentpkg.NewCoder(agentpkg.ClientConfig{})
+	coder.SetPlanHookForTests(func(context.Context, agentpkg.PlanInput) (agentpkg.PlanOutput, error) {
+		calls++
+		return agentpkg.PlanOutput{Summary: "unexpected"}, nil
+	})
+	e := NewEngine(EngineDeps{Coder: coder})
+	st := &loopSession{
+		Spec:        model.RunSpec{Goal: "keep current plan"},
+		RepoAbs:     t.TempDir(),
+		Phase:       loopPhaseCode,
+		PlanSummary: "existing plan",
+	}
+
+	got, err := e.planNode(context.Background(), st)
+	if err != nil {
+		t.Fatalf("planNode: %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("expected planner hook to be skipped, got %d calls", calls)
+	}
+	if got.PlanSummary != "existing plan" {
+		t.Fatalf("expected existing plan to be preserved, got %+v", got)
+	}
+}
+
+func TestPlanNodeResumeAfterPlanCompletedPreservesExistingPlan(t *testing.T) {
+	var calls int
+	coder := agentpkg.NewCoder(agentpkg.ClientConfig{})
+	coder.SetPlanHookForTests(func(context.Context, agentpkg.PlanInput) (agentpkg.PlanOutput, error) {
+		calls++
+		return agentpkg.PlanOutput{Summary: "should not be called"}, nil
+	})
+	e := NewEngine(EngineDeps{Coder: coder})
+	st := &loopSession{
+		Spec:        model.RunSpec{Goal: "resumed task"},
+		RepoAbs:     t.TempDir(),
+		Phase:       loopPhaseCode,
+		PlanSummary: "original plan from before interrupt",
+		PlanSteps:   []string{"step 1", "step 2"},
+		PlanRisks:   []string{"risk 1"},
+	}
+
+	got, err := e.planNode(context.Background(), st)
+	if err != nil {
+		t.Fatalf("planNode on resume: %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("planner should not re-run on resume, got %d calls", calls)
+	}
+	if got.PlanSummary != "original plan from before interrupt" {
+		t.Fatalf("expected original plan preserved, got %q", got.PlanSummary)
+	}
+	if len(got.PlanSteps) != 2 {
+		t.Fatalf("expected original plan steps preserved, got %v", got.PlanSteps)
+	}
+	if len(got.PlanRisks) != 1 || got.PlanRisks[0] != "risk 1" {
+		t.Fatalf("expected original plan risks preserved, got %v", got.PlanRisks)
+	}
+}
+
+func TestPlanNodeSkipsWhenPlanModeOff(t *testing.T) {
+	var calls int
+	coder := agentpkg.NewCoder(agentpkg.ClientConfig{})
+	coder.SetPlanHookForTests(func(context.Context, agentpkg.PlanInput) (agentpkg.PlanOutput, error) {
+		calls++
+		return agentpkg.PlanOutput{Summary: "should not be called"}, nil
+	})
+	e := NewEngine(EngineDeps{Coder: coder})
+	st := &loopSession{
+		Spec:    model.RunSpec{Goal: "task with plan off", PlanMode: model.PlanModeOff},
+		RepoAbs: t.TempDir(),
+		Phase:   loopPhasePlan,
+	}
+
+	got, err := e.planNode(context.Background(), st)
+	if err != nil {
+		t.Fatalf("planNode: %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("expected planner to be skipped when plan_mode=off, got %d calls", calls)
+	}
+	if got.Phase != loopPhaseCode {
+		t.Fatalf("expected phase to advance to code, got %s", got.Phase)
+	}
+	if got.PlanSummary != "" {
+		t.Fatalf("expected empty plan summary when plan_mode=off, got %q", got.PlanSummary)
+	}
+}
+
+func TestShouldEnterRepairBasicEligible(t *testing.T) {
+	st := &loopSession{
+		Spec: model.RunSpec{
+			Goal:          "修复 internal/config/config_test.go 的编译失败",
+			MaxIterations: 3,
+		},
+		Iteration: 1,
+	}
+
+	got := shouldEnterRepair(st, true, true, "diff --git a/internal/config/config_test.go b/internal/config/config_test.go")
+	if !got {
+		t.Fatal("expected repair-eligible turn")
+	}
+}
+
+func TestShouldEnterRepairSkipsAfterFirstAttempt(t *testing.T) {
+	st := &loopSession{
+		Spec: model.RunSpec{
+			Goal:          "修复 internal/config/config_test.go 的编译失败",
+			MaxIterations: 3,
+		},
+		Iteration:      1,
+		RepairAttempts: 1,
+	}
+
+	got := shouldEnterRepair(st, true, true, "diff --git a/internal/config/config_test.go b/internal/config/config_test.go")
+	if got {
+		t.Fatal("expected repair to be skipped after first attempt")
+	}
+}
+
+func TestShouldEnterRepairSkipsWhenPatchFailed(t *testing.T) {
+	st := &loopSession{
+		Spec: model.RunSpec{
+			Goal:          "修复 internal/config/config_test.go 的编译失败",
+			MaxIterations: 3,
+		},
+		Iteration: 1,
+	}
+
+	got := shouldEnterRepair(st, true, false, "diff --git a/internal/config/config_test.go b/internal/config/config_test.go")
+	if got {
+		t.Fatal("expected repair to be skipped when patch application failed")
+	}
+}
+
+func TestShouldEnterRepairSkipsWhenPatchMissesTargets(t *testing.T) {
+	st := &loopSession{
+		Spec: model.RunSpec{
+			Goal:          "修复 internal/config/config_test.go 的编译失败",
+			MaxIterations: 3,
+		},
+		Iteration: 1,
+	}
+
+	got := shouldEnterRepair(st, true, true, "diff --git a/README.md b/README.md")
+	if got {
+		t.Fatal("expected repair to be skipped when applied patch misses goal targets")
+	}
+}
+
+func TestShouldEnterRepairSkipsAtMaxIterations(t *testing.T) {
+	st := &loopSession{
+		Spec: model.RunSpec{
+			Goal:          "修复 internal/config/config_test.go 的编译失败",
+			MaxIterations: 1,
+		},
+		Iteration: 1,
+	}
+
+	got := shouldEnterRepair(st, true, true, "diff --git a/internal/config/config_test.go b/internal/config/config_test.go")
+	if got {
+		t.Fatal("expected repair to be skipped at max iterations")
+	}
+}
+
+func TestTurnNodeRoutesToRepairWhenEligible(t *testing.T) {
+	ctx := context.Background()
+	engine, st, _, cleanup := newTurnNodeRepairHarness(t, model.CommandSet{Test: []string{"echo PASS"}})
+	defer cleanup()
+
+	var repairCalls int
+	engine.coder.SetRepairHookForTests(func(_ context.Context, in agentpkg.RepairInput) (agentpkg.CoderOutput, error) {
+		repairCalls++
+		if len(in.FailedCommands) != 1 || in.FailedCommands[0] != "go test ./..." {
+			t.Fatalf("expected failed commands to be forwarded to repair, got %+v", in.FailedCommands)
+		}
+		if !strings.Contains(in.CommandOutput, "undefined: Config") {
+			t.Fatalf("expected last command output to be forwarded to repair, got %q", in.CommandOutput)
+		}
+		if in.PreviousReview != "reviewer said the target file is still incomplete" {
+			t.Fatalf("expected previous review to be forwarded to repair, got %q", in.PreviousReview)
+		}
+		return agentpkg.CoderOutput{
+			Summary:  "repair applied",
+			Patch:    "",
+			Commands: []string{"echo MODEL_SHOULD_BE_IGNORED"},
+		}, nil
+	})
+	st.RepairEligible = true
+	st.LastFailedCommands = []string{"go test ./..."}
+	st.LastCommandOutput = "undefined: Config"
+	st.PreviousReview = "reviewer said the target file is still incomplete"
+
+	got, err := engine.turnNode(ctx, st)
+	if err != nil {
+		t.Fatalf("turnNode: %v", err)
+	}
+	if repairCalls != 1 {
+		t.Fatalf("expected repair to be called exactly once, got %d", repairCalls)
+	}
+	if got.RepairAttempts != 1 {
+		t.Fatalf("expected repair attempts to increment, got %d", got.RepairAttempts)
+	}
+	if got.Phase != loopPhaseReview {
+		t.Fatalf("expected repair turn to reach review phase, got %s", got.Phase)
+	}
+}
+
+func TestRepairEmptyPatchUsesExistingRepoDiffForReviewerCoverage(t *testing.T) {
+	ctx := context.Background()
+	engine, st, _, cleanup := newTurnNodeRepairHarnessWithGoal(t, "在 README.md 增加一行功能描述", model.CommandSet{Test: []string{"echo PASS"}})
+	defer cleanup()
+
+	readmePath := filepath.Join(st.RepoAbs, "README.md")
+	if err := os.WriteFile(readmePath, []byte("demo\nadded line before repair\n"), 0o644); err != nil {
+		t.Fatalf("seed README diff: %v", err)
+	}
+
+	engine.coder.SetRepairHookForTests(func(context.Context, agentpkg.RepairInput) (agentpkg.CoderOutput, error) {
+		return agentpkg.CoderOutput{
+			Summary: "repair found no extra patch needed",
+			Patch:   "",
+		}, nil
+	})
+	st.RepairEligible = true
+	st.LastFailedCommands = []string{"go test ./..."}
+	st.LastCommandOutput = "undefined: Config"
+	st.PreviousReview = "review previous change and keep the README goal intact"
+
+	got, err := engine.turnNode(ctx, st)
+	if err != nil {
+		t.Fatalf("turnNode: %v", err)
+	}
+	if got.Decision != model.LoopDecisionComplete {
+		t.Fatalf("expected empty-patch repair turn with target-touching repo diff to complete, got %s summary=%q", got.Decision, got.Summary)
+	}
+	if got.Review.Decision == string(model.ReviewDecisionRequestChanges) {
+		t.Fatalf("expected reviewer target coverage to accept existing README diff, got summary=%q", got.Review.Summary)
+	}
+	if strings.Contains(strings.ToLower(got.Review.Summary), "goal-target file(s) not touched") {
+		t.Fatalf("expected reviewer summary not to report missing goal target coverage, got %q", got.Review.Summary)
+	}
+}
+
+func TestTurnNodeSkipsRepairAfterFirstAttempt(t *testing.T) {
+	ctx := context.Background()
+	engine, st, _, cleanup := newTurnNodeRepairHarness(t, model.CommandSet{Test: []string{"echo PASS"}})
+	defer cleanup()
+
+	var repairCalls int
+	engine.coder.SetRepairHookForTests(func(context.Context, agentpkg.RepairInput) (agentpkg.CoderOutput, error) {
+		repairCalls++
+		return agentpkg.CoderOutput{}, nil
+	})
+	st.RepairEligible = true
+	st.RepairAttempts = 1
+	st.LastFailedCommands = []string{"go test ./..."}
+	st.LastCommandOutput = "undefined: Config"
+
+	got, err := engine.turnNode(ctx, st)
+	if err != nil {
+		t.Fatalf("turnNode: %v", err)
+	}
+	if repairCalls != 0 {
+		t.Fatalf("expected repair to be skipped after first attempt, got %d calls", repairCalls)
+	}
+	if got.RepairAttempts != 1 {
+		t.Fatalf("expected repair attempts to stay at 1, got %d", got.RepairAttempts)
+	}
+}
+
+func TestRepairForcesSpecCommands(t *testing.T) {
+	ctx := context.Background()
+	engine, st, dbPath, cleanup := newTurnNodeRepairHarness(t, model.CommandSet{Test: []string{"echo SPEC_COMMAND"}})
+	defer cleanup()
+
+	engine.coder.SetRepairHookForTests(func(context.Context, agentpkg.RepairInput) (agentpkg.CoderOutput, error) {
+		return agentpkg.CoderOutput{
+			Summary:  "repair applied",
+			Patch:    "",
+			Commands: []string{"echo MODEL_COMMAND"},
+		}, nil
+	})
+	st.RepairEligible = true
+	st.LastFailedCommands = []string{"go test ./..."}
+	st.LastCommandOutput = "undefined: Config"
+
+	if _, err := engine.turnNode(ctx, st); err != nil {
+		t.Fatalf("turnNode: %v", err)
+	}
+
+	query := "select input_text from tool_calls where run_id='" + st.RunID + "' and tool='run_command' order by id;"
+	out, err := exec.Command("sqlite3", "-json", dbPath, query).Output()
+	if err != nil {
+		t.Fatalf("sqlite3 run_command query: %v", err)
+	}
+	var rows []struct {
+		InputText string `json:"input_text"`
+	}
+	if err := json.Unmarshal(out, &rows); err != nil {
+		t.Fatalf("unmarshal sqlite json: %v raw=%s", err, string(out))
+	}
+	if len(rows) != 1 || rows[0].InputText != "echo SPEC_COMMAND" {
+		t.Fatalf("expected only spec command to run, got %+v", rows)
 	}
 }
 

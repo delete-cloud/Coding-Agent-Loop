@@ -84,6 +84,36 @@ func TestCoderFallback(t *testing.T) {
 	}
 }
 
+func TestCoderPlanFallback(t *testing.T) {
+	c := NewCoder(ClientConfig{BaseURL: "http://example.com", Model: "test-model"})
+	out, err := c.Plan(context.Background(), PlanInput{Goal: "inspect config validation", RepoSummary: t.TempDir()})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if strings.TrimSpace(out.Summary) == "" {
+		t.Fatal("expected non-empty planner summary")
+	}
+	if len(out.Steps) == 0 {
+		t.Fatalf("expected fallback planner steps, got %+v", out)
+	}
+}
+
+func TestCoderRepairFallback(t *testing.T) {
+	c := NewCoder(ClientConfig{BaseURL: "http://example.com", Model: "test-model"})
+	out, err := c.Repair(context.Background(), RepairInput{
+		Goal:           "修复 internal/config/config_test.go 中的测试编译失败",
+		RepoSummary:    t.TempDir(),
+		FailedCommands: []string{"go test ./..."},
+		CommandOutput:  "undefined: Config",
+	})
+	if err != nil {
+		t.Fatalf("Repair: %v", err)
+	}
+	if strings.TrimSpace(out.Patch) != "" {
+		t.Fatalf("expected fallback repair to leave patch empty, got %q", out.Patch)
+	}
+}
+
 func TestShouldBackfillCitations(t *testing.T) {
 	if !shouldBackfillCitations("你必须先调用 kb_search 获取上下文，再修改代码。") {
 		t.Fatalf("expected kb-required goal to enable citation backfill")
@@ -434,6 +464,73 @@ func TestCoderPromptsDoNotMentionSkillTools(t *testing.T) {
 	}
 	if strings.Contains(system, "list_skills") || strings.Contains(system, "view_skill") {
 		t.Fatalf("expected coder prompt to stop mentioning skill tools, got %q", system)
+	}
+}
+
+func TestCoderPromptsIncludePlanContextWhenPresent(t *testing.T) {
+	_, user := coderPrompts(CoderInput{
+		Goal:        "在 internal/config/config.go 增加 DBPath 校验",
+		PlanSummary: "Inspect config load flow, then apply the minimal validation change.",
+		PlanSteps: []string{
+			"Read the existing config loader and validation path.",
+			"Edit the existing validation branch with the minimal change.",
+		},
+	})
+
+	if !strings.Contains(user, "\"plan_summary\"") {
+		t.Fatalf("expected coder prompt payload to include plan_summary, got %q", user)
+	}
+	if !strings.Contains(user, "\"plan_steps\"") {
+		t.Fatalf("expected coder prompt payload to include plan_steps, got %q", user)
+	}
+}
+
+func TestPlannerPromptsForbidPatchAndCommands(t *testing.T) {
+	system, user := plannerPrompts(PlanInput{
+		Goal:        "在 internal/config/config.go 增加 DBPath 校验",
+		RepoSummary: "/tmp/repo",
+	})
+
+	if !strings.Contains(system, "summary, steps, risks, citations") {
+		t.Fatalf("expected planner prompt to declare strict JSON fields, got %q", system)
+	}
+	if !strings.Contains(system, "Do not return patches or commands") {
+		t.Fatalf("expected planner prompt to forbid patches and commands, got %q", system)
+	}
+	if !strings.Contains(user, "\"task_input\"") {
+		t.Fatalf("expected planner prompt payload to include task_input, got %q", user)
+	}
+}
+
+func TestRepairPromptsForbidFullRewrite(t *testing.T) {
+	system, _ := repairPrompts(RepairInput{
+		Goal:          "修复 internal/config/config_test.go 中的失败测试",
+		RepoSummary:   "/tmp/repo",
+		CommandOutput: "undefined: Config",
+	})
+
+	if !strings.Contains(system, "Do NOT rewrite from scratch") {
+		t.Fatalf("expected repair prompt to forbid full rewrite, got %q", system)
+	}
+}
+
+func TestRepairPromptsIncludeFailedCommands(t *testing.T) {
+	_, user := repairPrompts(RepairInput{
+		Goal:           "修复 internal/config/config_test.go 中的失败测试",
+		RepoSummary:    "/tmp/repo",
+		PreviousReview: "reviewer said the target file is still incomplete",
+		FailedCommands: []string{"go test ./..."},
+		CommandOutput:  "undefined: Config",
+	})
+
+	if !strings.Contains(user, "\"failed_commands\"") {
+		t.Fatalf("expected repair prompt payload to include failed_commands, got %q", user)
+	}
+	if !strings.Contains(user, "\"command_output\"") {
+		t.Fatalf("expected repair prompt payload to include command_output, got %q", user)
+	}
+	if !strings.Contains(user, "\"previous_review\"") {
+		t.Fatalf("expected repair prompt payload to include previous_review, got %q", user)
 	}
 }
 

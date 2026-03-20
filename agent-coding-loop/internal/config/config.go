@@ -12,6 +12,7 @@ type Config struct {
 	ListenAddr string      `json:"listen_addr"`
 	DBPath     string      `json:"db_path"`
 	Artifacts  string      `json:"artifacts_dir"`
+	PlanMode   string      `json:"plan_mode"`
 	Model      ModelConfig `json:"model"`
 	KB         KBConfig    `json:"kb"`
 }
@@ -114,6 +115,8 @@ func parseSimpleYAML(raw string, cfg *Config) error {
 			cfg.Model.ResponsesAPI = v == "true" || v == "1" || v == "yes"
 		case "kb_base_url", "kb_url":
 			cfg.KB.BaseURL = strings.TrimRight(v, "/")
+		case "plan_mode":
+			cfg.PlanMode = v
 		}
 	}
 	return nil
@@ -146,6 +149,9 @@ func overrideFromEnv(cfg *Config) {
 	}
 	if v := strings.TrimSpace(os.Getenv("AGENT_LOOP_KB_URL")); v != "" {
 		cfg.KB.BaseURL = strings.TrimRight(v, "/")
+	}
+	if v := strings.TrimSpace(os.Getenv("AGENT_LOOP_PLAN_MODE")); v != "" {
+		cfg.PlanMode = v
 	}
 }
 

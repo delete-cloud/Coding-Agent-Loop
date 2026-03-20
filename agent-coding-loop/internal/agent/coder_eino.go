@@ -20,11 +20,13 @@ import (
 )
 
 type Coder struct {
-	client     ClientConfig
-	runner     *tools.Runner
-	skills     *skills.Registry
-	kb         *kb.Client
-	retryHooks *coderRetryHooks
+	client             ClientConfig
+	runner             *tools.Runner
+	skills             *skills.Registry
+	kb                 *kb.Client
+	retryHooks         *coderRetryHooks
+	planHookForTests   func(context.Context, PlanInput) (PlanOutput, error)
+	repairHookForTests func(context.Context, RepairInput) (CoderOutput, error)
 }
 
 type agentStageRecorderKey struct{}
@@ -47,6 +49,8 @@ type CoderInput struct {
 	Goal                        string
 	RepoSummary                 string
 	PreviousReview              string
+	PlanSummary                 string   `json:"plan_summary,omitempty"`
+	PlanSteps                   []string `json:"plan_steps,omitempty"`
 	Diff                        string
 	TestOutput                  string
 	Commands                    []string
@@ -68,6 +72,36 @@ type CoderOutput struct {
 	Citations      []string `json:"citations"`
 	UsedFallback   bool     `json:"used_fallback"`
 	FallbackSource string   `json:"fallback_source"`
+}
+
+type PlanInput struct {
+	Goal             string         `json:"goal"`
+	RepoSummary      string         `json:"repo_summary"`
+	PreviousReview   string         `json:"previous_review,omitempty"`
+	Diff             string         `json:"diff,omitempty"`
+	SkillsSummary    string         `json:"skills_summary,omitempty"`
+	RetrievedContext []kb.SearchHit `json:"retrieved_context,omitempty"`
+	RetrievedQuery   string         `json:"retrieved_query,omitempty"`
+}
+
+type PlanOutput struct {
+	Summary   string   `json:"summary"`
+	Steps     []string `json:"steps"`
+	Risks     []string `json:"risks"`
+	Citations []string `json:"citations"`
+}
+
+type RepairInput struct {
+	Goal             string         `json:"goal"`
+	RepoSummary      string         `json:"repo_summary"`
+	CurrentDiff      string         `json:"current_diff"`
+	PreviousReview   string         `json:"previous_review,omitempty"`
+	FailedCommands   []string       `json:"failed_commands"`
+	CommandOutput    string         `json:"command_output"`
+	PlanSummary      string         `json:"plan_summary,omitempty"`
+	PlanSteps        []string       `json:"plan_steps,omitempty"`
+	RetrievedContext []kb.SearchHit `json:"retrieved_context,omitempty"`
+	RetrievedQuery   string         `json:"retrieved_query,omitempty"`
 }
 
 const citationBackfillTimeout = 8 * time.Second
@@ -179,6 +213,76 @@ func (c *Coder) Generate(ctx context.Context, in CoderInput) (CoderOutput, error
 	return fallback, nil
 }
 
+func (c *Coder) Plan(ctx context.Context, in PlanInput) (PlanOutput, error) {
+	if c.planHookForTests != nil {
+		return normalizePlanOutput(c.planHookForTests(ctx, in))
+	}
+	if !c.client.Ready() {
+		return fallbackPlan(in), nil
+	}
+
+	emitAgentStage(ctx, "planner_eino_start")
+	einoCtx, cancelEino := withCoderToolCallingTimeout(ctx)
+	out, err := runWithHardTimeout(einoCtx, coderToolCallingTimeout, func(callCtx context.Context) (PlanOutput, error) {
+		return c.planWithEino(callCtx, in)
+	})
+	cancelEino()
+	emitAgentStage(ctx, "planner_eino_done")
+	if err == nil {
+		return normalizePlanOutput(out, nil)
+	}
+
+	emitAgentStage(ctx, "planner_client_completion_start")
+	fallback, fallbackErr := runWithHardTimeout(ctx, coderCompletionTimeout, func(callCtx context.Context) (PlanOutput, error) {
+		return c.planWithClient(callCtx, in)
+	})
+	emitAgentStage(ctx, "planner_client_completion_done")
+	if fallbackErr != nil {
+		return fallbackPlan(in), nil
+	}
+	return normalizePlanOutput(fallback, nil)
+}
+
+func (c *Coder) Repair(ctx context.Context, in RepairInput) (CoderOutput, error) {
+	if c.repairHookForTests != nil {
+		return c.repairHookForTests(ctx, in)
+	}
+	if !c.client.Ready() {
+		out := fallbackRepair(in)
+		out.UsedFallback = true
+		out.FallbackSource = "offline"
+		return out, nil
+	}
+
+	emitAgentStage(ctx, "repair_eino_start")
+	einoCtx, cancelEino := withCoderToolCallingTimeout(ctx)
+	out, err := runWithHardTimeout(einoCtx, coderToolCallingTimeout, func(callCtx context.Context) (CoderOutput, error) {
+		return c.repairWithEino(callCtx, in)
+	})
+	cancelEino()
+	emitAgentStage(ctx, "repair_eino_done")
+	if err == nil {
+		return out, nil
+	}
+
+	emitAgentStage(ctx, "repair_client_completion_start")
+	fallback, fallbackErr := runWithHardTimeout(ctx, coderCompletionTimeout, func(callCtx context.Context) (CoderOutput, error) {
+		return c.repairWithClient(callCtx, in)
+	})
+	emitAgentStage(ctx, "repair_client_completion_done")
+	if fallbackErr != nil {
+		out := fallbackRepair(in)
+		out.UsedFallback = true
+		out.FallbackSource = "repair_fallback"
+		out.Notes = appendCoderNote(out.Notes, "repair tool-calling path failed: "+err.Error())
+		out.Notes = appendCoderNote(out.Notes, "repair completion path failed: "+fallbackErr.Error())
+		return out, nil
+	}
+	fallback.UsedFallback = true
+	fallback.FallbackSource = "repair_client_completion"
+	return fallback, nil
+}
+
 func withCoderToolCallingTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	timeout := coderToolCallingTimeout
 	if timeout <= 0 {
@@ -198,6 +302,45 @@ func WithAgentStageRecorder(ctx context.Context, record func(string)) context.Co
 	return withAgentStageRecorder(ctx, record)
 }
 
+func (c *Coder) runStructuredAgent(ctx context.Context, repoRoot string, toolMode tools.ToolMode, systemPrompt, userPrompt string, maxStep int) (string, error) {
+	chatModel, err := c.client.newToolCallingModel(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	runner := c.runner
+	if runner == nil {
+		runner = tools.NewRunner(tools.WithReadOnly(true))
+	}
+	toolset, err := tools.BuildToolsForMode(repoRoot, toolMode, c.skills, runner, c.kb)
+	if err != nil {
+		return "", err
+	}
+
+	rAgent, err := react.NewAgent(ctx, &react.AgentConfig{
+		ToolCallingModel: chatModel,
+		ToolsConfig: compose.ToolsNodeConfig{
+			Tools: toolset,
+		},
+		MaxStep: maxStep,
+	})
+	if err != nil {
+		return "", err
+	}
+
+	msg, err := rAgent.Generate(ctx, []*schema.Message{
+		schema.SystemMessage(systemPrompt),
+		schema.UserMessage(userPrompt),
+	})
+	if err != nil {
+		return "", err
+	}
+	if msg == nil {
+		return "", nil
+	}
+	return msg.Content, nil
+}
+
 func emitAgentStage(ctx context.Context, stage string) {
 	if strings.TrimSpace(stage) == "" {
 		return
@@ -215,6 +358,14 @@ func (c *Coder) SetRetryHooksForTests(hooks CoderRetryHooksForTests) {
 		scopedStrict:   hooks.ScopedStrict,
 		repoOnly:       hooks.RepoOnly,
 	}
+}
+
+func (c *Coder) SetPlanHookForTests(hook func(context.Context, PlanInput) (PlanOutput, error)) {
+	c.planHookForTests = hook
+}
+
+func (c *Coder) SetRepairHookForTests(hook func(context.Context, RepairInput) (CoderOutput, error)) {
+	c.repairHookForTests = hook
 }
 
 func runWithHardTimeout[T any](ctx context.Context, timeout time.Duration, fn func(context.Context) (T, error)) (T, error) {
@@ -260,6 +411,77 @@ func fallbackCoder(in CoderInput) CoderOutput {
 		Notes:     "Configure OPENAI_BASE_URL and OPENAI_MODEL to enable patch generation.",
 		Citations: []string{},
 	}
+}
+
+func fallbackPlan(in PlanInput) PlanOutput {
+	targets := extractGoalTargetFiles(in.Goal)
+	steps := []string{
+		"Inspect the existing implementation and identify the exact file and function to change.",
+		"Apply the minimal change in the current code path instead of introducing unrelated helpers or cleanup.",
+		"Validate the focused behavior after the code change.",
+	}
+	if len(targets) > 0 {
+		steps[0] = "Inspect the existing implementation in the goal target files and identify the exact code path to change."
+	}
+	risks := []string{"Avoid unrelated file changes or adjacent validation rules not required by the goal."}
+	if len(targets) > 1 {
+		risks = append(risks, "Make sure every required target file is updated consistently.")
+	}
+	return PlanOutput{
+		Summary:   "LLM unavailable; inspect the existing code path first and apply the minimal change required by the goal.",
+		Steps:     steps,
+		Risks:     risks,
+		Citations: fallbackCitationPaths(in.RepoSummary),
+	}
+}
+
+func fallbackRepair(in RepairInput) CoderOutput {
+	return CoderOutput{
+		Summary:   "Repair agent unavailable; leaving the current diff unchanged for the normal retry path.",
+		Patch:     "",
+		Commands:  nil,
+		Notes:     "Repair fallback returns an empty patch instead of rewriting from scratch.",
+		Citations: normalizeCitationList(citationPathsFromHits(in.RetrievedContext)),
+	}
+}
+
+func normalizePlanOutput(out PlanOutput, err error) (PlanOutput, error) {
+	if err != nil {
+		return PlanOutput{}, err
+	}
+	out.Summary = strings.TrimSpace(out.Summary)
+	out.Steps = normalizePlanTextList(out.Steps)
+	out.Risks = normalizePlanTextList(out.Risks)
+	out.Citations = normalizeCitationList(out.Citations)
+	if out.Summary == "" {
+		out.Summary = "Inspect the existing code path first, then apply the minimal change required by the goal."
+	}
+	if len(out.Steps) == 0 {
+		out.Steps = []string{
+			"Inspect the existing implementation and identify the exact file and function to change.",
+			"Apply the minimal change in the current code path.",
+			"Validate the focused behavior after the code change.",
+		}
+	}
+	return out, nil
+}
+
+func normalizePlanTextList(items []string) []string {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		out = append(out, item)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func appendCoderNote(existing, note string) string {
@@ -1322,42 +1544,10 @@ func fallbackCitationPaths(repoRoot string) []string {
 }
 
 func (c *Coder) generateWithEino(ctx context.Context, in CoderInput) (CoderOutput, error) {
-	chatModel, err := c.client.newToolCallingModel(ctx)
-	if err != nil {
-		return CoderOutput{}, err
-	}
-
-	runner := c.runner
-	if runner == nil {
-		runner = tools.NewRunner(tools.WithReadOnly(true))
-	}
-	toolset, err := tools.BuildCoderTools(in.RepoSummary, c.skills, runner, c.kb)
-	if err != nil {
-		return CoderOutput{}, err
-	}
-
-	rAgent, err := react.NewAgent(ctx, &react.AgentConfig{
-		ToolCallingModel: chatModel,
-		ToolsConfig: compose.ToolsNodeConfig{
-			Tools: toolset,
-		},
-		MaxStep: 32,
-	})
-	if err != nil {
-		return CoderOutput{}, err
-	}
-
 	systemPrompt, userPrompt := coderPrompts(in)
-	msg, err := rAgent.Generate(ctx, []*schema.Message{
-		schema.SystemMessage(systemPrompt),
-		schema.UserMessage(userPrompt),
-	})
+	raw, err := c.runStructuredAgent(ctx, in.RepoSummary, tools.ToolModeCode, systemPrompt, userPrompt, 32)
 	if err != nil {
 		return CoderOutput{}, err
-	}
-	raw := ""
-	if msg != nil {
-		raw = msg.Content
 	}
 	var wire map[string]any
 	if err := decodeJSONWithRepair(ctx, raw, &wire, c.client.RepairJSON); err != nil {
@@ -1404,6 +1594,86 @@ func (c *Coder) generateWithClient(ctx context.Context, in CoderInput) (CoderOut
 	return out, nil
 }
 
+func (c *Coder) planWithEino(ctx context.Context, in PlanInput) (PlanOutput, error) {
+	systemPrompt, userPrompt := plannerPrompts(in)
+	raw, err := c.runStructuredAgent(ctx, in.RepoSummary, tools.ToolModePlan, systemPrompt, userPrompt, 16)
+	if err != nil {
+		return PlanOutput{}, err
+	}
+	var wire map[string]any
+	if err := decodeJSONWithRepair(ctx, raw, &wire, c.client.RepairJSON); err != nil {
+		return PlanOutput{}, err
+	}
+	b, err := json.Marshal(wire)
+	if err != nil {
+		return PlanOutput{}, wrapStructuredOutputStageError("encode repaired planner json failed", raw, err)
+	}
+	out, err := decodePlanOutput(string(b))
+	if err != nil {
+		return PlanOutput{}, wrapStructuredOutputStageError("parse planner json failed", string(b), err)
+	}
+	return out, nil
+}
+
+func (c *Coder) planWithClient(ctx context.Context, in PlanInput) (PlanOutput, error) {
+	system, user := plannerPrompts(in)
+	var wire any
+	if err := c.client.CompleteJSON(ctx, system, user, &wire); err != nil {
+		return PlanOutput{}, err
+	}
+	b, _ := json.Marshal(wire)
+	out, err := decodePlanOutput(string(b))
+	if err != nil {
+		return PlanOutput{}, err
+	}
+	return out, nil
+}
+
+func (c *Coder) repairWithEino(ctx context.Context, in RepairInput) (CoderOutput, error) {
+	systemPrompt, userPrompt := repairPrompts(in)
+	raw, err := c.runStructuredAgent(ctx, in.RepoSummary, tools.ToolModeRepair, systemPrompt, userPrompt, 12)
+	if err != nil {
+		return CoderOutput{}, err
+	}
+	var wire map[string]any
+	if err := decodeJSONWithRepair(ctx, raw, &wire, c.client.RepairJSON); err != nil {
+		return CoderOutput{}, err
+	}
+	b, err := json.Marshal(wire)
+	if err != nil {
+		return CoderOutput{}, wrapStructuredOutputStageError("encode repaired repair json failed", raw, err)
+	}
+	out, err := decodeCoderOutput(string(b))
+	if err != nil {
+		return CoderOutput{}, wrapStructuredOutputStageError("parse repair json failed", string(b), err)
+	}
+	targets := extractGoalTargetFiles(in.Goal)
+	out.Patch = normalizeCoderPatchForContract(strings.TrimSpace(in.RepoSummary), out.Patch, targets, len(targets) > 1, false)
+	if out.Summary == "" {
+		out.Summary = "Repair agent generated output."
+	}
+	return out, nil
+}
+
+func (c *Coder) repairWithClient(ctx context.Context, in RepairInput) (CoderOutput, error) {
+	system, user := repairPrompts(in)
+	var wire any
+	if err := c.client.CompleteJSON(ctx, system, user, &wire); err != nil {
+		return CoderOutput{}, err
+	}
+	b, _ := json.Marshal(wire)
+	out, err := decodeCoderOutput(string(b))
+	if err != nil {
+		return CoderOutput{}, err
+	}
+	targets := extractGoalTargetFiles(in.Goal)
+	out.Patch = normalizeCoderPatchForContract(strings.TrimSpace(in.RepoSummary), out.Patch, targets, len(targets) > 1, false)
+	if out.Summary == "" {
+		out.Summary = "Repair agent generated output."
+	}
+	return out, nil
+}
+
 func coderPrompts(in CoderInput) (string, string) {
 	targets := extractGoalTargetFiles(in.Goal)
 	singleFnConstraint := buildSingleTargetFunctionConstraint(in.Goal, targets)
@@ -1428,6 +1698,7 @@ func coderPrompts(in CoderInput) (string, string) {
 	- never invent dependencies; verify go.mod and existing imports using repo_read/repo_search before introducing new packages.
 	- patch file paths must be relative to repo root; do not include the repo directory name as a prefix.
 	- commands must not include tool invocations (repo_read/repo_search/repo_list/git_diff/run_command).
+	- plan_summary and plan_steps in the task input are guidance for execution; use them to stay focused, but do not treat them as authorization to modify unrelated files.
 - never return markdown outside JSON.`
 	if len(targets) > 1 {
 		system = strings.TrimSpace(system + "\n\t- this is a multi-target goal: a valid answer must return a non-empty patch touching all target files; do not claim success or goal satisfaction without changing each required target file.")
@@ -1453,6 +1724,51 @@ func coderPrompts(in CoderInput) (string, string) {
 	}
 	b, _ := json.MarshalIndent(payload, "", "  ")
 	user := fmt.Sprintf("Task input:\n%s\nUse tools when needed, then return strict JSON only.", string(b))
+	return system, user
+}
+
+func plannerPrompts(in PlanInput) (string, string) {
+	targets := extractGoalTargetFiles(in.Goal)
+	system := `You are a planning agent operating in a local git repository.
+	You may call tools to inspect repository files, search code, inspect diff, and query the knowledge base.
+	Return JSON only with fields: summary, steps, risks, citations.
+	- Do not return patches or commands.
+	- summary should describe the intended implementation direction in 1-3 sentences.
+	- steps should be a short ordered list of concrete implementation steps.
+	- risks should list the main ways this task could go wrong.
+	- before mentioning a file or function, inspect it with repo_read or repo_search instead of guessing.
+	- retrieved_context in the task input contains pre-fetched knowledge base evidence; use it as the primary source for domain/project background. Call kb_search only for supplementary exploration not covered by retrieved_context.
+	- when kb_scope_contract is present, only plan the identifiers explicitly requested there; KB evidence explains the requested rule, but it does not authorize adjacent validation, cleanup, or extra checks.
+	- citations must contain only repository-relative paths.
+	- never return markdown outside JSON.`
+	payload := map[string]any{
+		"task_input":        in,
+		"kb_scope_contract": buildKBScopeContract(in.Goal, targets),
+	}
+	b, _ := json.MarshalIndent(payload, "", "  ")
+	user := fmt.Sprintf("Task input:\n%s\nUse tools when needed, then return strict JSON only.", string(b))
+	return system, user
+}
+
+func repairPrompts(in RepairInput) (string, string) {
+	system := `You are a repair-focused coding agent operating in a local git repository.
+	You may call read-only tools to inspect repository files, search code, inspect diff, and query the knowledge base.
+	Return JSON only with fields: summary, patch, commands, notes, citations.
+	- The current diff already contains correct progress. Do NOT rewrite from scratch.
+	- previous_review contains reviewer feedback from the prior turn; treat it as an additional constraint, not optional context.
+	- Only fix the specific compilation or test failures shown in command_output.
+	- patch must be unified diff text or empty string.
+	- patch must be incremental and limited to the files/functions causing the failure.
+	- do not add unrelated helpers, cleanup, refactoring, or adjacent behavior changes.
+	- do not change code that is already passing tests.
+	- commands may be empty; the engine controls verification and will rerun the task commands.
+	- citations must contain only repository-relative paths.
+	- never return markdown outside JSON.`
+	payload := map[string]any{
+		"task_input": in,
+	}
+	b, _ := json.MarshalIndent(payload, "", "  ")
+	user := fmt.Sprintf("Repair input:\n%s\nUse tools when needed, then return strict JSON only.", string(b))
 	return system, user
 }
 
@@ -1539,6 +1855,59 @@ func decodeCoderOutput(content string) (CoderOutput, error) {
 			var s string
 			if err2 := json.Unmarshal(b, &s); err2 == nil && strings.TrimSpace(s) != "" {
 				out.Commands = []string{s}
+			}
+		}
+	}
+	return out, nil
+}
+
+func decodePlanOutput(content string) (PlanOutput, error) {
+	raw := extractJSON(content)
+	var m map[string]any
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		var out PlanOutput
+		if err2 := json.Unmarshal([]byte(raw), &out); err2 == nil {
+			return out, nil
+		}
+		return PlanOutput{}, fmt.Errorf("parse planner json failed: %w; content=%s", err, truncateDiagnosticPreview(raw))
+	}
+	out := PlanOutput{}
+	if v, ok := m["summary"].(string); ok {
+		out.Summary = strings.TrimSpace(v)
+	}
+	if c, ok := m["steps"]; ok {
+		b, _ := json.Marshal(c)
+		var items []string
+		if err := json.Unmarshal(b, &items); err == nil {
+			out.Steps = normalizePlanTextList(items)
+		} else {
+			var s string
+			if err2 := json.Unmarshal(b, &s); err2 == nil && strings.TrimSpace(s) != "" {
+				out.Steps = []string{strings.TrimSpace(s)}
+			}
+		}
+	}
+	if c, ok := m["risks"]; ok {
+		b, _ := json.Marshal(c)
+		var items []string
+		if err := json.Unmarshal(b, &items); err == nil {
+			out.Risks = normalizePlanTextList(items)
+		} else {
+			var s string
+			if err2 := json.Unmarshal(b, &s); err2 == nil && strings.TrimSpace(s) != "" {
+				out.Risks = []string{strings.TrimSpace(s)}
+			}
+		}
+	}
+	if c, ok := m["citations"]; ok {
+		b, _ := json.Marshal(c)
+		var items []string
+		if err := json.Unmarshal(b, &items); err == nil {
+			out.Citations = normalizeCitationList(items)
+		} else {
+			var s string
+			if err2 := json.Unmarshal(b, &s); err2 == nil && strings.TrimSpace(s) != "" {
+				out.Citations = normalizeCitationList([]string{s})
 			}
 		}
 	}

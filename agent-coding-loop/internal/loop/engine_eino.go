@@ -63,6 +63,15 @@ type Engine struct {
 	checkpoints compose.CheckPointStore
 }
 
+type loopPhase string
+
+const (
+	loopPhasePlan   loopPhase = "plan"
+	loopPhaseCode   loopPhase = "code"
+	loopPhaseRepair loopPhase = "repair"
+	loopPhaseReview loopPhase = "review"
+)
+
 type loopSession struct {
 	RunID          string
 	Spec           model.RunSpec
@@ -82,6 +91,16 @@ type loopSession struct {
 	DoomLastTool  string
 	DoomLastInput string
 	DoomCount     int
+
+	Phase       loopPhase
+	PlanSummary string
+	PlanSteps   []string
+	PlanRisks   []string
+
+	RepairAttempts     int
+	RepairEligible     bool
+	LastFailedCommands []string
+	LastCommandOutput  string
 
 	Decision model.LoopDecision
 	Status   model.RunStatus
@@ -270,7 +289,6 @@ func (e *Engine) failClosedResume(ctx context.Context, runID, summary string, ca
 	}, fmt.Errorf("%s: %w", summary, cause)
 }
 
-
 func (e *Engine) hasCheckpoint(ctx context.Context, runID string) (bool, error) {
 	if e.checkpoints == nil {
 		return false, nil
@@ -356,6 +374,7 @@ func (e *Engine) run(ctx context.Context, spec model.RunSpec, existingRunID stri
 		Commands:       commands,
 		SkillsSummary:  e.renderSkillsSummary(),
 		Iteration:      iteration,
+		Phase:          loopPhasePlan,
 		Status:         model.RunStatusRunning,
 	}
 
@@ -401,6 +420,9 @@ func (e *Engine) run(ctx context.Context, spec model.RunSpec, existingRunID stri
 
 func (e *Engine) buildLoopRunner(ctx context.Context) (compose.Runnable[*loopSession, *loopSession], error) {
 	g := compose.NewGraph[*loopSession, *loopSession]()
+	if err := g.AddLambdaNode("plan", compose.InvokableLambda(e.planNode)); err != nil {
+		return nil, err
+	}
 	if err := g.AddLambdaNode("turn", compose.InvokableLambda(e.turnNode)); err != nil {
 		return nil, err
 	}
@@ -413,7 +435,10 @@ func (e *Engine) buildLoopRunner(ctx context.Context) (compose.Runnable[*loopSes
 	if err := g.AddLambdaNode("blocked", compose.InvokableLambda(e.blockedNode)); err != nil {
 		return nil, err
 	}
-	if err := g.AddEdge(compose.START, "turn"); err != nil {
+	if err := g.AddEdge(compose.START, "plan"); err != nil {
+		return nil, err
+	}
+	if err := g.AddEdge("plan", "turn"); err != nil {
 		return nil, err
 	}
 	if err := g.AddBranch("turn", compose.NewGraphBranch(e.branchAfterTurn, map[string]bool{
@@ -436,6 +461,61 @@ func (e *Engine) buildLoopRunner(ctx context.Context) (compose.Runnable[*loopSes
 	return g.Compile(ctx, compose.WithCheckPointStore(e.checkpoints), compose.WithGraphName("agent_loop_eino"))
 }
 
+func (e *Engine) planNode(ctx context.Context, st *loopSession) (*loopSession, error) {
+	if st == nil {
+		return nil, fmt.Errorf("loop state is nil")
+	}
+	if st.Phase == loopPhaseCode || st.Phase == loopPhaseReview {
+		return st, nil
+	}
+	if st.Spec.PlanMode == model.PlanModeOff {
+		st.Phase = loopPhaseCode
+		return st, nil
+	}
+
+	st.Phase = loopPhasePlan
+	e.maybePreflightKBSearch(ctx, st, st.Iteration)
+
+	currentDiff := ""
+	if e.git != nil {
+		currentDiff = mustDiff(ctx, e.git, st.RepoAbs)
+	}
+	in := buildPlanInput(st, currentDiff)
+	out := heuristicPlanOutput(st)
+	status := "completed"
+	if e.coder != nil {
+		planned, err := e.coder.Plan(ctx, in)
+		if err != nil {
+			status = "fallback"
+		} else {
+			out = planned
+		}
+	}
+
+	st.PlanSummary = strings.TrimSpace(out.Summary)
+	st.PlanSteps = append([]string(nil), out.Steps...)
+	st.PlanRisks = append([]string(nil), out.Risks...)
+	st.Phase = loopPhaseCode
+
+	if e.store != nil {
+		_ = e.store.InsertToolCall(ctx, sqlite.ToolCallRecord{
+			RunID:     st.RunID,
+			Iteration: st.Iteration,
+			Tool:      "planner_meta",
+			Input:     truncateString(st.Spec.Goal, 500),
+			Output: truncateString(mustJSON(map[string]any{
+				"summary":   st.PlanSummary,
+				"steps":     st.PlanSteps,
+				"risks":     st.PlanRisks,
+				"citations": out.Citations,
+			}), 4000),
+			Status:    status,
+			CreatedAt: time.Now().UnixMilli(),
+		})
+	}
+	return st, nil
+}
+
 func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, error) {
 	if st == nil {
 		return nil, fmt.Errorf("loop state is nil")
@@ -446,6 +526,7 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 		st.Summary = "max iterations reached"
 		return st, nil
 	}
+	st.Phase = loopPhaseCode
 
 	st.Iteration++
 	iteration := st.Iteration
@@ -454,16 +535,36 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 	e.maybePreflightKBSearch(ctx, st, iteration)
 
 	currentDiff := mustDiff(ctx, e.git, st.RepoAbs)
-	coderIn := buildCoderInput(st, currentDiff)
-	if refreshedIn, refreshed := e.maybeRefreshCoderContext(ctx, st, iteration, coderIn); refreshed {
-		coderIn = refreshedIn
+	isRepairTurn := st.RepairEligible && st.RepairAttempts == 0
+	st.Phase = loopPhaseCode
+	startTool := "coder_start"
+	stageTool := "coder_stage"
+	metaTool := "coder_meta"
+	startInput := truncateString(st.Spec.Goal, 500)
+	startOutput := "starting coder generate"
+	progressStart := "coder generating"
+	progressDone := "coder generated patch"
+	if isRepairTurn {
+		st.Phase = loopPhaseRepair
+		st.RepairAttempts++
+		st.RepairEligible = false
+		startTool = "repair_start"
+		stageTool = "repair_stage"
+		metaTool = "repair_meta"
+		startInput = truncateString(mustJSON(map[string]any{
+			"goal":            st.Spec.Goal,
+			"failed_commands": st.LastFailedCommands,
+		}), 500)
+		startOutput = "starting repair generate"
+		progressStart = "repair generating"
+		progressDone = "repair generated patch"
 	}
 	_ = e.store.InsertToolCall(ctx, sqlite.ToolCallRecord{
 		RunID:     st.RunID,
 		Iteration: iteration,
-		Tool:      "coder_start",
-		Input:     truncateString(st.Spec.Goal, 500),
-		Output:    "starting coder generate",
+		Tool:      startTool,
+		Input:     startInput,
+		Output:    startOutput,
 		Status:    "started",
 		CreatedAt: time.Now().UnixMilli(),
 	})
@@ -475,19 +576,64 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 		_ = e.store.InsertToolCall(ctx, sqlite.ToolCallRecord{
 			RunID:     st.RunID,
 			Iteration: iteration,
-			Tool:      "coder_stage",
+			Tool:      stageTool,
 			Input:     "",
 			Output:    stage,
 			Status:    "progress",
 			CreatedAt: time.Now().UnixMilli(),
 		})
 	})
-	e.emitProgress(ctx, st.RunID, iteration, model.ProgressEventCoderGenerating, model.ProgressStatusStarted, "coder generating", nil)
-	coderOut, err := e.coder.Generate(coderCtx, coderIn)
+	e.emitProgress(ctx, st.RunID, iteration, model.ProgressEventCoderGenerating, model.ProgressStatusStarted, progressStart, nil)
+	var (
+		coderOut agentpkg.CoderOutput
+		err      error
+	)
+	if isRepairTurn {
+		coderOut, err = e.coder.Repair(coderCtx, buildRepairInput(st, currentDiff))
+	} else {
+		coderIn := buildCoderInput(st, currentDiff)
+		if refreshedIn, refreshed := e.maybeRefreshCoderContext(ctx, st, iteration, coderIn); refreshed {
+			coderIn = refreshedIn
+		}
+		coderOut, err = e.coder.Generate(coderCtx, coderIn)
+	}
 	if err != nil {
-		e.emitProgress(ctx, st.RunID, iteration, model.ProgressEventCoderGenerating, model.ProgressStatusError, "coder failed", map[string]any{
+		failSummary := "coder failed"
+		if isRepairTurn {
+			failSummary = "repair failed"
+		}
+		e.emitProgress(ctx, st.RunID, iteration, model.ProgressEventCoderGenerating, model.ProgressStatusError, failSummary, map[string]any{
 			"error": truncateString(err.Error(), 500),
 		})
+		if isRepairTurn {
+			_ = e.store.InsertToolCall(ctx, sqlite.ToolCallRecord{
+				RunID:     st.RunID,
+				Iteration: iteration,
+				Tool:      metaTool,
+				Input:     "",
+				Output:    truncateString(err.Error(), 4000),
+				Status:    "error",
+				CreatedAt: time.Now().UnixMilli(),
+			})
+			_ = e.store.InsertStep(ctx, sqlite.StepRecord{
+				RunID:     st.RunID,
+				Iteration: iteration,
+				Agent:     "coder",
+				Decision:  string(model.LoopDecisionRequestChanges),
+				Status:    string(model.RunStatusNeedsChange),
+				StartedAt: started,
+				EndedAt:   time.Now().UnixMilli(),
+			})
+			st.Decision = model.LoopDecisionRequestChanges
+			st.PreviousReview = "Repair failed: " + err.Error()
+			st.Summary = st.PreviousReview
+			st.Status = model.RunStatusNeedsChange
+			_ = e.store.UpdateRunStatus(ctx, st.RunID, model.RunStatusNeedsChange, st.Summary)
+			e.emitProgress(ctx, st.RunID, iteration, model.ProgressEventIterationComplete, model.ProgressStatusCompleted, "iteration completed: request changes", map[string]any{
+				"decision": string(model.LoopDecisionRequestChanges),
+			})
+			return st, nil
+		}
 		_ = e.store.InsertToolCall(ctx, sqlite.ToolCallRecord{
 			RunID:     st.RunID,
 			Iteration: iteration,
@@ -512,7 +658,7 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 		_ = e.store.UpdateRunStatus(ctx, st.RunID, model.RunStatusFailed, st.Summary)
 		return st, nil
 	}
-	e.emitProgress(ctx, st.RunID, iteration, model.ProgressEventCoderGenerating, model.ProgressStatusCompleted, "coder generated patch", nil)
+	e.emitProgress(ctx, st.RunID, iteration, model.ProgressEventCoderGenerating, model.ProgressStatusCompleted, progressDone, nil)
 	coderMetaJSON := mustJSON(map[string]any{
 		"used_fallback":   coderOut.UsedFallback,
 		"fallback_source": strings.TrimSpace(coderOut.FallbackSource),
@@ -527,16 +673,21 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 			return loopPatchTouchesTargets(coderOut.Patch, targets, len(targets) > 1)
 		}(),
 	})
+	metaStatus := "completed"
+	if isRepairTurn && strings.TrimSpace(coderOut.Patch) == "" {
+		metaStatus = "empty_patch"
+	}
 	_ = e.store.InsertToolCall(ctx, sqlite.ToolCallRecord{
 		RunID:     st.RunID,
 		Iteration: iteration,
-		Tool:      "coder_meta",
+		Tool:      metaTool,
 		Input:     "",
 		Output:    coderMetaJSON,
-		Status:    "completed",
+		Status:    metaStatus,
 		CreatedAt: time.Now().UnixMilli(),
 	})
 
+	patchApplied := false
 	if strings.TrimSpace(coderOut.Patch) != "" {
 		if e.observeDoom(st, "git_apply", coderOut.Patch) {
 			st.Decision = model.LoopDecisionAbort
@@ -585,16 +736,24 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 			})
 			return st, nil
 		}
+		patchApplied = true
 		e.emitProgress(ctx, st.RunID, iteration, model.ProgressEventPatchApplying, model.ProgressStatusCompleted, "patch applied", nil)
 	}
 
-	cmds := coderOut.Commands
-	cmds = sanitizeShellCommands(cmds)
-	if len(cmds) == 0 {
+	var cmds []string
+	if isRepairTurn {
 		cmds = mergeCommands(st.Commands)
+		cmds = sanitizeShellCommands(cmds)
+	} else {
+		cmds = coderOut.Commands
+		cmds = sanitizeShellCommands(cmds)
+		if len(cmds) == 0 {
+			cmds = mergeCommands(st.Commands)
+		}
 	}
 	var commandOutput strings.Builder
 	commandFailed := false
+	failedCommands := make([]string, 0, len(cmds))
 	for _, cmd := range cmds {
 		if e.observeDoom(st, "run_command", cmd) {
 			st.Decision = model.LoopDecisionAbort
@@ -614,6 +773,7 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 			callStatus = "error"
 			combined = strings.TrimSpace(combined + "\n" + err.Error())
 			commandFailed = true
+			failedCommands = append(failedCommands, cmd)
 		}
 		if combined != "" {
 			commandOutput.WriteString("$ " + cmd + "\n" + combined + "\n")
@@ -640,7 +800,17 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 		}
 		e.emitProgress(ctx, st.RunID, iteration, model.ProgressEventCommandRunning, progressStatus, progressSummary, progressDetail)
 	}
+	if shouldEnterRepair(st, commandFailed, patchApplied, coderOut.Patch) {
+		st.RepairEligible = true
+		st.LastFailedCommands = append([]string(nil), failedCommands...)
+		st.LastCommandOutput = commandOutput.String()
+	} else {
+		st.RepairEligible = false
+		st.LastFailedCommands = nil
+		st.LastCommandOutput = ""
+	}
 	statusShort, _ := e.git.StatusShort(ctx, st.RepoAbs)
+	st.Phase = loopPhaseReview
 	reviewIn := buildReviewInput(st, mustDiff(ctx, e.git, st.RepoAbs), statusShort, coderOut.Patch, commandOutput.String())
 	_ = e.store.InsertToolCall(ctx, sqlite.ToolCallRecord{
 		RunID:     st.RunID,
@@ -794,9 +964,44 @@ func buildCoderInput(st *loopSession, diff string) agentpkg.CoderInput {
 		Goal:             st.Spec.Goal,
 		RepoSummary:      st.RepoAbs,
 		PreviousReview:   st.PreviousReview,
+		PlanSummary:      st.PlanSummary,
+		PlanSteps:        append([]string(nil), st.PlanSteps...),
 		Diff:             diff,
 		TestOutput:       st.CommandOutput,
 		Commands:         mergeCommands(st.Commands),
+		SkillsSummary:    st.SkillsSummary,
+		RetrievedContext: compactRetrievedContext(st.RetrievedHits),
+		RetrievedQuery:   st.RetrievedQuery,
+	}
+}
+
+func buildRepairInput(st *loopSession, diff string) agentpkg.RepairInput {
+	if st == nil {
+		return agentpkg.RepairInput{}
+	}
+	return agentpkg.RepairInput{
+		Goal:             st.Spec.Goal,
+		RepoSummary:      st.RepoAbs,
+		CurrentDiff:      diff,
+		PreviousReview:   st.PreviousReview,
+		FailedCommands:   append([]string(nil), st.LastFailedCommands...),
+		CommandOutput:    st.LastCommandOutput,
+		PlanSummary:      st.PlanSummary,
+		PlanSteps:        append([]string(nil), st.PlanSteps...),
+		RetrievedContext: compactRetrievedContext(st.RetrievedHits),
+		RetrievedQuery:   st.RetrievedQuery,
+	}
+}
+
+func buildPlanInput(st *loopSession, diff string) agentpkg.PlanInput {
+	if st == nil {
+		return agentpkg.PlanInput{}
+	}
+	return agentpkg.PlanInput{
+		Goal:             st.Spec.Goal,
+		RepoSummary:      st.RepoAbs,
+		PreviousReview:   st.PreviousReview,
+		Diff:             diff,
 		SkillsSummary:    st.SkillsSummary,
 		RetrievedContext: compactRetrievedContext(st.RetrievedHits),
 		RetrievedQuery:   st.RetrievedQuery,
@@ -841,6 +1046,47 @@ func compactRetrievedContext(hits []kbpkg.SearchHit) []kbpkg.SearchHit {
 		}
 	}
 	return out
+}
+
+func heuristicPlanOutput(st *loopSession) agentpkg.PlanOutput {
+	targets := loopExtractGoalTargetFiles(st.Spec.Goal)
+	steps := []string{
+		"Inspect the existing implementation and identify the exact code path to change.",
+		"Apply the minimal change in the current code path instead of adding unrelated helpers or cleanup.",
+		"Run the focused validation commands after the code change.",
+	}
+	if len(targets) > 0 {
+		steps[0] = "Inspect the existing implementation in the goal target files and identify the exact code path to change."
+	}
+	risks := []string{"Avoid unrelated file changes or adjacent validation rules not required by the goal."}
+	if len(targets) > 1 {
+		risks = append(risks, "Make sure every required target file is updated consistently.")
+	}
+	return agentpkg.PlanOutput{
+		Summary: "Inspect the existing code path first and apply the minimal change required by the goal.",
+		Steps:   steps,
+		Risks:   risks,
+	}
+}
+
+func shouldEnterRepair(st *loopSession, commandFailed bool, patchApplied bool, appliedPatch string) bool {
+	if st == nil {
+		return false
+	}
+	if !commandFailed || !patchApplied {
+		return false
+	}
+	if st.RepairAttempts >= 1 {
+		return false
+	}
+	if st.Iteration >= st.Spec.MaxIterations {
+		return false
+	}
+	targets := loopExtractGoalTargetFiles(st.Spec.Goal)
+	if len(targets) == 0 {
+		return false
+	}
+	return loopPatchTouchesTargets(appliedPatch, targets, len(targets) > 1)
 }
 
 func retrievedContextChunkKey(hit kbpkg.SearchHit) string {
