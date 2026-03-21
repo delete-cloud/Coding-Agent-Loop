@@ -117,7 +117,7 @@ func BuildReviewerTools(repoRoot string, reg *skills.Registry, runner *Runner, k
 func buildReadOnlyTools(repoRoot string, reg *skills.Registry, runner *Runner, kbClient *kb.Client) ([]einotool.BaseTool, error) {
 	repoList, err := utils.InferTool(
 		"repo_list",
-		"List files under repository path. path is relative to repo root.",
+		"List files under a repository path. Use when you need directory structure or need to discover candidate files first. Do not use when you already know the exact file path; use repo_read instead. Example JSON: {\"path\":\"internal\"}. If a path is missing, fix the path or switch to repo_read for a known file.",
 		func(_ context.Context, input listArgs) (string, error) {
 			path := strings.TrimSpace(input.Path)
 			if path == "" {
@@ -139,7 +139,7 @@ func buildReadOnlyTools(repoRoot string, reg *skills.Registry, runner *Runner, k
 
 	repoRead, err := utils.InferTool(
 		"repo_read",
-		"Read a file in repository by relative path.",
+		"Read a repository file by relative path. Use when you already know the file path and need contents. Do not use to search for an unknown symbol or string across the repo; use repo_search first. Example JSON: {\"path\":\"internal/tools/eino_tools.go\",\"max_bytes\":4096}. If the file is missing, confirm with repo_list or use repo_search to find the right file.",
 		func(_ context.Context, input readArgs) (string, error) {
 			maxBytes := input.MaxBytes
 			if maxBytes <= 0 {
@@ -161,7 +161,7 @@ func buildReadOnlyTools(repoRoot string, reg *skills.Registry, runner *Runner, k
 
 	repoSearch, err := utils.InferTool(
 		"repo_search",
-		"Search files in repository containing the query string.",
+		"Search repository files containing a query string. Use when you know the symbol or string but not its location. Do not use when you already know which file to read; use repo_read instead of searching the whole repo first. Example JSON: {\"query\":\"buildReadOnlyTools\"}. If there are too many or no matches, refine the query or switch to repo_read once you know the file.",
 		func(_ context.Context, input searchArgs) (string, error) {
 			q := strings.TrimSpace(input.Query)
 			if q == "" {
@@ -183,7 +183,7 @@ func buildReadOnlyTools(repoRoot string, reg *skills.Registry, runner *Runner, k
 
 	gitDiff, err := utils.InferTool(
 		"git_diff",
-		"Get current git diff in repository.",
+		"Get the current git diff in the repository. Use when you need the current modified diff or want to review edits already made. Do not use it to understand untouched repository state; use repo_list, repo_read, or repo_search for that. Example JSON: {}. If the diff is empty, use repo_list, repo_read, or repo_search to inspect the repo directly.",
 		func(ctx context.Context, _ struct{}) (string, error) {
 			stdout, stderr, err := runner.Run(ctx, "git diff -- .", repoRoot)
 			out := strings.TrimSpace(stdout + "\n" + stderr)
@@ -202,7 +202,7 @@ func buildReadOnlyTools(repoRoot string, reg *skills.Registry, runner *Runner, k
 
 	kbSearch, err := utils.InferTool(
 		"kb_search",
-		"Search external knowledge base (LanceDB sidecar) for relevant context. Returns cited chunks with path and offsets.",
+		"Search the external knowledge base (LanceDB sidecar) for relevant context and return cited chunks with path and offsets. Use when you need external or KB context that is not already in the repository. Do not use it instead of inspecting repository code; repo inspection tools remain primary for local code understanding. Example JSON: {\"query\":\"rag pipeline glossary\",\"top_k\":5}. If kb_search has no hits or is unavailable, inspect the repo directly with repo_list, repo_read, or repo_search.",
 		func(ctx context.Context, input kbSearchArgs) (string, error) {
 			q := strings.TrimSpace(input.Query)
 			if q == "" {
