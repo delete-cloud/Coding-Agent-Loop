@@ -126,7 +126,7 @@ func buildReadOnlyTools(repoRoot string, reg *skills.Registry, runner *Runner, k
 			entries, err := RepoList(repoRoot, path)
 			if err != nil {
 				if errors.Is(err, os.ErrNotExist) {
-					return fmt.Sprintf("path not found: %s", path), nil
+					return formatToolMessage("repo_list", path, "path not found"), nil
 				}
 				return formatToolError("repo_list", path, err), nil
 			}
@@ -148,7 +148,7 @@ func buildReadOnlyTools(repoRoot string, reg *skills.Registry, runner *Runner, k
 			out, err := RepoRead(repoRoot, input.Path, maxBytes)
 			if err != nil {
 				if errors.Is(err, os.ErrNotExist) {
-					return fmt.Sprintf("path not found: %s", strings.TrimSpace(input.Path)), nil
+					return formatToolMessage("repo_read", strings.TrimSpace(input.Path), "path not found"), nil
 				}
 				return formatToolError("repo_read", strings.TrimSpace(input.Path), err), nil
 			}
@@ -165,14 +165,14 @@ func buildReadOnlyTools(repoRoot string, reg *skills.Registry, runner *Runner, k
 		func(_ context.Context, input searchArgs) (string, error) {
 			q := strings.TrimSpace(input.Query)
 			if q == "" {
-				return "query is required; provide a non-empty string for repo_search (e.g. \"WithCheckPointID\").", nil
+				return formatToolMessage("repo_search", "", "query is required"), nil
 			}
 			matches, err := RepoSearch(repoRoot, q)
 			if err != nil {
 				return formatToolError("repo_search", q, err), nil
 			}
 			if len(matches) == 0 {
-				return "no matches", nil
+				return formatToolMessage("repo_search", q, "no matches"), nil
 			}
 			return strings.Join(matches, "\n"), nil
 		},
@@ -206,10 +206,10 @@ func buildReadOnlyTools(repoRoot string, reg *skills.Registry, runner *Runner, k
 		func(ctx context.Context, input kbSearchArgs) (string, error) {
 			q := strings.TrimSpace(input.Query)
 			if q == "" {
-				return "query is required; provide a short topic or question for kb_search (e.g. \"rag pipeline glossary\").", nil
+				return formatToolMessage("kb_search", "", "query is required"), nil
 			}
 			if kbClient == nil || strings.TrimSpace(kbClient.BaseURL) == "" {
-				return "kb is not configured. Start kb/server.py and set AGENT_LOOP_KB_URL or use default http://127.0.0.1:8788.", nil
+				return formatToolMessage("kb_search", q, "kb is not configured"), nil
 			}
 			topK := input.TopK
 			if topK <= 0 {
@@ -225,7 +225,7 @@ func buildReadOnlyTools(repoRoot string, reg *skills.Registry, runner *Runner, k
 				return formatToolError("kb_search", q, err), nil
 			}
 			if len(resp.Hits) == 0 {
-				return "no hits", nil
+				return formatToolMessage("kb_search", q, "no hits"), nil
 			}
 			var b strings.Builder
 			for i, h := range resp.Hits {
@@ -280,11 +280,88 @@ func formatToolError(toolName string, input string, err error) string {
 	if msg == "" {
 		msg = "unknown error"
 	}
-	input = strings.TrimSpace(input)
-	if input == "" {
-		return fmt.Sprintf("%s error: %s (type=%T)", toolName, msg, err)
+	return formatToolMessage(toolName, input, msg)
+}
+
+func formatToolMessage(toolName string, input string, msg string) string {
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		msg = "unknown error"
 	}
-	return fmt.Sprintf("%s error: %s (type=%T, input=%q)", toolName, msg, err, input)
+	input = strings.TrimSpace(input)
+	lines := []string{"ERROR: " + msg}
+	if input != "" {
+		lines = append(lines, formatToolInputLine(toolName, input))
+	}
+	lines = append(lines, "SUGGESTION: "+toolSuggestion(toolName, msg))
+	return strings.Join(lines, "\n")
+}
+
+func formatToolInputLine(toolName string, input string) string {
+	switch toolName {
+	case "repo_list", "repo_read":
+		return "PATH: " + input
+	case "repo_search", "kb_search":
+		return "QUERY: " + input
+	default:
+		return "INPUT: " + input
+	}
+}
+
+func toolSuggestion(toolName string, msg string) string {
+	lower := strings.ToLower(strings.TrimSpace(msg))
+	switch toolName {
+	case "repo_list":
+		if strings.Contains(lower, "escapes repo root") {
+			return "Use a repository-relative path inside the repo root, such as \".\" or \"internal\". If you already know the file, switch to repo_read."
+		}
+		if strings.Contains(lower, "not found") {
+			return "List a parent directory first or correct the path. If you already know a symbol or string, switch to repo_search."
+		}
+		return "Use a repository-relative directory path. If you already know the file, switch to repo_read."
+	case "repo_read":
+		if strings.Contains(lower, "escapes repo root") || strings.Contains(lower, "not found") {
+			return "Use a repository-relative file path. If you do not know the exact file, use repo_list or repo_search first."
+		}
+		return "Use a repository-relative file path. If you do not know the exact file, use repo_list or repo_search first."
+	case "repo_search":
+		if strings.Contains(lower, "query is required") {
+			return "Provide a short, distinctive query string, then switch to repo_read once you know the file."
+		}
+		if strings.Contains(lower, "no matches") || strings.Contains(lower, "too many") || strings.Contains(lower, "broad") {
+			return "Narrow the query to a distinctive symbol or phrase. If you already know the file, use repo_read instead."
+		}
+		return "Narrow the query to a distinctive symbol or phrase. If you already know the file, use repo_read instead."
+	case "kb_search":
+		if strings.Contains(lower, "query is required") {
+			return "Provide a short KB topic or question. If the answer should be in the repo, inspect the repo directly."
+		}
+		if strings.Contains(lower, "not configured") {
+			return "Start kb/server.py and verify AGENT_LOOP_KB_URL. If KB is unavailable, inspect the repo directly with repo_list, repo_read, or repo_search."
+		}
+		if isKBServiceFailure(lower) {
+			return "The KB service appears unavailable or unhealthy. Check kb/server.py and AGENT_LOOP_KB_URL, then fall back to repo inspection with repo_list, repo_read, or repo_search."
+		}
+		if strings.Contains(lower, "no hits") {
+			return "Try a narrower KB query or different keywords. If the answer should be in the repo, inspect the repo directly."
+		}
+		return "Refine the KB query or inspect the repo directly if the KB does not help."
+	default:
+		return "Retry with a narrower input or switch to a more specific tool."
+	}
+}
+
+func isKBServiceFailure(msg string) bool {
+	return strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "unexpected eof") ||
+		strings.Contains(msg, "timeout") ||
+		strings.Contains(msg, "deadline exceeded") ||
+		strings.Contains(msg, "context canceled") ||
+		strings.Contains(msg, "status=") ||
+		strings.Contains(msg, "decode kb search response failed") ||
+		strings.Contains(msg, "kb search failed:") ||
+		strings.Contains(msg, "unavailable")
 }
 
 func toolNamesForDebug(items []einotool.BaseTool) string {

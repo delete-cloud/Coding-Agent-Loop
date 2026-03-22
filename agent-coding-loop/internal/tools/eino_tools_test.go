@@ -2,10 +2,14 @@ package tools
 
 import (
 	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/kina/agent-coding-loop/internal/kb"
 )
 
 func TestBuildCoderToolsIncludesRunCommand(t *testing.T) {
@@ -251,8 +255,14 @@ func TestKBSearchEmptyQueryDoesNotHardFail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("kb_search empty query should not return error: %v", err)
 	}
-	if !strings.Contains(strings.ToLower(out), "query") {
-		t.Fatalf("expected guidance in output, got %q", out)
+	if !strings.Contains(out, "ERROR:") || !strings.Contains(out, "SUGGESTION:") {
+		t.Fatalf("expected structured kb_search empty-query output, got %q", out)
+	}
+	if !strings.Contains(strings.ToLower(out), "query is required") {
+		t.Fatalf("expected explicit kb_search query guidance, got %q", out)
+	}
+	if !strings.Contains(strings.ToLower(out), "short kb topic or question") {
+		t.Fatalf("expected kb_search empty-query suggestion, got %q", out)
 	}
 }
 
@@ -317,8 +327,14 @@ func TestRepoSearchEmptyQueryDoesNotHardFail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("repo_search empty query should not return error: %v", err)
 	}
-	if !strings.Contains(strings.ToLower(out), "query") {
-		t.Fatalf("expected guidance in output, got %q", out)
+	if !strings.Contains(out, "ERROR:") || !strings.Contains(out, "SUGGESTION:") {
+		t.Fatalf("expected structured repo_search empty-query output, got %q", out)
+	}
+	if !strings.Contains(strings.ToLower(out), "query is required") {
+		t.Fatalf("expected explicit repo_search query guidance, got %q", out)
+	}
+	if !strings.Contains(strings.ToLower(out), "distinctive query string") {
+		t.Fatalf("expected repo_search empty-query suggestion, got %q", out)
 	}
 }
 
@@ -419,8 +435,14 @@ func TestRepoListEscapePathReturnsStructuredError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("repo_list escape path should not return error: %v", err)
 	}
-	if !strings.Contains(out, "repo_list error") || !strings.Contains(out, "path escapes repo root") {
+	if !strings.Contains(out, "ERROR:") || !strings.Contains(out, "SUGGESTION:") {
 		t.Fatalf("expected structured repo_list error, got %q", out)
+	}
+	if !strings.Contains(out, "path escapes repo root") || !strings.Contains(out, "PATH: ../etc/passwd") {
+		t.Fatalf("expected path details in repo_list error, got %q", out)
+	}
+	if !strings.Contains(strings.ToLower(out), "repository-relative path") {
+		t.Fatalf("expected repo_list suggestion, got %q", out)
 	}
 }
 
@@ -453,7 +475,194 @@ func TestRepoReadEscapePathReturnsStructuredError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("repo_read escape path should not return error: %v", err)
 	}
-	if !strings.Contains(out, "repo_read error") || !strings.Contains(out, "path escapes repo root") {
+	if !strings.Contains(out, "ERROR:") || !strings.Contains(out, "SUGGESTION:") {
 		t.Fatalf("expected structured repo_read error, got %q", out)
+	}
+	if !strings.Contains(out, "path escapes repo root") || !strings.Contains(out, "PATH: ../etc/passwd") {
+		t.Fatalf("expected path details in repo_read error, got %q", out)
+	}
+	if !strings.Contains(strings.ToLower(out), "repo_list or repo_search") {
+		t.Fatalf("expected repo_read suggestion, got %q", out)
+	}
+}
+
+func TestFormatToolErrorWithoutInputReturnsStructuredMessage(t *testing.T) {
+	out := formatToolError("repo_search", "", errors.New("ripgrep failed"))
+	if !strings.Contains(out, "ERROR: ripgrep failed") {
+		t.Fatalf("expected structured generic error, got %q", out)
+	}
+	if strings.Contains(out, "type=") {
+		t.Fatalf("expected type noise removed, got %q", out)
+	}
+	if !strings.Contains(out, "SUGGESTION:") {
+		t.Fatalf("expected suggestion in generic error, got %q", out)
+	}
+}
+
+func TestRepoSearchNoMatchesReturnsStructuredMessage(t *testing.T) {
+	repo := t.TempDir()
+	got, err := BuildReviewerTools(repo, nil, NewRunner(), nil)
+	if err != nil {
+		t.Fatalf("BuildReviewerTools: %v", err)
+	}
+	var repoSearchTool tool.InvokableTool
+	for _, item := range got {
+		info, infoErr := item.Info(context.Background())
+		if infoErr != nil || info == nil {
+			continue
+		}
+		if info.Name != "repo_search" {
+			continue
+		}
+		inv, ok := item.(tool.InvokableTool)
+		if !ok {
+			t.Fatalf("repo_search is not invokable")
+		}
+		repoSearchTool = inv
+		break
+	}
+	if repoSearchTool == nil {
+		t.Fatalf("repo_search not found")
+	}
+	out, err := repoSearchTool.InvokableRun(context.Background(), `{"query":"definitely-no-match-token"}`)
+	if err != nil {
+		t.Fatalf("repo_search no matches should not return error: %v", err)
+	}
+	if !strings.Contains(out, "ERROR:") || !strings.Contains(out, "SUGGESTION:") {
+		t.Fatalf("expected structured repo_search no-matches output, got %q", out)
+	}
+	if !strings.Contains(strings.ToLower(out), "no matches") || !strings.Contains(out, "QUERY: definitely-no-match-token") {
+		t.Fatalf("expected repo_search no-matches details, got %q", out)
+	}
+	if !strings.Contains(strings.ToLower(out), "narrow the query") {
+		t.Fatalf("expected repo_search no-matches suggestion, got %q", out)
+	}
+}
+
+func TestKBSearchUnavailableReturnsStructuredError(t *testing.T) {
+	got, err := BuildReviewerTools(t.TempDir(), nil, NewRunner(), nil)
+	if err != nil {
+		t.Fatalf("BuildReviewerTools: %v", err)
+	}
+	var kbTool tool.InvokableTool
+	for _, item := range got {
+		info, infoErr := item.Info(context.Background())
+		if infoErr != nil || info == nil {
+			continue
+		}
+		if info.Name != "kb_search" {
+			continue
+		}
+		inv, ok := item.(tool.InvokableTool)
+		if !ok {
+			t.Fatalf("kb_search is not invokable")
+		}
+		kbTool = inv
+		break
+	}
+	if kbTool == nil {
+		t.Fatalf("kb_search not found")
+	}
+	out, err := kbTool.InvokableRun(context.Background(), `{"query":"api conventions"}`)
+	if err != nil {
+		t.Fatalf("kb_search unavailable should not return error: %v", err)
+	}
+	if !strings.Contains(out, "ERROR:") || !strings.Contains(out, "SUGGESTION:") {
+		t.Fatalf("expected structured kb_search error, got %q", out)
+	}
+	if !strings.Contains(out, "kb is not configured") {
+		t.Fatalf("expected kb_search unconfigured message, got %q", out)
+	}
+	if !strings.Contains(strings.ToLower(out), "start kb/server.py") {
+		t.Fatalf("expected kb_search suggestion, got %q", out)
+	}
+}
+
+func TestKBSearchHTTPStatusReturnsServiceSuggestion(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "upstream unavailable", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	got, err := BuildReviewerTools(t.TempDir(), nil, NewRunner(), kb.NewClient(srv.URL))
+	if err != nil {
+		t.Fatalf("BuildReviewerTools: %v", err)
+	}
+	var kbTool tool.InvokableTool
+	for _, item := range got {
+		info, infoErr := item.Info(context.Background())
+		if infoErr != nil || info == nil {
+			continue
+		}
+		if info.Name != "kb_search" {
+			continue
+		}
+		inv, ok := item.(tool.InvokableTool)
+		if !ok {
+			t.Fatalf("kb_search is not invokable")
+		}
+		kbTool = inv
+		break
+	}
+	if kbTool == nil {
+		t.Fatalf("kb_search not found")
+	}
+	out, err := kbTool.InvokableRun(context.Background(), `{"query":"api conventions"}`)
+	if err != nil {
+		t.Fatalf("kb_search status failure should not return error: %v", err)
+	}
+	if !strings.Contains(out, "ERROR:") || !strings.Contains(out, "SUGGESTION:") {
+		t.Fatalf("expected structured kb_search status error, got %q", out)
+	}
+	if !strings.Contains(strings.ToLower(out), "status=503") || !strings.Contains(out, "QUERY: api conventions") {
+		t.Fatalf("expected kb_search status details, got %q", out)
+	}
+	if !strings.Contains(strings.ToLower(out), "kb service") || !strings.Contains(strings.ToLower(out), "repo inspection") {
+		t.Fatalf("expected kb_search outage suggestion, got %q", out)
+	}
+}
+
+func TestKBSearchNoHitsReturnsStructuredMessage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"hits":[]}`))
+	}))
+	defer srv.Close()
+
+	got, err := BuildReviewerTools(t.TempDir(), nil, NewRunner(), kb.NewClient(srv.URL))
+	if err != nil {
+		t.Fatalf("BuildReviewerTools: %v", err)
+	}
+	var kbTool tool.InvokableTool
+	for _, item := range got {
+		info, infoErr := item.Info(context.Background())
+		if infoErr != nil || info == nil {
+			continue
+		}
+		if info.Name != "kb_search" {
+			continue
+		}
+		inv, ok := item.(tool.InvokableTool)
+		if !ok {
+			t.Fatalf("kb_search is not invokable")
+		}
+		kbTool = inv
+		break
+	}
+	if kbTool == nil {
+		t.Fatalf("kb_search not found")
+	}
+	out, err := kbTool.InvokableRun(context.Background(), `{"query":"rag pipeline glossary"}`)
+	if err != nil {
+		t.Fatalf("kb_search no hits should not return error: %v", err)
+	}
+	if !strings.Contains(out, "ERROR:") || !strings.Contains(out, "SUGGESTION:") {
+		t.Fatalf("expected structured kb_search no-hits output, got %q", out)
+	}
+	if !strings.Contains(strings.ToLower(out), "no hits") || !strings.Contains(out, "QUERY: rag pipeline glossary") {
+		t.Fatalf("expected kb_search no-hits details, got %q", out)
+	}
+	if !strings.Contains(strings.ToLower(out), "narrower kb query") || !strings.Contains(strings.ToLower(out), "different keywords") {
+		t.Fatalf("expected kb_search no-hits suggestion, got %q", out)
 	}
 }
