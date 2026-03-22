@@ -554,6 +554,10 @@ def aggregate_metrics(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         citation_recall_avg = safe_mean([float(x.get("citation_recall", 0.0)) for x in kb_items])
         kb_search_calls_avg = safe_mean([float(x.get("kb_search_calls", 0)) for x in kb_items])
         repo_kb_overuse_rate = safe_mean([1.0 if bool(x.get("kb_signal", False)) else 0.0 for x in repo_items])
+        repair_trigger_count = sum(1 for x in items if bool(x.get("repair_triggered", False)))
+        repair_empty_patch_count = sum(1 for x in items if bool(x.get("repair_empty_patch", False)))
+        repair_error_count = sum(1 for x in items if bool(x.get("repair_error", False)))
+        command_failure_task_count = sum(1 for x in items if int(x.get("command_fail_count", 0) or 0) > 0)
 
         out[exp] = {
             "total_tasks": total,
@@ -566,6 +570,12 @@ def aggregate_metrics(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
             "kb_search_calls_avg": kb_search_calls_avg,
             "repo_task_count": len(repo_items),
             "repo_kb_overuse_rate": repo_kb_overuse_rate,
+            "repair_trigger_count": repair_trigger_count,
+            "repair_trigger_rate": float(repair_trigger_count) / float(total) if total else 0.0,
+            "repair_empty_patch_count": repair_empty_patch_count,
+            "repair_empty_patch_rate": float(repair_empty_patch_count) / float(total) if total else 0.0,
+            "repair_error_count": repair_error_count,
+            "command_failure_task_count": command_failure_task_count,
         }
     return out
 
@@ -579,6 +589,12 @@ def read_run_context(db_path: str, run_id: str) -> tuple[float, str, dict[str, A
             "reviewer_decision": "",
             "citations": [],
             "kb_search_calls": 0,
+            "repair_triggered": False,
+            "repair_empty_patch": False,
+            "repair_error": False,
+            "repair_stage_count": 0,
+            "failed_commands": [],
+            "command_fail_count": 0,
         }
     conn = sqlite3.connect(db_path)
     conn.text_factory = lambda b: b.decode("utf-8", "replace") if isinstance(b, (bytes, bytearray)) else str(b)
@@ -611,6 +627,12 @@ def read_run_context(db_path: str, run_id: str) -> tuple[float, str, dict[str, A
                 "reviewer_decision": "",
                 "citations": [],
                 "kb_search_calls": 0,
+                "repair_triggered": False,
+                "repair_empty_patch": False,
+                "repair_error": False,
+                "repair_stage_count": 0,
+                "failed_commands": [],
+                "command_fail_count": 0,
                 "run_status": "",
                 "run_summary": "",
             }
@@ -626,6 +648,12 @@ def read_run_context(db_path: str, run_id: str) -> tuple[float, str, dict[str, A
             "reviewer_decision": "",
             "citations": [],
             "kb_search_calls": 0,
+            "repair_triggered": False,
+            "repair_empty_patch": False,
+            "repair_error": False,
+            "repair_stage_count": 0,
+            "failed_commands": [],
+            "command_fail_count": 0,
             "run_status": str(run["status"] or "").strip(),
             "run_summary": str(run["summary"] or "").strip(),
         }
@@ -663,6 +691,19 @@ def read_run_context(db_path: str, run_id: str) -> tuple[float, str, dict[str, A
                         trace["reviewer_used_fallback"] = bool(payload.get("used_fallback", False))
                         trace["reviewer_decision"] = str(payload.get("decision", "")).strip().lower()
             tool_status = str(row["status"] or "").strip().lower()
+            if tool_key == "repair_start":
+                trace["repair_triggered"] = True
+            if tool_key == "repair_stage":
+                trace["repair_stage_count"] = int(trace.get("repair_stage_count", 0) or 0) + 1
+            if tool_key == "repair_meta" and tool_status == "empty_patch":
+                trace["repair_empty_patch"] = True
+            if tool_key == "repair_meta" and tool_status == "error":
+                trace["repair_error"] = True
+            if tool_key == "run_command" and tool_status == "error":
+                trace["command_fail_count"] = int(trace.get("command_fail_count", 0) or 0) + 1
+                input_text = str(row["input_text"] or "").strip()
+                if input_text:
+                    trace["failed_commands"] = list(trace.get("failed_commands", [])) + [input_text]
             if tool_key in {"kb_search", "retrieval_preflight", "coder_retrieval_refresh", "reviewer_retrieval_refresh"} and tool_status == "completed":
                 trace["kb_search_calls"] = int(trace.get("kb_search_calls", 0) or 0) + 1
 
@@ -716,6 +757,21 @@ def render_markdown(report: dict[str, Any]) -> str:
             f"{item['kb_signal_rate']:.3f} | {item['citation_recall_avg']:.3f} | "
             f"{item.get('kb_search_calls_avg', 0.0):.2f} | "
             f"{item['repo_kb_overuse_rate']:.3f} |"
+        )
+    lines.append("")
+    lines.append("## Repair Telemetry")
+    lines.append("")
+    lines.append("| Experiment | Repair Triggered | Empty Patch | Repair Error | Command Failure Tasks |")
+    lines.append("|---|---:|---:|---:|---:|")
+    for exp in ("no_rag", "rag"):
+        item = report.get("metrics", {}).get(exp)
+        if not item:
+            continue
+        lines.append(
+            f"| {exp} | {int(item.get('repair_trigger_count', 0) or 0)} | "
+            f"{int(item.get('repair_empty_patch_count', 0) or 0)} | "
+            f"{int(item.get('repair_error_count', 0) or 0)} | "
+            f"{int(item.get('command_failure_task_count', 0) or 0)} |"
         )
     lines.append("")
     paired = report.get("paired_analysis", {})
@@ -802,6 +858,7 @@ def run_one(
     max_iterations: int,
     kb_url: str,
     plan_mode: str = "on",
+    repair_mode: str = "on",
     dry_run: bool,
     task_timeout_sec: int,
     strict_mode: bool,
@@ -853,6 +910,12 @@ def run_one(
             "fallback_used": False,
             "structured_citations": [],
             "kb_search_calls": 0,
+            "repair_triggered": False,
+            "repair_empty_patch": False,
+            "repair_error": False,
+            "repair_stage_count": 0,
+            "failed_commands": [],
+            "command_fail_count": 0,
         }
 
     cmd = [
@@ -870,6 +933,8 @@ def run_one(
         str(max_iterations),
         "--plan-mode",
         plan_mode,
+        "--repair-mode",
+        repair_mode,
     ]
     if str(task.get("test_cmd", "")).strip():
         cmd += ["--test-cmd", str(task["test_cmd"]).strip()]
@@ -891,6 +956,12 @@ def run_one(
             "fallback_used": False,
             "structured_citations": [],
             "kb_search_calls": 0,
+            "repair_triggered": False,
+            "repair_empty_patch": False,
+            "repair_error": False,
+            "repair_stage_count": 0,
+            "failed_commands": [],
+            "command_fail_count": 0,
         }
         if isolated_root:
             cleanup_isolated_repo(isolated_git_top, isolated_worktree_root, isolated_root)
@@ -962,6 +1033,12 @@ def run_one(
             "fallback_used": bool(trace.get("fallback_used", False)),
             "structured_citations": normalize_citations(list(trace.get("citations", []))),
             "kb_search_calls": int(trace.get("kb_search_calls", 0) or 0),
+            "repair_triggered": bool(trace.get("repair_triggered", False)),
+            "repair_empty_patch": bool(trace.get("repair_empty_patch", False)),
+            "repair_error": bool(trace.get("repair_error", False)),
+            "repair_stage_count": int(trace.get("repair_stage_count", 0) or 0),
+            "failed_commands": list(trace.get("failed_commands", [])),
+            "command_fail_count": int(trace.get("command_fail_count", 0) or 0),
         }
         if isolated_root:
             cleanup_isolated_repo(isolated_git_top, isolated_worktree_root, isolated_root)
@@ -1016,6 +1093,12 @@ def run_one(
         "fallback_used": bool(trace.get("fallback_used", False)),
         "structured_citations": normalize_citations(list(trace.get("citations", []))),
         "kb_search_calls": int(trace.get("kb_search_calls", 0) or 0),
+        "repair_triggered": bool(trace.get("repair_triggered", False)),
+        "repair_empty_patch": bool(trace.get("repair_empty_patch", False)),
+        "repair_error": bool(trace.get("repair_error", False)),
+        "repair_stage_count": int(trace.get("repair_stage_count", 0) or 0),
+        "failed_commands": list(trace.get("failed_commands", [])),
+        "command_fail_count": int(trace.get("command_fail_count", 0) or 0),
     }
     if isolated_root:
         cleanup_isolated_repo(isolated_git_top, isolated_worktree_root, isolated_root)
@@ -1044,6 +1127,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--concurrency", type=int, default=1, help="Max parallel tasks (default: 1 = serial)")
     p.add_argument("--launch-interval", type=float, default=2.0, help="Min seconds between launching tasks (rate-limit friendly)")
     p.add_argument("--plan-mode", default="on", choices=["on", "off"], help="Plan mode for agent-loop run (default: on)")
+    p.add_argument("--repair-mode", default="on", choices=["on", "off"], help="Repair mode for agent-loop run (default: on)")
     p.add_argument("--only", choices=["no_rag", "rag"], help="Run only one experiment")
     p.add_argument("--dry-run", action="store_true", help="Only print commands, do not execute")
     return p.parse_args()
@@ -1092,6 +1176,7 @@ def main() -> int:
                 max_iterations=args.max_iterations,
                 kb_url=args.kb_url,
                 plan_mode=args.plan_mode,
+                repair_mode=args.repair_mode,
                 dry_run=bool(args.dry_run),
                 task_timeout_sec=args.task_timeout_sec,
                 strict_mode=bool(args.strict_mode),
@@ -1120,6 +1205,7 @@ def main() -> int:
                     max_iterations=args.max_iterations,
                     kb_url=args.kb_url,
                     plan_mode=args.plan_mode,
+                    repair_mode=args.repair_mode,
                     dry_run=bool(args.dry_run),
                     task_timeout_sec=args.task_timeout_sec,
                     strict_mode=bool(args.strict_mode),
@@ -1158,6 +1244,7 @@ def main() -> int:
             "max_iterations": args.max_iterations,
             "task_timeout_sec": args.task_timeout_sec,
             "plan_mode": args.plan_mode,
+            "repair_mode": args.repair_mode,
             "strict_mode": bool(args.strict_mode),
             "isolate_worktree": bool(args.isolate_worktree),
             "concurrency": concurrency,

@@ -75,6 +75,10 @@ class RunABTests(unittest.TestCase):
                 "requires_kb": True,
                 "kb_signal": True,
                 "citation_recall": 1.0,
+                "repair_triggered": False,
+                "repair_empty_patch": False,
+                "repair_error": False,
+                "command_fail_count": 0,
             },
             {
                 "experiment": "rag",
@@ -83,6 +87,10 @@ class RunABTests(unittest.TestCase):
                 "requires_kb": True,
                 "kb_signal": False,
                 "citation_recall": 0.0,
+                "repair_triggered": True,
+                "repair_empty_patch": True,
+                "repair_error": False,
+                "command_fail_count": 1,
             },
             {
                 "experiment": "rag",
@@ -91,6 +99,10 @@ class RunABTests(unittest.TestCase):
                 "requires_kb": False,
                 "kb_signal": False,
                 "citation_recall": 0.0,
+                "repair_triggered": False,
+                "repair_empty_patch": False,
+                "repair_error": False,
+                "command_fail_count": 0,
             },
         ]
         got = aggregate_metrics(rows)
@@ -100,6 +112,11 @@ class RunABTests(unittest.TestCase):
         self.assertAlmostEqual(rag["avg_duration_sec"], 20.0)
         self.assertAlmostEqual(rag["kb_signal_rate"], 0.5)
         self.assertAlmostEqual(rag["citation_recall_avg"], 0.5)
+        self.assertEqual(rag["repair_trigger_count"], 1)
+        self.assertAlmostEqual(rag["repair_trigger_rate"], 1.0 / 3.0)
+        self.assertEqual(rag["repair_empty_patch_count"], 1)
+        self.assertEqual(rag["repair_error_count"], 0)
+        self.assertEqual(rag["command_failure_task_count"], 1)
 
     def test_status_to_pair_outcome_maps_terminal_statuses(self):
         self.assertEqual("pass", status_to_pair_outcome("completed"))
@@ -322,6 +339,12 @@ class RunABTests(unittest.TestCase):
                     "citation_recall_avg": 0.0,
                     "kb_search_calls_avg": 0.0,
                     "repo_kb_overuse_rate": 0.0,
+                    "repair_trigger_count": 0,
+                    "repair_trigger_rate": 0.0,
+                    "repair_empty_patch_count": 0,
+                    "repair_empty_patch_rate": 0.0,
+                    "repair_error_count": 0,
+                    "command_failure_task_count": 0,
                 },
                 "rag": {
                     "pass_rate": 1.0,
@@ -330,6 +353,12 @@ class RunABTests(unittest.TestCase):
                     "citation_recall_avg": 1.0,
                     "kb_search_calls_avg": 2.0,
                     "repo_kb_overuse_rate": 0.0,
+                    "repair_trigger_count": 1,
+                    "repair_trigger_rate": 0.5,
+                    "repair_empty_patch_count": 1,
+                    "repair_empty_patch_rate": 0.5,
+                    "repair_error_count": 0,
+                    "command_failure_task_count": 1,
                 },
             },
             "paired_analysis": {
@@ -362,6 +391,7 @@ class RunABTests(unittest.TestCase):
         md = render_markdown(report)
 
         self.assertIn("## Paired Analysis", md)
+        self.assertIn("## Repair Telemetry", md)
         self.assertIn("exact_mcnemar", md)
         self.assertIn("excluded missing pairs", md)
 
@@ -508,6 +538,70 @@ class RunABTests(unittest.TestCase):
 
             self.assertEqual(trace["kb_search_calls"], 1)
 
+    def test_read_run_context_captures_repair_telemetry(self):
+        with tempfile.TemporaryDirectory() as d:
+            db_path = Path(d) / "state.db"
+            conn = sqlite3.connect(db_path)
+            conn.executescript(
+                """
+                create table runs (id text primary key, summary text, created_at integer, updated_at integer);
+                create table reviews (run_id text, summary text, findings_json text);
+                create table tool_calls (run_id text, tool text, input_text text, output_text text, status text);
+                """
+            )
+            conn.execute(
+                "insert into runs(id, summary, created_at, updated_at) values (?, ?, ?, ?)",
+                ("r1", "summary", 0, 1000),
+            )
+            conn.executemany(
+                "insert into tool_calls(run_id, tool, input_text, output_text, status) values (?, ?, ?, ?, ?)",
+                [
+                    ("r1", "repair_start", "", "starting repair generate", "started"),
+                    ("r1", "repair_stage", "", "repair generating", "progress"),
+                    ("r1", "repair_meta", "", '{"patch_empty": true}', "empty_patch"),
+                    ("r1", "run_command", "go test ./internal/model/...", "undefined: Repo", "error"),
+                ],
+            )
+            conn.commit()
+            conn.close()
+
+            _, _, trace = read_run_context(str(db_path), "r1")
+
+            self.assertTrue(trace["repair_triggered"])
+            self.assertTrue(trace["repair_empty_patch"])
+            self.assertFalse(trace["repair_error"])
+            self.assertEqual(trace["repair_stage_count"], 1)
+            self.assertEqual(trace["command_fail_count"], 1)
+            self.assertEqual(trace["failed_commands"], ["go test ./internal/model/..."])
+
+    def test_read_run_context_captures_repair_error(self):
+        with tempfile.TemporaryDirectory() as d:
+            db_path = Path(d) / "state.db"
+            conn = sqlite3.connect(db_path)
+            conn.executescript(
+                """
+                create table runs (id text primary key, summary text, created_at integer, updated_at integer);
+                create table reviews (run_id text, summary text, findings_json text);
+                create table tool_calls (run_id text, tool text, input_text text, output_text text, status text);
+                """
+            )
+            conn.execute(
+                "insert into runs(id, summary, created_at, updated_at) values (?, ?, ?, ?)",
+                ("r1", "summary", 0, 1000),
+            )
+            conn.execute(
+                "insert into tool_calls(run_id, tool, input_text, output_text, status) values (?, ?, ?, ?, ?)",
+                ("r1", "repair_meta", "", "repair failed", "error"),
+            )
+            conn.commit()
+            conn.close()
+
+            _, _, trace = read_run_context(str(db_path), "r1")
+
+            self.assertFalse(trace["repair_triggered"])
+            self.assertFalse(trace["repair_empty_patch"])
+            self.assertTrue(trace["repair_error"])
+
     @mock.patch("eval.ab.run_ab.subprocess.run")
     def test_run_one_sets_agent_loop_db_path_env(self, mock_run):
         mock_run.return_value = SimpleNamespace(stdout='{"run_id":"","status":"completed","summary":"ok"}', stderr='', returncode=0)
@@ -522,6 +616,7 @@ class RunABTests(unittest.TestCase):
             pr_mode="dry-run",
             max_iterations=1,
             kb_url="http://127.0.0.1:8788",
+            repair_mode="off",
             dry_run=False,
             task_timeout_sec=60,
             strict_mode=False,
@@ -530,6 +625,8 @@ class RunABTests(unittest.TestCase):
 
         self.assertEqual(row["status"], "completed")
         self.assertEqual(mock_run.call_args.kwargs["env"]["AGENT_LOOP_DB_PATH"], "/tmp/state.db")
+        self.assertIn("--repair-mode", mock_run.call_args.args[0])
+        self.assertIn("off", mock_run.call_args.args[0])
 
     @mock.patch("eval.ab.run_ab.subprocess.run")
     def test_run_one_recovers_run_id_from_db_on_timeout_without_stdout_json(self, mock_run):
