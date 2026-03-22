@@ -22,6 +22,7 @@ type ClientConfig struct {
 
 	newToolCallingModelForTest func(context.Context) (modelpkg.ToolCallingChatModel, error)
 	completeJSONForTest        func(context.Context, string, string, any) error
+	completeJSONWithRawForTest func(context.Context, string, string, any) (string, error)
 }
 
 const defaultModelTimeout = 90 * time.Second
@@ -66,17 +67,33 @@ func (c ClientConfig) newToolCallingModel(ctx context.Context) (modelpkg.ToolCal
 }
 
 func (c ClientConfig) CompleteJSON(ctx context.Context, systemPrompt, userPrompt string, out any) error {
+	_, err := c.CompleteJSONWithRaw(ctx, systemPrompt, userPrompt, out)
+	return err
+}
+
+func (c ClientConfig) CompleteJSONWithRaw(ctx context.Context, systemPrompt, userPrompt string, out any) (string, error) {
+	if c.completeJSONWithRawForTest != nil {
+		return c.completeJSONWithRawForTest(ctx, systemPrompt, userPrompt, out)
+	}
 	if c.completeJSONForTest != nil {
-		return c.completeJSONForTest(ctx, systemPrompt, userPrompt, out)
+		err := c.completeJSONForTest(ctx, systemPrompt, userPrompt, out)
+		if err != nil {
+			return "", err
+		}
+		b, marshalErr := json.Marshal(out)
+		if marshalErr != nil {
+			return "", nil
+		}
+		return string(b), nil
 	}
 	if !c.Ready() {
-		return fmt.Errorf("llm client not configured")
+		return "", fmt.Errorf("llm client not configured")
 	}
 	cm, err := c.newToolCallingModel(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
-	return completeJSONWithModel(ctx, cm, systemPrompt, userPrompt, out)
+	return completeJSONWithModelRaw(ctx, cm, systemPrompt, userPrompt, out)
 }
 
 func (c ClientConfig) RepairJSON(ctx context.Context, previous string, out any) error {
@@ -103,17 +120,27 @@ func (c ClientConfig) validateAuth() error {
 }
 
 func completeJSONWithModel(ctx context.Context, cm modelpkg.ToolCallingChatModel, systemPrompt, userPrompt string, out any) error {
+	_, err := completeJSONWithModelRaw(ctx, cm, systemPrompt, userPrompt, out)
+	return err
+}
+
+func completeJSONWithModelRaw(ctx context.Context, cm modelpkg.ToolCallingChatModel, systemPrompt, userPrompt string, out any) (string, error) {
 	if cm == nil {
-		return fmt.Errorf("llm model is nil")
+		return "", fmt.Errorf("llm model is nil")
 	}
-	return completeJSONWithGenerator(ctx, func(ctx context.Context, messages []*schema.Message) (*schema.Message, error) {
+	return completeJSONWithGeneratorRaw(ctx, func(ctx context.Context, messages []*schema.Message) (*schema.Message, error) {
 		return cm.Generate(ctx, messages)
 	}, systemPrompt, userPrompt, out)
 }
 
 func completeJSONWithGenerator(ctx context.Context, generate messageGenerator, systemPrompt, userPrompt string, out any) error {
+	_, err := completeJSONWithGeneratorRaw(ctx, generate, systemPrompt, userPrompt, out)
+	return err
+}
+
+func completeJSONWithGeneratorRaw(ctx context.Context, generate messageGenerator, systemPrompt, userPrompt string, out any) (string, error) {
 	if generate == nil {
-		return fmt.Errorf("llm generate function is nil")
+		return "", fmt.Errorf("llm generate function is nil")
 	}
 	base := []*schema.Message{
 		schema.SystemMessage(systemPrompt),
@@ -126,15 +153,15 @@ func completeJSONWithGenerator(ctx context.Context, generate messageGenerator, s
 	for attempt := 0; attempt < maxJSONRepairAttempts; attempt++ {
 		resp, err := generate(ctx, messages)
 		if err != nil {
-			return fmt.Errorf("model_generate attempt=%d: %s", attempt+1, formatDiagnosticError(err))
+			return lastRaw, fmt.Errorf("model_generate attempt=%d: %s", attempt+1, formatDiagnosticError(err))
 		}
 		lastRaw = ""
 		if resp != nil {
-			lastRaw = strings.TrimSpace(resp.Content)
+			lastRaw = resp.Content
 		}
 		content := extractJSON(lastRaw)
 		if err := json.Unmarshal([]byte(content), out); err == nil {
-			return nil
+			return lastRaw, nil
 		} else {
 			lastErr = err
 		}
@@ -148,7 +175,7 @@ func completeJSONWithGenerator(ctx context.Context, generate messageGenerator, s
 		}
 		messages = append(messages, schema.UserMessage(buildJSONRepairPrompt(lastRaw)))
 	}
-	return fmt.Errorf("parse llm json failed: %w; content=%s", lastErr, truncateDiagnosticPreview(lastRaw))
+	return lastRaw, fmt.Errorf("parse llm json failed: %w; content=%s", lastErr, truncateDiagnosticPreview(lastRaw))
 }
 
 func decodeJSONWithRepair(ctx context.Context, raw string, out any, repair func(context.Context, string, any) error) error {

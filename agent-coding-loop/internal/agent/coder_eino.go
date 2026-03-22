@@ -1545,21 +1545,28 @@ func fallbackCitationPaths(repoRoot string) []string {
 
 func (c *Coder) generateWithEino(ctx context.Context, in CoderInput) (CoderOutput, error) {
 	systemPrompt, userPrompt := coderPrompts(in)
+	emitPromptStarted(ctx, "coder_prompt", "eino_tool_call", systemPrompt, userPrompt)
 	raw, err := c.runStructuredAgent(ctx, in.RepoSummary, tools.ToolModeCode, systemPrompt, userPrompt, 32)
 	if err != nil {
+		emitPromptError(ctx, "coder_prompt", "eino_tool_call", systemPrompt, userPrompt, "", err)
 		return CoderOutput{}, err
 	}
 	var wire map[string]any
 	if err := decodeJSONWithRepair(ctx, raw, &wire, c.client.RepairJSON); err != nil {
+		emitPromptError(ctx, "coder_prompt", "eino_tool_call", systemPrompt, userPrompt, raw, err)
 		return CoderOutput{}, err
 	}
 	b, err := json.Marshal(wire)
 	if err != nil {
-		return CoderOutput{}, wrapStructuredOutputStageError("encode repaired coder json failed", raw, err)
+		wrapped := wrapStructuredOutputStageError("encode repaired coder json failed", raw, err)
+		emitPromptError(ctx, "coder_prompt", "eino_tool_call", systemPrompt, userPrompt, raw, wrapped)
+		return CoderOutput{}, wrapped
 	}
 	out, err := decodeCoderOutput(string(b))
 	if err != nil {
-		return CoderOutput{}, wrapStructuredOutputStageError("parse coder json failed", string(b), err)
+		wrapped := wrapStructuredOutputStageError("parse coder json failed", string(b), err)
+		emitPromptError(ctx, "coder_prompt", "eino_tool_call", systemPrompt, userPrompt, raw, wrapped)
+		return CoderOutput{}, wrapped
 	}
 	if len(out.Commands) == 0 {
 		out.Commands = in.Commands
@@ -1569,18 +1576,23 @@ func (c *Coder) generateWithEino(ctx context.Context, in CoderInput) (CoderOutpu
 	}
 	targets := extractGoalTargetFiles(in.Goal)
 	out.Patch = normalizeCoderPatchForContract(strings.TrimSpace(in.RepoSummary), out.Patch, targets, len(targets) > 1, false)
+	emitPromptCompleted(ctx, "coder_prompt", "eino_tool_call", systemPrompt, userPrompt, raw)
 	return out, nil
 }
 
 func (c *Coder) generateWithClient(ctx context.Context, in CoderInput) (CoderOutput, error) {
 	system, user := coderPrompts(in)
+	emitPromptStarted(ctx, "coder_prompt", "client_completion", system, user)
 	var wire any
-	if err := c.client.CompleteJSON(ctx, system, user, &wire); err != nil {
+	raw, err := c.client.CompleteJSONWithRaw(ctx, system, user, &wire)
+	if err != nil {
+		emitPromptError(ctx, "coder_prompt", "client_completion", system, user, raw, err)
 		return CoderOutput{}, err
 	}
 	b, _ := json.Marshal(wire)
 	out, err := decodeCoderOutput(string(b))
 	if err != nil {
+		emitPromptError(ctx, "coder_prompt", "client_completion", system, user, raw, err)
 		return CoderOutput{}, err
 	}
 	if len(out.Commands) == 0 {
@@ -1591,6 +1603,7 @@ func (c *Coder) generateWithClient(ctx context.Context, in CoderInput) (CoderOut
 	}
 	targets := extractGoalTargetFiles(in.Goal)
 	out.Patch = normalizeCoderPatchForContract(strings.TrimSpace(in.RepoSummary), out.Patch, targets, len(targets) > 1, false)
+	emitPromptCompleted(ctx, "coder_prompt", "client_completion", system, user, raw)
 	return out, nil
 }
 

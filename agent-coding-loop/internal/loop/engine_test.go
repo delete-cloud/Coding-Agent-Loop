@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -240,6 +242,278 @@ func TestEnginePersistsStructuredMetaToolCalls(t *testing.T) {
 	}
 	if !strings.Contains(text, "reviewer_meta:completed") {
 		t.Fatalf("expected reviewer_meta tool call in events, got %q", text)
+	}
+}
+
+func TestEnginePersistsCoderAndReviewerPromptToolCalls(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+
+	r := tools.NewRunner()
+	mustRun(t, r, repo, "git init")
+	mustRun(t, r, repo, "git config user.email test@example.com")
+	mustRun(t, r, repo, "git config user.name tester")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("demo\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustRun(t, r, repo, "git add README.md")
+	mustRun(t, r, repo, "git commit -m init")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path != "/chat/completions" {
+			http.NotFound(w, req)
+			return
+		}
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+		payload := string(body)
+		content := `{"summary":"coder ok","patch":"","commands":["echo PASS"],"notes":"ok","citations":[]}`
+		if strings.Contains(payload, "Review input:") {
+			content = `{"decision":"approve","summary":"review ok","findings":[],"review_markdown":"approved"}`
+		} else if strings.Contains(payload, "Plan input:") {
+			content = `{"summary":"plan ok","steps":["Inspect the existing implementation and identify the exact file and function to change."],"risks":["minimal"],"citations":[]}`
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+			"object":  "chat.completion",
+			"created": 1700000000,
+			"model":   "test-model",
+			"choices": []map[string]any{
+				{
+					"index": 0,
+					"message": map[string]any{
+						"role":    "assistant",
+						"content": content,
+					},
+					"finish_reason": "stop",
+				},
+			},
+			"usage": map[string]any{
+				"prompt_tokens":     1,
+				"completion_tokens": 1,
+				"total_tokens":      2,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	store, err := sqlite.New(dbPath)
+	if err != nil {
+		t.Fatalf("sqlite.New: %v", err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	clientCfg := agentpkg.ClientConfig{
+		BaseURL: srv.URL,
+		Model:   "test-model",
+		APIKey:  "x",
+	}
+	engine := NewEngine(EngineDeps{
+		Store:      store,
+		Runner:     r,
+		Git:        gitpkg.NewClient(r),
+		GitHub:     ghpkg.NewClient(r),
+		Coder:      agentpkg.NewCoder(clientCfg),
+		Reviewer:   agentpkg.NewReviewer(clientCfg),
+		Skills:     skills.NewRegistry(nil),
+		Artifacts:  filepath.Join(repo, ".agent-loop-artifacts"),
+		DoomThresh: 3,
+	})
+
+	spec := model.RunSpec{
+		Goal:          "validate repo",
+		Repo:          repo,
+		PRMode:        model.PRModeDryRun,
+		MaxIterations: 1,
+		Commands: model.CommandSet{
+			Test: []string{"echo PASS"},
+		},
+	}
+	result, err := engine.Run(ctx, spec)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	query := "select tool, status, input_text, output_text from tool_calls where run_id='" + result.RunID + "' and tool in ('coder_prompt','reviewer_prompt') order by id;"
+	out, err := exec.Command("sqlite3", "-json", dbPath, query).Output()
+	if err != nil {
+		t.Fatalf("sqlite3 prompt query: %v", err)
+	}
+	var rows []struct {
+		Tool       string `json:"tool"`
+		Status     string `json:"status"`
+		InputText  string `json:"input_text"`
+		OutputText string `json:"output_text"`
+	}
+	if err := json.Unmarshal(out, &rows); err != nil {
+		t.Fatalf("unmarshal sqlite json: %v; raw=%s", err, string(out))
+	}
+	if len(rows) == 0 {
+		t.Fatalf("expected prompt tool_call rows, got raw=%s", string(out))
+	}
+
+	var sawCoderStarted, sawCoderCompleted, sawReviewerStarted, sawReviewerCompleted bool
+	for _, row := range rows {
+		switch {
+		case row.Tool == "coder_prompt" && row.Status == "started":
+			sawCoderStarted = strings.Contains(row.InputText, `"system_prompt"`) && strings.Contains(row.InputText, `"user_prompt"`)
+		case row.Tool == "coder_prompt" && row.Status == "completed":
+			sawCoderCompleted = strings.Contains(row.OutputText, `"summary":"coder ok"`)
+		case row.Tool == "reviewer_prompt" && row.Status == "started":
+			sawReviewerStarted = strings.Contains(row.InputText, `"system_prompt"`) && strings.Contains(row.InputText, `"user_prompt"`)
+		case row.Tool == "reviewer_prompt" && row.Status == "completed":
+			sawReviewerCompleted = strings.Contains(row.OutputText, `"decision":"approve"`)
+		}
+	}
+	if !sawCoderStarted || !sawCoderCompleted || !sawReviewerStarted || !sawReviewerCompleted {
+		t.Fatalf("expected started/completed prompt rows for coder and reviewer, got %+v", rows)
+	}
+}
+
+func TestEnginePersistsReviewerPromptErrorWhenEinoDecodeFailsBeforeFallback(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+
+	r := tools.NewRunner()
+	mustRun(t, r, repo, "git init")
+	mustRun(t, r, repo, "git config user.email test@example.com")
+	mustRun(t, r, repo, "git config user.name tester")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("demo\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	mustRun(t, r, repo, "git add README.md")
+	mustRun(t, r, repo, "git commit -m init")
+
+	rawReviewer := "not json from reviewer"
+	rawFallback := `{"decision":"approve","summary":"fallback review ok","findings":[],"review_markdown":"approved"}`
+	var reviewerCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path != "/chat/completions" {
+			http.NotFound(w, req)
+			return
+		}
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+		payload := string(body)
+		content := `{"summary":"coder ok","patch":"","commands":["echo PASS"],"notes":"ok","citations":[]}`
+		status := http.StatusOK
+		if strings.Contains(payload, "You repair invalid JSON responses.") {
+			status = http.StatusInternalServerError
+			content = `{"error":"repair failed"}`
+		} else if strings.Contains(payload, "Review input:") {
+			reviewerCalls++
+			if reviewerCalls == 1 {
+				content = rawReviewer
+			} else {
+				content = rawFallback
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+			"object":  "chat.completion",
+			"created": 1700000000,
+			"model":   "test-model",
+			"choices": []map[string]any{
+				{
+					"index": 0,
+					"message": map[string]any{
+						"role":    "assistant",
+						"content": content,
+					},
+					"finish_reason": "stop",
+				},
+			},
+			"usage": map[string]any{
+				"prompt_tokens":     1,
+				"completion_tokens": 1,
+				"total_tokens":      2,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	store, err := sqlite.New(dbPath)
+	if err != nil {
+		t.Fatalf("sqlite.New: %v", err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	clientCfg := agentpkg.ClientConfig{
+		BaseURL: srv.URL,
+		Model:   "test-model",
+		APIKey:  "x",
+	}
+	engine := NewEngine(EngineDeps{
+		Store:      store,
+		Runner:     r,
+		Git:        gitpkg.NewClient(r),
+		GitHub:     ghpkg.NewClient(r),
+		Coder:      agentpkg.NewCoder(clientCfg),
+		Reviewer:   agentpkg.NewReviewer(clientCfg),
+		Skills:     skills.NewRegistry(nil),
+		Artifacts:  filepath.Join(repo, ".agent-loop-artifacts"),
+		DoomThresh: 3,
+	})
+
+	spec := model.RunSpec{
+		Goal:          "validate repo",
+		Repo:          repo,
+		PRMode:        model.PRModeDryRun,
+		MaxIterations: 1,
+		Commands: model.CommandSet{
+			Test: []string{"echo PASS"},
+		},
+	}
+	result, err := engine.Run(ctx, spec)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	query := "select tool, status, input_text, output_text from tool_calls where run_id='" + result.RunID + "' and tool='reviewer_prompt' order by id;"
+	out, err := exec.Command("sqlite3", "-json", dbPath, query).Output()
+	if err != nil {
+		t.Fatalf("sqlite3 reviewer_prompt query: %v", err)
+	}
+	var rows []struct {
+		Tool       string `json:"tool"`
+		Status     string `json:"status"`
+		InputText  string `json:"input_text"`
+		OutputText string `json:"output_text"`
+	}
+	if err := json.Unmarshal(out, &rows); err != nil {
+		t.Fatalf("unmarshal sqlite json: %v; raw=%s", err, string(out))
+	}
+	var sawEinoError, sawWrongEinoCompleted, sawFallbackCompleted bool
+	for _, row := range rows {
+		switch row.Status {
+		case "error":
+			if strings.Contains(row.InputText, `"path":"eino_tool_call"`) {
+				sawEinoError = row.OutputText == rawReviewer
+			}
+		case "completed":
+			if strings.Contains(row.InputText, `"path":"eino_tool_call"`) {
+				sawWrongEinoCompleted = true
+			}
+			if strings.Contains(row.InputText, `"path":"client_completion"`) {
+				sawFallbackCompleted = row.OutputText == rawFallback
+			}
+		}
+	}
+	if !sawEinoError || sawWrongEinoCompleted || !sawFallbackCompleted {
+		t.Fatalf("expected eino error with raw + fallback completed, got %+v", rows)
 	}
 }
 
