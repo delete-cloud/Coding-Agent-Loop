@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY,
   spec_json TEXT NOT NULL,
   status TEXT NOT NULL,
+  failure_reason TEXT NOT NULL DEFAULT '',
   branch TEXT NOT NULL DEFAULT '',
   commit_hash TEXT NOT NULL DEFAULT '',
   pr_url TEXT NOT NULL DEFAULT '',
@@ -98,6 +99,7 @@ type RunRecord struct {
 	ID         string
 	SpecJSON   string
 	Status     string
+	FailureReason string
 	Branch     string
 	CommitHash string
 	PRURL      string
@@ -158,7 +160,13 @@ func New(path string) (*Store, error) {
 
 func (s *Store) Migrate(ctx context.Context) error {
 	_, _, err := s.run(ctx, schemaSQL)
-	return err
+	if err != nil {
+		return err
+	}
+	if err := s.ensureRunsFailureReasonColumn(ctx); err != nil {
+		return err
+	}
+	return s.backfillRunFailureReasons(ctx)
 }
 
 func (s *Store) CreateRun(ctx context.Context, spec model.RunSpec, status model.RunStatus) (string, error) {
@@ -166,8 +174,8 @@ func (s *Store) CreateRun(ctx context.Context, spec model.RunSpec, status model.
 	runID := newID("run")
 	b, _ := json.Marshal(spec)
 	sql := fmt.Sprintf(
-		"INSERT INTO runs (id, spec_json, status, created_at, updated_at) VALUES (%s,%s,%s,%d,%d);",
-		q(runID), q(string(b)), q(string(status)), now, now,
+		"INSERT INTO runs (id, spec_json, status, failure_reason, created_at, updated_at) VALUES (%s,%s,%s,%s,%d,%d);",
+		q(runID), q(string(b)), q(string(status)), q(""), now, now,
 	)
 	_, _, err := s.run(ctx, sql)
 	if err != nil {
@@ -179,7 +187,8 @@ func (s *Store) CreateRun(ctx context.Context, spec model.RunSpec, status model.
 func (s *Store) UpdateRunStatus(ctx context.Context, runID string, status model.RunStatus, summary string) error {
 	now := time.Now().UnixMilli()
 	summary = sanitizeInline(summary)
-	sql := fmt.Sprintf("UPDATE runs SET status=%s, summary=%s, updated_at=%d WHERE id=%s;", q(string(status)), q(summary), now, q(runID))
+	failureReason := deriveFailureReason(status, summary)
+	sql := fmt.Sprintf("UPDATE runs SET status=%s, failure_reason=%s, summary=%s, updated_at=%d WHERE id=%s;", q(string(status)), q(failureReason), q(summary), now, q(runID))
 	_, _, err := s.run(ctx, sql)
 	return err
 }
@@ -195,7 +204,7 @@ func (s *Store) UpdateRunMeta(ctx context.Context, runID, branch, commitHash, pr
 }
 
 func (s *Store) GetRun(ctx context.Context, runID string) (RunRecord, error) {
-	rows, err := s.query(ctx, "SELECT id, spec_json, status, branch, commit_hash, pr_url, summary, created_at, updated_at FROM runs WHERE id="+q(runID)+" LIMIT 1;")
+	rows, err := s.query(ctx, "SELECT id, spec_json, status, failure_reason, branch, commit_hash, pr_url, summary, created_at, updated_at FROM runs WHERE id="+q(runID)+" LIMIT 1;")
 	if err != nil {
 		return RunRecord{}, err
 	}
@@ -203,20 +212,78 @@ func (s *Store) GetRun(ctx context.Context, runID string) (RunRecord, error) {
 		return RunRecord{}, fmt.Errorf("run not found: %s", runID)
 	}
 	r := rows[0]
-	if len(r) < 9 {
-		return RunRecord{}, fmt.Errorf("run row parse failed: expected 9 columns, got %d", len(r))
+	if len(r) < 10 {
+		return RunRecord{}, fmt.Errorf("run row parse failed: expected 10 columns, got %d", len(r))
 	}
 	return RunRecord{
 		ID:         r[0],
 		SpecJSON:   r[1],
 		Status:     r[2],
-		Branch:     r[3],
-		CommitHash: r[4],
-		PRURL:      r[5],
-		Summary:    r[6],
-		CreatedAt:  parseInt64(r[7]),
-		UpdatedAt:  parseInt64(r[8]),
+		FailureReason: r[3],
+		Branch:     r[4],
+		CommitHash: r[5],
+		PRURL:      r[6],
+		Summary:    r[7],
+		CreatedAt:  parseInt64(r[8]),
+		UpdatedAt:  parseInt64(r[9]),
 	}, nil
+}
+
+func (s *Store) ensureRunsFailureReasonColumn(ctx context.Context) error {
+	rows, err := s.query(ctx, "PRAGMA table_info(runs);")
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if len(row) > 1 && row[1] == "failure_reason" {
+			return nil
+		}
+	}
+	_, _, err = s.run(ctx, "ALTER TABLE runs ADD COLUMN failure_reason TEXT NOT NULL DEFAULT '';")
+	return err
+}
+
+func (s *Store) backfillRunFailureReasons(ctx context.Context) error {
+	rows, err := s.query(ctx, "SELECT id, status, summary FROM runs;")
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if len(row) < 3 {
+			continue
+		}
+		failureReason := deriveFailureReason(model.RunStatus(strings.TrimSpace(row[1])), sanitizeInline(row[2]))
+		sql := fmt.Sprintf("UPDATE runs SET failure_reason=%s WHERE id=%s;", q(failureReason), q(row[0]))
+		if _, _, err := s.run(ctx, sql); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func deriveFailureReason(status model.RunStatus, summary string) string {
+	switch status {
+	case model.RunStatusFailed, model.RunStatusNeedsChange, model.RunStatusBlocked:
+	default:
+		return ""
+	}
+	lower := strings.ToLower(strings.TrimSpace(summary))
+	switch {
+	case strings.Contains(lower, "patch apply failed"):
+		return "patch_apply"
+	case strings.Contains(lower, "parse llm json failed"):
+		return "json_parse"
+	case strings.Contains(lower, "doom-loop detected"), strings.Contains(lower, "doom loop"):
+		return "doom_loop"
+	case strings.Contains(lower, "max iterations"), strings.Contains(lower, "max iteration"):
+		return "max_iterations"
+	case strings.Contains(lower, "reviewer failed"):
+		return "reviewer_error"
+	case strings.Contains(lower, "coder failed"):
+		return "coder_error"
+	default:
+		return ""
+	}
 }
 
 func sanitizeInline(s string) string {
