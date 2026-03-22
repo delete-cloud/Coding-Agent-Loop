@@ -2,6 +2,7 @@ CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY,
   spec_json TEXT NOT NULL,
   status TEXT NOT NULL,
+  failure_reason TEXT NOT NULL DEFAULT '',
   branch TEXT NOT NULL DEFAULT '',
   commit_hash TEXT NOT NULL DEFAULT '',
   pr_url TEXT NOT NULL DEFAULT '',
