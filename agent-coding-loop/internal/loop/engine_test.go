@@ -1,11 +1,13 @@
 package loop
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -373,6 +375,40 @@ func TestEnginePersistsCoderAndReviewerPromptToolCalls(t *testing.T) {
 	}
 	if !sawCoderStarted || !sawCoderCompleted || !sawReviewerStarted || !sawReviewerCompleted {
 		t.Fatalf("expected started/completed prompt rows for coder and reviewer, got %+v", rows)
+	}
+}
+
+func TestRecordPromptToolCallLogsWarningWhenInsertFails(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	store, err := sqlite.New(dbPath)
+	if err != nil {
+		t.Fatalf("sqlite.New: %v", err)
+	}
+	engine := NewEngine(EngineDeps{Store: store})
+
+	var buf bytes.Buffer
+	prevWriter := log.Writer()
+	prevFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(prevWriter)
+		log.SetFlags(prevFlags)
+	}()
+
+	engine.recordPromptToolCall(ctx, "run_demo", 1, agentpkg.PromptCallRecord{
+		Tool:         "coder_prompt",
+		Path:         "client_completion",
+		Status:       "completed",
+		SystemPrompt: "system",
+		UserPrompt:   "user",
+		RawResponse:  `{"summary":"ok"}`,
+	})
+
+	out := buf.String()
+	if !strings.Contains(strings.ToLower(out), "warning") || !strings.Contains(out, "coder_prompt") {
+		t.Fatalf("expected warning log for prompt instrumentation failure, got %q", out)
 	}
 }
 

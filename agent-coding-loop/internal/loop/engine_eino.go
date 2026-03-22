@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -249,7 +250,7 @@ func (e *Engine) recordPromptToolCall(ctx context.Context, runID string, iterati
 	if output == "" {
 		output = rec.ErrorText
 	}
-	_ = e.store.InsertToolCall(ctx, sqlite.ToolCallRecord{
+	if err := e.store.InsertToolCall(ctx, sqlite.ToolCallRecord{
 		RunID:     runID,
 		Iteration: iteration,
 		Tool:      strings.TrimSpace(rec.Tool),
@@ -257,7 +258,9 @@ func (e *Engine) recordPromptToolCall(ctx context.Context, runID string, iterati
 		Output:    output,
 		Status:    strings.TrimSpace(rec.Status),
 		CreatedAt: time.Now().UnixMilli(),
-	})
+	}); err != nil {
+		log.Printf("warning: prompt instrumentation insert failed run_id=%s iteration=%d tool=%s status=%s: %v", runID, iteration, strings.TrimSpace(rec.Tool), strings.TrimSpace(rec.Status), err)
+	}
 }
 
 func (e *Engine) Run(ctx context.Context, spec model.RunSpec) (model.RunResult, error) {
