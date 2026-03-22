@@ -195,6 +195,31 @@ func TestCompleteJSONWithGeneratorRawPreservesLeadingAndTrailingWhitespace(t *te
 	}
 }
 
+func TestCompleteJSONWithRawReturnsMarshalErrorForTestShim(t *testing.T) {
+	c := ClientConfig{
+		completeJSONForTest: func(_ context.Context, _, _ string, out any) error {
+			wire, ok := out.(*interface{})
+			if !ok {
+				return fmt.Errorf("unexpected out type %T", out)
+			}
+			*wire = map[string]any{"summary": badJSONMarshaler{}}
+			return nil
+		},
+	}
+
+	var out any
+	raw, err := c.CompleteJSONWithRaw(context.Background(), "system", "user", &out)
+	if err == nil {
+		t.Fatalf("expected marshal error")
+	}
+	if raw != "" {
+		t.Fatalf("expected empty raw on marshal error, got %q", raw)
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "bad json value") {
+		t.Fatalf("expected marshal error to surface, got %v", err)
+	}
+}
+
 func TestCompleteJSONWithGeneratorFailsAfterRepairAttempts(t *testing.T) {
 	model := &fakeToolCallingModel{
 		responses: []string{

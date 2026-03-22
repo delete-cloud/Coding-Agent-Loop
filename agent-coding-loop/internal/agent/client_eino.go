@@ -82,7 +82,7 @@ func (c ClientConfig) CompleteJSONWithRaw(ctx context.Context, systemPrompt, use
 		}
 		b, marshalErr := json.Marshal(out)
 		if marshalErr != nil {
-			return "", nil
+			return "", marshalErr
 		}
 		return string(b), nil
 	}
