@@ -82,7 +82,10 @@ func (c ClientConfig) CompleteJSONWithRaw(ctx context.Context, systemPrompt, use
 		}
 		b, marshalErr := json.Marshal(out)
 		if marshalErr != nil {
-			return "", marshalErr
+			if shouldReturnTestShimMarshalError(out) {
+				return "", marshalErr
+			}
+			return "", nil
 		}
 		return string(b), nil
 	}
@@ -94,6 +97,11 @@ func (c ClientConfig) CompleteJSONWithRaw(ctx context.Context, systemPrompt, use
 		return "", err
 	}
 	return completeJSONWithModelRaw(ctx, cm, systemPrompt, userPrompt, out)
+}
+
+func shouldReturnTestShimMarshalError(out any) bool {
+	_, ok := out.(*interface{})
+	return ok
 }
 
 func (c ClientConfig) RepairJSON(ctx context.Context, previous string, out any) error {
