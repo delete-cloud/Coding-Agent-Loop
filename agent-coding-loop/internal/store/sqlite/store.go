@@ -271,7 +271,10 @@ func deriveFailureReason(status model.RunStatus, summary string) string {
 	switch {
 	case strings.Contains(lower, "patch apply failed"):
 		return "patch_apply"
-	case strings.Contains(lower, "parse llm json failed"):
+	case strings.Contains(lower, "parse llm json failed"),
+		strings.Contains(lower, "parse coder json failed"),
+		strings.Contains(lower, "parse reviewer json failed"),
+		(strings.Contains(lower, "encode repaired") && strings.Contains(lower, "json failed")):
 		return "json_parse"
 	case strings.Contains(lower, "doom-loop detected"), strings.Contains(lower, "doom loop"):
 		return "doom_loop"
@@ -282,7 +285,7 @@ func deriveFailureReason(status model.RunStatus, summary string) string {
 	case strings.Contains(lower, "coder failed"):
 		return "coder_error"
 	default:
-		return ""
+		return "unclassified_failure"
 	}
 }
 
