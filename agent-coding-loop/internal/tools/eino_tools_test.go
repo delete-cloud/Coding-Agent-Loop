@@ -161,6 +161,32 @@ func TestReadOnlyToolDescriptionsIncludeUsageBoundaries(t *testing.T) {
 	}
 }
 
+func TestRunCommandDescriptionIncludesUsageBoundaries(t *testing.T) {
+	got, err := BuildCoderTools(t.TempDir(), nil, NewRunner(), nil)
+	if err != nil {
+		t.Fatalf("BuildCoderTools: %v", err)
+	}
+
+	descs := toolDescriptions(t, got)
+	desc, ok := descs["run_command"]
+	if !ok {
+		t.Fatalf("missing description for tool %q", "run_command")
+	}
+
+	lower := strings.ToLower(desc)
+	requires := []string{
+		"use when you need to inspect repository state with a safe command",
+		"do not use it to read a known file or search for a known symbol",
+		`{"command":"git status --short"}`,
+		"if a command fails, read the output and then narrow or correct the command",
+	}
+	for _, want := range requires {
+		if !strings.Contains(lower, strings.ToLower(want)) {
+			t.Fatalf("description for run_command missing %q: %q", want, desc)
+		}
+	}
+}
+
 func toolNames(t *testing.T, items []tool.BaseTool) []string {
 	t.Helper()
 	out := make([]string, 0, len(items))
@@ -226,6 +252,39 @@ func TestKBSearchEmptyQueryDoesNotHardFail(t *testing.T) {
 		t.Fatalf("kb_search empty query should not return error: %v", err)
 	}
 	if !strings.Contains(strings.ToLower(out), "query") {
+		t.Fatalf("expected guidance in output, got %q", out)
+	}
+}
+
+func TestRunCommandEmptyCommandDoesNotHardFail(t *testing.T) {
+	got, err := BuildCoderTools(t.TempDir(), nil, NewRunner(), nil)
+	if err != nil {
+		t.Fatalf("BuildCoderTools: %v", err)
+	}
+	var runCommandTool tool.InvokableTool
+	for _, item := range got {
+		info, infoErr := item.Info(context.Background())
+		if infoErr != nil || info == nil {
+			continue
+		}
+		if info.Name != "run_command" {
+			continue
+		}
+		inv, ok := item.(tool.InvokableTool)
+		if !ok {
+			t.Fatalf("run_command is not invokable")
+		}
+		runCommandTool = inv
+		break
+	}
+	if runCommandTool == nil {
+		t.Fatalf("run_command not found")
+	}
+	out, err := runCommandTool.InvokableRun(context.Background(), `{"command":""}`)
+	if err != nil {
+		t.Fatalf("run_command empty command should not return error: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(out), "command is required") {
 		t.Fatalf("expected guidance in output, got %q", out)
 	}
 }

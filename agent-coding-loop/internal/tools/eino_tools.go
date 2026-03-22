@@ -73,11 +73,11 @@ func BuildToolsForMode(repoRoot string, mode ToolMode, reg *skills.Registry, run
 	case ToolModeCode:
 		runCommand, err := utils.InferTool(
 			"run_command",
-			"Run a safe shell command in the repository root and return combined stdout/stderr.",
+			"Run a safe shell command in the repository root and return combined stdout/stderr. Use when you need to inspect repository state with a safe command or gather command-line context that repo inspection tools do not provide directly. Do not use it to read a known file or search for a known symbol; use repo_read or repo_search first when those fit. Example JSON: {\"command\":\"git status --short\"}. If a command fails, read the output and then narrow or correct the command before retrying.",
 			func(ctx context.Context, input commandArgs) (string, error) {
 				cmd := strings.TrimSpace(input.Command)
 				if cmd == "" {
-					return "", fmt.Errorf("command is required")
+					return "command is required; provide a safe shell command for run_command (e.g. \"git status --short\").", nil
 				}
 				stdout, stderr, err := runner.Run(ctx, cmd, repoRoot)
 				combined := strings.TrimSpace(stdout + "\n" + stderr)
