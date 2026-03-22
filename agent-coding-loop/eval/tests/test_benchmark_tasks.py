@@ -40,19 +40,19 @@ STEP_2_2_ASSERTIONS = {
         "grep -Fq",
         "db_path must end with .db extension",
         "internal/config/config.go",
-        "find internal/config -name '*test.go'",
+        "find internal/config -name '*test.go' -print | grep -q .",
     ],
     "kb_mixed_002": [
         "grep -Fq",
         "[BLOCKED]",
         "internal/loop/engine_eino.go",
-        "find internal/loop -name '*test.go'",
+        "find internal/loop -name '*test.go' -print | grep -q .",
     ],
     "kb_code_009": [
         "grep -Fq",
         "X-Request-Id",
         "internal/http/server.go",
-        "find internal/http -name '*test.go'",
+        "find internal/http -name '*test.go' -print | grep -q .",
     ],
 }
 STEP_2_2_UNCHANGED = {
