@@ -174,6 +174,27 @@ func TestCompleteJSONWithGeneratorRepairsPlainTextResponse(t *testing.T) {
 	}
 }
 
+func TestCompleteJSONWithGeneratorRawPreservesLeadingAndTrailingWhitespace(t *testing.T) {
+	rawWithWhitespace := "\n  {\"summary\":\"ok\",\"patch\":\"\",\"commands\":[]}  \n"
+	model := &fakeToolCallingModel{
+		responses: []string{rawWithWhitespace},
+	}
+	var out map[string]any
+	raw, err := completeJSONWithGeneratorRaw(context.Background(), func(ctx context.Context, messages []*schema.Message) (*schema.Message, error) {
+		return model.Generate(ctx, messages)
+	}, "system", "user", &out)
+	if err != nil {
+		t.Fatalf("completeJSONWithGeneratorRaw: %v", err)
+	}
+	if raw != rawWithWhitespace {
+		t.Fatalf("expected raw response to preserve whitespace, got %q want %q", raw, rawWithWhitespace)
+	}
+	summary, _ := out["summary"].(string)
+	if summary != "ok" {
+		t.Fatalf("expected parsed summary=ok, got %q", summary)
+	}
+}
+
 func TestCompleteJSONWithGeneratorFailsAfterRepairAttempts(t *testing.T) {
 	model := &fakeToolCallingModel{
 		responses: []string{
@@ -421,6 +442,126 @@ func TestReviewerFallbackCompletionPreservesEinoStructuredOutputDiagnostics(t *t
 	}
 	if strings.Contains(out.Markdown, strings.Repeat("z", 2500)) {
 		t.Fatalf("expected reviewer markdown preview to be truncated, got %q", out.Markdown)
+	}
+}
+
+func TestCoderFallbackCompletionRecorderCapturesRawResponse(t *testing.T) {
+	rawResponse := `{"summary":"fallback ok","patch":"","commands":[]}`
+	records := make([]PromptCallRecord, 0, 4)
+	ctx := WithPromptCallRecorder(context.Background(), func(_ context.Context, rec PromptCallRecord) {
+		records = append(records, rec)
+	})
+	c := NewCoder(ClientConfig{
+		BaseURL: "http://example.com",
+		Model:   "test-model",
+		newToolCallingModelForTest: func(context.Context) (modelpkg.ToolCallingChatModel, error) {
+			return nil, errors.New("tool path unavailable")
+		},
+		completeJSONWithRawForTest: func(_ context.Context, _, _ string, out any) (string, error) {
+			switch v := out.(type) {
+			case *interface{}:
+				*v = map[string]any{"summary": "fallback ok", "patch": "", "commands": []string{}}
+			default:
+				return "", fmt.Errorf("unexpected completion out type %T", out)
+			}
+			return rawResponse, nil
+		},
+	})
+
+	out, err := c.Generate(ctx, CoderInput{
+		Goal:        "validate repo",
+		RepoSummary: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if !out.UsedFallback || out.FallbackSource != "client_completion" {
+		t.Fatalf("expected client completion fallback, got %+v", out)
+	}
+	var sawCompleted bool
+	for _, rec := range records {
+		if rec.Tool != "coder_prompt" || rec.Path != "client_completion" || rec.Status != "completed" {
+			continue
+		}
+		sawCompleted = true
+		if rec.RawResponse != rawResponse {
+			t.Fatalf("expected raw response %q, got %q", rawResponse, rec.RawResponse)
+		}
+		if strings.TrimSpace(rec.SystemPrompt) == "" || strings.TrimSpace(rec.UserPrompt) == "" {
+			t.Fatalf("expected prompts in recorder event, got %+v", rec)
+		}
+	}
+	if !sawCompleted {
+		t.Fatalf("expected completed coder_prompt record for client_completion, got %+v", records)
+	}
+}
+
+func TestReviewerRecorderMarksEinoDecodeFailureAsErrorWithRawResponse(t *testing.T) {
+	rawEino := "not json from reviewer"
+	rawFallback := `{"decision":"comment","summary":"fallback ok","review_markdown":"fallback markdown","findings":[]}`
+	records := make([]PromptCallRecord, 0, 8)
+	ctx := WithPromptCallRecorder(context.Background(), func(_ context.Context, rec PromptCallRecord) {
+		records = append(records, rec)
+	})
+	model := &fakeToolCallingModel{
+		responses: []string{rawEino},
+	}
+	r := NewReviewer(ClientConfig{
+		BaseURL: "http://example.com",
+		Model:   "test-model",
+		newToolCallingModelForTest: func(context.Context) (modelpkg.ToolCallingChatModel, error) {
+			return model, nil
+		},
+		completeJSONWithRawForTest: func(_ context.Context, system, _ string, out any) (string, error) {
+			if strings.Contains(system, "repair invalid JSON responses") {
+				return "", errors.New("repair failed")
+			}
+			switch v := out.(type) {
+			case *interface{}:
+				*v = map[string]any{
+					"decision":        "comment",
+					"summary":         "fallback ok",
+					"review_markdown": "fallback markdown",
+					"findings":        []map[string]any{},
+				}
+			default:
+				return "", fmt.Errorf("unexpected completion out type %T", out)
+			}
+			return rawFallback, nil
+		},
+	})
+
+	out, err := r.Review(ctx, ReviewInput{
+		Goal:          "check",
+		RepoRoot:      t.TempDir(),
+		CommandOutput: "PASS",
+	})
+	if err != nil {
+		t.Fatalf("Review: %v", err)
+	}
+	if !out.UsedFallback || out.FallbackSource != "client_completion" {
+		t.Fatalf("expected client completion fallback, got %+v", out)
+	}
+
+	var sawEinoError, sawFallbackCompleted, sawWrongEinoCompleted bool
+	for _, rec := range records {
+		switch {
+		case rec.Tool == "reviewer_prompt" && rec.Path == "eino_tool_call" && rec.Status == "error":
+			sawEinoError = true
+			if rec.RawResponse != rawEino {
+				t.Fatalf("expected raw eino response %q, got %q", rawEino, rec.RawResponse)
+			}
+		case rec.Tool == "reviewer_prompt" && rec.Path == "eino_tool_call" && rec.Status == "completed":
+			sawWrongEinoCompleted = true
+		case rec.Tool == "reviewer_prompt" && rec.Path == "client_completion" && rec.Status == "completed":
+			sawFallbackCompleted = true
+			if rec.RawResponse != rawFallback {
+				t.Fatalf("expected raw fallback response %q, got %q", rawFallback, rec.RawResponse)
+			}
+		}
+	}
+	if !sawEinoError || sawWrongEinoCompleted || !sawFallbackCompleted {
+		t.Fatalf("expected eino error + fallback completed without false eino completed, got %+v", records)
 	}
 }
 

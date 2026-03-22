@@ -236,6 +236,30 @@ func NewEngine(deps EngineDeps) *Engine {
 	}
 }
 
+func (e *Engine) recordPromptToolCall(ctx context.Context, runID string, iteration int, rec agentpkg.PromptCallRecord) {
+	if e == nil || e.store == nil {
+		return
+	}
+	inputJSON := mustJSON(map[string]any{
+		"path":          strings.TrimSpace(rec.Path),
+		"system_prompt": rec.SystemPrompt,
+		"user_prompt":   rec.UserPrompt,
+	})
+	output := rec.RawResponse
+	if output == "" {
+		output = rec.ErrorText
+	}
+	_ = e.store.InsertToolCall(ctx, sqlite.ToolCallRecord{
+		RunID:     runID,
+		Iteration: iteration,
+		Tool:      strings.TrimSpace(rec.Tool),
+		Input:     inputJSON,
+		Output:    output,
+		Status:    strings.TrimSpace(rec.Status),
+		CreatedAt: time.Now().UnixMilli(),
+	})
+}
+
 func (e *Engine) Run(ctx context.Context, spec model.RunSpec) (model.RunResult, error) {
 	return e.run(ctx, spec, "", runOptions{})
 }
@@ -583,6 +607,11 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 			CreatedAt: time.Now().UnixMilli(),
 		})
 	})
+	if !isRepairTurn {
+		coderCtx = agentpkg.WithPromptCallRecorder(coderCtx, func(_ context.Context, rec agentpkg.PromptCallRecord) {
+			e.recordPromptToolCall(ctx, st.RunID, iteration, rec)
+		})
+	}
 	e.emitProgress(ctx, st.RunID, iteration, model.ProgressEventCoderGenerating, model.ProgressStatusStarted, progressStart, nil)
 	var (
 		coderOut agentpkg.CoderOutput
@@ -823,6 +852,9 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 	})
 	e.emitProgress(ctx, st.RunID, iteration, model.ProgressEventReviewerReviewing, model.ProgressStatusStarted, "reviewer reviewing", nil)
 	reviewCtx, cancelReview := context.WithTimeout(ctx, e.reviewerTimeout)
+	reviewCtx = agentpkg.WithPromptCallRecorder(reviewCtx, func(_ context.Context, rec agentpkg.PromptCallRecord) {
+		e.recordPromptToolCall(ctx, st.RunID, iteration, rec)
+	})
 	reviewOut, err := e.reviewer.Review(reviewCtx, reviewIn)
 	cancelReview()
 	if err != nil {
@@ -856,6 +888,9 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 	if refreshedIn, refreshed := e.maybeRefreshReviewerContext(ctx, st, iteration, reviewIn, reviewOut); refreshed {
 		reviewIn = refreshedIn
 		reviewCtx, cancelReview = context.WithTimeout(ctx, e.reviewerTimeout)
+		reviewCtx = agentpkg.WithPromptCallRecorder(reviewCtx, func(_ context.Context, rec agentpkg.PromptCallRecord) {
+			e.recordPromptToolCall(ctx, st.RunID, iteration, rec)
+		})
 		reviewOut, err = e.reviewer.Review(reviewCtx, reviewIn)
 		cancelReview()
 		if err != nil {

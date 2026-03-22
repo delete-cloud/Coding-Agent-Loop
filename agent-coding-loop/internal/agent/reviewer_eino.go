@@ -189,11 +189,13 @@ func (r *Reviewer) reviewWithEino(ctx context.Context, in ReviewInput) (ReviewOu
 	}
 
 	systemPrompt, userPrompt := reviewerPrompts(in)
+	emitPromptStarted(ctx, "reviewer_prompt", "eino_tool_call", systemPrompt, userPrompt)
 	msg, err := rAgent.Generate(ctx, []*schema.Message{
 		schema.SystemMessage(systemPrompt),
 		schema.UserMessage(userPrompt),
 	})
 	if err != nil {
+		emitPromptError(ctx, "reviewer_prompt", "eino_tool_call", systemPrompt, userPrompt, "", err)
 		return ReviewOutput{}, err
 	}
 	raw := ""
@@ -202,32 +204,43 @@ func (r *Reviewer) reviewWithEino(ctx context.Context, in ReviewInput) (ReviewOu
 	}
 	var wire map[string]any
 	if err := decodeJSONWithRepair(ctx, raw, &wire, r.client.RepairJSON); err != nil {
+		emitPromptError(ctx, "reviewer_prompt", "eino_tool_call", systemPrompt, userPrompt, raw, err)
 		return ReviewOutput{}, err
 	}
 	b, err := json.Marshal(wire)
 	if err != nil {
-		return ReviewOutput{}, wrapStructuredOutputStageError("encode repaired reviewer json failed", raw, err)
+		wrapped := wrapStructuredOutputStageError("encode repaired reviewer json failed", raw, err)
+		emitPromptError(ctx, "reviewer_prompt", "eino_tool_call", systemPrompt, userPrompt, raw, wrapped)
+		return ReviewOutput{}, wrapped
 	}
 	out, err := decodeReviewOutput(string(b))
 	if err != nil {
-		return ReviewOutput{}, wrapStructuredOutputStageError("parse reviewer json failed", string(b), err)
+		wrapped := wrapStructuredOutputStageError("parse reviewer json failed", string(b), err)
+		emitPromptError(ctx, "reviewer_prompt", "eino_tool_call", systemPrompt, userPrompt, raw, wrapped)
+		return ReviewOutput{}, wrapped
 	}
 	normalizeReviewOutput(&out)
+	emitPromptCompleted(ctx, "reviewer_prompt", "eino_tool_call", systemPrompt, userPrompt, raw)
 	return out, nil
 }
 
 func (r *Reviewer) reviewWithClient(ctx context.Context, in ReviewInput) (ReviewOutput, error) {
 	system, user := reviewerPrompts(in)
+	emitPromptStarted(ctx, "reviewer_prompt", "client_completion", system, user)
 	var wire any
-	if err := r.client.CompleteJSON(ctx, system, user, &wire); err != nil {
+	raw, err := r.client.CompleteJSONWithRaw(ctx, system, user, &wire)
+	if err != nil {
+		emitPromptError(ctx, "reviewer_prompt", "client_completion", system, user, raw, err)
 		return ReviewOutput{}, err
 	}
 	b, _ := json.Marshal(wire)
 	out, err := decodeReviewOutput(string(b))
 	if err != nil {
+		emitPromptError(ctx, "reviewer_prompt", "client_completion", system, user, raw, err)
 		return ReviewOutput{}, err
 	}
 	normalizeReviewOutput(&out)
+	emitPromptCompleted(ctx, "reviewer_prompt", "client_completion", system, user, raw)
 	return out, nil
 }
 
