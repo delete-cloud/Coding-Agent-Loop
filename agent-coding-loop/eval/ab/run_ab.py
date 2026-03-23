@@ -86,6 +86,15 @@ def safe_slug(text: str) -> str:
     return value[:64]
 
 
+def split_citation_ref(ref: str) -> tuple[str, str]:
+    """Split 'path#heading' into (path, heading). If no '#', heading is empty."""
+    ref = str(ref or "").strip()
+    if "#" in ref:
+        path, heading = ref.split("#", 1)
+        return path.strip(), heading.strip()
+    return ref, ""
+
+
 def normalize_rel_path(path: str) -> str:
     p = str(path or "").strip().replace("\\", "/")
     p = p.strip("`'\"")
@@ -128,7 +137,7 @@ def extract_goal_target_files(goal: str) -> list[str]:
 def collect_overlay_paths(task: dict[str, Any], *, include_goal_targets: bool = True) -> list[str]:
     values: list[str] = []
     for raw in task.get("expected_citations", []) or []:
-        p = normalize_rel_path(str(raw))
+        p = normalize_rel_path(split_citation_ref(str(raw))[0])
         if p:
             values.append(p)
     if include_goal_targets:

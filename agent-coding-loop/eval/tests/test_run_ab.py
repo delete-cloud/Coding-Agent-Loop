@@ -12,6 +12,7 @@ from eval.ab.run_ab import (
     build_paired_analysis,
     build_report,
     build_goal,
+    citation_hit,
     collect_overlay_paths,
     exact_mcnemar_p_value,
     evaluate_expectations,
@@ -21,6 +22,7 @@ from eval.ab.run_ab import (
     read_run_context,
     run_one,
     should_copy_overlay_path,
+    split_citation_ref,
     status_to_pair_outcome,
 )
 
@@ -811,6 +813,62 @@ class RunABTests(unittest.TestCase):
         self.assertEqual(parse_result(None), {})
         # Empty bytes
         self.assertEqual(parse_result(b""), {})
+
+    def test_split_citation_ref_with_heading(self):
+        path, heading = split_citation_ref("eval/ab/kb/config_validation.md#Model Configuration")
+        self.assertEqual(path, "eval/ab/kb/config_validation.md")
+        self.assertEqual(heading, "Model Configuration")
+
+    def test_split_citation_ref_without_heading(self):
+        path, heading = split_citation_ref("eval/ab/kb/rag_pipeline.md")
+        self.assertEqual(path, "eval/ab/kb/rag_pipeline.md")
+        self.assertEqual(heading, "")
+
+    def test_split_citation_ref_empty(self):
+        path, heading = split_citation_ref("")
+        self.assertEqual(path, "")
+        self.assertEqual(heading, "")
+
+    def test_split_citation_ref_none(self):
+        path, heading = split_citation_ref(None)
+        self.assertEqual(path, "")
+        self.assertEqual(heading, "")
+
+    def test_collect_overlay_paths_strips_heading_fragment(self):
+        task = {
+            "requires_kb": True,
+            "goal": "修改配置校验",
+            "expected_citations": [
+                "eval/ab/kb/config_validation.md#Model Configuration",
+                "eval/ab/kb/testing_standards.md#Test Naming Convention",
+            ],
+        }
+        got = collect_overlay_paths(task, include_goal_targets=False)
+        self.assertIn("eval/ab/kb/config_validation.md", got)
+        self.assertIn("eval/ab/kb/testing_standards.md", got)
+        # No path should contain '#'
+        for p in got:
+            self.assertNotIn("#", p)
+
+    def test_citation_hit_with_heading_level_token(self):
+        # Heading-level token matches when full string appears in citation values
+        self.assertTrue(citation_hit(
+            "config_validation.md#Model Configuration",
+            ["eval/ab/kb/config_validation.md#Model Configuration"],
+            "",
+        ))
+        # File-level citation does NOT match heading-level expected token
+        self.assertFalse(citation_hit(
+            "config_validation.md#Model Configuration",
+            ["eval/ab/kb/config_validation.md"],
+            "",
+        ))
+        # Heading-level token found in corpus text
+        self.assertTrue(citation_hit(
+            "config_validation.md#Model Configuration",
+            [],
+            "see config_validation.md#Model Configuration for details",
+        ))
 
 
     @mock.patch("eval.ab.run_ab.subprocess.run")
