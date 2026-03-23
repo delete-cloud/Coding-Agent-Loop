@@ -1946,7 +1946,10 @@ func normalizeCoderPatch(patch string) string {
 	patch = ensureDiffSectionFileHeaders(patch)
 	patch = ensureDiffGitHeaderForPatch(patch)
 	if !patchHasConsistentUnifiedHunks(patch) {
-		return ""
+		patch = recountUnifiedHunkHeaders(patch)
+		if !patchHasConsistentUnifiedHunks(patch) {
+			return ""
+		}
 	}
 	if !patchContainsRealChanges(patch) {
 		return ""
@@ -2413,6 +2416,67 @@ func patchHasConsistentUnifiedHunks(patch string) bool {
 		i = j - 1
 	}
 	return true
+}
+
+func recountUnifiedHunkHeaders(patch string) string {
+	lines := strings.Split(strings.TrimSpace(patch), "\n")
+	changed := false
+	for i := 0; i < len(lines); i++ {
+		trim := strings.TrimSpace(lines[i])
+		if !unifiedHunkHeaderRegex.MatchString(trim) {
+			continue
+		}
+		wantOld, wantNew, ok := parseUnifiedHunkCounts(trim)
+		if !ok {
+			continue
+		}
+		j := i + 1
+		for j < len(lines) && !isHunkBoundaryLine(lines[j]) {
+			j++
+		}
+		gotOld, gotNew, _ := summarizeHunkBody(lines[i+1 : j])
+		if gotOld == wantOld && gotNew == wantNew {
+			i = j - 1
+			continue
+		}
+		oldStart := parseUnifiedHunkRangeStart(trim, '-')
+		newStart := parseUnifiedHunkRangeStart(trim, '+')
+		suffix := unifiedHunkHeaderSuffix(trim)
+		lines[i] = fmt.Sprintf("@@ -%d,%d +%d,%d @@%s", oldStart, gotOld, newStart, gotNew, suffix)
+		changed = true
+		i = j - 1
+	}
+	if !changed {
+		return patch
+	}
+	return strings.Join(lines, "\n")
+}
+
+func parseUnifiedHunkRangeStart(header string, prefix byte) int {
+	fields := strings.Fields(strings.TrimSpace(header))
+	for _, f := range fields {
+		f = strings.TrimSpace(f)
+		if f == "" || f[0] != prefix {
+			continue
+		}
+		body := f[1:]
+		if body == "" {
+			continue
+		}
+		if !strings.Contains(body, ",") {
+			n, err := strconv.Atoi(body)
+			if err == nil {
+				return n
+			}
+			continue
+		}
+		parts := strings.SplitN(body, ",", 2)
+		n, err := strconv.Atoi(parts[0])
+		if err == nil {
+			return n
+		}
+	}
+	return 1
 }
 
 func parseUnifiedHunkCounts(header string) (oldCount int, newCount int, ok bool) {

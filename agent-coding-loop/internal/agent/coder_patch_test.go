@@ -126,12 +126,17 @@ func TestNormalizeCoderPatchForTargetsStripsRepoPrefixFromMultiTargetPaths(t *te
 	}
 }
 
-func TestNormalizeCoderPatchDropsTruncatedHunkWhenCountsDoNotMatch(t *testing.T) {
+// Salvage policy: we prefer to fix diff format issues and let downstream validation
+// (go test, git apply, reviewer) catch semantic errors like missing closing braces.
+func TestNormalizeCoderPatchRecountsSalvagesTruncatedHunkWithWrongCounts(t *testing.T) {
 	patch := "diff --git a/internal/config/config.go b/internal/config/config.go\nindex 1f5a7d6..a8c4b59 100644\n--- a/internal/config/config.go\n+++ b/internal/config/config.go\n@@ -186,6 +186,12 @@ func Load(cfg Config) (Config, error) {\n \t}\n \n \tif cfg.Model.APIKey != \"\" && cfg.Model.BaseURL == \"\" {\n+\t\treturn cfg, fmt.Errorf(\"api_key requires base_url\")\n+\t}\n+\n+\tif cfg.Model.BaseURL != \"\" {\n+\t\tif !strings.HasPrefix(cfg.Model.BaseURL, \"https://\") && !strings.HasPrefix(cfg.Model.BaseURL, \"http://\") {\n+\t\t\treturn cfg, fmt.Errorf(\"base_url must start with http:// or https://\")\n+\t\t}\n \n \tif err := cfg.Validate(); err != nil {\n \t\treturn cfg, err\n \t}\n"
 
 	got := normalizeCoderPatch(patch)
-	if got != "" {
-		t.Fatalf("expected truncated hunk to be rejected, got %q", got)
+	if got == "" {
+		t.Fatal("expected patch with wrong counts to be recounted and salvaged")
+	}
+	if !strings.Contains(got, "+\t\treturn cfg, fmt.Errorf(\"api_key requires base_url\")") {
+		t.Fatalf("expected api_key validation in salvaged patch, got %q", got)
 	}
 }
 
@@ -365,6 +370,204 @@ func TestNormalizeCoderPatchForContractRejectsDuplicateTwoLineAddedBlockInSameFi
 	got := normalizeCoderPatchForContract("", patch, []string{"README.md"}, false, false)
 	if got != "" {
 		t.Fatalf("expected duplicate two-line added block to be rejected, got %q", got)
+	}
+}
+
+func TestNormalizeCoderPatchRecountsWrongHunkHeaderCounts(t *testing.T) {
+	patch := `diff --git a/internal/loop/processor.go b/internal/loop/processor.go
+--- a/internal/loop/processor.go
++++ b/internal/loop/processor.go
+@@ -25,1 +25,5 @@ func (d *DoomLoopDetector) Observe(tool string, input any) bool {
+	return d.count >= d.threshold
+ }
++
++func (d *DoomLoopDetector) Reset() {
++	d.lastTool = ""
++	d.lastInput = ""
++	d.count = 0
++}
+`
+
+	got := normalizeCoderPatch(patch)
+	if got == "" {
+		t.Fatal("expected patch with wrong hunk counts to be auto-repaired, got empty")
+	}
+	if !strings.Contains(got, "@@ -25,2 +25,8 @@") {
+		t.Fatalf("expected recounted hunk header @@ -25,2 +25,8 @@, got %q", got)
+	}
+	if !strings.Contains(got, "+func (d *DoomLoopDetector) Reset()") {
+		t.Fatalf("expected Reset method in repaired patch, got %q", got)
+	}
+}
+
+func TestNormalizeCoderPatchRecountsMultiFileWrongCounts(t *testing.T) {
+	patch := `diff --git a/internal/loop/processor.go b/internal/loop/processor.go
+--- a/internal/loop/processor.go
++++ b/internal/loop/processor.go
+@@ -18,2 +18,6 @@ func (d *DoomLoopDetector) Observe(tool string, input any) bool {
+	}
+	return d.count >= d.threshold
+ }
++
++func (d *DoomLoopDetector) Reset() {
++	d.lastTool = ""
++	d.lastInput = ""
++	d.count = 0
++}
+diff --git a/internal/loop/processor_test.go b/internal/loop/processor_test.go
+--- a/internal/loop/processor_test.go
++++ b/internal/loop/processor_test.go
+@@ -20,1 +20,7 @@ func TestDoomLoopDetectorResetsOnDifferentInput(t *testing.T) {
+	}
+	}
+
++func TestDoomLoopDetectorReset(t *testing.T) {
++	d := NewDoomLoopDetector(3)
++	d.Observe("tool", "input")
++	d.Reset()
++	if d.count != 0 {
++		t.Fatal("expected count to be 0 after reset")
++	}
++}
+`
+
+	got := normalizeCoderPatch(patch)
+	if got == "" {
+		t.Fatal("expected multi-file patch with wrong hunk counts to be auto-repaired, got empty")
+	}
+	if !strings.Contains(got, "diff --git a/internal/loop/processor.go") {
+		t.Fatalf("expected processor.go in repaired patch, got %q", got)
+	}
+	if !strings.Contains(got, "diff --git a/internal/loop/processor_test.go") {
+		t.Fatalf("expected processor_test.go in repaired patch, got %q", got)
+	}
+}
+
+func TestRecountUnifiedHunkHeadersPreservesCorrectHeaders(t *testing.T) {
+	patch := `@@ -1,3 +1,4 @@
+ line1
+ line2
+ line3
++line4`
+
+	got := recountUnifiedHunkHeaders(patch)
+	if got != patch {
+		t.Fatalf("expected correct headers unchanged, got %q", got)
+	}
+}
+
+func TestRecountUnifiedHunkHeadersFixesMismatch(t *testing.T) {
+	patch := `@@ -1,2 +1,3 @@
+ line1
+ line2
+ line3
++line4`
+
+	got := recountUnifiedHunkHeaders(patch)
+	if !strings.Contains(got, "@@ -1,3 +1,4 @@") {
+		t.Fatalf("expected recounted header @@ -1,3 +1,4 @@, got %q", got)
+	}
+}
+
+func TestRecountUnifiedHunkHeadersDeletionOnly(t *testing.T) {
+	patch := `diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1,5 +1,2 @@
+ # Title
+-old line 1
+-old line 2
+-old line 3
+ rest`
+
+	got := recountUnifiedHunkHeaders(patch)
+	if !strings.Contains(got, "@@ -1,5 +1,2 @@") {
+		t.Fatalf("expected deletion-only hunk header preserved, got %q", got)
+	}
+}
+
+func TestRecountUnifiedHunkHeadersDeletionOnlyWrongCounts(t *testing.T) {
+	patch := `diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1,3 +1,1 @@
+ # Title
+-old line 1
+-old line 2
+-old line 3
+ rest`
+
+	got := recountUnifiedHunkHeaders(patch)
+	if !strings.Contains(got, "@@ -1,5 +1,2 @@") {
+		t.Fatalf("expected recounted deletion-only hunk header @@ -1,5 +1,2 @@, got %q", got)
+	}
+}
+
+func TestRecountUnifiedHunkHeadersNoNewlineMarker(t *testing.T) {
+	patch := `diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1,1 +1,1 @@
+-old
++new
+\ No newline at end of file`
+
+	got := recountUnifiedHunkHeaders(patch)
+	if !strings.Contains(got, "@@ -1,1 +1,1 @@") {
+		t.Fatalf("expected no-newline marker to not affect counts, got %q", got)
+	}
+}
+
+func TestRecountUnifiedHunkHeadersNewFile(t *testing.T) {
+	patch := `diff --git a/newfile.go b/newfile.go
+--- /dev/null
++++ b/newfile.go
+@@ -0,0 +1,2 @@
++package main
++func init() {}`
+
+	got := recountUnifiedHunkHeaders(patch)
+	if !strings.Contains(got, "@@ -0,0 +1,2 @@") {
+		t.Fatalf("expected new-file hunk header preserved, got %q", got)
+	}
+}
+
+func TestRecountUnifiedHunkHeadersNewFileWrongCounts(t *testing.T) {
+	patch := `diff --git a/newfile.go b/newfile.go
+--- /dev/null
++++ b/newfile.go
+@@ -0,0 +1,1 @@
++package main
++func init() {}`
+
+	got := recountUnifiedHunkHeaders(patch)
+	if !strings.Contains(got, "@@ -0,0 +1,2 @@") {
+		t.Fatalf("expected recounted new-file hunk header @@ -0,0 +1,2 @@, got %q", got)
+	}
+}
+
+func TestRecountUnifiedHunkHeadersNoCommaFormatCorrectCounts(t *testing.T) {
+	// @@ -1 +1 @@ means count=1 implicitly; when counts match, header is preserved.
+	patch := `@@ -1 +1 @@
+-old
++new`
+
+	got := recountUnifiedHunkHeaders(patch)
+	if got != patch {
+		t.Fatalf("expected no-comma format with correct counts to be preserved, got %q", got)
+	}
+}
+
+func TestRecountUnifiedHunkHeadersNoCommaFormatWrongCounts(t *testing.T) {
+	// @@ -1 +1 @@ implies count=1, but body has 2 lines each; recount rewrites to comma format.
+	patch := `@@ -1 +1 @@
+ context
+-old
++new`
+
+	got := recountUnifiedHunkHeaders(patch)
+	if !strings.Contains(got, "@@ -1,2 +1,2 @@") {
+		t.Fatalf("expected no-comma format rewritten to @@ -1,2 +1,2 @@, got %q", got)
 	}
 }
 
