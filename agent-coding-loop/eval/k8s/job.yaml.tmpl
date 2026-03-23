@@ -1,0 +1,82 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: eval-{{.TaskID}}
+  labels:
+    app: agent-coding-loop
+    component: eval
+    task-id: "{{.TaskID}}"
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: agent-coding-loop
+        component: eval
+        task-id: "{{.TaskID}}"
+      annotations:
+        eval.agent-coding-loop/task-id: "{{.TaskID}}"
+        eval.agent-coding-loop/goal: {{printf "%q" .Goal}}
+    spec:
+      restartPolicy: Never
+
+      volumes:
+        - name: workspace
+          emptyDir: {}
+        - name: state
+          emptyDir: {}
+
+      initContainers:
+        - name: clone-repo
+          image: alpine/git:latest
+          command:
+            - sh
+            - -c
+            - |
+              git clone --depth=1 "{{.Repo}}" /workspace/repo
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+
+      containers:
+        - name: agent
+          image: "{{.Image}}"
+          args:
+            - run
+            - --repo=/workspace/repo
+            - --goal
+            - |-
+              {{.Goal}}
+            - --test-cmd
+            - |-
+              {{.TestCmd}}
+            - --max-iterations={{.MaxIterations}}
+            - --plan-mode={{.PlanMode}}
+            - --retrieval-mode={{.RetrievalMode}}
+          env:
+            - name: MODEL_BASE_URL
+              value: "{{.ModelBaseURL}}"
+            - name: MODEL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: "{{.ModelAPIKey}}"
+                  key: api-key
+            - name: MODEL_NAME
+              value: "{{.ModelName}}"
+            - name: KB_BASE_URL
+              value: "{{.KBBaseURL}}"
+            - name: STATE_DB
+              value: /state/state.db
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: state
+              mountPath: /state
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 2Gi
