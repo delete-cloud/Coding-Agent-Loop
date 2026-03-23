@@ -443,6 +443,96 @@ func TestRoundTrip_StreamRejected(t *testing.T) {
 	}
 }
 
+// TestRoundTrip_3xxRedirect ensures 3xx responses are returned as-is (not JSON-decoded).
+func TestRoundTrip_3xxRedirect(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "https://example.com/v1/responses")
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(302)
+		w.Write([]byte(`<html><body>Redirecting...</body></html>`))
+	}))
+	defer server.Close()
+
+	transport := newResponsesTransport(server.Client().Transport)
+	// Use raw RoundTrip (not client.Do which follows redirects).
+	chatReq := chatCompletionsRequest{
+		Model:    "gpt-4o",
+		Messages: []chatMessage{{Role: "user", Content: "Hi"}},
+	}
+	body, _ := json.Marshal(chatReq)
+	req, _ := http.NewRequest("POST", server.URL+"/v1/chat/completions", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("expected no error for 302, got: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 302 {
+		t.Errorf("expected status 302, got %d", resp.StatusCode)
+	}
+}
+
+// TestRoundTrip_200TextPlain ensures 200 with non-JSON content-type returns an error.
+func TestRoundTrip_200TextPlain(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(200)
+		w.Write([]byte("error: upstream unavailable"))
+	}))
+	defer server.Close()
+
+	transport := newResponsesTransport(server.Client().Transport)
+	chatReq := chatCompletionsRequest{
+		Model:    "gpt-4o",
+		Messages: []chatMessage{{Role: "user", Content: "Hi"}},
+	}
+	body, _ := json.Marshal(chatReq)
+	req, _ := http.NewRequest("POST", server.URL+"/v1/chat/completions", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+
+	_, err := transport.RoundTrip(req)
+	if err == nil {
+		t.Fatal("expected error for text/plain response")
+	}
+	if !strings.Contains(err.Error(), "unexpected content-type") {
+		t.Errorf("expected content-type error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "text/plain") {
+		t.Errorf("expected text/plain in error, got: %v", err)
+	}
+}
+
+// TestRoundTrip_200InvalidJSON ensures 200 with invalid JSON body returns a diagnostic error.
+func TestRoundTrip_200InvalidJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		w.Write([]byte("error: something went wrong"))
+	}))
+	defer server.Close()
+
+	transport := newResponsesTransport(server.Client().Transport)
+	chatReq := chatCompletionsRequest{
+		Model:    "gpt-4o",
+		Messages: []chatMessage{{Role: "user", Content: "Hi"}},
+	}
+	body, _ := json.Marshal(chatReq)
+	req, _ := http.NewRequest("POST", server.URL+"/v1/chat/completions", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+
+	_, err := transport.RoundTrip(req)
+	if err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+	if !strings.Contains(err.Error(), "decode responses reply") {
+		t.Errorf("expected decode error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "error: something went wrong") {
+		t.Errorf("expected body preview in error, got: %v", err)
+	}
+}
+
 // TestRoundTrip_NonChatEndpointPassthrough ensures non-chat endpoints are not intercepted.
 func TestRoundTrip_NonChatEndpointPassthrough(t *testing.T) {
 	var gotPath string

@@ -78,8 +78,9 @@ func (t *responsesTransport) RoundTrip(req *http.Request) (*http.Response, error
 		return resp, err
 	}
 
-	// Don't transform error responses — let SDK handle them.
-	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
+	// Only transform successful JSON responses (2xx).
+	// Non-2xx (3xx redirects, 4xx, 5xx) are returned as-is for SDK error handling.
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return resp, nil
 	}
 
@@ -90,9 +91,23 @@ func (t *responsesTransport) RoundTrip(req *http.Request) (*http.Response, error
 		return nil, fmt.Errorf("responses_transport: read response body: %w", err)
 	}
 
+	// Guard against non-JSON responses (HTML error pages, plain text, etc.).
+	ct := resp.Header.Get("Content-Type")
+	if ct != "" && !strings.Contains(ct, "json") {
+		preview := string(respBodyBytes)
+		if len(preview) > 256 {
+			preview = preview[:256]
+		}
+		return nil, fmt.Errorf("responses_transport: unexpected content-type %q (status %d, body: %s)", ct, resp.StatusCode, strings.TrimSpace(preview))
+	}
+
 	var respAPI responsesAPIResponse
 	if err := json.Unmarshal(respBodyBytes, &respAPI); err != nil {
-		return nil, fmt.Errorf("responses_transport: decode responses reply: %w", err)
+		preview := string(respBodyBytes)
+		if len(preview) > 256 {
+			preview = preview[:256]
+		}
+		return nil, fmt.Errorf("responses_transport: decode responses reply (status %d, content-type %q, body: %s): %w", resp.StatusCode, ct, strings.TrimSpace(preview), err)
 	}
 
 	chatResp := transformResponsesToChatCompletions(respAPI)
