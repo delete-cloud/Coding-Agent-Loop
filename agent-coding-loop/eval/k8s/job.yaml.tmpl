@@ -17,7 +17,7 @@ spec:
         task-id: "{{.TaskID}}"
       annotations:
         eval.agent-coding-loop/task-id: "{{.TaskID}}"
-        eval.agent-coding-loop/goal: "{{.Goal}}"
+        eval.agent-coding-loop/goal: {{printf "%q" .Goal}}
     spec:
       restartPolicy: Never
 
@@ -45,8 +45,12 @@ spec:
           args:
             - run
             - --repo=/workspace/repo
-            - --goal={{.Goal}}
-            - --test-cmd={{.TestCmd}}
+            - --goal
+            - |-
+              {{.Goal}}
+            - --test-cmd
+            - |-
+              {{.TestCmd}}
             - --max-iterations={{.MaxIterations}}
             - --plan-mode={{.PlanMode}}
             - --retrieval-mode={{.RetrievalMode}}
