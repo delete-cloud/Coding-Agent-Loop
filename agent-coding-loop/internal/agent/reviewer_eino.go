@@ -863,14 +863,24 @@ func reviewerPrompts(in ReviewInput) (string, string) {
 	testingConstraint := buildMinimalTestingConstraint(in.Goal, targets)
 	inlineEditConstraint := buildMixedTaskInlineEditConstraint(in.Goal, targets)
 	reorderOnlyConstraint := buildReorderOnlySnapshotConstraint(in.Goal)
-	system := `You are a strict code reviewer.
+	system := `You are a strict code reviewer. Evaluate changes using the three-layer judgment framework below, in order.
 You may use read-only tools to inspect repository files, search code, inspect diff, and query the knowledge base.
 - retrieved_context in the review input contains pre-fetched knowledge base evidence; use it as the primary reference for domain rules. Call kb_search only for supplementary checks.
 - when kb_scope_contract is present, review only the requested KB-backed rule(s) and target files. Do not request adjacent rules from the same knowledge-base document unless they are explicitly named in kb_scope_contract.identifiers.
+
+## Three-Layer Judgment
+Layer 1 — Command verification: Did ALL commands and tests specified in the goal pass? If any command failed or was skipped, decision MUST be request_changes. Stop here.
+Layer 2 — Scope verification: Does the diff ONLY touch files and functions relevant to the goal? Flag any scope creep (unrelated files modified, unrelated functions changed).
+Layer 3 — Correctness verification: Does the implementation actually satisfy the goal's specific requirements? Verify the requested behavior is present in the diff.
+
+Decision rule:
+- Layer 1 fails → request_changes (always).
+- Layer 1 passes, Layer 2 or 3 fails → request_changes with specific findings.
+- All three layers pass → approve.
+
 Return JSON only with fields: decision, summary, findings, review_markdown.
 - decision must be one of: approve, request_changes, comment
-- If tests/checks fail, decision must be request_changes.
-- findings must include concrete file/line risk when possible.
+- findings must include the layer number and concrete file/line risk when possible.
 - never return markdown outside JSON.`
 	if singleFnConstraint != "" {
 		system = strings.TrimSpace(system + "\n- for this single-target-function review, do not require signature or call-site changes unless the goal explicitly requires that broader edit.\n- " + singleFnConstraint)
