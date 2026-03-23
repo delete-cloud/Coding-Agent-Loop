@@ -256,8 +256,10 @@ class _RateLimiter:
         self._sem.release()
 
 
-def build_goal(base_goal: str, rag_enabled: bool, requires_kb: bool) -> str:
+def build_goal(base_goal: str, rag_enabled: bool, requires_kb: bool, trap: bool = False) -> str:
     base_goal = base_goal.strip()
+    if trap:
+        return base_goal
     if rag_enabled and requires_kb:
         rule = (
             "你必须先调用 kb_search 获取上下文，再修改代码。"
@@ -352,6 +354,7 @@ def evaluate_strict_reasons(
     summary_text: str,
     corpus_text: str,
     trace: dict[str, Any] | None = None,
+    trap: bool = False,
 ) -> list[str]:
     if not strict_mode:
         return []
@@ -385,6 +388,14 @@ def evaluate_strict_reasons(
         kb_calls = int(trace.get("kb_search_calls", 0) or 0)
         if kb_calls <= 0:
             reasons.append("no_real_kb_search")
+
+    # Strict rule #4: trap task should not use kb_search.
+    # Trap tasks are repo-only tasks whose goal does NOT forbid kb_search,
+    # so the agent must self-determine that KB retrieval is unnecessary.
+    if trap:
+        kb_calls = int(trace.get("kb_search_calls", 0) or 0)
+        if kb_calls > 0:
+            reasons.append("trap_kb_search_used")
 
     return reasons
 
@@ -875,7 +886,8 @@ def run_one(
     rate_limiter: _RateLimiter | None = None,
 ) -> dict[str, Any]:
     requires_kb = bool(task.get("requires_kb", False))
-    goal = build_goal(str(task.get("goal", "")), rag_enabled=rag_enabled, requires_kb=requires_kb)
+    trap = bool(task.get("trap", False))
+    goal = build_goal(str(task.get("goal", "")), rag_enabled=rag_enabled, requires_kb=requires_kb, trap=trap)
     task_id = str(task.get("task_id", ""))
 
     run_repo = repo
@@ -899,6 +911,7 @@ def run_one(
             summary_text=isolate_err,
             corpus_text=isolate_err,
             trace={},
+            trap=trap,
         )
         return {
             "experiment": experiment,
@@ -1019,6 +1032,7 @@ def run_one(
             summary_text=summary,
             corpus_text=corpus,
             trace=trace,
+            trap=trap,
         )
         if strict_reasons and status == "completed":
             status = "failed"
@@ -1079,6 +1093,7 @@ def run_one(
         summary_text=summary,
         corpus_text=corpus,
         trace=trace,
+        trap=trap,
     )
     if strict_reasons and status == "completed":
         status = "failed"

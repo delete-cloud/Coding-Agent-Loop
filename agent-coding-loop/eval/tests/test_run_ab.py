@@ -16,6 +16,7 @@ from eval.ab.run_ab import (
     collect_overlay_paths,
     exact_mcnemar_p_value,
     evaluate_expectations,
+    evaluate_strict_reasons,
     extract_goal_target_files,
     render_markdown,
     retrieval_mode_for_task,
@@ -38,6 +39,54 @@ class RunABTests(unittest.TestCase):
 
         rag_repo_goal = build_goal(base, rag_enabled=True, requires_kb=False)
         self.assertIn("禁止调用 kb_search", rag_repo_goal)
+
+    def test_build_goal_trap_returns_bare_goal(self):
+        base = "给 config.go 加 MaxRetries 校验"
+        goal = build_goal(base, rag_enabled=True, requires_kb=False, trap=True)
+        self.assertEqual(goal, base)
+        self.assertNotIn("禁止", goal)
+        self.assertNotIn("kb_search", goal)
+
+    def test_build_goal_trap_overrides_rag_kb(self):
+        base = "加校验"
+        goal = build_goal(base, rag_enabled=True, requires_kb=True, trap=True)
+        self.assertEqual(goal, base)
+
+    def test_strict_rule4_trap_kb_search_used(self):
+        reasons = evaluate_strict_reasons(
+            strict_mode=True,
+            status="completed",
+            checks={"requires_kb": False},
+            summary_text="done",
+            corpus_text="done",
+            trace={"meta_present": True, "kb_search_calls": 2},
+            trap=True,
+        )
+        self.assertIn("trap_kb_search_used", reasons)
+
+    def test_strict_rule4_trap_no_kb_search_clean(self):
+        reasons = evaluate_strict_reasons(
+            strict_mode=True,
+            status="completed",
+            checks={"requires_kb": False},
+            summary_text="done",
+            corpus_text="done",
+            trace={"meta_present": True, "kb_search_calls": 0},
+            trap=True,
+        )
+        self.assertNotIn("trap_kb_search_used", reasons)
+
+    def test_strict_rule4_non_trap_ignores_kb_search(self):
+        reasons = evaluate_strict_reasons(
+            strict_mode=True,
+            status="completed",
+            checks={"requires_kb": False},
+            summary_text="done",
+            corpus_text="done",
+            trace={"meta_present": True, "kb_search_calls": 3},
+            trap=False,
+        )
+        self.assertNotIn("trap_kb_search_used", reasons)
 
     def test_expectations(self):
         task = {
