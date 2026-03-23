@@ -9,6 +9,7 @@ from pathlib import Path
 
 from eval.ab.run_ab import (
     aggregate_metrics,
+    aggregate_metrics_by_difficulty,
     aggregate_trials,
     build_paired_analysis,
     build_report,
@@ -579,6 +580,68 @@ class RunABTests(unittest.TestCase):
         md = render_markdown(report)
         self.assertIn("Pass Rate", md)
         self.assertNotIn("Pass@k", md)
+
+    def test_aggregate_metrics_by_difficulty(self):
+        rows = [
+            {"experiment": "rag", "task_id": "t1", "status": "completed", "difficulty": "easy",
+             "requires_kb": True, "kb_signal": True, "citation_recall": 1.0},
+            {"experiment": "rag", "task_id": "t2", "status": "failed", "difficulty": "hard",
+             "requires_kb": True, "kb_signal": False, "citation_recall": 0.0},
+            {"experiment": "rag", "task_id": "t3", "status": "completed", "difficulty": "easy",
+             "requires_kb": False, "kb_signal": False, "citation_recall": 0.0},
+        ]
+        out = aggregate_metrics_by_difficulty(rows)
+        self.assertIn("rag", out)
+        self.assertIn("easy", out["rag"])
+        self.assertIn("hard", out["rag"])
+        self.assertEqual(out["rag"]["easy"]["total"], 2)
+        self.assertAlmostEqual(out["rag"]["easy"]["pass_rate"], 1.0)
+        self.assertEqual(out["rag"]["hard"]["total"], 1)
+        self.assertAlmostEqual(out["rag"]["hard"]["pass_rate"], 0.0)
+
+    def test_aggregate_metrics_by_difficulty_missing_field_defaults_medium(self):
+        rows = [
+            {"experiment": "rag", "task_id": "t1", "status": "completed",
+             "requires_kb": False, "kb_signal": False, "citation_recall": 0.0},
+        ]
+        out = aggregate_metrics_by_difficulty(rows)
+        self.assertIn("medium", out["rag"])
+        self.assertEqual(out["rag"]["medium"]["total"], 1)
+
+    def test_render_markdown_difficulty_breakdown(self):
+        rows = [
+            {"experiment": "rag", "task_id": "t1", "status": "completed", "duration_sec": 10.0,
+             "difficulty": "easy", "requires_kb": True, "kb_signal": True, "citation_recall": 1.0,
+             "repair_triggered": False, "repair_empty_patch": False, "repair_error": False, "command_fail_count": 0},
+            {"experiment": "rag", "task_id": "t2", "status": "failed", "duration_sec": 5.0,
+             "difficulty": "hard", "requires_kb": True, "kb_signal": False, "citation_recall": 0.0,
+             "repair_triggered": False, "repair_empty_patch": False, "repair_error": False, "command_fail_count": 0},
+        ]
+        report = build_report(meta={}, rows=rows)
+        md = render_markdown(report)
+        self.assertIn("Pass Rate by Difficulty", md)
+        self.assertIn("easy", md)
+        self.assertIn("hard", md)
+
+    def test_render_markdown_no_difficulty_breakdown_when_all_medium(self):
+        rows = [
+            {"experiment": "rag", "task_id": "t1", "status": "completed", "duration_sec": 10.0,
+             "requires_kb": True, "kb_signal": True, "citation_recall": 1.0,
+             "repair_triggered": False, "repair_empty_patch": False, "repair_error": False, "command_fail_count": 0},
+        ]
+        report = build_report(meta={}, rows=rows)
+        md = render_markdown(report)
+        self.assertNotIn("Pass Rate by Difficulty", md)
+
+    def test_build_report_has_metrics_by_difficulty(self):
+        rows = [
+            {"experiment": "rag", "task_id": "t1", "status": "completed", "duration_sec": 10.0,
+             "difficulty": "easy", "requires_kb": True, "kb_signal": True, "citation_recall": 1.0,
+             "repair_triggered": False, "repair_empty_patch": False, "repair_error": False, "command_fail_count": 0},
+        ]
+        report = build_report(meta={}, rows=rows)
+        self.assertIn("metrics_by_difficulty", report)
+        self.assertIn("rag", report["metrics_by_difficulty"])
 
     def test_extract_goal_target_files(self):
         goal = "更新 docs/eino-agent-loop.md，并补充 README.md，同时忽略 pkg/xxx.go。"

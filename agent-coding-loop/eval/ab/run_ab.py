@@ -600,6 +600,35 @@ def aggregate_metrics(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return out
 
 
+def aggregate_metrics_by_difficulty(rows: list[dict[str, Any]]) -> dict[str, dict[str, dict[str, Any]]]:
+    """Break down pass rate and citation recall by (experiment, difficulty).
+
+    Returns: {experiment: {difficulty: {total, completed, pass_rate, citation_recall_avg}}}
+    Missing difficulty defaults to "medium".
+    """
+    by_exp_diff: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for row in rows:
+        exp = str(row.get("experiment", ""))
+        diff = str(row.get("difficulty", "medium")) or "medium"
+        by_exp_diff.setdefault(exp, {}).setdefault(diff, []).append(row)
+
+    out: dict[str, dict[str, dict[str, Any]]] = {}
+    for exp, by_diff in sorted(by_exp_diff.items()):
+        out[exp] = {}
+        for diff, items in sorted(by_diff.items()):
+            total = len(items)
+            completed = sum(1 for x in items if x.get("status") == "completed")
+            kb_items = [x for x in items if bool(x.get("requires_kb", False))]
+            out[exp][diff] = {
+                "total": total,
+                "completed": completed,
+                "pass_rate": float(completed) / float(total) if total else 0.0,
+                "citation_recall_avg": safe_mean([float(x.get("citation_recall", 0.0)) for x in kb_items]) if kb_items else 0.0,
+                "kb_signal_rate": safe_mean([1.0 if bool(x.get("kb_signal", False)) else 0.0 for x in kb_items]) if kb_items else 0.0,
+            }
+    return out
+
+
 def aggregate_trials(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Group by (experiment, task_id), aggregate trials into a single task-level row.
 
@@ -834,6 +863,28 @@ def render_markdown(report: dict[str, Any]) -> str:
                 f"{item['repo_kb_overuse_rate']:.3f} |"
             )
     lines.append("")
+    by_diff = report.get("metrics_by_difficulty", {})
+    if by_diff:
+        # Collect all difficulty levels across experiments
+        all_diffs = sorted({d for exp_diffs in by_diff.values() for d in exp_diffs})
+        if len(all_diffs) > 1 or (len(all_diffs) == 1 and all_diffs != ["medium"]):
+            lines.append("## Pass Rate by Difficulty")
+            lines.append("")
+            lines.append("| Experiment | Difficulty | Total | Pass Rate | Citation Recall | KB Signal |")
+            lines.append("|---|---|---:|---:|---:|---:|")
+            for exp in ("no_rag", "rag"):
+                exp_diffs = by_diff.get(exp, {})
+                if not exp_diffs:
+                    continue
+                for diff in all_diffs:
+                    item = exp_diffs.get(diff)
+                    if not item:
+                        continue
+                    lines.append(
+                        f"| {exp} | {diff} | {item['total']} | {item['pass_rate']:.3f} | "
+                        f"{item['citation_recall_avg']:.3f} | {item['kb_signal_rate']:.3f} |"
+                    )
+            lines.append("")
     lines.append("## Repair Telemetry")
     lines.append("")
     lines.append("| Experiment | Repair Triggered | Empty Patch | Repair Error | Command Failure Tasks |")
@@ -900,6 +951,7 @@ def build_report(*, meta: dict[str, Any], rows: list[dict[str, Any]]) -> dict[st
     return {
         "meta": meta,
         "metrics": aggregate_metrics(aggregated),
+        "metrics_by_difficulty": aggregate_metrics_by_difficulty(aggregated),
         "paired_analysis": build_paired_analysis(aggregated),
         "rows": rows,
         "aggregated_rows": aggregated,
