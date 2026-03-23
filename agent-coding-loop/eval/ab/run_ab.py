@@ -1064,9 +1064,11 @@ def run_one(
         str(max_iterations),
         "--plan-mode",
         plan_mode,
-        "--repair-mode",
-        repair_mode,
     ]
+    if repair_mode != "on":
+        # Only pass --repair-mode when non-default; the binary may not
+        # support this flag yet, and "on" is the implicit default anyway.
+        cmd += ["--repair-mode", repair_mode]
     if str(task.get("test_cmd", "")).strip():
         cmd += ["--test-cmd", str(task["test_cmd"]).strip()]
 

@@ -1712,6 +1712,9 @@ func coderPrompts(in CoderInput) (string, string) {
 	- patch file paths must be relative to repo root; do not include the repo directory name as a prefix.
 	- commands must not include tool invocations (repo_read/repo_search/repo_list/git_diff/run_command).
 	- plan_summary and plan_steps in the task input are guidance for execution; use them to stay focused, but do not treat them as authorization to modify unrelated files.
+	- if previous_review reports a command failure, do NOT rerun the same command without changing the code first; read the failing file/line from the error output and fix the root cause before retrying.
+	- if your previous patch was rejected or caused the same test failure twice, you must change strategy: read the error location with repo_read, check whether you are editing the correct file, and try a different fix.
+	- if a test error points to a file you have not yet read, read that file before attempting another patch.
 - never return markdown outside JSON.`
 	if len(targets) > 1 {
 		system = strings.TrimSpace(system + "\n\t- this is a multi-target goal: a valid answer must return a non-empty patch touching all target files; do not claim success or goal satisfaction without changing each required target file.")
