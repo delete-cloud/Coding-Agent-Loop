@@ -600,6 +600,37 @@ def aggregate_metrics(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return out
 
 
+def aggregate_trials(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group by (experiment, task_id), aggregate trials into a single task-level row.
+
+    When --trials 1 (default), this is an identity transform.
+    When --trials N>1, produces one row per (experiment, task_id) with Pass@k semantics.
+    """
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        key = (str(row.get("experiment", "")), str(row.get("task_id", "")))
+        grouped.setdefault(key, []).append(row)
+
+    out: list[dict[str, Any]] = []
+    for (exp, task_id), trials in sorted(grouped.items()):
+        passes = sum(1 for t in trials if t.get("status") == "completed")
+        n = len(trials)
+        first = trials[0]
+        aggregated = {
+            **first,
+            # Pass@k: completed if any trial passed
+            "status": "completed" if passes > 0 else first["status"],
+            "pass_at_k": passes > 0,
+            "pass_all_k": passes == n,
+            "trial_pass_count": passes,
+            "trial_total": n,
+            "duration_sec": safe_mean([float(t.get("duration_sec", 0)) for t in trials]),
+            "citation_recall": safe_mean([float(t.get("citation_recall", 0)) for t in trials]),
+        }
+        out.append(aggregated)
+    return out
+
+
 def read_run_context(db_path: str, run_id: str) -> tuple[float, str, dict[str, Any]]:
     if not run_id:
         return 0.0, "", {
@@ -764,20 +795,44 @@ def recover_run_id_from_db(db_path: str, repo: str, goal: str) -> str:
 
 def render_markdown(report: dict[str, Any]) -> str:
     lines = []
+    # Detect multi-trial mode from aggregated rows
+    aggregated = report.get("aggregated_rows", [])
+    trial_total = max((int(r.get("trial_total", 1)) for r in aggregated), default=1) if aggregated else 1
+    multi_trial = trial_total > 1
+
     lines.append("# A/B Report (No-RAG vs RAG)")
     lines.append("")
-    lines.append("| Experiment | Pass Rate | Avg Duration (s) | KB Signal Rate | Citation Recall | KB Search Calls | Repo KB Overuse |")
-    lines.append("|---|---:|---:|---:|---:|---:|---:|")
+    if multi_trial:
+        header = "| Experiment | Pass@k | Pass^k | Avg Duration (s) | KB Signal Rate | Citation Recall | KB Search Calls | Repo KB Overuse |"
+        sep = "|---|---:|---:|---:|---:|---:|---:|---:|"
+    else:
+        header = "| Experiment | Pass Rate | Avg Duration (s) | KB Signal Rate | Citation Recall | KB Search Calls | Repo KB Overuse |"
+        sep = "|---|---:|---:|---:|---:|---:|---:|"
+    lines.append(header)
+    lines.append(sep)
     for exp in ("no_rag", "rag"):
         item = report.get("metrics", {}).get(exp)
         if not item:
             continue
-        lines.append(
-            f"| {exp} | {item['pass_rate']:.3f} | {item['avg_duration_sec']:.2f} | "
-            f"{item['kb_signal_rate']:.3f} | {item['citation_recall_avg']:.3f} | "
-            f"{item.get('kb_search_calls_avg', 0.0):.2f} | "
-            f"{item['repo_kb_overuse_rate']:.3f} |"
-        )
+        if multi_trial:
+            # Compute Pass@k and Pass^k from aggregated rows
+            exp_rows = [r for r in aggregated if r.get("experiment") == exp]
+            total_tasks = len(exp_rows) or 1
+            pass_at_k = sum(1 for r in exp_rows if r.get("pass_at_k", False)) / total_tasks
+            pass_all_k = sum(1 for r in exp_rows if r.get("pass_all_k", False)) / total_tasks
+            lines.append(
+                f"| {exp} | {pass_at_k:.3f} | {pass_all_k:.3f} | {item['avg_duration_sec']:.2f} | "
+                f"{item['kb_signal_rate']:.3f} | {item['citation_recall_avg']:.3f} | "
+                f"{item.get('kb_search_calls_avg', 0.0):.2f} | "
+                f"{item['repo_kb_overuse_rate']:.3f} |"
+            )
+        else:
+            lines.append(
+                f"| {exp} | {item['pass_rate']:.3f} | {item['avg_duration_sec']:.2f} | "
+                f"{item['kb_signal_rate']:.3f} | {item['citation_recall_avg']:.3f} | "
+                f"{item.get('kb_search_calls_avg', 0.0):.2f} | "
+                f"{item['repo_kb_overuse_rate']:.3f} |"
+            )
     lines.append("")
     lines.append("## Repair Telemetry")
     lines.append("")
@@ -841,11 +896,13 @@ def render_markdown(report: dict[str, Any]) -> str:
 
 
 def build_report(*, meta: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
+    aggregated = aggregate_trials(rows)
     return {
         "meta": meta,
-        "metrics": aggregate_metrics(rows),
-        "paired_analysis": build_paired_analysis(rows),
+        "metrics": aggregate_metrics(aggregated),
+        "paired_analysis": build_paired_analysis(aggregated),
         "rows": rows,
+        "aggregated_rows": aggregated,
     }
 
 
@@ -1152,6 +1209,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--launch-interval", type=float, default=2.0, help="Min seconds between launching tasks (rate-limit friendly)")
     p.add_argument("--plan-mode", default="on", choices=["on", "off"], help="Plan mode for agent-loop run (default: on)")
     p.add_argument("--repair-mode", default="on", choices=["on", "off"], help="Repair mode for agent-loop run (default: on)")
+    p.add_argument("--trials", type=int, default=1, help="Number of trials per task (default: 1)")
     p.add_argument("--only", choices=["no_rag", "rag"], help="Run only one experiment")
     p.add_argument("--dry-run", action="store_true", help="Only print commands, do not execute")
     return p.parse_args()
@@ -1176,11 +1234,14 @@ def main() -> int:
     launch_interval = max(0.0, args.launch_interval)
     limiter = _RateLimiter(max_concurrent=concurrency, min_interval_sec=launch_interval)
 
-    # Build the full job list: [(experiment, rag_enabled, task), ...]
-    jobs: list[tuple[str, bool, dict[str, Any]]] = []
+    trials = max(1, args.trials)
+
+    # Build the full job list: [(experiment, rag_enabled, task, trial), ...]
+    jobs: list[tuple[str, bool, dict[str, Any], int]] = []
     for exp_name, rag_enabled in experiments:
         for task in tasks:
-            jobs.append((exp_name, rag_enabled, task))
+            for trial in range(1, trials + 1):
+                jobs.append((exp_name, rag_enabled, task, trial))
 
     total = len(jobs)
     log.info("scheduling %d jobs (concurrency=%d, interval=%.1fs)", total, concurrency, launch_interval)
@@ -1188,7 +1249,7 @@ def main() -> int:
     if concurrency <= 1:
         # Serial path: simple loop, no thread overhead
         rows: list[dict[str, Any]] = []
-        for exp_name, rag_enabled, task in jobs:
+        for exp_name, rag_enabled, task, trial in jobs:
             row = run_one(
                 experiment=exp_name,
                 rag_enabled=rag_enabled,
@@ -1206,6 +1267,8 @@ def main() -> int:
                 strict_mode=bool(args.strict_mode),
                 isolate_worktree=bool(args.isolate_worktree),
             )
+            row["trial"] = trial
+            row["trial_count"] = trials
             rows.append(row)
     else:
         # Parallel path: ThreadPoolExecutor + rate limiter
@@ -1216,7 +1279,7 @@ def main() -> int:
         rows_by_idx: dict[int, dict[str, Any]] = {}
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
             future_to_idx = {}
-            for idx, (exp_name, rag_enabled, task) in enumerate(jobs):
+            for idx, (exp_name, rag_enabled, task, trial) in enumerate(jobs):
                 fut = pool.submit(
                     run_one,
                     experiment=exp_name,
@@ -1240,9 +1303,12 @@ def main() -> int:
             for fut in as_completed(future_to_idx):
                 idx = future_to_idx[fut]
                 try:
-                    rows_by_idx[idx] = fut.result()
+                    row = fut.result()
+                    row["trial"] = jobs[idx][3]
+                    row["trial_count"] = trials
+                    rows_by_idx[idx] = row
                 except Exception as exc:
-                    exp_name, _, task = jobs[idx]
+                    exp_name, _, task, trial = jobs[idx]
                     task_id = str(task.get("task_id", ""))
                     log.error("job %s/%s crashed: %s", exp_name, task_id, exc)
                     rows_by_idx[idx] = {
@@ -1252,6 +1318,8 @@ def main() -> int:
                         "duration_sec": 0.0,
                         "run_id": "",
                         "summary": f"worker exception: {exc}",
+                        "trial": trial,
+                        "trial_count": trials,
                     }
         rows = [rows_by_idx[i] for i in range(total)]
 
@@ -1269,6 +1337,7 @@ def main() -> int:
             "task_timeout_sec": args.task_timeout_sec,
             "plan_mode": args.plan_mode,
             "repair_mode": args.repair_mode,
+            "trials": trials,
             "strict_mode": bool(args.strict_mode),
             "isolate_worktree": bool(args.isolate_worktree),
             "concurrency": concurrency,

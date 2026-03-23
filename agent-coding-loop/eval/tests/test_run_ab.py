@@ -9,6 +9,7 @@ from pathlib import Path
 
 from eval.ab.run_ab import (
     aggregate_metrics,
+    aggregate_trials,
     build_paired_analysis,
     build_report,
     build_goal,
@@ -480,6 +481,104 @@ class RunABTests(unittest.TestCase):
 
         self.assertIn("Paired analysis unavailable", md)
         self.assertIn("no_valid_pairs", md)
+
+    def test_aggregate_trials_single_trial_identity(self):
+        rows = [
+            {"experiment": "rag", "task_id": "t1", "status": "completed", "duration_sec": 10.0, "citation_recall": 1.0},
+            {"experiment": "no_rag", "task_id": "t1", "status": "failed", "duration_sec": 5.0, "citation_recall": 0.0},
+        ]
+        out = aggregate_trials(rows)
+        self.assertEqual(len(out), 2)
+        for r in out:
+            self.assertEqual(r["trial_total"], 1)
+            self.assertEqual(r["trial_pass_count"], 1 if r["status"] == "completed" else 0)
+
+    def test_aggregate_trials_multi_trial_pass_at_k(self):
+        rows = [
+            {"experiment": "rag", "task_id": "t1", "status": "failed", "duration_sec": 8.0, "citation_recall": 0.0, "trial": 1, "trial_count": 3},
+            {"experiment": "rag", "task_id": "t1", "status": "completed", "duration_sec": 12.0, "citation_recall": 1.0, "trial": 2, "trial_count": 3},
+            {"experiment": "rag", "task_id": "t1", "status": "failed", "duration_sec": 10.0, "citation_recall": 0.0, "trial": 3, "trial_count": 3},
+        ]
+        out = aggregate_trials(rows)
+        self.assertEqual(len(out), 1)
+        r = out[0]
+        self.assertEqual(r["status"], "completed")  # Pass@k: any trial passed
+        self.assertTrue(r["pass_at_k"])
+        self.assertFalse(r["pass_all_k"])  # Not all passed
+        self.assertEqual(r["trial_pass_count"], 1)
+        self.assertEqual(r["trial_total"], 3)
+        self.assertAlmostEqual(r["duration_sec"], 10.0)
+
+    def test_aggregate_trials_all_fail(self):
+        rows = [
+            {"experiment": "rag", "task_id": "t1", "status": "failed", "duration_sec": 5.0, "citation_recall": 0.0, "trial": 1, "trial_count": 2},
+            {"experiment": "rag", "task_id": "t1", "status": "failed", "duration_sec": 7.0, "citation_recall": 0.0, "trial": 2, "trial_count": 2},
+        ]
+        out = aggregate_trials(rows)
+        self.assertEqual(len(out), 1)
+        r = out[0]
+        self.assertEqual(r["status"], "failed")
+        self.assertFalse(r["pass_at_k"])
+        self.assertFalse(r["pass_all_k"])
+        self.assertEqual(r["trial_pass_count"], 0)
+
+    def test_aggregate_trials_preserves_paired_analysis(self):
+        """With --trials 3, build_paired_analysis should get 1 row per (exp, task) and not exclude as duplicate."""
+        rows = []
+        for trial in range(1, 4):
+            rows.append({"experiment": "no_rag", "task_id": "t1", "status": "completed", "duration_sec": 5.0, "citation_recall": 0.0, "trial": trial, "trial_count": 3})
+            rows.append({"experiment": "rag", "task_id": "t1", "status": "failed", "duration_sec": 8.0, "citation_recall": 0.0, "trial": trial, "trial_count": 3})
+        aggregated = aggregate_trials(rows)
+        paired = build_paired_analysis(aggregated)
+        self.assertTrue(paired["available"])
+        self.assertEqual(paired["integrity"]["excluded_duplicate_pair_count"], 0)
+        self.assertEqual(paired["integrity"]["valid_pair_count"], 1)
+
+    def test_build_report_with_trials_has_aggregated_rows(self):
+        rows = [
+            {"experiment": "rag", "task_id": "t1", "status": "completed", "duration_sec": 10.0,
+             "requires_kb": True, "kb_signal": True, "citation_recall": 1.0,
+             "repair_triggered": False, "repair_empty_patch": False, "repair_error": False, "command_fail_count": 0,
+             "trial": 1, "trial_count": 2},
+            {"experiment": "rag", "task_id": "t1", "status": "failed", "duration_sec": 8.0,
+             "requires_kb": True, "kb_signal": False, "citation_recall": 0.0,
+             "repair_triggered": False, "repair_empty_patch": False, "repair_error": False, "command_fail_count": 0,
+             "trial": 2, "trial_count": 2},
+        ]
+        report = build_report(meta={}, rows=rows)
+        self.assertIn("aggregated_rows", report)
+        self.assertEqual(len(report["aggregated_rows"]), 1)
+        self.assertEqual(len(report["rows"]), 2)  # raw rows preserved
+        agg = report["aggregated_rows"][0]
+        self.assertTrue(agg["pass_at_k"])
+
+    def test_render_markdown_multi_trial_shows_pass_at_k(self):
+        rows = [
+            {"experiment": "rag", "task_id": "t1", "status": "completed", "duration_sec": 10.0,
+             "requires_kb": True, "kb_signal": True, "citation_recall": 1.0,
+             "repair_triggered": False, "repair_empty_patch": False, "repair_error": False, "command_fail_count": 0,
+             "trial": 1, "trial_count": 2},
+            {"experiment": "rag", "task_id": "t1", "status": "failed", "duration_sec": 8.0,
+             "requires_kb": True, "kb_signal": False, "citation_recall": 0.0,
+             "repair_triggered": False, "repair_empty_patch": False, "repair_error": False, "command_fail_count": 0,
+             "trial": 2, "trial_count": 2},
+        ]
+        report = build_report(meta={}, rows=rows)
+        md = render_markdown(report)
+        self.assertIn("Pass@k", md)
+        self.assertIn("Pass^k", md)
+        self.assertNotIn("Pass Rate", md)
+
+    def test_render_markdown_single_trial_shows_pass_rate(self):
+        rows = [
+            {"experiment": "rag", "task_id": "t1", "status": "completed", "duration_sec": 10.0,
+             "requires_kb": True, "kb_signal": True, "citation_recall": 1.0,
+             "repair_triggered": False, "repair_empty_patch": False, "repair_error": False, "command_fail_count": 0},
+        ]
+        report = build_report(meta={}, rows=rows)
+        md = render_markdown(report)
+        self.assertIn("Pass Rate", md)
+        self.assertNotIn("Pass@k", md)
 
     def test_extract_goal_target_files(self):
         goal = "更新 docs/eino-agent-loop.md，并补充 README.md，同时忽略 pkg/xxx.go。"
