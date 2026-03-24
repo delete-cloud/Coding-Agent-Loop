@@ -67,7 +67,7 @@ def _latest_run_id(db_path: str) -> str:
             "SELECT id FROM runs ORDER BY created_at DESC LIMIT 1"
         ).fetchone()
         return str(row["id"]).strip() if row else ""
-    except sqlite3.OperationalError:
+    except (sqlite3.OperationalError, sqlite3.DatabaseError):
         return ""
     finally:
         conn.close()

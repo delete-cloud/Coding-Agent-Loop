@@ -25,28 +25,7 @@ kubectl create secret generic model-api-key --from-literal=api-key="$MODEL_API_K
 
 ## Render the job template
 
-The template uses Go template syntax. You can render it with `go run`, `envsubst` (after converting to env-var style), or any Go template tool.
-
-Example using a small Go helper:
-
-```bash
-go run eval/k8s/render.go \
-  -task-id=task-001 \
-  -goal="Fix the broken test in pkg/foo" \
-  -repo="https://github.com/example/repo.git" \
-  -test-cmd="go test ./..." \
-  -max-iterations=10 \
-  -image="registry.example.com/agent-coding-loop:latest" \
-  -model-base-url="https://api.example.com/v1" \
-  -model-api-key="model-api-key" \
-  -model-name="gpt-4" \
-  -plan-mode=on \
-  -retrieval-mode=off \
-  -kb-base-url="" \
-  > job-task-001.yaml
-```
-
-Or with `sed` for quick one-offs:
+The template uses Go template syntax. Render it with `sed` for quick one-offs:
 
 ```bash
 sed \
@@ -86,16 +65,59 @@ kubectl get job eval-task-001 -o jsonpath='{.status.conditions[0].type}'
 
 ## Collect results from completed pods
 
+Copy each task's `state.db` into a results directory organized by task ID:
+
 ```bash
-# List completed eval jobs
-kubectl get jobs -l component=eval --field-selector=status.successful=1
-
-# Get logs (contains agent output and final state)
-kubectl logs job/eval-task-001
-
-# Copy state.db from a still-running or just-completed pod
+# Copy state.db from a completed pod
 POD=$(kubectl get pods -l task-id=task-001 -o jsonpath='{.items[0].metadata.name}')
-kubectl cp "$POD:/state/state.db" ./results/task-001-state.db
+kubectl cp "$POD:/state/state.db" ./results/task-001/state.db
+```
+
+## Results directory contract
+
+The `collect_results.py` and `summarize.py` scripts expect a specific directory layout.
+
+### Input directory structure
+
+```
+results/
+  <task_id>/
+    state.db          # required — SQLite database from the agent run
+  <task_id>/
+    state.db
+  ...
+```
+
+- Each subdirectory is named by `task_id` (must match entries in the tasks JSONL file).
+- Each subdirectory must contain a `state.db` file.
+- Directories without `state.db` or with task IDs not in the tasks file are skipped with a warning.
+
+### Collect results into JSONL
+
+```bash
+python3 eval/k8s/collect_results.py \
+    --results-dir ./results/ \
+    --tasks eval/ab/benchmark_tasks.jsonl \
+    --experiment rag \
+    --output results-rag.jsonl \
+    --strict-mode \
+    --trial 1 \
+    --trial-count 3
+```
+
+### Summarize into a markdown report
+
+```bash
+# Single JSONL
+python3 eval/k8s/summarize.py \
+    --results results-rag.jsonl \
+    --output report.md \
+    --strict-mode
+
+# Multiple JSONL files (e.g. two experiment arms)
+python3 eval/k8s/summarize.py \
+    --results results-rag.jsonl results-no-rag.jsonl \
+    --output combined-report.md
 ```
 
 ## Cleanup
