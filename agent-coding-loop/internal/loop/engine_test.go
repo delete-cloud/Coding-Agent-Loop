@@ -1806,6 +1806,16 @@ func TestBuildReviewInputIncludesRetrievedContext(t *testing.T) {
 	}
 }
 
+func TestFormatCommandEvidenceIncludesSilentSuccessMarker(t *testing.T) {
+	got := formatCommandEvidence("go build ./...", "", "", nil)
+	if !strings.Contains(got, "$ go build ./...") {
+		t.Fatalf("expected command line to be preserved, got %q", got)
+	}
+	if !strings.Contains(got, "[command completed with no output]") {
+		t.Fatalf("expected silent success marker, got %q", got)
+	}
+}
+
 func TestPlanNodeTransitionsToCodeAndStoresPlan(t *testing.T) {
 	coder := agentpkg.NewCoder(agentpkg.ClientConfig{})
 	coder.SetPlanHookForTests(func(_ context.Context, in agentpkg.PlanInput) (agentpkg.PlanOutput, error) {

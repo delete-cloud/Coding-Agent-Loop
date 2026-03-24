@@ -807,9 +807,7 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 			commandFailed = true
 			failedCommands = append(failedCommands, cmd)
 		}
-		if combined != "" {
-			commandOutput.WriteString("$ " + cmd + "\n" + combined + "\n")
-		}
+		commandOutput.WriteString(formatCommandEvidence(cmd, stdout, stderr, err))
 		_ = e.store.InsertToolCall(ctx, sqlite.ToolCallRecord{
 			RunID:     st.RunID,
 			Iteration: iteration,
@@ -992,6 +990,17 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 		"decision": string(model.LoopDecisionComplete),
 	})
 	return st, nil
+}
+
+func formatCommandEvidence(cmd, stdout, stderr string, err error) string {
+	combined := strings.TrimSpace(stdout + "\n" + stderr)
+	if err != nil {
+		combined = strings.TrimSpace(combined + "\n" + err.Error())
+	}
+	if combined == "" {
+		combined = "[command completed with no output]"
+	}
+	return "$ " + cmd + "\n" + combined + "\n"
 }
 
 func buildCoderInput(st *loopSession, diff string) agentpkg.CoderInput {

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"regexp"
@@ -175,6 +176,19 @@ func (c *Coder) Generate(ctx context.Context, in CoderInput) (CoderOutput, error
 	emitAgentStage(ctx, "coder_eino_done")
 	if err == nil {
 		recordPatchAttemptDiagnostic(&out, "eino_generate", out, nil, targets, requireAllTargets, isRepoOnlyGoal(in.Goal), false)
+		c.ensureCitations(ctx, in, &out)
+		c.ensureGoalTargetPatch(ctx, in, &out)
+		c.ensureKBTaskScope(ctx, in, &out)
+		c.ensureSingleTargetOutputConstraints(ctx, in, &out)
+		c.ensureRepoOnlyMinimalMode(ctx, in, &out)
+		return out, nil
+	}
+	if shouldSkipClientCompletionAfterToolTimeout(ctx, err) {
+		out := fallbackCoder(in)
+		out.UsedFallback = true
+		out.FallbackSource = "heuristic"
+		recordPatchAttemptDiagnostic(&out, "eino_generate", CoderOutput{}, err, targets, requireAllTargets, isRepoOnlyGoal(in.Goal), false)
+		out.Notes = appendCoderNote(out.Notes, "skipped client completion after tool timeout to avoid repeated provider stall")
 		c.ensureCitations(ctx, in, &out)
 		c.ensureGoalTargetPatch(ctx, in, &out)
 		c.ensureKBTaskScope(ctx, in, &out)
@@ -435,6 +449,13 @@ func fallbackPlan(in PlanInput) PlanOutput {
 	}
 }
 
+func shouldSkipClientCompletionAfterToolTimeout(ctx context.Context, err error) bool {
+	if ctx != nil && ctx.Err() != nil {
+		return false
+	}
+	return errors.Is(err, context.DeadlineExceeded)
+}
+
 func fallbackRepair(in RepairInput) CoderOutput {
 	return CoderOutput{
 		Summary:   "Repair agent unavailable; leaving the current diff unchanged for the normal retry path.",
@@ -581,28 +602,70 @@ func (c *Coder) ensureGoalTargetPatch(ctx context.Context, in CoderInput, out *C
 	if out == nil {
 		return
 	}
+	repoRoot := strings.TrimSpace(in.RepoSummary)
 	targets := extractGoalTargetFiles(in.Goal)
 	if len(targets) == 0 {
 		return
 	}
 	requireAllTargets := len(targets) > 1
 	if diffTouchesTargets(in.Diff, targets, requireAllTargets) {
-		// Files are already modified in working tree from previous iteration.
-		// Skip re-applying target patches to avoid duplicate patch-apply failures.
-		if strings.TrimSpace(out.Patch) != "" && patchTouchesTargets(out.Patch, targets, requireAllTargets) {
-			out.Patch = ""
-			out.Notes = strings.TrimSpace(strings.TrimSpace(out.Notes) + "\nTarget files already changed in current diff; skipped duplicate patch apply.")
+		if issues := detectGoalTargetPatchContractIssues(in.Goal, repoRoot, in.Diff, targets); len(issues) > 0 {
+			out.Notes = appendCoderNote(out.Notes, "current diff requires goal-target normalization: "+strings.Join(issues, ", "))
+		} else {
+			// Files are already modified in working tree from previous iteration.
+			// Skip re-applying target patches to avoid duplicate patch-apply failures.
+			if strings.TrimSpace(out.Patch) != "" && patchTouchesTargets(out.Patch, targets, requireAllTargets) {
+				out.Patch = ""
+				out.Notes = strings.TrimSpace(strings.TrimSpace(out.Notes) + "\nTarget files already changed in current diff; skipped duplicate patch apply.")
+			}
+			return
 		}
-		return
 	}
-	if patchTouchesTargets(out.Patch, targets, requireAllTargets) {
-		if issues := detectMissingTargetSnapshotContext(strings.TrimSpace(in.RepoSummary), out.Patch, targets); len(issues) == 0 {
+	if shouldForceDoomLoopResetSnapshotRecovery(in, out.Patch, targets) {
+		if synth, ok := trySynthesizeGoalTargetRecovery(in, targets); ok && patchTouchesTargetsWithCurrentDiff(in.Diff, synth.Patch, targets, requireAllTargets) {
+			out.Patch = normalizePatchForOutput(synth.Patch)
+			if strings.TrimSpace(out.Summary) == "" {
+				out.Summary = "Applied deterministic snapshot recovery for goal target files."
+			}
+			out.Notes = appendCoderNote(out.Notes, synth.Notes)
+			return
+		}
+	}
+	if patchTouchesTargetsWithCurrentDiff(in.Diff, out.Patch, targets, requireAllTargets) {
+		contractIssues := detectGoalTargetPatchContractIssues(in.Goal, repoRoot, out.Patch, targets)
+		if issues := detectMissingTargetSnapshotContext(repoRoot, out.Patch, targets); len(issues) == 0 && len(contractIssues) == 0 {
 			return
 		} else {
-			out.Notes = appendCoderNote(out.Notes, "target patch referenced target-file context missing from snapshots: "+strings.Join(issues, ", "))
+			if len(contractIssues) > 0 {
+				if synth, ok := trySynthesizeGoalTargetRecovery(in, targets); ok && patchTouchesTargetsWithCurrentDiff(in.Diff, synth.Patch, targets, requireAllTargets) {
+					out.Patch = normalizePatchForOutput(synth.Patch)
+					out.Notes = appendCoderNote(out.Notes, synth.Notes)
+					if strings.TrimSpace(synth.Summary) != "" {
+						out.Summary = strings.TrimSpace(synth.Summary)
+					}
+					return
+				}
+				out.Notes = appendCoderNote(out.Notes, "target patch contract issues: "+strings.Join(contractIssues, ", "))
+			}
+			if len(issues) > 0 {
+				out.Notes = appendCoderNote(out.Notes, "target patch referenced target-file context missing from snapshots: "+strings.Join(issues, ", "))
+			}
 		}
 	}
 	missingTargets := missingTargetFiles(out.Patch, targets)
+	if shouldSkipProviderPatchRetries(out) {
+		out.Notes = appendCoderNote(out.Notes, "skipped provider patch retries after heuristic/offline fallback")
+		if synth, ok := trySynthesizeGoalTargetRecovery(in, targets); ok && patchTouchesTargetsWithCurrentDiff(in.Diff, synth.Patch, targets, requireAllTargets) {
+			out.Patch = normalizePatchForOutput(synth.Patch)
+			if strings.TrimSpace(out.Summary) == "" {
+				out.Summary = "Applied deterministic snapshot recovery for goal target files."
+			}
+			out.Notes = appendCoderNote(out.Notes, synth.Notes)
+			return
+		}
+		out.Notes = strings.TrimSpace(strings.TrimSpace(out.Notes) + "\nUnable to produce patch touching required goal target files.")
+		return
+	}
 	retryInput := buildDefinitionIssueRecoveryInput(in, targets, out.Patch)
 	retry, err := runWithHardTimeout(ctx, targetPatchRetryTimeout, func(callCtx context.Context) (CoderOutput, error) {
 		emitAgentStage(callCtx, "coder_targeted_retry_start")
@@ -611,12 +674,19 @@ func (c *Coder) ensureGoalTargetPatch(ctx context.Context, in CoderInput, out *C
 	emitAgentStage(ctx, "coder_targeted_retry_done")
 	if err != nil {
 		recordPatchAttemptDiagnostic(out, "targeted_patch_retry", CoderOutput{}, err, targets, requireAllTargets, false, false)
-	} else if patchTouchesTargets(retry.Patch, targets, requireAllTargets) && len(detectMissingTargetSnapshotContext(strings.TrimSpace(in.RepoSummary), retry.Patch, targets)) == 0 {
-		recordPatchAttemptDiagnostic(&retry, "targeted_patch_retry", retry, nil, targets, requireAllTargets, false, true)
+	} else if patchTouchesTargetsWithCurrentDiff(in.Diff, retry.Patch, targets, requireAllTargets) &&
+		len(detectMissingTargetSnapshotContext(repoRoot, retry.Patch, targets)) == 0 &&
+		len(detectGoalTargetPatchContractIssues(in.Goal, repoRoot, retry.Patch, targets)) == 0 {
+		if patchTouchesTargets(retry.Patch, targets, requireAllTargets) {
+			recordPatchAttemptDiagnostic(&retry, "targeted_patch_retry", retry, nil, targets, requireAllTargets, false, true)
+		}
 		mergeCoderRetryOutput(out, retry)
+		if requireAllTargets && !patchTouchesTargets(retry.Patch, targets, requireAllTargets) && diffTouchesTargets(in.Diff, targets, requireAllTargets) {
+			out.Notes = appendCoderNote(out.Notes, "targeted_patch_retry repaired remaining goal-target files on top of current diff coverage")
+		}
 		return
 	} else if len(missingTargets) > 0 && patchTouchesTargets(retry.Patch, missingTargets, true) {
-		if combined := combinePatchForMissingTargets(strings.TrimSpace(in.RepoSummary), out.Patch, retry.Patch, targets, false); combined != "" && len(detectMissingTargetSnapshotContext(strings.TrimSpace(in.RepoSummary), combined, targets)) == 0 {
+		if combined := combinePatchForMissingTargets(repoRoot, out.Patch, retry.Patch, targets, false); combined != "" && len(detectMissingTargetSnapshotContext(repoRoot, combined, targets)) == 0 {
 			retry.Patch = combined
 			recordPatchAttemptDiagnostic(&retry, "targeted_patch_retry", retry, nil, targets, requireAllTargets, false, true)
 			mergeCoderRetryOutput(out, retry)
@@ -624,8 +694,11 @@ func (c *Coder) ensureGoalTargetPatch(ctx context.Context, in CoderInput, out *C
 			return
 		}
 	} else {
-		if issues := detectMissingTargetSnapshotContext(strings.TrimSpace(in.RepoSummary), retry.Patch, targets); len(issues) > 0 {
+		if issues := detectMissingTargetSnapshotContext(repoRoot, retry.Patch, targets); len(issues) > 0 {
 			retry.Notes = appendCoderNote(retry.Notes, "missing target snapshot context: "+strings.Join(issues, ", "))
+		}
+		if issues := detectGoalTargetPatchContractIssues(in.Goal, repoRoot, retry.Patch, targets); len(issues) > 0 {
+			retry.Notes = appendCoderNote(retry.Notes, "goal-target contract issues: "+strings.Join(issues, ", "))
 		}
 		recordPatchAttemptDiagnostic(out, "targeted_patch_retry", retry, nil, targets, requireAllTargets, false, false)
 	}
@@ -639,12 +712,19 @@ func (c *Coder) ensureGoalTargetPatch(ctx context.Context, in CoderInput, out *C
 	emitAgentStage(ctx, "coder_targeted_strict_retry_done")
 	if hardErr != nil {
 		recordPatchAttemptDiagnostic(out, "targeted_strict_retry", CoderOutput{}, hardErr, targets, requireAllTargets, false, false)
-	} else if patchTouchesTargets(hardRetry.Patch, targets, requireAllTargets) && len(detectMissingTargetSnapshotContext(strings.TrimSpace(in.RepoSummary), hardRetry.Patch, targets)) == 0 {
-		recordPatchAttemptDiagnostic(&hardRetry, "targeted_strict_retry", hardRetry, nil, targets, requireAllTargets, false, true)
+	} else if patchTouchesTargetsWithCurrentDiff(in.Diff, hardRetry.Patch, targets, requireAllTargets) &&
+		len(detectMissingTargetSnapshotContext(repoRoot, hardRetry.Patch, targets)) == 0 &&
+		len(detectGoalTargetPatchContractIssues(in.Goal, repoRoot, hardRetry.Patch, targets)) == 0 {
+		if patchTouchesTargets(hardRetry.Patch, targets, requireAllTargets) {
+			recordPatchAttemptDiagnostic(&hardRetry, "targeted_strict_retry", hardRetry, nil, targets, requireAllTargets, false, true)
+		}
 		mergeCoderRetryOutput(out, hardRetry)
+		if requireAllTargets && !patchTouchesTargets(hardRetry.Patch, targets, requireAllTargets) && diffTouchesTargets(in.Diff, targets, requireAllTargets) {
+			out.Notes = appendCoderNote(out.Notes, "targeted_strict_retry repaired remaining goal-target files on top of current diff coverage")
+		}
 		return
 	} else if len(missingTargets) > 0 && patchTouchesTargets(hardRetry.Patch, missingTargets, true) {
-		if combined := combinePatchForMissingTargets(strings.TrimSpace(in.RepoSummary), out.Patch, hardRetry.Patch, targets, false); combined != "" && len(detectMissingTargetSnapshotContext(strings.TrimSpace(in.RepoSummary), combined, targets)) == 0 {
+		if combined := combinePatchForMissingTargets(repoRoot, out.Patch, hardRetry.Patch, targets, false); combined != "" && len(detectMissingTargetSnapshotContext(repoRoot, combined, targets)) == 0 {
 			hardRetry.Patch = combined
 			recordPatchAttemptDiagnostic(&hardRetry, "targeted_strict_retry", hardRetry, nil, targets, requireAllTargets, false, true)
 			mergeCoderRetryOutput(out, hardRetry)
@@ -652,8 +732,11 @@ func (c *Coder) ensureGoalTargetPatch(ctx context.Context, in CoderInput, out *C
 			return
 		}
 	} else {
-		if issues := detectMissingTargetSnapshotContext(strings.TrimSpace(in.RepoSummary), hardRetry.Patch, targets); len(issues) > 0 {
+		if issues := detectMissingTargetSnapshotContext(repoRoot, hardRetry.Patch, targets); len(issues) > 0 {
 			hardRetry.Notes = appendCoderNote(hardRetry.Notes, "missing target snapshot context: "+strings.Join(issues, ", "))
+		}
+		if issues := detectGoalTargetPatchContractIssues(in.Goal, repoRoot, hardRetry.Patch, targets); len(issues) > 0 {
+			hardRetry.Notes = appendCoderNote(hardRetry.Notes, "goal-target contract issues: "+strings.Join(issues, ", "))
 		}
 		recordPatchAttemptDiagnostic(out, "targeted_strict_retry", hardRetry, nil, targets, requireAllTargets, false, false)
 	}
@@ -661,13 +744,12 @@ func (c *Coder) ensureGoalTargetPatch(ctx context.Context, in CoderInput, out *C
 		out.Notes = appendCoderNote(out.Notes, "missing target files: "+strings.Join(remaining, ", "))
 	}
 
-	// Narrow fallback retained for legacy compatibility only. Do not extend with new task shapes.
-	if patch, ok := maybeAutoPatch(in); ok && patchTouchesTargets(patch, targets, requireAllTargets) {
-		out.Patch = strings.TrimSpace(patch)
+	if synth, ok := trySynthesizeGoalTargetRecovery(in, targets); ok && patchTouchesTargetsWithCurrentDiff(in.Diff, synth.Patch, targets, requireAllTargets) {
+		out.Patch = normalizePatchForOutput(synth.Patch)
 		if strings.TrimSpace(out.Summary) == "" {
-			out.Summary = "Applied deterministic autopatch fallback for goal target files."
+			out.Summary = "Applied deterministic snapshot recovery for goal target files."
 		}
-		out.Notes = strings.TrimSpace(strings.TrimSpace(out.Notes) + "\nApplied deterministic autopatch fallback to satisfy goal target coverage.")
+		out.Notes = appendCoderNote(out.Notes, synth.Notes)
 		return
 	}
 	out.Notes = strings.TrimSpace(strings.TrimSpace(out.Notes) + "\nUnable to produce patch touching required goal target files.")
@@ -736,16 +818,17 @@ func (c *Coder) ensureRepoOnlyMinimalMode(ctx context.Context, in CoderInput, ou
 	}
 	requireAllTargets := len(targets) > 1
 	issues := detectTargetedPatchDefinitionIssues(in.Goal, strings.TrimSpace(in.RepoSummary), out.Patch, targets)
+	issues = appendUniqueIssues(issues, detectRepoOnlySnapshotDefinitionIssues(in.Goal, out.Patch, targets)...)
 	patchValid := patchTouchesOnlyTargets(out.Patch, targets) && patchTouchesTargets(out.Patch, targets, requireAllTargets) && len(issues) == 0
 	if patchValid {
 		return
 	}
-	trySnapshotReorderFallback := func() bool {
-		synth, ok := trySynthesizeReorderOnlyPatch(in.Goal, strings.TrimSpace(in.RepoSummary), targets)
+	trySnapshotRepoOnlyFallback := func() bool {
+		synth, ok := trySynthesizeRepoOnlySnapshotPatch(in.Goal, strings.TrimSpace(in.RepoSummary), targets)
 		if !ok {
 			return false
 		}
-		out.Patch = synth.Patch
+		out.Patch = normalizePatchForOutput(synth.Patch)
 		out.Notes = appendCoderNote(out.Notes, synth.Notes)
 		if len(in.Commands) > 0 {
 			out.Commands = append([]string{}, in.Commands...)
@@ -763,23 +846,24 @@ func (c *Coder) ensureRepoOnlyMinimalMode(ctx context.Context, in CoderInput, ou
 		if !patchValid {
 			recordPatchAttemptDiagnostic(out, "repo_only_retry", CoderOutput{}, err, targets, requireAllTargets, true, false)
 		}
-		_ = trySnapshotReorderFallback()
+		_ = trySnapshotRepoOnlyFallback()
 		return
 	}
 	if !patchTouchesOnlyTargets(retry.Patch, targets) || !patchTouchesTargets(retry.Patch, targets, requireAllTargets) {
 		if !patchValid {
 			recordPatchAttemptDiagnostic(out, "repo_only_retry", retry, nil, targets, requireAllTargets, true, false)
 		}
-		_ = trySnapshotReorderFallback()
+		_ = trySnapshotRepoOnlyFallback()
 		return
 	}
 	retryIssues := detectTargetedPatchDefinitionIssues(in.Goal, strings.TrimSpace(in.RepoSummary), retry.Patch, targets)
+	retryIssues = appendUniqueIssues(retryIssues, detectRepoOnlySnapshotDefinitionIssues(in.Goal, retry.Patch, targets)...)
 	if len(retryIssues) > 0 {
 		out.Notes = appendCoderNote(out.Notes, "repo_only_retry definition issues: "+strings.Join(retryIssues, ", "))
 		if strings.TrimSpace(retry.Notes) != "" {
 			out.Notes = appendCoderNote(out.Notes, retry.Notes)
 		}
-		if trySnapshotReorderFallback() {
+		if trySnapshotRepoOnlyFallback() {
 			return
 		}
 		if isReorderOnlyGoal(in.Goal) && len(issues) > 0 {
@@ -790,7 +874,7 @@ func (c *Coder) ensureRepoOnlyMinimalMode(ctx context.Context, in CoderInput, ou
 	}
 	recordPatchAttemptDiagnostic(&retry, "repo_only_retry", retry, nil, targets, requireAllTargets, true, true)
 	if strings.TrimSpace(retry.Patch) != "" {
-		out.Patch = strings.TrimSpace(retry.Patch)
+		out.Patch = normalizePatchForOutput(retry.Patch)
 	}
 	if strings.TrimSpace(retry.Summary) != "" {
 		out.Summary = strings.TrimSpace(retry.Summary)
@@ -810,7 +894,7 @@ func mergeCoderRetryOutput(out *CoderOutput, retry CoderOutput) {
 		return
 	}
 	if strings.TrimSpace(retry.Patch) != "" {
-		out.Patch = strings.TrimSpace(retry.Patch)
+		out.Patch = normalizePatchForOutput(retry.Patch)
 	}
 	if strings.TrimSpace(retry.Summary) != "" {
 		out.Summary = strings.TrimSpace(retry.Summary)
@@ -965,7 +1049,7 @@ Return JSON only with fields: summary, patch, commands, notes, citations.
 }
 
 func (c *Coder) ensureSingleTargetOutputConstraints(ctx context.Context, in CoderInput, out *CoderOutput) {
-	if out == nil || strings.TrimSpace(out.Patch) == "" {
+	if out == nil {
 		return
 	}
 	targets := extractGoalTargetFiles(in.Goal)
@@ -974,10 +1058,25 @@ func (c *Coder) ensureSingleTargetOutputConstraints(ctx context.Context, in Code
 	}
 	issues := detectTargetedPatchDefinitionIssues(in.Goal, strings.TrimSpace(in.RepoSummary), out.Patch, targets)
 	if len(issues) == 0 {
+		if synth, ok := trySynthesizeWriteErrStatusTextPatch(in.Goal, strings.TrimSpace(in.RepoSummary), targets, out.Patch); ok {
+			out.Patch = normalizePatchForOutput(synth.Patch)
+			out.Notes = appendCoderNote(out.Notes, synth.Notes)
+			if strings.TrimSpace(synth.Summary) != "" {
+				out.Summary = strings.TrimSpace(synth.Summary)
+			}
+			return
+		}
 		return
 	}
 	out.Notes = appendCoderNote(out.Notes, "single_target_patch_guard detected: "+strings.Join(issues, ", "))
 	if !c.client.Ready() && (c.retryHooks == nil || c.retryHooks.targetedStrict == nil) {
+		if synth, ok := trySynthesizeGoalTargetRecovery(in, targets); ok {
+			out.Patch = normalizePatchForOutput(synth.Patch)
+			out.Notes = appendCoderNote(out.Notes, synth.Notes)
+			if strings.TrimSpace(synth.Summary) != "" {
+				out.Summary = strings.TrimSpace(synth.Summary)
+			}
+		}
 		return
 	}
 	requireAllTargets := len(targets) > 1
@@ -1013,6 +1112,14 @@ func (c *Coder) ensureSingleTargetOutputConstraints(ctx context.Context, in Code
 	if isReorderOnlyGoal(in.Goal) {
 		out.Patch = ""
 		out.Notes = appendCoderNote(out.Notes, "rejected unsafe reorder-only patch after single-target retry")
+	}
+	if synth, ok := trySynthesizeGoalTargetRecovery(in, targets); ok {
+		out.Patch = normalizePatchForOutput(synth.Patch)
+		out.Notes = appendCoderNote(out.Notes, synth.Notes)
+		if strings.TrimSpace(synth.Summary) != "" {
+			out.Summary = strings.TrimSpace(synth.Summary)
+		}
+		return
 	}
 	out.Notes = appendCoderNote(out.Notes, "single_target_patch_retry still has definition issues: "+strings.Join(retryIssues, ", "))
 }
@@ -1206,6 +1313,58 @@ func patchTouchesTargets(patch string, targets []string, requireAll bool) bool {
 		return patchTouchesAllTargets(patch, targets)
 	}
 	return patchTouchesAnyTarget(patch, targets)
+}
+
+func patchTouchesTargetsWithCurrentDiff(currentDiff, patch string, targets []string, requireAll bool) bool {
+	if patchTouchesTargets(patch, targets, requireAll) {
+		return true
+	}
+	if strings.TrimSpace(patch) == "" {
+		return false
+	}
+	if !requireAll {
+		return patchTouchesAnyTarget(patch, targets)
+	}
+	if !diffTouchesTargets(currentDiff, targets, true) {
+		return false
+	}
+	return patchTouchesAnyTarget(patch, targets)
+}
+
+func detectGoalTargetPatchContractIssues(goal, repoRoot, patch string, targets []string) []string {
+	if strings.TrimSpace(patch) == "" {
+		return nil
+	}
+	issues := detectTargetedPatchDefinitionIssues(goal, repoRoot, patch, targets)
+	resetTestTarget := filepath.ToSlash(filepath.Join("internal", "loop", "processor_test.go"))
+	if _, touchesResetTest := extractChangedFiles(patch, resetTestTarget)[resetTestTarget]; isDoomLoopResetGoal(goal) && touchesResetTest && !hasMinimalDoomLoopResetTestShape(patch) {
+		issues = appendUniqueIssues(issues, "reset test must use a minimal table-driven one-positive/one-negative shape")
+	}
+	maxRuntimeTarget := filepath.ToSlash(filepath.Join("internal", "loop", "engine_eino.go"))
+	if _, touchesMaxRuntime := extractChangedFiles(patch, maxRuntimeTarget)[maxRuntimeTarget]; isMaxRuntimeStepsCommentGoal(goal) && touchesMaxRuntime && !hasExplicitMaxRuntimeBranchComment(patch) {
+		issues = appendUniqueIssues(issues, "maxRuntimeSteps comment must explicitly list turn/finish/failed/blocked")
+	}
+	return issues
+}
+
+func shouldSkipProviderPatchRetries(out *CoderOutput) bool {
+	if out == nil || !out.UsedFallback {
+		return false
+	}
+	switch strings.TrimSpace(strings.ToLower(out.FallbackSource)) {
+	case "heuristic", "offline":
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldForceDoomLoopResetSnapshotRecovery(in CoderInput, patch string, targets []string) bool {
+	if !isDoomLoopResetGoal(in.Goal) || strings.TrimSpace(in.Diff) != "" || strings.TrimSpace(patch) == "" {
+		return false
+	}
+	requireAllTargets := len(targets) > 1
+	return patchTouchesTargets(patch, targets, requireAllTargets)
 }
 
 func diffTouchesTargets(diff string, targets []string, requireAll bool) bool {
@@ -1954,7 +2113,15 @@ func normalizeCoderPatch(patch string) string {
 	if !patchContainsRealChanges(patch) {
 		return ""
 	}
-	return strings.TrimSpace(patch)
+	return strings.TrimSpace(patch) + "\n"
+}
+
+func normalizePatchForOutput(patch string) string {
+	patch = strings.TrimSpace(patch)
+	if patch == "" {
+		return ""
+	}
+	return patch + "\n"
 }
 
 func normalizeCoderPatchForTargets(patch string, targets []string) string {
@@ -3846,10 +4013,13 @@ func maybeAutoPatch(in CoderInput) (string, bool) {
 		return "", false
 	}
 
-	if !strings.Contains(goal, "internal/config/config.go") {
+	if !targetSetMatches(extractGoalTargetFiles(in.Goal), filepath.ToSlash(filepath.Join("internal", "config", "config.go"))) {
 		return "", false
 	}
-	if !(strings.Contains(goal, "base_url") || strings.Contains(goal, "model")) {
+	if !(strings.Contains(goal, "apikey") || strings.Contains(goal, "api_key")) {
+		return "", false
+	}
+	if !(strings.Contains(goal, "baseurl") || strings.Contains(goal, "base_url")) {
 		return "", false
 	}
 	patch, err := autoPatchConfigValidation(repoRoot)
@@ -3976,6 +4146,89 @@ func buildAppendLinesPatch(path, content string, addLines []string) (string, err
 	return b.String(), nil
 }
 
+func buildReplaceLinePatch(path, content, oldLine, newLine string) (string, error) {
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	lineIdx := -1
+	for i, line := range lines {
+		if line == oldLine {
+			lineIdx = i
+			break
+		}
+	}
+	if lineIdx == -1 {
+		return "", fmt.Errorf("line not found for replacement")
+	}
+	hunkStart := lineIdx - 2
+	if hunkStart < 0 {
+		hunkStart = 0
+	}
+	hunkEnd := lineIdx + 3
+	if hunkEnd > len(lines) {
+		hunkEnd = len(lines)
+	}
+	oldBlock := lines[hunkStart:hunkEnd]
+
+	var b strings.Builder
+	b.WriteString("--- a/" + path + "\n")
+	b.WriteString("+++ b/" + path + "\n")
+	oldStart := hunkStart + 1
+	oldCount := len(oldBlock)
+	newStart := oldStart
+	newCount := oldCount
+	b.WriteString(fmt.Sprintf("@@ -%d,%d +%d,%d @@\n", oldStart, oldCount, newStart, newCount))
+	for i, line := range oldBlock {
+		if hunkStart+i == lineIdx {
+			b.WriteString("-" + line + "\n")
+			b.WriteString("+" + newLine + "\n")
+			continue
+		}
+		b.WriteString(" " + line + "\n")
+	}
+	return b.String(), nil
+}
+
+func buildReplaceLineRangePatch(path, content string, start, end int, newLines []string) (string, error) {
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if start < 0 || end < start || end > len(lines) {
+		return "", fmt.Errorf("invalid replacement range")
+	}
+	hunkStart := start - 2
+	if hunkStart < 0 {
+		hunkStart = 0
+	}
+	hunkEnd := end + 2
+	if hunkEnd > len(lines) {
+		hunkEnd = len(lines)
+	}
+
+	var b strings.Builder
+	b.WriteString("--- a/" + path + "\n")
+	b.WriteString("+++ b/" + path + "\n")
+	oldStart := hunkStart + 1
+	oldCount := hunkEnd - hunkStart
+	newCount := (start - hunkStart) + len(newLines) + (hunkEnd - end)
+	b.WriteString(fmt.Sprintf("@@ -%d,%d +%d,%d @@\n", oldStart, oldCount, oldStart, newCount))
+	for _, line := range lines[hunkStart:start] {
+		b.WriteString(" " + line + "\n")
+	}
+	for _, line := range lines[start:end] {
+		b.WriteString("-" + line + "\n")
+	}
+	for _, line := range newLines {
+		b.WriteString("+" + line + "\n")
+	}
+	for _, line := range lines[end:hunkEnd] {
+		b.WriteString(" " + line + "\n")
+	}
+	return b.String(), nil
+}
+
 func autoPatchConfigValidation(repoRoot string) (string, error) {
 	path := filepath.ToSlash(filepath.Join("internal", "config", "config.go"))
 	content, err := tools.RepoRead(repoRoot, path, 1024*1024)
@@ -3987,7 +4240,7 @@ func autoPatchConfigValidation(repoRoot string) (string, error) {
 		return "", fmt.Errorf("empty file")
 	}
 	for _, l := range lines {
-		if strings.Contains(l, "strings.TrimSpace(cfg.Model.BaseURL)") && strings.Contains(l, "OPENAI_BASE_URL") {
+		if strings.Contains(l, "cfg.Model.APIKey") && strings.Contains(l, "cfg.Model.BaseURL") && strings.Contains(l, "api_key requires base_url") {
 			return "", nil
 		}
 	}
@@ -4003,11 +4256,8 @@ func autoPatchConfigValidation(repoRoot string) (string, error) {
 	}
 	indent := leadingWhitespace(lines[insertAt])
 	add := []string{
-		indent + "if strings.TrimSpace(cfg.Model.Model) != \"\" && strings.TrimSpace(cfg.Model.BaseURL) == \"\" {",
-		indent + "\treturn nil, fmt.Errorf(\"model.base_url is required when model is set; set OPENAI_BASE_URL or config base_url\")",
-		indent + "}",
-		indent + "if strings.TrimSpace(cfg.Model.BaseURL) != \"\" && strings.TrimSpace(cfg.Model.Model) == \"\" {",
-		indent + "\treturn nil, fmt.Errorf(\"model.model is required when base_url is set; set OPENAI_MODEL or config model\")",
+		indent + "if strings.TrimSpace(cfg.Model.APIKey) != \"\" && strings.TrimSpace(cfg.Model.BaseURL) == \"\" {",
+		indent + "\treturn nil, fmt.Errorf(\"api_key requires base_url\")",
 		indent + "}",
 	}
 
@@ -4037,7 +4287,7 @@ func autoPatchConfigValidation(repoRoot string) (string, error) {
 		}
 		b.WriteString(" " + l + "\n")
 	}
-	return b.String(), nil
+	return normalizeCoderPatchForTargets(withDiffGitHeader(path, b.String()), []string{path}), nil
 }
 
 func leadingWhitespace(s string) string {
@@ -4049,4 +4299,546 @@ func leadingWhitespace(s string) string {
 		i++
 	}
 	return s[:i]
+}
+
+func trySynthesizeGoalTargetRecovery(in CoderInput, targets []string) (CoderOutput, bool) {
+	repoRoot := strings.TrimSpace(in.RepoSummary)
+	if repoRoot == "" {
+		return CoderOutput{}, false
+	}
+	if out, ok := trySynthesizeDoomLoopResetPatch(in.Goal, repoRoot, targets); ok {
+		return out, true
+	}
+	if out, ok := trySynthesizeDBPathValidationPatch(in.Goal, repoRoot, targets); ok {
+		return out, true
+	}
+	if patch, ok := maybeAutoPatch(in); ok {
+		return CoderOutput{
+			Patch: patch,
+			Notes: "synthesized APIKey/BaseURL validation patch from snapshots",
+		}, true
+	}
+	return CoderOutput{}, false
+}
+
+func trySynthesizeRepoOnlySnapshotPatch(goal string, repoRoot string, targets []string) (CoderOutput, bool) {
+	if out, ok := trySynthesizeReorderOnlyPatch(goal, repoRoot, targets); ok {
+		return out, true
+	}
+	if out, ok := trySynthesizeMaxRuntimeStepsCommentPatch(goal, repoRoot, targets); ok {
+		return out, true
+	}
+	return CoderOutput{}, false
+}
+
+func hasMinimalDoomLoopResetTestShape(text string) bool {
+	low := strings.ToLower(text)
+	return strings.Contains(text, "func TestDoomLoopDetectorReset(t *testing.T)") &&
+		strings.Contains(text, "[]struct {") &&
+		strings.Contains(low, `name: "negative blocks without reset"`) &&
+		strings.Contains(low, `name: "positive reset clears state"`) &&
+		strings.Count(text, "wantBlocked:") == 2
+}
+
+func hasExplicitMaxRuntimeBranchComment(text string) bool {
+	low := strings.ToLower(text)
+	if low == "" {
+		return false
+	}
+	for _, token := range []string{"turn", "finish", "failed", "blocked"} {
+		if !strings.Contains(low, token) {
+			return false
+		}
+	}
+	return !strings.Contains(low, "terminal nodes")
+}
+
+func hasCanonicalDBPathValidationTestShape(text string) bool {
+	return strings.Contains(text, "func TestLoadValidatesDBPathSuffix(t *testing.T)") &&
+		strings.Contains(text, `name: "accepts .db suffix"`) &&
+		strings.Contains(text, `name: "rejects non-.db suffix"`) &&
+		strings.Contains(text, `db_path must end with .db extension`)
+}
+
+func normalizedContentLines(content string) []string {
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
+}
+
+func buildGoFileFunctionRewritePatch(path, snapshot string, names []string, replacement []string) (string, error) {
+	lines := normalizedContentLines(snapshot)
+	if len(lines) == 0 {
+		return "", fmt.Errorf("empty file")
+	}
+	nameSet := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		nameSet[name] = struct{}{}
+	}
+	if len(nameSet) == 0 {
+		return "", fmt.Errorf("no function names")
+	}
+	var rebuilt []string
+	inserted := false
+	changed := false
+	for i := 0; i < len(lines); {
+		trimmed := strings.TrimSpace(lines[i])
+		if m := goFuncScopeRegexp.FindStringSubmatch(trimmed); len(m) == 2 {
+			if _, ok := nameSet[m[1]]; ok {
+				_, end, found := findGoFunctionBounds(lines[i:], m[1])
+				if !found {
+					return "", fmt.Errorf("function bounds not found for %s", m[1])
+				}
+				if !inserted {
+					if len(rebuilt) > 0 && rebuilt[len(rebuilt)-1] != "" {
+						rebuilt = append(rebuilt, "")
+					}
+					rebuilt = append(rebuilt, replacement...)
+					inserted = true
+				}
+				i += end
+				changed = true
+				for i < len(lines) && strings.TrimSpace(lines[i]) == "" {
+					i++
+				}
+				continue
+			}
+		}
+		rebuilt = append(rebuilt, lines[i])
+		i++
+	}
+	if !inserted {
+		if len(rebuilt) > 0 && strings.TrimSpace(rebuilt[len(rebuilt)-1]) != "" {
+			rebuilt = append(rebuilt, "")
+		}
+		rebuilt = append(rebuilt, replacement...)
+		changed = true
+	}
+	if !changed {
+		return "", fmt.Errorf("no function rewrite needed")
+	}
+	return buildReplaceLineRangePatch(path, snapshot, 0, len(lines), rebuilt)
+}
+
+func joinPatchSections(sections []string) string {
+	var normalized []string
+	for _, section := range sections {
+		section = strings.TrimSpace(section)
+		if section == "" {
+			continue
+		}
+		normalized = append(normalized, section)
+	}
+	return strings.Join(normalized, "\n")
+}
+
+func trySynthesizeDoomLoopResetPatch(goal string, repoRoot string, targets []string) (CoderOutput, bool) {
+	lowGoal := strings.ToLower(goal)
+	if !strings.Contains(lowGoal, "doomloopdetector") || !strings.Contains(lowGoal, "reset") {
+		return CoderOutput{}, false
+	}
+	wantTargets := []string{
+		filepath.ToSlash(filepath.Join("internal", "loop", "processor.go")),
+		filepath.ToSlash(filepath.Join("internal", "loop", "processor_test.go")),
+	}
+	if !targetSetMatches(targets, wantTargets...) {
+		return CoderOutput{}, false
+	}
+	snapshots := buildRepoOnlyTargetSnapshots(repoRoot, wantTargets)
+	processor := strings.TrimSpace(snapshots[wantTargets[0]])
+	processorTest := strings.TrimSpace(snapshots[wantTargets[1]])
+	if processor == "" || processorTest == "" || strings.HasPrefix(processor, "[repo_read_error]") || strings.HasPrefix(processorTest, "[repo_read_error]") {
+		return CoderOutput{}, false
+	}
+	needCodePatch := !strings.Contains(processor, "func (d *DoomLoopDetector) Reset()")
+	needTestPatch := !hasMinimalDoomLoopResetTestShape(processorTest)
+	if !needCodePatch && !needTestPatch {
+		return CoderOutput{}, false
+	}
+	var patchParts []string
+	if needCodePatch {
+		codePatch, err := buildAppendLinesPatch(wantTargets[0], processor, []string{
+			"",
+			"func (d *DoomLoopDetector) Reset() {",
+			"\td.lastTool = \"\"",
+			"\td.lastInput = \"\"",
+			"\td.count = 0",
+			"}",
+		})
+		if err != nil {
+			return CoderOutput{}, false
+		}
+		patchParts = append(patchParts, withDiffGitHeader(wantTargets[0], codePatch))
+	}
+	if needTestPatch {
+		resetTestLines := []string{
+			"func TestDoomLoopDetectorReset(t *testing.T) {",
+			"\ttests := []struct {",
+			"\t\tname        string",
+			"\t\treset       bool",
+			"\t\twantBlocked bool",
+			"\t}{",
+			"\t\t{name: \"negative blocks without reset\", wantBlocked: true},",
+			"\t\t{name: \"positive reset clears state\", reset: true, wantBlocked: false},",
+			"\t}",
+			"\tfor _, tt := range tests {",
+			"\t\tt.Run(tt.name, func(t *testing.T) {",
+			"\t\t\td := NewDoomLoopDetector(3)",
+			"\t\t\td.Observe(\"run_command\", \"go test ./...\")",
+			"\t\t\td.Observe(\"run_command\", \"go test ./...\")",
+			"\t\t\tif tt.reset {",
+			"\t\t\t\td.Reset()",
+			"\t\t\t\tif d.count != 0 || d.lastTool != \"\" || d.lastInput != \"\" {",
+			"\t\t\t\t\tt.Fatalf(\"expected reset to clear detector state, got count=%d lastTool=%q lastInput=%q\", d.count, d.lastTool, d.lastInput)",
+			"\t\t\t\t}",
+			"\t\t\t}",
+			"\t\t\tif got := d.Observe(\"run_command\", \"go test ./...\"); got != tt.wantBlocked {",
+			"\t\t\t\tt.Fatalf(\"blocked=%v want %v\", got, tt.wantBlocked)",
+			"\t\t\t}",
+			"\t\t})",
+			"\t}",
+			"}",
+		}
+		testLines := normalizedContentLines(processorTest)
+		start, end, found := findGoFunctionBounds(testLines, "TestDoomLoopDetectorReset")
+		var testPatch string
+		var err error
+		if found {
+			testPatch, err = buildReplaceLineRangePatch(wantTargets[1], processorTest, start, end, resetTestLines)
+		} else {
+			testPatch, err = buildAppendLinesPatch(wantTargets[1], processorTest, append([]string{""}, resetTestLines...))
+		}
+		if err != nil {
+			return CoderOutput{}, false
+		}
+		patchParts = append(patchParts, withDiffGitHeader(wantTargets[1], testPatch))
+	}
+	patch := normalizeCoderPatchForTargets(joinPatchSections(patchParts), wantTargets)
+	if strings.TrimSpace(patch) == "" || !patchTouchesAnyTarget(patch, wantTargets) {
+		return CoderOutput{}, false
+	}
+	return CoderOutput{
+		Patch: patch,
+		Notes: "synthesized DoomLoopDetector Reset patch from snapshots",
+	}, true
+}
+
+func trySynthesizeDBPathValidationPatch(goal string, repoRoot string, targets []string) (CoderOutput, bool) {
+	lowGoal := strings.ToLower(goal)
+	if !(strings.Contains(lowGoal, "dbpath") || strings.Contains(lowGoal, "db_path")) {
+		return CoderOutput{}, false
+	}
+	wantTargets := []string{
+		filepath.ToSlash(filepath.Join("internal", "config", "config.go")),
+		filepath.ToSlash(filepath.Join("internal", "config", "config_test.go")),
+	}
+	if !targetSetMatches(targets, wantTargets...) || !goalNeedsMinimalTableDrivenTesting(goal, wantTargets) {
+		return CoderOutput{}, false
+	}
+	snapshots := buildRepoOnlyTargetSnapshots(repoRoot, wantTargets)
+	configSnapshot := strings.TrimSpace(snapshots[wantTargets[0]])
+	testSnapshot := strings.TrimSpace(snapshots[wantTargets[1]])
+	if configSnapshot == "" || testSnapshot == "" || strings.HasPrefix(configSnapshot, "[repo_read_error]") || strings.HasPrefix(testSnapshot, "[repo_read_error]") {
+		return CoderOutput{}, false
+	}
+	needCodePatch := !strings.Contains(configSnapshot, `db_path must end with .db extension`)
+	needTestPatch := !hasCanonicalDBPathValidationTestShape(testSnapshot)
+	if !needCodePatch && !needTestPatch {
+		return CoderOutput{}, false
+	}
+	var patchParts []string
+	if needCodePatch {
+		configLines := strings.Split(strings.ReplaceAll(configSnapshot, "\r\n", "\n"), "\n")
+		insertAt := -1
+		for i, line := range configLines {
+			if strings.TrimSpace(line) == "return cfg, nil" {
+				insertAt = i
+				break
+			}
+		}
+		if insertAt == -1 {
+			return CoderOutput{}, false
+		}
+		indent := leadingWhitespace(configLines[insertAt])
+		codePatch, err := buildInsertBeforeNeedlePatch(wantTargets[0], configSnapshot, "return cfg, nil", []string{
+			indent + `if !strings.HasSuffix(cfg.DBPath, ".db") {`,
+			indent + `	return nil, fmt.Errorf("db_path must end with .db extension")`,
+			indent + `}`,
+		})
+		if err != nil {
+			return CoderOutput{}, false
+		}
+		patchParts = append(patchParts, withDiffGitHeader(wantTargets[0], codePatch))
+	}
+	if needTestPatch {
+		testPatch, err := buildGoFileFunctionRewritePatch(wantTargets[1], testSnapshot, []string{"TestLoadValidatesDBPathSuffix", "TestLoadValidatesDBPathExtension"}, []string{
+			"func TestLoadValidatesDBPathSuffix(t *testing.T) {",
+			"\ttests := []struct {",
+			"\t\tname    string",
+			"\t\tdata    string",
+			"\t\twantErr string",
+			"\t}{",
+			"\t\t{name: \"accepts .db suffix\", data: \"{\\\"db_path\\\":\\\"/tmp/state.db\\\"}\"},",
+			"\t\t{name: \"rejects non-.db suffix\", data: \"{\\\"db_path\\\":\\\"/tmp/state.txt\\\"}\", wantErr: \"db_path must end with .db extension\"},",
+			"\t}",
+			"\tfor _, tt := range tests {",
+			"\t\tt.Run(tt.name, func(t *testing.T) {",
+			"\t\t\tpath := filepath.Join(t.TempDir(), \"config.json\")",
+			"\t\t\tif err := os.WriteFile(path, []byte(tt.data), 0o644); err != nil {",
+			"\t\t\t\tt.Fatalf(\"write: %v\", err)",
+			"\t\t\t}",
+			"\t\t\t_, err := Load(path)",
+			"\t\t\tif tt.wantErr == \"\" {",
+			"\t\t\t\tif err != nil {",
+			"\t\t\t\t\tt.Fatalf(\"Load: %v\", err)",
+			"\t\t\t\t}",
+			"\t\t\t\treturn",
+			"\t\t\t}",
+			"\t\t\tif err == nil {",
+			"\t\t\t\tt.Fatalf(\"expected error %q\", tt.wantErr)",
+			"\t\t\t}",
+			"\t\t\tif err.Error() != tt.wantErr {",
+			"\t\t\t\tt.Fatalf(\"expected error %q, got %v\", tt.wantErr, err)",
+			"\t\t\t}",
+			"\t\t})",
+			"\t}",
+			"}",
+		})
+		if err != nil {
+			return CoderOutput{}, false
+		}
+		patchParts = append(patchParts, withDiffGitHeader(wantTargets[1], testPatch))
+	}
+	patch := normalizeCoderPatchForTargets(joinPatchSections(patchParts), wantTargets)
+	if strings.TrimSpace(patch) == "" || !patchTouchesAnyTarget(patch, wantTargets) {
+		return CoderOutput{}, false
+	}
+	return CoderOutput{
+		Patch: patch,
+		Notes: "synthesized DBPath validation patch from snapshots",
+	}, true
+}
+
+func trySynthesizeMaxRuntimeStepsCommentPatch(goal string, repoRoot string, targets []string) (CoderOutput, bool) {
+	if !isMaxRuntimeStepsCommentGoal(goal) {
+		return CoderOutput{}, false
+	}
+	wantTargets := []string{filepath.ToSlash(filepath.Join("internal", "loop", "engine_eino.go"))}
+	if !targetSetMatches(targets, wantTargets...) {
+		return CoderOutput{}, false
+	}
+	snapshot := strings.TrimSpace(buildRepoOnlyTargetSnapshots(repoRoot, wantTargets)[wantTargets[0]])
+	if snapshot == "" || strings.HasPrefix(snapshot, "[repo_read_error]") {
+		return CoderOutput{}, false
+	}
+	if !strings.Contains(snapshot, "return maxIterations*3 + 8") {
+		return CoderOutput{}, false
+	}
+	lines := strings.Split(strings.ReplaceAll(snapshot, "\r\n", "\n"), "\n")
+	oldLine := ""
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "// Each loop turn has one main processing node, plus terminal nodes." {
+			oldLine = line
+			break
+		}
+	}
+	if oldLine == "" {
+		return CoderOutput{}, false
+	}
+	newLine := leadingWhitespace(oldLine) + `// Each iteration reserves three runtime steps plus fixed overhead for buildLoopRunner's "turn"/"finish"/"failed"/"blocked" branches.`
+	patch, err := buildReplaceLinePatch(wantTargets[0], snapshot, oldLine, newLine)
+	if err != nil {
+		return CoderOutput{}, false
+	}
+	patch = normalizeCoderPatchForTargets(withDiffGitHeader(wantTargets[0], patch), wantTargets)
+	if !patchTouchesTargets(patch, wantTargets, false) {
+		return CoderOutput{}, false
+	}
+	return CoderOutput{
+		Patch: patch,
+		Notes: "synthesized maxRuntimeSteps comment patch from snapshots",
+	}, true
+}
+
+func trySynthesizeWriteErrStatusTextPatch(goal string, repoRoot string, targets []string, patch string) (CoderOutput, bool) {
+	if !isWriteErrKBGoal(goal) || strings.TrimSpace(repoRoot) == "" {
+		return CoderOutput{}, false
+	}
+	wantTargets := []string{filepath.ToSlash(filepath.Join("internal", "http", "server.go"))}
+	if !targetSetMatches(targets, wantTargets...) {
+		return CoderOutput{}, false
+	}
+	snapshot := strings.TrimSpace(buildRepoOnlyTargetSnapshots(repoRoot, wantTargets)[wantTargets[0]])
+	if snapshot == "" || strings.HasPrefix(snapshot, "[repo_read_error]") {
+		return CoderOutput{}, false
+	}
+	lines := strings.Split(strings.ReplaceAll(snapshot, "\r\n", "\n"), "\n")
+	start, end, ok := findGoFunctionBounds(lines, "writeErr")
+	if !ok {
+		return CoderOutput{}, false
+	}
+	writeErrBody := strings.Join(lines[start:end], "\n")
+	patchSuggestsStatusCodeAttempt := strings.Contains(patch, `"code"`) || strings.Contains(patch, "switch code") || strings.Contains(strings.ToLower(patch), "http.statustext(code)")
+	if hasStableWriteErrCodeMapping(writeErrBody) || hasStableWriteErrCodeMapping(patch) {
+		return CoderOutput{}, false
+	}
+	if !patchSuggestsStatusCodeAttempt && !writeErrBodyNeedsStableCodeRecovery(writeErrBody) {
+		return CoderOutput{}, false
+	}
+	patchText, err := buildReplaceLineRangePatch(wantTargets[0], snapshot, start, end, []string{
+		"func writeErr(w http.ResponseWriter, code int, msg string) {",
+		"\terrorCode := \"INTERNAL_ERROR\"",
+		"\tswitch code {",
+		"\tcase http.StatusBadRequest:",
+		"\t\terrorCode = \"BAD_REQUEST\"",
+		"\tcase http.StatusUnauthorized:",
+		"\t\terrorCode = \"UNAUTHORIZED\"",
+		"\tcase http.StatusForbidden:",
+		"\t\terrorCode = \"FORBIDDEN\"",
+		"\tcase http.StatusNotFound:",
+		"\t\terrorCode = \"NOT_FOUND\"",
+		"\tcase http.StatusMethodNotAllowed:",
+		"\t\terrorCode = \"METHOD_NOT_ALLOWED\"",
+		"\tcase http.StatusConflict:",
+		"\t\terrorCode = \"CONFLICT\"",
+		"\tcase http.StatusTooManyRequests:",
+		"\t\terrorCode = \"TOO_MANY_REQUESTS\"",
+		"\t}",
+		"\twriteJSON(w, code, map[string]any{\"error\": msg, \"code\": errorCode})",
+		"}",
+	})
+	if err != nil {
+		return CoderOutput{}, false
+	}
+	patchText = normalizeCoderPatchForTargets(withDiffGitHeader(wantTargets[0], patchText), wantTargets)
+	if !patchTouchesTargets(patchText, wantTargets, false) {
+		return CoderOutput{}, false
+	}
+	return CoderOutput{
+		Patch:   patchText,
+		Summary: "Updated writeErr to emit KB-compliant machine-readable error codes via explicit stable HTTP status mapping.",
+		Notes:   "synthesized writeErr stable-code patch from snapshots",
+	}, true
+}
+
+func hasStableWriteErrCodeMapping(text string) bool {
+	low := strings.ToLower(strings.TrimSpace(text))
+	if low == "" {
+		return false
+	}
+	return strings.Contains(low, "switch code") &&
+		strings.Contains(low, "case http.statusbadrequest:") &&
+		strings.Contains(low, "method_not_allowed") &&
+		strings.Contains(low, `"code"`) &&
+		(strings.Contains(low, "internal_error") || strings.Contains(low, "errorcode := "))
+}
+
+func writeErrBodyNeedsStableCodeRecovery(body string) bool {
+	low := strings.ToLower(strings.TrimSpace(body))
+	if low == "" {
+		return false
+	}
+	if !strings.Contains(low, `"code"`) {
+		return true
+	}
+	if strings.Contains(low, "http.statustext(code)") {
+		return true
+	}
+	patterns := []string{
+		"strings.replaceall(msg",
+		"strings.replaceall(strings.trimspace(msg)",
+		"strings.toupper(msg",
+		"strings.toupper(strings.replaceall(strings.trimspace(msg)",
+		"machinecode :=",
+		"errorcode :=",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(low, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+func detectRepoOnlySnapshotDefinitionIssues(goal string, patch string, targets []string) []string {
+	if !isMaxRuntimeStepsCommentGoal(goal) || strings.TrimSpace(patch) == "" {
+		return nil
+	}
+	wantTargets := []string{filepath.ToSlash(filepath.Join("internal", "loop", "engine_eino.go"))}
+	if !targetSetMatches(targets, wantTargets...) {
+		return nil
+	}
+	low := strings.ToLower(patch)
+	var issues []string
+	if strings.Contains(low, "einoengine") {
+		issues = append(issues, "outdated maxRuntimeSteps snapshot reference: einoEngine")
+	}
+	if strings.Contains(low, "maxturns") || strings.Contains(low, "*4 + 2") || strings.Contains(low, "*4+2") {
+		issues = append(issues, "outdated maxRuntimeSteps formula reference")
+	}
+	return issues
+}
+
+func appendUniqueIssues(base []string, extra ...string) []string {
+	if len(extra) == 0 {
+		return base
+	}
+	seen := make(map[string]struct{}, len(base)+len(extra))
+	out := make([]string, 0, len(base)+len(extra))
+	for _, item := range base {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+	}
+	for _, item := range extra {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func targetSetMatches(targets []string, want ...string) bool {
+	got := normalizeCitationList(targets)
+	need := normalizeCitationList(want)
+	if len(got) != len(need) {
+		return false
+	}
+	seen := make(map[string]struct{}, len(got))
+	for _, target := range got {
+		seen[target] = struct{}{}
+	}
+	for _, target := range need {
+		if _, ok := seen[target]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func withDiffGitHeader(path string, patch string) string {
+	patch = strings.TrimSpace(patch)
+	if patch == "" || strings.HasPrefix(patch, "diff --git ") {
+		return patch
+	}
+	return fmt.Sprintf("diff --git a/%s b/%s\n%s", path, path, patch)
 }

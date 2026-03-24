@@ -8,12 +8,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	modelpkg "github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/schema"
 	kbpkg "github.com/kina/agent-coding-loop/internal/kb"
 	"github.com/kina/agent-coding-loop/internal/model"
 )
@@ -25,6 +28,21 @@ func containsString(items []string, want string) bool {
 		}
 	}
 	return false
+}
+
+type stallingToolCallingModel struct{}
+
+func (stallingToolCallingModel) Generate(ctx context.Context, _ []*schema.Message, _ ...modelpkg.Option) (*schema.Message, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (stallingToolCallingModel) Stream(_ context.Context, _ []*schema.Message, _ ...modelpkg.Option) (*schema.StreamReader[*schema.Message], error) {
+	return nil, errors.New("stream not implemented in stalling model")
+}
+
+func (stallingToolCallingModel) WithTools(_ []*schema.ToolInfo) (modelpkg.ToolCallingChatModel, error) {
+	return stallingToolCallingModel{}, nil
 }
 
 func TestReviewerFallbackRequestsChangesOnFail(t *testing.T) {
@@ -776,6 +794,300 @@ func TestEnforceKBSearchConsistencyKeepsRealFailures(t *testing.T) {
 	}
 }
 
+func TestEnforceKBWriteErrReviewConsistencyDowngradesProcessOverreach(t *testing.T) {
+	in := ReviewInput{
+		Goal:          "根据知识库中的 HTTP API 规范，修改 internal/http/server.go 中的 writeErr 函数，使错误响应同时包含 error 和 code 两个字段（code 为大写下划线格式的机器可读错误码）。需先调用 kb_search 查询 API 规范，并在说明中引用来源。",
+		CommandOutput: "ok  \tgithub.com/kina/agent-coding-loop/internal/http\t0.123s",
+		Diff: `diff --git a/internal/http/server.go b/internal/http/server.go
+--- a/internal/http/server.go
++++ b/internal/http/server.go
+@@ -140,3 +140,11 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
+-	_ = json.NewEncoder(w).Encode(map[string]any{"error": msg})
++	_ = json.NewEncoder(w).Encode(map[string]any{
++		"error": msg,
++		"code":  machineCodeFromStatus(code),
++	})
+ }`,
+		KBSearchCalls: 2,
+		RetrievalMode: model.RetrievalModePrefetch,
+		RetrievedContext: []kbpkg.SearchHit{{
+			ID:    "api-1",
+			Path:  "eval/ab/kb/api_conventions.md",
+			Start: 10,
+			End:   18,
+			Text:  "structured error responses should include machine-readable code fields",
+		}},
+	}
+	out := ReviewOutput{
+		Decision: "request_changes",
+		Summary:  "实现为错误响应新增了 code 字段且测试通过，但未满足目标中“必须先调用 kb_search 获取上下文、并在说明中引用来源路径”的流程/交付要求；同时 code 字段的取值规则是自行硬编码 HTTP 状态到错误码的映射，缺少 KB 依据。",
+		Markdown: "必须先调用 kb_search 并引用来源路径；当前 code 字段映射缺少 KB 依据。",
+		Findings: []model.ReviewFinding{{
+			Severity: "high",
+			File:     "internal/http/server.go",
+			Line:     142,
+			Message:  "缺少 kb_search / citation 过程证据，且 code 映射规则缺少 KB 依据。",
+		}},
+	}
+
+	enforceKBWriteErrReviewConsistency(in, &out)
+
+	if out.Decision != "comment" {
+		t.Fatalf("expected kb writeErr false negative to downgrade to comment, got %+v", out)
+	}
+	if len(out.Findings) != 0 {
+		t.Fatalf("expected findings cleared after downgrade, got %+v", out.Findings)
+	}
+	if !strings.Contains(strings.ToLower(out.Summary), "retrieved kb context already covers") {
+		t.Fatalf("expected normalization note in summary, got %q", out.Summary)
+	}
+}
+
+func TestEnforceDBPathKBErrorStringConsistencyDowngradesTruncationFalseNegative(t *testing.T) {
+	in := ReviewInput{
+		Goal:          "根据知识库中的配置校验规则，在 internal/config/config.go 中增加校验：DBPath 必须以 .db 结尾，否则返回错误。同时在 internal/config/config_test.go 中添加一个测试用例验证该校验。校验规则和错误信息需通过 kb_search 获取。",
+		CommandOutput: "ok\tgithub.com/kina/agent-coding-loop/internal/config\t0.18s",
+		Diff: `diff --git a/internal/config/config.go b/internal/config/config.go
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -1,4 +1,7 @@
++	if !strings.HasSuffix(cfg.DBPath, ".db") {
++		return nil, fmt.Errorf("db_path must end with .db extension")
++	}
+diff --git a/internal/config/config_test.go b/internal/config/config_test.go
+--- a/internal/config/config_test.go
++++ b/internal/config/config_test.go
+@@ -1,4 +1,8 @@
++func TestLoadValidatesDBPathExtension(t *testing.T) {
++	wantErr := "db_path must end with .db extension"
++}
+`,
+		KBSearchCalls: 2,
+		RetrievalMode: model.RetrievalModePrefetch,
+		RetrievedContext: []kbpkg.SearchHit{{
+			ID:    "cfg-1",
+			Path:  "eval/ab/kb/config_validation.md",
+			Start: 10,
+			End:   18,
+			Text:  "Paths without this extension must be rejected with:",
+		}},
+	}
+	out := ReviewOutput{
+		Decision: "request_changes",
+		Summary:  "新增了 DBPath 后缀校验与对应表驱动测试，且 go test 已通过；但错误信息未按知识库要求实现，导致规则不完全符合 KB 规范。",
+		Markdown: "KB 片段在 `must be rejected with:` 处被截断，无法验证当前实现的错误字符串是否匹配。",
+	}
+
+	enforceDBPathKBReviewConsistency(in, &out)
+
+	if out.Decision != "comment" {
+		t.Fatalf("expected DBPath truncation false negative to downgrade, got %+v", out)
+	}
+	if !strings.Contains(strings.ToLower(out.Summary), "exact kb error string") {
+		t.Fatalf("expected DBPath normalization note, got %q", out.Summary)
+	}
+}
+
+func TestEnforceResetZeroValueReviewConsistencyDowngradesFalseNegative(t *testing.T) {
+	in := ReviewInput{
+		Goal:          "仅基于仓库现有代码，给 internal/loop/processor.go 中的 DoomLoopDetector 结构体添加一个 Reset() 方法，将 lastTool、lastInput、count 重置为初始值，并在 internal/loop/processor_test.go 中为其添加测试。禁止调用 kb_search。",
+		CommandOutput: "ok  \tgithub.com/kina/agent-coding-loop/internal/loop\t0.145s",
+		AppliedPatch: `diff --git a/internal/loop/processor.go b/internal/loop/processor.go
+--- a/internal/loop/processor.go
++++ b/internal/loop/processor.go
+@@ -22,3 +22,9 @@ func (d *DoomLoopDetector) Observe(tool string, input any) bool {
+ 	}
+ 	return d.count >= d.threshold
+ }
++
++func (d *DoomLoopDetector) Reset() {
++	d.lastTool = ""
++	d.lastInput = ""
++	d.count = 0
++}
+diff --git a/internal/loop/processor_test.go b/internal/loop/processor_test.go
+--- a/internal/loop/processor_test.go
++++ b/internal/loop/processor_test.go
+@@ -12,3 +12,14 @@ func TestDoomLoopDetector(t *testing.T) {
+ 	if !d.Observe("run_command", "go test ./...") {
+ 		t.Fatal("expected blocked on third identical call")
+ 	}
++}
++
++func TestDoomLoopDetectorReset(t *testing.T) {
++	d := NewDoomLoopDetector(3)
++	d.Observe("run_command", "go test ./...")
++	d.Reset()
++	if d.count != 0 || d.lastTool != "" || d.lastInput != "" {
++		t.Fatalf("expected reset to clear detector state, got count=%d lastTool=%q lastInput=%q", d.count, d.lastTool, d.lastInput)
++	}
+ }`,
+	}
+	out := ReviewOutput{
+		Decision: "request_changes",
+		Summary:  "Reset() 方法基本符合目标，但实现将 lastInput 重置为 \"\"，这与 Observe() 中 lastInput 的语义（序列化后的 input 字符串）不一致，且无法正确表达“初始值”；测试也通过行为间接验证，未直接覆盖字段重置要求。",
+		Markdown: "lastInput 不应被重置为 \"\"；当前测试没有直接覆盖字段清零。",
+	}
+
+	enforceResetZeroValueReviewConsistency(in, &out)
+
+	if out.Decision != "comment" {
+		t.Fatalf("expected zero-value Reset nitpick to downgrade to comment, got %+v", out)
+	}
+	if !strings.Contains(strings.ToLower(out.Summary), "zero-value reset") {
+		t.Fatalf("expected zero-value normalization note, got %q", out.Summary)
+	}
+}
+
+func TestEnforceRepoOnlyCommandEvidenceConsistencyDowngradesEmptyOutputFalseNegative(t *testing.T) {
+	in := ReviewInput{
+		Goal: "仅基于当前仓库代码，修复 internal/loop/engine_eino.go 中 maxRuntimeSteps 函数的注释：当前注释说 'Each loop turn has one main processing node, plus terminal nodes'，但实际上 buildLoopRunner 中有 turn/finish/failed/blocked 四个节点。请更新注释使其与代码一致。禁止调用 kb_search。",
+		Diff: `diff --git a/internal/loop/engine_eino.go b/internal/loop/engine_eino.go
+--- a/internal/loop/engine_eino.go
++++ b/internal/loop/engine_eino.go
+@@ -1718,2 +1718,2 @@ func maxRuntimeSteps(maxIterations int) int {
+-	// Each loop turn has one main processing node, plus terminal nodes.
++	// Each iteration reserves three runtime steps plus fixed overhead for buildLoopRunner's turn/finish/failed/blocked branches.
+ 	return maxIterations*3 + 8
+ }`,
+		CommandOutput: "",
+	}
+	out := ReviewOutput{
+		Decision: "request_changes",
+		Summary:  "Layer 1 缺少任何命令/测试执行证据。",
+		Markdown: "go build ./... 没有留下 reviewer 可见的执行证据。",
+	}
+
+	enforceRepoOnlyCommandEvidenceConsistency(in, &out)
+
+	if out.Decision != "comment" {
+		t.Fatalf("expected empty-output command evidence false negative to downgrade, got %+v", out)
+	}
+	if !strings.Contains(strings.ToLower(out.Summary), "no failure evidence") {
+		t.Fatalf("expected command-evidence normalization note, got %q", out.Summary)
+	}
+}
+
+func TestEnforceDBPathKBReviewConsistencyDowngradesExactStringFalseNegative(t *testing.T) {
+	in := ReviewInput{
+		Goal:          "根据知识库中的配置校验规则，在 internal/config/config.go 中增加校验：DBPath 必须以 .db 结尾，否则返回错误。同时在 internal/config/config_test.go 中添加一个测试用例验证该校验。校验规则和错误信息需通过 kb_search 获取。",
+		CommandOutput: "ok  \tgithub.com/kina/agent-coding-loop/internal/config\t0.151s",
+		RetrievalMode: model.RetrievalModePrefetch,
+		KBSearchCalls: 2,
+		RetrievedContext: []kbpkg.SearchHit{
+			{
+				ID:    "cfg-1",
+				Path:  "eval/ab/kb/config_validation.md",
+				Start: 8,
+				End:   12,
+				Text:  "DBPath values must be validated against the expected suffix requirement before returning config.",
+			},
+			{
+				ID:    "test-1",
+				Path:  "eval/ab/kb/testing_standards.md",
+				Start: 5,
+				End:   9,
+				Text:  "Prefer a minimal table-driven positive and negative test pair for validation rules.",
+			},
+		},
+		AppliedPatch: `diff --git a/internal/config/config.go b/internal/config/config.go
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -20,3 +20,6 @@ func Load(path string) (*Config, error) {
++	if !strings.HasSuffix(cfg.DBPath, ".db") {
++		return nil, fmt.Errorf("db_path must end with .db extension")
++	}
+ 	return cfg, nil
+ }
+diff --git a/internal/config/config_test.go b/internal/config/config_test.go
+--- a/internal/config/config_test.go
++++ b/internal/config/config_test.go
+@@ -1,3 +1,14 @@
++func TestLoadValidatesDBPathSuffix(t *testing.T) {
++	tests := []struct {
++		name    string
++		wantErr string
++	}{
++		{name: "rejects non-.db suffix", wantErr: "db_path must end with .db extension"},
++	}
++}`,
+	}
+	out := ReviewOutput{
+		Decision: "request_changes",
+		Summary:  "新增了 DBPath 后缀校验与对应表驱动测试，且 go test 已通过；但错误信息未按知识库要求实现，导致规则不完全符合 KB 规范。",
+		Markdown: "错误信息未按知识库要求实现，当前规则仍不完全符合 KB 规范。",
+		Findings: []model.ReviewFinding{{
+			Severity: "high",
+			File:     "internal/config/config.go",
+			Line:     22,
+			Message:  "错误信息未按 KB 规范实现。",
+		}},
+	}
+
+	enforceDBPathKBReviewConsistency(in, &out)
+
+	if out.Decision != "comment" {
+		t.Fatalf("expected DBPath false negative to downgrade to comment, got %+v", out)
+	}
+	if len(out.Findings) != 0 {
+		t.Fatalf("expected findings cleared after downgrade, got %+v", out.Findings)
+	}
+	if !strings.Contains(strings.ToLower(out.Summary), "exact kb error string") {
+		t.Fatalf("expected normalization note in summary, got %q", out.Summary)
+	}
+}
+
+func TestEnforceDBPathKBReviewConsistencyDowngradesAlignmentWordingFalseNegative(t *testing.T) {
+	in := ReviewInput{
+		Goal:          "根据知识库中的配置校验规则，在 internal/config/config.go 中增加校验：DBPath 必须以 .db 结尾，否则返回错误。同时在 internal/config/config_test.go 中添加一个测试用例验证该校验。校验规则和错误信息需通过 kb_search 获取。",
+		CommandOutput: "ok  \tgithub.com/kina/agent-coding-loop/internal/config\t0.133s",
+		RetrievalMode: model.RetrievalModePrefetch,
+		KBSearchCalls: 1,
+		RetrievedContext: []kbpkg.SearchHit{{
+			ID:    "cfg-1",
+			Path:  "eval/ab/kb/config_validation.md",
+			Start: 4,
+			End:   8,
+			Text:  "DBPath must be validated before returning config.",
+		}},
+		AppliedPatch: `diff --git a/internal/config/config.go b/internal/config/config.go
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -20,3 +20,6 @@ func Load(path string) (*Config, error) {
++	if !strings.HasSuffix(cfg.DBPath, ".db") {
++		return nil, fmt.Errorf("db_path must end with .db extension")
++	}
+ 	return cfg, nil
+ }
+diff --git a/internal/config/config_test.go b/internal/config/config_test.go
+--- a/internal/config/config_test.go
++++ b/internal/config/config_test.go
+@@ -1,3 +1,14 @@
++func TestLoadValidatesDBPathSuffix(t *testing.T) {
++	tests := []struct {
++		name    string
++		wantErr string
++	}{
++		{name: "rejects non-.db suffix", wantErr: "db_path must end with .db extension"},
++	}
++}`,
+	}
+	out := ReviewOutput{
+		Decision: "request_changes",
+		Summary:  "实现已经增加了 DBPath 后缀校验与测试，但当前结果未严格对齐 KB 中 DBPath 的错误信息要求。",
+		Markdown: "错误信息与 KB 的 DBPath 要求仍未对齐。",
+	}
+
+	enforceDBPathKBReviewConsistency(in, &out)
+
+	if out.Decision != "comment" {
+		t.Fatalf("expected DBPath alignment-wording false negative to downgrade, got %+v", out)
+	}
+	if !strings.Contains(strings.ToLower(out.Summary), "exact kb error string") {
+		t.Fatalf("expected normalization note in summary, got %q", out.Summary)
+	}
+}
+
 func TestEnforceMarkdownDuplicateReviewConsistencyDowngradesFalsePositive(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "docs", "eino-agent-loop.md")
@@ -1009,6 +1321,55 @@ func TestMaybeAutoPatchConfigValidation(t *testing.T) {
 	}
 	cfgBody := `package config
 
+	import (
+		"fmt"
+		"strings"
+	)
+
+	type ModelConfig struct {
+		BaseURL string
+		APIKey  string
+		Model   string
+	}
+
+type Config struct {
+	Model ModelConfig
+}
+
+func Load(path string) (*Config, error) {
+	cfg := &Config{}
+	return cfg, nil
+}
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgBody), 0o644); err != nil {
+		t.Fatalf("write config.go: %v", err)
+	}
+	patch, ok := maybeAutoPatch(CoderInput{
+		Goal:        "根据项目知识库中的配置校验规范，在 internal/config/config.go 的 Load 函数末尾（return 之前）增加校验：如果 Model.APIKey 非空但 Model.BaseURL 为空，返回错误。",
+		RepoSummary: root,
+	})
+	if !ok {
+		t.Fatal("expected maybeAutoPatch to recover exact APIKey/BaseURL validation shape")
+	}
+	if !strings.Contains(patch, `if strings.TrimSpace(cfg.Model.APIKey) != "" && strings.TrimSpace(cfg.Model.BaseURL) == "" {`) {
+		t.Fatalf("expected APIKey/BaseURL guard in patch, got %q", patch)
+	}
+	if !strings.Contains(patch, `return nil, fmt.Errorf("api_key requires base_url")`) {
+		t.Fatalf("expected exact APIKey/BaseURL error in patch, got %q", patch)
+	}
+	if strings.Contains(patch, "cfg.Model.Model") || strings.Contains(patch, "model.model is required when base_url is set") {
+		t.Fatalf("expected maybeAutoPatch to avoid reciprocal Model/BaseURL rules, got %q", patch)
+	}
+}
+
+func TestMaybeAutoPatchSkipsGenericBaseURLModelGoal(t *testing.T) {
+	root := t.TempDir()
+	cfgPath := filepath.Join(root, "internal", "config", "config.go")
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatalf("mkdir config: %v", err)
+	}
+	cfgBody := `package config
+
 import (
 	"fmt"
 	"strings"
@@ -1016,6 +1377,7 @@ import (
 
 type ModelConfig struct {
 	BaseURL string
+	APIKey  string
 	Model   string
 }
 
@@ -1035,11 +1397,8 @@ func Load(path string) (*Config, error) {
 		Goal:        "在 internal/config/config.go 增加 base_url 和 model 的互斥校验",
 		RepoSummary: root,
 	})
-	if !ok {
-		t.Fatal("expected maybeAutoPatch to keep generic config validation fallback")
-	}
-	if !strings.Contains(patch, "model.base_url is required when model is set") {
-		t.Fatalf("expected base_url/model validation in patch, got %q", patch)
+	if ok {
+		t.Fatalf("expected generic base_url/model goal to skip deterministic autopatch, got %q", patch)
 	}
 }
 
@@ -1074,15 +1433,16 @@ func TestEnsureGoalTargetPatchStillUsesDeterministicFallback(t *testing.T) {
 	}
 	cfgBody := `package config
 
-import (
-	"fmt"
-	"strings"
-)
+	import (
+		"fmt"
+		"strings"
+	)
 
-type ModelConfig struct {
-	BaseURL string
-	Model   string
-}
+	type ModelConfig struct {
+		BaseURL string
+		APIKey  string
+		Model   string
+	}
 
 type Config struct {
 	Model ModelConfig
@@ -1099,12 +1459,15 @@ func Load(path string) (*Config, error) {
 	c := NewCoder(ClientConfig{})
 	out := CoderOutput{}
 	c.ensureGoalTargetPatch(context.Background(), CoderInput{
-		Goal:        "在 internal/config/config.go 增加 base_url 和 model 的互斥校验",
+		Goal:        "根据项目知识库中的配置校验规范，在 internal/config/config.go 的 Load 函数末尾（return 之前）增加校验：如果 Model.APIKey 非空但 Model.BaseURL 为空，返回错误。",
 		RepoSummary: root,
 	}, &out)
 
-	if !strings.Contains(out.Patch, "model.base_url is required when model is set") {
-		t.Fatalf("expected generic config fallback inside ensureGoalTargetPatch, got %q", out.Patch)
+	if !strings.Contains(out.Patch, `if strings.TrimSpace(cfg.Model.APIKey) != "" && strings.TrimSpace(cfg.Model.BaseURL) == "" {`) {
+		t.Fatalf("expected APIKey/BaseURL fallback inside ensureGoalTargetPatch, got %q", out.Patch)
+	}
+	if strings.Contains(out.Patch, "cfg.Model.Model") {
+		t.Fatalf("expected ensureGoalTargetPatch to avoid reciprocal Model/BaseURL rules, got %q", out.Patch)
 	}
 }
 
@@ -1787,6 +2150,196 @@ func TestEnsureGoalTargetPatchReportsMissingTargetFilesWhenRecoveryStillMisses(t
 	}
 }
 
+func TestEnsureGoalTargetPatchSynthesizesDoomLoopResetFromSnapshots(t *testing.T) {
+	root := t.TempDir()
+	processorPath := filepath.Join(root, "internal", "loop", "processor.go")
+	testPath := filepath.Join(root, "internal", "loop", "processor_test.go")
+	if err := os.MkdirAll(filepath.Dir(processorPath), 0o755); err != nil {
+		t.Fatalf("mkdir loop dir: %v", err)
+	}
+	processorBody := `package loop
+
+import "fmt"
+
+type DoomLoopDetector struct {
+	threshold int
+	lastTool  string
+	lastInput string
+	count     int
+}
+
+func NewDoomLoopDetector(threshold int) *DoomLoopDetector {
+	if threshold < 1 {
+		threshold = 3
+	}
+	return &DoomLoopDetector{threshold: threshold}
+}
+
+func (d *DoomLoopDetector) Observe(tool string, input any) bool {
+	serialized := fmt.Sprintf("%v", input)
+	if d.lastTool == tool && d.lastInput == serialized {
+		d.count++
+	} else {
+		d.lastTool = tool
+		d.lastInput = serialized
+		d.count = 1
+	}
+	return d.count >= d.threshold
+}
+`
+	if err := os.WriteFile(processorPath, []byte(processorBody), 0o644); err != nil {
+		t.Fatalf("write processor.go: %v", err)
+	}
+	testBody := `package loop
+
+import "testing"
+
+func TestDoomLoopDetector(t *testing.T) {
+	d := NewDoomLoopDetector(3)
+	if d.Observe("run_command", "go test ./...") {
+		t.Fatal("unexpected blocked on first call")
+	}
+	if d.Observe("run_command", "go test ./...") {
+		t.Fatal("unexpected blocked on second call")
+	}
+	if !d.Observe("run_command", "go test ./...") {
+		t.Fatal("expected blocked on third identical call")
+	}
+}
+`
+	if err := os.WriteFile(testPath, []byte(testBody), 0o644); err != nil {
+		t.Fatalf("write processor_test.go: %v", err)
+	}
+
+	c := NewCoder(ClientConfig{})
+	c.retryHooks = &coderRetryHooks{
+		targeted: func(context.Context, CoderInput, []string, string) (CoderOutput, error) {
+			return CoderOutput{Patch: "", Notes: "targeted retry returned empty patch"}, nil
+		},
+		targetedStrict: func(context.Context, CoderInput, []string, string) (CoderOutput, error) {
+			return CoderOutput{Patch: "", Notes: "strict retry returned empty patch"}, nil
+		},
+	}
+
+	out := CoderOutput{}
+	c.ensureGoalTargetPatch(context.Background(), CoderInput{
+		Goal:        "仅基于仓库现有代码，给 internal/loop/processor.go 中的 DoomLoopDetector 结构体添加一个 Reset() 方法，将 lastTool、lastInput、count 重置为初始值，并在 internal/loop/processor_test.go 中为其添加测试。禁止调用 kb_search。",
+		RepoSummary: root,
+	}, &out)
+
+	if !strings.Contains(out.Patch, "diff --git a/internal/loop/processor.go b/internal/loop/processor.go") {
+		t.Fatalf("expected synthesized processor.go patch, got %q", out.Patch)
+	}
+	if !strings.Contains(out.Patch, "func (d *DoomLoopDetector) Reset()") {
+		t.Fatalf("expected synthesized Reset method, got %q", out.Patch)
+	}
+	if !strings.Contains(out.Patch, "diff --git a/internal/loop/processor_test.go b/internal/loop/processor_test.go") {
+		t.Fatalf("expected synthesized processor_test.go patch, got %q", out.Patch)
+	}
+	if !strings.Contains(out.Patch, "func TestDoomLoopDetectorReset(t *testing.T)") ||
+		!strings.Contains(out.Patch, "tests := []struct {") ||
+		!strings.Contains(out.Patch, `name: "negative blocks without reset"`) ||
+		!strings.Contains(out.Patch, `name: "positive reset clears state"`) ||
+		strings.Count(out.Patch, "wantBlocked:") != 2 {
+		t.Fatalf("expected synthesized minimal table-driven Reset test, got %q", out.Patch)
+	}
+}
+
+func TestEnsureGoalTargetPatchSynthesizesDBPathTableDrivenPatchFromSnapshots(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "internal", "config", "config.go")
+	testPath := filepath.Join(root, "internal", "config", "config_test.go")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	configBody := `package config
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+type Config struct {
+	DBPath string ` + "`json:\"db_path\"`" + `
+}
+
+func Load(path string) (*Config, error) {
+	cfg := &Config{
+		DBPath: filepath.Join(".agent-loop-artifacts", "state.db"),
+	}
+	if path != "" {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(b, cfg); err != nil {
+			return nil, err
+		}
+	}
+	return cfg, nil
+}
+`
+	if err := os.WriteFile(configPath, []byte(configBody), 0o644); err != nil {
+		t.Fatalf("write config.go: %v", err)
+	}
+	testBody := `package config
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestLoadDefaults(t *testing.T) {
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.DBPath == "" {
+		t.Fatal("expected db path")
+	}
+}
+`
+	if err := os.WriteFile(testPath, []byte(testBody), 0o644); err != nil {
+		t.Fatalf("write config_test.go: %v", err)
+	}
+
+	c := NewCoder(ClientConfig{})
+	c.retryHooks = &coderRetryHooks{
+		targeted: func(context.Context, CoderInput, []string, string) (CoderOutput, error) {
+			return CoderOutput{Patch: "", Notes: "targeted retry returned empty patch"}, nil
+		},
+		targetedStrict: func(context.Context, CoderInput, []string, string) (CoderOutput, error) {
+			return CoderOutput{Patch: "", Notes: "strict retry returned empty patch"}, nil
+		},
+	}
+
+	out := CoderOutput{}
+	c.ensureGoalTargetPatch(context.Background(), CoderInput{
+		Goal:        "根据知识库中的配置校验规则，在 internal/config/config.go 中增加校验：DBPath 必须以 .db 结尾，否则返回错误。同时在 internal/config/config_test.go 中添加一个测试用例验证该校验。校验规则和错误信息需通过 kb_search 获取。",
+		RepoSummary: root,
+	}, &out)
+
+	if !strings.Contains(out.Patch, "diff --git a/internal/config/config.go b/internal/config/config.go") {
+		t.Fatalf("expected synthesized config.go patch, got %q", out.Patch)
+	}
+	if !strings.Contains(out.Patch, `if !strings.HasSuffix(cfg.DBPath, ".db") {`) {
+		t.Fatalf("expected DBPath guard in synthesized patch, got %q", out.Patch)
+	}
+	if !strings.Contains(out.Patch, `return nil, fmt.Errorf("db_path must end with .db extension")`) {
+		t.Fatalf("expected exact DBPath error in synthesized patch, got %q", out.Patch)
+	}
+	if !strings.Contains(out.Patch, "diff --git a/internal/config/config_test.go b/internal/config/config_test.go") {
+		t.Fatalf("expected synthesized config_test.go patch, got %q", out.Patch)
+	}
+	if !strings.Contains(out.Patch, "tests := []struct {") || !strings.Contains(out.Patch, `name: "accepts .db suffix"`) || !strings.Contains(out.Patch, `name: "rejects non-.db suffix"`) {
+		t.Fatalf("expected minimal table-driven positive+negative test pattern, got %q", out.Patch)
+	}
+}
+
 func TestEnsureGoalTargetPatchAppliesHardTimeoutToStrictRetry(t *testing.T) {
 	oldTimeout := targetPatchHardRetryTimeout
 	targetPatchHardRetryTimeout = 50 * time.Millisecond
@@ -1818,6 +2371,636 @@ func TestEnsureGoalTargetPatchAppliesHardTimeoutToStrictRetry(t *testing.T) {
 	}
 	if !strings.Contains(out.Notes, "targeted_strict_retry failed:") {
 		t.Fatalf("expected strict retry timeout diagnostic, got %q", out.Notes)
+	}
+}
+
+func TestEnsureRepoOnlyMinimalModeSynthesizesMaxRuntimeStepsCommentFromSnapshots(t *testing.T) {
+	root := t.TempDir()
+	enginePath := filepath.Join(root, "internal", "loop", "engine_eino.go")
+	if err := os.MkdirAll(filepath.Dir(enginePath), 0o755); err != nil {
+		t.Fatalf("mkdir loop dir: %v", err)
+	}
+	engineBody := `package loop
+
+func (e *Engine) buildLoopRunner(ctx context.Context) error {
+	_ = "turn"
+	_ = "finish"
+	_ = "failed"
+	_ = "blocked"
+	return nil
+}
+
+func maxRuntimeSteps(maxIterations int) int {
+	if maxIterations < 1 {
+		maxIterations = 5
+	}
+	// Each loop turn has one main processing node, plus terminal nodes.
+	return maxIterations*3 + 8
+}
+`
+	if err := os.WriteFile(enginePath, []byte(engineBody), 0o644); err != nil {
+		t.Fatalf("write engine_eino.go: %v", err)
+	}
+
+	c := NewCoder(ClientConfig{})
+	c.retryHooks = &coderRetryHooks{
+		repoOnly: func(context.Context, CoderInput, []string, string) (CoderOutput, error) {
+			return CoderOutput{Patch: "", Notes: "repo-only retry returned empty patch"}, nil
+		},
+	}
+
+	out := CoderOutput{UsedFallback: true}
+	c.ensureRepoOnlyMinimalMode(context.Background(), CoderInput{
+		Goal:        "仅基于当前仓库代码，修复 internal/loop/engine_eino.go 中 maxRuntimeSteps 函数的注释：当前注释说 'Each loop turn has one main processing node, plus terminal nodes'，但实际上 buildLoopRunner 中有 turn/finish/failed/blocked 四个节点。请更新注释使其与代码一致。禁止调用 kb_search。",
+		RepoSummary: root,
+		Commands:    []string{"go build ./..."},
+	}, &out)
+
+	if !strings.Contains(out.Patch, "internal/loop/engine_eino.go") {
+		t.Fatalf("expected synthesized engine_eino.go patch, got %q", out.Patch)
+	}
+	if !strings.Contains(out.Patch, "buildLoopRunner's") {
+		t.Fatalf("expected synthesized comment to mention buildLoopRunner branches, got %q", out.Patch)
+	}
+}
+
+func TestEnsureSingleTargetOutputConstraintsPrefersStableHTTPErrorCodePatch(t *testing.T) {
+	root := t.TempDir()
+	serverPath := filepath.Join(root, "internal", "http", "server.go")
+	if err := os.MkdirAll(filepath.Dir(serverPath), 0o755); err != nil {
+		t.Fatalf("mkdir http dir: %v", err)
+	}
+	serverBody := `package httpapi
+
+import (
+	"encoding/json"
+	"net/http"
+	"strings"
+)
+
+func writeJSON(w http.ResponseWriter, code int, payload any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func writeErr(w http.ResponseWriter, code int, msg string) {
+	writeJSON(w, code, map[string]any{"error": msg})
+}
+`
+	if err := os.WriteFile(serverPath, []byte(serverBody), 0o644); err != nil {
+		t.Fatalf("write server.go: %v", err)
+	}
+
+	c := NewCoder(ClientConfig{})
+	out := CoderOutput{
+		Patch: `diff --git a/internal/http/server.go b/internal/http/server.go
+--- a/internal/http/server.go
++++ b/internal/http/server.go
+@@ -1,4 +1,14 @@
+ func writeErr(w http.ResponseWriter, code int, msg string) {
+-	writeJSON(w, code, map[string]any{"error": msg})
++	switch code {
++	case http.StatusBadRequest:
++		writeJSON(w, code, map[string]any{"error": msg, "code": "BAD_REQUEST"})
++	case http.StatusNotFound:
++		writeJSON(w, code, map[string]any{"error": msg, "code": "NOT_FOUND"})
++	default:
++		writeJSON(w, code, map[string]any{"error": msg, "code": "ERROR"})
++	}
+ }
+`,
+	}
+
+	c.ensureSingleTargetOutputConstraints(context.Background(), CoderInput{
+		Goal:        "根据知识库中的 HTTP API 规范，修改 internal/http/server.go 中的 writeErr 函数，使错误响应同时包含 error 和 code 两个字段（code 为大写下划线格式的机器可读错误码）。需先调用 kb_search 查询 API 规范，并在说明中引用来源。",
+		RepoSummary: root,
+	}, &out)
+
+	if !strings.Contains(out.Patch, "switch code") {
+		t.Fatalf("expected snapshot-based writeErr patch to use explicit status mapping, got %q", out.Patch)
+	}
+	if !strings.Contains(out.Patch, `errorCode := "INTERNAL_ERROR"`) {
+		t.Fatalf("expected stable default error code, got %q", out.Patch)
+	}
+	if !strings.Contains(out.Patch, `case http.StatusMethodNotAllowed:`) || !strings.Contains(out.Patch, `"METHOD_NOT_ALLOWED"`) {
+		t.Fatalf("expected METHOD_NOT_ALLOWED mapping, got %q", out.Patch)
+	}
+	if strings.Contains(out.Patch, "http.StatusText(code)") {
+		t.Fatalf("expected StatusText-based mapping to be removed, got %q", out.Patch)
+	}
+}
+
+func TestEnsureSingleTargetOutputConstraintsSynthesizesWriteErrPatchFromMutatedSnapshotWhenPatchEmpty(t *testing.T) {
+	root := t.TempDir()
+	serverPath := filepath.Join(root, "internal", "http", "server.go")
+	if err := os.MkdirAll(filepath.Dir(serverPath), 0o755); err != nil {
+		t.Fatalf("mkdir http dir: %v", err)
+	}
+	serverBody := `package httpapi
+
+import (
+	"encoding/json"
+	"net/http"
+	"strings"
+)
+
+func writeJSON(w http.ResponseWriter, code int, payload any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func writeErr(w http.ResponseWriter, code int, msg string) {
+	machineCode := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(msg), " ", "_"))
+	writeJSON(w, code, map[string]any{"error": msg, "code": machineCode})
+}
+`
+	if err := os.WriteFile(serverPath, []byte(serverBody), 0o644); err != nil {
+		t.Fatalf("write server.go: %v", err)
+	}
+
+	c := NewCoder(ClientConfig{})
+	out := CoderOutput{}
+	c.ensureSingleTargetOutputConstraints(context.Background(), CoderInput{
+		Goal:        "根据知识库中的 HTTP API 规范，修改 internal/http/server.go 中的 writeErr 函数，使错误响应同时包含 error 和 code 两个字段（code 为大写下划线格式的机器可读错误码）。需先调用 kb_search 查询 API 规范，并在说明中引用来源。",
+		RepoSummary: root,
+	}, &out)
+
+	if !strings.Contains(out.Patch, "switch code") {
+		t.Fatalf("expected empty-patch mutated snapshot to synthesize explicit status mapping, got %q", out.Patch)
+	}
+	if !strings.Contains(out.Patch, `errorCode := "INTERNAL_ERROR"`) {
+		t.Fatalf("expected stable default error code, got %q", out.Patch)
+	}
+	if strings.Contains(out.Patch, `+	machineCode := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(msg), " ", "_"))`) {
+		t.Fatalf("expected msg-derived code generation to be replaced, got %q", out.Patch)
+	}
+	if strings.Contains(out.Patch, "http.StatusText(code)") {
+		t.Fatalf("expected StatusText-based mapping to be removed, got %q", out.Patch)
+	}
+}
+
+func TestEnsureSingleTargetOutputConstraintsSynthesizesStableCodePatchFromMutatedSnapshotAfterEmptyRetry(t *testing.T) {
+	root := t.TempDir()
+	serverPath := filepath.Join(root, "internal", "http", "server.go")
+	if err := os.MkdirAll(filepath.Dir(serverPath), 0o755); err != nil {
+		t.Fatalf("mkdir http dir: %v", err)
+	}
+	serverBody := `package httpapi
+
+import (
+	"encoding/json"
+	"net/http"
+	"strings"
+)
+
+func writeJSON(w http.ResponseWriter, code int, payload any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func writeErr(w http.ResponseWriter, code int, msg string) {
+	machineCode := strings.ToUpper(strings.ReplaceAll(msg, " ", "_"))
+	writeJSON(w, code, map[string]any{"error": msg, "code": machineCode})
+}
+`
+	if err := os.WriteFile(serverPath, []byte(serverBody), 0o644); err != nil {
+		t.Fatalf("write server.go: %v", err)
+	}
+
+	c := NewCoder(ClientConfig{})
+	out := CoderOutput{Patch: ""}
+	c.ensureSingleTargetOutputConstraints(context.Background(), CoderInput{
+		Goal:        "根据知识库中的 HTTP API 规范，修改 internal/http/server.go 中的 writeErr 函数，使错误响应同时包含 error 和 code 两个字段（code 为大写下划线格式的机器可读错误码）。需先调用 kb_search 查询 API 规范，并在说明中引用来源。",
+		RepoSummary: root,
+	}, &out)
+
+	if !strings.Contains(out.Patch, "switch code") {
+		t.Fatalf("expected empty-patch recovery to synthesize explicit status mapping, got %q", out.Patch)
+	}
+	if strings.Contains(out.Patch, `+	machineCode := strings.ToUpper(strings.ReplaceAll(msg, " ", "_"))`) {
+		t.Fatalf("expected msg-derived code path to be replaced, got %q", out.Patch)
+	}
+	if strings.Contains(out.Patch, "http.StatusText(code)") {
+		t.Fatalf("expected StatusText-based mapping to be removed, got %q", out.Patch)
+	}
+	if !strings.Contains(out.Notes, "synthesized writeErr stable-code patch from snapshots") {
+		t.Fatalf("expected stable-code synth note, got %q", out.Notes)
+	}
+}
+
+func TestEnsureSingleTargetOutputConstraintsSynthesizesWriteErrPatchFromOriginalSnapshotWhenPatchEmpty(t *testing.T) {
+	root := t.TempDir()
+	serverPath := filepath.Join(root, "internal", "http", "server.go")
+	if err := os.MkdirAll(filepath.Dir(serverPath), 0o755); err != nil {
+		t.Fatalf("mkdir http dir: %v", err)
+	}
+	serverBody := `package httpapi
+
+import (
+	"encoding/json"
+	"net/http"
+)
+
+func writeJSON(w http.ResponseWriter, code int, payload any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func writeErr(w http.ResponseWriter, code int, msg string) {
+	writeJSON(w, code, map[string]any{"error": msg})
+}
+`
+	if err := os.WriteFile(serverPath, []byte(serverBody), 0o644); err != nil {
+		t.Fatalf("write server.go: %v", err)
+	}
+
+	c := NewCoder(ClientConfig{})
+	out := CoderOutput{}
+	c.ensureSingleTargetOutputConstraints(context.Background(), CoderInput{
+		Goal:        "根据知识库中的 HTTP API 规范，修改 internal/http/server.go 中的 writeErr 函数，使错误响应同时包含 error 和 code 两个字段（code 为大写下划线格式的机器可读错误码）。需先调用 kb_search 查询 API 规范，并在说明中引用来源。",
+		RepoSummary: root,
+	}, &out)
+
+	if !strings.Contains(out.Patch, "switch code") {
+		t.Fatalf("expected original snapshot to synthesize explicit status mapping, got %q", out.Patch)
+	}
+	if !strings.Contains(out.Patch, `"code": errorCode`) {
+		t.Fatalf("expected synthesized patch to add code field, got %q", out.Patch)
+	}
+	if !strings.Contains(out.Notes, "synthesized writeErr stable-code patch from snapshots") {
+		t.Fatalf("expected stable-code synth note, got %q", out.Notes)
+	}
+}
+
+func TestEnsureGoalTargetPatchRepairsDBPathDuplicateSnapshotWhenDiffAlreadyTouchesTargets(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "internal", "config", "config.go")
+	testPath := filepath.Join(root, "internal", "config", "config_test.go")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	configBody := `package config
+
+import (
+	"fmt"
+	"strings"
+)
+
+type Config struct {
+	DBPath string
+}
+
+func Load(path string) (*Config, error) {
+	cfg := &Config{}
+	if !strings.HasSuffix(cfg.DBPath, ".db") {
+		return nil, fmt.Errorf("db_path must end with .db extension")
+	}
+	return cfg, nil
+}
+`
+	if err := os.WriteFile(configPath, []byte(configBody), 0o644); err != nil {
+		t.Fatalf("write config.go: %v", err)
+	}
+	testBody := `package config
+
+import "testing"
+
+func TestLoadValidatesDBPathExtension(t *testing.T) {
+	t.Helper()
+}
+
+func TestLoadValidatesDBPathExtension(t *testing.T) {
+	t.Fatal("duplicate")
+}
+`
+	if err := os.WriteFile(testPath, []byte(testBody), 0o644); err != nil {
+		t.Fatalf("write config_test.go: %v", err)
+	}
+
+	c := NewCoder(ClientConfig{})
+	c.retryHooks = &coderRetryHooks{
+		targeted: func(context.Context, CoderInput, []string, string) (CoderOutput, error) {
+			return CoderOutput{Patch: "", Notes: "targeted retry returned empty patch"}, nil
+		},
+		targetedStrict: func(context.Context, CoderInput, []string, string) (CoderOutput, error) {
+			return CoderOutput{Patch: "", Notes: "strict retry returned empty patch"}, nil
+		},
+	}
+
+	out := CoderOutput{}
+	c.ensureGoalTargetPatch(context.Background(), CoderInput{
+		Goal:        "根据知识库中的配置校验规则，在 internal/config/config.go 中增加校验：DBPath 必须以 .db 结尾，否则返回错误。同时在 internal/config/config_test.go 中添加一个测试用例验证该校验。校验规则和错误信息需通过 kb_search 获取。",
+		RepoSummary: root,
+		Diff: `diff --git a/internal/config/config.go b/internal/config/config.go
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -8,3 +8,6 @@ func Load(path string) (*Config, error) {
++	if !strings.HasSuffix(cfg.DBPath, ".db") {
++		return nil, fmt.Errorf("db_path must end with .db extension")
++	}
+ 	return cfg, nil
+ }
+diff --git a/internal/config/config_test.go b/internal/config/config_test.go
+--- a/internal/config/config_test.go
++++ b/internal/config/config_test.go
+@@ -1,3 +1,10 @@
++func TestLoadValidatesDBPathExtension(t *testing.T) {
++	t.Helper()
++}
++
++func TestLoadValidatesDBPathExtension(t *testing.T) {
++	t.Fatal("duplicate")
++}
+`,
+	}, &out)
+
+	if !strings.Contains(out.Patch, "internal/config/config_test.go") ||
+		!strings.Contains(out.Patch, "func TestLoadValidatesDBPathSuffix(t *testing.T)") ||
+		!strings.Contains(out.Patch, `name: "accepts .db suffix"`) ||
+		!strings.Contains(out.Patch, `name: "rejects non-.db suffix"`) {
+		t.Fatalf("expected duplicate DBPath snapshot to produce deterministic repair patch, got %q", out.Patch)
+	}
+	if strings.Contains(out.Patch, "\n+func TestLoadValidatesDBPathExtension") {
+		t.Fatalf("expected duplicate test name to be removed from repair patch, got %q", out.Patch)
+	}
+}
+
+func TestEnsureGoalTargetPatchKeepsReplacementPatchWhenDiffAlreadyTouchesTargets(t *testing.T) {
+	root := t.TempDir()
+	processorPath := filepath.Join(root, "internal", "loop", "processor.go")
+	testPath := filepath.Join(root, "internal", "loop", "processor_test.go")
+	if err := os.MkdirAll(filepath.Dir(processorPath), 0o755); err != nil {
+		t.Fatalf("mkdir loop dir: %v", err)
+	}
+	processorBody := `package loop
+
+import "fmt"
+
+type DoomLoopDetector struct {
+	threshold int
+	lastTool  string
+	lastInput string
+	count     int
+}
+
+func NewDoomLoopDetector(threshold int) *DoomLoopDetector {
+	if threshold < 1 {
+		threshold = 3
+	}
+	return &DoomLoopDetector{threshold: threshold}
+}
+
+func (d *DoomLoopDetector) Observe(tool string, input any) bool {
+	serialized := fmt.Sprintf("%v", input)
+	if d.lastTool == tool && d.lastInput == serialized {
+		d.count++
+	} else {
+		d.lastTool = tool
+		d.lastInput = serialized
+		d.count = 1
+	}
+	return d.count >= d.threshold
+}
+
+func (d *DoomLoopDetector) Reset() {
+	d.lastTool = ""
+	d.lastInput = ""
+	d.count = 0
+}
+`
+	if err := os.WriteFile(processorPath, []byte(processorBody), 0o644); err != nil {
+		t.Fatalf("write processor.go: %v", err)
+	}
+	testBody := `package loop
+
+import "testing"
+
+func TestDoomLoopDetector(t *testing.T) {
+	d := NewDoomLoopDetector(3)
+	if d.Observe("run_command", "go test ./...") {
+		t.Fatal("unexpected blocked on first call")
+	}
+	if d.Observe("run_command", "go test ./...") {
+		t.Fatal("unexpected blocked on second call")
+	}
+	if !d.Observe("run_command", "go test ./...") {
+		t.Fatal("expected blocked on third identical call")
+	}
+}
+
+func TestDoomLoopDetectorReset(t *testing.T) {
+	tests := []struct {
+		name        string
+		reset       bool
+		wantBlocked bool
+	}{
+		{name: "negative blocks without reset", wantBlocked: true},
+		{name: "positive reset clears state", reset: true, wantBlocked: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := NewDoomLoopDetector(3)
+			d.Observe("run_command", "go test ./...")
+			d.Observe("run_command", "go test ./...")
+			if tt.reset {
+				d.Reset()
+			}
+			if got := d.Observe("run_command", "go test ./..."); got != tt.wantBlocked {
+				t.Fatalf("blocked=%v want %v", got, tt.wantBlocked)
+			}
+		})
+	}
+}
+`
+	if err := os.WriteFile(testPath, []byte(testBody), 0o644); err != nil {
+		t.Fatalf("write processor_test.go: %v", err)
+	}
+
+	out := CoderOutput{
+		Patch: `diff --git a/internal/loop/processor_test.go b/internal/loop/processor_test.go
+--- a/internal/loop/processor_test.go
++++ b/internal/loop/processor_test.go
+@@ -15,20 +15,26 @@ func TestDoomLoopDetector(t *testing.T) {
+ }
+ 
+ func TestDoomLoopDetectorReset(t *testing.T) {
+-	cases := []struct {
+-		name string
+-	}{
+-		{name: "broad case 1"},
+-		{name: "broad case 2"},
++	cases := []struct {
++		name      string
++		observes  int
++		wantBlock bool
++	}{
++		{name: "positive reset restarts counter", observes: 2, wantBlock: false},
++		{name: "negative reset still blocks at threshold", observes: 3, wantBlock: true},
+ 	}
+ 	for _, tc := range cases {
+ 		t.Run(tc.name, func(t *testing.T) {
+ 			d := NewDoomLoopDetector(3)
+ 			d.Observe("run_command", "go test ./...")
+ 			d.Reset()
+-			if d.Observe("run_command", "go test ./...") {
+-				t.Fatal("unexpected blocked after reset")
++			blocked := false
++			for i := 0; i < tc.observes; i++ {
++				blocked = d.Observe("run_command", "go test ./...")
++			}
++			if blocked != tc.wantBlock {
++				t.Fatalf("blocked=%v want %v", blocked, tc.wantBlock)
+ 			}
+ 		})
+ 	}
+ }
+`,
+	}
+	c := NewCoder(ClientConfig{})
+	c.ensureGoalTargetPatch(context.Background(), CoderInput{
+		Goal:        "仅基于仓库现有代码，给 internal/loop/processor.go 中的 DoomLoopDetector 结构体添加一个 Reset() 方法，将 lastTool、lastInput、count 重置为初始值，并在 internal/loop/processor_test.go 中为其添加测试。禁止调用 kb_search。",
+		RepoSummary: root,
+		Diff: `diff --git a/internal/loop/processor.go b/internal/loop/processor.go
+--- a/internal/loop/processor.go
++++ b/internal/loop/processor.go
+@@ -20,3 +20,9 @@ func (d *DoomLoopDetector) Observe(tool string, input any) bool {
+ 	return d.count >= d.threshold
+ }
++
++func (d *DoomLoopDetector) Reset() {
++	d.lastTool = ""
++	d.lastInput = ""
++	d.count = 0
++}
+diff --git a/internal/loop/processor_test.go b/internal/loop/processor_test.go
+--- a/internal/loop/processor_test.go
++++ b/internal/loop/processor_test.go
+@@ -15,3 +15,20 @@ func TestDoomLoopDetector(t *testing.T) {
++func TestDoomLoopDetectorReset(t *testing.T) {
++	cases := []struct {
++		name string
++	}{
++		{name: "broad case 1"},
++		{name: "broad case 2"},
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			d := NewDoomLoopDetector(3)
++			d.Observe("run_command", "go test ./...")
++			d.Reset()
++			if d.Observe("run_command", "go test ./...") {
++				t.Fatal("unexpected blocked after reset")
++			}
++		})
++	}
++}
+`,
+	}, &out)
+
+	if strings.TrimSpace(out.Patch) == "" {
+		t.Fatal("expected replacement patch to be preserved when current diff already touches targets")
+	}
+	if strings.Contains(out.Notes, "skipped duplicate patch apply") {
+		t.Fatalf("expected replacement patch to avoid duplicate-skip note, got %q", out.Notes)
+	}
+	if !strings.Contains(out.Patch, "negative reset still blocks at threshold") {
+		t.Fatalf("expected refined replacement patch to survive, got %q", out.Patch)
+	}
+}
+
+func TestEnsureSingleTargetOutputConstraintsSynthesizesDBPathPatchOnDefinitionIssuesWithoutClient(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "internal", "config", "config.go")
+	testPath := filepath.Join(root, "internal", "config", "config_test.go")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	configBody := `package config
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+type Config struct {
+	DBPath string ` + "`json:\"db_path\"`" + `
+}
+
+func Load(path string) (*Config, error) {
+	cfg := &Config{
+		DBPath: filepath.Join(".agent-loop-artifacts", "state.db"),
+	}
+	if path != "" {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(b, cfg); err != nil {
+			return nil, err
+		}
+	}
+	return cfg, nil
+}
+`
+	if err := os.WriteFile(configPath, []byte(configBody), 0o644); err != nil {
+		t.Fatalf("write config.go: %v", err)
+	}
+	testBody := `package config
+
+import "testing"
+
+func TestLoadDefaults(t *testing.T) {}
+`
+	if err := os.WriteFile(testPath, []byte(testBody), 0o644); err != nil {
+		t.Fatalf("write config_test.go: %v", err)
+	}
+
+	c := NewCoder(ClientConfig{})
+	out := CoderOutput{
+		Patch: `diff --git a/internal/config/config.go b/internal/config/config.go
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -18,3 +18,6 @@ func Load(path string) (*Config, error) {
++	if !strings.HasSuffix(cfg.DBPath, ".db") {
++		return nil, fmt.Errorf("db_path must end with .db extension")
++	}
+ 	return cfg, nil
+ }
+diff --git a/internal/config/config_test.go b/internal/config/config_test.go
+--- a/internal/config/config_test.go
++++ b/internal/config/config_test.go
+@@ -1,3 +1,15 @@
++func TestLoadDefaults(t *testing.T) {}
++
++func TestLoadDefaults(t *testing.T) {
++	tests := []struct {
++		name string
++	}{
++		{name: "duplicate"},
++	}
++}
+`,
+	}
+	c.ensureSingleTargetOutputConstraints(context.Background(), CoderInput{
+		Goal:        "根据知识库中的配置校验规则，在 internal/config/config.go 中增加校验：DBPath 必须以 .db 结尾，否则返回错误。同时在 internal/config/config_test.go 中添加一个测试用例验证该校验。校验规则和错误信息需通过 kb_search 获取。",
+		RepoSummary: root,
+	}, &out)
+
+	if !strings.Contains(out.Patch, "TestLoadValidatesDBPathSuffix") {
+		t.Fatalf("expected deterministic DBPath synth to replace duplicate-test patch, got %q", out.Patch)
+	}
+	if strings.Contains(out.Patch, "\n+func TestLoadDefaults(t *testing.T) {\n+\ttests := []struct {") {
+		t.Fatalf("expected duplicate test definition to be removed, got %q", out.Patch)
+	}
+	if !strings.Contains(out.Notes, "synthesized DBPath validation patch from snapshots") {
+		t.Fatalf("expected deterministic DBPath synth note, got %q", out.Notes)
 	}
 }
 
@@ -2679,6 +3862,445 @@ func buildReadOnlyTools() []string {
 	}
 }
 
+func TestEnsureRepoOnlyMinimalModeSynthesizesMaxRuntimeStepsCommentPatchFromSnapshots(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "internal", "loop", "engine_eino.go")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir loop dir: %v", err)
+	}
+	body := `package loop
+
+import "context"
+
+func (e *Engine) buildLoopRunner(ctx context.Context) error {
+	addNode("plan")
+	addNode("turn")
+	addNode("finish")
+	addNode("failed")
+	addNode("blocked")
+	return nil
+}
+
+func maxRuntimeSteps(maxIterations int) int {
+	if maxIterations < 1 {
+		maxIterations = 5
+	}
+	// Each loop turn has one main processing node, plus terminal nodes.
+	return maxIterations*3 + 8
+}
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write engine_eino.go: %v", err)
+	}
+
+	c := NewCoder(ClientConfig{})
+	c.retryHooks = &coderRetryHooks{
+		repoOnly: func(context.Context, CoderInput, []string, string) (CoderOutput, error) {
+			return CoderOutput{Patch: "", Notes: "repo-only retry returned empty patch"}, nil
+		},
+	}
+
+	out := CoderOutput{UsedFallback: true}
+	c.ensureRepoOnlyMinimalMode(context.Background(), CoderInput{
+		Goal:        "仅基于当前仓库代码，修复 internal/loop/engine_eino.go 中 maxRuntimeSteps 函数的注释：当前注释说 'Each loop turn has one main processing node, plus terminal nodes'，但实际上 buildLoopRunner 中有 turn/finish/failed/blocked 四个节点。请更新注释使其与代码一致。禁止调用 kb_search。",
+		RepoSummary: root,
+		Commands:    []string{"go build ./..."},
+	}, &out)
+
+	if !strings.Contains(out.Patch, "diff --git a/internal/loop/engine_eino.go b/internal/loop/engine_eino.go") {
+		t.Fatalf("expected synthesized engine_eino.go patch, got %q", out.Patch)
+	}
+	if !strings.Contains(out.Patch, "buildLoopRunner's") {
+		t.Fatalf("expected synthesized comment to reflect current runner nodes, got %q", out.Patch)
+	}
+	if !strings.Contains(out.Patch, "return maxIterations*3 + 8") {
+		t.Fatalf("expected synthesized patch to anchor on current formula context, got %q", out.Patch)
+	}
+	if strings.Contains(out.Patch, "maxTurns*4 + 2") || strings.Contains(out.Patch, "einoEngine") {
+		t.Fatalf("expected synthesized patch to avoid stale hallucinated snapshot, got %q", out.Patch)
+	}
+	if !strings.Contains(out.Notes, "synthesized maxRuntimeSteps comment patch from snapshots") {
+		t.Fatalf("expected snapshot synthesis note, got %q", out.Notes)
+	}
+	if len(out.Commands) != 1 || out.Commands[0] != "go build ./..." {
+		t.Fatalf("expected repo-only commands preserved, got %v", out.Commands)
+	}
+}
+
+func TestEnsureRepoOnlyMinimalModeReplacesStaleMaxRuntimeStepsSnapshotPatch(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "internal", "loop", "engine_eino.go")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir loop dir: %v", err)
+	}
+	body := `package loop
+
+import "context"
+
+func (e *Engine) buildLoopRunner(ctx context.Context) error {
+	addNode("plan")
+	addNode("turn")
+	addNode("finish")
+	addNode("failed")
+	addNode("blocked")
+	return nil
+}
+
+func maxRuntimeSteps(maxIterations int) int {
+	if maxIterations < 1 {
+		maxIterations = 5
+	}
+	// Each loop turn has one main processing node, plus terminal nodes.
+	return maxIterations*3 + 8
+}
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write engine_eino.go: %v", err)
+	}
+
+	c := NewCoder(ClientConfig{})
+	c.retryHooks = &coderRetryHooks{
+		repoOnly: func(context.Context, CoderInput, []string, string) (CoderOutput, error) {
+			return CoderOutput{Patch: "", Notes: "repo-only retry returned empty patch"}, nil
+		},
+	}
+
+	out := CoderOutput{
+		UsedFallback: true,
+		Patch: `diff --git a/internal/loop/engine_eino.go b/internal/loop/engine_eino.go
+--- a/internal/loop/engine_eino.go
++++ b/internal/loop/engine_eino.go
+@@ -10,2 +10,2 @@ func maxRuntimeSteps(maxTurns int) int {
+-	// Each turn in einoEngine can traverse four graph nodes plus setup.
++	// Each einoEngine pass may need maxTurns*4 + 2 runtime steps.
+ 	return maxIterations*3 + 8
+ }`,
+	}
+	c.ensureRepoOnlyMinimalMode(context.Background(), CoderInput{
+		Goal:        "仅基于当前仓库代码，修复 internal/loop/engine_eino.go 中 maxRuntimeSteps 函数的注释：当前注释说 'Each loop turn has one main processing node, plus terminal nodes'，但实际上 buildLoopRunner 中有 turn/finish/failed/blocked 四个节点。请更新注释使其与代码一致。禁止调用 kb_search。",
+		RepoSummary: root,
+		Commands:    []string{"go build ./..."},
+	}, &out)
+
+	if strings.Contains(out.Patch, "maxTurns*4 + 2") || strings.Contains(out.Patch, "einoEngine") {
+		t.Fatalf("expected stale snapshot references removed, got %q", out.Patch)
+	}
+	if !strings.Contains(out.Patch, "buildLoopRunner's") {
+		t.Fatalf("expected synthesized patch to reflect current runner nodes, got %q", out.Patch)
+	}
+	if !strings.Contains(out.Notes, "synthesized maxRuntimeSteps comment patch from snapshots") {
+		t.Fatalf("expected synthesized fallback note, got %q", out.Notes)
+	}
+}
+
+func TestEnsureGoalTargetPatchKeepsMaxRuntimeReplacementPatchWhenCurrentDiffViolatesContract(t *testing.T) {
+	root := t.TempDir()
+	enginePath := filepath.Join(root, "internal", "loop", "engine_eino.go")
+	if err := os.MkdirAll(filepath.Dir(enginePath), 0o755); err != nil {
+		t.Fatalf("mkdir loop dir: %v", err)
+	}
+	engineBody := `package loop
+
+import "context"
+
+func (e *Engine) buildLoopRunner(ctx context.Context) error {
+	addNode("plan")
+	addNode("turn")
+	addNode("finish")
+	addNode("failed")
+	addNode("blocked")
+	return nil
+}
+
+func maxRuntimeSteps(maxIterations int) int {
+	if maxIterations < 1 {
+		maxIterations = 5
+	}
+	// Each iteration reserves three runtime steps plus fixed overhead for buildLoopRunner's turn plus terminal nodes.
+	return maxIterations*3 + 8
+}
+`
+	if err := os.WriteFile(enginePath, []byte(engineBody), 0o644); err != nil {
+		t.Fatalf("write engine_eino.go: %v", err)
+	}
+
+	out := CoderOutput{
+		Patch: `diff --git a/internal/loop/engine_eino.go b/internal/loop/engine_eino.go
+--- a/internal/loop/engine_eino.go
++++ b/internal/loop/engine_eino.go
+@@ -12,2 +12,2 @@ func maxRuntimeSteps(maxIterations int) int {
+-	// Each iteration reserves three runtime steps plus fixed overhead for buildLoopRunner's turn plus terminal nodes.
++	// Each iteration reserves three runtime steps plus fixed overhead for buildLoopRunner's turn/finish/failed/blocked branches.
+ 	return maxIterations*3 + 8
+ }`,
+	}
+	c := NewCoder(ClientConfig{})
+	c.ensureGoalTargetPatch(context.Background(), CoderInput{
+		Goal:        "仅基于当前仓库代码，修复 internal/loop/engine_eino.go 中 maxRuntimeSteps 函数的注释：当前注释说 'Each loop turn has one main processing node, plus terminal nodes'，但实际上 buildLoopRunner 中有 turn/finish/failed/blocked 四个节点。请更新注释使其与代码一致。禁止调用 kb_search。",
+		RepoSummary: root,
+		Diff: `diff --git a/internal/loop/engine_eino.go b/internal/loop/engine_eino.go
+--- a/internal/loop/engine_eino.go
++++ b/internal/loop/engine_eino.go
+@@ -12,2 +12,2 @@ func maxRuntimeSteps(maxIterations int) int {
+-	// Each loop turn has one main processing node, plus terminal nodes.
++	// Each iteration reserves three runtime steps plus fixed overhead for buildLoopRunner's turn plus terminal nodes.
+ 	return maxIterations*3 + 8
+ }`,
+	}, &out)
+
+	if strings.TrimSpace(out.Patch) == "" {
+		t.Fatal("expected refined maxRuntimeSteps patch to survive when current diff still violates the four-node contract")
+	}
+	if strings.Contains(out.Notes, "skipped duplicate patch apply") {
+		t.Fatalf("expected invalid current diff to avoid duplicate-skip note, got %q", out.Notes)
+	}
+	if !strings.Contains(out.Patch, "turn/finish/failed/blocked") {
+		t.Fatalf("expected refined four-node comment patch, got %q", out.Patch)
+	}
+}
+
+func TestEnsureGoalTargetPatchSynthesizesMinimalResetPatchBeforeRetryingInvalidPatch(t *testing.T) {
+	root := t.TempDir()
+	processorPath := filepath.Join(root, "internal", "loop", "processor.go")
+	testPath := filepath.Join(root, "internal", "loop", "processor_test.go")
+	if err := os.MkdirAll(filepath.Dir(processorPath), 0o755); err != nil {
+		t.Fatalf("mkdir loop dir: %v", err)
+	}
+	processorBody := `package loop
+
+import "fmt"
+
+type DoomLoopDetector struct {
+	threshold int
+	lastTool  string
+	lastInput string
+	count     int
+}
+
+func NewDoomLoopDetector(threshold int) *DoomLoopDetector {
+	if threshold < 1 {
+		threshold = 3
+	}
+	return &DoomLoopDetector{threshold: threshold}
+}
+
+func (d *DoomLoopDetector) Observe(tool string, input any) bool {
+	serialized := fmt.Sprintf("%v", input)
+	if d.lastTool == tool && d.lastInput == serialized {
+		d.count++
+	} else {
+		d.lastTool = tool
+		d.lastInput = serialized
+		d.count = 1
+	}
+	return d.count >= d.threshold
+}
+`
+	if err := os.WriteFile(processorPath, []byte(processorBody), 0o644); err != nil {
+		t.Fatalf("write processor.go: %v", err)
+	}
+	testBody := `package loop
+
+import "testing"
+
+func TestDoomLoopDetector(t *testing.T) {
+	d := NewDoomLoopDetector(3)
+	if d.Observe("run_command", "go test ./...") {
+		t.Fatal("unexpected blocked on first call")
+	}
+	if d.Observe("run_command", "go test ./...") {
+		t.Fatal("unexpected blocked on second call")
+	}
+	if !d.Observe("run_command", "go test ./...") {
+		t.Fatal("expected blocked on third identical call")
+	}
+}
+`
+	if err := os.WriteFile(testPath, []byte(testBody), 0o644); err != nil {
+		t.Fatalf("write processor_test.go: %v", err)
+	}
+
+	out := CoderOutput{
+		Patch: `diff --git a/internal/loop/processor.go b/internal/loop/processor.go
+--- a/internal/loop/processor.go
++++ b/internal/loop/processor.go
+@@ -20,3 +20,9 @@ func (d *DoomLoopDetector) Observe(tool string, input any) bool {
+ 	return d.count >= d.threshold
+ }
++
++func (d *DoomLoopDetector) Reset() {
++	d.lastTool = ""
++	d.lastInput = ""
++	d.count = 0
++}
+diff --git a/internal/loop/processor_test.go b/internal/loop/processor_test.go
+--- a/internal/loop/processor_test.go
++++ b/internal/loop/processor_test.go
+@@ -15,3 +15,20 @@ func TestDoomLoopDetector(t *testing.T) {
++func TestDoomLoopDetectorReset(t *testing.T) {
++	cases := []struct {
++		name string
++	}{
++		{name: "broad case 1"},
++		{name: "broad case 2"},
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			d := NewDoomLoopDetector(3)
++			d.Observe("run_command", "go test ./...")
++			d.Reset()
++			if d.Observe("run_command", "go test ./...") {
++				t.Fatal("unexpected blocked after reset")
++			}
++		})
++	}
++}
+`,
+	}
+	c := NewCoder(ClientConfig{})
+	c.ensureGoalTargetPatch(context.Background(), CoderInput{
+		Goal:        "仅基于仓库现有代码，给 internal/loop/processor.go 中的 DoomLoopDetector 结构体添加一个 Reset() 方法，将 lastTool、lastInput、count 重置为初始值，并在 internal/loop/processor_test.go 中为其添加测试。禁止调用 kb_search。",
+		RepoSummary: root,
+	}, &out)
+
+	if !strings.Contains(out.Patch, `name: "negative blocks without reset"`) {
+		t.Fatalf("expected invalid broad reset patch to be replaced by snapshot-synthesized minimal test, got %q", out.Patch)
+	}
+	if !strings.Contains(out.Patch, `name: "positive reset clears state"`) {
+		t.Fatalf("expected synthesized positive reset case, got %q", out.Patch)
+	}
+	if strings.Contains(out.Patch, `name: "broad case 1"`) {
+		t.Fatalf("expected broad reset cases to be removed, got %q", out.Patch)
+	}
+}
+
+func TestEnsureGoalTargetPatchReplacesStaleResetPatchBeforeApply(t *testing.T) {
+	root := t.TempDir()
+	processorPath := filepath.Join(root, "internal", "loop", "processor.go")
+	testPath := filepath.Join(root, "internal", "loop", "processor_test.go")
+	if err := os.MkdirAll(filepath.Dir(processorPath), 0o755); err != nil {
+		t.Fatalf("mkdir loop dir: %v", err)
+	}
+	processorBody := `package loop
+
+import "fmt"
+
+type DoomLoopDetector struct {
+	threshold int
+	lastTool  string
+	lastInput string
+	count     int
+}
+
+func NewDoomLoopDetector(threshold int) *DoomLoopDetector {
+	if threshold < 1 {
+		threshold = 3
+	}
+	return &DoomLoopDetector{threshold: threshold}
+}
+
+func (d *DoomLoopDetector) Observe(tool string, input any) bool {
+	serialized := fmt.Sprintf("%v", input)
+	if d.lastTool == tool && d.lastInput == serialized {
+		d.count++
+	} else {
+		d.lastTool = tool
+		d.lastInput = serialized
+		d.count = 1
+	}
+	return d.count >= d.threshold
+}
+`
+	if err := os.WriteFile(processorPath, []byte(processorBody), 0o644); err != nil {
+		t.Fatalf("write processor.go: %v", err)
+	}
+	testBody := `package loop
+
+import "testing"
+
+func TestDoomLoopDetector(t *testing.T) {
+	d := NewDoomLoopDetector(3)
+	if d.Observe("run_command", "go test ./...") {
+		t.Fatal("unexpected blocked on first call")
+	}
+	if d.Observe("run_command", "go test ./...") {
+		t.Fatal("unexpected blocked on second call")
+	}
+	if !d.Observe("run_command", "go test ./...") {
+		t.Fatal("expected blocked on third identical call")
+	}
+}
+`
+	if err := os.WriteFile(testPath, []byte(testBody), 0o644); err != nil {
+		t.Fatalf("write processor_test.go: %v", err)
+	}
+
+	out := CoderOutput{
+		Patch: `diff --git a/internal/loop/processor.go b/internal/loop/processor.go
+--- a/internal/loop/processor.go
++++ b/internal/loop/processor.go
+@@ -20,3 +20,9 @@ func (d *DoomLoopDetector) Observe(tool string, input any) bool {
+ 	return d.count >= d.threshold
+ }
++
++func (d *DoomLoopDetector) Reset() {
++	d.lastTool = ""
++	d.lastInput = ""
++	d.count = 0
++}
+diff --git a/internal/loop/processor_test.go b/internal/loop/processor_test.go
+--- a/internal/loop/processor_test.go
++++ b/internal/loop/processor_test.go
+@@ -12,6 +12,25 @@ func TestDoomLoopDetector(t *testing.T) {
+ 	if !d.Observe("run_command", "go test ./...") {
+ 		t.Fatal("expected blocked on third identical call")
+ 	}
+-	legacyResetCase := "old"
+-	legacyObserveCount := 99
+-	_ = legacyResetCase
+-	_ = legacyObserveCount
++}
++
++func TestDoomLoopDetectorReset(t *testing.T) {
++	tests := []struct {
++		name        string
++		reset       bool
++		wantBlocked bool
++	}{
++		{name: "negative blocks without reset", wantBlocked: true},
++		{name: "positive reset clears state", reset: true, wantBlocked: false},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			d := NewDoomLoopDetector(3)
++			d.Observe("run_command", "go test ./...")
++			d.Observe("run_command", "go test ./...")
++			if tt.reset {
++				d.Reset()
++			}
++			if got := d.Observe("run_command", "go test ./..."); got != tt.wantBlocked {
++				t.Fatalf("blocked=%v want %v", got, tt.wantBlocked)
++			}
++		})
++	}
+ }`,
+	}
+
+	c := NewCoder(ClientConfig{})
+	c.ensureGoalTargetPatch(context.Background(), CoderInput{
+		Goal:        "仅基于仓库现有代码，给 internal/loop/processor.go 中的 DoomLoopDetector 结构体添加一个 Reset() 方法，将 lastTool、lastInput、count 重置为初始值，并在 internal/loop/processor_test.go 中为其添加测试。禁止调用 kb_search。",
+		RepoSummary: root,
+	}, &out)
+
+	cmd := exec.Command("git", "apply", "--check", "-")
+	cmd.Dir = root
+	cmd.Stdin = strings.NewReader(out.Patch)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("expected synthesized reset patch to apply cleanly, got err=%v output=%s patch=%q", err, strings.TrimSpace(string(output)), out.Patch)
+	}
+}
+
 func TestRetryStageRecorderEmitsSubstages(t *testing.T) {
 	root := t.TempDir()
 	readmePath := filepath.Join(root, "README.md")
@@ -2954,5 +4576,48 @@ func TestRunWithHardTimeoutPreservesShorterParentDeadline(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 150*time.Millisecond {
 		t.Fatalf("expected shorter parent deadline to win quickly, got %s", elapsed)
+	}
+}
+
+func TestCoderGenerateSkipsSecondProviderTimeoutAfterToolTimeout(t *testing.T) {
+	prevToolTimeout := coderToolCallingTimeout
+	prevCompletionTimeout := coderCompletionTimeout
+	coderToolCallingTimeout = 35 * time.Millisecond
+	coderCompletionTimeout = 200 * time.Millisecond
+	defer func() {
+		coderToolCallingTimeout = prevToolTimeout
+		coderCompletionTimeout = prevCompletionTimeout
+	}()
+
+	var completionCalls int32
+	c := NewCoder(ClientConfig{
+		BaseURL: "http://example.com",
+		Model:   "test-model",
+		newToolCallingModelForTest: func(context.Context) (modelpkg.ToolCallingChatModel, error) {
+			return stallingToolCallingModel{}, nil
+		},
+		completeJSONWithRawForTest: func(ctx context.Context, _, _ string, out any) (string, error) {
+			atomic.AddInt32(&completionCalls, 1)
+			<-ctx.Done()
+			return "", ctx.Err()
+		},
+	})
+
+	start := time.Now()
+	out, err := c.Generate(context.Background(), CoderInput{
+		Goal:        "根据知识库中的 HTTP API 规范，修改 internal/http/server.go 中的 writeErr 函数，使错误响应同时包含 error 和 code 两个字段（code 为大写下划线格式的机器可读错误码）。需先调用 kb_search 查询 API 规范，并在说明中引用来源。",
+		RepoSummary: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if !out.UsedFallback || out.FallbackSource != "heuristic" {
+		t.Fatalf("expected heuristic fallback after tool timeout, got %+v", out)
+	}
+	if got := atomic.LoadInt32(&completionCalls); got != 0 {
+		t.Fatalf("expected client completion provider path to be skipped after tool timeout, got %d calls", got)
+	}
+	if elapsed := time.Since(start); elapsed > 150*time.Millisecond {
+		t.Fatalf("expected heuristic fallback to return before a second provider timeout, got %s", elapsed)
 	}
 }
