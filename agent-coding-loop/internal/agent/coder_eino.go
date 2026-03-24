@@ -653,7 +653,7 @@ func (c *Coder) ensureGoalTargetPatch(ctx context.Context, in CoderInput, out *C
 		}
 	}
 	missingTargets := missingTargetFiles(out.Patch, targets)
-	if shouldSkipProviderPatchRetries(out) {
+	if shouldSkipProviderPatchRetries(out) && !hasExplicitRetryHooks(c.retryHooks) {
 		out.Notes = appendCoderNote(out.Notes, "skipped provider patch retries after heuristic/offline fallback")
 		if synth, ok := trySynthesizeGoalTargetRecovery(in, targets); ok && patchTouchesTargetsWithCurrentDiff(in.Diff, synth.Patch, targets, requireAllTargets) {
 			out.Patch = normalizePatchForOutput(synth.Patch)
@@ -1357,6 +1357,16 @@ func shouldSkipProviderPatchRetries(out *CoderOutput) bool {
 	default:
 		return false
 	}
+}
+
+func hasExplicitRetryHooks(hooks *coderRetryHooks) bool {
+	if hooks == nil {
+		return false
+	}
+	return hooks.targeted != nil ||
+		hooks.targetedStrict != nil ||
+		hooks.scopedStrict != nil ||
+		hooks.repoOnly != nil
 }
 
 func shouldForceDoomLoopResetSnapshotRecovery(in CoderInput, patch string, targets []string) bool {
