@@ -145,12 +145,16 @@ func buildReadOnlyTools(repoRoot string, reg *skills.Registry, runner *Runner, k
 			if maxBytes <= 0 {
 				maxBytes = 64 * 1024
 			}
-			out, err := RepoRead(repoRoot, input.Path, maxBytes)
+			path := strings.TrimSpace(input.Path)
+			if path == "" {
+				return "path is required; provide a relative file path for repo_read", nil
+			}
+			out, err := RepoRead(repoRoot, path, maxBytes)
 			if err != nil {
 				if errors.Is(err, os.ErrNotExist) {
-					return formatToolMessage("repo_read", strings.TrimSpace(input.Path), "path not found"), nil
+					return formatToolMessage("repo_read", path, "path not found"), nil
 				}
-				return formatToolError("repo_read", strings.TrimSpace(input.Path), err), nil
+				return formatToolError("repo_read", path, err), nil
 			}
 			return out, nil
 		},
