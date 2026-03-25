@@ -485,6 +485,25 @@ func TestCoderPromptsDoNotMentionSkillTools(t *testing.T) {
 	}
 }
 
+func TestCoderPromptsForbidDiffInCommands(t *testing.T) {
+	system, _ := coderPrompts(CoderInput{
+		Goal: "给 Makefile 添加注释。",
+	})
+
+	if !strings.Contains(system, "unified diff must appear only in patch") {
+		t.Fatalf("expected coder prompt to force diff-only-in-patch contract, got %q", system)
+	}
+	if !strings.Contains(system, "commands must never contain diff markers") {
+		t.Fatalf("expected coder prompt to forbid diff markers in commands, got %q", system)
+	}
+	if !strings.Contains(system, "<patch-file>") || !strings.Contains(system, "<your-patch-file>") {
+		t.Fatalf("expected coder prompt to forbid placeholder patch paths in commands, got %q", system)
+	}
+	if !strings.Contains(system, "if patch is empty, commands must also be empty") {
+		t.Fatalf("expected coder prompt to tie empty patch to empty commands, got %q", system)
+	}
+}
+
 func TestCoderPromptsIncludePlanContextWhenPresent(t *testing.T) {
 	_, user := coderPrompts(CoderInput{
 		Goal:        "在 internal/config/config.go 增加 DBPath 校验",
@@ -549,6 +568,27 @@ func TestRepairPromptsIncludeFailedCommands(t *testing.T) {
 	}
 	if !strings.Contains(user, "\"previous_review\"") {
 		t.Fatalf("expected repair prompt payload to include previous_review, got %q", user)
+	}
+}
+
+func TestRepairPromptsForbidDiffInCommands(t *testing.T) {
+	system, _ := repairPrompts(RepairInput{
+		Goal:          "修复 internal/config/config_test.go 中的失败测试",
+		RepoSummary:   "/tmp/repo",
+		CommandOutput: "undefined: Config",
+	})
+
+	if !strings.Contains(system, "unified diff must appear only in patch") {
+		t.Fatalf("expected repair prompt to force diff-only-in-patch contract, got %q", system)
+	}
+	if !strings.Contains(system, "commands must never contain diff markers") {
+		t.Fatalf("expected repair prompt to forbid diff markers in commands, got %q", system)
+	}
+	if !strings.Contains(system, "<patch-file>") || !strings.Contains(system, "<your-patch-file>") {
+		t.Fatalf("expected repair prompt to forbid placeholder patch paths in commands, got %q", system)
+	}
+	if !strings.Contains(system, "if patch is empty, commands must also be empty") {
+		t.Fatalf("expected repair prompt to tie empty patch to empty commands, got %q", system)
 	}
 }
 

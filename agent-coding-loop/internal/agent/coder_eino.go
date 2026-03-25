@@ -1017,6 +1017,7 @@ Return JSON only with fields: summary, patch, commands, notes, citations.
 - commands must be deterministic shell commands only.
 - do not call kb_search or include kb citations.
 - never return markdown outside JSON.`
+	system = strings.TrimSpace(system + "\n" + patchCommandContractPromptRules())
 	system += "\n" + reorderOnlyConstraint
 	if recoveryConstraint := buildDefinitionIssueRecoveryConstraint(in, targets); recoveryConstraint != "" {
 		system = strings.TrimSpace(system + "\n- " + recoveryConstraint)
@@ -1436,6 +1437,7 @@ Return JSON only with fields: summary, patch, commands, notes, citations.
 - if patch is empty, notes must explain why the goal is already satisfied in current files.
 - commands must be deterministic shell commands only.
 - never return markdown outside JSON.`
+	system = strings.TrimSpace(system + "\n" + patchCommandContractPromptRules())
 	if len(targets) > 1 {
 		system = strings.TrimSpace(system + "\n- this is a multi-target goal: a valid answer must return a non-empty patch touching all target files; do not claim the goal is already satisfied unless every target_file_snapshot contains direct quoted evidence for the requested behavior.")
 	}
@@ -1517,6 +1519,7 @@ Return JSON only with fields: summary, patch, commands, notes, citations.
 - do not define the same top-level helper or Test* name more than once in the patch; inspect target_file_snapshots and reuse existing names.
 - for a single target file task, empty patch is invalid unless target_file_snapshots already satisfy the goal; notes must quote the exact line, section, or snippet proving that.
 - no markdown. no prose. JSON only.`
+	system = strings.TrimSpace(system + "\n" + patchCommandContractPromptRules())
 	if len(targets) > 1 {
 		system = strings.TrimSpace(system + "\n- this is a multi-target goal: empty patch is invalid. Return a non-empty unified diff touching all target files, or fail explicitly in notes if snapshot evidence is contradictory.")
 	}
@@ -1594,6 +1597,7 @@ Return JSON only with fields: summary, patch, commands, notes, citations.
 - knowledge-base evidence explains the requested rule; it does not authorize adjacent validation rules, cleanup, or extra checks.
 - remove any changes related to scope_creep_identifiers.
 - no markdown. no prose. JSON only.`
+	system = strings.TrimSpace(system + "\n" + patchCommandContractPromptRules())
 	if len(targets) > 1 {
 		system = strings.TrimSpace(system + "\n- this is a multi-target goal: empty patch is invalid. Return a non-empty unified diff touching all target files.")
 	}
@@ -1885,6 +1889,7 @@ func coderPrompts(in CoderInput) (string, string) {
 	- if your previous patch was rejected or caused the same test failure twice, you must change strategy: read the error location with repo_read, check whether you are editing the correct file, and try a different fix.
 	- if a test error points to a file you have not yet read, read that file before attempting another patch.
 - never return markdown outside JSON.`
+	system = strings.TrimSpace(system + "\n" + patchCommandContractPromptRules())
 	if len(targets) > 1 {
 		system = strings.TrimSpace(system + "\n\t- this is a multi-target goal: a valid answer must return a non-empty patch touching all target files; do not claim success or goal satisfaction without changing each required target file.")
 	}
@@ -1949,12 +1954,20 @@ func repairPrompts(in RepairInput) (string, string) {
 	- commands may be empty; the engine controls verification and will rerun the task commands.
 	- citations must contain only repository-relative paths.
 	- never return markdown outside JSON.`
+	system = strings.TrimSpace(system + "\n" + patchCommandContractPromptRules())
 	payload := map[string]any{
 		"task_input": in,
 	}
 	b, _ := json.MarshalIndent(payload, "", "  ")
 	user := fmt.Sprintf("Repair input:\n%s\nUse tools when needed, then return strict JSON only.", string(b))
 	return system, user
+}
+
+func patchCommandContractPromptRules() string {
+	return strings.TrimSpace(`- unified diff must appear only in patch.
+- never put diff text, heredoc patch bodies, or patch file placeholders into commands, notes, citations, or tool arguments.
+- commands must never contain diff markers (diff --git, ---, +++, @@) or placeholder patch paths like <patch-file> or <your-patch-file>.
+- if patch is empty, commands must also be empty unless you have verified the goal is already satisfied and notes quote the exact current-file evidence.`)
 }
 
 func buildMixedTaskInlineEditConstraint(goal string, targets []string) string {
