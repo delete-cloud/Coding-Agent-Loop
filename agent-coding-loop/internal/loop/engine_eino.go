@@ -123,6 +123,7 @@ const (
 )
 
 var goalPathHintRE = regexp.MustCompile(`[A-Za-z0-9_./\-]+\.[A-Za-z0-9_+-]+`)
+var loopQuotedSatisfiedEvidenceRE = regexp.MustCompile(`"[^"\n]{3,}"|'[^'\n]{3,}'|` + "`[^`\n]{3,}`")
 
 type memoryCheckpointStore struct {
 	mu   sync.RWMutex
@@ -1191,7 +1192,7 @@ func loopHasReliableSatisfiedEvidence(notes string) bool {
 	if !satisfied {
 		return false
 	}
-	return strings.Contains(notes, "`") || strings.Contains(notes, "\"") || strings.Contains(notes, "'")
+	return loopQuotedSatisfiedEvidenceRE.MatchString(notes)
 }
 
 func retrievedContextChunkKey(hit kbpkg.SearchHit) string {

@@ -2301,6 +2301,49 @@ func TestTurnNodeShortCircuitsEmptyPatchHeredocDiffCommands(t *testing.T) {
 	}
 }
 
+func TestTurnNodeShortCircuitsEmptyPatchWithoutQuotedEvidence(t *testing.T) {
+	ctx := context.Background()
+	engine, st, dbPath, cleanup := newTurnNodeCodeHarness(t, "在 internal/config/config.go 中增加 DBPath 校验。", `{"summary":"claims satisfaction without evidence","patch":"","commands":[],"notes":"it's already satisfied in config.go","citations":[]}`)
+	defer cleanup()
+
+	got, err := engine.turnNode(ctx, st)
+	if err != nil {
+		t.Fatalf("turnNode: %v", err)
+	}
+	if got.Decision != model.LoopDecisionRequestChanges {
+		t.Fatalf("expected request_changes, got %s", got.Decision)
+	}
+	if got.Status != model.RunStatusNeedsChange {
+		t.Fatalf("expected needs_change, got %s", got.Status)
+	}
+	if !strings.Contains(got.Summary, "empty_patch_for_code_change") {
+		t.Fatalf("expected stable empty_patch_for_code_change summary, got %q", got.Summary)
+	}
+	if count := queryToolCallCount(t, dbPath, st.RunID, "run_command"); count != 0 {
+		t.Fatalf("expected no run_command tool calls, got %d", count)
+	}
+	if count := queryToolCallCount(t, dbPath, st.RunID, "reviewer_start", "reviewer_review", "reviewer_meta", "reviewer_prompt"); count != 0 {
+		t.Fatalf("expected reviewer to be skipped, got %d reviewer tool calls", count)
+	}
+}
+
+func TestTurnNodeBypassesShortCircuitWithQuotedSatisfiedEvidence(t *testing.T) {
+	ctx := context.Background()
+	engine, st, dbPath, cleanup := newTurnNodeCodeHarness(t, "在 internal/config/config.go 中增加 DBPath 校验。", `{"summary":"quotes current-file evidence","patch":"","commands":[],"notes":"already satisfied: \"func Load() string { return \\\"ok\\\" }\"","citations":[]}`)
+	defer cleanup()
+
+	got, err := engine.turnNode(ctx, st)
+	if err != nil {
+		t.Fatalf("turnNode: %v", err)
+	}
+	if strings.Contains(got.Summary, "empty_patch_for_code_change") {
+		t.Fatalf("expected quoted evidence note to bypass empty-patch short-circuit, got %q", got.Summary)
+	}
+	if count := queryToolCallCount(t, dbPath, st.RunID, "reviewer_start", "reviewer_review", "reviewer_meta"); count == 0 {
+		t.Fatalf("expected reviewer tool calls when quoted evidence bypasses short-circuit")
+	}
+}
+
 func TestTurnNodeStillRunsPatchCommandsAndReviewerWhenPatchIsPresent(t *testing.T) {
 	ctx := context.Background()
 	engine, st, dbPath, cleanup := newTurnNodeCodeHarness(t, "在 internal/config/config.go 中增加 DBPath 校验。", `{"summary":"apply real patch","patch":"diff --git a/internal/config/config.go b/internal/config/config.go\n--- a/internal/config/config.go\n+++ b/internal/config/config.go\n@@ -1,3 +1,4 @@\n package config\n \n+// DBPath validation placeholder\n func Load() string { return \"ok\" }\n","commands":["go build ./..."],"notes":"real patch","citations":[]}`)
