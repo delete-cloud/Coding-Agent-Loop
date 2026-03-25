@@ -148,6 +148,66 @@ func TestRunnerExecutesSafeCommand(t *testing.T) {
 	}
 }
 
+func TestRunnerRejectsPatchLikeValidationCommands(t *testing.T) {
+	dir := t.TempDir()
+	r := NewRunner()
+
+	cases := []struct {
+		name string
+		cmd  string
+	}{
+		{
+			name: "heredoc diff command",
+			cmd: "git apply --check <<'PATCH'\ndiff --git a/Makefile b/Makefile\n--- a/Makefile\n+++ b/Makefile\n@@ -1 +1,2 @@\n+# comment\n build:\nPATCH",
+		},
+		{
+			name: "placeholder patch file",
+			cmd:  "git apply --check <patch-file>",
+		},
+		{
+			name: "placeholder your patch file",
+			cmd:  "git apply --check <your-patch-file>",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := r.Run(context.Background(), tc.cmd, dir)
+			if err == nil {
+				t.Fatal("expected protocol validation error")
+			}
+			if !strings.Contains(err.Error(), "patch content must be placed in the patch field") {
+				t.Fatalf("expected stable patch-field guidance, got %v", err)
+			}
+			if !strings.Contains(err.Error(), "commands may only contain validation commands") {
+				t.Fatalf("expected stable validation-command guidance, got %v", err)
+			}
+		})
+	}
+}
+
+func TestRunnerAllowsNormalValidationCommands(t *testing.T) {
+	r := NewRunner()
+	dir := t.TempDir()
+
+	allowed := []string{
+		"go build ./...",
+		"make -n test",
+	}
+
+	for _, cmd := range allowed {
+		t.Run(cmd, func(t *testing.T) {
+			_, _, err := r.Run(context.Background(), cmd, dir)
+			if err == nil {
+				return
+			}
+			if strings.Contains(err.Error(), "patch content must be placed in the patch field") {
+				t.Fatalf("expected normal validation command to bypass patch-like protocol guard, got %v", err)
+			}
+		})
+	}
+}
+
 func TestRunnerFiltersAgentOrchestrationEnv(t *testing.T) {
 	t.Setenv("AGENT_LOOP_DB_PATH", "/tmp/state.db")
 	t.Setenv("OPENAI_MODEL", "claude-haiku-4-5")

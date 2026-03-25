@@ -14,6 +14,8 @@ type Runner struct {
 	readOnly bool
 }
 
+const patchLikeCommandError = "patch-like command blocked: patch content must be placed in the patch field; commands may only contain validation commands"
+
 type RunnerOption func(*Runner)
 
 func WithReadOnly(v bool) RunnerOption {
@@ -34,6 +36,9 @@ func (r *Runner) Run(ctx context.Context, cmd string, dir string) (string, strin
 	cleanDir, err := filepath.Abs(dir)
 	if err != nil {
 		return "", "", err
+	}
+	if isPatchLikeValidationCommand(cmd) {
+		return "", "", fmt.Errorf(patchLikeCommandError)
 	}
 	if IsDangerousCommand(cmd) {
 		return "", "", fmt.Errorf("dangerous command blocked: %s", cmd)
@@ -79,6 +84,36 @@ func filteredCommandEnv(env []string) []string {
 		}
 	}
 	return out
+}
+
+func isPatchLikeValidationCommand(cmd string) bool {
+	v := strings.ToLower(strings.TrimSpace(cmd))
+	if v == "" {
+		return false
+	}
+	if strings.Contains(v, "git apply --check") {
+		if strings.Contains(v, "<patch-file>") || strings.Contains(v, "<your-patch-file>") {
+			return true
+		}
+		if containsShellHeredoc(v) && containsUnifiedDiffStructure(v) {
+			return true
+		}
+	}
+	return containsShellHeredoc(v) && containsUnifiedDiffStructure(v)
+}
+
+func containsShellHeredoc(cmd string) bool {
+	return strings.Contains(cmd, "<<")
+}
+
+func containsUnifiedDiffStructure(cmd string) bool {
+	if strings.Contains(cmd, "diff --git") {
+		return true
+	}
+	if strings.Contains(cmd, "\n--- ") && strings.Contains(cmd, "\n+++ ") {
+		return true
+	}
+	return strings.Contains(cmd, "\n@@ ")
 }
 
 func IsDangerousCommand(cmd string) bool {
