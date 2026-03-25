@@ -23,6 +23,14 @@ docker push registry.example.com/agent-coding-loop:latest
 kubectl create secret generic model-api-key --from-literal=api-key="$MODEL_API_KEY"
 ```
 
+## Setup PVC
+
+Evaluation jobs use a shared volume to collect outputs. Before running jobs:
+
+```bash
+kubectl apply -f eval/k8s/pvc.yaml
+```
+
 ## Render the job template
 
 The template uses Go template syntax. Render it with `sed` for quick one-offs:
@@ -63,15 +71,11 @@ kubectl logs -f job/eval-task-001
 kubectl get job eval-task-001 -o jsonpath='{.status.conditions[0].type}'
 ```
 
-## Collect results from completed pods
+## Collect results
 
-Copy each task's `state.db` into a results directory organized by task ID:
+Jobs automatically write their output to the `eval-results-pvc`. If you are using the default local `eval/k8s/pvc.yaml`, the results are bind-mounted directly to your host machine at `eval-results/` within this repository.
 
-```bash
-# Copy state.db from a completed pod
-POD=$(kubectl get pods -l task-id=task-001 -o jsonpath='{.items[0].metadata.name}')
-kubectl cp "$POD:/state/state.db" ./results/task-001/state.db
-```
+You no longer need to use `kubectl cp` to extract `state.db` files.
 
 ## Results directory contract
 

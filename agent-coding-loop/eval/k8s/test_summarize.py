@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 import tempfile
+import unittest
 from pathlib import Path
 from typing import Any
 from unittest import mock
-
-import pytest
+import io
 
 import sys
 
@@ -92,7 +92,7 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
 # ---------------------------------------------------------------------------
 
 
-class TestLoadJsonlRows:
+class TestLoadJsonlRows(unittest.TestCase):
     def test_loads_valid_file(self):
         with tempfile.NamedTemporaryFile(suffix=".jsonl", mode="w", delete=False) as f:
             f.write(json.dumps(SAMPLE_ROW_1) + "\n")
@@ -151,7 +151,7 @@ class TestLoadJsonlRows:
 # ---------------------------------------------------------------------------
 
 
-class TestParseArgs:
+class TestParseArgs(unittest.TestCase):
     def test_single_results_file(self):
         args = parse_args(["--results", "a.jsonl"])
         assert args.results == ["a.jsonl"]
@@ -173,7 +173,7 @@ class TestParseArgs:
 # ---------------------------------------------------------------------------
 
 
-class TestMain:
+class TestMain(unittest.TestCase):
     @mock.patch("eval.k8s.summarize.render_markdown", return_value="# Report\nDone.\n")
     @mock.patch(
         "eval.k8s.summarize.build_report",
@@ -249,17 +249,17 @@ class TestMain:
         "eval.k8s.summarize.build_report",
         return_value={"meta": {}, "metrics": {}, "rows": []},
     )
-    def test_stdout_output(self, mock_build, mock_render, capsys):
+    def test_stdout_output(self, mock_build, mock_render):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir = Path(tmpdir)
             jsonl_path = tmpdir / "results.jsonl"
             _write_jsonl(jsonl_path, [SAMPLE_ROW_1])
 
-            rc = main(["--results", str(jsonl_path)])
+            with mock.patch("sys.stdout", new_callable=io.StringIO) as fake_out:
+                rc = main(["--results", str(jsonl_path)])
 
             assert rc == 0
-            captured = capsys.readouterr()
-            assert "Stdout" in captured.out
+            assert "Stdout" in fake_out.getvalue()
 
     @mock.patch("eval.k8s.summarize.render_markdown", return_value="")
     @mock.patch(

@@ -1068,10 +1068,16 @@ class RunABTests(unittest.TestCase):
             ["eval/ab/kb/config_validation.md#Model Configuration"],
             "",
         ))
-        # File-level citation does NOT match heading-level expected token
-        self.assertFalse(citation_hit(
+        # File-level citation matches heading-level expected token (path-stem match)
+        self.assertTrue(citation_hit(
             "config_validation.md#Model Configuration",
             ["eval/ab/kb/config_validation.md"],
+            "",
+        ))
+        # Completely unrelated citation should not match
+        self.assertFalse(citation_hit(
+            "config_validation.md#Model Configuration",
+            ["other_file.md"],
             "",
         ))
         # Heading-level token found in corpus text

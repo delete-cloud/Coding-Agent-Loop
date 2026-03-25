@@ -6,11 +6,10 @@ import json
 import os
 import sqlite3
 import tempfile
+import unittest
 from pathlib import Path
 from typing import Any
 from unittest import mock
-
-import pytest
 
 # ---------------------------------------------------------------------------
 # Import under test
@@ -87,7 +86,7 @@ def _minimal_task(
 # ---------------------------------------------------------------------------
 
 
-class TestIsTerminal:
+class TestIsTerminal(unittest.TestCase):
     def test_terminal_statuses(self):
         for s in ("completed", "failed", "needs_changes", "blocked"):
             assert _is_terminal(s) is True
@@ -100,7 +99,7 @@ class TestIsTerminal:
         assert _is_terminal(None) is False
 
 
-class TestBuildTaskIndex:
+class TestBuildTaskIndex(unittest.TestCase):
     def test_builds_index(self):
         tasks = [
             {"task_id": "alpha", "goal": "a"},
@@ -116,7 +115,7 @@ class TestBuildTaskIndex:
         assert len(idx) == 0
 
 
-class TestLatestRunId:
+class TestLatestRunId(unittest.TestCase):
     def test_returns_latest(self):
         with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
             db_path = f.name
@@ -159,7 +158,7 @@ class TestLatestRunId:
 # ---------------------------------------------------------------------------
 
 
-class TestCollectOne:
+class TestCollectOne(unittest.TestCase):
     """Test collect_one with mocked run_ab functions."""
 
     def _mock_read_run_context(self, db_path, run_id):
@@ -317,7 +316,7 @@ def _mock_read_run_context(db_path, run_id):
     )
 
 
-class TestMain:
+class TestMain(unittest.TestCase):
     """Test the main() CLI with real filesystem and mocked run_ab functions."""
 
     def _setup_results_dir(self, tmpdir: Path, tasks: list[dict[str, Any]]) -> Path:
@@ -479,7 +478,7 @@ class TestMain:
             assert rows[0]["task_id"] == "alpha"
 
 
-class TestParseArgs:
+class TestParseArgs(unittest.TestCase):
     def test_required_args(self):
         args = parse_args([
             "--results-dir", "/tmp/r",

@@ -307,8 +307,14 @@ def normalize_citations(values: list[Any]) -> list[str]:
 
 def citation_hit(token: str, citation_values: list[str], corpus_text: str) -> bool:
     low_token = token.lower()
+    path_stem = low_token.split("#")[0] if "#" in low_token else low_token
     for item in citation_values:
-        if low_token in item.lower():
+        low_item = item.lower()
+        if low_token in low_item:
+            return True
+        if low_item in low_token:
+            return True
+        if path_stem and path_stem in low_item:
             return True
     return low_token in (corpus_text or "").lower()
 
@@ -1047,6 +1053,7 @@ def run_one(
             "repair_stage_count": 0,
             "failed_commands": [],
             "command_fail_count": 0,
+            "difficulty": task.get("difficulty", ""),
         }
 
     cmd = [
@@ -1095,6 +1102,7 @@ def run_one(
             "repair_stage_count": 0,
             "failed_commands": [],
             "command_fail_count": 0,
+            "difficulty": task.get("difficulty", ""),
         }
         if isolated_root:
             cleanup_isolated_repo(isolated_git_top, isolated_worktree_root, isolated_root)
@@ -1173,6 +1181,7 @@ def run_one(
             "repair_stage_count": int(trace.get("repair_stage_count", 0) or 0),
             "failed_commands": list(trace.get("failed_commands", [])),
             "command_fail_count": int(trace.get("command_fail_count", 0) or 0),
+            "difficulty": task.get("difficulty", ""),
         }
         if isolated_root:
             cleanup_isolated_repo(isolated_git_top, isolated_worktree_root, isolated_root)
@@ -1234,6 +1243,7 @@ def run_one(
         "repair_stage_count": int(trace.get("repair_stage_count", 0) or 0),
         "failed_commands": list(trace.get("failed_commands", [])),
         "command_fail_count": int(trace.get("command_fail_count", 0) or 0),
+        "difficulty": task.get("difficulty", ""),
     }
     if isolated_root:
         cleanup_isolated_repo(isolated_git_top, isolated_worktree_root, isolated_root)

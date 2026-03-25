@@ -25,7 +25,8 @@ spec:
         - name: workspace
           emptyDir: {}
         - name: state
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: eval-results-pvc
 
       initContainers:
         - name: clone-repo
@@ -42,6 +43,7 @@ spec:
       containers:
         - name: agent
           image: "{{.Image}}"
+          imagePullPolicy: IfNotPresent
           args:
             - run
             - --repo=/workspace/repo
@@ -66,8 +68,8 @@ spec:
               value: "{{.ModelName}}"
             - name: KB_BASE_URL
               value: "{{.KBBaseURL}}"
-            - name: STATE_DB
-              value: /state/state.db
+            - name: AGENT_LOOP_DB_PATH
+              value: /state/{{.TaskID}}/state.db
           volumeMounts:
             - name: workspace
               mountPath: /workspace
