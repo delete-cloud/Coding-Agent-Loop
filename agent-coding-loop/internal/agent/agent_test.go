@@ -493,6 +493,9 @@ func TestCoderPromptsForbidDiffInCommands(t *testing.T) {
 	if !strings.Contains(system, "unified diff must appear only in patch") {
 		t.Fatalf("expected coder prompt to force diff-only-in-patch contract, got %q", system)
 	}
+	if !strings.Contains(system, "heredoc patch bodies") || !strings.Contains(system, "tool arguments") {
+		t.Fatalf("expected coder prompt to forbid heredoc patch bodies and tool-argument leakage, got %q", system)
+	}
 	if !strings.Contains(system, "commands must never contain diff markers") {
 		t.Fatalf("expected coder prompt to forbid diff markers in commands, got %q", system)
 	}
@@ -581,6 +584,9 @@ func TestRepairPromptsForbidDiffInCommands(t *testing.T) {
 	if !strings.Contains(system, "unified diff must appear only in patch") {
 		t.Fatalf("expected repair prompt to force diff-only-in-patch contract, got %q", system)
 	}
+	if !strings.Contains(system, "heredoc patch bodies") || !strings.Contains(system, "tool arguments") {
+		t.Fatalf("expected repair prompt to forbid heredoc patch bodies and tool-argument leakage, got %q", system)
+	}
 	if !strings.Contains(system, "commands must never contain diff markers") {
 		t.Fatalf("expected repair prompt to forbid diff markers in commands, got %q", system)
 	}
@@ -589,6 +595,20 @@ func TestRepairPromptsForbidDiffInCommands(t *testing.T) {
 	}
 	if !strings.Contains(system, "if patch is empty, commands must also be empty") {
 		t.Fatalf("expected repair prompt to tie empty patch to empty commands, got %q", system)
+	}
+}
+
+func TestPatchCommandContractPromptRulesMentionHeredocAndToolArgs(t *testing.T) {
+	rules := patchCommandContractPromptRules()
+
+	if !strings.Contains(rules, "unified diff must appear only in patch") {
+		t.Fatalf("expected shared contract helper to keep diff-only-in-patch rule, got %q", rules)
+	}
+	if !strings.Contains(rules, "heredoc patch bodies") {
+		t.Fatalf("expected shared contract helper to mention heredoc patch bodies, got %q", rules)
+	}
+	if !strings.Contains(rules, "tool arguments") {
+		t.Fatalf("expected shared contract helper to mention tool arguments, got %q", rules)
 	}
 }
 
@@ -1955,6 +1975,108 @@ func TestEnsureGoalTargetPatchUsesRetryPatchForSingleTargetDoc(t *testing.T) {
 	if !strings.Contains(out.Notes, "targeted_patch_retry") {
 		t.Fatalf("expected retry diagnostics in notes, got %q", out.Notes)
 	}
+}
+
+func TestRetryPromptVariantsIncludePatchCommandContractRules(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "Makefile")
+	if err := os.WriteFile(path, []byte("build:\n\tgo build ./...\n"), 0o644); err != nil {
+		t.Fatalf("write Makefile: %v", err)
+	}
+
+	checkContract := func(t *testing.T, system string) {
+		t.Helper()
+		if !strings.Contains(system, "unified diff must appear only in patch") {
+			t.Fatalf("expected retry prompt to force diff-only-in-patch contract, got %q", system)
+		}
+		if !strings.Contains(system, "heredoc patch bodies") || !strings.Contains(system, "tool arguments") {
+			t.Fatalf("expected retry prompt to forbid heredoc patch bodies and tool-argument leakage, got %q", system)
+		}
+		if !strings.Contains(system, "commands must never contain diff markers") {
+			t.Fatalf("expected retry prompt to forbid diff markers in commands, got %q", system)
+		}
+		if !strings.Contains(system, "<patch-file>") || !strings.Contains(system, "<your-patch-file>") {
+			t.Fatalf("expected retry prompt to forbid placeholder patch paths, got %q", system)
+		}
+		if !strings.Contains(system, "if patch is empty, commands must also be empty") {
+			t.Fatalf("expected retry prompt to tie empty patch to empty commands, got %q", system)
+		}
+	}
+
+	makeClient := func(t *testing.T, capture *string) ClientConfig {
+		t.Helper()
+		return ClientConfig{
+			BaseURL: "http://example.com",
+			Model:   "test-model",
+			completeJSONForTest: func(_ context.Context, systemPrompt, _ string, out any) error {
+				*capture = systemPrompt
+				wire, ok := out.(*any)
+				if !ok {
+					t.Fatalf("expected *any output, got %T", out)
+				}
+				*wire = map[string]any{
+					"summary":   "ok",
+					"patch":     "",
+					"commands":  []string{},
+					"notes":     "goal already satisfied",
+					"citations": []string{},
+				}
+				return nil
+			},
+		}
+	}
+
+	t.Run("repo_only_retry", func(t *testing.T) {
+		var system string
+		c := NewCoder(makeClient(t, &system))
+		_, err := c.generateRepoOnlyPatchWithClient(context.Background(), CoderInput{
+			Goal:        "给 Makefile 添加注释。",
+			RepoSummary: root,
+		}, []string{"Makefile"}, "")
+		if err != nil {
+			t.Fatalf("generateRepoOnlyPatchWithClient: %v", err)
+		}
+		checkContract(t, system)
+	})
+
+	t.Run("targeted_retry", func(t *testing.T) {
+		var system string
+		c := NewCoder(makeClient(t, &system))
+		_, err := c.generateTargetedPatchWithClient(context.Background(), CoderInput{
+			Goal:        "给 Makefile 添加注释。",
+			RepoSummary: root,
+		}, []string{"Makefile"}, "")
+		if err != nil {
+			t.Fatalf("generateTargetedPatchWithClient: %v", err)
+		}
+		checkContract(t, system)
+	})
+
+	t.Run("targeted_strict_retry", func(t *testing.T) {
+		var system string
+		c := NewCoder(makeClient(t, &system))
+		_, err := c.generateTargetedPatchWithClientStrict(context.Background(), CoderInput{
+			Goal:        "给 Makefile 添加注释。",
+			RepoSummary: root,
+		}, []string{"Makefile"}, "")
+		if err != nil {
+			t.Fatalf("generateTargetedPatchWithClientStrict: %v", err)
+		}
+		checkContract(t, system)
+	})
+
+	t.Run("scoped_strict_retry", func(t *testing.T) {
+		var system string
+		c := NewCoder(makeClient(t, &system))
+		_, err := c.generateScopedPatchWithClientStrict(context.Background(), CoderInput{
+			Goal:        "根据知识库规则修改 Makefile。",
+			RepoSummary: root,
+		}, []string{"Makefile"}, "", []string{"scope creep"})
+		if err != nil {
+			t.Fatalf("generateScopedPatchWithClientStrict: %v", err)
+		}
+		checkContract(t, system)
+	})
 }
 
 func TestEnsureGoalTargetPatchReportsEmptyRetryDiagnostics(t *testing.T) {
