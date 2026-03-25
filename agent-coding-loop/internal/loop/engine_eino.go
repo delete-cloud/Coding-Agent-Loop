@@ -718,6 +718,31 @@ func (e *Engine) turnNode(ctx context.Context, st *loopSession) (*loopSession, e
 		Status:    metaStatus,
 		CreatedAt: time.Now().UnixMilli(),
 	})
+	if !isRepairTurn && shouldShortCircuitEmptyPatchForCodeChange(st, currentDiff, coderOut) {
+		reason := "empty_patch_for_code_change: coder returned empty patch for code-change task without reliable evidence the goal is already satisfied"
+		_ = e.store.InsertStep(ctx, sqlite.StepRecord{
+			RunID:     st.RunID,
+			Iteration: iteration,
+			Agent:     "coder",
+			Decision:  string(model.LoopDecisionRequestChanges),
+			Status:    string(model.RunStatusNeedsChange),
+			StartedAt: started,
+			EndedAt:   time.Now().UnixMilli(),
+		})
+		st.Decision = model.LoopDecisionRequestChanges
+		st.Status = model.RunStatusNeedsChange
+		st.PreviousReview = reason
+		st.Summary = reason
+		st.RepairEligible = false
+		st.LastFailedCommands = nil
+		st.LastCommandOutput = ""
+		_ = e.store.UpdateRunStatus(ctx, st.RunID, model.RunStatusNeedsChange, st.Summary)
+		e.emitProgress(ctx, st.RunID, iteration, model.ProgressEventIterationComplete, model.ProgressStatusCompleted, "iteration completed: request changes", map[string]any{
+			"decision": string(model.LoopDecisionRequestChanges),
+			"reason":   "empty_patch_for_code_change",
+		})
+		return st, nil
+	}
 
 	patchApplied := false
 	if strings.TrimSpace(coderOut.Patch) != "" {
@@ -1134,6 +1159,39 @@ func shouldEnterRepair(st *loopSession, commandFailed bool, patchApplied bool, a
 		return false
 	}
 	return loopPatchTouchesTargets(appliedPatch, targets, len(targets) > 1)
+}
+
+func shouldShortCircuitEmptyPatchForCodeChange(st *loopSession, currentDiff string, coderOut agentpkg.CoderOutput) bool {
+	if st == nil {
+		return false
+	}
+	if strings.TrimSpace(coderOut.Patch) != "" {
+		return false
+	}
+	targets := loopExtractGoalTargetFiles(st.Spec.Goal)
+	if len(targets) == 0 {
+		return false
+	}
+	if loopHasReliableSatisfiedEvidence(strings.TrimSpace(coderOut.Notes)) {
+		return false
+	}
+	if loopPatchTouchesTargets(currentDiff, targets, len(targets) > 1) {
+		return false
+	}
+	return true
+}
+
+func loopHasReliableSatisfiedEvidence(notes string) bool {
+	notes = strings.TrimSpace(notes)
+	if notes == "" {
+		return false
+	}
+	lower := strings.ToLower(notes)
+	satisfied := strings.Contains(lower, "already satisfied") || strings.Contains(notes, "已满足") || strings.Contains(notes, "已经满足")
+	if !satisfied {
+		return false
+	}
+	return strings.Contains(notes, "`") || strings.Contains(notes, "\"") || strings.Contains(notes, "'")
 }
 
 func retrievedContextChunkKey(hit kbpkg.SearchHit) string {

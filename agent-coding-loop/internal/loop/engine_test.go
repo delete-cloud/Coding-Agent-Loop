@@ -1582,6 +1582,142 @@ func newTurnNodeRepairHarnessWithGoal(t *testing.T, goal string, commands model.
 	return engine, st, dbPath, func() {}
 }
 
+func newTurnNodeCodeHarness(t *testing.T, goal string, coderContent string) (*Engine, *loopSession, string, func()) {
+	t.Helper()
+	ctx := context.Background()
+	repo := t.TempDir()
+	r := tools.NewRunner()
+	mustRun(t, r, repo, "git init")
+	mustRun(t, r, repo, "git config user.email test@example.com")
+	mustRun(t, r, repo, "git config user.name tester")
+	if err := os.MkdirAll(filepath.Join(repo, "internal", "config"), 0o755); err != nil {
+		t.Fatalf("mkdir internal/config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "go.mod"), []byte("module example.com/test\n\ngo 1.22\n"), 0o644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "internal", "config", "config.go"), []byte("package config\n\nfunc Load() string { return \"ok\" }\n"), 0o644); err != nil {
+		t.Fatalf("write config.go: %v", err)
+	}
+	mustRun(t, r, repo, "git add go.mod internal/config/config.go")
+	mustRun(t, r, repo, "git commit -m init")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path != "/chat/completions" {
+			http.NotFound(w, req)
+			return
+		}
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+		payload := string(body)
+		content := coderContent
+		if strings.Contains(payload, "Review input:") {
+			content = `{"decision":"approve","summary":"review ok","findings":[],"review_markdown":"approved"}`
+		} else if strings.Contains(payload, "Plan input:") {
+			content = `{"summary":"plan ok","steps":["Inspect the existing implementation and identify the exact file to change."],"risks":["minimal"],"citations":[]}`
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+			"object":  "chat.completion",
+			"created": 1700000000,
+			"model":   "test-model",
+			"choices": []map[string]any{
+				{
+					"index": 0,
+					"message": map[string]any{
+						"role":    "assistant",
+						"content": content,
+					},
+					"finish_reason": "stop",
+				},
+			},
+			"usage": map[string]any{
+				"prompt_tokens":     1,
+				"completion_tokens": 1,
+				"total_tokens":      2,
+			},
+		})
+	}))
+
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	store, err := sqlite.New(dbPath)
+	if err != nil {
+		t.Fatalf("sqlite.New: %v", err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	spec := model.RunSpec{
+		Goal:          goal,
+		Repo:          repo,
+		PRMode:        model.PRModeDryRun,
+		MaxIterations: 3,
+		Commands: model.CommandSet{
+			Test: []string{"echo SHOULD_NOT_FALLBACK"},
+		},
+	}
+	runID, err := store.CreateRun(ctx, spec, model.RunStatusQueued)
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if err := store.UpdateRunStatus(ctx, runID, model.RunStatusRunning, "running"); err != nil {
+		t.Fatalf("UpdateRunStatus: %v", err)
+	}
+
+	clientCfg := agentpkg.ClientConfig{
+		BaseURL: srv.URL,
+		Model:   "test-model",
+		APIKey:  "x",
+	}
+	engine := NewEngine(EngineDeps{
+		Store:    store,
+		Runner:   r,
+		Git:      gitpkg.NewClient(r),
+		GitHub:   ghpkg.NewClient(r),
+		Coder:    agentpkg.NewCoder(clientCfg),
+		Reviewer: agentpkg.NewReviewer(clientCfg),
+		Skills:   skills.NewRegistry(nil),
+	})
+	st := &loopSession{
+		RunID:    runID,
+		Spec:     spec,
+		RepoAbs:  repo,
+		Commands: spec.Commands,
+		Status:   model.RunStatusRunning,
+	}
+	return engine, st, dbPath, srv.Close
+}
+
+func queryToolCallCount(t *testing.T, dbPath, runID string, tools ...string) int {
+	t.Helper()
+	if len(tools) == 0 {
+		return 0
+	}
+	quoted := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		quoted = append(quoted, fmt.Sprintf("'%s'", tool))
+	}
+	query := "select count(*) as count from tool_calls where run_id='" + runID + "' and tool in (" + strings.Join(quoted, ",") + ");"
+	out, err := exec.Command("sqlite3", "-json", dbPath, query).Output()
+	if err != nil {
+		t.Fatalf("sqlite3 tool call count query: %v", err)
+	}
+	var rows []struct {
+		Count int `json:"count"`
+	}
+	if err := json.Unmarshal(out, &rows); err != nil {
+		t.Fatalf("unmarshal sqlite count json: %v raw=%s", err, string(out))
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected one count row, got %d raw=%s", len(rows), string(out))
+	}
+	return rows[0].Count
+}
+
 func TestEngineKBPrefetchInsertsToolCallOnce(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "state.db")
@@ -2110,6 +2246,81 @@ func TestTurnNodeRoutesToRepairWhenEligible(t *testing.T) {
 	}
 	if got.Phase != loopPhaseReview {
 		t.Fatalf("expected repair turn to reach review phase, got %s", got.Phase)
+	}
+}
+
+func TestTurnNodeShortCircuitsEmptyPatchPlaceholderCommands(t *testing.T) {
+	ctx := context.Background()
+	engine, st, dbPath, cleanup := newTurnNodeCodeHarness(t, "在 internal/config/config.go 中增加 DBPath 校验。", `{"summary":"try placeholder command","patch":"","commands":["git apply --check <patch-file>","go build ./..."],"notes":"no patch yet","citations":[]}`)
+	defer cleanup()
+
+	got, err := engine.turnNode(ctx, st)
+	if err != nil {
+		t.Fatalf("turnNode: %v", err)
+	}
+	if got.Decision != model.LoopDecisionRequestChanges {
+		t.Fatalf("expected request_changes, got %s", got.Decision)
+	}
+	if got.Status != model.RunStatusNeedsChange {
+		t.Fatalf("expected needs_change, got %s", got.Status)
+	}
+	if !strings.Contains(got.Summary, "empty_patch_for_code_change") {
+		t.Fatalf("expected stable empty_patch_for_code_change summary, got %q", got.Summary)
+	}
+	if count := queryToolCallCount(t, dbPath, st.RunID, "run_command"); count != 0 {
+		t.Fatalf("expected no run_command tool calls, got %d", count)
+	}
+	if count := queryToolCallCount(t, dbPath, st.RunID, "reviewer_start", "reviewer_review", "reviewer_meta", "reviewer_prompt"); count != 0 {
+		t.Fatalf("expected reviewer to be skipped, got %d reviewer tool calls", count)
+	}
+}
+
+func TestTurnNodeShortCircuitsEmptyPatchHeredocDiffCommands(t *testing.T) {
+	ctx := context.Background()
+	engine, st, dbPath, cleanup := newTurnNodeCodeHarness(t, "在 internal/config/config.go 中增加 DBPath 校验。", `{"summary":"try heredoc diff command","patch":"","commands":["git apply --check <<'PATCH'\ndiff --git a/internal/config/config.go b/internal/config/config.go\n--- a/internal/config/config.go\n+++ b/internal/config/config.go\n@@ -1,3 +1,4 @@\n package config\n \n+// comment\n func Load() string { return \"ok\" }\nPATCH"],"notes":"no patch yet","citations":[]}`)
+	defer cleanup()
+
+	got, err := engine.turnNode(ctx, st)
+	if err != nil {
+		t.Fatalf("turnNode: %v", err)
+	}
+	if got.Decision != model.LoopDecisionRequestChanges {
+		t.Fatalf("expected request_changes, got %s", got.Decision)
+	}
+	if got.Status != model.RunStatusNeedsChange {
+		t.Fatalf("expected needs_change, got %s", got.Status)
+	}
+	if !strings.Contains(got.Summary, "empty_patch_for_code_change") {
+		t.Fatalf("expected stable empty_patch_for_code_change summary, got %q", got.Summary)
+	}
+	if count := queryToolCallCount(t, dbPath, st.RunID, "run_command"); count != 0 {
+		t.Fatalf("expected no run_command tool calls, got %d", count)
+	}
+	if count := queryToolCallCount(t, dbPath, st.RunID, "reviewer_start", "reviewer_review", "reviewer_meta", "reviewer_prompt"); count != 0 {
+		t.Fatalf("expected reviewer to be skipped, got %d reviewer tool calls", count)
+	}
+}
+
+func TestTurnNodeStillRunsPatchCommandsAndReviewerWhenPatchIsPresent(t *testing.T) {
+	ctx := context.Background()
+	engine, st, dbPath, cleanup := newTurnNodeCodeHarness(t, "在 internal/config/config.go 中增加 DBPath 校验。", `{"summary":"apply real patch","patch":"diff --git a/internal/config/config.go b/internal/config/config.go\n--- a/internal/config/config.go\n+++ b/internal/config/config.go\n@@ -1,3 +1,4 @@\n package config\n \n+// DBPath validation placeholder\n func Load() string { return \"ok\" }\n","commands":["go build ./..."],"notes":"real patch","citations":[]}`)
+	defer cleanup()
+
+	got, err := engine.turnNode(ctx, st)
+	if err != nil {
+		t.Fatalf("turnNode: %v", err)
+	}
+	if got.Decision != model.LoopDecisionComplete {
+		t.Fatalf("expected completion path with non-empty patch, got %s summary=%q", got.Decision, got.Summary)
+	}
+	if count := queryToolCallCount(t, dbPath, st.RunID, "git_apply"); count != 1 {
+		t.Fatalf("expected one git_apply tool call, got %d", count)
+	}
+	if count := queryToolCallCount(t, dbPath, st.RunID, "run_command"); count != 1 {
+		t.Fatalf("expected one run_command tool call, got %d", count)
+	}
+	if count := queryToolCallCount(t, dbPath, st.RunID, "reviewer_start", "reviewer_review", "reviewer_meta"); count == 0 {
+		t.Fatalf("expected reviewer tool calls for non-empty patch")
 	}
 }
 
