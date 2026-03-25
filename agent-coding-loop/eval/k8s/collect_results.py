@@ -10,14 +10,17 @@ Usage:
         [--strict-mode] \
         [--trial 1] [--trial-count 1]
 
-The --results-dir directory must contain subdirectories named by task_id, each
-containing a state.db file copied from the completed K8S Job Pod.
+The --results-dir directory should point at one experiment/trial partition and
+contain subdirectories named by task_id, each containing a state.db file from
+the completed K8S Job.
 
     results/
-      task-alpha/
-        state.db
-      task-beta/
-        state.db
+      rag/
+        trial-1/
+          task-alpha/
+            state.db
+          task-beta/
+            state.db
 """
 
 from __future__ import annotations
@@ -171,7 +174,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--results-dir",
         required=True,
-        help="Directory containing subdirs named by task_id, each with state.db",
+        help="Directory for one experiment/trial partition, containing task_id subdirs with state.db",
     )
     p.add_argument(
         "--tasks",

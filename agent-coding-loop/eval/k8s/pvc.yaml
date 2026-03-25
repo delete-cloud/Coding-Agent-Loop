@@ -1,3 +1,9 @@
+#
+# Local-cluster default only:
+# This PV uses hostPath to bind results onto the current machine under
+# agent-coding-loop/eval-results. Keep this scoped to local development unless
+# you replace it with a cluster-portable storage class.
+#
 apiVersion: v1
 kind: PersistentVolume
 metadata:
