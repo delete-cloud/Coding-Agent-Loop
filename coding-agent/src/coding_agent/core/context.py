@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from coding_agent.core.planner import PlanManager
 from coding_agent.core.tape import Entry, Tape
 
 
@@ -22,11 +23,12 @@ class Context:
     # Approximate chars per token for budget estimation
     CHARS_PER_TOKEN = 4
 
-    def __init__(self, max_tokens: int, system_prompt: str):
+    def __init__(self, max_tokens: int, system_prompt: str, planner: PlanManager | None = None):
         if max_tokens <= 0:
             raise ValueError(f"max_tokens must be positive, got {max_tokens}")
         self.max_tokens = max_tokens
         self.system_prompt = system_prompt
+        self.planner = planner
         self._max_chars = max_tokens * self.CHARS_PER_TOKEN
 
     def _estimate_tokens(self, text: str) -> int:
@@ -55,12 +57,16 @@ class Context:
         System prompt is always preserved. Truncation removes oldest
         non-system messages first.
         """
-        messages: list[dict[str, Any]] = []
-
         # System prompt always first
         system_msg = {"role": "system", "content": self.system_prompt}
-        messages.append(system_msg)
         current_chars = len(self.system_prompt)
+
+        # Inject plan if present and non-empty
+        plan_msg = None
+        if self.planner and self.planner.tasks:
+            plan_text = f"[Current Plan]\n{self.planner.to_text()}"
+            plan_msg = {"role": "system", "content": plan_text}
+            current_chars += len(plan_text)
 
         # Find the last anchor to start from
         entries = tape.entries()
@@ -98,8 +104,12 @@ class Context:
                     new_messages.append(msg)
                     current_chars += msg_chars
 
-        # Combine system message with (possibly truncated) new messages
-        return [system_msg] + new_messages
+        # Combine: system + plan (if present) + conversation messages
+        result = [system_msg]
+        if plan_msg:
+            result.append(plan_msg)
+        result.extend(new_messages)
+        return result
 
     def _truncate_message(self, message: dict[str, Any], max_chars: int) -> dict[str, Any] | None:
         """Truncate a message to fit within max_chars.

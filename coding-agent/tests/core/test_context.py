@@ -190,3 +190,43 @@ class TestContextConfiguration:
         """Context should store system_prompt parameter."""
         context = Context(max_tokens=4000, system_prompt="Custom prompt")
         assert context.system_prompt == "Custom prompt"
+
+
+# --- Plan Injection Tests (P1) ---
+
+from coding_agent.core.planner import PlanManager
+
+
+class TestPlanInjection:
+    def test_no_plan_injected_when_none(self):
+        ctx = Context(max_tokens=100000, system_prompt="You are an agent.")
+        tape = Tape(path=None)
+        tape.append(Entry.message("user", "hello"))
+        msgs = ctx.build_working_set(tape)
+        # Only system + user, no plan message
+        assert len(msgs) == 2
+
+    def test_plan_injected_after_system(self):
+        planner = PlanManager()
+        planner.set_tasks([
+            {"title": "Read code", "status": "todo"},
+            {"title": "Write tests", "status": "todo"},
+        ])
+        ctx = Context(max_tokens=100000, system_prompt="You are an agent.", planner=planner)
+        tape = Tape(path=None)
+        tape.append(Entry.message("user", "hello"))
+        msgs = ctx.build_working_set(tape)
+        # system + plan + user
+        assert len(msgs) == 3
+        assert msgs[1]["role"] == "system"
+        assert "Current Plan" in msgs[1]["content"]
+        assert "[ ] 1. Read code" in msgs[1]["content"]
+
+    def test_empty_plan_not_injected(self):
+        planner = PlanManager()
+        ctx = Context(max_tokens=100000, system_prompt="You are an agent.", planner=planner)
+        tape = Tape(path=None)
+        tape.append(Entry.message("user", "hello"))
+        msgs = ctx.build_working_set(tape)
+        # Empty plan should not inject a message
+        assert len(msgs) == 2
