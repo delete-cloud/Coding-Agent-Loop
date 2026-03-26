@@ -18,7 +18,8 @@ def main():
 @click.option("--api-key", envvar="AGENT_API_KEY", required=True, help="API key")
 @click.option("--max-steps", default=30, help="Max steps per turn")
 @click.option("--approval", default="yolo", type=click.Choice(["yolo", "interactive", "auto"]))
-def run(goal, repo, model, provider_name, base_url, api_key, max_steps, approval):
+@click.option("--tui", is_flag=True, help="Use Rich TUI interface")
+def run(goal, repo, model, provider_name, base_url, api_key, max_steps, approval, tui):
     """Run agent on a goal (batch mode)."""
     import asyncio
     from coding_agent.core.config import Config
@@ -32,10 +33,10 @@ def run(goal, repo, model, provider_name, base_url, api_key, max_steps, approval
         max_steps=max_steps,
         approval_mode=approval,
     )
-    asyncio.run(_run(config, goal))
+    asyncio.run(_run(config, goal, use_tui=tui))
 
 
-async def _run(config, goal):
+async def _run(config, goal, use_tui: bool = False):
     from coding_agent.core.loop import AgentLoop
     from coding_agent.core.planner import PlanManager
     from coding_agent.tools.registry import ToolRegistry
@@ -58,40 +59,81 @@ async def _run(config, goal):
     register_search_tools(registry, repo_root=config.repo)
     register_planner_tools(registry, planner)
 
-    consumer = HeadlessConsumer()
+    if use_tui:
+        # TUI mode
+        from coding_agent.ui.rich_tui import CodingAgentTUI
+        
+        tui = CodingAgentTUI(model_name=config.model, max_steps=config.max_steps)
+        consumer = tui.consumer
+        
+        # Register subagent tool
+        register_subagent_tool(
+            registry=registry,
+            provider=provider,
+            tape=tape,
+            consumer=consumer,
+            max_steps=config.subagent_max_steps,
+            max_depth=config.max_subagent_depth,
+        )
+        
+        system_prompt = (
+            "You are a coding agent. You can read files, edit files, "
+            "run shell commands, search the codebase, create task plans, "
+            "and dispatch sub-agents for independent sub-tasks.\n\n"
+            "Always create a plan (todo_write) before starting complex work. "
+            "Update task status as you progress."
+        )
+        context = Context(provider.max_context_size, system_prompt, planner=planner)
+        
+        loop = AgentLoop(
+            provider=provider,
+            tools=registry,
+            tape=tape,
+            context=context,
+            consumer=consumer,
+            max_steps=config.max_steps,
+        )
+        
+        with tui:
+            tui.add_user_message(goal)
+            result = await loop.run_turn(goal)
+            click.echo(f"\n--- Result ({result.stop_reason}) ---")
+    else:
+        # Headless mode (existing code)
+        consumer = HeadlessConsumer()
 
-    # Register subagent tool (needs provider, tape, consumer)
-    register_subagent_tool(
-        registry=registry,
-        provider=provider,
-        tape=tape,
-        consumer=consumer,
-        max_steps=config.subagent_max_steps,
-        max_depth=config.max_subagent_depth,
-    )
+        # Register subagent tool (needs provider, tape, consumer)
+        register_subagent_tool(
+            registry=registry,
+            provider=provider,
+            tape=tape,
+            consumer=consumer,
+            max_steps=config.subagent_max_steps,
+            max_depth=config.max_subagent_depth,
+        )
 
-    system_prompt = (
-        "You are a coding agent. You can read files, edit files, "
-        "run shell commands, search the codebase, create task plans, "
-        "and dispatch sub-agents for independent sub-tasks.\n\n"
-        "Always create a plan (todo_write) before starting complex work. "
-        "Update task status as you progress."
-    )
-    context = Context(provider.max_context_size, system_prompt, planner=planner)
+        system_prompt = (
+            "You are a coding agent. You can read files, edit files, "
+            "run shell commands, search the codebase, create task plans, "
+            "and dispatch sub-agents for independent sub-tasks.\n\n"
+            "Always create a plan (todo_write) before starting complex work. "
+            "Update task status as you progress."
+        )
+        context = Context(provider.max_context_size, system_prompt, planner=planner)
 
-    loop = AgentLoop(
-        provider=provider,
-        tools=registry,
-        tape=tape,
-        context=context,
-        consumer=consumer,
-        max_steps=config.max_steps,
-    )
+        loop = AgentLoop(
+            provider=provider,
+            tools=registry,
+            tape=tape,
+            context=context,
+            consumer=consumer,
+            max_steps=config.max_steps,
+        )
 
-    result = await loop.run_turn(goal)
-    click.echo(f"\n--- Result ({result.stop_reason}) ---")
-    if result.final_message:
-        click.echo(result.final_message)
+        result = await loop.run_turn(goal)
+        click.echo(f"\n--- Result ({result.stop_reason}) ---")
+        if result.final_message:
+            click.echo(result.final_message)
 
 
 def _create_provider(config):
