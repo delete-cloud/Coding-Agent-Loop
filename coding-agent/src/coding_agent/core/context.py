@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from coding_agent.core.tape import Entry, Tape
@@ -18,7 +19,7 @@ class Context:
     """
 
     def __init__(self, max_tokens: int, system_prompt: str):
-        self.max_tokens = max_tokens
+        self.max_tokens = max_tokens  # TODO: max_tokens is stored but not yet enforced
         self.system_prompt = system_prompt
 
     def build_working_set(self, tape: Tape) -> list[dict[str, Any]]:
@@ -69,7 +70,7 @@ class Context:
                             "type": "function",
                             "function": {
                                 "name": entry.payload["tool"],
-                                "arguments": __import__("json").dumps(
+                                "arguments": json.dumps(
                                     entry.payload["args"]
                                 ),
                             },

@@ -48,21 +48,21 @@ class Entry:
         )
 
     @classmethod
-    def tool_call(cls, name: str, arguments: dict, id: int | None = None) -> Entry:
+    def tool_call(cls, call_id: str, tool: str, args: dict, id: int | None = None) -> Entry:
         """Create a tool_call entry."""
         return cls(
             id=id or 0,
             kind="tool_call",
-            payload={"name": name, "arguments": arguments},
+            payload={"call_id": call_id, "tool": tool, "args": args},
         )
 
     @classmethod
-    def tool_result(cls, name: str, result: object, id: int | None = None) -> Entry:
+    def tool_result(cls, call_id: str, result: object, id: int | None = None) -> Entry:
         """Create a tool_result entry."""
         return cls(
             id=id or 0,
             kind="tool_result",
-            payload={"name": name, "result": result},
+            payload={"call_id": call_id, "result": result},
         )
 
     @classmethod

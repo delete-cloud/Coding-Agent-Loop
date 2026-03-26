@@ -28,16 +28,17 @@ class TestEntry:
 
     def test_entry_creation_tool_call(self):
         """Test creating a tool_call entry."""
-        entry = Entry.tool_call(name="read_file", arguments={"path": "/tmp/test.txt"})
+        entry = Entry.tool_call(call_id="call_123", tool="read_file", args={"path": "/tmp/test.txt"})
         assert entry.kind == "tool_call"
-        assert entry.payload["name"] == "read_file"
-        assert entry.payload["arguments"] == {"path": "/tmp/test.txt"}
+        assert entry.payload["call_id"] == "call_123"
+        assert entry.payload["tool"] == "read_file"
+        assert entry.payload["args"] == {"path": "/tmp/test.txt"}
 
     def test_entry_creation_tool_result(self):
         """Test creating a tool_result entry."""
-        entry = Entry.tool_result(name="read_file", result="file content")
+        entry = Entry.tool_result(call_id="call_123", result="file content")
         assert entry.kind == "tool_result"
-        assert entry.payload["name"] == "read_file"
+        assert entry.payload["call_id"] == "call_123"
         assert entry.payload["result"] == "file content"
 
     def test_entry_creation_event(self):
