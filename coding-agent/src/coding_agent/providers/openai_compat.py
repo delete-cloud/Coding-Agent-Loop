@@ -42,6 +42,9 @@ class OpenAICompatProvider:
         temperature: float = 0.7,
     ):
         self._model = model
+        # Handle SecretStr by extracting actual value
+        if hasattr(api_key, 'get_secret_value'):
+            api_key = api_key.get_secret_value()
         self._client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
