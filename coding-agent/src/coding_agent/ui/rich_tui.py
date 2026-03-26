@@ -163,6 +163,9 @@ class CodingAgentTUI:
             "args": args,
             "result": None,
         })
+        # Prevent unbounded growth - keep last 20 tools
+        if len(self.tools) > 20:
+            self.tools = self.tools[-20:]
         self.refresh()
 
     def update_tool_result(self, result: str) -> None:
@@ -188,22 +191,24 @@ class CodingAgentTUI:
             "role": "user",
             "content": content,
         })
+        # Prevent unbounded growth - keep last 50 messages
+        if len(self.messages) > 50:
+            self.messages = self.messages[-50:]
         self.refresh()
 
-    def run(self) -> Live:
-        """Run the TUI (context manager)."""
+    def __enter__(self) -> CodingAgentTUI:
+        """Enter TUI context - initialize Live display."""
         self.live = Live(
             self.layout,
             refresh_per_second=10,
             screen=True,
             console=self.console,
         )
-        return self.live
-
-    def __enter__(self) -> CodingAgentTUI:
-        self.run().__enter__()
+        self.live.__enter__()
         return self
 
-    def __exit__(self, *args) -> None:
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Exit TUI context - cleanup Live display."""
         if self.live:
-            self.live.__exit__(*args)
+            self.live.__exit__(exc_type, exc_val, exc_tb)
+            self.live = None

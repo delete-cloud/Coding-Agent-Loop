@@ -57,8 +57,8 @@ class RichConsumer(WireConsumer):
                     self.tui.update_tool_result(result)
                 self.current_tool = None
             
-            case StepInfo(current=current, total=total):
-                self.tui.update_step(current, total)
+            case StepInfo(step_number=step_number, max_steps=max_steps):
+                self.tui.update_step(step_number, max_steps)
 
     async def request_approval(self, req: ApprovalRequest) -> ApprovalResponse:
         """Request approval from user via TUI."""

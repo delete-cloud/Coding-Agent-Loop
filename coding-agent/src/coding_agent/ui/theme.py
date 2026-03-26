@@ -1,8 +1,5 @@
 """Centralized theme configuration for Coding Agent TUI."""
 
-from rich.box import Box
-from rich.style import Style
-
 
 class Theme:
     """TUI theme with colors, icons, and layout constants."""
