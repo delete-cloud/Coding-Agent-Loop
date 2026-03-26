@@ -30,9 +30,18 @@ def register_shell_tools(registry: ToolRegistry, cwd: Path | str = ".") -> None:
             Command output (stdout + stderr)
         """
         try:
-            # Create subprocess
-            process = await asyncio.create_subprocess_shell(
-                command,
+            # Parse command safely using shlex (safer than shell=True)
+            # This splits the command into arguments properly
+            args = shlex.split(command)
+            if not args:
+                return json.dumps({
+                    "error": "Empty command",
+                    "command": command,
+                })
+            
+            # Create subprocess without shell (safer)
+            process = await asyncio.create_subprocess_exec(
+                *args,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=work_dir,

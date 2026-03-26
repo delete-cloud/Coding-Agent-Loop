@@ -75,7 +75,7 @@ class AgentLoop:
             TurnOutcome with result details
         """
         # Append user message to tape
-        self.tape.append("message", {"role": "user", "content": user_input})
+        self.tape.append(Entry.message("user", user_input))
         await self.consumer.emit(TurnBegin())
 
         for step in range(self.max_steps):
@@ -92,11 +92,7 @@ class AgentLoop:
                 # Execute each tool call
                 for call in response.tool_calls:
                     # Record tool call
-                    self.tape.append("tool_call", {
-                        "call_id": call.id,
-                        "tool": call.name,
-                        "args": call.arguments,
-                    })
+                    self.tape.append(Entry.tool_call(call.id, call.name, call.arguments))
                     await self.consumer.emit(ToolCallBegin(
                         call_id=call.id,
                         tool=call.name,
@@ -106,10 +102,7 @@ class AgentLoop:
                     # Check for doom loop
                     if self.doom_detector.observe(call.name, call.arguments):
                         result_msg = "[ABORTED] Repetitive tool call detected (doom loop)"
-                        self.tape.append("tool_result", {
-                            "call_id": call.id,
-                            "result": result_msg,
-                        })
+                        self.tape.append(Entry.tool_result(call.id, result_msg))
                         await self.consumer.emit(ToolCallEnd(
                             call_id=call.id,
                             result=result_msg,
@@ -135,10 +128,7 @@ class AgentLoop:
 
                     if approval.decision == "deny":
                         result_msg = f"[DENIED] {approval.feedback or 'Tool call denied by user'}"
-                        self.tape.append("tool_result", {
-                            "call_id": call.id,
-                            "result": result_msg,
-                        })
+                        self.tape.append(Entry.tool_result(call.id, result_msg))
                         await self.consumer.emit(ToolCallEnd(
                             call_id=call.id,
                             result=result_msg,
@@ -148,11 +138,13 @@ class AgentLoop:
                     # Execute tool
                     result = await self.tools.execute(call.name, call.arguments)
                     
+                    # Truncate result if too large (prevent context overflow)
+                    MAX_RESULT_SIZE = 10000
+                    if len(result) > MAX_RESULT_SIZE:
+                        result = result[:MAX_RESULT_SIZE] + f"\n... ({len(result) - MAX_RESULT_SIZE} chars truncated)"
+                    
                     # Record result
-                    self.tape.append("tool_result", {
-                        "call_id": call.id,
-                        "result": result,
-                    })
+                    self.tape.append(Entry.tool_result(call.id, result))
                     await self.consumer.emit(ToolCallEnd(
                         call_id=call.id,
                         result=result,
@@ -160,10 +152,7 @@ class AgentLoop:
             else:
                 # No tool calls = turn complete
                 assistant_message = response.text
-                self.tape.append("message", {
-                    "role": "assistant",
-                    "content": assistant_message,
-                })
+                self.tape.append(Entry.message("assistant", assistant_message))
                 await self.consumer.emit(TurnEnd(
                     stop_reason="no_tool_calls",
                     final_message=assistant_message,

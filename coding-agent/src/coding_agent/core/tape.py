@@ -158,25 +158,25 @@ class Tape:
         with open(self.path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry.to_dict(), ensure_ascii=False) + "\n")
 
-    def append(self, kind: EntryKind, payload: dict) -> Entry:
-        """Append a new entry to the tape.
+    def append(self, entry: Entry) -> Entry:
+        """Append an entry to the tape.
         
         Args:
-            kind: Type of entry
-            payload: Entry data
+            entry: The entry to append (id will be assigned)
             
         Returns:
-            The created entry
+            The entry with assigned id
         """
-        entry = Entry(
+        # Create new entry with sequential id
+        entry_with_id = Entry(
             id=self._next_id,
-            kind=kind,
-            payload=payload,
+            kind=entry.kind,
+            payload=entry.payload,
         )
-        self._entries.append(entry)
+        self._entries.append(entry_with_id)
         self._next_id += 1
-        self._append_to_file(entry)
-        return entry
+        self._append_to_file(entry_with_id)
+        return entry_with_id
 
     def entries(self, after_anchor: Entry | None = None) -> list[Entry]:
         """Get entries, optionally filtered from an anchor point.
@@ -208,7 +208,7 @@ class Tape:
         Returns:
             The created anchor entry
         """
-        return self.append("anchor", {"name": name, "state": state})
+        return self.append(Entry.anchor(name, state))
 
     def fork(self) -> Tape:
         """Create an in-memory copy of this tape.

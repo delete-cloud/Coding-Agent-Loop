@@ -92,9 +92,9 @@ class TestTape:
     def test_tape_append_assigns_sequential_ids(self):
         """Test that append assigns sequential IDs starting from 1."""
         tape = Tape(path=None)
-        entry1 = tape.append("message", {"role": "user", "content": "hello"})
-        entry2 = tape.append("message", {"role": "assistant", "content": "hi"})
-        entry3 = tape.append("tool_call", {"name": "test"})
+        entry1 = tape.append(Entry.message("user", "hello"))
+        entry2 = tape.append(Entry.message("assistant", "hi"))
+        entry3 = tape.append(Entry.tool_call("call_1", "test", {}))
 
         assert entry1.id == 1
         assert entry2.id == 2
@@ -103,16 +103,16 @@ class TestTape:
     def test_tape_append_adds_to_entries_list(self):
         """Test that append adds entries to the internal list."""
         tape = Tape(path=None)
-        tape.append("message", {"role": "user", "content": "hello"})
-        tape.append("message", {"role": "assistant", "content": "hi"})
+        tape.append(Entry.message("user", "hello"))
+        tape.append(Entry.message("assistant", "hi"))
 
         assert len(tape._entries) == 2
 
     def test_tape_entries_returns_all_by_default(self):
         """Test entries() returns all entries when no anchor specified."""
         tape = Tape(path=None)
-        tape.append("message", {"role": "user", "content": "hello"})
-        tape.append("message", {"role": "assistant", "content": "hi"})
+        tape.append(Entry.message("user", "hello"))
+        tape.append(Entry.message("assistant", "hi"))
 
         entries = tape.entries()
         assert len(entries) == 2
@@ -122,10 +122,10 @@ class TestTape:
     def test_tape_entries_filters_after_anchor(self):
         """Test entries(after_anchor) filters from anchor onwards."""
         tape = Tape(path=None)
-        tape.append("message", {"role": "user", "content": "hello"})
+        tape.append(Entry.message("user", "hello"))
         anchor = tape.handoff(name="phase1", state={})
-        tape.append("message", {"role": "assistant", "content": "hi"})
-        tape.append("tool_call", {"name": "test"})
+        tape.append(Entry.message("assistant", "hi"))
+        tape.append(Entry.tool_call("call_1", "test", {}))
 
         entries = tape.entries(after_anchor=anchor)
         assert len(entries) == 3  # anchor + entries after
@@ -134,7 +134,7 @@ class TestTape:
     def test_tape_entries_returns_copies(self):
         """Test entries() returns copies, not original references."""
         tape = Tape(path=None)
-        tape.append("message", {"role": "user", "content": "hello"})
+        tape.append(Entry.message("user", "hello"))
         
         entries = tape.entries()
         # Modifying returned entry shouldn't affect tape
@@ -147,8 +147,8 @@ class TestTape:
         """Test that append writes to JSONL file when path exists."""
         with tempfile.TemporaryDirectory() as tmpdir:
             tape = Tape.create(Path(tmpdir))
-            tape.append("message", {"role": "user", "content": "hello"})
-            tape.append("message", {"role": "assistant", "content": "hi"})
+            tape.append(Entry.message("user", "hello"))
+            tape.append(Entry.message("assistant", "hi"))
 
             # Read file directly
             lines = tape.path.read_text().strip().split("\n")
@@ -163,8 +163,8 @@ class TestTape:
         """Test that loading reads existing JSONL file."""
         with tempfile.TemporaryDirectory() as tmpdir:
             tape = Tape.create(Path(tmpdir))
-            tape.append("message", {"role": "user", "content": "hello"})
-            tape.append("tool_call", {"name": "test"})
+            tape.append(Entry.message("user", "hello"))
+            tape.append(Entry.tool_call("call_1", "test", {}))
 
             # Create new tape pointing to same file
             tape2 = Tape(tape.path)
@@ -187,7 +187,7 @@ class TestTape:
     def test_fork_creates_independent_copy(self):
         """Test fork() creates a copy with independent entries."""
         tape = Tape(path=None)
-        tape.append("message", {"role": "user", "content": "hello"})
+        tape.append(Entry.message("user", "hello"))
         
         forked = tape.fork()
         
@@ -195,7 +195,7 @@ class TestTape:
         assert len(forked.entries()) == 1
         
         # Add to fork shouldn't affect original
-        forked.append("message", {"role": "assistant", "content": "hi"})
+        forked.append(Entry.message("assistant", "hi"))
         assert len(tape.entries()) == 1
         assert len(forked.entries()) == 2
 
@@ -203,7 +203,7 @@ class TestTape:
         """Test fork() creates in-memory tape with no path."""
         with tempfile.TemporaryDirectory() as tmpdir:
             tape = Tape.create(Path(tmpdir))
-            tape.append("message", {"role": "user", "content": "hello"})
+            tape.append(Entry.message("user", "hello"))
             
             forked = tape.fork()
             
@@ -213,8 +213,8 @@ class TestTape:
     def test_fork_preserves_entry_ids(self):
         """Test fork() preserves entry IDs from original."""
         tape = Tape(path=None)
-        tape.append("message", {"role": "user", "content": "hello"})
-        tape.append("message", {"role": "assistant", "content": "hi"})
+        tape.append(Entry.message("user", "hello"))
+        tape.append(Entry.message("assistant", "hi"))
         
         forked = tape.fork()
         
@@ -222,17 +222,17 @@ class TestTape:
         assert forked._entries[0].id == 1
         assert forked._entries[1].id == 2
         # next_id should continue from where it left off
-        new_entry = forked.append("message", {"role": "user", "content": "again"})
+        new_entry = forked.append(Entry.message("user", "again"))
         assert new_entry.id == 3
 
     def test_merge_appends_new_entries(self):
         """Test merge() appends new entries from forked tape."""
         tape = Tape(path=None)
-        tape.append("message", {"role": "user", "content": "hello"})
+        tape.append(Entry.message("user", "hello"))
         
         forked = tape.fork()
-        forked.append("message", {"role": "assistant", "content": "hi"})
-        forked.append("tool_call", {"name": "test"})
+        forked.append(Entry.message("assistant", "hi"))
+        forked.append(Entry.tool_call("call_1", "test", {}))
         
         # Merge back
         tape.merge(forked)
@@ -247,13 +247,13 @@ class TestTape:
     def test_merge_only_adds_new_entries(self):
         """Test merge() only adds entries that are new (after fork point)."""
         tape = Tape(path=None)
-        tape.append("message", {"role": "user", "content": "original"})
+        tape.append(Entry.message("user", "original"))
         
         forked = tape.fork()
-        forked.append("message", {"role": "assistant", "content": "new"})
+        forked.append(Entry.message("assistant", "new"))
         
         # Original also adds something before merge
-        tape.append("message", {"role": "user", "content": "also new"})
+        tape.append(Entry.message("user", "also new"))
         
         # Merge should not duplicate the original entry
         tape.merge(forked)
@@ -269,10 +269,10 @@ class TestTape:
         """Test merge() persists merged entries to disk."""
         with tempfile.TemporaryDirectory() as tmpdir:
             tape = Tape.create(Path(tmpdir))
-            tape.append("message", {"role": "user", "content": "hello"})
+            tape.append(Entry.message("user", "hello"))
             
             forked = tape.fork()
-            forked.append("message", {"role": "assistant", "content": "hi"})
+            forked.append(Entry.message("assistant", "hi"))
             
             # Before merge, file has 1 entry
             lines_before = tape.path.read_text().strip().split("\n")
@@ -288,16 +288,16 @@ class TestTape:
     def test_merge_updates_next_id(self):
         """Test merge() updates next_id to continue correctly."""
         tape = Tape(path=None)
-        tape.append("message", {"role": "user", "content": "hello"})
+        tape.append(Entry.message("user", "hello"))
         
         forked = tape.fork()
-        forked.append("message", {"role": "assistant", "content": "hi"})
-        forked.append("tool_call", {"name": "test"})
+        forked.append(Entry.message("assistant", "hi"))
+        forked.append(Entry.tool_call("call_1", "test", {}))
         
         tape.merge(forked)
         
         # Next entry should continue from merged entries
-        new_entry = tape.append("message", {"role": "user", "content": "again"})
+        new_entry = tape.append(Entry.message("user", "again"))
         assert new_entry.id == 4
 
     def test_entry_kind_literal(self):
@@ -316,17 +316,17 @@ class TestTapeEdgeCases:
     def test_append_to_in_memory_does_not_create_file(self):
         """Test append to in-memory tape doesn't create file."""
         tape = Tape(path=None)
-        tape.append("message", {"role": "user", "content": "hello"})
+        tape.append(Entry.message("user", "hello"))
         # Should not raise or create file
         assert tape.path is None
 
     def test_merge_from_non_forked_tape(self):
         """Test merge from tape that wasn't forked from self."""
         tape1 = Tape(path=None)
-        tape1.append("message", {"role": "user", "content": "hello"})
+        tape1.append(Entry.message("user", "hello"))
         
         tape2 = Tape(path=None)
-        tape2.append("message", {"role": "assistant", "content": "hi"})
+        tape2.append(Entry.message("assistant", "hi"))
         
         # Merging unrelated tapes should still work (adds all entries from tape2)
         tape1.merge(tape2)
@@ -335,16 +335,16 @@ class TestTapeEdgeCases:
     def test_multiple_forks_and_merges(self):
         """Test multiple fork/merge cycles."""
         tape = Tape(path=None)
-        tape.append("message", {"role": "user", "content": "1"})
+        tape.append(Entry.message("user", "1"))
         
         # First fork/merge
         fork1 = tape.fork()
-        fork1.append("message", {"role": "assistant", "content": "2"})
+        fork1.append(Entry.message("assistant", "2"))
         tape.merge(fork1)
         
         # Second fork/merge
         fork2 = tape.fork()
-        fork2.append("message", {"role": "user", "content": "3"})
+        fork2.append(Entry.message("user", "3"))
         tape.merge(fork2)
         
         entries = tape.entries()

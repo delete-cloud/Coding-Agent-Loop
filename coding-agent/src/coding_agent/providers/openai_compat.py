@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import random
 from typing import Any, AsyncIterator
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, APIError, RateLimitError, APIStatusError
 from openai.types.chat import ChatCompletionChunk
 from openai.types.chat.chat_completion_chunk import ChoiceDeltaToolCall
 
@@ -57,13 +59,54 @@ class OpenAICompatProvider:
         """Maximum context size in tokens."""
         return self.CONTEXT_SIZES.get(self._model, 128000)
 
+    # Retry configuration
+    MAX_RETRIES = 3
+    RETRY_DELAY_BASE = 1.0  # seconds
+    RETRY_STATUS_CODES = {429, 500, 502, 503, 529}  # Rate limit + server errors
+
+    async def _make_request_with_retry(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        **kwargs: Any,
+    ):
+        """Make API request with exponential backoff retry."""
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                return await self._client.chat.completions.create(
+                    model=self._model,
+                    messages=messages,
+                    tools=tools,
+                    stream=True,
+                    temperature=self._temperature,
+                    max_tokens=self._max_tokens,
+                    **kwargs,
+                )
+            except RateLimitError as e:
+                # Always retry rate limits with longer delay
+                if attempt < self.MAX_RETRIES - 1:
+                    delay = self.RETRY_DELAY_BASE * (2 ** attempt) + random.uniform(0, 1)
+                    await asyncio.sleep(delay)
+                    continue
+                raise
+            except APIStatusError as e:
+                # Retry on specific status codes
+                if e.status_code in self.RETRY_STATUS_CODES and attempt < self.MAX_RETRIES - 1:
+                    delay = self.RETRY_DELAY_BASE * (2 ** attempt) + random.uniform(0, 1)
+                    await asyncio.sleep(delay)
+                    continue
+                raise
+            except Exception:
+                # Don't retry other errors (auth, validation, etc.)
+                raise
+
     async def stream(
         self,
         messages: list[dict[str, Any]],
         tools: list[ToolSchema] | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[StreamEvent]:
-        """Stream LLM response.
+        """Stream LLM response with retry logic.
         
         Args:
             messages: List of message dicts
@@ -82,13 +125,9 @@ class OpenAICompatProvider:
             ]
 
         try:
-            stream = await self._client.chat.completions.create(
-                model=self._model,
+            stream = await self._make_request_with_retry(
                 messages=messages,
                 tools=openai_tools,
-                stream=True,
-                temperature=self._temperature,
-                max_tokens=self._max_tokens,
                 **kwargs,
             )
 
@@ -142,5 +181,11 @@ class OpenAICompatProvider:
 
             yield StreamEvent(type="done")
 
+        except RateLimitError as e:
+            yield StreamEvent(type="error", error=f"Rate limit exceeded: {e}")
+        except APIStatusError as e:
+            yield StreamEvent(type="error", error=f"API error {e.status_code}: {e}")
+        except APIError as e:
+            yield StreamEvent(type="error", error=f"API error: {e}")
         except Exception as e:
-            yield StreamEvent(type="error", error=str(e))
+            yield StreamEvent(type="error", error=f"Unexpected error: {e}")

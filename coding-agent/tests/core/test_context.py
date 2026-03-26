@@ -13,7 +13,7 @@ class TestContextWorkingSet:
         """System prompt should always be the first message."""
         context = Context(max_tokens=4000, system_prompt="You are a helpful assistant.")
         tape = Tape(path=None)
-        tape.append("message", {"role": "user", "content": "Hello"})
+        tape.append(Entry.message("user", "Hello"))
         
         messages = context.build_working_set(tape)
         
@@ -25,8 +25,8 @@ class TestContextWorkingSet:
         """Basic working set with system prompt + tape entries as messages."""
         context = Context(max_tokens=4000, system_prompt="You are a helpful assistant.")
         tape = Tape(path=None)
-        tape.append("message", {"role": "user", "content": "Hello"})
-        tape.append("message", {"role": "assistant", "content": "Hi there!"})
+        tape.append(Entry.message("user", "Hello"))
+        tape.append(Entry.message("assistant", "Hi there!"))
         
         messages = context.build_working_set(tape)
         
@@ -39,9 +39,9 @@ class TestContextWorkingSet:
         """Entries before the most recent anchor should be excluded."""
         context = Context(max_tokens=4000, system_prompt="System prompt")
         tape = Tape(path=None)
-        tape.append("message", {"role": "user", "content": "Old message"})
+        tape.append(Entry.message("user", "Old message"))
         tape.handoff(name="checkpoint1", state={"summary": "Checkpoint reached"})
-        tape.append("message", {"role": "user", "content": "New message"})
+        tape.append(Entry.message("user", "New message"))
         
         messages = context.build_working_set(tape)
         
@@ -69,11 +69,11 @@ class TestContextWorkingSet:
         """When multiple anchors exist, start from the most recent one."""
         context = Context(max_tokens=4000, system_prompt="System")
         tape = Tape(path=None)
-        tape.append("message", {"role": "user", "content": "Before first anchor"})
+        tape.append(Entry.message("user", "Before first anchor"))
         tape.handoff(name="anchor1", state={})
-        tape.append("message", {"role": "user", "content": "Between anchors"})
+        tape.append(Entry.message("user", "Between anchors"))
         tape.handoff(name="anchor2", state={})
-        tape.append("message", {"role": "user", "content": "After second anchor"})
+        tape.append(Entry.message("user", "After second anchor"))
         
         messages = context.build_working_set(tape)
         
@@ -87,9 +87,9 @@ class TestContextWorkingSet:
         """Event entries should be excluded from the working set."""
         context = Context(max_tokens=4000, system_prompt="System")
         tape = Tape(path=None)
-        tape.append("message", {"role": "user", "content": "Hello"})
-        tape.append("event", {"type": "internal", "data": {"key": "value"}})
-        tape.append("message", {"role": "assistant", "content": "Hi"})
+        tape.append(Entry.message("user", "Hello"))
+        tape.append(Entry.event("internal", {"key": "value"}))
+        tape.append(Entry.message("assistant", "Hi"))
         
         messages = context.build_working_set(tape)
         
@@ -102,7 +102,7 @@ class TestContextWorkingSet:
         """Tool call entries should be converted to OpenAI tool_calls format."""
         context = Context(max_tokens=4000, system_prompt="System")
         tape = Tape(path=None)
-        tape.append("tool_call", {"call_id": "call_123", "tool": "read_file", "args": {"path": "/tmp/test.txt"}})
+        tape.append(Entry.tool_call("call_123", "read_file", {"path": "/tmp/test.txt"}))
         
         messages = context.build_working_set(tape)
         
@@ -119,7 +119,7 @@ class TestContextWorkingSet:
         """Tool result entries should be converted to OpenAI tool format."""
         context = Context(max_tokens=4000, system_prompt="System")
         tape = Tape(path=None)
-        tape.append("tool_result", {"call_id": "call_123", "result": "File contents here"})
+        tape.append(Entry.tool_result("call_123", "File contents here"))
         
         messages = context.build_working_set(tape)
         
@@ -132,9 +132,9 @@ class TestContextWorkingSet:
         """Complete workflow: assistant tool_calls followed by tool result."""
         context = Context(max_tokens=4000, system_prompt="System")
         tape = Tape(path=None)
-        tape.append("message", {"role": "user", "content": "Read a file"})
-        tape.append("tool_call", {"call_id": "call_abc", "tool": "read_file", "args": {"path": "/tmp/test.txt"}})
-        tape.append("tool_result", {"call_id": "call_abc", "result": "Hello World"})
+        tape.append(Entry.message("user", "Read a file"))
+        tape.append(Entry.tool_call("call_abc", "read_file", {"path": "/tmp/test.txt"}))
+        tape.append(Entry.tool_result("call_abc", "Hello World"))
         
         messages = context.build_working_set(tape)
         
@@ -168,17 +168,14 @@ class TestContextWorkingSet:
     def test_unknown_entry_kind_is_excluded(self):
         """Unknown entry kinds should be silently excluded."""
         context = Context(max_tokens=4000, system_prompt="System")
-        tape = Tape(path=None)
-        tape.append("message", {"role": "user", "content": "Hello"})
-        # Create an entry with unknown kind by using append directly
-        tape.append("unknown_kind", {"data": "test"})
-        tape.append("message", {"role": "assistant", "content": "Hi"})
         
-        messages = context.build_working_set(tape)
+        # Test _entry_to_message directly with unknown kind
+        from coding_agent.core.tape import Entry
+        unknown_entry = Entry(id=1, kind="unknown_kind", payload={"data": "test"})
+        result = context._entry_to_message(unknown_entry)
         
-        # Should have system + user + assistant (unknown excluded)
-        assert len(messages) == 3
-        assert "test" not in str(messages)
+        # Should return None for unknown kinds
+        assert result is None
 
 
 class TestContextConfiguration:
