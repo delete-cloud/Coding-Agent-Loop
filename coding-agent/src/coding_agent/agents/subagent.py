@@ -65,10 +65,12 @@ class SubAgent:
         Returns:
             SubAgentResult with success flag and output
         """
-        if depth >= self.max_depth:
+        # Depth 0 = main agent, depth 1+ = sub-agents
+        # max_depth is the maximum allowed nesting level
+        if depth > self.max_depth:
             return SubAgentResult(
                 success=False,
-                output=f"Max sub-agent depth ({self.max_depth}) reached",
+                output=f"Max sub-agent depth ({self.max_depth}) exceeded at depth {depth}",
                 stop_reason="depth_limit",
             )
 

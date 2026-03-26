@@ -164,11 +164,12 @@ class TestSubAgent:
             max_steps=10,
             max_depth=2,
         )
+        # depth > max_depth should fail (depth=3 exceeds max_depth=2)
         result = await subagent.run(
             goal="Too deep",
             parent_tape=parent_tape,
             tools=tools,
-            depth=2,
+            depth=3,
         )
 
         assert result.success is False

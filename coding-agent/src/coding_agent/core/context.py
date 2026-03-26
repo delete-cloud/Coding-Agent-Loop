@@ -140,6 +140,25 @@ class Context:
                 result["content"] = truncated
                 return result
         
+        # Truncate tool_calls if present (can be very large)
+        if message.get("tool_calls"):
+            tool_calls = message["tool_calls"]
+            tool_calls_str = json.dumps(tool_calls)
+            if len(tool_calls_str) > max_chars:
+                # Truncate arguments of each tool call
+                truncated_calls = []
+                remaining_chars = max_chars - 50  # Reserve space for structure
+                for tc in tool_calls:
+                    tc_copy = dict(tc)
+                    func = tc_copy.get("function", {})
+                    args = func.get("arguments", "")
+                    if args and len(str(args)) > remaining_chars // len(tool_calls):
+                        func["arguments"] = str(args)[:remaining_chars // len(tool_calls)] + "...[truncated]"
+                    truncated_calls.append(tc_copy)
+                result = dict(message)
+                result["tool_calls"] = truncated_calls
+                return result
+        
         return message
 
     def _entry_to_message(self, entry: Entry) -> dict[str, Any] | None:

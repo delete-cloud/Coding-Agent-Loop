@@ -194,4 +194,8 @@ class OpenAICompatProvider:
         except APIError as e:
             yield StreamEvent(type="error", error=f"API error: {e}")
         except Exception as e:
+            # Catch specific non-critical exceptions only
+            # Let BaseException subclasses (KeyboardInterrupt, SystemExit) propagate
+            if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                raise
             yield StreamEvent(type="error", error=f"Unexpected error: {e}")

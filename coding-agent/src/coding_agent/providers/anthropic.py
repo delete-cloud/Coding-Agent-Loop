@@ -33,10 +33,13 @@ class AnthropicProvider:
         max_tokens: int = 8192,
         temperature: float = 0.7,
     ):
-        if hasattr(api_key, "get_secret_value"):
-            api_key = api_key.get_secret_value()
+        # Handle both plain strings and Pydantic SecretStr
+        api_key_str = api_key
+        if not isinstance(api_key, str):
+            # Assume it's a SecretStr or similar with get_secret_value
+            api_key_str = api_key.get_secret_value()
         self._model = model
-        self._client = AsyncAnthropic(api_key=api_key)
+        self._client = AsyncAnthropic(api_key=api_key_str)
         self._max_tokens = max_tokens
         self._temperature = temperature
 
@@ -216,4 +219,8 @@ class AnthropicProvider:
         except APIError as e:
             yield StreamEvent(type="error", error=f"API error: {e}")
         except Exception as e:
+            # Catch specific non-critical exceptions only
+            # Let BaseException subclasses (KeyboardInterrupt, SystemExit) propagate
+            if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                raise
             yield StreamEvent(type="error", error=f"Unexpected error: {e}")
