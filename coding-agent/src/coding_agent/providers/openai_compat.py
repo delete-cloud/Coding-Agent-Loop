@@ -165,7 +165,9 @@ class OpenAICompatProvider:
                                 accumulating_calls[idx]["arguments"] += tc.function.arguments
 
                 # Check for finished tool calls (when finish_reason is present)
-                if chunk.choices[0].finish_reason == "tool_calls":
+                # Some APIs return "stop" even for tool calls, so check if we have accumulated calls
+                finish_reason = chunk.choices[0].finish_reason
+                if finish_reason in ("tool_calls", "stop") and accumulating_calls:
                     for idx in sorted(accumulating_calls.keys()):
                         call_data = accumulating_calls[idx]
                         try:
@@ -181,6 +183,7 @@ class OpenAICompatProvider:
                                 arguments=args,
                             ),
                         )
+                    accumulating_calls.clear()  # Clear after yielding
 
             yield StreamEvent(type="done")
 

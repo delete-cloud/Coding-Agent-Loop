@@ -78,6 +78,18 @@ class AgentLoop:
         self.tape.append(Entry.message("user", user_input))
         await self.consumer.emit(TurnBegin())
 
+        try:
+            return await self._run_turn_steps()
+        except Exception as e:
+            error_msg = f"Error during turn: {e}"
+            await self.consumer.emit(TurnEnd(
+                stop_reason="error",
+                final_message=error_msg,
+            ))
+            raise
+
+    async def _run_turn_steps(self) -> TurnOutcome:
+        """Internal: run the turn steps."""
         for step in range(self.max_steps):
             # Emit step info
             await self.consumer.emit(StepInfo(step + 1, self.max_steps))
@@ -137,6 +149,7 @@ class AgentLoop:
 
                     # Execute tool
                     result = await self.tools.execute(call.name, call.arguments)
+                    result = str(result) if result is not None else ""
                     
                     # Truncate result if too large (prevent context overflow)
                     MAX_RESULT_SIZE = 10000
@@ -174,6 +187,8 @@ class AgentLoop:
             final_message=msg,
             steps_taken=self.max_steps,
         )
+
+
 
     async def _stream_response(self, messages: list[dict]) -> StreamingResponse:
         """Stream LLM response and accumulate it.

@@ -95,9 +95,14 @@ class Context:
                             new_messages.append(msg)
                     else:
                         # Remove oldest messages to make room
-                        while new_messages and current_chars + msg_chars > self._max_chars:
+                        max_iterations = len(new_messages) + 1  # Safety limit
+                        iterations = 0
+                        while (new_messages and 
+                               current_chars + msg_chars > self._max_chars and 
+                               iterations < max_iterations):
                             removed = new_messages.pop(0)
                             current_chars -= len(self._message_to_text(removed))
+                            iterations += 1
                         new_messages.append(msg)
                         current_chars += msg_chars
                 else:

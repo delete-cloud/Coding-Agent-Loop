@@ -104,9 +104,5 @@ class ToolRegistry:
         return list(self._tools.keys())
 
 
-@dataclass
-class ToolCall:
-    """A pending tool call."""
-    id: str
-    name: str
-    arguments: dict[str, Any]
+# Import ToolCall from providers.base to avoid duplication
+from coding_agent.providers.base import ToolCall

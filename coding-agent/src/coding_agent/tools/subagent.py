@@ -42,6 +42,7 @@ def register_subagent_tool(
         # If tools filter is provided, create a filtered registry
         if tools is not None:
             filtered_registry = ToolRegistry()
+            invalid_tools = []
             for tool_name in tools:
                 tool_def = registry.get(tool_name)
                 if tool_def is not None:
@@ -51,6 +52,17 @@ def register_subagent_tool(
                         parameters=tool_def.parameters,
                         handler=tool_def.handler,
                     )
+                else:
+                    invalid_tools.append(tool_name)
+            
+            # Return error if any requested tools are invalid
+            if invalid_tools:
+                return json.dumps({
+                    "success": False,
+                    "error": f"Invalid tools requested: {', '.join(invalid_tools)}. "
+                            f"Available tools: {', '.join(registry.list_tools())}",
+                })
+            
             target_registry = filtered_registry
         else:
             target_registry = registry

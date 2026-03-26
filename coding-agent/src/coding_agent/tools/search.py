@@ -54,10 +54,15 @@ def register_search_tools(registry: ToolRegistry, repo_root: Path | str = ".") -
             
             compiled = re.compile(pattern)
             max_results = 50
+            max_file_size = 10 * 1024 * 1024  # 10MB limit
             total_matches = 0
             
             for file_path in files:
                 try:
+                    # Skip files that are too large
+                    if file_path.stat().st_size > max_file_size:
+                        continue
+                        
                     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                         for line_num, line in enumerate(f, 1):
                             if compiled.search(line):
@@ -103,7 +108,8 @@ def register_search_tools(registry: ToolRegistry, repo_root: Path | str = ".") -
             
             # Support both **/pattern and simple patterns
             if "**" in pattern:
-                matches = list(target.rglob(pattern.replace("**", "").lstrip("/")))
+                # Use rglob for recursive patterns
+                matches = list(target.rglob(pattern.lstrip("/")))
             else:
                 matches = list(target.glob(pattern))
             

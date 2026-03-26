@@ -160,3 +160,70 @@ class TestOpenAICompatProvider:
         assert call_count == 1
         assert events[0].type == "error"
         assert "API error" in events[0].error
+
+    @pytest.mark.asyncio
+    async def test_stream_yields_tool_calls_on_stop_reason(self):
+        """Test that tool calls are yielded even when finish_reason is 'stop'.
+        
+        Some APIs (like right.codes) return finish_reason='stop' instead of 'tool_calls'
+        when tool calls are present in the stream.
+        """
+        from coding_agent.providers.base import ToolSchema
+
+        provider = OpenAICompatProvider(
+            model="gpt-4o",
+            api_key="sk-test",
+        )
+
+        # Mock chunks with tool calls and finish_reason="stop"
+        mock_chunk1 = MagicMock()
+        mock_chunk1.choices = [MagicMock()]
+        mock_chunk1.choices[0].delta.content = None
+        mock_chunk1.choices[0].finish_reason = None
+        
+        # Tool call delta
+        mock_tool_call = MagicMock()
+        mock_tool_call.index = 0
+        mock_tool_call.id = "call_123"
+        mock_tool_call.function.name = "bash"
+        mock_tool_call.function.arguments = '{"command": "ls"}'
+        mock_chunk1.choices[0].delta.tool_calls = [mock_tool_call]
+
+        # Final chunk with finish_reason="stop" (not "tool_calls")
+        mock_chunk2 = MagicMock()
+        mock_chunk2.choices = [MagicMock()]
+        mock_chunk2.choices[0].delta.content = None
+        mock_chunk2.choices[0].delta.tool_calls = None
+        mock_chunk2.choices[0].finish_reason = "stop"
+
+        mock_stream = AsyncMock()
+        mock_stream.__aiter__.return_value = [mock_chunk1, mock_chunk2]
+
+        provider._client.chat.completions.create = AsyncMock(return_value=mock_stream)
+
+        tools = [ToolSchema(
+            type="function",
+            function={
+                "name": "bash",
+                "description": "Execute shell command",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"]
+                }
+            }
+        )]
+
+        events = []
+        async for event in provider.stream(
+            messages=[{"role": "user", "content": "Run ls"}],
+            tools=tools
+        ):
+            events.append(event)
+
+        # Should get tool_call + done
+        assert len(events) == 2, f"Expected 2 events, got {len(events)}: {[e.type for e in events]}"
+        assert events[0].type == "tool_call"
+        assert events[0].tool_call.name == "bash"
+        assert events[0].tool_call.arguments == {"command": "ls"}
+        assert events[1].type == "done"

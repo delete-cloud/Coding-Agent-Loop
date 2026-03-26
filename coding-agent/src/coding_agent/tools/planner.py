@@ -50,8 +50,12 @@ def register_planner_tools(
 
             if updates is not None:
                 for update in updates:
-                    task_id = update.pop("id")
-                    plan_manager.update_task(task_id, **update)
+                    task_id = update.get("id")
+                    if task_id is None:
+                        raise ValueError("Update must have 'id' field")
+                    # Create a copy of update dict without 'id' to avoid mutation
+                    update_fields = {k: v for k, v in update.items() if k != "id"}
+                    plan_manager.update_task(task_id, **update_fields)
 
             return json.dumps({
                 "status": "ok",

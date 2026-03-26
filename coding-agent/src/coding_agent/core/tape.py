@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -112,6 +113,7 @@ class Tape:
         self.path = path
         self._entries: list[Entry] = []
         self._next_id = 1
+        self._lock = threading.Lock()  # Protect concurrent modifications
         
         if path is not None and path.exists():
             self._load()
@@ -167,25 +169,30 @@ class Tape:
         Returns:
             The entry with assigned id
         """
-        # Create new entry with sequential id
-        entry_with_id = Entry(
-            id=self._next_id,
-            kind=entry.kind,
-            payload=entry.payload,
-        )
-        self._entries.append(entry_with_id)
-        self._next_id += 1
-        self._append_to_file(entry_with_id)
-        return entry_with_id
+        with self._lock:
+            # Create new entry with sequential id
+            entry_with_id = Entry(
+                id=self._next_id,
+                kind=entry.kind,
+                payload=entry.payload,
+            )
+            self._entries.append(entry_with_id)
+            self._next_id += 1
+            self._append_to_file(entry_with_id)
+            return entry_with_id
 
     def entries(self, after_anchor: Entry | None = None) -> list[Entry]:
-        """Get entries, optionally filtered from an anchor point.
+        """Get entries, optionally filtered starting from an anchor point (inclusive).
         
         Args:
-            after_anchor: If provided, returns entries from this anchor onwards
+            after_anchor: If provided, returns entries from this anchor onwards,
+                         including the anchor entry itself
             
         Returns:
             List of entries (copies)
+            
+        Raises:
+            ValueError: If the specified anchor is not found in the tape
         """
         if after_anchor is None:
             return deepcopy(self._entries)
@@ -195,8 +202,8 @@ class Tape:
             if entry.id == after_anchor.id:
                 return deepcopy(self._entries[i:])
         
-        # Anchor not found, return all
-        return deepcopy(self._entries)
+        # Anchor not found
+        raise ValueError(f"Anchor entry with id={after_anchor.id} not found in tape")
 
     def handoff(self, name: str, state: dict) -> Entry:
         """Create an anchor entry for phase handoff.
@@ -210,15 +217,29 @@ class Tape:
         """
         return self.append(Entry.anchor(name, state))
 
+    def __deepcopy__(self, memo):
+        """Support deep copy by creating a new lock."""
+        cls = self.__class__
+        result = cls.__new__(cls)
+        memo[id(self)] = result
+        
+        # Copy simple attributes
+        result.path = self.path
+        result._entries = deepcopy(self._entries, memo)
+        result._next_id = self._next_id
+        # Create new lock for the copy
+        result._lock = threading.Lock()
+        
+        return result
+
     def fork(self) -> Tape:
         """Create an in-memory copy of this tape.
         
         Returns:
             New Tape with copied entries but no path
         """
-        forked = Tape(path=None)
-        forked._entries = deepcopy(self._entries)
-        forked._next_id = self._next_id
+        forked = deepcopy(self)
+        forked.path = None  # Forked tapes have no file path
         return forked
 
     def merge(self, forked: Tape) -> None:
@@ -231,28 +252,29 @@ class Tape:
         Args:
             forked: The forked tape to merge from
         """
-        # Build set of existing entry identifiers (kind + payload)
-        existing_signatures = {
-            (e.kind, json.dumps(e.payload, sort_keys=True))
-            for e in self._entries
-        }
-        
-        # Find entries from forked that are not in self
-        new_entries_from_forked = []
-        for entry in forked._entries:
-            sig = (entry.kind, json.dumps(entry.payload, sort_keys=True))
-            if sig not in existing_signatures:
-                new_entries_from_forked.append(entry)
-                existing_signatures.add(sig)
-        
-        # Append new entries with new sequential IDs
-        for entry in new_entries_from_forked:
-            new_entry = Entry(
-                id=self._next_id,
-                kind=entry.kind,
-                payload=entry.payload,
-                timestamp=entry.timestamp,
-            )
-            self._entries.append(new_entry)
-            self._append_to_file(new_entry)
-            self._next_id += 1
+        with self._lock:
+            # Build set of existing entry identifiers (kind + payload)
+            existing_signatures = {
+                (e.kind, json.dumps(e.payload, sort_keys=True))
+                for e in self._entries
+            }
+            
+            # Find entries from forked that are not in self
+            new_entries_from_forked = []
+            for entry in forked._entries:
+                sig = (entry.kind, json.dumps(entry.payload, sort_keys=True))
+                if sig not in existing_signatures:
+                    new_entries_from_forked.append(entry)
+                    existing_signatures.add(sig)
+            
+            # Append new entries with new sequential IDs
+            for entry in new_entries_from_forked:
+                new_entry = Entry(
+                    id=self._next_id,
+                    kind=entry.kind,
+                    payload=entry.payload,
+                    timestamp=entry.timestamp,
+                )
+                self._entries.append(new_entry)
+                self._append_to_file(new_entry)
+                self._next_id += 1

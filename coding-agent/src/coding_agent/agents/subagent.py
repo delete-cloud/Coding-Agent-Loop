@@ -99,7 +99,9 @@ class SubAgent:
 
         outcome = await loop.run_turn(goal)
 
-        success = outcome.stop_reason == "no_tool_calls"
+        # Success: only when agent completes normally without hitting limits
+        # Failure reasons: max_steps_reached, doom_loop, error
+        success = outcome.stop_reason not in ("max_steps_reached", "doom_loop", "error")
 
         if success:
             # Merge forked entries back into parent tape

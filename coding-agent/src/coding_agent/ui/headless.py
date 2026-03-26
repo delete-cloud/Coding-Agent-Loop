@@ -30,14 +30,8 @@ class HeadlessConsumer(WireConsumer):
 
     def __init__(self, auto_approve: bool = True):
         self.auto_approve = auto_approve
-        self._setup_logging()
-
-    def _setup_logging(self) -> None:
-        """Configure logging for headless mode."""
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(asctime)s - %(levelname)s - %(message)s",
-        )
+        # Note: logging configuration is left to the application entry point
+        # to avoid side effects from library code
 
     async def emit(self, msg: WireMessage) -> None:
         """Emit a message to the consumer."""

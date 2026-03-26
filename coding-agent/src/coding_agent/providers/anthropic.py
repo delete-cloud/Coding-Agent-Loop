@@ -86,8 +86,9 @@ class AnthropicProvider:
                         args_str = func.get("arguments", "{}")
                         try:
                             args = json.loads(args_str) if isinstance(args_str, str) else args_str
-                        except json.JSONDecodeError:
-                            args = {}
+                        except json.JSONDecodeError as e:
+                            logging.warning(f"Failed to parse tool arguments JSON: {e}, args_str={args_str!r}")
+                            args = {"_parse_error": str(e), "_raw": args_str}
                         content_blocks.append({
                             "type": "tool_use",
                             "id": tc["id"],
