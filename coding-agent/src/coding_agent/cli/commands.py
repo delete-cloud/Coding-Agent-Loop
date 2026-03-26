@@ -69,8 +69,13 @@ async def cmd_model(args: list[str], context: dict[str, Any]) -> None:
     """Show current model or change it."""
     if args:
         new_model = args[0]
+        # Basic validation - model name should not be empty and reasonable length
+        if len(new_model) < 2 or len(new_model) > 100:
+            console.print(f"[red]Invalid model name:[/] {new_model}")
+            return
         context['model'] = new_model
         console.print(f"[green]Model changed to:[/] {new_model}")
+        console.print("[dim]Note: Model change will take effect on next turn.[/]")
     else:
         current = context.get('model', 'unknown')
         console.print(f"[dim]Current model:[/] {current}")
@@ -105,7 +110,9 @@ async def handle_command(input_text: str, context: dict[str, Any]) -> bool:
     # Parse command and args
     parts = input_text[1:].strip().split()
     if not parts:
-        return False
+        # Empty "/" command - show help
+        await cmd_help([], context)
+        return True
     
     cmd_name = parts[0].lower()
     args = parts[1:]

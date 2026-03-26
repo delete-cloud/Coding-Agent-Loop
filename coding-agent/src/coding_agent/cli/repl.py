@@ -79,21 +79,38 @@ class InteractiveSession:
             "Always create a plan (todo_write) before starting complex work. "
             "Update task status as you progress."
         )
+        
+        # Register subagent tool (consumer will be updated per-turn)
+        self._current_consumer = None
+        register_subagent_tool(
+            registry=self.tools,
+            provider=self.provider,
+            tape=self.tape,
+            consumer=self,  # Self as proxy - delegates to _current_consumer
+            max_steps=self.config.subagent_max_steps,
+            max_depth=self.config.max_subagent_depth,
+        )
+    
+    # Proxy methods for WireConsumer protocol (used by subagent tool)
+    async def emit(self, msg) -> None:
+        """Proxy emit to current consumer."""
+        if self._current_consumer:
+            await self._current_consumer.emit(msg)
+    
+    async def request_approval(self, req):
+        """Proxy approval to current consumer."""
+        if self._current_consumer:
+            return await self._current_consumer.request_approval(req)
+        # Default: auto-approve
+        from coding_agent.wire import ApprovalResponse
+        return ApprovalResponse(call_id=req.call_id, decision="approve", scope="once")
     
     async def run(self):
         """Run the REPL loop."""
         console.print("\n[bold cyan]🤖 Coding Agent[/] - Interactive Mode")
         console.print("[dim]Type /help for commands, or just chat with the agent.[/]\n")
         
-        # Register subagent (needs consumer, set up per-turn)
-        register_subagent_tool(
-            registry=self.tools,
-            provider=self.provider,
-            tape=self.tape,
-            consumer=None,  # Will be set per-turn
-            max_steps=self.config.subagent_max_steps,
-            max_depth=self.config.max_subagent_depth,
-        )
+        # Register subagent tool - consumer will be set per-turn via context
         
         turn_count = 0
         
@@ -116,7 +133,11 @@ class InteractiveSession:
                 continue
             
             # Process user message through agent with TUI
-            await self._process_message(user_input)
+            try:
+                await self._process_message(user_input)
+            except Exception as e:
+                console.print(f"\n[red]Error during agent execution:[/] {e}")
+                console.print("[dim]You can continue with a new message.[/]\n")
             turn_count += 1
         
         console.print("\n[dim]Session ended.[/]\n")
@@ -128,6 +149,9 @@ class InteractiveSession:
             model_name=self.config.model,
             max_steps=self.config.max_steps,
         )
+        
+        # Set current consumer for subagent proxy
+        self._current_consumer = tui.consumer
         
         # Update context with consumer
         self.context['consumer'] = tui.consumer

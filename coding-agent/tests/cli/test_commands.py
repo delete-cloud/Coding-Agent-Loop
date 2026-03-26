@@ -83,12 +83,13 @@ class TestCommands:
         assert handled is False  # Not a command
     
     @pytest.mark.asyncio
-    async def test_empty_slash(self):
-        """Test that just '/' returns False (not a valid command)."""
+    async def test_empty_slash_shows_help(self, capsys):
+        """Test that just '/' shows help (treated as help command)."""
         context = {'should_exit': False}
         handled = await handle_command("/", context)
-        # Empty command returns False (not handled)
-        assert handled is False
+        # Empty command now shows help and returns True (handled)
+        assert handled is True
+        assert context['should_exit'] is False  # Help doesn't exit
     
     def test_command_completions(self):
         completions = get_command_completions()
