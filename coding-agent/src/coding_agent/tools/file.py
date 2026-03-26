@@ -34,7 +34,9 @@ def register_file_tools(registry: ToolRegistry, repo_root: Path | str = ".") -> 
             if not target.is_file():
                 return json.dumps({"error": f"Not a file: {path}"})
 
-            with open(target, "r", encoding="utf-8") as f:
+            # Read as UTF-8 by default, but tolerate non-UTF8 bytes (e.g. binary files)
+            # by replacing invalid sequences. This preserves behavior for valid UTF-8 files.
+            with open(target, "r", encoding="utf-8", errors="replace") as f:
                 lines = f.readlines()
             
             # Limit lines
@@ -104,7 +106,8 @@ def register_file_tools(registry: ToolRegistry, repo_root: Path | str = ".") -> 
             if not target.is_file():
                 return json.dumps({"error": f"Not a file: {path}"})
             
-            with open(target, "r", encoding="utf-8") as f:
+            # Be tolerant of non-UTF8 bytes in the target file.
+            with open(target, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
             
             if old_string not in content:
