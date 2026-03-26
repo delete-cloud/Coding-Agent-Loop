@@ -82,11 +82,11 @@ Must redesign:
 │ / Zed)  │                         │  │ ┌───────┐ ┌─────────┐ │  │
 └─────────┘                         │  │ │  MCP   │ │SubAgent │ │  │
                                     │  │ │Provider│ │Dispatch │ │  │
-                                    │  │ └───────┘ └─────────┘ │  │
-                                    │  └────────────────────────┘  │
-                                    │                              │
-                                    │  ┌────────────────────────┐  │
-                                    │  │     Providers          │  │
+┌─────────┐                         │  │ └───────┘ └─────────┘ │  │
+│Telegram │◄── Wire (webhook) ─────►│  └────────────────────────┘  │
+│Feishu   │                         │                              │
+│Discord  │                         │  ┌────────────────────────┐  │
+└─────────┘                         │  │     Providers          │  │
                                     │  │ OpenAI | Anthropic     │  │
                                     │  └────────────────────────┘  │
                                     └──────────────────────────────┘
@@ -152,6 +152,12 @@ src/coding_agent/
     tui.py              # Textual/Rich TUI
     headless.py         # Batch mode (eval)
     http_server.py      # REST + SSE API (FastAPI/Litestar)
+
+  integrations/
+    base.py             # ChatPlatformAdapter protocol + SessionRegistry
+    telegram.py         # Telegram Bot API webhook + consumer
+    feishu.py           # Feishu/Lark Event Subscription webhook + consumer
+    discord.py          # Discord Bot webhook + consumer
 
   eval/
     benchmark.py        # Benchmark task runner (from existing framework)
@@ -327,6 +333,9 @@ class WireConsumer(Protocol):
 - `ui/headless.py` → logs to file, auto-approves per policy
 - `ui/http_server.py` → serializes Wire messages as SSE events, handles REST endpoints
 - `wire/acp_adapter.py` → translates to/from ACP JSON-RPC
+- `integrations/telegram.py` → buffers output into chat messages, approval via inline keyboards
+- `integrations/feishu.py` → buffers output into Lark cards, approval via card actions
+- `integrations/discord.py` → buffers output into Discord messages, approval via button components
 
 ### 4.5 Provider Layer (`providers/`)
 
@@ -620,6 +629,43 @@ You are a senior code reviewer. Analyze the following changes...
 ```
 
 Injected via tool_result when the agent (or user) invokes a skill, not stuffed into the system prompt upfront (s05 pattern).
+
+### 4.15 Chat Platform Integration (`integrations/`)
+
+Chat platforms (Telegram, Feishu/Lark, Discord) connect as Wire consumers with webhook ingress and buffered output.
+
+```python
+class ChatPlatformAdapter(Protocol):
+    """Adapter for a chat platform. Handles webhook → session → output."""
+
+    async def handle_webhook(self, payload: dict) -> None:
+        """Parse platform webhook, route to session, run turn."""
+
+    async def send_message(self, external_id: str, text: str) -> None:
+        """Send a formatted message to the chat platform."""
+
+class SessionRegistry:
+    """Maps external chat IDs to internal sessions."""
+
+    async def get_or_create(self, platform: str, external_id: str) -> Session:
+        """Lookup or create a session for a chat thread."""
+```
+
+Each platform consumer implements `WireConsumer` with two key adaptations:
+
+1. **Buffered output**: `on_message()` accumulates `StreamDelta` events and flushes a single formatted message on `TurnEnd` (chat platforms cannot handle token-by-token streaming)
+2. **Async approval**: `request_approval()` sends platform-native buttons (Telegram inline keyboards, Feishu card actions, Discord button components) and awaits the callback via `asyncio.Future`
+
+Platform-specific constraints:
+| Platform | Message limit | Markdown dialect | Approval UI |
+|----------|--------------|-----------------|-------------|
+| Telegram | 4,096 chars | MarkdownV2 | Inline keyboard buttons |
+| Feishu | 30,000 chars | Lark Markdown | Interactive card actions |
+| Discord | 2,000 chars | Discord Markdown | Button components |
+
+**Core changes required: none.** Chat adapters are purely additive — they implement `WireConsumer` and add webhook HTTP endpoints alongside the existing HTTP API. The `SessionRegistry` wraps `Session.create()`/`Session.load()` with external ID mapping.
+
+CLI entry: `python -m coding_agent serve-bot --platform telegram --token $BOT_TOKEN`
 
 ---
 
@@ -1069,7 +1115,19 @@ Deliverables:
 
 Exit criteria: Can load tools from MCP servers (e.g., web_search). Can be launched by VS Code/Zed as an ACP agent.
 
-### P6: Eval Framework
+### P6: Chat Platform Integration
+
+Deliverables:
+- `integrations/base.py` — `ChatPlatformAdapter` protocol + `SessionRegistry`
+- `integrations/telegram.py` — Telegram Bot API webhook handler + consumer
+- `integrations/feishu.py` — Feishu/Lark Event Subscription webhook handler + consumer
+- `integrations/discord.py` — Discord Bot webhook handler + consumer
+
+Key design: consumers buffer `StreamDelta` → flush on `TurnEnd`, approval via platform-native buttons + `asyncio.Future`. No core changes — purely additive `WireConsumer` implementations.
+
+Exit criteria: Agent is reachable via Telegram/Feishu/Discord bots. Can receive messages, execute tasks, send results, and handle approval via chat platform buttons.
+
+### P7: Eval Framework
 
 Deliverables:
 - `eval/benchmark.py` — benchmark task runner
@@ -1078,7 +1136,7 @@ Deliverables:
 
 Exit criteria: Can run A/B eval identical to current Go agent's eval pipeline.
 
-### P7: Multi-Agent (s09-s12, deferred)
+### P8: Multi-Agent (s09-s12, deferred)
 
 Deliverables:
 - `agents/team.py` — agent teams with async mailbox
@@ -1134,3 +1192,6 @@ yolo/interactive/auto are ApprovalPolicy configurations, not separate code paths
 
 ### D8: MCP for external tools, built-in for core
 Core tools (file, shell, search, kb) are built-in for reliability and offline use. External tools (web_search, browser, Slack) load via MCP servers. No need to implement every tool.
+
+### D9: Chat platforms as Wire consumers, not special cases
+Telegram, Feishu, Discord integrations are just `WireConsumer` implementations with webhook ingress and buffered output. No agent core changes needed. The `SessionRegistry` maps external chat IDs to internal sessions. This validates D3 (Wire protocol for transport independence).
