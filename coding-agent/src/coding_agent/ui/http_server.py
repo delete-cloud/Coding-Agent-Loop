@@ -14,11 +14,19 @@ from typing import Any, AsyncIterator
 from fastapi import FastAPI, HTTPException
 from sse_starlette.sse import EventSourceResponse
 
-from coding_agent.wire.protocol import (
+from coding_agent.approval import ApprovalPolicy
+from coding_agent.ui.session_manager import SessionManager
+from coding_agent.wire import (
     ApprovalRequest,
     ApprovalResponse,
+    ErrorMessage,
+    LocalWire,
+    StepInfo,
     StreamDelta,
+    ToolCallBegin,
     ToolCallDelta,
+    ToolCallEnd,
+    TurnBegin,
     TurnEnd,
     WireMessage,
 )
@@ -32,7 +40,7 @@ SESSION_IDLE_TIMEOUT_MINUTES = 30
 
 @dataclass
 class SessionState:
-    """In-memory session state."""
+    """In-memory session state (for backward compatibility with tests)."""
 
     id: str
     created_at: datetime
@@ -44,7 +52,10 @@ class SessionState:
     event_queues: list[asyncio.Queue[dict]] = field(default_factory=list)
 
 
-# In-memory session store
+# Global session manager
+session_manager = SessionManager()
+
+# In-memory session store (for backward compatibility with existing tests)
 sessions: dict[str, SessionState] = {}
 
 
@@ -98,6 +109,14 @@ def _wire_message_to_event(msg: WireMessage) -> dict:
                     "timestamp": msg.timestamp.isoformat(),
                 }),
             }
+        case TurnBegin():
+            return {
+                "event": "TurnBegin",
+                "data": json.dumps({
+                    "session_id": msg.session_id,
+                    "timestamp": msg.timestamp.isoformat(),
+                }),
+            }
         case StreamDelta():
             return {
                 "event": "StreamDelta",
@@ -119,6 +138,27 @@ def _wire_message_to_event(msg: WireMessage) -> dict:
                     "timestamp": msg.timestamp.isoformat(),
                 }),
             }
+        case ToolCallBegin():
+            return {
+                "event": "ToolCallBegin",
+                "data": json.dumps({
+                    "session_id": msg.session_id,
+                    "call_id": msg.call_id,
+                    "tool": msg.tool,
+                    "args": msg.args,
+                    "timestamp": msg.timestamp.isoformat(),
+                }),
+            }
+        case ToolCallEnd():
+            return {
+                "event": "ToolCallEnd",
+                "data": json.dumps({
+                    "session_id": msg.session_id,
+                    "call_id": msg.call_id,
+                    "result": msg.result,
+                    "timestamp": msg.timestamp.isoformat(),
+                }),
+            }
         case ApprovalRequest():
             return {
                 "event": "ApprovalRequest",
@@ -126,9 +166,9 @@ def _wire_message_to_event(msg: WireMessage) -> dict:
                     "session_id": msg.session_id,
                     "request_id": msg.request_id,
                     "tool_call": {
-                        "tool_name": msg.tool_call.tool_name,
-                        "arguments": msg.tool_call.arguments,
-                        "call_id": msg.tool_call.call_id,
+                        "tool_name": msg.tool_call.tool_name if msg.tool_call else "",
+                        "arguments": msg.tool_call.arguments if msg.tool_call else {},
+                        "call_id": msg.tool_call.call_id if msg.tool_call else "",
                     },
                     "timeout_seconds": msg.timeout_seconds,
                     "timestamp": msg.timestamp.isoformat(),
@@ -142,6 +182,25 @@ def _wire_message_to_event(msg: WireMessage) -> dict:
                     "request_id": msg.request_id,
                     "approved": msg.approved,
                     "feedback": msg.feedback,
+                    "timestamp": msg.timestamp.isoformat(),
+                }),
+            }
+        case ErrorMessage():
+            return {
+                "event": "ErrorMessage",
+                "data": json.dumps({
+                    "session_id": msg.session_id,
+                    "content": msg.content,
+                    "timestamp": msg.timestamp.isoformat(),
+                }),
+            }
+        case StepInfo():
+            return {
+                "event": "StepInfo",
+                "data": json.dumps({
+                    "session_id": msg.session_id,
+                    "step_number": msg.step_number,
+                    "max_steps": msg.max_steps,
                     "timestamp": msg.timestamp.isoformat(),
                 }),
             }
@@ -171,15 +230,49 @@ async def _cleanup_idle_sessions() -> None:
     """Background task to clean up idle sessions."""
     while True:
         await asyncio.sleep(60)  # Check every minute
-        now = datetime.now()
-        expired = []
-        for session_id, session in sessions.items():
-            idle_time = now - session.last_activity
-            if idle_time > timedelta(minutes=SESSION_IDLE_TIMEOUT_MINUTES):
-                expired.append(session_id)
-        for session_id in expired:
-            logger.info(f"Cleaning up idle session: {session_id}")
-            del sessions[session_id]
+        try:
+            # Cleanup in session manager
+            await session_manager.cleanup_idle_sessions(SESSION_IDLE_TIMEOUT_MINUTES)
+            
+            # Cleanup legacy sessions (for backward compatibility)
+            now = datetime.now()
+            expired = []
+            for session_id, session in sessions.items():
+                idle_time = now - session.last_activity
+                if idle_time > timedelta(minutes=SESSION_IDLE_TIMEOUT_MINUTES):
+                    expired.append(session_id)
+            for session_id in expired:
+                logger.info(f"Cleaning up idle legacy session: {session_id}")
+                del sessions[session_id]
+        except Exception as e:
+            logger.exception("Error during idle session cleanup")
+
+
+async def stream_wire_messages(wire: LocalWire) -> AsyncIterator[dict]:
+    """Stream wire messages as SSE events.
+    
+    Consumes messages from the wire's outgoing queue and yields SSE events.
+    Stops when a TurnEnd message is received.
+    """
+    while True:
+        try:
+            msg = await wire.get_next_outgoing()
+            event = _wire_message_to_event(msg)
+            yield event
+            
+            # Stop streaming on TurnEnd
+            if isinstance(msg, TurnEnd):
+                break
+        except asyncio.CancelledError:
+            # Client disconnected
+            raise
+        except Exception as e:
+            logger.exception("Error streaming wire message")
+            yield {
+                "event": "Error",
+                "data": json.dumps({"error": str(e)}),
+            }
+            break
 
 
 @app.get("/health")
@@ -194,14 +287,24 @@ async def health_check():
 
 @app.post("/sessions")
 async def create_session() -> dict:
-    """Create new session."""
-    session_id = str(uuid.uuid4())
+    """Create new session with AgentLoop integration."""
+    # Create session using SessionManager
+    # Note: For now, we create without a provider (mock mode)
+    # In production, a provider would be configured
+    session_id = await session_manager.create_session(
+        repo_path=None,
+        approval_policy=ApprovalPolicy.AUTO,
+        provider=None,  # Will use mock/test provider
+    )
+    
+    # Also create legacy session state for backward compatibility with tests
     now = datetime.now()
     sessions[session_id] = SessionState(
         id=session_id,
         created_at=now,
         last_activity=now,
     )
+    
     logger.info(f"Created session: {session_id}")
     return {"session_id": session_id}
 
@@ -212,50 +315,42 @@ async def send_prompt(session_id: str, prompt: str) -> EventSourceResponse:
 
     Returns 409 if a turn is already in progress.
     """
-    if session_id not in sessions:
+    # Check in session manager
+    if not session_manager.has_session(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
-
-    session = sessions[session_id]
-    if session.turn_in_progress:
+    
+    session = session_manager.get_session(session_id)
+    
+    # Check if turn is already in progress (check both session_manager and legacy state)
+    if session.task and not session.task.done():
         raise HTTPException(status_code=409, detail="Turn already in progress")
-
-    session.turn_in_progress = True
-    session.last_activity = datetime.now()
-
+    
+    # Also check legacy session state for backward compatibility
+    if session_id in sessions and sessions[session_id].turn_in_progress:
+        raise HTTPException(status_code=409, detail="Turn already in progress")
+    
+    # Update legacy session state if exists
+    if session_id in sessions:
+        sessions[session_id].turn_in_progress = True
+        sessions[session_id].last_activity = datetime.now()
+    
     async def event_generator() -> AsyncIterator[dict]:
         """Generate SSE events for the turn."""
         try:
-            # Simulate streaming response (placeholder for actual agent loop)
-            # This will be replaced with actual integration in Task 4
-            chunks = [
-                "I'll help you with that request.",
-                " Let me analyze the task...",
-                " Done!",
-            ]
-            for chunk in chunks:
-                delta = StreamDelta(
-                    session_id=session_id,
-                    content=chunk,
-                    role="assistant",
-                )
-                event = _wire_message_to_event(delta)
-                await _broadcast_event(session, event)
-                yield event
-                await asyncio.sleep(0.1)  # Simulate streaming delay
-
-            # Emit TurnEnd
-            end_msg = TurnEnd(
-                session_id=session_id,
-                turn_id=str(uuid.uuid4()),
-                completion_status="completed",
+            # Start agent run in background
+            session.task = asyncio.create_task(
+                session_manager.run_agent(session_id, prompt)
             )
-            event = _wire_message_to_event(end_msg)
-            await _broadcast_event(session, event)
-            yield event
-
+            
+            # Stream wire messages
+            async for event in stream_wire_messages(session.wire):
+                # Also broadcast to legacy event queues
+                if session_id in sessions:
+                    await _broadcast_event(sessions[session_id], event)
+                yield event
+                
         except Exception as e:
             logger.exception("Error during turn")
-            # Create error-like response
             error_data = {
                 "event": "Error",
                 "data": json.dumps({
@@ -264,13 +359,19 @@ async def send_prompt(session_id: str, prompt: str) -> EventSourceResponse:
                     "timestamp": datetime.now().isoformat(),
                 }),
             }
-            await _broadcast_event(session, error_data)
+            if session_id in sessions:
+                await _broadcast_event(sessions[session_id], error_data)
             yield error_data
         finally:
-            session.turn_in_progress = False
-            session.last_activity = datetime.now()
-
-    return EventSourceResponse(event_generator())
+            if session_id in sessions:
+                sessions[session_id].turn_in_progress = False
+                sessions[session_id].last_activity = datetime.now()
+    
+    # Return SSE stream from wire
+    return EventSourceResponse(
+        event_generator(),
+        media_type="text/event-stream",
+    )
 
 
 @app.post("/sessions/{session_id}/approve")
@@ -281,23 +382,36 @@ async def approve_request(
     feedback: str | None = None,
 ) -> dict:
     """Respond to approval request."""
-    if session_id not in sessions:
+    if not session_manager.has_session(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
-
-    session = sessions[session_id]
-
-    if session.pending_approval is None:
-        raise HTTPException(status_code=400, detail="No pending approval request")
-
-    if session.pending_approval.get("request_id") != request_id:
-        raise HTTPException(status_code=400, detail="Request ID mismatch")
-
-    session.approval_response = {
-        "decision": "approve" if approved else "deny",
-        "feedback": feedback,
-    }
-    session.approval_event.set()
-    session.last_activity = datetime.now()
+    
+    # Check legacy session state for pending approval (for backward compatibility)
+    if session_id in sessions:
+        session = sessions[session_id]
+        if session.pending_approval is None:
+            raise HTTPException(status_code=400, detail="No pending approval request")
+        if session.pending_approval.get("request_id") != request_id:
+            raise HTTPException(status_code=400, detail="Request ID mismatch")
+    
+    try:
+        await session_manager.submit_approval(
+            session_id=session_id,
+            request_id=request_id,
+            approved=approved,
+            feedback=feedback,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    
+    # Update legacy session state if exists
+    if session_id in sessions:
+        sessions[session_id].pending_approval = None
+        sessions[session_id].approval_response = {
+            "decision": "approve" if approved else "deny",
+            "feedback": feedback,
+        }
+        sessions[session_id].approval_event.set()
+        sessions[session_id].last_activity = datetime.now()
 
     return {
         "status": "ok",
@@ -338,33 +452,48 @@ async def get_events(session_id: str) -> EventSourceResponse:
 @app.get("/sessions/{session_id}")
 async def get_session(session_id: str) -> dict:
     """Get session state."""
-    if session_id not in sessions:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    return _session_to_dict(sessions[session_id])
+    # Check in legacy sessions first (for backward compatibility)
+    if session_id in sessions:
+        return _session_to_dict(sessions[session_id])
+    
+    # Check in session manager
+    if session_manager.has_session(session_id):
+        return session_manager.get_session_info(session_id)
+    
+    raise HTTPException(status_code=404, detail="Session not found")
 
 
 @app.delete("/sessions/{session_id}")
 async def close_session(session_id: str) -> dict:
     """Close session and release resources."""
-    if session_id not in sessions:
+    # Check if session exists in either store
+    if not session_manager.has_session(session_id) and session_id not in sessions:
         raise HTTPException(status_code=404, detail="Session not found")
+    
+    # Close in session manager
+    if session_manager.has_session(session_id):
+        try:
+            await session_manager.close_session(session_id)
+        except Exception as e:
+            logger.exception(f"Error closing session in manager: {e}")
+    
+    # Close in legacy sessions if exists
+    if session_id in sessions:
+        session = sessions[session_id]
 
-    session = sessions[session_id]
+        # Notify all connected clients
+        await _broadcast_event(
+            session,
+            {"event": "SessionClosed", "data": json.dumps({"session_id": session_id})},
+        )
 
-    # Notify all connected clients
-    await _broadcast_event(
-        session,
-        {"event": "SessionClosed", "data": json.dumps({"session_id": session_id})},
-    )
-
-    del sessions[session_id]
+        del sessions[session_id]
+    
     logger.info(f"Closed session: {session_id}")
-
     return {"status": "closed", "session_id": session_id}
 
 
-# Global approval handler for integration with agent loop
+# Global approval handler for integration with agent loop (legacy)
 async def wait_for_approval(
     session_id: str,
     approval_req: ApprovalRequest,
@@ -375,6 +504,12 @@ async def wait_for_approval(
     It will block until the user responds via the /approve endpoint
     or the timeout expires.
     """
+    # Use session manager if available
+    if session_manager.has_session(session_id):
+        # Submit through session manager
+        # This is handled by the client calling /approve
+        pass
+    
     if session_id not in sessions:
         return ApprovalResponse(
             session_id=session_id,
@@ -389,8 +524,8 @@ async def wait_for_approval(
         # Set pending approval and notify clients
         session.pending_approval = {
             "request_id": approval_req.request_id,
-            "tool_name": approval_req.tool_call.tool_name,
-            "arguments": approval_req.tool_call.arguments,
+            "tool_name": approval_req.tool_call.tool_name if approval_req.tool_call else "",
+            "arguments": approval_req.tool_call.arguments if approval_req.tool_call else {},
         }
         session.approval_event.clear()
         session.approval_response = None

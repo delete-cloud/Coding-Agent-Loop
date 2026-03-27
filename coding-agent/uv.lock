@@ -187,8 +187,12 @@ dev = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "httpx" },
+    { name = "httpx-sse" },
     { name = "mypy" },
     { name = "pandas" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
 ]
 
 [package.metadata]
@@ -218,8 +222,12 @@ provides-extras = ["dev"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "httpx-sse", specifier = ">=0.4.3" },
     { name = "mypy", specifier = ">=1.19.1" },
     { name = "pandas", specifier = ">=3.0.1" },
+    { name = "pytest", specifier = ">=9.0.2" },
+    { name = "pytest-asyncio", specifier = ">=1.3.0" },
 ]
 
 [[package]]

@@ -1,35 +1,31 @@
-# P2: Wire + TUI + HTTP Implementation
+# P2 Cleanup and Hardening
 
-## Tasks
+## Phase 1: Foundation
+- [ ] **Task 1**: Consolidate Wire Protocol
+  - Delete wire.py, update imports, fix tests
+  
+- [ ] **Task 2**: HTTP Server Integration with AgentLoop
+  - Create session_manager.py, integrate with loop, streaming
+  
+- [ ] **Task 3**: FastAPI Modernization
+  - Replace on_event with lifespan, add health endpoint
 
-- [ ] **Task 1**: Wire Protocol (`wire/protocol.py`, `wire/local.py`)
-  - Define WireMessage, StreamDelta, ToolCallDelta, ApprovalRequest, ApprovalResponse, TurnEnd
-  - Implement LocalWire with async queues
-  - Tests for serialization and queue operations
+## Phase 2: Core Features
+- [ ] **Task 4**: Input Validation & Security
+  - Pydantic models, API key auth, rate limiting
   
-- [ ] **Task 2**: HTTP API Server (`ui/http_server.py`)
-  - FastAPI app with 6 endpoints
-  - SSE streaming support
-  - Session management with idle timeout
-  - Tests for all endpoints
+- [ ] **Task 5**: ApprovalStore Integration
+  - Use ApprovalStore in HTTP server, remove duplication
   
-- [ ] **Task 3**: Approval System (`approval/policy.py`, `approval/store.py`)
-  - ApprovalPolicy enum (yolo, interactive, auto)
-  - ApprovalStore with timeout handling
-  - Integration hooks for core loop
-  - Tests for policies and store
-  
-- [ ] **Task 4**: Integration & CLI
-  - Add `serve` command to __main__.py
-  - Integrate wire with core loop
-  - Connect approval system
-  
-- [ ] **Task 5**: Testing & Validation
-  - Unit tests for all new modules
-  - Integration tests
-  - Manual verification
+- [ ] **Task 6**: Session Persistence
+  - Persistence interface, SQLite implementation
 
-## Dependencies to Add
-- fastapi >=0.100.0
-- uvicorn[standard] >=0.23.0  
-- sse-starlette >=1.6.0
+## Phase 3: Polish & Testing
+- [ ] **Task 7**: RichConsumer Interactive Approval
+  - prompt-toolkit approval UI, timeout handling
+  
+- [ ] **Task 8**: CORS and Production Config
+  - CORS middleware, production settings
+  
+- [ ] **Task 9**: Testing & Documentation
+  - Security tests, integration tests, API docs
