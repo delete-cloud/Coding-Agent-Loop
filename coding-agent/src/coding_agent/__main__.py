@@ -29,8 +29,10 @@ def main(ctx):
 @click.option("--api-key", envvar="AGENT_API_KEY", required=True, help="API key")
 @click.option("--max-steps", default=30, help="Max steps per turn")
 @click.option("--approval", default="yolo", type=click.Choice(["yolo", "interactive", "auto"]))
+@click.option("--parallel/--no-parallel", default=True, help="Enable parallel tool execution")
+@click.option("--max-parallel", default=5, help="Maximum parallel tool executions")
 @click.option("--tui", is_flag=True, help="Use Rich TUI interface (batch mode)")
-def run(goal, repo, model, provider_name, base_url, api_key, max_steps, approval, tui):
+def run(goal, repo, model, provider_name, base_url, api_key, max_steps, approval, parallel, max_parallel, tui):
     """Run agent on a goal (batch mode)."""
     import asyncio
     from coding_agent.core.config import Config
@@ -43,6 +45,8 @@ def run(goal, repo, model, provider_name, base_url, api_key, max_steps, approval
         repo=repo,
         max_steps=max_steps,
         approval_mode=approval,
+        enable_parallel_tools=parallel,
+        max_parallel_tools=max_parallel,
     )
     
     if tui:

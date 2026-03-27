@@ -32,6 +32,10 @@ class Config(BaseModel):
     max_subagent_depth: int = 3
     subagent_max_steps: int = 15
 
+    # Execution
+    enable_parallel_tools: bool = True
+    max_parallel_tools: int = 5
+
 
 # Env var prefix → Config field mapping
 _ENV_MAP: dict[str, str] = {
@@ -43,6 +47,8 @@ _ENV_MAP: dict[str, str] = {
     "AGENT_APPROVAL_MODE": "approval_mode",
     "AGENT_DOOM_THRESHOLD": "doom_threshold",
     "AGENT_REPO": "repo",
+    "AGENT_ENABLE_PARALLEL_TOOLS": "enable_parallel_tools",
+    "AGENT_MAX_PARALLEL_TOOLS": "max_parallel_tools",
 }
 
 
