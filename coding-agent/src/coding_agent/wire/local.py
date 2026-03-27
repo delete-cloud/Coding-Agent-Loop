@@ -81,7 +81,7 @@ class LocalWire:
         Raises:
             TimeoutError: If no response received within timeout period
         """
-        from coding_agent.wire.protocol import ApprovalRequest
+        from coding_agent.wire.protocol import ApprovalRequest, ApprovalResponse
         
         request = ApprovalRequest(
             session_id=self.session_id,

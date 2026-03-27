@@ -167,6 +167,7 @@ class TestLocalWireApprovalFlow:
                 approved=False,
                 feedback="Too dangerous",
             )
+            # UI injects response to incoming queue
             wire.inject_incoming(response)
         
         asyncio.create_task(send_response())
@@ -197,7 +198,7 @@ class TestLocalWireApprovalFlow:
 
     @pytest.mark.asyncio
     async def test_request_approval_default_timeout(self):
-        """Test approval request uses default timeout of 120."""
+        """Test approval request with custom short timeout."""
         wire = LocalWire("test-session")
         
         tool_call = ToolCallDelta(
@@ -207,11 +208,6 @@ class TestLocalWireApprovalFlow:
             call_id="call-default",
         )
         
-        # Check that default timeout is 120
-        # We can't easily test this without actually waiting, but we can verify
-        # the ApprovalRequest is created with correct timeout
-        # The actual timeout test would require mocking asyncio.wait_for
-        
         # Just verify no exception with quick response
         async def send_response():
             await asyncio.sleep(0.01)
@@ -220,6 +216,7 @@ class TestLocalWireApprovalFlow:
                 request_id="call-default",
                 approved=True,
             )
+            # UI injects response to incoming queue
             wire.inject_incoming(response)
         
         asyncio.create_task(send_response())
@@ -245,7 +242,7 @@ class TestLocalWireErrorHandling:
         
         async def send_wrong_response():
             await asyncio.sleep(0.01)
-            # Send wrong message type
+            # Send wrong message type (UI injects wrong type)
             wrong_msg = StreamDelta(
                 session_id="test-session",
                 content="wrong",
@@ -278,6 +275,7 @@ class TestLocalWireErrorHandling:
                 request_id="wrong-request-id",  # Doesn't match
                 approved=True,
             )
+            # UI injects response with wrong ID
             wire.inject_incoming(response)
         
         asyncio.create_task(send_mismatched_response())
@@ -342,20 +340,20 @@ class TestLocalWireIntegration:
         await wire.send(StreamDelta(session_id="test-session", content="Hello"))
         await wire.send(StreamDelta(session_id="test-session", content="Processing..."))
         
-        # UI consumes messages
+        # UI consumes messages from outgoing queue
         assert wire.consume_outgoing().content == "Hello"
         assert wire.consume_outgoing().content == "Processing..."
         
-        # UI sends user input
+        # UI sends user input via incoming queue
         wire.inject_incoming(StreamDelta(session_id="test-session", content="User response"))
         
-        # Agent receives it
+        # Agent receives it from incoming queue
         result = await wire.receive()
         assert result.content == "User response"
 
     @pytest.mark.asyncio
     async def test_approval_flow_simulation(self):
-        """Simulate full approval flow."""
+        """Simulate full approval flow between agent and UI."""
         wire = LocalWire("test-session")
         
         async def agent_side():
@@ -367,35 +365,32 @@ class TestLocalWireIntegration:
                 call_id="call-001",
             )
             
-            # Send approval request
+            # Send approval request and wait for response
             response = await wire.request_approval(tool_call, timeout=1)
             return response.approved
         
         async def ui_side():
             """Simulate UI handling approval."""
-            # Get the approval request
+            # Get the approval request from outgoing queue (agent -> UI)
             msg = await wire.get_next_outgoing()
             assert isinstance(msg, ApprovalRequest)
             assert msg.tool_call.tool_name == "write_file"
             
-            # Simulate user approval
+            # Simulate user approval - send response to incoming queue (UI -> agent)
             response = ApprovalResponse(
                 session_id="test-session",
                 request_id=msg.request_id,
                 approved=True,
                 feedback="Approved",
             )
-            
-            # Note: In real usage, the UI would put this in the queue
-            # that request_approval is waiting on. Since request_approval
-            # waits on _outgoing, we inject there.
-            # Actually, looking at the implementation, request_approval sends
-            # to _outgoing and waits on _outgoing.get(). This seems wrong.
-            # Let me re-check the implementation...
-            # Actually, the implementation has a bug - it should wait on _incoming
-            # but it waits on _outgoing. Let me fix this.
-            pass
+            wire.inject_incoming(response)
         
         # Run both sides concurrently
-        # This test reveals a bug in the implementation
-        # The fix is needed for proper bidirectional communication
+        agent_task = asyncio.create_task(agent_side())
+        ui_task = asyncio.create_task(ui_side())
+        
+        # Wait for both to complete
+        approved = await agent_task
+        await ui_task
+        
+        assert approved is True
