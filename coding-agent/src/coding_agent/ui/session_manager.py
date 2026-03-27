@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 from coding_agent.approval import ApprovalPolicy
+from coding_agent.approval.store import ApprovalStore
 from coding_agent.core.loop import AgentLoop
 from coding_agent.core.tape import Tape
 from coding_agent.core.context import Context
@@ -80,6 +81,7 @@ class Session:
         id: Unique session identifier
         loop: The AgentLoop instance for this session
         wire: LocalWire for communication between agent and UI
+        approval_store: ApprovalStore for managing approval requests
         created_at: When the session was created
         last_activity: Last activity timestamp
         task: Currently running agent task, if any
@@ -87,6 +89,7 @@ class Session:
     id: str
     loop: AgentLoop
     wire: LocalWire
+    approval_store: ApprovalStore
     created_at: datetime
     last_activity: datetime
     task: asyncio.Task | None = None
@@ -97,6 +100,7 @@ class SessionManager:
     
     def __init__(self):
         self._sessions: dict[str, Session] = {}
+        self._approval_stores: dict[str, ApprovalStore] = {}
         self._lock = asyncio.Lock()
     
     async def create_session(
@@ -130,6 +134,10 @@ class SessionManager:
         
         # Create LocalWire for this session
         wire = LocalWire(session_id)
+        
+        # Create ApprovalStore for this session
+        approval_store = ApprovalStore()
+        self._approval_stores[session_id] = approval_store
         
         # Create tape (in-memory for HTTP sessions)
         tape = Tape(path=None)
@@ -191,6 +199,7 @@ class SessionManager:
             id=session_id,
             loop=loop,
             wire=wire,
+            approval_store=approval_store,
             created_at=now,
             last_activity=now,
             task=None,
@@ -254,6 +263,9 @@ class SessionManager:
             
             # Remove from store
             del self._sessions[session_id]
+            
+            # Cleanup approval store
+            self._approval_stores.pop(session_id, None)
         
         logger.info(f"Closed session: {session_id}")
     
@@ -295,8 +307,10 @@ class SessionManager:
         request_id: str,
         approved: bool,
         feedback: str | None = None,
-    ) -> None:
+    ) -> bool:
         """Submit an approval response for a pending request.
+        
+        Uses the session's ApprovalStore to record the response.
         
         Args:
             session_id: The session ID
@@ -304,22 +318,30 @@ class SessionManager:
             approved: Whether the request is approved
             feedback: Optional feedback message
             
+        Returns:
+            True if the response was recorded successfully, False otherwise
+            
         Raises:
             KeyError: If session not found
-            ValueError: If no pending approval or request ID mismatch
         """
         session = self.get_session(session_id)
         
-        # Create approval response and inject into wire's incoming queue
+        # Create approval response and submit to ApprovalStore
         response = ApprovalResponse(
             session_id=session_id,
             request_id=request_id,
             approved=approved,
             feedback=feedback,
         )
-        session.wire.inject_incoming(response)
+        success = session.approval_store.respond(response)
         session.last_activity = datetime.now()
-        logger.info(f"Approval submitted for session {session_id}: {approved}")
+        
+        if success:
+            logger.info(f"Approval submitted for session {session_id}: {approved}")
+        else:
+            logger.warning(f"Approval submission failed for session {session_id}: request {request_id} not found")
+        
+        return success
     
     def list_sessions(self) -> list[str]:
         """List all active session IDs.

@@ -10,6 +10,7 @@ import pytest
 from httpx import AsyncClient, ASGITransport
 from httpx_sse import aconnect_sse
 
+from coding_agent.approval.store import ApprovalStore
 from coding_agent.ui.http_server import (
     APPROVAL_TIMEOUT_SECONDS,
     SESSION_IDLE_TIMEOUT_MINUTES,
@@ -18,6 +19,8 @@ from coding_agent.ui.http_server import (
     _session_to_dict,
     _wire_message_to_event,
     app,
+    limiter,
+    session_manager,
     sessions,
     wait_for_approval,
 )
@@ -34,8 +37,22 @@ from coding_agent.wire.protocol import (
 async def clear_sessions():
     """Clear sessions before each test."""
     sessions.clear()
+    # Clear rate limit storage to prevent 429 errors
+    limiter.reset()
+    # Also close any sessions in session_manager
+    for session_id in list(session_manager.list_sessions()):
+        try:
+            await session_manager.close_session(session_id)
+        except Exception:
+            pass
     yield
     sessions.clear()
+    # Cleanup session_manager
+    for session_id in list(session_manager.list_sessions()):
+        try:
+            await session_manager.close_session(session_id)
+        except Exception:
+            pass
 
 
 @pytest.fixture
@@ -51,7 +68,7 @@ class TestSessionCreation:
 
     async def test_create_session(self, client):
         """Test creating a new session."""
-        response = await client.post("/sessions")
+        response = await client.post("/sessions", json={})
         assert response.status_code == 200
         data = response.json()
         assert "session_id" in data
@@ -59,7 +76,7 @@ class TestSessionCreation:
 
     async def test_create_session_stores_in_memory(self, client):
         """Test that created session is stored in memory."""
-        response = await client.post("/sessions")
+        response = await client.post("/sessions", json={})
         data = response.json()
         session_id = data["session_id"]
         assert session_id in sessions
@@ -73,7 +90,7 @@ class TestPromptStreaming:
         """Test 404 when session doesn't exist."""
         response = await client.post(
             "/sessions/nonexistent/prompt",
-            params={"prompt": "test"},
+            json={"prompt": "test"},
         )
         assert response.status_code == 404
         assert "not found" in response.json()["detail"].lower()
@@ -81,7 +98,7 @@ class TestPromptStreaming:
     async def test_prompt_streaming_events(self, client):
         """Test that prompt returns SSE events."""
         # Create session first
-        create_resp = await client.post("/sessions")
+        create_resp = await client.post("/sessions", json={})
         session_id = create_resp.json()["session_id"]
 
         # Send prompt and collect SSE events
@@ -90,7 +107,7 @@ class TestPromptStreaming:
             client,
             "POST",
             f"/sessions/{session_id}/prompt",
-            params={"prompt": "Hello"},
+            json={"prompt": "Hello"},
         ) as event_source:
             async for sse in event_source.aiter_sse():
                 events.append({"event": sse.event, "data": json.loads(sse.data)})
@@ -105,7 +122,7 @@ class TestPromptStreaming:
 
     async def test_prompt_sets_turn_in_progress(self, client):
         """Test that prompt sets turn_in_progress flag."""
-        create_resp = await client.post("/sessions")
+        create_resp = await client.post("/sessions", json={})
         session_id = create_resp.json()["session_id"]
 
         # Start prompt in background
@@ -114,7 +131,7 @@ class TestPromptStreaming:
                 client,
                 "POST",
                 f"/sessions/{session_id}/prompt",
-                params={"prompt": "Hello"},
+                json={"prompt": "Hello"},
             ) as event_source:
                 async for sse in event_source.aiter_sse():
                     if sse.event == "TurnEnd":
@@ -134,7 +151,7 @@ class TestConcurrentTurns:
     async def test_concurrent_turn_returns_409(self, client):
         """Test that concurrent turns return 409."""
         # Create session
-        create_resp = await client.post("/sessions")
+        create_resp = await client.post("/sessions", json={})
         session_id = create_resp.json()["session_id"]
 
         # Manually set turn_in_progress
@@ -143,14 +160,14 @@ class TestConcurrentTurns:
         # Try to send another prompt
         response = await client.post(
             f"/sessions/{session_id}/prompt",
-            params={"prompt": "Hello"},
+            json={"prompt": "Hello"},
         )
         assert response.status_code == 409
         assert "already in progress" in response.json()["detail"].lower()
 
     async def test_turn_in_progress_cleared_after_completion(self, client):
         """Test that turn_in_progress is cleared after turn completes."""
-        create_resp = await client.post("/sessions")
+        create_resp = await client.post("/sessions", json={})
         session_id = create_resp.json()["session_id"]
 
         # Complete a turn
@@ -158,7 +175,7 @@ class TestConcurrentTurns:
             client,
             "POST",
             f"/sessions/{session_id}/prompt",
-            params={"prompt": "Hello"},
+            json={"prompt": "Hello"},
         ) as event_source:
             async for sse in event_source.aiter_sse():
                 if sse.event == "TurnEnd":
@@ -168,7 +185,7 @@ class TestConcurrentTurns:
         assert not sessions[session_id].turn_in_progress
         response = await client.post(
             f"/sessions/{session_id}/prompt",
-            params={"prompt": "Hello again"},
+            json={"prompt": "Hello again"},
         )
         assert response.status_code == 200
 
@@ -180,49 +197,54 @@ class TestApprovalEndpoint:
         """Test 404 when session doesn't exist."""
         response = await client.post(
             "/sessions/nonexistent/approve",
-            params={"request_id": "req1", "approved": True},
+            json={"request_id": "req1", "approved": True},
         )
         assert response.status_code == 404
 
     async def test_approve_no_pending_request(self, client):
-        """Test 400 when no pending approval."""
-        create_resp = await client.post("/sessions")
+        """Test 400 when no pending approval (legacy check)."""
+        create_resp = await client.post("/sessions", json={})
         session_id = create_resp.json()["session_id"]
 
+        # Without adding request to ApprovalStore or setting legacy pending_approval,
+        # it will fail the legacy check (400) if legacy session exists
+        # But if no legacy session, it should try ApprovalStore (which returns 404)
+        # Since create_session creates both, we expect 400 from legacy check
         response = await client.post(
             f"/sessions/{session_id}/approve",
-            params={"request_id": "req1", "approved": True},
+            json={"request_id": "req1", "approved": True},
         )
+        # Legacy session exists and pending_approval is None -> 400
         assert response.status_code == 400
         assert "no pending" in response.json()["detail"].lower()
 
     async def test_approve_request_id_mismatch(self, client):
-        """Test 400 when request ID doesn't match."""
-        create_resp = await client.post("/sessions")
+        """Test 400 when request ID doesn't match (legacy check)."""
+        create_resp = await client.post("/sessions", json={})
         session_id = create_resp.json()["session_id"]
 
-        # Set up pending approval
+        # Set up pending approval in legacy session
         sessions[session_id].pending_approval = {"request_id": "correct_id"}
 
         response = await client.post(
             f"/sessions/{session_id}/approve",
-            params={"request_id": "wrong_id", "approved": True},
+            json={"request_id": "wrong_id", "approved": True},
         )
         assert response.status_code == 400
         assert "mismatch" in response.json()["detail"].lower()
 
     async def test_approve_success(self, client):
         """Test successful approval."""
-        create_resp = await client.post("/sessions")
+        create_resp = await client.post("/sessions", json={})
         session_id = create_resp.json()["session_id"]
 
-        # Set up pending approval
+        # Set up pending approval in legacy session
         sessions[session_id].pending_approval = {"request_id": "req123"}
         sessions[session_id].approval_event.clear()
 
         response = await client.post(
             f"/sessions/{session_id}/approve",
-            params={"request_id": "req123", "approved": True, "feedback": "Looks good"},
+            json={"request_id": "req123", "approved": True, "feedback": "Looks good"},
         )
         assert response.status_code == 200
         data = response.json()
@@ -232,21 +254,54 @@ class TestApprovalEndpoint:
 
     async def test_deny_success(self, client):
         """Test successful denial."""
-        create_resp = await client.post("/sessions")
+        create_resp = await client.post("/sessions", json={})
         session_id = create_resp.json()["session_id"]
 
-        # Set up pending approval
+        # Set up pending approval in legacy session
         sessions[session_id].pending_approval = {"request_id": "req123"}
         sessions[session_id].approval_event.clear()
 
         response = await client.post(
             f"/sessions/{session_id}/approve",
-            params={"request_id": "req123", "approved": False, "feedback": "Too risky"},
+            json={"request_id": "req123", "approved": False, "feedback": "Too risky"},
         )
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "ok"
         assert data["decision"] == "denied"
+
+    async def test_approve_with_approval_store(self, client):
+        """Test approval using ApprovalStore."""
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        # Add request to ApprovalStore directly (bypassing legacy check)
+        session = session_manager.get_session(session_id)
+        tool_call = ToolCallDelta(
+            session_id=session_id,
+            tool_name="bash",
+            arguments={"command": "ls"},
+            call_id="call1"
+        )
+        approval_req = ApprovalRequest(
+            session_id=session_id,
+            request_id="req123",
+            tool_call=tool_call,
+            timeout_seconds=120
+        )
+        session.approval_store.add_request(approval_req)
+
+        # Clear legacy pending_approval to test ApprovalStore path
+        sessions[session_id].pending_approval = None
+
+        # Now approve via submit_approval (which uses ApprovalStore)
+        success = await session_manager.submit_approval(
+            session_id=session_id,
+            request_id="req123",
+            approved=True,
+            feedback="Looks good"
+        )
+        assert success is True
 
 
 class TestEventsFanOut:
@@ -254,7 +309,7 @@ class TestEventsFanOut:
 
     async def test_event_queues_registered(self, client):
         """Test that event queues are registered for fan-out."""
-        create_resp = await client.post("/sessions")
+        create_resp = await client.post("/sessions", json={})
         session_id = create_resp.json()["session_id"]
 
         # Manually add queues to test fan-out
@@ -272,7 +327,7 @@ class TestEventsFanOut:
 
     async def test_multiple_queues_in_session(self, client):
         """Test that a session can have multiple event queues."""
-        create_resp = await client.post("/sessions")
+        create_resp = await client.post("/sessions", json={})
         session_id = create_resp.json()["session_id"]
 
         # Verify the session has event_queues list
@@ -290,7 +345,7 @@ class TestGetSession:
 
     async def test_get_session_success(self, client):
         """Test getting session details."""
-        create_resp = await client.post("/sessions")
+        create_resp = await client.post("/sessions", json={})
         session_id = create_resp.json()["session_id"]
 
         response = await client.get(f"/sessions/{session_id}")
@@ -313,7 +368,7 @@ class TestCloseSession:
 
     async def test_close_session_success(self, client):
         """Test closing a session."""
-        create_resp = await client.post("/sessions")
+        create_resp = await client.post("/sessions", json={})
         session_id = create_resp.json()["session_id"]
 
         response = await client.delete(f"/sessions/{session_id}")
@@ -325,7 +380,7 @@ class TestCloseSession:
 
     async def test_close_session_broadcasts_event(self, client):
         """Test that closing session broadcasts to event queues."""
-        create_resp = await client.post("/sessions")
+        create_resp = await client.post("/sessions", json={})
         session_id = create_resp.json()["session_id"]
 
         # Add a queue to receive events
@@ -563,7 +618,7 @@ class TestIntegration:
     async def test_full_session_lifecycle(self, client):
         """Test full session lifecycle: create -> prompt -> get -> close."""
         # Create session
-        response = await client.post("/sessions")
+        response = await client.post("/sessions", json={})
         assert response.status_code == 200
         session_id = response.json()["session_id"]
 
@@ -578,7 +633,7 @@ class TestIntegration:
             client,
             "POST",
             f"/sessions/{session_id}/prompt",
-            params={"prompt": "Hello"},
+            json={"prompt": "Hello"},
         ) as event_source:
             async for sse in event_source.aiter_sse():
                 events.append(sse.event)
@@ -596,3 +651,106 @@ class TestIntegration:
         # Verify session is gone
         response = await client.get(f"/sessions/{session_id}")
         assert response.status_code == 404
+
+
+class TestApprovalStoreIntegration:
+    """Tests for ApprovalStore integration in SessionManager and HTTP server."""
+
+    async def test_session_has_approval_store(self, client):
+        """Test that newly created sessions have an ApprovalStore."""
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        session = session_manager.get_session(session_id)
+        assert hasattr(session, 'approval_store')
+        assert isinstance(session.approval_store, ApprovalStore)
+
+    async def test_approval_store_request_response(self, client):
+        """Test that ApprovalStore can handle request/response cycle."""
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        session = session_manager.get_session(session_id)
+
+        # Add a request
+        tool_call = ToolCallDelta(
+            session_id=session_id,
+            tool_name="bash",
+            arguments={"command": "echo test"},
+            call_id="call1"
+        )
+        approval_req = ApprovalRequest(
+            session_id=session_id,
+            request_id="req-test",
+            tool_call=tool_call,
+            timeout_seconds=120
+        )
+        session.approval_store.add_request(approval_req)
+
+        # Verify request was stored
+        retrieved = session.approval_store.get_request("req-test")
+        assert retrieved is not None
+        assert retrieved.request_id == "req-test"
+
+        # Respond to the request
+        approval_resp = ApprovalResponse(
+            session_id=session_id,
+            request_id="req-test",
+            approved=True,
+            feedback="Approved"
+        )
+        success = session.approval_store.respond(approval_resp)
+        assert success is True
+
+    async def test_submit_approval_returns_bool(self, client):
+        """Test that submit_approval returns boolean success status."""
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        # Try to approve non-existent request
+        result = await session_manager.submit_approval(
+            session_id=session_id,
+            request_id="nonexistent",
+            approved=True,
+            feedback=None
+        )
+        # Should return False since request wasn't added to store
+        assert result is False
+
+        # Now add the request and try again
+        session = session_manager.get_session(session_id)
+        tool_call = ToolCallDelta(
+            session_id=session_id,
+            tool_name="bash",
+            arguments={},
+            call_id="call1"
+        )
+        approval_req = ApprovalRequest(
+            session_id=session_id,
+            request_id="real-req",
+            tool_call=tool_call,
+            timeout_seconds=120
+        )
+        session.approval_store.add_request(approval_req)
+
+        result = await session_manager.submit_approval(
+            session_id=session_id,
+            request_id="real-req",
+            approved=True,
+            feedback="Good"
+        )
+        assert result is True
+
+    async def test_close_session_cleans_up_approval_store(self, client):
+        """Test that closing session removes approval store from manager."""
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        # Verify store exists
+        assert session_id in session_manager._approval_stores
+
+        # Close session
+        await session_manager.close_session(session_id)
+
+        # Store should be cleaned up
+        assert session_id not in session_manager._approval_stores

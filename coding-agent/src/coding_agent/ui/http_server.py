@@ -11,11 +11,24 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, AsyncIterator
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.ui.session_manager import SessionManager
+from coding_agent.ui.schemas import (
+    PromptRequest,
+    CreateSessionRequest,
+    ApproveRequest,
+    SessionResponse,
+    ApprovalResponseSchema,
+    CloseSessionResponse,
+    HealthResponse,
+)
+from coding_agent.ui.auth import verify_api_key
+from coding_agent.ui.rate_limit import limiter, RateLimits
+from slowapi.errors import RateLimitExceeded
 from coding_agent.wire import (
     ApprovalRequest,
     ApprovalResponse,
@@ -83,6 +96,23 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Coding Agent HTTP API", lifespan=lifespan)
+
+# Add rate limiter to app state
+app.state.limiter = limiter
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Configure appropriately for production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Add exception handler for rate limit exceeded
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    raise HTTPException(status_code=429, detail=str(exc))
 
 
 def _session_to_dict(session: SessionState) -> dict:
@@ -275,25 +305,41 @@ async def stream_wire_messages(wire: LocalWire) -> AsyncIterator[dict]:
             break
 
 
-@app.get("/health")
-async def health_check():
+@app.get("/health", response_model=HealthResponse)
+@limiter.limit(RateLimits.HEALTH)
+async def health_check(request: Request):
     """Health check endpoint."""
-    return {
-        "status": "healthy",
-        "sessions": len(sessions),
-        "version": "2.0.0"
-    }
+    return HealthResponse(
+        status="healthy",
+        sessions=len(sessions),
+        version="2.0.0"
+    )
 
 
-@app.post("/sessions")
-async def create_session() -> dict:
+@app.post("/sessions", response_model=SessionResponse)
+@limiter.limit(RateLimits.CREATE_SESSION)
+async def create_session(
+    request: Request,
+    body: CreateSessionRequest | None = None,
+    api_key: str | None = Depends(verify_api_key),
+) -> SessionResponse:
     """Create new session with AgentLoop integration."""
+    # Use defaults if no body provided
+    repo_path = body.repo_path if body else None
+    approval_policy_str = body.approval_policy if body else "auto"
+    
+    # Map string to ApprovalPolicy enum
+    approval_policy_map = {
+        "yolo": ApprovalPolicy.YOLO,
+        "interactive": ApprovalPolicy.INTERACTIVE,
+        "auto": ApprovalPolicy.AUTO,
+    }
+    approval_policy = approval_policy_map.get(approval_policy_str, ApprovalPolicy.AUTO)
+    
     # Create session using SessionManager
-    # Note: For now, we create without a provider (mock mode)
-    # In production, a provider would be configured
     session_id = await session_manager.create_session(
-        repo_path=None,
-        approval_policy=ApprovalPolicy.AUTO,
+        repo_path=repo_path,
+        approval_policy=approval_policy,
         provider=None,  # Will use mock/test provider
     )
     
@@ -306,15 +352,28 @@ async def create_session() -> dict:
     )
     
     logger.info(f"Created session: {session_id}")
-    return {"session_id": session_id}
+    return SessionResponse(session_id=session_id)
 
 
 @app.post("/sessions/{session_id}/prompt")
-async def send_prompt(session_id: str, prompt: str) -> EventSourceResponse:
+@limiter.limit(RateLimits.SEND_PROMPT)
+async def send_prompt(
+    request: Request,
+    session_id: str,
+    body: PromptRequest | None = None,
+    prompt: str | None = None,  # Backward compat: query param
+    api_key: str | None = Depends(verify_api_key),
+) -> EventSourceResponse:
     """Send message, returns SSE stream.
 
     Returns 409 if a turn is already in progress.
+    Accepts prompt via JSON body (preferred) or query param (backward compat).
     """
+    # Get prompt from body or query param (body takes precedence)
+    prompt_text = body.prompt if body else prompt
+    if not prompt_text:
+        raise HTTPException(status_code=422, detail="Prompt is required")
+    
     # Check in session manager
     if not session_manager.has_session(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
@@ -339,7 +398,7 @@ async def send_prompt(session_id: str, prompt: str) -> EventSourceResponse:
         try:
             # Start agent run in background
             session.task = asyncio.create_task(
-                session_manager.run_agent(session_id, prompt)
+                session_manager.run_agent(session_id, prompt_text)
             )
             
             # Stream wire messages
@@ -374,14 +433,31 @@ async def send_prompt(session_id: str, prompt: str) -> EventSourceResponse:
     )
 
 
-@app.post("/sessions/{session_id}/approve")
+@app.post("/sessions/{session_id}/approve", response_model=ApprovalResponseSchema)
+@limiter.limit(RateLimits.APPROVE)
 async def approve_request(
+    request: Request,
     session_id: str,
-    request_id: str,
-    approved: bool,
-    feedback: str | None = None,
-) -> dict:
-    """Respond to approval request."""
+    body: ApproveRequest | None = None,
+    request_id: str | None = None,  # Backward compat: query param
+    approved: bool | None = None,   # Backward compat: query param
+    feedback: str | None = None,    # Backward compat: query param
+    api_key: str | None = Depends(verify_api_key),
+) -> ApprovalResponseSchema:
+    """Respond to approval request.
+    
+    Accepts parameters via JSON body (preferred) or query params (backward compat).
+    """
+    # Get values from body or query params (body takes precedence)
+    req_id = body.request_id if body else request_id
+    is_approved = body.approved if body else approved
+    fb = body.feedback if body else feedback
+    
+    if req_id is None:
+        raise HTTPException(status_code=422, detail="request_id is required")
+    if is_approved is None:
+        raise HTTPException(status_code=422, detail="approved is required")
+    
     if not session_manager.has_session(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -390,15 +466,15 @@ async def approve_request(
         session = sessions[session_id]
         if session.pending_approval is None:
             raise HTTPException(status_code=400, detail="No pending approval request")
-        if session.pending_approval.get("request_id") != request_id:
+        if session.pending_approval.get("request_id") != req_id:
             raise HTTPException(status_code=400, detail="Request ID mismatch")
     
     try:
         await session_manager.submit_approval(
             session_id=session_id,
-            request_id=request_id,
-            approved=approved,
-            feedback=feedback,
+            request_id=req_id,
+            approved=is_approved,
+            feedback=fb,
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -407,21 +483,26 @@ async def approve_request(
     if session_id in sessions:
         sessions[session_id].pending_approval = None
         sessions[session_id].approval_response = {
-            "decision": "approve" if approved else "deny",
-            "feedback": feedback,
+            "decision": "approve" if is_approved else "deny",
+            "feedback": fb,
         }
         sessions[session_id].approval_event.set()
         sessions[session_id].last_activity = datetime.now()
 
-    return {
-        "status": "ok",
-        "request_id": request_id,
-        "decision": "approved" if approved else "denied",
-    }
+    return ApprovalResponseSchema(
+        status="ok",
+        request_id=req_id,
+        decision="approved" if is_approved else "denied",
+    )
 
 
 @app.get("/sessions/{session_id}/events")
-async def get_events(session_id: str) -> EventSourceResponse:
+@limiter.limit(RateLimits.EVENTS)
+async def get_events(
+    request: Request,
+    session_id: str,
+    api_key: str | None = Depends(verify_api_key),
+) -> EventSourceResponse:
     """Persistent SSE event stream (fan-out supported)."""
     if session_id not in sessions:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -450,7 +531,12 @@ async def get_events(session_id: str) -> EventSourceResponse:
 
 
 @app.get("/sessions/{session_id}")
-async def get_session(session_id: str) -> dict:
+@limiter.limit(RateLimits.GET_SESSION)
+async def get_session(
+    request: Request,
+    session_id: str,
+    api_key: str | None = Depends(verify_api_key),
+) -> dict:
     """Get session state."""
     # Check in legacy sessions first (for backward compatibility)
     if session_id in sessions:
@@ -463,8 +549,13 @@ async def get_session(session_id: str) -> dict:
     raise HTTPException(status_code=404, detail="Session not found")
 
 
-@app.delete("/sessions/{session_id}")
-async def close_session(session_id: str) -> dict:
+@app.delete("/sessions/{session_id}", response_model=CloseSessionResponse)
+@limiter.limit(RateLimits.CLOSE_SESSION)
+async def close_session(
+    request: Request,
+    session_id: str,
+    api_key: str | None = Depends(verify_api_key),
+) -> CloseSessionResponse:
     """Close session and release resources."""
     # Check if session exists in either store
     if not session_manager.has_session(session_id) and session_id not in sessions:
@@ -490,7 +581,7 @@ async def close_session(session_id: str) -> dict:
         del sessions[session_id]
     
     logger.info(f"Closed session: {session_id}")
-    return {"status": "closed", "session_id": session_id}
+    return CloseSessionResponse(status="closed", session_id=session_id)
 
 
 # Global approval handler for integration with agent loop (legacy)

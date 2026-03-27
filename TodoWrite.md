@@ -1,14 +1,9 @@
 # P2 Cleanup and Hardening
 
-## Phase 1: Foundation
-- [ ] **Task 1**: Consolidate Wire Protocol
-  - Delete wire.py, update imports, fix tests
-  
-- [ ] **Task 2**: HTTP Server Integration with AgentLoop
-  - Create session_manager.py, integrate with loop, streaming
-  
-- [ ] **Task 3**: FastAPI Modernization
-  - Replace on_event with lifespan, add health endpoint
+## Phase 1: Foundation ✅ COMPLETE
+- [x] **Task 1**: Consolidate Wire Protocol
+- [x] **Task 2**: HTTP Server Integration with AgentLoop
+- [x] **Task 3**: FastAPI Modernization
 
 ## Phase 2: Core Features
 - [ ] **Task 4**: Input Validation & Security

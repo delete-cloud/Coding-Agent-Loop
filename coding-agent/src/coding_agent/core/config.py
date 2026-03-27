@@ -15,7 +15,7 @@ class Config(BaseModel):
     # Provider
     provider: Literal["openai", "anthropic"] = "openai"
     model: str = "gpt-4o"
-    api_key: SecretStr
+    api_key: SecretStr | None = None
     base_url: str | None = None
 
     # Agent behavior
@@ -36,6 +36,9 @@ class Config(BaseModel):
     enable_parallel_tools: bool = True
     max_parallel_tools: int = 5
 
+    # HTTP Server settings
+    http_api_key: str | None = None  # API key for HTTP API authentication
+
 
 # Env var prefix → Config field mapping
 _ENV_MAP: dict[str, str] = {
@@ -49,6 +52,7 @@ _ENV_MAP: dict[str, str] = {
     "AGENT_REPO": "repo",
     "AGENT_ENABLE_PARALLEL_TOOLS": "enable_parallel_tools",
     "AGENT_MAX_PARALLEL_TOOLS": "max_parallel_tools",
+    "AGENT_HTTP_API_KEY": "http_api_key",
 }
 
 
@@ -69,3 +73,7 @@ def load_config(cli_args: dict | None = None) -> Config:
                 values[k] = v
 
     return Config(**values)
+
+
+# Default settings instance (can be overridden by load_config)
+settings = load_config()
