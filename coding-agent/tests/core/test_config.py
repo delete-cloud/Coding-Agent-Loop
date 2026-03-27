@@ -16,9 +16,10 @@ class TestConfig:
         assert c.doom_threshold == 3
         assert c.approval_mode == "yolo"
 
-    def test_api_key_required(self):
-        with pytest.raises(ValidationError):
-            Config()
+    def test_api_key_optional(self):
+        # api_key is now optional (None) to support testing and HTTP server modes
+        c = Config()
+        assert c.api_key is None
 
     def test_api_key_is_secret(self):
         c = Config(api_key="sk-secret")
@@ -57,7 +58,8 @@ class TestLoadConfig:
         assert c.model == "gpt-4o"
         assert c.api_key.get_secret_value() == "sk-cli"
 
-    def test_missing_api_key_raises(self, monkeypatch):
+    def test_missing_api_key_allows_none(self, monkeypatch):
+        # api_key is optional - missing env var results in None, not error
         monkeypatch.delenv("AGENT_API_KEY", raising=False)
-        with pytest.raises(ValidationError):
-            load_config()
+        c = load_config()
+        assert c.api_key is None
