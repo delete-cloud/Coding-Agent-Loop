@@ -10,19 +10,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, AsyncIterator
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException
 from sse_starlette.sse import EventSourceResponse
 
-from coding_agent.wire import (
+from coding_agent.wire.protocol import (
     ApprovalRequest,
     ApprovalResponse,
-    ErrorMessage,
-    StepInfo,
     StreamDelta,
-    ToolCallBegin,
-    ToolCallEnd,
-    TurnBegin,
+    ToolCallDelta,
     TurnEnd,
     WireMessage,
 )
@@ -68,17 +63,13 @@ def _session_to_dict(session: SessionState) -> dict:
 def _wire_message_to_event(msg: WireMessage) -> dict:
     """Convert wire message to SSE event."""
     match msg:
-        case TurnBegin():
-            return {
-                "event": "TurnBegin",
-                "data": json.dumps({"timestamp": msg.timestamp.isoformat()}),
-            }
         case TurnEnd():
             return {
                 "event": "TurnEnd",
                 "data": json.dumps({
-                    "stop_reason": msg.stop_reason,
-                    "final_message": msg.final_message,
+                    "session_id": msg.session_id,
+                    "turn_id": msg.turn_id,
+                    "completion_status": msg.completion_status,
                     "timestamp": msg.timestamp.isoformat(),
                 }),
             }
@@ -86,26 +77,20 @@ def _wire_message_to_event(msg: WireMessage) -> dict:
             return {
                 "event": "StreamDelta",
                 "data": json.dumps({
-                    "text": msg.text,
+                    "session_id": msg.session_id,
+                    "content": msg.content,
+                    "role": msg.role,
                     "timestamp": msg.timestamp.isoformat(),
                 }),
             }
-        case ToolCallBegin():
+        case ToolCallDelta():
             return {
-                "event": "ToolCallBegin",
+                "event": "ToolCallDelta",
                 "data": json.dumps({
+                    "session_id": msg.session_id,
+                    "tool_name": msg.tool_name,
+                    "arguments": msg.arguments,
                     "call_id": msg.call_id,
-                    "tool": msg.tool,
-                    "args": msg.args,
-                    "timestamp": msg.timestamp.isoformat(),
-                }),
-            }
-        case ToolCallEnd():
-            return {
-                "event": "ToolCallEnd",
-                "data": json.dumps({
-                    "call_id": msg.call_id,
-                    "result": msg.result,
                     "timestamp": msg.timestamp.isoformat(),
                 }),
             }
@@ -113,34 +98,35 @@ def _wire_message_to_event(msg: WireMessage) -> dict:
             return {
                 "event": "ApprovalRequest",
                 "data": json.dumps({
-                    "call_id": msg.call_id,
-                    "tool": msg.tool,
-                    "args": msg.args,
-                    "risk_level": msg.risk_level,
+                    "session_id": msg.session_id,
+                    "request_id": msg.request_id,
+                    "tool_call": {
+                        "tool_name": msg.tool_call.tool_name,
+                        "arguments": msg.tool_call.arguments,
+                        "call_id": msg.tool_call.call_id,
+                    },
+                    "timeout_seconds": msg.timeout_seconds,
                     "timestamp": msg.timestamp.isoformat(),
                 }),
             }
-        case StepInfo():
+        case ApprovalResponse():
             return {
-                "event": "StepInfo",
+                "event": "ApprovalResponse",
                 "data": json.dumps({
-                    "step_number": msg.step_number,
-                    "max_steps": msg.max_steps,
-                    "timestamp": msg.timestamp.isoformat(),
-                }),
-            }
-        case ErrorMessage():
-            return {
-                "event": "ErrorMessage",
-                "data": json.dumps({
-                    "content": msg.content,
+                    "session_id": msg.session_id,
+                    "request_id": msg.request_id,
+                    "approved": msg.approved,
+                    "feedback": msg.feedback,
                     "timestamp": msg.timestamp.isoformat(),
                 }),
             }
         case _:
             return {
                 "event": "Unknown",
-                "data": json.dumps({"type": type(msg).__name__}),
+                "data": json.dumps({
+                    "type": type(msg).__name__,
+                    "session_id": getattr(msg, "session_id", None),
+                }),
             }
 
 
@@ -210,12 +196,6 @@ async def send_prompt(session_id: str, prompt: str) -> EventSourceResponse:
     async def event_generator() -> AsyncIterator[dict]:
         """Generate SSE events for the turn."""
         try:
-            # Emit TurnBegin
-            begin_msg = TurnBegin()
-            event = _wire_message_to_event(begin_msg)
-            await _broadcast_event(session, event)
-            yield event
-
             # Simulate streaming response (placeholder for actual agent loop)
             # This will be replaced with actual integration in Task 4
             chunks = [
@@ -224,38 +204,44 @@ async def send_prompt(session_id: str, prompt: str) -> EventSourceResponse:
                 " Done!",
             ]
             for chunk in chunks:
-                delta = StreamDelta(text=chunk)
+                delta = StreamDelta(
+                    session_id=session_id,
+                    content=chunk,
+                    role="assistant",
+                )
                 event = _wire_message_to_event(delta)
                 await _broadcast_event(session, event)
                 yield event
                 await asyncio.sleep(0.1)  # Simulate streaming delay
 
             # Emit TurnEnd
-            end_msg = TurnEnd(stop_reason="completed", final_message="Task completed")
+            end_msg = TurnEnd(
+                session_id=session_id,
+                turn_id=str(uuid.uuid4()),
+                completion_status="completed",
+            )
             event = _wire_message_to_event(end_msg)
             await _broadcast_event(session, event)
             yield event
 
         except Exception as e:
             logger.exception("Error during turn")
-            error_msg = ErrorMessage(content=str(e))
-            event = _wire_message_to_event(error_msg)
-            await _broadcast_event(session, event)
-            yield event
+            # Create error-like response
+            error_data = {
+                "event": "Error",
+                "data": json.dumps({
+                    "session_id": session_id,
+                    "error": str(e),
+                    "timestamp": datetime.now().isoformat(),
+                }),
+            }
+            await _broadcast_event(session, error_data)
+            yield error_data
         finally:
             session.turn_in_progress = False
             session.last_activity = datetime.now()
 
     return EventSourceResponse(event_generator())
-
-
-class ApprovalRequestBody:
-    """Request body for approval endpoint."""
-
-    def __init__(self, request_id: str, approved: bool, feedback: str | None = None):
-        self.request_id = request_id
-        self.approved = approved
-        self.feedback = feedback
 
 
 @app.post("/sessions/{session_id}/approve")
@@ -274,7 +260,7 @@ async def approve_request(
     if session.pending_approval is None:
         raise HTTPException(status_code=400, detail="No pending approval request")
 
-    if session.pending_approval.get("call_id") != request_id:
+    if session.pending_approval.get("request_id") != request_id:
         raise HTTPException(status_code=400, detail="Request ID mismatch")
 
     session.approval_response = {
@@ -362,8 +348,9 @@ async def wait_for_approval(
     """
     if session_id not in sessions:
         return ApprovalResponse(
-            call_id=approval_req.call_id,
-            decision="deny",
+            session_id=session_id,
+            request_id=approval_req.request_id,
+            approved=False,
             feedback="Session not found",
         )
 
@@ -372,10 +359,9 @@ async def wait_for_approval(
     if session.turn_in_progress:
         # Set pending approval and notify clients
         session.pending_approval = {
-            "call_id": approval_req.call_id,
-            "tool": approval_req.tool,
-            "args": approval_req.args,
-            "risk_level": approval_req.risk_level,
+            "request_id": approval_req.request_id,
+            "tool_name": approval_req.tool_call.tool_name,
+            "arguments": approval_req.tool_call.arguments,
         }
         session.approval_event.clear()
         session.approval_response = None
@@ -393,8 +379,9 @@ async def wait_for_approval(
 
             if session.approval_response:
                 return ApprovalResponse(
-                    call_id=approval_req.call_id,
-                    decision=session.approval_response["decision"],
+                    session_id=session_id,
+                    request_id=approval_req.request_id,
+                    approved=session.approval_response["decision"] == "approve",
                     feedback=session.approval_response.get("feedback"),
                 )
         except asyncio.TimeoutError:
@@ -402,7 +389,7 @@ async def wait_for_approval(
             # Broadcast timeout event
             timeout_event = {
                 "event": "ApprovalTimeout",
-                "data": json.dumps({"call_id": approval_req.call_id}),
+                "data": json.dumps({"request_id": approval_req.request_id}),
             }
             await _broadcast_event(session, timeout_event)
         finally:
@@ -410,7 +397,8 @@ async def wait_for_approval(
             session.approval_response = None
 
     return ApprovalResponse(
-        call_id=approval_req.call_id,
-        decision="deny",
+        session_id=session_id,
+        request_id=approval_req.request_id,
+        approved=False,
         feedback="Approval timeout or error",
     )
