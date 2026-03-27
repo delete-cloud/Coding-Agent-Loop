@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import re
+from dataclasses import dataclass
 from pathlib import Path
+from typing import List, Optional, Tuple
 
 from coding_agent.tools.registry import ToolRegistry
 
@@ -135,6 +138,182 @@ def register_file_tools(registry: ToolRegistry, repo_root: Path | str = ".") -> 
         except Exception as e:
             return json.dumps({"error": str(e)})
 
+    @dataclass
+    class _Hunk:
+        old_start: int
+        old_count: int
+        new_start: int
+        new_count: int
+        lines: List[Tuple[str, str]]  # (tag, text) where tag in {' ', '+', '-'}
+
+    def _parse_unified_diff(patch_text: str) -> List[_Hunk]:
+        """Parse a (single-file) unified diff into hunks.
+
+        Accepts typical git-style diffs but only consumes the hunk sections.
+        """
+        lines = patch_text.splitlines(keepends=True)
+        hunks: List[_Hunk] = []
+        i = 0
+        hunk_header_re = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+        while i < len(lines):
+            m = hunk_header_re.match(lines[i])
+            if not m:
+                i += 1
+                continue
+            old_start = int(m.group(1))
+            old_count = int(m.group(2) or "1")
+            new_start = int(m.group(3))
+            new_count = int(m.group(4) or "1")
+            i += 1
+            hunk_lines: List[Tuple[str, str]] = []
+            while i < len(lines):
+                l = lines[i]
+                if l.startswith("@@ "):
+                    break
+                if l.startswith("\\ No newline at end of file"):
+                    i += 1
+                    continue
+                if l == "\n" or l == "\r\n":
+                    # blank line in diff context is represented as ' ' + '\n' typically,
+                    # but tolerate raw blank lines by treating as context.
+                    hunk_lines.append((" ", l))
+                    i += 1
+                    continue
+                tag = l[:1]
+                if tag not in (" ", "+", "-"):
+                    # ignore diff metadata lines
+                    break
+                hunk_lines.append((tag, l[1:]))
+                i += 1
+            hunks.append(_Hunk(old_start, old_count, new_start, new_count, hunk_lines))
+        if not hunks:
+            raise ValueError("No hunks found in patch")
+        return hunks
+
+    def _find_hunk_pos(file_lines: List[str], hunk: _Hunk, search_window: int = 50) -> Optional[int]:
+        """Find the best position to apply the hunk.
+
+        Prefer the line indicated by hunk.old_start, but allow small drift by searching
+        for the context sequence in a window.
+
+        Returns:
+            0-based index into file_lines where hunk should be applied, or None.
+        """
+        # Build the sequence of old lines expected in the file: context + deletions
+        expected = [text for (tag, text) in hunk.lines if tag in (" ", "-")]
+        if not expected:
+            # Pure insertion: apply at old_start (clamped)
+            return max(0, min(len(file_lines), hunk.old_start - 1))
+
+        def matches_at(pos: int) -> bool:
+            if pos < 0:
+                return False
+            if pos + len(expected) > len(file_lines):
+                return False
+            return file_lines[pos : pos + len(expected)] == expected
+
+        preferred = max(0, hunk.old_start - 1)
+        if matches_at(preferred):
+            return preferred
+
+        start = max(0, preferred - search_window)
+        end = min(len(file_lines), preferred + search_window)
+        for pos in range(start, end + 1):
+            if matches_at(pos):
+                return pos
+        return None
+
+    def _apply_hunks_to_lines(file_lines: List[str], hunks: List[_Hunk]) -> Tuple[List[str], List[dict]]:
+        """Apply hunks to file lines, returning new lines and per-hunk results."""
+        out = list(file_lines)
+        results: List[dict] = []
+        offset = 0
+        for idx, hunk in enumerate(hunks):
+            # Recompute position on current output for robustness.
+            pos = _find_hunk_pos(out, hunk)
+            if pos is None:
+                results.append({
+                    "hunk": idx,
+                    "status": "failed",
+                    "error": "Context not found for hunk",
+                    "old_start": hunk.old_start,
+                })
+                raise ValueError("Context not found for hunk")
+
+            cursor = pos
+            new_block: List[str] = []
+            for tag, text in hunk.lines:
+                if tag == " ":
+                    if cursor >= len(out) or out[cursor] != text:
+                        raise ValueError("Context mismatch while applying hunk")
+                    new_block.append(text)
+                    cursor += 1
+                elif tag == "-":
+                    if cursor >= len(out) or out[cursor] != text:
+                        raise ValueError("Deletion mismatch while applying hunk")
+                    cursor += 1
+                elif tag == "+":
+                    new_block.append(text)
+
+            # Replace the affected range [pos, cursor) with new_block
+            before = out[:pos]
+            after = out[cursor:]
+            out = before + new_block + after
+
+            results.append({
+                "hunk": idx,
+                "status": "applied",
+                "applied_at": pos + 1,
+                "old_start": hunk.old_start,
+                "new_start": hunk.new_start,
+            })
+        return out, results
+
+    async def file_patch(path: str, patch: str) -> str:
+        """Apply a unified diff patch to an existing file.
+
+        The patch should contain one or more hunks (lines starting with @@ ... @@).
+        Context is verified before applying; if any hunk fails, no changes are written.
+        """
+        try:
+            target = _resolve_path(root, path)
+            if not target.exists():
+                return json.dumps({"success": False, "error": f"File not found: {path}"})
+            if not target.is_file():
+                return json.dumps({"success": False, "error": f"Not a file: {path}"})
+
+            with open(target, "r", encoding="utf-8", errors="replace") as f:
+                original = f.read()
+            original_lines = original.splitlines(keepends=True)
+
+            hunks = _parse_unified_diff(patch)
+            new_lines, hunk_results = _apply_hunks_to_lines(original_lines, hunks)
+            new_content = "".join(new_lines)
+
+            if new_content == original:
+                return json.dumps({
+                    "success": True,
+                    "path": path,
+                    "changed": False,
+                    "hunks": hunk_results,
+                })
+
+            # Safe write: write to temp then replace
+            tmp = target.with_suffix(target.suffix + ".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(new_content)
+            tmp.replace(target)
+
+            return json.dumps({
+                "success": True,
+                "path": path,
+                "changed": True,
+                "bytes_written": len(new_content.encode("utf-8")),
+                "hunks": hunk_results,
+            })
+        except Exception as e:
+            return json.dumps({"success": False, "error": str(e), "path": path})
+
     # Register tools
     registry.register(
         name="file_read",
@@ -199,6 +378,26 @@ def register_file_tools(registry: ToolRegistry, repo_root: Path | str = ".") -> 
             "required": ["path", "old_string", "new_string"],
         },
         handler=file_replace,
+    )
+
+    registry.register(
+        name="file_patch",
+        description="Apply unified diff format patches to files.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Relative path to the file",
+                },
+                "patch": {
+                    "type": "string",
+                    "description": "Unified diff patch text",
+                },
+            },
+            "required": ["path", "patch"],
+        },
+        handler=file_patch,
     )
 
 
