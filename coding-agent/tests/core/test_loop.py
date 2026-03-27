@@ -43,10 +43,10 @@ class MockConsumer:
     async def request_approval(self, req: ApprovalRequest) -> ApprovalResponse:
         self.approvals_requested.append(req)
         if self.auto_approve:
-            return ApprovalResponse(call_id=req.call_id, decision="approve")
+            return ApprovalResponse(request_id=req.request_id, approved=True)
         return ApprovalResponse(
-            call_id=req.call_id,
-            decision="deny",
+            request_id=req.request_id,
+            approved=False,
             feedback="Denied by mock consumer",
         )
 
@@ -475,8 +475,8 @@ class TestAgentLoopEdgeCases:
 
         # Should have requested approval for each tool call
         assert len(consumer.approvals_requested) == 2
-        assert consumer.approvals_requested[0].call_id == "call_1"
-        assert consumer.approvals_requested[1].call_id == "call_2"
+        assert consumer.approvals_requested[0].request_id == "call_1"
+        assert consumer.approvals_requested[1].request_id == "call_2"
 
     async def test_turn_begin_emitted(self, tape: Tape, context: Context):
         """Test that TurnBegin is emitted at start."""

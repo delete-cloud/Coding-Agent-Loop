@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Protocol
 
 from coding_agent.core.context import Context
 from coding_agent.core.loop import AgentLoop
@@ -12,7 +12,11 @@ from coding_agent.core.tape import Tape
 if TYPE_CHECKING:
     from coding_agent.providers.base import ChatProvider
     from coding_agent.tools.registry import ToolRegistry
-    from coding_agent.wire import WireConsumer
+    from coding_agent.wire.protocol import WireMessage
+
+    class WireConsumer(Protocol):
+        async def emit(self, msg: WireMessage) -> None: ...
+        async def request_approval(self, req: Any) -> Any: ...
 
 
 @dataclass

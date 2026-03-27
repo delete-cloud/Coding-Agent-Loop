@@ -3,6 +3,8 @@
 This module provides typed message contracts and wire implementations
 for communication between the core agent loop and UI components.
 
+All message types are defined in wire.protocol.
+
 Example:
     >>> from coding_agent.wire import StreamDelta, LocalWire
     >>> wire = LocalWire("session-123")

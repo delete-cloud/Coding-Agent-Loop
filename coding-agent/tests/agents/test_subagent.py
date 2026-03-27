@@ -26,7 +26,7 @@ class MockConsumer:
         self.messages.append(msg)
 
     async def request_approval(self, req: ApprovalRequest) -> ApprovalResponse:
-        return ApprovalResponse(call_id=req.call_id, decision="approve")
+        return ApprovalResponse(request_id=req.request_id, approved=True)
 
 
 class MockProvider:
