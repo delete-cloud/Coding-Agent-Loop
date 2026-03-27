@@ -108,8 +108,8 @@ class InteractiveSession:
         if self._current_consumer:
             return await self._current_consumer.request_approval(req)
         # Default: auto-approve
-        from coding_agent.wire import ApprovalResponse
-        return ApprovalResponse(call_id=req.call_id, decision="approve", scope="once")
+        from coding_agent.wire.protocol import ApprovalResponse
+        return ApprovalResponse(session_id=req.session_id, request_id=req.request_id, approved=True)
     
     async def run(self):
         """Run the REPL loop."""

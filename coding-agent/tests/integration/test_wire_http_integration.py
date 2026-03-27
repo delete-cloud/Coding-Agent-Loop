@@ -225,19 +225,15 @@ class TestPromptStreamingFlow:
 
     async def test_prompt_streaming_events(self, client):
         """Test that prompt endpoint streams correct events."""
-        # Create a session
-        session_id = "test-session-stream"
-        sessions[session_id] = SessionState(
-            id=session_id,
-            created_at=datetime.now(),
-            last_activity=datetime.now(),
-        )
+        # Create a session using the API (for full AgentLoop integration)
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
 
         async with aconnect_sse(
             client,
             "POST",
             f"/sessions/{session_id}/prompt",
-            params={"prompt": "Hello"},
+            json={"prompt": "Hello"},
         ) as event_source:
             events = []
             async for sse in event_source.aiter_sse():
@@ -262,7 +258,7 @@ class TestPromptStreamingFlow:
 
         response = await client.post(
             f"/sessions/{session_id}/prompt",
-            params={"prompt": "Hello"},
+            json={"prompt": "Hello"},
         )
         assert response.status_code == 409
 
@@ -329,7 +325,7 @@ class TestApprovalFlowIntegration:
 
         response = await client.post(
             f"/sessions/{session_id}/approve",
-            params={
+            json={
                 "request_id": "req-123",
                 "approved": True,
                 "feedback": "Approved!",
@@ -364,11 +360,12 @@ class TestApprovalFlowIntegration:
 
         response = await client.post(
             f"/sessions/{session_id}/approve",
-            params={
+            json={
                 "request_id": "wrong-id",
                 "approved": True,
             },
         )
+        # Legacy check returns 400 for request ID mismatch
         assert response.status_code == 400
 
 
@@ -481,7 +478,7 @@ class TestFullFlowIntegration:
         # Send a prompt to generate events (non-streaming request just to trigger events)
         response = await client.post(
             f"/sessions/{session_id}/prompt",
-            params={"prompt": "Hello"},
+            json={"prompt": "Hello"},
         )
         assert response.status_code == 200
 

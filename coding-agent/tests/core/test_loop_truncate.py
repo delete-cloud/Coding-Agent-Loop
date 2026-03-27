@@ -65,7 +65,7 @@ class TestToolResultTruncation:
         
         # Mock consumer to auto-approve
         async def mock_request_approval(req):
-            return ApprovalResponse(decision="approve")
+            return ApprovalResponse(approved=True)
         
         consumer.request_approval = mock_request_approval
         
