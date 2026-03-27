@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, AsyncIterator
@@ -46,7 +47,31 @@ class SessionState:
 # In-memory session store
 sessions: dict[str, SessionState] = {}
 
-app = FastAPI(title="Coding Agent HTTP API")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup/shutdown."""
+    # Startup
+    cleanup_task = asyncio.create_task(_cleanup_idle_sessions())
+    logger.info("HTTP server starting up")
+
+    yield  # Server runs here
+
+    # Shutdown
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
+
+    # Close all sessions
+    for session_id in list(sessions.keys()):
+        await close_session(session_id)
+
+    logger.info("HTTP server shut down")
+
+
+app = FastAPI(title="Coding Agent HTTP API", lifespan=lifespan)
 
 
 def _session_to_dict(session: SessionState) -> dict:
@@ -157,10 +182,14 @@ async def _cleanup_idle_sessions() -> None:
             del sessions[session_id]
 
 
-@app.on_event("startup")
-async def startup_event() -> None:
-    """Start background tasks."""
-    asyncio.create_task(_cleanup_idle_sessions())
+@app.get("/health")
+async def health_check():
+    """Health check endpoint."""
+    return {
+        "status": "healthy",
+        "sessions": len(sessions),
+        "version": "2.0.0"
+    }
 
 
 @app.post("/sessions")
