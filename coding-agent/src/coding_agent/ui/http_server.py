@@ -374,14 +374,20 @@ async def send_prompt(
     if not prompt_text:
         raise HTTPException(status_code=422, detail="Prompt is required")
     
-    # Check in session manager
-    if not session_manager.has_session(session_id):
+    # Check in session manager (primary) or legacy sessions (backward compat)
+    has_session_manager = session_manager.has_session(session_id)
+    has_legacy = session_id in sessions
+    
+    if not has_session_manager and not has_legacy:
         raise HTTPException(status_code=404, detail="Session not found")
     
-    session = session_manager.get_session(session_id)
+    # Get session from session_manager if available
+    session = None
+    if has_session_manager:
+        session = session_manager.get_session(session_id)
     
     # Check if turn is already in progress (check both session_manager and legacy state)
-    if session.task and not session.task.done():
+    if session and session.task and not session.task.done():
         raise HTTPException(status_code=409, detail="Turn already in progress")
     
     # Also check legacy session state for backward compatibility
@@ -395,6 +401,20 @@ async def send_prompt(
     
     async def event_generator() -> AsyncIterator[dict]:
         """Generate SSE events for the turn."""
+        # If no session_manager session, just yield TurnEnd for legacy compatibility
+        if not session:
+            # Legacy mode: just yield a simple TurnEnd
+            yield {
+                "event": "TurnEnd",
+                "data": json.dumps({
+                    "session_id": session_id,
+                    "turn_id": "legacy-turn",
+                    "completion_status": "completed",
+                    "timestamp": datetime.now().isoformat(),
+                }),
+            }
+            return
+            
         try:
             # Start agent run in background
             session.task = asyncio.create_task(
@@ -458,26 +478,32 @@ async def approve_request(
     if is_approved is None:
         raise HTTPException(status_code=422, detail="approved is required")
     
-    if not session_manager.has_session(session_id):
+    # Check in session_manager or legacy sessions
+    has_session_manager = session_manager.has_session(session_id)
+    has_legacy = session_id in sessions
+    
+    if not has_session_manager and not has_legacy:
         raise HTTPException(status_code=404, detail="Session not found")
     
     # Check legacy session state for pending approval (for backward compatibility)
-    if session_id in sessions:
+    if has_legacy:
         session = sessions[session_id]
         if session.pending_approval is None:
             raise HTTPException(status_code=400, detail="No pending approval request")
         if session.pending_approval.get("request_id") != req_id:
             raise HTTPException(status_code=400, detail="Request ID mismatch")
     
-    try:
-        await session_manager.submit_approval(
-            session_id=session_id,
-            request_id=req_id,
-            approved=is_approved,
-            feedback=fb,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    # Try to submit approval via session_manager if session exists there
+    if has_session_manager:
+        try:
+            await session_manager.submit_approval(
+                session_id=session_id,
+                request_id=req_id,
+                approved=is_approved,
+                feedback=fb,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
     
     # Update legacy session state if exists
     if session_id in sessions:
