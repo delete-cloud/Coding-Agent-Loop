@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import random
 from typing import Any, AsyncIterator
 
@@ -14,6 +15,9 @@ from coding_agent.providers.base import (
     ToolCall,
     ToolSchema,
 )
+from coding_agent.utils.retry import _extract_status_code, RETRYABLE_STATUS_CODES
+
+logger = logging.getLogger(__name__)
 
 
 class AnthropicProvider:
@@ -32,6 +36,10 @@ class AnthropicProvider:
         api_key: str,
         max_tokens: int = 8192,
         temperature: float = 0.7,
+        timeout: float = 60.0,
+        max_retries: int = 3,
+        retry_base_delay: float = 1.0,
+        retry_max_delay: float = 60.0,
     ):
         # Handle both plain strings and Pydantic SecretStr
         api_key_str = api_key
@@ -39,9 +47,29 @@ class AnthropicProvider:
             # Assume it's a SecretStr or similar with get_secret_value
             api_key_str = api_key.get_secret_value()
         self._model = model
-        self._client = AsyncAnthropic(api_key=api_key_str)
+        self._api_key = api_key_str
         self._max_tokens = max_tokens
         self._temperature = temperature
+        self._timeout = timeout
+        self._max_retries = max_retries
+        self._retry_base_delay = retry_base_delay
+        self._retry_max_delay = retry_max_delay
+        self.__client: AsyncAnthropic | None = None
+
+    @property
+    def _client(self) -> AsyncAnthropic:
+        """Lazy initialization of Anthropic client."""
+        if self.__client is None:
+            self.__client = AsyncAnthropic(
+                api_key=self._api_key,
+                timeout=self._timeout,
+            )
+        return self.__client
+
+    @_client.setter
+    def _client(self, value: AsyncAnthropic | None) -> None:
+        """Allow setting _client directly (for testing)."""
+        self.__client = value
 
     @property
     def model_name(self) -> str:
@@ -50,11 +78,6 @@ class AnthropicProvider:
     @property
     def max_context_size(self) -> int:
         return self.DEFAULT_CONTEXT_SIZE
-
-    # Retry configuration
-    MAX_RETRIES = 3
-    RETRY_DELAY_BASE = 1.0
-    RETRY_STATUS_CODES = {429, 500, 502, 503, 529}
 
     def _convert_messages(
         self, messages: list[dict[str, Any]]
@@ -135,9 +158,17 @@ class AnthropicProvider:
         tools: list[ToolSchema] | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[StreamEvent]:
-        """Stream response from Anthropic API.
+        """Stream response from Anthropic API with automatic retry.
 
         Translates Anthropic streaming events to internal StreamEvent format.
+
+        Args:
+            messages: List of message dicts in OpenAI format
+            tools: Optional list of tool schemas
+            **kwargs: Additional options
+
+        Yields:
+            StreamEvent objects
         """
         system_prompt, anthropic_msgs = self._convert_messages(messages)
 
@@ -152,75 +183,108 @@ class AnthropicProvider:
         if tools:
             api_kwargs["tools"] = self._convert_tools(tools)
 
-        try:
-            # Track tool use blocks being accumulated
-            tool_blocks: dict[int, dict[str, Any]] = {}
+        last_exception: Exception | None = None
 
-            for attempt in range(self.MAX_RETRIES):
-                try:
-                    async with self._client.messages.stream(**api_kwargs) as stream:
-                        async for event in stream:
-                            match event.type:
-                                case "content_block_start":
-                                    block = event.content_block
-                                    if block.type == "tool_use":
-                                        tool_blocks[event.index] = {
-                                            "id": block.id,
-                                            "name": block.name,
-                                            "input_json": "",
-                                        }
-                                case "content_block_delta":
-                                    delta = event.delta
-                                    if delta.type == "text_delta":
-                                        yield StreamEvent(type="delta", text=delta.text)
-                                    elif delta.type == "input_json_delta":
-                                        idx = event.index
-                                        if idx in tool_blocks:
-                                            tool_blocks[idx]["input_json"] += delta.partial_json
-                                case "content_block_stop":
+        for attempt in range(self._max_retries + 1):
+            try:
+                # Track tool use blocks being accumulated
+                tool_blocks: dict[int, dict[str, Any]] = {}
+
+                async with self._client.messages.stream(**api_kwargs) as stream:
+                    async for event in stream:
+                        match event.type:
+                            case "content_block_start":
+                                block = event.content_block
+                                if block.type == "tool_use":
+                                    tool_blocks[event.index] = {
+                                        "id": block.id,
+                                        "name": block.name,
+                                        "input_json": "",
+                                    }
+                            case "content_block_delta":
+                                delta = event.delta
+                                if delta.type == "text_delta":
+                                    yield StreamEvent(type="delta", text=delta.text)
+                                elif delta.type == "input_json_delta":
                                     idx = event.index
                                     if idx in tool_blocks:
-                                        block = tool_blocks.pop(idx)
-                                        try:
-                                            args = json.loads(block["input_json"]) if block["input_json"] else {}
-                                        except json.JSONDecodeError:
-                                            args = {}
-                                        yield StreamEvent(
-                                            type="tool_call",
-                                            tool_call=ToolCall(
-                                                id=block["id"],
-                                                name=block["name"],
-                                                arguments=args,
-                                            ),
-                                        )
-                                case "message_stop":
-                                    pass  # handled below
+                                        tool_blocks[idx]["input_json"] += delta.partial_json
+                            case "content_block_stop":
+                                idx = event.index
+                                if idx in tool_blocks:
+                                    block = tool_blocks.pop(idx)
+                                    try:
+                                        args = json.loads(block["input_json"]) if block["input_json"] else {}
+                                    except json.JSONDecodeError:
+                                        args = {}
+                                    yield StreamEvent(
+                                        type="tool_call",
+                                        tool_call=ToolCall(
+                                            id=block["id"],
+                                            name=block["name"],
+                                            arguments=args,
+                                        ),
+                                    )
+                            case "message_stop":
+                                pass
 
-                    yield StreamEvent(type="done")
-                    return  # success, exit retry loop
+                yield StreamEvent(type="done")
+                return  # Success, exit the retry loop
 
-                except RateLimitError:
-                    if attempt < self.MAX_RETRIES - 1:
-                        delay = self.RETRY_DELAY_BASE * (2 ** attempt) + random.uniform(0, 1)
-                        await asyncio.sleep(delay)
-                        continue
-                    raise
-                except APIStatusError as e:
-                    if e.status_code in self.RETRY_STATUS_CODES and attempt < self.MAX_RETRIES - 1:
-                        delay = self.RETRY_DELAY_BASE * (2 ** attempt) + random.uniform(0, 1)
-                        await asyncio.sleep(delay)
-                        continue
-                    raise
+            except Exception as e:
+                last_exception = e
 
-        except RateLimitError as e:
-            yield StreamEvent(type="error", error=f"Rate limit exceeded: {e}")
-        except APIStatusError as e:
-            yield StreamEvent(type="error", error=f"API error {e.status_code}: {e}")
-        except APIError as e:
-            yield StreamEvent(type="error", error=f"API error: {e}")
-        except Exception as e:
-            # Catch specific non-critical exceptions only
-            # Let BaseException subclasses (KeyboardInterrupt, SystemExit) propagate
-            if isinstance(e, (KeyboardInterrupt, SystemExit)):
-                raise
-            yield StreamEvent(type="error", error=f"Unexpected error: {e}")
+                # Check if this is the last attempt
+                if attempt >= self._max_retries:
+                    logger.debug(f"Max retries ({self._max_retries}) exceeded")
+                    break
+
+                # Extract status code from exception
+                status_code = _extract_status_code(e)
+
+                # Only retry if we have a status code and it's in retryable list
+                if status_code is None:
+                    logger.debug(f"No status code found in {type(e).__name__}, raising immediately")
+                    break
+
+                if status_code not in RETRYABLE_STATUS_CODES:
+                    logger.debug(f"Status {status_code} not retryable, raising immediately")
+                    break
+
+                # Calculate delay with exponential backoff and jitter
+                delay = min(self._retry_base_delay * (2 ** attempt), self._retry_max_delay)
+                delay += random.uniform(0, 1)  # Add jitter
+
+                logger.warning(
+                    f"stream failed (attempt {attempt + 1}/{self._max_retries + 1}): "
+                    f"{type(e).__name__}{f' (status={status_code})' if status_code else ''}, "
+                    f"retrying in {delay:.2f}s..."
+                )
+
+                await asyncio.sleep(delay)
+
+        # All retries exhausted or non-retryable error
+        if last_exception:
+            status_code = _extract_status_code(last_exception)
+            if isinstance(last_exception, RateLimitError):
+                yield StreamEvent(type="error", error=f"Rate limit exceeded: {last_exception}")
+            elif isinstance(last_exception, APIStatusError):
+                yield StreamEvent(type="error", error=f"API error {status_code}: {last_exception}")
+            elif isinstance(last_exception, APIError):
+                yield StreamEvent(type="error", error=f"API error: {last_exception}")
+            else:
+                yield StreamEvent(type="error", error=f"Unexpected error: {last_exception}")
+
+    async def close(self) -> None:
+        """Close client and release connections."""
+        if self.__client:
+            await self.__client.close()
+            self.__client = None
+
+    async def __aenter__(self):
+        """Async context manager entry."""
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit."""
+        await self.close()

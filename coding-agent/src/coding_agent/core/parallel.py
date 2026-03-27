@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
+from coding_agent.config.constants import MAX_TOOL_RESULT_SIZE as MAX_RESULT_SIZE
 from coding_agent.providers.base import ToolCall
 
 
@@ -16,6 +18,7 @@ class ExecutionResult:
     tool_call: ToolCall
     result: str
     error: str | None = None
+    duration: float = 0.0
 
 
 class DependencyAnalyzer:
@@ -89,6 +92,7 @@ class ParallelExecutor:
         self.execute_fn = execute_fn
         self.max_concurrency = max_concurrency
         self.analyzer = DependencyAnalyzer()
+        self._semaphore = asyncio.Semaphore(max_concurrency)
     
     def _group_by_dependencies(
         self, 
@@ -146,12 +150,15 @@ class ParallelExecutor:
         if len(tool_calls) == 1:
             # Single call - no parallelization needed
             call = tool_calls[0]
+            start_time = time.time()
             try:
                 result = await self.execute_fn(call.name, call.arguments)
-                return [ExecutionResult(0, call, result)]
+                duration = time.time() - start_time
+                return [ExecutionResult(0, call, result, duration=duration)]
             except Exception as e:
                 import json
-                return [ExecutionResult(0, call, json.dumps({"error": str(e)}), str(e))]
+                duration = time.time() - start_time
+                return [ExecutionResult(0, call, json.dumps({"error": str(e)}), str(e), duration)]
         
         # Group into parallel batches
         batches = self._group_by_dependencies(tool_calls)
@@ -159,20 +166,28 @@ class ParallelExecutor:
         all_results: list[ExecutionResult] = []
         
         for batch in batches:
-            # Execute batch concurrently
+            # Execute batch concurrently with semaphore limit
             async def execute_one(idx: int, call: ToolCall) -> ExecutionResult:
-                try:
-                    result = await self.execute_fn(call.name, call.arguments)
-                    return ExecutionResult(idx, call, result)
-                except Exception as e:
-                    import json
-                    return ExecutionResult(
-                        idx, call, 
-                        json.dumps({"error": str(e)}),
-                        str(e)
-                    )
+                async with self._semaphore:
+                    start_time = time.time()
+                    try:
+                        result = await self.execute_fn(call.name, call.arguments)
+                        duration = time.time() - start_time
+                        # Truncate result if too large (prevent context overflow)
+                        if len(result) > MAX_RESULT_SIZE:
+                            result = result[:MAX_RESULT_SIZE] + f"\n... ({len(result) - MAX_RESULT_SIZE} chars truncated)"
+                        return ExecutionResult(idx, call, result, duration=duration)
+                    except Exception as e:
+                        import json
+                        duration = time.time() - start_time
+                        return ExecutionResult(
+                            idx, call, 
+                            json.dumps({"error": str(e)}),
+                            str(e),
+                            duration
+                        )
             
-            # Run batch in parallel
+            # Run batch in parallel (semaphore limits concurrency)
             batch_results = await asyncio.gather(*[
                 execute_one(idx, call) for idx, call in batch
             ])

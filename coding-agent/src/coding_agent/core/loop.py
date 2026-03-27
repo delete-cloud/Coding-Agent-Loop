@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from coding_agent.config.constants import MAX_TOOL_RESULT_SIZE as MAX_RESULT_SIZE
 from coding_agent.core.doom import DoomDetector
 from coding_agent.core.parallel import ParallelExecutor
 from coding_agent.core.tape import Entry, Tape
+from coding_agent.metrics import SessionMetrics, collector
 from coding_agent.providers.base import StreamingResponse, ToolCall
+from coding_agent.errors import ErrorHandler
 from coding_agent.wire import (
     ApprovalRequest,
+    ErrorMessage,
     StepInfo,
     StreamDelta,
     ToolCallBegin,
@@ -33,6 +39,7 @@ class TurnOutcome:
     stop_reason: str  # "no_tool_calls", "max_steps_reached", "doom_loop", "error"
     final_message: str | None = None
     steps_taken: int = 0
+    error: Any = None  # AgentError if stop_reason is "error"
 
 
 class AgentLoop:
@@ -46,6 +53,7 @@ class AgentLoop:
         consumer: Wire consumer for UI/approval
         max_steps: Maximum steps per turn
         doom_threshold: Threshold for doom loop detection
+        metrics: Optional session metrics for performance tracking
     """
 
     def __init__(
@@ -57,6 +65,9 @@ class AgentLoop:
         consumer: WireConsumer,
         max_steps: int = 30,
         doom_threshold: int = 3,
+        enable_parallel: bool = True,
+        max_parallel: int = 5,
+        metrics: SessionMetrics | None = None,
     ):
         self.provider = provider
         self.tools = tools
@@ -65,10 +76,12 @@ class AgentLoop:
         self.consumer = consumer
         self.max_steps = max_steps
         self.doom_detector = DoomDetector(threshold=doom_threshold)
+        self._enable_parallel = enable_parallel
         self._parallel_executor = ParallelExecutor(
             execute_fn=self.tools.execute,
-            max_concurrency=5,
+            max_concurrency=max_parallel,
         )
+        self._metrics = metrics
 
     async def run_turn(self, user_input: str) -> TurnOutcome:
         """Run a single conversation turn.
@@ -86,12 +99,28 @@ class AgentLoop:
         try:
             return await self._run_turn_steps()
         except Exception as e:
-            error_msg = f"Error during turn: {e}"
+            # Structured error handling
+            error = ErrorHandler.handle_exception(e)
+            
+            # Log full traceback for debugging
+            logger = logging.getLogger(__name__)
+            logger.exception("Agent error during turn")
+            
+            # Display user-friendly error message
+            await self.consumer.emit(ErrorMessage(
+                content=error.format_for_display(),
+            ))
+            
             await self.consumer.emit(TurnEnd(
                 stop_reason="error",
-                final_message=error_msg,
+                final_message=error.message,
             ))
-            raise
+            
+            return TurnOutcome(
+                stop_reason="error",
+                final_message=error.message,
+                error=error,
+            )
 
     async def _run_turn_steps(self) -> TurnOutcome:
         """Internal: run the turn steps."""
@@ -100,7 +129,7 @@ class AgentLoop:
             await self.consumer.emit(StepInfo(step + 1, self.max_steps))
 
             # Build working set from tape
-            messages = self.context.build_working_set(self.tape)
+            messages = await self.context.build_working_set(self.tape)
 
             # Stream LLM response
             response = await self._stream_response(messages)
@@ -159,6 +188,7 @@ class AgentLoop:
             Accumulated response
         """
         response = StreamingResponse()
+        start_time = time.time()
         
         async for event in self.provider.stream(
             messages=messages,
@@ -178,10 +208,19 @@ class AgentLoop:
                     # Log error but continue
                     response.add_delta(f"\n[Error: {event.error}]\n")
         
+        # Record API call latency
+        if self._metrics:
+            latency = time.time() - start_time
+            self._metrics.record_api_call(latency)
+        
         return response
 
     def _can_parallelize(self, tool_calls: list[ToolCall]) -> bool:
         """Check if tool calls can be parallelized."""
+        # Parallel execution disabled by config
+        if not self._enable_parallel:
+            return False
+        
         if len(tool_calls) <= 1:
             return False
         
@@ -226,6 +265,12 @@ class AgentLoop:
             else:
                 denied_results[call.id] = f"[DENIED] {approval.feedback or 'Tool call denied by user'}"
         
+        # Check for doom loop before parallel execution
+        for call in approved_calls:
+            if self.doom_detector.observe(call.name, call.arguments):
+                from coding_agent.core.doom import DoomLoopError
+                raise DoomLoopError("Repetitive tool call detected")
+        
         # Execute approved calls in parallel
         output: list[tuple[ToolCall, str]] = []
         
@@ -243,8 +288,10 @@ class AgentLoop:
                     result = result_map.get(call.id)
                     if result:
                         result_str = result.result
+                        # Record tool call metrics
+                        if self._metrics:
+                            self._metrics.record_tool_call(call.name, result.duration)
                         # Truncate if needed
-                        MAX_RESULT_SIZE = 10000
                         if len(result_str) > MAX_RESULT_SIZE:
                             result_str = result_str[:MAX_RESULT_SIZE] + f"\n... ({len(result_str) - MAX_RESULT_SIZE} chars truncated)"
                     else:
@@ -319,11 +366,16 @@ class AgentLoop:
                 continue
 
             # Execute tool
+            start_time = time.time()
             result = await self.tools.execute(call.name, call.arguments)
+            duration = time.time() - start_time
             result = str(result) if result is not None else ""
             
+            # Record tool call metrics
+            if self._metrics:
+                self._metrics.record_tool_call(call.name, duration)
+            
             # Truncate result if too large (prevent context overflow)
-            MAX_RESULT_SIZE = 10000
             if len(result) > MAX_RESULT_SIZE:
                 result = result[:MAX_RESULT_SIZE] + f"\n... ({len(result) - MAX_RESULT_SIZE} chars truncated)"
             

@@ -21,6 +21,8 @@ def register_subagent_tool(
     consumer: WireConsumer,
     max_steps: int = 15,
     max_depth: int = 3,
+    enable_parallel: bool = True,
+    max_parallel: int = 5,
 ) -> None:
     """Register the subagent dispatch tool."""
 
@@ -29,6 +31,8 @@ def register_subagent_tool(
         consumer=consumer,
         max_steps=max_steps,
         max_depth=max_depth,
+        enable_parallel=enable_parallel,
+        max_parallel=max_parallel,
     )
 
     async def subagent_dispatch(goal: str, tools: list[str] | None = None) -> str:
@@ -41,7 +45,7 @@ def register_subagent_tool(
         """
         # If tools filter is provided, create a filtered registry
         if tools is not None:
-            filtered_registry = ToolRegistry()
+            filtered_registry = ToolRegistry(enable_cache=False)
             invalid_tools = []
             for tool_name in tools:
                 tool_def = registry.get(tool_name)

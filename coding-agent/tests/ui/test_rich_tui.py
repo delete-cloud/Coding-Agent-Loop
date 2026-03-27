@@ -82,14 +82,16 @@ class TestCodingAgentTUI:
         from coding_agent.ui.rich_tui import CodingAgentTUI
         
         tui = CodingAgentTUI()
-        tui.show_tool_call("bash", {"command": "ls"})
+        tui.show_tool_call("call_1", "bash", {"command": "ls"})
         assert len(tui.tools) == 1
         assert tui.tools[0]["name"] == "bash"
+        assert tui.tools[0]["call_id"] == "call_1"
     
     def test_update_tool_result(self):
         from coding_agent.ui.rich_tui import CodingAgentTUI
         
         tui = CodingAgentTUI()
-        tui.show_tool_call("bash", {"command": "ls"})
-        tui.update_tool_result("file1.py file2.py")
+        tui.show_tool_call("call_1", "bash", {"command": "ls"})
+        tui.update_tool_result("call_1", "file1.py file2.py")
         assert tui.tools[0]["result"] == "file1.py file2.py"
+        assert tui.tools[0]["duration"] is not None

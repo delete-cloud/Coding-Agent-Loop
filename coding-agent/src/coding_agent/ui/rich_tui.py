@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+import time
+from typing import Any, Dict
 
 from rich.console import Console, Group
 from rich.layout import Layout
@@ -18,6 +19,45 @@ from coding_agent.ui.components import (
 )
 from coding_agent.ui.rich_consumer import RichConsumer
 from coding_agent.ui.theme import theme
+
+
+class ToolExecutionTracker:
+    """Track tool execution times."""
+
+    def __init__(self):
+        self._start_times: Dict[str, float] = {}
+        self._durations: Dict[str, float] = {}
+
+    def start(self, call_id: str) -> None:
+        """Start tracking a tool call."""
+        self._start_times[call_id] = time.perf_counter()
+
+    def end(self, call_id: str) -> float:
+        """End tracking and return duration."""
+        if call_id not in self._start_times:
+            return 0.0
+
+        duration = time.perf_counter() - self._start_times[call_id]
+        self._durations[call_id] = duration
+        return duration
+
+    def format_duration(self, duration: float) -> Text:
+        """Format duration with color coding.
+
+        Color scheme:
+        - < 1s: default dim color
+        - 1-5s: yellow warning
+        - > 5s: red bold with warning mark
+        """
+        if duration < 1.0:
+            # < 1s: default dim color
+            return Text(f"({duration:.2f}s)", style="dim")
+        elif duration < 5.0:
+            # 1-5s: yellow warning
+            return Text(f"({duration:.2f}s)", style="yellow")
+        else:
+            # > 5s: red bold with warning
+            return Text(f"({duration:.2f}s) ⚠", style="red bold")
 
 
 class CodingAgentTUI:
@@ -38,6 +78,9 @@ class CodingAgentTUI:
         # Layout
         self.layout = self._create_layout()
         self.live: Live | None = None
+        
+        # Tool execution tracking
+        self._tool_tracker = ToolExecutionTracker()
         
         # Create consumer
         self.consumer = RichConsumer(self)
@@ -110,14 +153,20 @@ class CodingAgentTUI:
                 border_style=theme.Colors.TEXT_MUTED,
             )
         
-        # Show last 2 tool calls
+        # Show last 2 tool calls with timing
         panels = []
         for tool in self.tools[-2:]:
+            # Format timing if available
+            timing_text = None
+            if tool.get("duration") is not None:
+                timing_text = self._tool_tracker.format_duration(tool["duration"])
+            
             panels.append(
                 create_tool_panel(
                     tool["name"],
                     tool["args"],
                     tool.get("result"),
+                    timing_text=timing_text,
                 )
             )
         
@@ -156,23 +205,35 @@ class CodingAgentTUI:
         self.current_stream += text
         self.refresh()
 
-    def show_tool_call(self, name: str, args: dict[str, Any]) -> None:
+    def show_tool_call(self, call_id: str, name: str, args: dict[str, Any]) -> None:
         """Show a tool call."""
+        # Start tracking this tool call
+        self._tool_tracker.start(call_id)
+        
         self.tools.append({
+            "call_id": call_id,
             "name": name,
             "args": args,
             "result": None,
+            "duration": None,
         })
         # Prevent unbounded growth - keep last 20 tools
         if len(self.tools) > 20:
             self.tools = self.tools[-20:]
         self.refresh()
 
-    def update_tool_result(self, result: str) -> None:
-        """Update the result of the last tool call."""
-        if self.tools:
-            self.tools[-1]["result"] = result
-            self.refresh()
+    def update_tool_result(self, call_id: str, result: str) -> None:
+        """Update the result of a tool call."""
+        # End tracking and get duration
+        duration = self._tool_tracker.end(call_id)
+        
+        # Find the tool call by call_id and update it
+        for tool in reversed(self.tools):
+            if tool.get("call_id") == call_id:
+                tool["result"] = result
+                tool["duration"] = duration
+                break
+        self.refresh()
 
     def update_step(self, current: int, total: int) -> None:
         """Update step counter."""

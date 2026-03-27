@@ -17,20 +17,22 @@ class TestContextTokenLimits:
         with pytest.raises(ValueError, match="max_tokens must be positive"):
             Context(max_tokens=-100, system_prompt="Test")
 
-    def test_system_prompt_always_included(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_system_prompt_always_included(self, tmp_path):
         """Test that system prompt is always included even with tiny budget."""
         tape = Tape(tmp_path / "test.jsonl")
         tape.append(Entry.message("user", "A" * 1000))
         
         # Very small budget (10 tokens = ~40 chars)
         ctx = Context(max_tokens=10, system_prompt="System prompt here")
-        messages = ctx.build_working_set(tape)
+        messages = await ctx.build_working_set(tape)
         
         # System prompt should always be present
         assert messages[0]["role"] == "system"
         assert messages[0]["content"] == "System prompt here"
 
-    def test_truncates_when_exceeds_budget(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_truncates_when_exceeds_budget(self, tmp_path):
         """Test that messages are truncated when exceeding token budget."""
         tape = Tape(tmp_path / "test.jsonl")
         
@@ -40,7 +42,7 @@ class TestContextTokenLimits:
         
         # Small budget: 50 tokens = ~200 chars
         ctx = Context(max_tokens=50, system_prompt="System")
-        messages = ctx.build_working_set(tape)
+        messages = await ctx.build_working_set(tape)
         
         # Count total estimated tokens
         total_chars = sum(len(str(m.get("content", ""))) for m in messages)
@@ -50,7 +52,8 @@ class TestContextTokenLimits:
         # Should be within budget (with some tolerance for the truncation logic)
         assert estimated_tokens <= 60  # Allow some overhead
 
-    def test_oldest_messages_removed_first(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_oldest_messages_removed_first(self, tmp_path):
         """Test that oldest non-system messages are removed first when truncating."""
         tape = Tape(tmp_path / "test.jsonl")
         
@@ -61,7 +64,7 @@ class TestContextTokenLimits:
         
         # Very small budget to force truncation
         ctx = Context(max_tokens=5, system_prompt="System")
-        messages = ctx.build_working_set(tape)
+        messages = await ctx.build_working_set(tape)
         
         # System prompt + possibly 1-2 recent messages
         assert messages[0]["role"] == "system"
@@ -72,7 +75,8 @@ class TestContextTokenLimits:
             # "First message" should be removed if truncated
             assert "First message" not in user_contents or len(user_contents) >= 2
 
-    def test_truncates_large_tool_result(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_truncates_large_tool_result(self, tmp_path):
         """Test that large tool results are truncated."""
         tape = Tape(tmp_path / "test.jsonl")
         
@@ -82,7 +86,7 @@ class TestContextTokenLimits:
         
         # Small budget
         ctx = Context(max_tokens=50, system_prompt="System")
-        messages = ctx.build_working_set(tape)
+        messages = await ctx.build_working_set(tape)
         
         # Find tool result message
         tool_results = [m for m in messages if m["role"] == "tool"]
@@ -90,17 +94,19 @@ class TestContextTokenLimits:
             # Should be truncated
             assert len(tool_results[0]["content"]) < 5000
 
-    def test_empty_tape_within_budget(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_empty_tape_within_budget(self, tmp_path):
         """Test empty tape with large budget."""
         tape = Tape(tmp_path / "test.jsonl")
         
         ctx = Context(max_tokens=100000, system_prompt="System prompt")
-        messages = ctx.build_working_set(tape)
+        messages = await ctx.build_working_set(tape)
         
         assert len(messages) == 1
         assert messages[0]["content"] == "System prompt"
 
-    def test_anchor_truncation_respects_budget(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_anchor_truncation_respects_budget(self, tmp_path):
         """Test that anchor-based truncation also respects token budget."""
         tape = Tape(tmp_path / "test.jsonl")
         
@@ -114,7 +120,7 @@ class TestContextTokenLimits:
         
         # Small budget
         ctx = Context(max_tokens=20, system_prompt="System")
-        messages = ctx.build_working_set(tape)
+        messages = await ctx.build_working_set(tape)
         
         # Should have system + some messages after anchor
         assert messages[0]["role"] == "system"

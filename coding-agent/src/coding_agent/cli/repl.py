@@ -57,7 +57,11 @@ class InteractiveSession:
             )
         
         # Tools
-        self.tools = ToolRegistry()
+        self.tools = ToolRegistry(
+            repo_root=self.config.repo,
+            enable_cache=self.config.enable_cache,
+            cache_size=self.config.cache_size,
+        )
         register_file_tools(self.tools, repo_root=self.config.repo)
         register_shell_tools(self.tools, cwd=self.config.repo)
         register_search_tools(self.tools, repo_root=self.config.repo)
@@ -89,6 +93,8 @@ class InteractiveSession:
             consumer=self,  # Self as proxy - delegates to _current_consumer
             max_steps=self.config.subagent_max_steps,
             max_depth=self.config.max_subagent_depth,
+            enable_parallel=self.config.enable_parallel_tools,
+            max_parallel=self.config.max_parallel_tools,
         )
     
     # Proxy methods for WireConsumer protocol (used by subagent tool)
@@ -171,6 +177,8 @@ class InteractiveSession:
             context=ctx,
             consumer=tui.consumer,
             max_steps=self.config.max_steps,
+            enable_parallel=self.config.enable_parallel_tools,
+            max_parallel=self.config.max_parallel_tools,
         )
         
         # Run with TUI display

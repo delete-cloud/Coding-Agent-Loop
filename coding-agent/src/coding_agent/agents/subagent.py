@@ -40,12 +40,16 @@ class SubAgent:
         max_steps: int = 15,
         max_depth: int = 3,
         doom_threshold: int = 3,
+        enable_parallel: bool = True,
+        max_parallel: int = 5,
     ):
         self.provider = provider
         self.consumer = consumer
         self.max_steps = max_steps
         self.max_depth = max_depth
         self.doom_threshold = doom_threshold
+        self.enable_parallel = enable_parallel
+        self.max_parallel = max_parallel
 
     async def run(
         self,
@@ -97,6 +101,8 @@ class SubAgent:
             consumer=self.consumer,
             max_steps=self.max_steps,
             doom_threshold=self.doom_threshold,
+            enable_parallel=self.enable_parallel,
+            max_parallel=self.max_parallel,
         )
 
         outcome = await loop.run_turn(goal)

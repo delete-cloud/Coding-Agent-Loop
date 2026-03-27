@@ -8,6 +8,7 @@ from coding_agent.ui.theme import theme
 from coding_agent.wire import (
     ApprovalRequest,
     ApprovalResponse,
+    ErrorMessage,
     StepInfo,
     StreamDelta,
     ToolCallBegin,
@@ -49,16 +50,24 @@ class RichConsumer(WireConsumer):
                     "args": args,
                     "result": None,
                 }
-                self.tui.show_tool_call(tool, args)
+                self.tui.show_tool_call(cid, tool, args)
             
             case ToolCallEnd(call_id=cid, result=result):
                 if self.current_tool and self.current_tool["id"] == cid:
                     self.current_tool["result"] = result
-                    self.tui.update_tool_result(result)
+                    self.tui.update_tool_result(cid, result)
                 self.current_tool = None
             
             case StepInfo(step_number=step_number, max_steps=max_steps):
                 self.tui.update_step(step_number, max_steps)
+            
+            case ErrorMessage(content=content):
+                # Display error message in TUI
+                from rich.panel import Panel
+                from rich.text import Text
+                error_text = Text(content, style="red")
+                panel = Panel(error_text, border_style="red", title="[bold red]Error[/]")
+                self.tui.console.print(panel)
 
     async def request_approval(self, req: ApprovalRequest) -> ApprovalResponse:
         """Request approval from user via TUI."""

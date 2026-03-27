@@ -15,7 +15,7 @@ class DoomDetector:
 
     def observe(self, tool: str, args: dict) -> bool:
         """Returns True if doom loop detected."""
-        args_hash = hashlib.md5(
+        args_hash = hashlib.sha256(
             json.dumps(args, sort_keys=True).encode()
         ).hexdigest()
         

@@ -122,7 +122,7 @@ class TestE2EP1:
         assert planner.tasks[0].title == "Read the code"
 
         # Verify plan is in context
-        messages = context.build_working_set(tape)
+        messages = await context.build_working_set(tape)
         plan_msgs = [m for m in messages if m.get("role") == "system" and "Current Plan" in m.get("content", "")]
         assert len(plan_msgs) == 1
 

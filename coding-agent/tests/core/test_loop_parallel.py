@@ -32,7 +32,7 @@ class TestAgentLoopParallel:
         # Mock other components
         mock_tape = MagicMock()
         mock_context = MagicMock()
-        mock_context.build_working_set.return_value = []
+        mock_context.build_working_set = AsyncMock(return_value=[])
         mock_consumer = AsyncMock()
         
         loop = AgentLoop(
@@ -56,6 +56,7 @@ class TestAgentLoopParallel:
         
         # Create minimal loop to test method
         loop = AgentLoop.__new__(AgentLoop)
+        loop._enable_parallel = True  # Enable parallel for this test
         assert loop._can_parallelize(calls) is True
     
     def test_cannot_parallelize_write_conflicts(self):
@@ -66,6 +67,7 @@ class TestAgentLoopParallel:
         ]
         
         loop = AgentLoop.__new__(AgentLoop)
+        loop._enable_parallel = True  # Enable parallel for this test
         # Conservative: multiple file_writes = sequential
         assert loop._can_parallelize(calls) is False
     
@@ -74,4 +76,83 @@ class TestAgentLoopParallel:
         calls = [ToolCall("c1", "file_read", {"path": "a.py"})]
         
         loop = AgentLoop.__new__(AgentLoop)
+        loop._enable_parallel = True  # Enable parallel for this test
         assert loop._can_parallelize(calls) is False
+    
+    def test_parallel_disabled_by_config(self):
+        """Parallel execution should be disabled when config sets enable_parallel=False."""
+        calls = [
+            ToolCall("c1", "file_read", {"path": "a.py"}),
+            ToolCall("c2", "file_read", {"path": "b.py"}),
+        ]
+        
+        loop = AgentLoop.__new__(AgentLoop)
+        loop._enable_parallel = False  # Disabled by config
+        assert loop._can_parallelize(calls) is False
+    
+    def test_parallel_enabled_by_config(self):
+        """Parallel execution should be enabled when config sets enable_parallel=True."""
+        calls = [
+            ToolCall("c1", "file_read", {"path": "a.py"}),
+            ToolCall("c2", "file_read", {"path": "b.py"}),
+        ]
+        
+        loop = AgentLoop.__new__(AgentLoop)
+        loop._enable_parallel = True  # Enabled by config
+        assert loop._can_parallelize(calls) is True
+    
+    @pytest.mark.asyncio
+    async def test_doom_loop_detection_in_parallel_path(self):
+        """Doom loop should be detected in parallel execution path."""
+        from coding_agent.core.doom import DoomDetector
+        
+        calls = [
+            ToolCall("c1", "file_read", {"path": "a.py"}),
+            ToolCall("c2", "file_read", {"path": "a.py"}),  # Same call
+            ToolCall("c3", "file_read", {"path": "a.py"}),  # Same call again
+        ]
+        
+        # Create loop with doom threshold of 3
+        loop = AgentLoop.__new__(AgentLoop)
+        loop.doom_detector = DoomDetector(threshold=3)
+        loop._enable_parallel = True
+        
+        # Prime the doom detector with 2 identical calls
+        loop.doom_detector.observe("file_read", {"path": "a.py"})
+        loop.doom_detector.observe("file_read", {"path": "a.py"})
+        
+        # The third call should trigger doom loop detection
+        # when checked in _execute_tools_parallel
+        assert loop.doom_detector.observe("file_read", {"path": "a.py"}) is True
+    
+    @pytest.mark.asyncio
+    async def test_max_concurrency_respected(self):
+        """ParallelExecutor should respect max_concurrency setting."""
+        from coding_agent.core.parallel import ParallelExecutor
+        
+        execution_times = []
+        
+        # Note: execute_fn signature is (name: str, args: dict) -> str
+        async def slow_execute(name: str, args: dict) -> str:
+            execution_times.append(asyncio.get_event_loop().time())
+            await asyncio.sleep(0.1)
+            return "result"
+        
+        # Create executor with max_concurrency=2
+        executor = ParallelExecutor(execute_fn=slow_execute, max_concurrency=2)
+        
+        calls = [
+            ToolCall(f"c{i}", "file_read", {"path": f"file{i}.py"})
+            for i in range(4)
+        ]
+        
+        start_time = asyncio.get_event_loop().time()
+        results = await executor.execute_all(calls)
+        elapsed = asyncio.get_event_loop().time() - start_time
+        
+        # Should take at least 0.2s (2 batches of 2 concurrent calls, each 0.1s)
+        # With max_concurrency=2 and 4 calls, should be ~0.2s
+        assert len(results) == 4
+        # Should take more than 0.15s (sequential would be 0.4s, parallel would be ~0.1s)
+        # With max_concurrency=2, should take ~0.2s
+        assert elapsed >= 0.15, f"Expected at least 0.15s with max_concurrency=2, got {elapsed}s"

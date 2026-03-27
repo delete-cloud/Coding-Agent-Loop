@@ -37,7 +37,12 @@ def create_message_panel(role: str, content: str, is_streaming: bool = False) ->
     )
 
 
-def create_tool_panel(name: str, args: dict[str, Any], result: str | None = None) -> Panel:
+def create_tool_panel(
+    name: str,
+    args: dict[str, Any],
+    result: str | None = None,
+    timing_text: Text | None = None,
+) -> Panel:
     """Create a tool call visualization panel."""
     # Build args display
     args_text = Text()
@@ -68,9 +73,15 @@ def create_tool_panel(name: str, args: dict[str, Any], result: str | None = None
     
     status = theme.Icons.THINKING if result is None else theme.Icons.SUCCESS
     
+    # Build title with optional timing
+    title_parts = [f"[bold]{icon} {name}[/]", status]
+    if timing_text is not None:
+        title_parts.append(str(timing_text))
+    title = " ".join(title_parts)
+    
     return Panel(
         Group(*content_parts),
-        title=f"[bold]{icon} {name}[/] {status}",
+        title=title,
         border_style=theme.Colors.INFO if result is None else theme.Colors.SUCCESS,
         padding=theme.Layout.PANEL_PADDING,
     )

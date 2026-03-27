@@ -73,6 +73,12 @@ class StepInfo(WireMessage):
     max_steps: int = 0
 
 
+@dataclass
+class ErrorMessage(WireMessage):
+    """Error message to display to the user."""
+    content: str = ""
+
+
 class WireConsumer(Protocol):
     """Protocol for wire message consumers (TUI, headless, HTTP)."""
 

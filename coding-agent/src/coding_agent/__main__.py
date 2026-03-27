@@ -31,8 +31,10 @@ def main(ctx):
 @click.option("--approval", default="yolo", type=click.Choice(["yolo", "interactive", "auto"]))
 @click.option("--parallel/--no-parallel", default=True, help="Enable parallel tool execution")
 @click.option("--max-parallel", default=5, help="Maximum parallel tool executions")
+@click.option("--cache/--no-cache", default=True, help="Enable tool result caching")
+@click.option("--cache-size", default=100, help="Maximum cached entries")
 @click.option("--tui", is_flag=True, help="Use Rich TUI interface (batch mode)")
-def run(goal, repo, model, provider_name, base_url, api_key, max_steps, approval, parallel, max_parallel, tui):
+def run(goal, repo, model, provider_name, base_url, api_key, max_steps, approval, parallel, max_parallel, cache, cache_size, tui):
     """Run agent on a goal (batch mode)."""
     import asyncio
     from coding_agent.core.config import Config
@@ -47,6 +49,8 @@ def run(goal, repo, model, provider_name, base_url, api_key, max_steps, approval
         approval_mode=approval,
         enable_parallel_tools=parallel,
         max_parallel_tools=max_parallel,
+        enable_cache=cache,
+        cache_size=cache_size,
     )
     
     if tui:
@@ -98,7 +102,11 @@ async def _run_with_tui(config, goal):
     provider = _create_provider(config)
 
     planner = PlanManager()
-    registry = ToolRegistry()
+    registry = ToolRegistry(
+        repo_root=config.repo,
+        enable_cache=config.enable_cache,
+        cache_size=config.cache_size,
+    )
     register_file_tools(registry, repo_root=config.repo)
     register_shell_tools(registry, cwd=config.repo)
     register_search_tools(registry, repo_root=config.repo)
@@ -115,6 +123,8 @@ async def _run_with_tui(config, goal):
         consumer=consumer,
         max_steps=config.subagent_max_steps,
         max_depth=config.max_subagent_depth,
+        enable_parallel=config.enable_parallel_tools,
+        max_parallel=config.max_parallel_tools,
     )
     
     system_prompt = (
@@ -133,6 +143,8 @@ async def _run_with_tui(config, goal):
         context=context,
         consumer=consumer,
         max_steps=config.max_steps,
+        enable_parallel=config.enable_parallel_tools,
+        max_parallel=config.max_parallel_tools,
     )
     
     with tui:
@@ -159,7 +171,11 @@ async def _run_headless(config, goal):
     provider = _create_provider(config)
 
     planner = PlanManager()
-    registry = ToolRegistry()
+    registry = ToolRegistry(
+        repo_root=config.repo,
+        enable_cache=config.enable_cache,
+        cache_size=config.cache_size,
+    )
     register_file_tools(registry, repo_root=config.repo)
     register_shell_tools(registry, cwd=config.repo)
     register_search_tools(registry, repo_root=config.repo)
@@ -175,6 +191,8 @@ async def _run_headless(config, goal):
         consumer=consumer,
         max_steps=config.subagent_max_steps,
         max_depth=config.max_subagent_depth,
+        enable_parallel=config.enable_parallel_tools,
+        max_parallel=config.max_parallel_tools,
     )
 
     system_prompt = (
@@ -193,6 +211,8 @@ async def _run_headless(config, goal):
         context=context,
         consumer=consumer,
         max_steps=config.max_steps,
+        enable_parallel=config.enable_parallel_tools,
+        max_parallel=config.max_parallel_tools,
     )
 
     result = await loop.run_turn(goal)
@@ -216,6 +236,37 @@ def _create_provider(config):
             api_key=config.api_key,
             base_url=config.base_url,
         )
+
+
+@main.command()
+@click.option("--session", "-s", help="Session ID (default: last)")
+def stats(session: str | None):
+    """Show session statistics."""
+    from coding_agent.metrics import collector
+    
+    if not session:
+        # Use last session
+        sessions = collector.list_sessions()
+        if not sessions:
+            click.echo("No sessions found.")
+            return
+        session = sessions[-1]
+    
+    metrics = collector.get_session(session)
+    if not metrics:
+        click.echo(f"Session {session} not found.")
+        return
+    
+    data = metrics.to_dict()
+    
+    click.echo(f"Session: {data['session_id']}")
+    click.echo(f"Duration: {data['duration']}")
+    click.echo(f"\nTools: {data['tools_total']} calls")
+    for tool, count in data['tool_calls'].items():
+        click.echo(f"  • {tool}: {count}")
+    click.echo(f"\nAPI: {data['api_calls']} calls, avg latency {data['avg_api_latency']}")
+    click.echo(f"Cache hit rate: {data['cache_hit_rate']}")
+    click.echo(f"Tokens: {data['tokens_input']} in / {data['tokens_output']} out")
 
 
 if __name__ == "__main__":
