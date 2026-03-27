@@ -76,6 +76,33 @@ Goodbye!
 | `/model [name]` | Show or change model |
 | `/tools` | List available tools |
 
+## Parallel Tool Execution
+
+The agent automatically executes independent tool calls in parallel to reduce latency:
+
+```bash
+# 3 file reads that would take 300ms sequentially → 100ms in parallel
+uv run python -m coding_agent run --goal "Read file1.py, file2.py, and file3.py"
+```
+
+### Configuration
+
+```bash
+# Disable parallel execution
+uv run python -m coding_agent run --goal "..." --no-parallel
+
+# Configure max parallelism (default: 5)
+uv run python -m coding_agent run --goal "..." --max-parallel 10
+```
+
+### Safety
+
+The agent detects dependencies and only parallelizes safe operations:
+- ✅ **Parallel:** `file_read(a) + file_read(b)` - different files
+- ✅ **Parallel:** `file_read(a) + grep(pattern)` - no dependency
+- ❌ **Sequential:** `file_read(a) + file_write(a)` - same file
+- ❌ **Sequential:** `file_write(a) + file_write(b)` - multiple writes (conservative)
+
 ### Batch Mode
 
 Run a single task (for scripts/CI):
