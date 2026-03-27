@@ -64,7 +64,7 @@ class LocalWire:
         
         This method sends an ApprovalRequest message and waits for an
         ApprovalResponse from the consumer. If the timeout is exceeded,
-        a TimeoutError is raised.
+        returns an ApprovalResponse with approved=False.
         
         The flow is:
         1. Agent calls request_approval() -> sends ApprovalRequest to _outgoing
@@ -76,10 +76,7 @@ class LocalWire:
             timeout: Maximum seconds to wait for response (default: 120)
             
         Returns:
-            The user's approval response
-            
-        Raises:
-            TimeoutError: If no response received within timeout period
+            The user's approval response, or a denial response if timeout
         """
         from coding_agent.wire.protocol import ApprovalRequest, ApprovalResponse
         
@@ -100,8 +97,12 @@ class LocalWire:
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
-            raise TimeoutError(
-                f"Approval request timed out after {timeout} seconds"
+            # Return denial response on timeout for consistency with HTTP server
+            return ApprovalResponse(
+                session_id=self.session_id,
+                request_id=request.request_id,
+                approved=False,
+                feedback=f"Approval timeout after {timeout} seconds",
             )
         
         # Validate response type

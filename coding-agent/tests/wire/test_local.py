@@ -189,12 +189,13 @@ class TestLocalWireApprovalFlow:
             call_id="call-timeout",
         )
         
-        # Don't send any response - should timeout
-        with pytest.raises(TimeoutError) as exc_info:
-            await wire.request_approval(tool_call, timeout=0.1)
+        # Don't send any response - should return denial response on timeout
+        result = await wire.request_approval(tool_call, timeout=0.1)
         
-        assert "timed out" in str(exc_info.value)
-        assert "0.1 seconds" in str(exc_info.value)
+        assert isinstance(result, ApprovalResponse)
+        assert result.approved is False
+        assert "timeout" in result.feedback.lower()
+        assert result.request_id == "call-timeout"
 
     @pytest.mark.asyncio
     async def test_request_approval_default_timeout(self):

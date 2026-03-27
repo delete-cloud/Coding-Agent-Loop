@@ -94,4 +94,4 @@ class TurnEnd(WireMessage):
         completion_status: Status of the turn completion
     """
     turn_id: str
-    completion_status: str  # "completed", "blocked", "error"
+    completion_status: CompletionStatus
