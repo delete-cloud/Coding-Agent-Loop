@@ -3,24 +3,33 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Protocol
 
-from coding_agent.wire import (
+from coding_agent.wire.protocol import (
     ApprovalRequest,
     ApprovalResponse,
     StreamDelta,
-    ToolCallBegin,
-    ToolCallEnd,
-    TurnBegin,
+    ToolCallDelta,
     TurnEnd,
-    WireConsumer,
     WireMessage,
 )
 
 logger = logging.getLogger(__name__)
 
 
-class HeadlessConsumer(WireConsumer):
+class WireConsumer(Protocol):
+    """Protocol for wire message consumers (TUI, headless, HTTP)."""
+
+    async def emit(self, msg: WireMessage) -> None:
+        """Emit a message to the consumer."""
+        ...
+
+    async def request_approval(self, req: ApprovalRequest) -> ApprovalResponse:
+        """Request approval and wait for response."""
+        ...
+
+
+class HeadlessConsumer:
     """WireConsumer implementation for batch/headless mode.
     
     - Logs all messages to console
@@ -36,19 +45,13 @@ class HeadlessConsumer(WireConsumer):
     async def emit(self, msg: WireMessage) -> None:
         """Emit a message to the consumer."""
         match msg:
-            case TurnBegin():
-                logger.info("=== Turn Begin ===")
-            case TurnEnd(stop_reason=reason, final_message=msg_text):
-                logger.info(f"=== Turn End ({reason}) ===")
-                if msg_text:
-                    logger.info(f"Final message: {msg_text}")
-            case StreamDelta(text=text):
+            case TurnEnd(completion_status=status):
+                logger.info(f"=== Turn End ({status}) ===")
+            case StreamDelta(content=text):
                 # Stream text to stdout in real-time
                 print(text, end="", flush=True)
-            case ToolCallBegin(call_id=cid, tool=tool, args=args):
+            case ToolCallDelta(tool_name=tool, arguments=args, call_id=cid):
                 logger.info(f"[Tool Call] {tool} (id={cid}): {args}")
-            case ToolCallEnd(call_id=cid, result=result):
-                logger.info(f"[Tool Result] (id={cid}): {result[:200]}...")
             case _:
                 logger.debug(f"Message: {type(msg).__name__}")
 
@@ -58,18 +61,18 @@ class HeadlessConsumer(WireConsumer):
         In headless mode, this auto-approves based on configuration.
         """
         if self.auto_approve:
-            logger.info(f"[Auto-approve] {req.tool}")
+            logger.info(f"[Auto-approve] {req.tool_call.tool_name}")
             return ApprovalResponse(
-                call_id=req.call_id,
-                decision="approve",
-                scope="once",
+                session_id=req.session_id,
+                request_id=req.request_id,
+                approved=True,
             )
         else:
             # In non-auto mode, deny by default in headless mode
-            logger.warning(f"[Auto-deny] {req.tool} (headless mode without auto_approve)")
+            logger.warning(f"[Auto-deny] {req.tool_call.tool_name} (headless mode without auto_approve)")
             return ApprovalResponse(
-                call_id=req.call_id,
-                decision="deny",
-                scope="once",
+                session_id=req.session_id,
+                request_id=req.request_id,
+                approved=False,
                 feedback="Approval denied in headless mode without auto_approve",
             )

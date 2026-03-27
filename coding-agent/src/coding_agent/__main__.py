@@ -269,5 +269,17 @@ def stats(session: str | None):
     click.echo(f"Tokens: {data['tokens_input']} in / {data['tokens_output']} out")
 
 
+@main.command()
+@click.option("--port", default=8080, help="Server port")
+@click.option("--host", default="127.0.0.1", help="Server host")
+def serve(port: int, host: str):
+    """Start HTTP API server."""
+    import uvicorn
+    from coding_agent.ui.http_server import app
+    
+    click.echo(f"Starting Coding Agent HTTP server on {host}:{port}")
+    uvicorn.run(app, host=host, port=port)
+
+
 if __name__ == "__main__":
     main()
