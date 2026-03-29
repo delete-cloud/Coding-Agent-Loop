@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from agentkit._types import StageName
 from agentkit.errors import PipelineError
@@ -34,6 +34,9 @@ class PipelineContext:
     tool_schemas: list[Any] = field(default_factory=list)
     response_entries: list[Any] = field(default_factory=list)
     output: Any = None
+    on_event: (
+        Callable[[TextEvent | ToolCallEvent | DoneEvent], Awaitable[None]] | None
+    ) = None
 
 
 class Pipeline:
