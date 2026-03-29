@@ -1,13 +1,113 @@
 """CLI entry point: python -m coding_agent"""
 
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
 import click
+
+
+def create_agent(
+    config_path: Path | None = None,
+    data_dir: Path | None = None,
+    api_key: str | None = None,
+    model_override: str | None = None,
+) -> tuple:
+    """Create a fully wired agent from config.
+
+    Returns (Pipeline, PipelineContext) ready for run_turn().
+    """
+    import os
+
+    from agentkit.config.loader import AgentConfig, load_config
+    from agentkit.directive.executor import DirectiveExecutor
+    from agentkit.plugin.registry import PluginRegistry
+    from agentkit.runtime.hook_runtime import HookRuntime
+    from agentkit.runtime.pipeline import Pipeline, PipelineContext
+    from agentkit.tape.tape import Tape
+
+    if config_path is None:
+        config_path = Path(__file__).parent / "agent.toml"
+    if data_dir is None:
+        data_dir = Path("./data")
+
+    cfg = load_config(config_path)
+
+    if model_override:
+        cfg.model = model_override
+
+    resolved_key = api_key or os.environ.get("AGENT_API_KEY", "")
+
+    registry = PluginRegistry()
+
+    from coding_agent.plugins.approval import ApprovalPlugin, ApprovalPolicy
+    from coding_agent.plugins.core_tools import CoreToolsPlugin
+    from coding_agent.plugins.llm_provider import LLMProviderPlugin
+    from coding_agent.plugins.memory import MemoryPlugin
+    from coding_agent.plugins.shell_session import ShellSessionPlugin
+    from coding_agent.plugins.storage import StoragePlugin
+    from coding_agent.plugins.summarizer import SummarizerPlugin
+
+    approval_cfg = cfg.extra.get("approval", {})
+    policy_str = approval_cfg.get("policy", "auto")
+    policy = ApprovalPolicy(policy_str)
+
+    sum_cfg = cfg.extra.get("summarizer", {})
+
+    registry.register(
+        LLMProviderPlugin(
+            provider=cfg.provider,
+            model=cfg.model,
+            api_key=resolved_key,
+        )
+    )
+    registry.register(StoragePlugin(data_dir=data_dir))
+    registry.register(CoreToolsPlugin())
+    registry.register(
+        ApprovalPlugin(
+            policy=policy,
+            blocked_tools=set(approval_cfg.get("blocked_tools", [])),
+        )
+    )
+    registry.register(
+        SummarizerPlugin(
+            max_entries=sum_cfg.get("max_entries", 100),
+            keep_recent=sum_cfg.get("keep_recent", 20),
+        )
+    )
+    registry.register(MemoryPlugin())
+    registry.register(ShellSessionPlugin())
+
+    runtime = HookRuntime(registry)
+
+    directive_executor = DirectiveExecutor()
+
+    pipeline = Pipeline(
+        runtime=runtime,
+        registry=registry,
+        directive_executor=directive_executor,
+    )
+
+    ctx = PipelineContext(
+        tape=Tape(),
+        session_id="",
+        config={
+            "system_prompt": cfg.system_prompt,
+            "model": cfg.model,
+            "provider": cfg.provider,
+            "max_turns": cfg.max_turns,
+        },
+    )
+
+    return pipeline, ctx
 
 
 @click.group(invoke_without_command=True)
 @click.pass_context
 def main(ctx):
     """Coding Agent CLI.
-    
+
     Without subcommand: starts interactive REPL mode (default)
     """
     if ctx.invoked_subcommand is None:
@@ -15,7 +115,7 @@ def main(ctx):
         import asyncio
         from coding_agent.cli.repl import run_repl
         from coding_agent.core.config import load_config
-        
+
         config = load_config()
         asyncio.run(run_repl(config))
 
@@ -24,21 +124,44 @@ def main(ctx):
 @click.option("--goal", required=True, help="Task goal for the agent")
 @click.option("--repo", default=".", help="Repository path")
 @click.option("--model", default="gpt-4o", help="Model name")
-@click.option("--provider", "provider_name", default="openai", type=click.Choice(["openai", "anthropic"]))
+@click.option(
+    "--provider",
+    "provider_name",
+    default="openai",
+    type=click.Choice(["openai", "anthropic"]),
+)
 @click.option("--base-url", default=None, help="OpenAI-compatible API base URL")
 @click.option("--api-key", envvar="AGENT_API_KEY", required=True, help="API key")
 @click.option("--max-steps", default=30, help="Max steps per turn")
-@click.option("--approval", default="yolo", type=click.Choice(["yolo", "interactive", "auto"]))
-@click.option("--parallel/--no-parallel", default=True, help="Enable parallel tool execution")
+@click.option(
+    "--approval", default="yolo", type=click.Choice(["yolo", "interactive", "auto"])
+)
+@click.option(
+    "--parallel/--no-parallel", default=True, help="Enable parallel tool execution"
+)
 @click.option("--max-parallel", default=5, help="Maximum parallel tool executions")
 @click.option("--cache/--no-cache", default=True, help="Enable tool result caching")
 @click.option("--cache-size", default=100, help="Maximum cached entries")
 @click.option("--tui", is_flag=True, help="Use Rich TUI interface (batch mode)")
-def run(goal, repo, model, provider_name, base_url, api_key, max_steps, approval, parallel, max_parallel, cache, cache_size, tui):
+def run(
+    goal,
+    repo,
+    model,
+    provider_name,
+    base_url,
+    api_key,
+    max_steps,
+    approval,
+    parallel,
+    max_parallel,
+    cache,
+    cache_size,
+    tui,
+):
     """Run agent on a goal (batch mode)."""
     import asyncio
     from coding_agent.core.config import Config
-    
+
     config = Config(
         provider=provider_name,
         model=model,
@@ -52,7 +175,7 @@ def run(goal, repo, model, provider_name, base_url, api_key, max_steps, approval
         enable_cache=cache,
         cache_size=cache_size,
     )
-    
+
     if tui:
         asyncio.run(_run_with_tui(config, goal))
     else:
@@ -62,7 +185,12 @@ def run(goal, repo, model, provider_name, base_url, api_key, max_steps, approval
 @main.command()
 @click.option("--repo", default=".", help="Repository path")
 @click.option("--model", default="gpt-4o", help="Model name")
-@click.option("--provider", "provider_name", default="openai", type=click.Choice(["openai", "anthropic"]))
+@click.option(
+    "--provider",
+    "provider_name",
+    default="openai",
+    type=click.Choice(["openai", "anthropic"]),
+)
 @click.option("--base-url", default=None, help="OpenAI-compatible API base URL")
 @click.option("--api-key", envvar="AGENT_API_KEY", required=True, help="API key")
 @click.option("--max-steps", default=30, help="Max steps per turn")
@@ -71,7 +199,7 @@ def repl(repo, model, provider_name, base_url, api_key, max_steps):
     import asyncio
     from coding_agent.cli.repl import run_repl
     from coding_agent.core.config import Config
-    
+
     config = Config(
         provider=provider_name,
         model=model,
@@ -114,7 +242,7 @@ async def _run_with_tui(config, goal):
 
     tui = CodingAgentTUI(model_name=config.model, max_steps=config.max_steps)
     consumer = tui.consumer
-    
+
     # Register subagent tool
     register_subagent_tool(
         registry=registry,
@@ -126,7 +254,7 @@ async def _run_with_tui(config, goal):
         enable_parallel=config.enable_parallel_tools,
         max_parallel=config.max_parallel_tools,
     )
-    
+
     system_prompt = (
         "You are a coding agent. You can read files, edit files, "
         "run shell commands, search the codebase, create task plans, "
@@ -135,7 +263,7 @@ async def _run_with_tui(config, goal):
         "Update task status as you progress."
     )
     context = Context(provider.max_context_size, system_prompt, planner=planner)
-    
+
     loop = AgentLoop(
         provider=provider,
         tools=registry,
@@ -146,7 +274,7 @@ async def _run_with_tui(config, goal):
         enable_parallel=config.enable_parallel_tools,
         max_parallel=config.max_parallel_tools,
     )
-    
+
     with tui:
         tui.add_user_message(goal)
         result = await loop.run_turn(goal)
@@ -225,12 +353,14 @@ def _create_provider(config):
     """Create the appropriate provider based on config."""
     if config.provider == "anthropic":
         from coding_agent.providers.anthropic import AnthropicProvider
+
         return AnthropicProvider(
             model=config.model,
             api_key=config.api_key,
         )
     else:
         from coding_agent.providers.openai_compat import OpenAICompatProvider
+
         return OpenAICompatProvider(
             model=config.model,
             api_key=config.api_key,
@@ -243,7 +373,7 @@ def _create_provider(config):
 def stats(session: str | None):
     """Show session statistics."""
     from coding_agent.metrics import collector
-    
+
     if not session:
         # Use last session
         sessions = collector.list_sessions()
@@ -251,20 +381,22 @@ def stats(session: str | None):
             click.echo("No sessions found.")
             return
         session = sessions[-1]
-    
+
     metrics = collector.get_session(session)
     if not metrics:
         click.echo(f"Session {session} not found.")
         return
-    
+
     data = metrics.to_dict()
-    
+
     click.echo(f"Session: {data['session_id']}")
     click.echo(f"Duration: {data['duration']}")
     click.echo(f"\nTools: {data['tools_total']} calls")
-    for tool, count in data['tool_calls'].items():
+    for tool, count in data["tool_calls"].items():
         click.echo(f"  • {tool}: {count}")
-    click.echo(f"\nAPI: {data['api_calls']} calls, avg latency {data['avg_api_latency']}")
+    click.echo(
+        f"\nAPI: {data['api_calls']} calls, avg latency {data['avg_api_latency']}"
+    )
     click.echo(f"Cache hit rate: {data['cache_hit_rate']}")
     click.echo(f"Tokens: {data['tokens_input']} in / {data['tokens_output']} out")
 
@@ -276,7 +408,7 @@ def serve(port: int, host: str):
     """Start HTTP API server."""
     import uvicorn
     from coding_agent.ui.http_server import app
-    
+
     click.echo(f"Starting Coding Agent HTTP server on {host}:{port}")
     uvicorn.run(app, host=host, port=port)
 

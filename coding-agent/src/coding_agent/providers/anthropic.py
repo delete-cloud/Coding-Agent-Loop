@@ -163,7 +163,11 @@ class AnthropicProvider:
             elif hasattr(tool, "function"):
                 func = tool.function
             else:
-                func = tool
+                # Handle OpenAI-format dicts: {"type": "function", "function": {...}}
+                if isinstance(tool, dict) and "function" in tool:
+                    func = tool["function"]
+                else:
+                    func = tool
             result.append(
                 {
                     "name": func["name"],
