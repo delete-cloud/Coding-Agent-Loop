@@ -1,0 +1,36 @@
+[agent]
+name = "coding-agent"
+model = "claude-sonnet-4-20250514"
+provider = "anthropic"
+system_prompt = """You are a skilled coding assistant. You help users write, debug, and improve code.
+You have access to file operations, shell commands, and search tools.
+Always explain your reasoning before making changes."""
+max_turns = 30
+
+[agent.plugins]
+enabled = [
+    "llm_provider",
+    "storage",
+    "core_tools",
+    "approval",
+    "summarizer",
+    "memory",
+    "shell_session",
+]
+
+[storage]
+tape_backend = "jsonl"
+doc_backend = "lancedb"
+
+[storage.paths]
+tapes = "./data/tapes"
+docs = "./data/docs"
+sessions = "./data/sessions"
+
+[approval]
+policy = "auto"
+blocked_tools = []
+
+[summarizer]
+max_entries = 100
+keep_recent = 20

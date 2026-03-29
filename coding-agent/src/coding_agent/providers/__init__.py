@@ -1,12 +1,16 @@
 """LLM providers."""
 
-from coding_agent.providers.base import ChatProvider, StreamEvent, ToolCall, ToolSchema
+from agentkit.providers.models import DoneEvent, StreamEvent, TextEvent, ToolCallEvent
+from agentkit.providers.protocol import LLMProvider
+from coding_agent.providers.anthropic import AnthropicProvider
 from coding_agent.providers.openai_compat import OpenAICompatProvider
 
 __all__ = [
-    "ChatProvider",
-    "StreamEvent",
-    "ToolCall",
-    "ToolSchema",
+    "AnthropicProvider",
+    "DoneEvent",
+    "LLMProvider",
     "OpenAICompatProvider",
+    "StreamEvent",
+    "TextEvent",
+    "ToolCallEvent",
 ]

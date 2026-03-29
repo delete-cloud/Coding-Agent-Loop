@@ -11,10 +11,11 @@ from typing import Any, AsyncIterator
 import httpx
 from openai import AsyncOpenAI, APIError, RateLimitError, APIStatusError
 
-from coding_agent.providers.base import (
+from agentkit.providers.models import (
     StreamEvent,
-    ToolCall,
-    ToolSchema,
+    TextEvent,
+    ToolCallEvent,
+    DoneEvent,
 )
 from coding_agent.utils.retry import _extract_status_code, RETRYABLE_STATUS_CODES
 
@@ -24,7 +25,6 @@ logger = logging.getLogger(__name__)
 class OpenAICompatProvider:
     """OpenAI-compatible provider (works with OpenAI, Deepseek, Qwen, etc.)."""
 
-    # Model context sizes (in tokens)
     CONTEXT_SIZES: dict[str, int] = {
         "gpt-4o": 128000,
         "gpt-4o-mini": 128000,
@@ -51,21 +51,20 @@ class OpenAICompatProvider:
     ):
         self._model = model
         # Handle SecretStr by extracting actual value
-        if hasattr(api_key, 'get_secret_value'):
+        if hasattr(api_key, "get_secret_value"):
             api_key = api_key.get_secret_value()
-        
-        # Create reusable HTTP client with connection pool
+
         limits = httpx.Limits(
             max_connections=max_connections,
             max_keepalive_connections=max_keepalive,
         )
         timeout_config = httpx.Timeout(timeout)
-        
+
         self._http_client = httpx.AsyncClient(
             limits=limits,
             timeout=timeout_config,
         )
-        
+
         self._client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
@@ -79,40 +78,37 @@ class OpenAICompatProvider:
 
     @property
     def model_name(self) -> str:
-        """Name of the model being used."""
         return self._model
 
     @property
     def max_context_size(self) -> int:
-        """Maximum context size in tokens."""
         return self.CONTEXT_SIZES.get(self._model, 128000)
+
+    def _convert_tools(self, tools: list[Any]) -> list[dict[str, Any]]:
+        result = []
+        for tool in tools:
+            # agentkit ToolSchema — has to_openai_format()
+            if hasattr(tool, "to_openai_format"):
+                result.append(tool.to_openai_format())
+            # old base.ToolSchema — has .function dict
+            elif hasattr(tool, "function"):
+                result.append({"type": "function", "function": tool.function})
+            else:
+                result.append(tool)
+        return result
 
     async def stream(
         self,
         messages: list[dict[str, Any]],
-        tools: list[ToolSchema] | None = None,
+        tools: list[Any] | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[StreamEvent]:
-        """Stream LLM response with automatic retry.
-
-        Args:
-            messages: List of message dicts
-            tools: Optional list of tool schemas
-            **kwargs: Additional options
-
-        Yields:
-            StreamEvent objects
-        """
-        # Convert tools to OpenAI format
         openai_tools = None
         if tools:
-            openai_tools = [
-                {"type": "function", "function": tool.function}
-                for tool in tools
-            ]
+            openai_tools = self._convert_tools(tools)
 
         last_exception: Exception | None = None
-        
+
         for attempt in range(self._max_retries + 1):
             try:
                 stream = await self._client.chat.completions.create(
@@ -125,7 +121,6 @@ class OpenAICompatProvider:
                     **kwargs,
                 )
 
-                # Track accumulating tool calls
                 accumulating_calls: dict[int, dict[str, Any]] = {}
 
                 async for chunk in stream:
@@ -134,11 +129,9 @@ class OpenAICompatProvider:
 
                     delta = chunk.choices[0].delta
 
-                    # Handle text content
                     if delta.content:
-                        yield StreamEvent(type="delta", text=delta.content)
+                        yield TextEvent(text=delta.content)
 
-                    # Handle tool calls
                     if delta.tool_calls:
                         for tc in delta.tool_calls:
                             idx = tc.index
@@ -148,90 +141,83 @@ class OpenAICompatProvider:
                                     "name": "",
                                     "arguments": "",
                                 }
-                            
+
                             if tc.function:
                                 if tc.function.name:
                                     accumulating_calls[idx]["name"] = tc.function.name
                                 if tc.function.arguments:
-                                    accumulating_calls[idx]["arguments"] += tc.function.arguments
+                                    accumulating_calls[idx]["arguments"] += (
+                                        tc.function.arguments
+                                    )
 
-                    # Check for finished tool calls
                     finish_reason = chunk.choices[0].finish_reason
                     if finish_reason in ("tool_calls", "stop") and accumulating_calls:
                         for idx in sorted(accumulating_calls.keys()):
                             call_data = accumulating_calls[idx]
                             try:
-                                args = json.loads(call_data["arguments"]) if call_data["arguments"] else {}
+                                args = (
+                                    json.loads(call_data["arguments"])
+                                    if call_data["arguments"]
+                                    else {}
+                                )
                             except json.JSONDecodeError:
                                 args = {}
-                            
-                            yield StreamEvent(
-                                type="tool_call",
-                                tool_call=ToolCall(
-                                    id=call_data["id"],
-                                    name=call_data["name"],
-                                    arguments=args,
-                                ),
+
+                            yield ToolCallEvent(
+                                tool_call_id=call_data["id"],
+                                name=call_data["name"],
+                                arguments=args,
                             )
                         accumulating_calls.clear()
 
-                yield StreamEvent(type="done")
+                yield DoneEvent()
                 return  # Success, exit the retry loop
 
             except Exception as e:
                 last_exception = e
-                
-                # Check if this is the last attempt
+
                 if attempt >= self._max_retries:
                     logger.debug(f"Max retries ({self._max_retries}) exceeded")
                     break
-                
-                # Extract status code from exception
+
                 status_code = _extract_status_code(e)
-                
-                # Only retry if we have a status code and it's in retryable list
+
                 if status_code is None:
-                    logger.debug(f"No status code found in {type(e).__name__}, raising immediately")
+                    logger.debug(
+                        f"No status code found in {type(e).__name__}, raising immediately"
+                    )
                     break
-                
+
                 if status_code not in RETRYABLE_STATUS_CODES:
-                    logger.debug(f"Status {status_code} not retryable, raising immediately")
+                    logger.debug(
+                        f"Status {status_code} not retryable, raising immediately"
+                    )
                     break
-                
-                # Calculate delay with exponential backoff and jitter
-                delay = min(self._retry_base_delay * (2 ** attempt), self._retry_max_delay)
-                delay += random.uniform(0, 1)  # Add jitter
-                
+
+                delay = min(
+                    self._retry_base_delay * (2**attempt), self._retry_max_delay
+                )
+                delay += random.uniform(0, 1)
+
                 logger.warning(
                     f"stream failed (attempt {attempt + 1}/{self._max_retries + 1}): "
                     f"{type(e).__name__}{f' (status={status_code})' if status_code else ''}, "
                     f"retrying in {delay:.2f}s..."
                 )
-                
+
                 await asyncio.sleep(delay)
-        
-        # All retries exhausted or non-retryable error
+
+        # All retries exhausted or non-retryable error — raise instead of yielding error events
         if last_exception:
-            status_code = _extract_status_code(last_exception)
-            if isinstance(last_exception, RateLimitError):
-                yield StreamEvent(type="error", error=f"Rate limit exceeded: {last_exception}")
-            elif isinstance(last_exception, APIStatusError):
-                yield StreamEvent(type="error", error=f"API error {status_code}: {last_exception}")
-            elif isinstance(last_exception, APIError):
-                yield StreamEvent(type="error", error=f"API error: {last_exception}")
-            else:
-                yield StreamEvent(type="error", error=f"Unexpected error: {last_exception}")
+            raise last_exception
 
     async def close(self) -> None:
-        """Close HTTP client and release connections."""
         if self._http_client:
             await self._http_client.aclose()
             self._http_client = None
 
     async def __aenter__(self):
-        """Async context manager entry."""
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit."""
         await self.close()
