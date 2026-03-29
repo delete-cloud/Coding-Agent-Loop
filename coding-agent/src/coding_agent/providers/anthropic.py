@@ -10,10 +10,11 @@ from typing import Any, AsyncIterator
 
 from anthropic import AsyncAnthropic, APIError, RateLimitError, APIStatusError
 
-from coding_agent.providers.base import (
+from agentkit.providers.models import (
     StreamEvent,
-    ToolCall,
-    ToolSchema,
+    TextEvent,
+    ToolCallEvent,
+    DoneEvent,
 )
 from coding_agent.utils.retry import _extract_status_code, RETRYABLE_STATUS_CODES
 
@@ -58,7 +59,6 @@ class AnthropicProvider:
 
     @property
     def _client(self) -> AsyncAnthropic:
-        """Lazy initialization of Anthropic client."""
         if self.__client is None:
             self.__client = AsyncAnthropic(
                 api_key=self._api_key,
@@ -68,7 +68,6 @@ class AnthropicProvider:
 
     @_client.setter
     def _client(self, value: AsyncAnthropic | None) -> None:
-        """Allow setting _client directly (for testing)."""
         self.__client = value
 
     @property
@@ -111,65 +110,77 @@ class AnthropicProvider:
                         func = tc.get("function", {})
                         args_str = func.get("arguments", "{}")
                         try:
-                            args = json.loads(args_str) if isinstance(args_str, str) else args_str
+                            args = (
+                                json.loads(args_str)
+                                if isinstance(args_str, str)
+                                else args_str
+                            )
                         except json.JSONDecodeError as e:
-                            logging.warning(f"Failed to parse tool arguments JSON: {e}, args_str={args_str!r}")
+                            logging.warning(
+                                f"Failed to parse tool arguments JSON: {e}, args_str={args_str!r}"
+                            )
                             args = {"_parse_error": str(e), "_raw": args_str}
-                        content_blocks.append({
-                            "type": "tool_use",
-                            "id": tc["id"],
-                            "name": func["name"],
-                            "input": args,
-                        })
-                    anthropic_msgs.append({"role": "assistant", "content": content_blocks})
+                        content_blocks.append(
+                            {
+                                "type": "tool_use",
+                                "id": tc["id"],
+                                "name": func["name"],
+                                "input": args,
+                            }
+                        )
+                    anthropic_msgs.append(
+                        {"role": "assistant", "content": content_blocks}
+                    )
                 else:
-                    anthropic_msgs.append({"role": "assistant", "content": msg.get("content", "")})
+                    anthropic_msgs.append(
+                        {"role": "assistant", "content": msg.get("content", "")}
+                    )
 
             elif role == "tool":
                 # Tool results → user message with tool_result content block
-                anthropic_msgs.append({
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": msg["tool_call_id"],
-                            "content": msg.get("content", ""),
-                        }
-                    ],
-                })
+                anthropic_msgs.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": msg["tool_call_id"],
+                                "content": msg.get("content", ""),
+                            }
+                        ],
+                    }
+                )
 
         return "\n\n".join(system_parts), anthropic_msgs
 
-    def _convert_tools(self, tools: list[ToolSchema]) -> list[dict[str, Any]]:
-        """Convert ToolSchema list to Anthropic tool format."""
+    def _convert_tools(self, tools: list[Any]) -> list[dict[str, Any]]:
         result = []
         for tool in tools:
-            func = tool.function
-            result.append({
-                "name": func["name"],
-                "description": func.get("description", ""),
-                "input_schema": func.get("parameters", {"type": "object", "properties": {}}),
-            })
+            # agentkit ToolSchema — has to_openai_format()
+            if hasattr(tool, "to_openai_format"):
+                func = tool.to_openai_format()["function"]
+            # old base.ToolSchema — has .function dict
+            elif hasattr(tool, "function"):
+                func = tool.function
+            else:
+                func = tool
+            result.append(
+                {
+                    "name": func["name"],
+                    "description": func.get("description", ""),
+                    "input_schema": func.get(
+                        "parameters", {"type": "object", "properties": {}}
+                    ),
+                }
+            )
         return result
 
     async def stream(
         self,
         messages: list[dict[str, Any]],
-        tools: list[ToolSchema] | None = None,
+        tools: list[Any] | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[StreamEvent]:
-        """Stream response from Anthropic API with automatic retry.
-
-        Translates Anthropic streaming events to internal StreamEvent format.
-
-        Args:
-            messages: List of message dicts in OpenAI format
-            tools: Optional list of tool schemas
-            **kwargs: Additional options
-
-        Yields:
-            StreamEvent objects
-        """
         system_prompt, anthropic_msgs = self._convert_messages(messages)
 
         api_kwargs: dict[str, Any] = {
@@ -204,31 +215,34 @@ class AnthropicProvider:
                             case "content_block_delta":
                                 delta = event.delta
                                 if delta.type == "text_delta":
-                                    yield StreamEvent(type="delta", text=delta.text)
+                                    yield TextEvent(text=delta.text)
                                 elif delta.type == "input_json_delta":
                                     idx = event.index
                                     if idx in tool_blocks:
-                                        tool_blocks[idx]["input_json"] += delta.partial_json
+                                        tool_blocks[idx]["input_json"] += (
+                                            delta.partial_json
+                                        )
                             case "content_block_stop":
                                 idx = event.index
                                 if idx in tool_blocks:
                                     block = tool_blocks.pop(idx)
                                     try:
-                                        args = json.loads(block["input_json"]) if block["input_json"] else {}
+                                        args = (
+                                            json.loads(block["input_json"])
+                                            if block["input_json"]
+                                            else {}
+                                        )
                                     except json.JSONDecodeError:
                                         args = {}
-                                    yield StreamEvent(
-                                        type="tool_call",
-                                        tool_call=ToolCall(
-                                            id=block["id"],
-                                            name=block["name"],
-                                            arguments=args,
-                                        ),
+                                    yield ToolCallEvent(
+                                        tool_call_id=block["id"],
+                                        name=block["name"],
+                                        arguments=args,
                                     )
                             case "message_stop":
                                 pass
 
-                yield StreamEvent(type="done")
+                yield DoneEvent()
                 return  # Success, exit the retry loop
 
             except Exception as e:
@@ -244,15 +258,21 @@ class AnthropicProvider:
 
                 # Only retry if we have a status code and it's in retryable list
                 if status_code is None:
-                    logger.debug(f"No status code found in {type(e).__name__}, raising immediately")
+                    logger.debug(
+                        f"No status code found in {type(e).__name__}, raising immediately"
+                    )
                     break
 
                 if status_code not in RETRYABLE_STATUS_CODES:
-                    logger.debug(f"Status {status_code} not retryable, raising immediately")
+                    logger.debug(
+                        f"Status {status_code} not retryable, raising immediately"
+                    )
                     break
 
                 # Calculate delay with exponential backoff and jitter
-                delay = min(self._retry_base_delay * (2 ** attempt), self._retry_max_delay)
+                delay = min(
+                    self._retry_base_delay * (2**attempt), self._retry_max_delay
+                )
                 delay += random.uniform(0, 1)  # Add jitter
 
                 logger.warning(
@@ -263,28 +283,17 @@ class AnthropicProvider:
 
                 await asyncio.sleep(delay)
 
-        # All retries exhausted or non-retryable error
+        # All retries exhausted or non-retryable error — raise instead of yielding error events
         if last_exception:
-            status_code = _extract_status_code(last_exception)
-            if isinstance(last_exception, RateLimitError):
-                yield StreamEvent(type="error", error=f"Rate limit exceeded: {last_exception}")
-            elif isinstance(last_exception, APIStatusError):
-                yield StreamEvent(type="error", error=f"API error {status_code}: {last_exception}")
-            elif isinstance(last_exception, APIError):
-                yield StreamEvent(type="error", error=f"API error: {last_exception}")
-            else:
-                yield StreamEvent(type="error", error=f"Unexpected error: {last_exception}")
+            raise last_exception
 
     async def close(self) -> None:
-        """Close client and release connections."""
         if self.__client:
             await self.__client.close()
             self.__client = None
 
     async def __aenter__(self):
-        """Async context manager entry."""
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit."""
         await self.close()
