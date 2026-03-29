@@ -7,6 +7,11 @@ from typing import Any
 
 import click
 
+from coding_agent.adapter import PipelineAdapter
+from coding_agent.core.config import use_pipeline
+from coding_agent.ui.headless import HeadlessConsumer
+from coding_agent.ui.rich_tui import CodingAgentTUI
+
 
 def create_agent(
     config_path: Path | None = None,
@@ -218,6 +223,20 @@ def repl(repo, model, provider_name, base_url, api_key, max_steps):
 
 async def _run_with_tui(config, goal):
     """Run agent with TUI display."""
+    if use_pipeline():
+        api_key = config.api_key.get_secret_value() if config.api_key else None
+        pipeline, ctx = create_agent(
+            api_key=api_key,
+            model_override=config.model,
+        )
+        tui = CodingAgentTUI(model_name=config.model, max_steps=config.max_steps)
+        adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=tui.consumer)
+        with tui:
+            tui.add_user_message(goal)
+            result = await adapter.run_turn(goal)
+            click.echo(f"\n--- Result ({result.stop_reason}) ---")
+        return
+
     from coding_agent.core.loop import AgentLoop
     from coding_agent.core.planner import PlanManager
     from coding_agent.tools.registry import ToolRegistry
@@ -228,7 +247,6 @@ async def _run_with_tui(config, goal):
     from coding_agent.tools.subagent import register_subagent_tool
     from coding_agent.core.tape import Tape
     from coding_agent.core.context import Context
-    from coding_agent.ui.rich_tui import CodingAgentTUI
 
     tape = Tape.create(config.tape_dir)
     provider = _create_provider(config)
@@ -287,6 +305,20 @@ async def _run_with_tui(config, goal):
 
 async def _run_headless(config, goal):
     """Run agent in headless mode."""
+    if use_pipeline():
+        api_key = config.api_key.get_secret_value() if config.api_key else None
+        pipeline, ctx = create_agent(
+            api_key=api_key,
+            model_override=config.model,
+        )
+        consumer = HeadlessConsumer()
+        adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
+        result = await adapter.run_turn(goal)
+        click.echo(f"\n--- Result ({result.stop_reason}) ---")
+        if result.final_message:
+            click.echo(result.final_message)
+        return
+
     from coding_agent.core.loop import AgentLoop
     from coding_agent.core.planner import PlanManager
     from coding_agent.tools.registry import ToolRegistry
@@ -297,7 +329,6 @@ async def _run_headless(config, goal):
     from coding_agent.tools.subagent import register_subagent_tool
     from coding_agent.core.tape import Tape
     from coding_agent.core.context import Context
-    from coding_agent.ui.headless import HeadlessConsumer
 
     tape = Tape.create(config.tape_dir)
     provider = _create_provider(config)
@@ -315,7 +346,6 @@ async def _run_headless(config, goal):
 
     consumer = HeadlessConsumer()
 
-    # Register subagent tool (needs provider, tape, consumer)
     register_subagent_tool(
         registry=registry,
         provider=provider,
