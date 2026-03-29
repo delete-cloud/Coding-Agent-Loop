@@ -107,6 +107,8 @@ class InteractiveSession:
                 else None,
                 model_override=self.config.model,
             )
+            if pipeline._directive_executor is not None:
+                pipeline._directive_executor._ask_user = self._ask_user_for_approval
             self._pipeline_adapter = PipelineAdapter(
                 pipeline=pipeline, ctx=pipeline_ctx
             )
@@ -114,6 +116,14 @@ class InteractiveSession:
         else:
             self._pipeline_adapter = None
             self._use_pipeline = False
+
+    async def _ask_user_for_approval(self, question: str) -> bool:
+        console.print("\n[yellow bold]⚠ Approval Required[/]")
+        console.print(f"[yellow]{question}[/]")
+        response = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: input("[y/N] > ").strip().lower()
+        )
+        return response in ("y", "yes")
 
     # Proxy methods for WireConsumer protocol (used by subagent tool)
     async def emit(self, msg) -> None:

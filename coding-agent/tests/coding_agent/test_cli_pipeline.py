@@ -692,3 +692,176 @@ class TestReplPipelineAdapterConsumerUpdated:
         assert len(consumers_seen) == 2
         assert consumers_seen[0] is tui_1.consumer
         assert consumers_seen[1] is tui_2.consumer
+
+
+# ---------------------------------------------------------------------------
+# T16: Interactive approval via DirectiveExecutor in REPL
+# ---------------------------------------------------------------------------
+
+
+class TestReplApprovalWiring:
+    """REPL wires an ask_user_handler to DirectiveExecutor for interactive approval."""
+
+    @patch("coding_agent.cli.repl.use_pipeline", return_value=True)
+    @patch("coding_agent.cli.repl.create_agent")
+    def test_repl_sets_ask_user_handler_on_directive_executor(
+        self, mock_create_agent, _mock_toggle
+    ):
+        """After setup, the pipeline's DirectiveExecutor has an ask_user handler."""
+        from agentkit.directive.executor import DirectiveExecutor
+
+        mock_pipeline = MagicMock()
+        mock_pipeline._directive_executor = DirectiveExecutor()
+        mock_ctx = MagicMock()
+        mock_create_agent.return_value = (mock_pipeline, mock_ctx)
+
+        from coding_agent.cli.repl import InteractiveSession
+
+        config = _make_repl_config()
+        session = InteractiveSession(config)
+
+        assert mock_pipeline._directive_executor._ask_user is not None
+        assert callable(mock_pipeline._directive_executor._ask_user)
+
+    @pytest.mark.asyncio
+    @patch("coding_agent.cli.repl.use_pipeline", return_value=True)
+    @patch("coding_agent.cli.repl.create_agent")
+    async def test_repl_approval_prompt_approved(
+        self, mock_create_agent, _mock_toggle, monkeypatch
+    ):
+        """When AskUser directive fires, the handler prompts and user approves."""
+        from agentkit.directive.executor import DirectiveExecutor
+        from agentkit.directive.types import AskUser
+
+        executor = DirectiveExecutor()
+        mock_pipeline = MagicMock()
+        mock_pipeline._directive_executor = executor
+        mock_ctx = MagicMock()
+        mock_create_agent.return_value = (mock_pipeline, mock_ctx)
+
+        from coding_agent.cli.repl import InteractiveSession
+
+        config = _make_repl_config()
+        session = InteractiveSession(config)
+
+        assert executor._ask_user is not None
+
+        monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+
+        directive = AskUser(question="Allow tool 'shell_exec'?")
+        result = await executor.execute(directive)
+        assert result is True
+
+    @pytest.mark.asyncio
+    @patch("coding_agent.cli.repl.use_pipeline", return_value=True)
+    @patch("coding_agent.cli.repl.create_agent")
+    async def test_repl_approval_prompt_denied(
+        self, mock_create_agent, _mock_toggle, monkeypatch
+    ):
+        """When user denies approval, AskUser returns False."""
+        from agentkit.directive.executor import DirectiveExecutor
+        from agentkit.directive.types import AskUser
+
+        executor = DirectiveExecutor()
+        mock_pipeline = MagicMock()
+        mock_pipeline._directive_executor = executor
+        mock_ctx = MagicMock()
+        mock_create_agent.return_value = (mock_pipeline, mock_ctx)
+
+        from coding_agent.cli.repl import InteractiveSession
+
+        config = _make_repl_config()
+        session = InteractiveSession(config)
+
+        monkeypatch.setattr("builtins.input", lambda prompt="": "n")
+
+        directive = AskUser(question="Allow tool 'shell_exec'?")
+        result = await executor.execute(directive)
+        assert result is False
+
+    @pytest.mark.asyncio
+    @patch("coding_agent.cli.repl.use_pipeline", return_value=True)
+    @patch("coding_agent.cli.repl.create_agent")
+    async def test_repl_approval_prompt_empty_defaults_no(
+        self, mock_create_agent, _mock_toggle, monkeypatch
+    ):
+        """Empty input defaults to rejection (N in [y/N])."""
+        from agentkit.directive.executor import DirectiveExecutor
+        from agentkit.directive.types import AskUser
+
+        executor = DirectiveExecutor()
+        mock_pipeline = MagicMock()
+        mock_pipeline._directive_executor = executor
+        mock_ctx = MagicMock()
+        mock_create_agent.return_value = (mock_pipeline, mock_ctx)
+
+        from coding_agent.cli.repl import InteractiveSession
+
+        config = _make_repl_config()
+        session = InteractiveSession(config)
+
+        monkeypatch.setattr("builtins.input", lambda prompt="": "")
+
+        directive = AskUser(question="Allow tool 'shell_exec'?")
+        result = await executor.execute(directive)
+        assert result is False
+
+    @pytest.mark.asyncio
+    @patch("coding_agent.cli.repl.use_pipeline", return_value=True)
+    @patch("coding_agent.cli.repl.create_agent")
+    async def test_repl_approval_yes_variants(
+        self, mock_create_agent, _mock_toggle, monkeypatch
+    ):
+        """'yes', 'Y', 'YES' all approve."""
+        from agentkit.directive.executor import DirectiveExecutor
+        from agentkit.directive.types import AskUser
+
+        executor = DirectiveExecutor()
+        mock_pipeline = MagicMock()
+        mock_pipeline._directive_executor = executor
+        mock_ctx = MagicMock()
+        mock_create_agent.return_value = (mock_pipeline, mock_ctx)
+
+        from coding_agent.cli.repl import InteractiveSession
+
+        config = _make_repl_config()
+        session = InteractiveSession(config)
+
+        for variant in ("y", "Y", "yes", "YES", "Yes"):
+            monkeypatch.setattr("builtins.input", lambda prompt="", v=variant: v)
+            directive = AskUser(question="Allow?")
+            result = await executor.execute(directive)
+            assert result is True, f"Expected True for input '{variant}'"
+
+
+class TestBatchModeAutoApprove:
+    """In batch mode with yolo policy, approval doesn't block (returns Approve)."""
+
+    @pytest.mark.asyncio
+    async def test_batch_yolo_policy_returns_approve(self):
+        """ApprovalPlugin with AUTO policy always returns Approve — no AskUser."""
+        from agentkit.directive.executor import DirectiveExecutor
+        from agentkit.directive.types import Approve
+        from coding_agent.plugins.approval import ApprovalPlugin, ApprovalPolicy
+
+        plugin = ApprovalPlugin(policy=ApprovalPolicy.AUTO)
+        directive = plugin.approve_tool_call(
+            tool_name="shell_exec", arguments={"cmd": "ls"}
+        )
+
+        assert isinstance(directive, Approve)
+
+        executor = DirectiveExecutor()
+        result = await executor.execute(directive)
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_batch_no_handler_rejects_ask_user(self):
+        """DirectiveExecutor with no handler rejects AskUser (batch safety)."""
+        from agentkit.directive.executor import DirectiveExecutor
+        from agentkit.directive.types import AskUser
+
+        executor = DirectiveExecutor()
+        directive = AskUser(question="Allow?")
+        result = await executor.execute(directive)
+        assert result is False
