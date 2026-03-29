@@ -1,3 +1,4 @@
+from agentkit.directive.executor import DirectiveExecutor
 from agentkit.directive.types import (
     Approve,
     AskUser,
@@ -7,4 +8,12 @@ from agentkit.directive.types import (
     Reject,
 )
 
-__all__ = ["Approve", "AskUser", "Checkpoint", "Directive", "MemoryRecord", "Reject"]
+__all__ = [
+    "Approve",
+    "AskUser",
+    "Checkpoint",
+    "Directive",
+    "DirectiveExecutor",
+    "MemoryRecord",
+    "Reject",
+]
