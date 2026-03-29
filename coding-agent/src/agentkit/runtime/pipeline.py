@@ -223,21 +223,43 @@ class Pipeline:
                         )
                         continue
 
-                    result = self._runtime.call_first(
-                        "execute_tool",
-                        name=tc["name"],
-                        arguments=tc["arguments"],
-                    )
-
-                    ctx.tape.append(
-                        Entry(
-                            kind="tool_result",
-                            payload={
-                                "tool_call_id": tc["id"],
-                                "content": str(result) if result is not None else "",
-                            },
+                    try:
+                        result = self._runtime.call_first(
+                            "execute_tool",
+                            name=tc["name"],
+                            arguments=tc["arguments"],
                         )
-                    )
+
+                        result_str = str(result) if result is not None else ""
+                        max_size = ctx.config.get("max_tool_result_size", 10000)
+                        if len(result_str) > max_size:
+                            result_str = (
+                                result_str[:max_size]
+                                + f"\n... ({len(result_str) - max_size} chars truncated)"
+                            )
+
+                        ctx.tape.append(
+                            Entry(
+                                kind="tool_result",
+                                payload={
+                                    "tool_call_id": tc["id"],
+                                    "content": result_str,
+                                },
+                            )
+                        )
+                    except Exception as exc:
+                        error_message = (
+                            f"Error executing tool '{tc['name']}': {str(exc)}"
+                        )
+                        ctx.tape.append(
+                            Entry(
+                                kind="tool_result",
+                                payload={
+                                    "tool_call_id": tc["id"],
+                                    "content": error_message,
+                                },
+                            )
+                        )
 
                 await self._stage_build_context(ctx)
                 continue

@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, AsyncIterator, Callable
 
 from agentkit.providers.protocol import LLMProvider
+from agentkit.providers.models import (
+    TextEvent,
+    ToolCallEvent,
+    DoneEvent,
+    StreamEvent as NewStreamEvent,
+)
+from coding_agent.providers.base import StreamEvent as OldStreamEvent
 
 
 class LLMProviderPlugin:
@@ -49,3 +56,38 @@ class LLMProviderPlugin:
             raise ValueError(f"unsupported provider: {self._provider_name}")
 
         return self._instance
+
+
+async def adapt_stream_events(
+    old_stream: AsyncIterator[OldStreamEvent],
+) -> AsyncIterator[NewStreamEvent]:
+    """Adapt old StreamEvent types to new agentkit event types.
+
+    Converts:
+    - delta → TextEvent
+    - tool_call → ToolCallEvent
+    - done → DoneEvent
+    - error → DoneEvent (error field not supported in agentkit)
+
+    Args:
+        old_stream: AsyncIterator yielding old StreamEvent objects
+
+    Yields:
+        New agentkit StreamEvent types (TextEvent, ToolCallEvent, DoneEvent)
+    """
+    async for event in old_stream:
+        if event.type == "delta":
+            yield TextEvent(text=event.text or "")
+        elif event.type == "tool_call":
+            if event.tool_call is not None:
+                yield ToolCallEvent(
+                    tool_call_id=event.tool_call.id,
+                    name=event.tool_call.name,
+                    arguments=event.tool_call.arguments,
+                )
+        elif event.type == "done":
+            yield DoneEvent()
+        elif event.type == "error":
+            # Error events converted to DoneEvent
+            # (agentkit DoneEvent has no error field; errors handled separately)
+            yield DoneEvent()
