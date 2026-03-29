@@ -3,7 +3,9 @@
   "started_at": "2026-03-29T13:15:00.000Z",
   "session_ids": [
     "ses_2caaf6e50ffefyaKVOCOuMdsSZ",
-    "ses_2c6321ef9ffe8u4o1VK5pzqtC2"
+    "ses_2c6321ef9ffe8u4o1VK5pzqtC2",
+    "ses_2c6311b71ffedgr5NJ1SQj4rGI",
+    "ses_2c631d83cffeFGzQEK9T66Spkb"
   ],
   "plan_name": "cli-cutover",
   "task_sessions": {}
