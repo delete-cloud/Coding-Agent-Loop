@@ -74,8 +74,7 @@ class Pipeline:
 
     async def run_turn(self, ctx: PipelineContext) -> PipelineContext:
         fork = None
-        if ctx.storage is not None and hasattr(ctx.storage, "begin"):
-            fork = ctx.storage.begin(ctx.tape)
+        original_tape = ctx.tape
 
         try:
             for stage in self.STAGES:
@@ -83,6 +82,11 @@ class Pipeline:
                     handler = getattr(self, f"_stage_{stage}", None)
                     if handler is not None:
                         await handler(ctx)
+                        if stage == "load_state" and ctx.storage is not None:
+                            begin = getattr(ctx.storage, "begin", None)
+                            if callable(begin):
+                                fork = begin(ctx.tape)
+                                ctx.tape = fork
                     else:
                         logger.debug("Stage '%s' has no handler, skipping", stage)
                 except PipelineError:
@@ -92,20 +96,23 @@ class Pipeline:
                     raise PipelineError(str(exc), stage=stage) from exc
 
             if fork is not None:
-                ctx.storage.commit(fork)
+                await ctx.storage.commit(fork)
 
             return ctx
         except Exception:
             if fork is not None:
                 ctx.storage.rollback(fork)
+            ctx.tape = original_tape
             raise
 
     async def _stage_resolve_session(self, ctx: PipelineContext) -> None:
         pass
 
     async def _stage_load_state(self, ctx: PipelineContext) -> None:
-        ctx.storage = self._runtime.call_first("provide_storage")
-        ctx.llm_provider = self._runtime.call_first("provide_llm")
+        if ctx.storage is None:
+            ctx.storage = self._runtime.call_first("provide_storage")
+        if ctx.llm_provider is None:
+            ctx.llm_provider = self._runtime.call_first("provide_llm")
 
         tool_lists = self._runtime.call_many("get_tools")
         ctx.tool_schemas = []
@@ -118,6 +125,11 @@ class Pipeline:
     async def _stage_build_context(self, ctx: PipelineContext) -> None:
         summary = self._runtime.call_first("summarize_context", tape=ctx.tape)
         if summary is not None:
+            ctx.tape = Tape(
+                entries=list(summary),
+                tape_id=ctx.tape.tape_id,
+                parent_id=ctx.tape.parent_id,
+            )
             logger.info("Context summarized: %d entries remaining", len(ctx.tape))
 
         grounding_results = self._runtime.call_many("build_context", tape=ctx.tape)
@@ -173,14 +185,19 @@ class Pipeline:
                 break
 
             if tool_calls:
-                ctx.tape.append(
-                    Entry(
-                        kind="tool_call",
-                        payload={"role": "assistant", "tool_calls": tool_calls},
-                    )
-                )
-
                 for tc in tool_calls:
+                    ctx.tape.append(
+                        Entry(
+                            kind="tool_call",
+                            payload={
+                                "id": tc["id"],
+                                "name": tc["name"],
+                                "arguments": tc["arguments"],
+                                "role": "assistant",
+                            },
+                        )
+                    )
+
                     directive = self._runtime.call_first(
                         "approve_tool_call",
                         tool_name=tc["name"],

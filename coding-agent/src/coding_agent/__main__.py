@@ -32,6 +32,8 @@ def create_agent(
     if data_dir is None:
         data_dir = Path("./data")
 
+    workspace_root = Path.cwd()
+
     cfg = load_config(config_path)
 
     if model_override:
@@ -40,6 +42,25 @@ def create_agent(
     resolved_key = api_key or os.environ.get("AGENT_API_KEY", "")
 
     registry = PluginRegistry()
+    plugin_factories = {
+        "llm_provider": lambda: LLMProviderPlugin(
+            provider=cfg.provider,
+            model=cfg.model,
+            api_key=resolved_key,
+        ),
+        "storage": lambda: StoragePlugin(data_dir=data_dir),
+        "core_tools": lambda: CoreToolsPlugin(workspace_root=workspace_root),
+        "approval": lambda: ApprovalPlugin(
+            policy=policy,
+            blocked_tools=set(approval_cfg.get("blocked_tools", [])),
+        ),
+        "summarizer": lambda: SummarizerPlugin(
+            max_entries=sum_cfg.get("max_entries", 100),
+            keep_recent=sum_cfg.get("keep_recent", 20),
+        ),
+        "memory": lambda: MemoryPlugin(),
+        "shell_session": lambda: ShellSessionPlugin(),
+    }
 
     from coding_agent.plugins.approval import ApprovalPlugin, ApprovalPolicy
     from coding_agent.plugins.core_tools import CoreToolsPlugin
@@ -55,29 +76,12 @@ def create_agent(
 
     sum_cfg = cfg.extra.get("summarizer", {})
 
-    registry.register(
-        LLMProviderPlugin(
-            provider=cfg.provider,
-            model=cfg.model,
-            api_key=resolved_key,
-        )
-    )
-    registry.register(StoragePlugin(data_dir=data_dir))
-    registry.register(CoreToolsPlugin())
-    registry.register(
-        ApprovalPlugin(
-            policy=policy,
-            blocked_tools=set(approval_cfg.get("blocked_tools", [])),
-        )
-    )
-    registry.register(
-        SummarizerPlugin(
-            max_entries=sum_cfg.get("max_entries", 100),
-            keep_recent=sum_cfg.get("keep_recent", 20),
-        )
-    )
-    registry.register(MemoryPlugin())
-    registry.register(ShellSessionPlugin())
+    enabled_plugins = cfg.plugins or list(plugin_factories.keys())
+    for plugin_name in enabled_plugins:
+        factory = plugin_factories.get(plugin_name)
+        if factory is None:
+            raise ValueError(f"unsupported plugin in config: {plugin_name}")
+        registry.register(factory())
 
     runtime = HookRuntime(registry)
 

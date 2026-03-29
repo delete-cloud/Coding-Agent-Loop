@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Callable
 
 from agentkit.tools import ToolRegistry, ToolSchema
@@ -8,20 +9,25 @@ from agentkit.tools import ToolRegistry, ToolSchema
 class CoreToolsPlugin:
     state_key = "core_tools"
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        workspace_root: Path | str = ".",
+        planner: Any = None,
+    ) -> None:
+        self._workspace_root = Path(workspace_root).resolve()
+        self._planner = planner
         self._registry = ToolRegistry()
         self._register_tools()
 
     def _register_tools(self) -> None:
-        from coding_agent.tools.file_ops import (
-            file_read,
-            file_replace,
-            file_write,
-            glob_files,
-            grep_search,
-        )
-        from coding_agent.tools.planner import todo_read, todo_write
+        from coding_agent.tools.file_ops import build_file_tools
+        from coding_agent.tools.planner import build_planner_tools
         from coding_agent.tools.shell import bash_run
+
+        file_read, file_write, file_replace, glob_files, grep_search = build_file_tools(
+            self._workspace_root
+        )
+        todo_write, todo_read = build_planner_tools(self._planner)
 
         for fn in (
             file_read,

@@ -15,6 +15,8 @@ class MinimalPlugin:
         self.mounted = False
         self.mount_called = False
         self._mock_llm = MagicMock()
+        self._mock_storage = object()
+        self._summary_result = None
 
     def hooks(self):
         return {
@@ -35,7 +37,7 @@ class MinimalPlugin:
         return self._mock_llm
 
     def provide_storage(self, **kwargs):
-        return MagicMock()
+        return self._mock_storage
 
     def get_tools(self, **kwargs):
         return []
@@ -44,7 +46,7 @@ class MinimalPlugin:
         return []
 
     def summarize_context(self, **kwargs):
-        return None
+        return self._summary_result
 
     def execute_tool(self, name: str = "", **kwargs):
         return f"executed:{name}"
@@ -170,3 +172,126 @@ class TestPipeline:
         assert any(e.kind == "tool_call" for e in entries)
         assert any(e.kind == "tool_result" for e in entries)
         assert entries[-1].payload["role"] == "assistant"
+
+    @pytest.mark.asyncio
+    async def test_run_turn_commits_active_fork_and_updates_context_tape(self, setup):
+        pipeline, plugin = setup
+
+        class RecordingStorage:
+            def __init__(self):
+                self.begin_calls = []
+                self.commit_calls = []
+                self.rollback_calls = []
+
+            def begin(self, tape):
+                self.begin_calls.append(tape)
+                return tape.fork()
+
+            async def commit(self, tape):
+                self.commit_calls.append(tape)
+
+            def rollback(self, tape):
+                self.rollback_calls.append(tape)
+
+        tape = Tape()
+        tape.append(Entry(kind="message", payload={"role": "user", "content": "hello"}))
+        ctx = PipelineContext(tape=tape, session_id="s1")
+        await pipeline.mount(ctx)
+
+        storage = RecordingStorage()
+        plugin._mock_storage = storage
+
+        from agentkit.providers.models import TextEvent, DoneEvent
+
+        async def mock_stream(messages, tools=None, **kwargs):
+            yield TextEvent(text="Hello back!")
+            yield DoneEvent()
+
+        mock_llm = MagicMock()
+        mock_llm.stream = mock_stream
+        plugin._mock_llm = mock_llm
+
+        original_tape = ctx.tape
+        await pipeline.run_turn(ctx)
+
+        assert storage.begin_calls == [original_tape]
+        assert len(storage.commit_calls) == 1
+        assert storage.rollback_calls == []
+        assert ctx.tape is storage.commit_calls[0]
+        assert ctx.tape is not original_tape
+        assert ctx.tape.parent_id == original_tape.tape_id
+
+    @pytest.mark.asyncio
+    async def test_build_context_applies_summary_entries(self, setup):
+        pipeline, plugin = setup
+        tape = Tape()
+        tape.append(Entry(kind="message", payload={"role": "user", "content": "older"}))
+        tape.append(
+            Entry(kind="message", payload={"role": "user", "content": "latest"})
+        )
+        ctx = PipelineContext(tape=tape, session_id="s1")
+
+        summary_entries = [
+            Entry(kind="anchor", payload={"content": "summary"}),
+            Entry(kind="message", payload={"role": "user", "content": "latest"}),
+        ]
+        plugin._summary_result = summary_entries
+
+        await pipeline._stage_build_context(ctx)
+
+        entries = list(ctx.tape)
+        assert len(entries) == 2
+        assert entries[0].kind == "anchor"
+        assert entries[0].payload["content"] == "summary"
+        assert ctx.messages[1]["role"] == "system"
+        assert ctx.messages[1]["content"] == "summary"
+
+    @pytest.mark.asyncio
+    async def test_run_turn_records_one_tool_call_entry_per_call(self, setup):
+        pipeline, plugin = setup
+        tape = Tape()
+        tape.append(
+            Entry(kind="message", payload={"role": "user", "content": "do two things"})
+        )
+        ctx = PipelineContext(tape=tape, session_id="s1")
+        await pipeline.mount(ctx)
+
+        from agentkit.providers.models import TextEvent, ToolCallEvent, DoneEvent
+
+        call_count = 0
+
+        async def mock_stream(messages, tools=None, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                yield ToolCallEvent(
+                    tool_call_id="tc1", name="file_read", arguments={"path": "a.txt"}
+                )
+                yield ToolCallEvent(
+                    tool_call_id="tc2", name="file_read", arguments={"path": "b.txt"}
+                )
+                yield DoneEvent()
+            else:
+                yield TextEvent(text="done")
+                yield DoneEvent()
+
+        mock_llm = MagicMock()
+        mock_llm.stream = mock_stream
+        plugin._mock_llm = mock_llm
+
+        await pipeline.run_turn(ctx)
+
+        tool_call_entries = [e for e in ctx.tape if e.kind == "tool_call"]
+        assert len(tool_call_entries) == 2
+        assert tool_call_entries[0].payload == {
+            "id": "tc1",
+            "name": "file_read",
+            "arguments": {"path": "a.txt"},
+            "role": "assistant",
+        }
+        assert tool_call_entries[1].payload == {
+            "id": "tc2",
+            "name": "file_read",
+            "arguments": {"path": "b.txt"},
+            "role": "assistant",
+        }

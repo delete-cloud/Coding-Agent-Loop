@@ -2,6 +2,7 @@ import pytest
 from agentkit.context.builder import ContextBuilder
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
+import json
 
 
 class TestContextBuilder:
@@ -37,6 +38,68 @@ class TestContextBuilder:
         messages = builder.build(tape)
         assert len(messages) == 2  # system + tool_call
         assert messages[1]["role"] == "assistant"
+        tool_call = messages[1]["tool_calls"][0]
+        assert tool_call["id"] == "tc_1"
+        assert tool_call["function"]["name"] == "bash"
+        assert tool_call["function"]["arguments"] == json.dumps({"cmd": "ls"})
+
+    def test_tool_call_list_entries_become_assistant_tool_use(self):
+        tape = Tape()
+        tape.append(
+            Entry(
+                kind="tool_call",
+                payload={
+                    "role": "assistant",
+                    "tool_calls": [
+                        {"id": "tc_1", "name": "bash", "arguments": {"cmd": "ls"}},
+                        {
+                            "id": "tc_2",
+                            "name": "grep",
+                            "arguments": {"pattern": "TODO"},
+                        },
+                    ],
+                },
+            )
+        )
+        builder = ContextBuilder(system_prompt="system")
+        messages = builder.build(tape)
+
+        assert len(messages) == 2
+        assert len(messages[1]["tool_calls"]) == 2
+        assert messages[1]["tool_calls"][0]["function"]["arguments"] == json.dumps(
+            {"cmd": "ls"}
+        )
+        assert messages[1]["tool_calls"][1]["function"]["arguments"] == json.dumps(
+            {"pattern": "TODO"}
+        )
+
+    def test_consecutive_tool_call_entries_merge_into_one_assistant_message(self):
+        tape = Tape()
+        tape.append(
+            Entry(
+                kind="tool_call",
+                payload={"id": "tc_1", "name": "bash", "arguments": {"cmd": "ls"}},
+            )
+        )
+        tape.append(
+            Entry(
+                kind="tool_call",
+                payload={
+                    "id": "tc_2",
+                    "name": "grep",
+                    "arguments": {"pattern": "TODO"},
+                },
+            )
+        )
+
+        builder = ContextBuilder(system_prompt="system")
+        messages = builder.build(tape)
+
+        assert len(messages) == 2
+        assert messages[1]["role"] == "assistant"
+        assert len(messages[1]["tool_calls"]) == 2
+        assert messages[1]["tool_calls"][0]["function"]["name"] == "bash"
+        assert messages[1]["tool_calls"][1]["function"]["name"] == "grep"
 
     def test_tool_result_entries_become_tool_messages(self):
         tape = Tape()

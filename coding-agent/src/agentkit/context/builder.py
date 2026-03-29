@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from agentkit.tape.models import Entry
@@ -21,10 +22,45 @@ class ContextBuilder:
     ) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = []
 
-        for entry in tape:
+        entries = list(tape)
+        index = 0
+        while index < len(entries):
+            entry = entries[index]
+            if entry.kind == "tool_call":
+                tool_calls: list[dict[str, Any]] = []
+                role = entry.payload.get("role", "assistant")
+
+                while index < len(entries) and entries[index].kind == "tool_call":
+                    current = entries[index]
+                    current_calls = current.payload.get("tool_calls")
+                    if isinstance(current_calls, list):
+                        tool_calls.extend(current_calls)
+                    else:
+                        tool_calls.append(
+                            {
+                                "id": current.payload.get("id", ""),
+                                "name": current.payload.get("name", ""),
+                                "arguments": current.payload.get("arguments", {}),
+                            }
+                        )
+                    index += 1
+
+                messages.append(
+                    {
+                        "role": role,
+                        "content": None,
+                        "tool_calls": [
+                            self._tool_call_to_message(tool_call)
+                            for tool_call in tool_calls
+                        ],
+                    }
+                )
+                continue
+
             msg = self._entry_to_message(entry)
             if msg is not None:
                 messages.append(msg)
+            index += 1
 
         if grounding:
             last_user_idx = None
@@ -48,19 +84,20 @@ class ContextBuilder:
                 "content": entry.payload.get("content", ""),
             }
         elif entry.kind == "tool_call":
-            return {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
+            tool_calls = entry.payload.get("tool_calls")
+            if not isinstance(tool_calls, list):
+                tool_calls = [
                     {
                         "id": entry.payload.get("id", ""),
-                        "type": "function",
-                        "function": {
-                            "name": entry.payload.get("name", ""),
-                            "arguments": entry.payload.get("arguments", {}),
-                        },
+                        "name": entry.payload.get("name", ""),
+                        "arguments": entry.payload.get("arguments", {}),
                     }
-                ],
+                ]
+
+            return {
+                "role": entry.payload.get("role", "assistant"),
+                "content": None,
+                "tool_calls": [self._tool_call_to_message(tc) for tc in tool_calls],
             }
         elif entry.kind == "tool_result":
             return {
@@ -76,3 +113,17 @@ class ContextBuilder:
         elif entry.kind == "event":
             return None
         return None
+
+    def _tool_call_to_message(self, tool_call: dict[str, Any]) -> dict[str, Any]:
+        arguments = tool_call.get("arguments", {})
+        if not isinstance(arguments, str):
+            arguments = json.dumps(arguments)
+
+        return {
+            "id": tool_call.get("id", ""),
+            "type": "function",
+            "function": {
+                "name": tool_call.get("name", ""),
+                "arguments": arguments,
+            },
+        }
