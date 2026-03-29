@@ -1,0 +1,34 @@
+Task 6b: Add file_patch and subagent Tools to CoreToolsPlugin
+================================================================
+
+QA1: file_patch in tool names
+------------------------------
+$ uv run python -c "from coding_agent.plugins.core_tools import CoreToolsPlugin; p = CoreToolsPlugin(); names = [t.name for t in p.get_tools()]; print(names); assert 'file_patch' in names"
+['file_read', 'file_write', 'file_replace', 'glob_files', 'grep_search', 'bash_run', 'todo_write', 'todo_read', 'file_patch', 'subagent']
+QA1: file_patch PASS
+
+QA2: subagent in tool names
+-----------------------------
+$ uv run python -c "from coding_agent.plugins.core_tools import CoreToolsPlugin; p = CoreToolsPlugin(); names = [t.name for t in p.get_tools()]; assert 'subagent' in names"
+QA2: subagent PASS
+
+QA3: All parity tests pass
+----------------------------
+$ uv run pytest tests/coding_agent/plugins/test_core_tools_parity.py -v
+tests/coding_agent/plugins/test_core_tools_parity.py::TestToolRegistration::test_registers_all_expected_tools PASSED
+tests/coding_agent/plugins/test_core_tools_parity.py::TestToolRegistration::test_total_tool_count_is_at_least_10 PASSED
+tests/coding_agent/plugins/test_core_tools_parity.py::TestToolRegistration::test_file_patch_registered PASSED
+tests/coding_agent/plugins/test_core_tools_parity.py::TestToolRegistration::test_subagent_registered PASSED
+tests/coding_agent/plugins/test_core_tools_parity.py::TestFilePatchTool::test_applies_simple_patch PASSED
+tests/coding_agent/plugins/test_core_tools_parity.py::TestFilePatchTool::test_patch_nonexistent_file_returns_error PASSED
+tests/coding_agent/plugins/test_core_tools_parity.py::TestFilePatchTool::test_patch_bad_context_returns_error PASSED
+tests/coding_agent/plugins/test_core_tools_parity.py::TestSubagentTool::test_subagent_raises_not_implemented PASSED
+tests/coding_agent/plugins/test_core_tools_parity.py::TestSubagentTool::test_subagent_schema_has_goal_parameter PASSED
+tests/coding_agent/plugins/test_core_tools_parity.py::TestExistingToolsStillWork::test_file_read_works PASSED
+tests/coding_agent/plugins/test_core_tools_parity.py::TestExistingToolsStillWork::test_bash_run_works PASSED
+11 passed in 0.29s
+
+Existing tests still pass:
+----------------------------
+$ uv run pytest tests/coding_agent/plugins/test_core_tools.py -v
+10 passed in 0.27s

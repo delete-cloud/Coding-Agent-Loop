@@ -21,12 +21,15 @@ class CoreToolsPlugin:
 
     def _register_tools(self) -> None:
         from coding_agent.tools.file_ops import build_file_tools
+        from coding_agent.tools.file_patch_tool import build_file_patch_tool
         from coding_agent.tools.planner import build_planner_tools
         from coding_agent.tools.shell import bash_run
+        from coding_agent.tools.subagent_stub import subagent_dispatch
 
         file_read, file_write, file_replace, glob_files, grep_search = build_file_tools(
             self._workspace_root
         )
+        file_patch = build_file_patch_tool(self._workspace_root)
         todo_write, todo_read = build_planner_tools(self._planner)
 
         for fn in (
@@ -38,6 +41,8 @@ class CoreToolsPlugin:
             bash_run,
             todo_write,
             todo_read,
+            file_patch,
+            subagent_dispatch,
         ):
             self._registry.register(fn)
 

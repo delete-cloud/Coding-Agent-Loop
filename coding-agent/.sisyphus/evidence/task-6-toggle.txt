@@ -1,0 +1,147 @@
+# Task 6: Feature Toggle Infrastructure Evidence
+
+## Status: DONE
+
+## Implementation Summary
+
+### 1. Test Implementation (RED)
+Created `tests/coding_agent/test_feature_toggle.py` with 7 comprehensive tests:
+- test_use_pipeline_respects_env_var_true: Verifies USE_PIPELINE=1 → True
+- test_use_pipeline_respects_env_var_false: Verifies no env var → False
+- test_use_pipeline_respects_env_var_true_variant: Tests "true" and "yes" variants
+- test_use_pipeline_override_true: Tests override=True returns True
+- test_use_pipeline_override_false: Tests override=False returns False
+- test_use_pipeline_override_none_respects_env: Tests override=None uses env var
+- test_use_pipeline_whitespace_handling: Tests whitespace is stripped correctly
+
+### 2. Function Implementation (GREEN)
+Added `use_pipeline()` function to `src/coding_agent/core/config.py`:
+- Accepts optional `override: bool | None` parameter
+- Returns True if override is not None (takes precedence)
+- Returns True if USE_PIPELINE env var is "1", "true", or "yes" (case-insensitive, whitespace-stripped)
+- Returns False by default (old path remains default during transition)
+
+### 3. Key Implementation Details
+- Function signature: `def use_pipeline(override: bool | None = None) -> bool:`
+- Env var matching: `os.environ.get("USE_PIPELINE", "").strip() in ("1", "true", "yes")`
+- Default behavior: False (preserves old AgentLoop path by default)
+- Override parameter enables CLI flag support (T13) without modifying this function
+
+## Test Results
+
+### Unit Tests
+```
+tests/coding_agent/test_feature_toggle.py::test_use_pipeline_respects_env_var_true PASSED
+tests/coding_agent/test_feature_toggle.py::test_use_pipeline_respects_env_var_false PASSED
+tests/coding_agent/test_feature_toggle.py::test_use_pipeline_respects_env_var_true_variant PASSED
+tests/coding_agent/test_feature_toggle.py::test_use_pipeline_override_true PASSED
+tests/coding_agent/test_feature_toggle.py::test_use_pipeline_override_false PASSED
+tests/coding_agent/test_feature_toggle.py::test_use_pipeline_override_none_respects_env PASSED
+tests/coding_agent/test_feature_toggle.py::test_use_pipeline_whitespace_handling PASSED
+
+====== 7 passed in 0.03s ======
+```
+
+### QA Scenarios
+
+QA 1: USE_PIPELINE=1 returns True
+```
+$ USE_PIPELINE=1 uv run python -c "from coding_agent.core.config import use_pipeline; print(use_pipeline())"
+True
+✓ PASS
+```
+
+QA 2: No env var returns False
+```
+$ uv run python -c "from coding_agent.core.config import use_pipeline; print(use_pipeline())"
+False
+✓ PASS
+```
+
+QA 3: Default to False assertion
+```
+$ uv run python -c "from coding_agent.core.config import use_pipeline; assert not use_pipeline(), 'Should default to False'"
+✓ PASS (no output = no error)
+```
+
+QA 4: Full test suite passes
+```
+uv run pytest tests/coding_agent/test_feature_toggle.py -v
+====== 7 passed in 0.03s ======
+✓ PASS
+```
+
+## Files Changed
+
+1. **tests/coding_agent/test_feature_toggle.py** (NEW)
+   - 7 comprehensive test functions
+   - Total lines: ~68
+
+2. **src/coding_agent/core/config.py** (MODIFIED)
+   - Added use_pipeline() function at end of file
+   - Added 13 lines (function + docstring)
+   - No changes to Config class or load_config() function
+   - Syntax validation: PASS
+
+## Git Commit
+
+```
+commit e730ae2d7a6c1d2b18d9e8c97990e17fe1b3eec8
+Author: kina0630 <kiakiana0630@gmail.com>
+Date:   Sun Mar 29 21:38:06 2026 +0800
+
+    feat(coding_agent): add USE_PIPELINE feature toggle
+```
+
+Files committed:
+- src/coding_agent/core/config.py
+- tests/coding_agent/test_feature_toggle.py (via creation)
+
+## Self-Review Findings
+
+✓ Acceptance Criteria - ALL MET:
+  - USE_PIPELINE=1 env var → use_pipeline() returns True ✓
+  - No env var → use_pipeline() returns False ✓
+  - use_pipeline(override=True) → returns True regardless of env var ✓
+  - use_pipeline(override=False) → returns False regardless of env var ✓
+  - uv run pytest tests/coding_agent/test_feature_toggle.py -v → ALL 7 PASS ✓
+
+✓ Design Constraints - ALL MET:
+  - Pipeline NOT the default (defaults to False) ✓
+  - Simple env var + function only (no complex framework) ✓
+  - No CLI args modification ✓
+  - Override parameter ready for T13 CLI integration ✓
+  - Function is public and exportable ✓
+
+✓ Code Quality:
+  - Follows PEP 257 docstring standard
+  - Clear parameter documentation
+  - Proper type hints (bool | None)
+  - Consistent with codebase style
+  - No external dependencies added
+  - Syntax validation: PASS
+
+✓ Testing Coverage:
+  - 7 distinct test cases covering all code paths
+  - Tests use monkeypatch for env var isolation
+  - Tests verify override parameter precedence
+  - Tests verify whitespace handling
+  - Tests verify variant values ("true", "yes", "1")
+
+## Transition Readiness
+
+This implementation enables the controlled transition path:
+1. Wave 1 (current): Pipeline OFF by default, USE_PIPELINE env var controls
+2. T13: CLI flag --use-pipeline will pass override=True
+3. Wave 3 verification: Toggle effectiveness is monitored
+4. T20: Default flips to True, old path becomes opt-in
+
+The function is now ready for consumption by entry points (T5, T8).
+
+## Notes
+
+- No breaking changes: existing code continues to work
+- Minimal footprint: only 13 lines of implementation
+- Ready for cross-feature integration
+- Environment variable checked at call time (not module load time)
+- Override parameter enables safe CLI integration without feature flag changes
