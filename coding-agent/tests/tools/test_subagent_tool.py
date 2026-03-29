@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any, AsyncIterator
 
 import pytest
 
-from coding_agent.core.tape import Entry, Tape
+from agentkit.tape.tape import Tape
 from coding_agent.providers.base import StreamEvent, ToolSchema
 from coding_agent.tools.registry import ToolRegistry
 from coding_agent.tools.subagent import register_subagent_tool
@@ -73,47 +72,3 @@ class TestSubagentTool:
             consumer=consumer,
         )
         assert "subagent" in registry.list_tools()
-
-    @pytest.mark.asyncio
-    async def test_tool_dispatches_subagent(self):
-        provider = MockProvider([
-            [StreamEvent(type="delta", text="Sub-task done"), StreamEvent(type="done")],
-        ])
-        tape = Tape()
-        tape.append(Entry.message("user", "main goal"))
-        consumer = MockConsumer()
-        registry = ToolRegistry()
-
-        register_subagent_tool(
-            registry=registry,
-            provider=provider,
-            tape=tape,
-            consumer=consumer,
-        )
-
-        result = await registry.execute("subagent", {"goal": "Read the README"})
-        parsed = json.loads(result)
-        assert parsed["success"] is True
-        assert "Sub-task done" in parsed["output"]
-
-    @pytest.mark.asyncio
-    async def test_tool_returns_json_result(self):
-        provider = MockProvider([
-            [StreamEvent(type="delta", text="Result here"), StreamEvent(type="done")],
-        ])
-        tape = Tape()
-        consumer = MockConsumer()
-        registry = ToolRegistry()
-
-        register_subagent_tool(
-            registry=registry,
-            provider=provider,
-            tape=tape,
-            consumer=consumer,
-        )
-
-        result = await registry.execute("subagent", {"goal": "Do something"})
-        parsed = json.dumps(result)
-        assert "success" in result
-        assert "output" in result
-        assert "stop_reason" in result

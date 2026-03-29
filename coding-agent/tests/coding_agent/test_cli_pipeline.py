@@ -145,32 +145,11 @@ class TestHeadlessRunUsesPipeline:
 
     @pytest.mark.asyncio
     async def test_headless_run_does_not_use_agent_loop(self):
-        """Pipeline is the only path — AgentLoop is never instantiated."""
-        mock_pipeline, mock_ctx = _mock_create_agent()
-        mock_outcome = _make_outcome()
+        """Pipeline is the only path — AgentLoop module has been deleted entirely."""
+        import importlib
 
-        mock_adapter_instance = AsyncMock()
-        mock_adapter_instance.run_turn = AsyncMock(return_value=mock_outcome)
-
-        with (
-            patch(
-                "coding_agent.__main__.create_agent",
-                return_value=(mock_pipeline, mock_ctx),
-            ),
-            patch(
-                "coding_agent.__main__.PipelineAdapter",
-                return_value=mock_adapter_instance,
-            ),
-            patch("coding_agent.__main__.HeadlessConsumer", MagicMock()),
-            patch("coding_agent.core.loop.AgentLoop") as mock_agent_loop,
-        ):
-            from coding_agent.__main__ import _run_headless
-
-            config = _make_config()
-            await _run_headless(config, "headless goal")
-
-        # AgentLoop should never be instantiated
-        mock_agent_loop.assert_not_called()
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module("coding_agent.core.loop")
 
 
 # ---------------------------------------------------------------------------
@@ -512,31 +491,11 @@ class TestHeadlessPipelineIsolation:
 
     @pytest.mark.asyncio
     async def test_headless_pipeline_does_not_create_agent_loop(self):
-        """Pipeline path returns early — AgentLoop is NOT created."""
-        mock_outcome = _make_outcome()
+        """AgentLoop module has been deleted — cannot be imported at all."""
+        import importlib
 
-        mock_adapter_instance = AsyncMock()
-        mock_adapter_instance.run_turn = AsyncMock(return_value=mock_outcome)
-
-        with (
-            patch(
-                "coding_agent.__main__.create_agent",
-                return_value=_mock_create_agent(),
-            ),
-            patch(
-                "coding_agent.__main__.PipelineAdapter",
-                return_value=mock_adapter_instance,
-            ),
-            patch("coding_agent.__main__.HeadlessConsumer", MagicMock()),
-            patch("coding_agent.core.loop.AgentLoop") as mock_agent_loop,
-        ):
-            from coding_agent.__main__ import _run_headless
-
-            config = _make_config()
-            await _run_headless(config, "goal")
-
-        # AgentLoop should never be instantiated
-        mock_agent_loop.assert_not_called()
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module("coding_agent.core.loop")
 
     @pytest.mark.asyncio
     async def test_headless_pipeline_passes_model_override(self):

@@ -23,7 +23,11 @@
     "ses_2c6035926fferBl35PLwOeBaxX",
     "ses_2c603ca0bffeFrcCoUfYLgnglo",
     "ses_2c5fd96bcffeHsQjmSiyOxkGCL",
-    "ses_2c5fd69f6ffeYnX15wljgO4xZj"
+    "ses_2c5fd69f6ffeYnX15wljgO4xZj",
+    "ses_2c5f791a1ffeyimrSMUerJzNS6",
+    "ses_2c5f1e2d1ffe15rtorgcevX7aP",
+    "ses_2c5f20115ffeSAFBAhO75laslA",
+    "ses_2c5f1c9f4ffe202jDKv1Si5pur"
   ],
   "plan_name": "cli-cutover",
   "task_sessions": {}

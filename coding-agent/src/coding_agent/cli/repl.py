@@ -11,17 +11,13 @@ from rich.console import Console
 from coding_agent.cli.commands import handle_command
 from coding_agent.cli.input_handler import InputHandler
 from coding_agent.core.config import Config
-from coding_agent.core.context import Context
-from coding_agent.core.loop import AgentLoop
 from coding_agent.core.planner import PlanManager
-from coding_agent.core.tape import Tape
 from coding_agent.providers.openai_compat import OpenAICompatProvider
 from coding_agent.tools.file import register_file_tools
 from coding_agent.tools.planner import register_planner_tools
 from coding_agent.tools.registry import ToolRegistry
 from coding_agent.tools.search import register_search_tools
 from coding_agent.tools.shell import register_shell_tools
-from coding_agent.tools.subagent import register_subagent_tool
 from coding_agent.ui.rich_tui import CodingAgentTUI
 from coding_agent.__main__ import create_agent
 from coding_agent.adapter import PipelineAdapter
@@ -75,30 +71,7 @@ class InteractiveSession:
         self.context["planner"] = self.planner
         self.context["tool_registry"] = self.tools
 
-        # Tape
-        self.tape = Tape.create(self.config.tape_dir)
-
-        # System prompt
-        self.system_prompt = (
-            "You are a coding agent. You can read files, edit files, "
-            "run shell commands, search the codebase, create task plans, "
-            "and dispatch sub-agents for independent sub-tasks.\n\n"
-            "Always create a plan (todo_write) before starting complex work. "
-            "Update task status as you progress."
-        )
-
-        # Register subagent tool (consumer will be updated per-turn)
         self._current_consumer = None
-        register_subagent_tool(
-            registry=self.tools,
-            provider=self.provider,
-            tape=self.tape,
-            consumer=self,  # Self as proxy - delegates to _current_consumer
-            max_steps=self.config.subagent_max_steps,
-            max_depth=self.config.max_subagent_depth,
-            enable_parallel=self.config.enable_parallel_tools,
-            max_parallel=self.config.max_parallel_tools,
-        )
 
         pipeline, pipeline_ctx = create_agent(
             api_key=str(self.config.api_key.get_secret_value())

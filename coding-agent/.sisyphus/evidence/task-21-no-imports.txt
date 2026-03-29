@@ -1,0 +1,18 @@
+=== Task 21: Verify no old core imports remain ===
+
+--- grep 'from coding_agent.core.loop' src/ tests/ ---
+(no matches)
+
+--- grep 'from coding_agent.core.tape' src/ tests/ ---
+(no matches)
+
+--- grep 'from coding_agent.core.context' src/ tests/ ---
+(no matches)
+
+--- grep 'from coding_agent.core.doom' src/ tests/ ---
+(no matches)
+
+--- grep 'from coding_agent.core.parallel' src/ tests/ ---
+(no matches)
+
+=== All clear ===

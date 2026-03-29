@@ -9,7 +9,7 @@ from coding_agent.agents.subagent import SubAgent
 from coding_agent.tools.registry import ToolRegistry
 
 if TYPE_CHECKING:
-    from coding_agent.core.tape import Tape
+    from agentkit.tape.tape import Tape
     from coding_agent.providers.base import ChatProvider
     from coding_agent.wire.protocol import WireMessage
 
@@ -62,15 +62,17 @@ def register_subagent_tool(
                     )
                 else:
                     invalid_tools.append(tool_name)
-            
+
             # Return error if any requested tools are invalid
             if invalid_tools:
-                return json.dumps({
-                    "success": False,
-                    "error": f"Invalid tools requested: {', '.join(invalid_tools)}. "
-                            f"Available tools: {', '.join(registry.list_tools())}",
-                })
-            
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": f"Invalid tools requested: {', '.join(invalid_tools)}. "
+                        f"Available tools: {', '.join(registry.list_tools())}",
+                    }
+                )
+
             target_registry = filtered_registry
         else:
             target_registry = registry
@@ -80,13 +82,15 @@ def register_subagent_tool(
             parent_tape=tape,
             tools=target_registry,
         )
-        return json.dumps({
-            "success": result.success,
-            "output": result.output,
-            "stop_reason": result.stop_reason,
-            "steps_taken": result.steps_taken,
-            "entries_count": result.tape_entries,
-        })
+        return json.dumps(
+            {
+                "success": result.success,
+                "output": result.output,
+                "stop_reason": result.stop_reason,
+                "steps_taken": result.steps_taken,
+                "entries_count": result.tape_entries,
+            }
+        )
 
     registry.register(
         name="subagent",
