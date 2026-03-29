@@ -8,7 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from coding_agent.providers.anthropic import AnthropicProvider
-from coding_agent.providers.base import StreamEvent, ToolCall, ToolSchema
+from coding_agent.providers.base import ToolCall, ToolSchema
+from agentkit.providers.models import TextEvent, ToolCallEvent, DoneEvent
 
 
 class TestAnthropicProviderInit:
@@ -125,9 +126,21 @@ class TestAnthropicStreaming:
 
         # Mock the Anthropic streaming events
         mock_events = [
-            MagicMock(type="content_block_start", index=0, content_block=MagicMock(type="text", text="")),
-            MagicMock(type="content_block_delta", index=0, delta=MagicMock(type="text_delta", text="Hello")),
-            MagicMock(type="content_block_delta", index=0, delta=MagicMock(type="text_delta", text=" world")),
+            MagicMock(
+                type="content_block_start",
+                index=0,
+                content_block=MagicMock(type="text", text=""),
+            ),
+            MagicMock(
+                type="content_block_delta",
+                index=0,
+                delta=MagicMock(type="text_delta", text="Hello"),
+            ),
+            MagicMock(
+                type="content_block_delta",
+                index=0,
+                delta=MagicMock(type="text_delta", text=" world"),
+            ),
             MagicMock(type="content_block_stop", index=0),
             MagicMock(type="message_stop"),
         ]
@@ -137,6 +150,7 @@ class TestAnthropicStreaming:
             async def _aiter():
                 for e in mock_events:
                     yield e
+
             return _aiter()
 
         # Create a mock stream context manager
@@ -157,11 +171,11 @@ class TestAnthropicStreaming:
         ):
             events.append(event)
 
-        deltas = [e for e in events if e.type == "delta"]
-        assert len(deltas) == 2
-        assert deltas[0].text == "Hello"
-        assert deltas[1].text == " world"
-        assert events[-1].type == "done"
+        text_events = [e for e in events if isinstance(e, TextEvent)]
+        assert len(text_events) == 2
+        assert text_events[0].text == "Hello"
+        assert text_events[1].text == " world"
+        assert isinstance(events[-1], DoneEvent)
 
     @pytest.mark.asyncio
     async def test_stream_tool_use_response(self):
@@ -199,6 +213,7 @@ class TestAnthropicStreaming:
             async def _aiter():
                 for e in mock_events:
                     yield e
+
             return _aiter()
 
         # Create a mock stream context manager
@@ -232,8 +247,8 @@ class TestAnthropicStreaming:
         ):
             events.append(event)
 
-        tool_events = [e for e in events if e.type == "tool_call"]
+        tool_events = [e for e in events if isinstance(e, ToolCallEvent)]
         assert len(tool_events) == 1
-        assert tool_events[0].tool_call.name == "bash"
-        assert tool_events[0].tool_call.arguments == {"command": "ls"}
-        assert tool_events[0].tool_call.id == "toolu_1"
+        assert tool_events[0].name == "bash"
+        assert tool_events[0].arguments == {"command": "ls"}
+        assert tool_events[0].tool_call_id == "toolu_1"

@@ -12,7 +12,7 @@ from coding_agent.core.loop import AgentLoop
 from coding_agent.core.planner import PlanManager
 from coding_agent.core.tape import Entry, Tape
 from coding_agent.providers.base import StreamEvent, ToolCall, ToolSchema
-from coding_agent.tools.planner import register_planner_tools
+from coding_agent.tools.planner import build_planner_tools
 from coding_agent.tools.registry import ToolRegistry
 from coding_agent.tools.subagent import register_subagent_tool
 from coding_agent.wire import (
@@ -70,34 +70,58 @@ class TestE2EP1:
         """Agent uses todo_write to create a plan, then responds."""
         # Step 1: LLM calls todo_write to create a plan
         # Step 2: LLM responds with final text
-        provider = MockProvider([
-            # Step 1: Call todo_write
+        provider = MockProvider(
             [
-                StreamEvent(
-                    type="tool_call",
-                    tool_call=ToolCall(
-                        id="call_1",
-                        name="todo_write",
-                        arguments={
-                            "tasks": [
-                                {"title": "Read the code", "status": "in_progress"},
-                                {"title": "Fix the bug", "status": "todo"},
-                            ]
-                        },
+                # Step 1: Call todo_write
+                [
+                    StreamEvent(
+                        type="tool_call",
+                        tool_call=ToolCall(
+                            id="call_1",
+                            name="todo_write",
+                            arguments={
+                                "tasks": [
+                                    {"title": "Read the code", "status": "in_progress"},
+                                    {"title": "Fix the bug", "status": "todo"},
+                                ]
+                            },
+                        ),
                     ),
-                ),
-                StreamEvent(type="done"),
-            ],
-            # Step 2: Final response
-            [
-                StreamEvent(type="delta", text="Plan created. Starting work."),
-                StreamEvent(type="done"),
-            ],
-        ])
+                    StreamEvent(type="done"),
+                ],
+                # Step 2: Final response
+                [
+                    StreamEvent(type="delta", text="Plan created. Starting work."),
+                    StreamEvent(type="done"),
+                ],
+            ]
+        )
 
         planner = PlanManager()
         registry = ToolRegistry()
-        register_planner_tools(registry, planner)
+
+        todo_write_fn, todo_read_fn = build_planner_tools(planner)
+
+        async def async_todo_write(**kwargs):
+            return todo_write_fn(**kwargs)
+
+        async def async_todo_read(**kwargs):
+            return todo_read_fn(**kwargs)
+
+        write_schema = todo_write_fn._tool_schema
+        registry.register(
+            name=write_schema.name,
+            description=write_schema.description,
+            parameters=write_schema.parameters,
+            handler=async_todo_write,
+        )
+        read_schema = todo_read_fn._tool_schema
+        registry.register(
+            name=read_schema.name,
+            description=read_schema.description,
+            parameters=read_schema.parameters,
+            handler=async_todo_read,
+        )
 
         tape = Tape(path=None)
         consumer = MockConsumer()
@@ -123,7 +147,11 @@ class TestE2EP1:
 
         # Verify plan is in context
         messages = await context.build_working_set(tape)
-        plan_msgs = [m for m in messages if m.get("role") == "system" and "Current Plan" in m.get("content", "")]
+        plan_msgs = [
+            m
+            for m in messages
+            if m.get("role") == "system" and "Current Plan" in m.get("content", "")
+        ]
         assert len(plan_msgs) == 1
 
     @pytest.mark.asyncio
@@ -170,7 +198,9 @@ class TestE2EP1:
                     yield StreamEvent(type="done")
                 else:
                     # Main agent: final response
-                    yield StreamEvent(type="delta", text="Sub-agent found the README info.")
+                    yield StreamEvent(
+                        type="delta", text="Sub-agent found the README info."
+                    )
                     yield StreamEvent(type="done")
 
         provider = SequencedProvider()
