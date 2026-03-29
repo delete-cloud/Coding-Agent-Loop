@@ -166,8 +166,12 @@ class Pipeline:
 
             async for event in ctx.llm_provider.stream(ctx.messages, tools=tool_dicts):
                 if isinstance(event, TextEvent):
+                    if ctx.on_event:
+                        await ctx.on_event(event)
                     text_chunks.append(event.text)
                 elif isinstance(event, ToolCallEvent):
+                    if ctx.on_event:
+                        await ctx.on_event(event)
                     tool_calls.append(
                         {
                             "id": event.tool_call_id,
@@ -176,6 +180,8 @@ class Pipeline:
                         }
                     )
                 elif isinstance(event, DoneEvent):
+                    if ctx.on_event:
+                        await ctx.on_event(event)
                     break
 
             if text_chunks and not tool_calls:
