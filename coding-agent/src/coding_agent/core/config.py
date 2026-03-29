@@ -36,6 +36,10 @@ class Config(BaseModel):
     enable_parallel_tools: bool = True
     max_parallel_tools: int = 5
 
+    # Caching
+    enable_cache: bool = True
+    cache_size: int = 100
+
     # HTTP Server settings
     http_api_key: str | None = None  # API key for HTTP API authentication
 
@@ -85,20 +89,6 @@ def use_pipeline(override: bool | None = None) -> bool:
     Args:
         override: If not None, takes precedence over env var.
 
-    Returns:
-        True if Pipeline should be used, False for old AgentLoop.
-    """
-    if override is not None:
-        return override
-    return os.environ.get("USE_PIPELINE", "").strip() in ("1", "true", "yes")
-
-
-def use_pipeline(override: bool | None = None) -> bool:
-    """Check if the new Pipeline path should be used.
-    
-    Args:
-        override: If not None, takes precedence over env var.
-    
     Returns:
         True if Pipeline should be used, False for old AgentLoop.
     """
