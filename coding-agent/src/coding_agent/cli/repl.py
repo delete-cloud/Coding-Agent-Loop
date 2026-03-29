@@ -10,7 +10,7 @@ from rich.console import Console
 
 from coding_agent.cli.commands import handle_command
 from coding_agent.cli.input_handler import InputHandler
-from coding_agent.core.config import Config, use_pipeline
+from coding_agent.core.config import Config
 from coding_agent.core.context import Context
 from coding_agent.core.loop import AgentLoop
 from coding_agent.core.planner import PlanManager
@@ -100,22 +100,15 @@ class InteractiveSession:
             max_parallel=self.config.max_parallel_tools,
         )
 
-        if use_pipeline():
-            pipeline, pipeline_ctx = create_agent(
-                api_key=str(self.config.api_key.get_secret_value())
-                if self.config.api_key
-                else None,
-                model_override=self.config.model,
-            )
-            if pipeline._directive_executor is not None:
-                pipeline._directive_executor._ask_user = self._ask_user_for_approval
-            self._pipeline_adapter = PipelineAdapter(
-                pipeline=pipeline, ctx=pipeline_ctx
-            )
-            self._use_pipeline = True
-        else:
-            self._pipeline_adapter = None
-            self._use_pipeline = False
+        pipeline, pipeline_ctx = create_agent(
+            api_key=str(self.config.api_key.get_secret_value())
+            if self.config.api_key
+            else None,
+            model_override=self.config.model,
+        )
+        if pipeline._directive_executor is not None:
+            pipeline._directive_executor._ask_user = self._ask_user_for_approval
+        self._pipeline_adapter = PipelineAdapter(pipeline=pipeline, ctx=pipeline_ctx)
 
     async def _ask_user_for_approval(self, question: str) -> bool:
         console.print("\n[yellow bold]⚠ Approval Required[/]")
@@ -187,37 +180,10 @@ class InteractiveSession:
         self._current_consumer = tui.consumer
         self.context["consumer"] = tui.consumer
 
-        if self._use_pipeline:
-            self._pipeline_adapter._consumer = tui.consumer
-            with tui:
-                tui.add_user_message(message)
-                result = await self._pipeline_adapter.run_turn(message)
-            console.print(
-                f"\n[dim]Completed: {result.stop_reason} | Steps: {result.steps_taken}[/]\n"
-            )
-            return
-
-        ctx = Context(
-            max_tokens=self.provider.max_context_size,
-            system_prompt=self.system_prompt,
-            planner=self.planner,
-        )
-
-        loop = AgentLoop(
-            provider=self.provider,
-            tools=self.tools,
-            tape=self.tape,
-            context=ctx,
-            consumer=tui.consumer,
-            max_steps=self.config.max_steps,
-            enable_parallel=self.config.enable_parallel_tools,
-            max_parallel=self.config.max_parallel_tools,
-        )
-
+        self._pipeline_adapter._consumer = tui.consumer
         with tui:
             tui.add_user_message(message)
-            result = await loop.run_turn(message)
-
+            result = await self._pipeline_adapter.run_turn(message)
         console.print(
             f"\n[dim]Completed: {result.stop_reason} | Steps: {result.steps_taken}[/]\n"
         )

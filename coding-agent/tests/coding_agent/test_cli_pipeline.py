@@ -1,4 +1,4 @@
-"""Tests: run + repl command wiring to PipelineAdapter behind USE_PIPELINE toggle."""
+"""Tests: run + repl command wiring to PipelineAdapter (Pipeline is always active)."""
 
 from __future__ import annotations
 
@@ -51,13 +51,11 @@ def _make_config():
 # ---------------------------------------------------------------------------
 
 
-class TestTuiRunUsesPipelineAdapterWhenToggleOn:
-    """With USE_PIPELINE=1, _run_with_tui creates PipelineAdapter instead of AgentLoop."""
+class TestTuiRunUsesPipeline:
+    """_run_with_tui creates PipelineAdapter (only execution path)."""
 
     @pytest.mark.asyncio
-    async def test_tui_run_uses_pipeline_adapter_when_toggle_on(self, monkeypatch):
-        monkeypatch.setenv("USE_PIPELINE", "1")
-
+    async def test_tui_run_uses_pipeline_adapter(self):
         mock_pipeline, mock_ctx = _mock_create_agent()
         mock_outcome = _make_outcome()
 
@@ -101,54 +99,17 @@ class TestTuiRunUsesPipelineAdapterWhenToggleOn:
         # Verify run_turn was called with the goal
         mock_adapter_instance.run_turn.assert_awaited_once_with("test goal")
 
-    @pytest.mark.asyncio
-    async def test_tui_run_uses_agent_loop_when_toggle_off(self, monkeypatch):
-        """Without USE_PIPELINE, _run_with_tui uses old AgentLoop path."""
-        monkeypatch.delenv("USE_PIPELINE", raising=False)
-
-        # We just need to verify AgentLoop is instantiated, not PipelineAdapter.
-        # Mock enough of the old path to avoid real provider/tool creation.
-        mock_loop_instance = AsyncMock()
-        mock_loop_instance.run_turn = AsyncMock(
-            return_value=MagicMock(stop_reason="completed")
-        )
-        mock_loop_cls = MagicMock(return_value=mock_loop_instance)
-
-        mock_tui = MagicMock()
-        mock_tui.consumer = MagicMock()
-        mock_tui.__enter__ = MagicMock(return_value=mock_tui)
-        mock_tui.__exit__ = MagicMock(return_value=False)
-
-        with (
-            patch("coding_agent.__main__.CodingAgentTUI", return_value=mock_tui),
-            patch(
-                "coding_agent.__main__._create_provider",
-                return_value=MagicMock(max_context_size=128000),
-            ),
-            patch("coding_agent.core.loop.AgentLoop", mock_loop_cls),
-            patch("coding_agent.__main__.create_agent") as p_create,
-        ):
-            from coding_agent.__main__ import _run_with_tui
-
-            config = _make_config()
-            await _run_with_tui(config, "test goal")
-
-        # create_agent should NOT have been called
-        p_create.assert_not_called()
-
 
 # ---------------------------------------------------------------------------
 # Headless path
 # ---------------------------------------------------------------------------
 
 
-class TestHeadlessRunUsesPipelineAdapterWhenToggleOn:
-    """With USE_PIPELINE=1, _run_headless creates PipelineAdapter instead of AgentLoop."""
+class TestHeadlessRunUsesPipeline:
+    """_run_headless creates PipelineAdapter (only execution path)."""
 
     @pytest.mark.asyncio
-    async def test_headless_run_uses_pipeline_adapter_when_toggle_on(self, monkeypatch):
-        monkeypatch.setenv("USE_PIPELINE", "1")
-
+    async def test_headless_run_uses_pipeline_adapter(self):
         mock_pipeline, mock_ctx = _mock_create_agent()
         mock_outcome = _make_outcome(final_message="headless done")
 
@@ -183,41 +144,33 @@ class TestHeadlessRunUsesPipelineAdapterWhenToggleOn:
         mock_adapter_instance.run_turn.assert_awaited_once_with("headless goal")
 
     @pytest.mark.asyncio
-    async def test_headless_run_uses_agent_loop_when_toggle_off(self, monkeypatch):
-        """Without USE_PIPELINE, _run_headless uses old AgentLoop path."""
-        monkeypatch.delenv("USE_PIPELINE", raising=False)
+    async def test_headless_run_does_not_use_agent_loop(self):
+        """Pipeline is the only path — AgentLoop is never instantiated."""
+        mock_pipeline, mock_ctx = _mock_create_agent()
+        mock_outcome = _make_outcome()
 
-        mock_loop_instance = AsyncMock()
-        mock_loop_instance.run_turn = AsyncMock(
-            return_value=MagicMock(stop_reason="completed", final_message="ok")
-        )
-        mock_loop_cls = MagicMock(return_value=mock_loop_instance)
+        mock_adapter_instance = AsyncMock()
+        mock_adapter_instance.run_turn = AsyncMock(return_value=mock_outcome)
 
         with (
             patch(
-                "coding_agent.__main__._create_provider",
-                return_value=MagicMock(max_context_size=128000),
+                "coding_agent.__main__.create_agent",
+                return_value=(mock_pipeline, mock_ctx),
             ),
-            patch("coding_agent.core.loop.AgentLoop", mock_loop_cls),
-            patch("coding_agent.__main__.create_agent") as p_create,
-            patch("coding_agent.tools.registry.ToolRegistry"),
-            patch("coding_agent.tools.file.register_file_tools"),
-            patch("coding_agent.tools.shell.register_shell_tools"),
-            patch("coding_agent.tools.search.register_search_tools"),
-            patch("coding_agent.tools.planner.register_planner_tools"),
-            patch("coding_agent.tools.subagent.register_subagent_tool"),
-            patch("coding_agent.core.tape.Tape") as mock_tape_cls,
-            patch("coding_agent.core.context.Context"),
-            patch("coding_agent.core.planner.PlanManager"),
+            patch(
+                "coding_agent.__main__.PipelineAdapter",
+                return_value=mock_adapter_instance,
+            ),
+            patch("coding_agent.__main__.HeadlessConsumer", MagicMock()),
+            patch("coding_agent.core.loop.AgentLoop") as mock_agent_loop,
         ):
-            mock_tape_cls.create.return_value = MagicMock()
-
             from coding_agent.__main__ import _run_headless
 
             config = _make_config()
             await _run_headless(config, "headless goal")
 
-        p_create.assert_not_called()
+        # AgentLoop should never be instantiated
+        mock_agent_loop.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -305,12 +258,9 @@ def _error_outcome(msg: str = "boom") -> TurnOutcome:
 # ---------------------------------------------------------------------------
 
 
-class TestReplUsesPipelineAdapterWhenToggleOn:
-    @patch("coding_agent.cli.repl.use_pipeline", return_value=True)
+class TestReplUsesPipeline:
     @patch("coding_agent.cli.repl.create_agent")
-    def test_repl_uses_pipeline_adapter_when_toggle_on(
-        self, mock_create_agent, _mock_toggle
-    ):
+    def test_repl_uses_pipeline_adapter(self, mock_create_agent):
         mock_pipeline = MagicMock()
         mock_ctx = MagicMock()
         mock_create_agent.return_value = (mock_pipeline, mock_ctx)
@@ -320,26 +270,14 @@ class TestReplUsesPipelineAdapterWhenToggleOn:
         config = _make_repl_config()
         session = InteractiveSession(config)
 
-        assert session._use_pipeline is True
         assert isinstance(session._pipeline_adapter, PipelineAdapter)
         mock_create_agent.assert_called_once()
-
-    @patch("coding_agent.cli.repl.use_pipeline", return_value=False)
-    def test_repl_uses_agent_loop_by_default(self, _mock_toggle):
-        from coding_agent.cli.repl import InteractiveSession
-
-        config = _make_repl_config()
-        session = InteractiveSession(config)
-
-        assert session._use_pipeline is False
-        assert session._pipeline_adapter is None
 
 
 class TestReplMultiturnContext:
     @pytest.mark.asyncio
-    @patch("coding_agent.cli.repl.use_pipeline", return_value=True)
     @patch("coding_agent.cli.repl.create_agent")
-    async def test_repl_multiturn_context(self, mock_create_agent, _mock_toggle):
+    async def test_repl_multiturn_context(self, mock_create_agent):
         from agentkit.runtime.pipeline import PipelineContext
         from agentkit.tape.tape import Tape
 
@@ -400,11 +338,8 @@ class TestReplMultiturnContext:
 
 class TestReplSlashCommands:
     @pytest.mark.asyncio
-    @patch("coding_agent.cli.repl.use_pipeline", return_value=True)
     @patch("coding_agent.cli.repl.create_agent")
-    async def test_repl_slash_commands_still_work(
-        self, mock_create_agent, _mock_toggle
-    ):
+    async def test_repl_slash_commands_still_work(self, mock_create_agent):
         mock_pipeline = MagicMock()
         mock_ctx = MagicMock()
         mock_create_agent.return_value = (mock_pipeline, mock_ctx)
@@ -433,9 +368,8 @@ class TestReplSlashCommands:
 
 class TestReplErrorRecovery:
     @pytest.mark.asyncio
-    @patch("coding_agent.cli.repl.use_pipeline", return_value=True)
     @patch("coding_agent.cli.repl.create_agent")
-    async def test_repl_error_recovery(self, mock_create_agent, _mock_toggle):
+    async def test_repl_error_recovery(self, mock_create_agent):
         mock_pipeline = MagicMock()
         mock_ctx = MagicMock()
         mock_create_agent.return_value = (mock_pipeline, mock_ctx)
@@ -483,10 +417,8 @@ class TestHeadlessPipelineOutput:
     """Verify _run_headless Pipeline path produces correct stdout output."""
 
     @pytest.mark.asyncio
-    async def test_headless_pipeline_prints_result_summary(self, monkeypatch, capsys):
+    async def test_headless_pipeline_prints_result_summary(self, capsys):
         """Pipeline path prints '--- Result (stop_reason) ---' to stdout."""
-        monkeypatch.setenv("USE_PIPELINE", "1")
-
         mock_outcome = _make_outcome(
             stop_reason=StopReason.NO_TOOL_CALLS,
             final_message="all done",
@@ -516,10 +448,8 @@ class TestHeadlessPipelineOutput:
         assert "NO_TOOL_CALLS" in captured.out
 
     @pytest.mark.asyncio
-    async def test_headless_pipeline_prints_final_message(self, monkeypatch, capsys):
+    async def test_headless_pipeline_prints_final_message(self, capsys):
         """Final message is echoed to stdout when present."""
-        monkeypatch.setenv("USE_PIPELINE", "1")
-
         mock_outcome = _make_outcome(final_message="Here is your answer")
 
         mock_adapter_instance = AsyncMock()
@@ -545,12 +475,8 @@ class TestHeadlessPipelineOutput:
         assert "Here is your answer" in captured.out
 
     @pytest.mark.asyncio
-    async def test_headless_pipeline_no_final_message_omits_echo(
-        self, monkeypatch, capsys
-    ):
+    async def test_headless_pipeline_no_final_message_omits_echo(self, capsys):
         """When final_message is None, only the result summary line is printed."""
-        monkeypatch.setenv("USE_PIPELINE", "1")
-
         mock_outcome = _make_outcome(final_message=None)
 
         mock_adapter_instance = AsyncMock()
@@ -585,10 +511,8 @@ class TestHeadlessPipelineIsolation:
     """Pipeline path must not instantiate AgentLoop."""
 
     @pytest.mark.asyncio
-    async def test_headless_pipeline_does_not_create_agent_loop(self, monkeypatch):
+    async def test_headless_pipeline_does_not_create_agent_loop(self):
         """Pipeline path returns early — AgentLoop is NOT created."""
-        monkeypatch.setenv("USE_PIPELINE", "1")
-
         mock_outcome = _make_outcome()
 
         mock_adapter_instance = AsyncMock()
@@ -611,14 +535,12 @@ class TestHeadlessPipelineIsolation:
             config = _make_config()
             await _run_headless(config, "goal")
 
-        # AgentLoop should never be instantiated in pipeline path
+        # AgentLoop should never be instantiated
         mock_agent_loop.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_headless_pipeline_passes_model_override(self, monkeypatch):
+    async def test_headless_pipeline_passes_model_override(self):
         """create_agent receives model_override from config."""
-        monkeypatch.setenv("USE_PIPELINE", "1")
-
         mock_outcome = _make_outcome()
 
         mock_adapter_instance = AsyncMock()
@@ -651,9 +573,8 @@ class TestHeadlessPipelineIsolation:
 
 class TestReplPipelineAdapterConsumerUpdated:
     @pytest.mark.asyncio
-    @patch("coding_agent.cli.repl.use_pipeline", return_value=True)
     @patch("coding_agent.cli.repl.create_agent")
-    async def test_consumer_updated_each_turn(self, mock_create_agent, _mock_toggle):
+    async def test_consumer_updated_each_turn(self, mock_create_agent):
         mock_pipeline = MagicMock()
         mock_ctx = MagicMock()
         mock_create_agent.return_value = (mock_pipeline, mock_ctx)
@@ -702,11 +623,8 @@ class TestReplPipelineAdapterConsumerUpdated:
 class TestReplApprovalWiring:
     """REPL wires an ask_user_handler to DirectiveExecutor for interactive approval."""
 
-    @patch("coding_agent.cli.repl.use_pipeline", return_value=True)
     @patch("coding_agent.cli.repl.create_agent")
-    def test_repl_sets_ask_user_handler_on_directive_executor(
-        self, mock_create_agent, _mock_toggle
-    ):
+    def test_repl_sets_ask_user_handler_on_directive_executor(self, mock_create_agent):
         """After setup, the pipeline's DirectiveExecutor has an ask_user handler."""
         from agentkit.directive.executor import DirectiveExecutor
 
@@ -724,11 +642,8 @@ class TestReplApprovalWiring:
         assert callable(mock_pipeline._directive_executor._ask_user)
 
     @pytest.mark.asyncio
-    @patch("coding_agent.cli.repl.use_pipeline", return_value=True)
     @patch("coding_agent.cli.repl.create_agent")
-    async def test_repl_approval_prompt_approved(
-        self, mock_create_agent, _mock_toggle, monkeypatch
-    ):
+    async def test_repl_approval_prompt_approved(self, mock_create_agent, monkeypatch):
         """When AskUser directive fires, the handler prompts and user approves."""
         from agentkit.directive.executor import DirectiveExecutor
         from agentkit.directive.types import AskUser
@@ -753,11 +668,8 @@ class TestReplApprovalWiring:
         assert result is True
 
     @pytest.mark.asyncio
-    @patch("coding_agent.cli.repl.use_pipeline", return_value=True)
     @patch("coding_agent.cli.repl.create_agent")
-    async def test_repl_approval_prompt_denied(
-        self, mock_create_agent, _mock_toggle, monkeypatch
-    ):
+    async def test_repl_approval_prompt_denied(self, mock_create_agent, monkeypatch):
         """When user denies approval, AskUser returns False."""
         from agentkit.directive.executor import DirectiveExecutor
         from agentkit.directive.types import AskUser
@@ -780,10 +692,9 @@ class TestReplApprovalWiring:
         assert result is False
 
     @pytest.mark.asyncio
-    @patch("coding_agent.cli.repl.use_pipeline", return_value=True)
     @patch("coding_agent.cli.repl.create_agent")
     async def test_repl_approval_prompt_empty_defaults_no(
-        self, mock_create_agent, _mock_toggle, monkeypatch
+        self, mock_create_agent, monkeypatch
     ):
         """Empty input defaults to rejection (N in [y/N])."""
         from agentkit.directive.executor import DirectiveExecutor
@@ -807,11 +718,8 @@ class TestReplApprovalWiring:
         assert result is False
 
     @pytest.mark.asyncio
-    @patch("coding_agent.cli.repl.use_pipeline", return_value=True)
     @patch("coding_agent.cli.repl.create_agent")
-    async def test_repl_approval_yes_variants(
-        self, mock_create_agent, _mock_toggle, monkeypatch
-    ):
+    async def test_repl_approval_yes_variants(self, mock_create_agent, monkeypatch):
         """'yes', 'Y', 'YES' all approve."""
         from agentkit.directive.executor import DirectiveExecutor
         from agentkit.directive.types import AskUser

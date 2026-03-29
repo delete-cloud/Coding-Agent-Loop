@@ -81,17 +81,3 @@ def load_config(cli_args: dict | None = None) -> Config:
 
 # Default settings instance (can be overridden by load_config)
 settings = load_config()
-
-
-def use_pipeline(override: bool | None = None) -> bool:
-    """Check if the new Pipeline path should be used.
-
-    Args:
-        override: If not None, takes precedence over env var.
-
-    Returns:
-        True if Pipeline should be used, False for old AgentLoop.
-    """
-    if override is not None:
-        return override
-    return os.environ.get("USE_PIPELINE", "").strip() in ("1", "true", "yes")

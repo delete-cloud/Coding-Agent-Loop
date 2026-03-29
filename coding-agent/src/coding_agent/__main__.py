@@ -8,7 +8,6 @@ from typing import Any
 import click
 
 from coding_agent.adapter import PipelineAdapter
-from coding_agent.core.config import use_pipeline
 from coding_agent.ui.headless import HeadlessConsumer
 from coding_agent.ui.rich_tui import CodingAgentTUI
 
@@ -223,161 +222,29 @@ def repl(repo, model, provider_name, base_url, api_key, max_steps):
 
 async def _run_with_tui(config, goal):
     """Run agent with TUI display."""
-    if use_pipeline():
-        api_key = config.api_key.get_secret_value() if config.api_key else None
-        pipeline, ctx = create_agent(
-            api_key=api_key,
-            model_override=config.model,
-        )
-        tui = CodingAgentTUI(model_name=config.model, max_steps=config.max_steps)
-        adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=tui.consumer)
-        with tui:
-            tui.add_user_message(goal)
-            result = await adapter.run_turn(goal)
-            click.echo(f"\n--- Result ({result.stop_reason}) ---")
-        return
-
-    from coding_agent.core.loop import AgentLoop
-    from coding_agent.core.planner import PlanManager
-    from coding_agent.tools.registry import ToolRegistry
-    from coding_agent.tools.file import register_file_tools
-    from coding_agent.tools.shell import register_shell_tools
-    from coding_agent.tools.search import register_search_tools
-    from coding_agent.tools.planner import register_planner_tools
-    from coding_agent.tools.subagent import register_subagent_tool
-    from coding_agent.core.tape import Tape
-    from coding_agent.core.context import Context
-
-    tape = Tape.create(config.tape_dir)
-    provider = _create_provider(config)
-
-    planner = PlanManager()
-    registry = ToolRegistry(
-        repo_root=config.repo,
-        enable_cache=config.enable_cache,
-        cache_size=config.cache_size,
+    api_key = config.api_key.get_secret_value() if config.api_key else None
+    pipeline, ctx = create_agent(
+        api_key=api_key,
+        model_override=config.model,
     )
-    register_file_tools(registry, repo_root=config.repo)
-    register_shell_tools(registry, cwd=config.repo)
-    register_search_tools(registry, repo_root=config.repo)
-    register_planner_tools(registry, planner)
-
     tui = CodingAgentTUI(model_name=config.model, max_steps=config.max_steps)
-    consumer = tui.consumer
-
-    # Register subagent tool
-    register_subagent_tool(
-        registry=registry,
-        provider=provider,
-        tape=tape,
-        consumer=consumer,
-        max_steps=config.subagent_max_steps,
-        max_depth=config.max_subagent_depth,
-        enable_parallel=config.enable_parallel_tools,
-        max_parallel=config.max_parallel_tools,
-    )
-
-    system_prompt = (
-        "You are a coding agent. You can read files, edit files, "
-        "run shell commands, search the codebase, create task plans, "
-        "and dispatch sub-agents for independent sub-tasks.\n\n"
-        "Always create a plan (todo_write) before starting complex work. "
-        "Update task status as you progress."
-    )
-    context = Context(provider.max_context_size, system_prompt, planner=planner)
-
-    loop = AgentLoop(
-        provider=provider,
-        tools=registry,
-        tape=tape,
-        context=context,
-        consumer=consumer,
-        max_steps=config.max_steps,
-        enable_parallel=config.enable_parallel_tools,
-        max_parallel=config.max_parallel_tools,
-    )
-
+    adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=tui.consumer)
     with tui:
         tui.add_user_message(goal)
-        result = await loop.run_turn(goal)
+        result = await adapter.run_turn(goal)
         click.echo(f"\n--- Result ({result.stop_reason}) ---")
 
 
 async def _run_headless(config, goal):
     """Run agent in headless mode."""
-    if use_pipeline():
-        api_key = config.api_key.get_secret_value() if config.api_key else None
-        pipeline, ctx = create_agent(
-            api_key=api_key,
-            model_override=config.model,
-        )
-        consumer = HeadlessConsumer()
-        adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
-        result = await adapter.run_turn(goal)
-        click.echo(f"\n--- Result ({result.stop_reason}) ---")
-        if result.final_message:
-            click.echo(result.final_message)
-        return
-
-    from coding_agent.core.loop import AgentLoop
-    from coding_agent.core.planner import PlanManager
-    from coding_agent.tools.registry import ToolRegistry
-    from coding_agent.tools.file import register_file_tools
-    from coding_agent.tools.shell import register_shell_tools
-    from coding_agent.tools.search import register_search_tools
-    from coding_agent.tools.planner import register_planner_tools
-    from coding_agent.tools.subagent import register_subagent_tool
-    from coding_agent.core.tape import Tape
-    from coding_agent.core.context import Context
-
-    tape = Tape.create(config.tape_dir)
-    provider = _create_provider(config)
-
-    planner = PlanManager()
-    registry = ToolRegistry(
-        repo_root=config.repo,
-        enable_cache=config.enable_cache,
-        cache_size=config.cache_size,
+    api_key = config.api_key.get_secret_value() if config.api_key else None
+    pipeline, ctx = create_agent(
+        api_key=api_key,
+        model_override=config.model,
     )
-    register_file_tools(registry, repo_root=config.repo)
-    register_shell_tools(registry, cwd=config.repo)
-    register_search_tools(registry, repo_root=config.repo)
-    register_planner_tools(registry, planner)
-
     consumer = HeadlessConsumer()
-
-    register_subagent_tool(
-        registry=registry,
-        provider=provider,
-        tape=tape,
-        consumer=consumer,
-        max_steps=config.subagent_max_steps,
-        max_depth=config.max_subagent_depth,
-        enable_parallel=config.enable_parallel_tools,
-        max_parallel=config.max_parallel_tools,
-    )
-
-    system_prompt = (
-        "You are a coding agent. You can read files, edit files, "
-        "run shell commands, search the codebase, create task plans, "
-        "and dispatch sub-agents for independent sub-tasks.\n\n"
-        "Always create a plan (todo_write) before starting complex work. "
-        "Update task status as you progress."
-    )
-    context = Context(provider.max_context_size, system_prompt, planner=planner)
-
-    loop = AgentLoop(
-        provider=provider,
-        tools=registry,
-        tape=tape,
-        context=context,
-        consumer=consumer,
-        max_steps=config.max_steps,
-        enable_parallel=config.enable_parallel_tools,
-        max_parallel=config.max_parallel_tools,
-    )
-
-    result = await loop.run_turn(goal)
+    adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
+    result = await adapter.run_turn(goal)
     click.echo(f"\n--- Result ({result.stop_reason}) ---")
     if result.final_message:
         click.echo(result.final_message)
