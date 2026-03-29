@@ -13,6 +13,7 @@ class StopReason(Enum):
     MAX_STEPS_REACHED = "max_steps_reached"
     DOOM_LOOP = "doom_loop"
     ERROR = "error"
+    INTERRUPTED = "interrupted"
 
 
 @dataclass

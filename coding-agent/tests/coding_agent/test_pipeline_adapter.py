@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
+from agentkit.errors import PipelineError
 from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
 from agentkit.runtime.pipeline import Pipeline, PipelineContext
 from agentkit.runtime.hook_runtime import HookRuntime
@@ -387,3 +388,147 @@ class TestNoConsumer:
         outcome = await adapter.run_turn("read x")
         assert outcome.stop_reason == StopReason.NO_TOOL_CALLS
         assert outcome.steps_taken == 1
+
+
+class TestErrorRecovery:
+    """T12: REPL-safe error recovery — PipelineAdapter must never crash the REPL."""
+
+    def _make_adapter_with_mock_pipeline(
+        self,
+        side_effect,
+        session_id: str = "err-session",
+        consumer=None,
+    ) -> tuple[PipelineAdapter, PipelineContext, AsyncMock]:
+        """Build adapter with a mock Pipeline whose run_turn raises `side_effect`."""
+        tape = Tape()
+        ctx = PipelineContext(tape=tape, session_id=session_id, config={})
+        mock_pipeline = AsyncMock(spec=Pipeline)
+        mock_pipeline.run_turn = AsyncMock(side_effect=side_effect)
+        adapter = PipelineAdapter(pipeline=mock_pipeline, ctx=ctx, consumer=consumer)
+        return adapter, ctx, mock_pipeline
+
+    # ── 1. PipelineError → TurnOutcome(ERROR) ───────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_pipeline_error_returns_error_outcome(self):
+        """PipelineError → TurnOutcome(stop_reason=ERROR, error=message)."""
+        adapter, ctx, _ = self._make_adapter_with_mock_pipeline(
+            PipelineError("stage blew up", stage="run_model")
+        )
+
+        outcome = await adapter.run_turn("hello")
+
+        assert outcome.stop_reason == StopReason.ERROR
+        assert outcome.error is not None
+        assert "stage blew up" in outcome.error
+
+    # ── 2. User message preserved after Pipeline rollback ────────────────
+
+    @pytest.mark.asyncio
+    async def test_user_message_preserved_after_pipeline_rollback(self):
+        """Pipeline rolls back tape, but adapter re-appends user message."""
+        tape = Tape()
+        ctx = PipelineContext(tape=tape, session_id="s-rollback", config={})
+
+        async def rollback_side_effect(ctx_arg):
+            """Simulate Pipeline.run_turn rollback: replace tape with empty one."""
+            ctx_arg.tape = Tape()
+            raise PipelineError("kaboom", stage="build_context")
+
+        mock_pipeline = AsyncMock(spec=Pipeline)
+        mock_pipeline.run_turn = AsyncMock(side_effect=rollback_side_effect)
+        adapter = PipelineAdapter(pipeline=mock_pipeline, ctx=ctx)
+
+        outcome = await adapter.run_turn("important question")
+
+        assert outcome.stop_reason == StopReason.ERROR
+        user_entries = [
+            e
+            for e in ctx.tape
+            if e.kind == "message" and e.payload.get("role") == "user"
+        ]
+        assert len(user_entries) == 1
+        assert user_entries[0].payload["content"] == "important question"
+
+    # ── 3. KeyboardInterrupt → INTERRUPTED, not crash ────────────────────
+
+    @pytest.mark.asyncio
+    async def test_keyboard_interrupt_returns_interrupted(self):
+        """KeyboardInterrupt → TurnOutcome(stop_reason=INTERRUPTED)."""
+        adapter, ctx, _ = self._make_adapter_with_mock_pipeline(KeyboardInterrupt())
+
+        outcome = await adapter.run_turn("long task")
+
+        assert outcome.stop_reason == StopReason.INTERRUPTED
+        assert outcome.error is None or "interrupt" in outcome.error.lower()
+
+    # ── 4. Generic RuntimeError → TurnOutcome(ERROR) ────────────────────
+
+    @pytest.mark.asyncio
+    async def test_generic_runtime_error_returns_error_outcome(self):
+        """RuntimeError → TurnOutcome(stop_reason=ERROR)."""
+        adapter, ctx, _ = self._make_adapter_with_mock_pipeline(
+            RuntimeError("unexpected failure")
+        )
+
+        outcome = await adapter.run_turn("do stuff")
+
+        assert outcome.stop_reason == StopReason.ERROR
+        assert "unexpected failure" in outcome.error
+
+    # ── 5. Multiple consecutive errors → adapter stays functional ────────
+
+    @pytest.mark.asyncio
+    async def test_multiple_consecutive_errors_adapter_stays_functional(self):
+        """Multiple run_turn errors don't break the adapter."""
+        tape = Tape()
+        ctx = PipelineContext(tape=tape, session_id="s-multi", config={})
+
+        call_count = 0
+
+        async def always_error(ctx_arg):
+            nonlocal call_count
+            call_count += 1
+            raise PipelineError(f"error #{call_count}", stage="run_model")
+
+        mock_pipeline = AsyncMock(spec=Pipeline)
+        mock_pipeline.run_turn = AsyncMock(side_effect=always_error)
+        adapter = PipelineAdapter(pipeline=mock_pipeline, ctx=ctx)
+
+        o1 = await adapter.run_turn("msg1")
+        assert o1.stop_reason == StopReason.ERROR
+        assert "error #1" in o1.error
+
+        o2 = await adapter.run_turn("msg2")
+        assert o2.stop_reason == StopReason.ERROR
+        assert "error #2" in o2.error
+
+        o3 = await adapter.run_turn("msg3")
+        assert o3.stop_reason == StopReason.ERROR
+        assert "error #3" in o3.error
+
+        user_entries = [
+            e
+            for e in ctx.tape
+            if e.kind == "message" and e.payload.get("role") == "user"
+        ]
+        assert len(user_entries) == 3
+
+    # ── 6. TurnEnd with ERROR emitted to consumer on error ───────────────
+
+    @pytest.mark.asyncio
+    async def test_error_emits_turn_end_error_to_consumer(self):
+        """On error, TurnEnd(completion_status=ERROR) emitted to consumer."""
+        consumer = _RecordingConsumer()
+        adapter, ctx, _ = self._make_adapter_with_mock_pipeline(
+            PipelineError("consumer test", stage="render"),
+            session_id="s-consumer-err",
+            consumer=consumer,
+        )
+
+        await adapter.run_turn("hello")
+
+        turn_ends = [m for m in consumer.messages if isinstance(m, TurnEnd)]
+        assert len(turn_ends) == 1
+        assert turn_ends[0].completion_status == CompletionStatus.ERROR
+        assert turn_ends[0].session_id == "s-consumer-err"

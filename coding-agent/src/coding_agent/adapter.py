@@ -31,18 +31,29 @@ class PipelineAdapter:
         self._consumer = consumer
 
     async def run_turn(self, user_input: str) -> TurnOutcome:
-        self._ctx.tape.append(
-            Entry(kind="message", payload={"role": "user", "content": user_input})
+        user_entry = Entry(
+            kind="message", payload={"role": "user", "content": user_input}
         )
+        self._ctx.tape.append(user_entry)
         self._ctx.on_event = self._handle_event
 
         try:
             await self._pipeline.run_turn(self._ctx)
+        except KeyboardInterrupt:
+            self._ensure_user_message(user_entry)
+            return await self._finish(StopReason.INTERRUPTED, error="Interrupted")
         except Exception as exc:
+            self._ensure_user_message(user_entry)
             return await self._finish(StopReason.ERROR, error=str(exc))
 
         stop_reason = self._determine_stop_reason()
         return await self._finish(stop_reason)
+
+    def _ensure_user_message(self, user_entry: Entry) -> None:
+        for entry in self._ctx.tape:
+            if entry is user_entry:
+                return
+        self._ctx.tape.append(user_entry)
 
     async def _handle_event(self, event: TextEvent | ToolCallEvent | DoneEvent) -> None:
         if self._consumer is None:
