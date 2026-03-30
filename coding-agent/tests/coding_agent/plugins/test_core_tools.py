@@ -1,5 +1,6 @@
 import pytest
 from coding_agent.plugins.core_tools import CoreToolsPlugin
+from coding_agent.plugins.shell_session import ShellSessionPlugin
 from agentkit.tools.schema import ToolSchema
 from coding_agent.core.planner import PlanManager
 
@@ -71,3 +72,63 @@ class TestCoreToolsPlugin:
         names = {s.name for s in plugin.get_tools()}
         assert "grep_search" in names
         assert "glob_files" in names
+
+    def test_bash_run_uses_and_updates_shell_session(self, tmp_path):
+        shell_session = ShellSessionPlugin()
+        shell_session.do_mount()
+        shell_session.update_cwd(str(tmp_path))
+
+        subdir = tmp_path / "subdir"
+        subdir.mkdir()
+
+        plugin = CoreToolsPlugin(workspace_root=tmp_path, shell_session=shell_session)
+
+        cd_result = plugin.execute_tool(
+            name="bash_run",
+            arguments={"command": "cd subdir"},
+        )
+        assert "changed directory" in cd_result.lower()
+        assert shell_session.get_session_context()["cwd"] == str(subdir.resolve())
+
+        export_result = plugin.execute_tool(
+            name="bash_run",
+            arguments={"command": "export TEST_VALUE=session-ok"},
+        )
+        assert "test_value" in export_result.lower()
+
+        result = plugin.execute_tool(
+            name="bash_run",
+            arguments={
+                "command": "python3 -c \"import os; from pathlib import Path; print(Path.cwd().name); print(os.environ.get('TEST_VALUE', 'missing'))\""
+            },
+        )
+        assert "subdir" in result
+        assert "session-ok" in result
+
+    def test_export_with_spaces_updates_shell_session_from_result(self, tmp_path):
+        shell_session = ShellSessionPlugin()
+        shell_session.do_mount()
+        plugin = CoreToolsPlugin(workspace_root=tmp_path, shell_session=shell_session)
+
+        result = plugin.execute_tool(
+            name="bash_run",
+            arguments={"command": 'export TEST_VALUE="two words"'},
+        )
+
+        assert result == "Exported TEST_VALUE=two words"
+        assert (
+            shell_session.get_session_context()["env_vars"]["TEST_VALUE"] == "two words"
+        )
+
+    def test_failed_export_does_not_update_shell_session(self, tmp_path):
+        shell_session = ShellSessionPlugin()
+        shell_session.do_mount()
+        plugin = CoreToolsPlugin(workspace_root=tmp_path, shell_session=shell_session)
+
+        result = plugin.execute_tool(
+            name="bash_run",
+            arguments={"command": "export TEST_VALUE=value && echo nope"},
+        )
+
+        assert result.lower().startswith("error:")
+        assert "TEST_VALUE" not in shell_session.get_session_context()["env_vars"]

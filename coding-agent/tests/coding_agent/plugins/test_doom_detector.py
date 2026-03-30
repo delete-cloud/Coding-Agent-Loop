@@ -215,3 +215,26 @@ class TestDoomDetectorPlugin:
         assert state["doom_detected"] is True
         assert "reason" in state
         assert "doom_loop" in state["reason"]
+
+    def test_previous_turn_calls_do_not_trigger_doom_in_next_turn(self) -> None:
+        plugin = DoomDetectorPlugin()
+        tape = Tape()
+        tape.append(Entry(kind="message", payload={"role": "user", "content": "first"}))
+
+        for _ in range(2):
+            tape.append(_make_tool_call("file_read", {"path": "/foo.py"}))
+            tape.append(_make_tool_result("file_read"))
+
+        ctx = FakePipelineContext(tape=tape)
+        plugin.on_checkpoint(ctx=ctx)
+        assert ctx.plugin_states["doom_detector"]["doom_detected"] is False
+
+        tape.append(
+            Entry(kind="message", payload={"role": "user", "content": "second"})
+        )
+        tape.append(_make_tool_call("file_read", {"path": "/foo.py"}))
+        tape.append(_make_tool_result("file_read"))
+
+        plugin.on_checkpoint(ctx=ctx)
+
+        assert ctx.plugin_states["doom_detector"]["doom_detected"] is False

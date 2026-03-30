@@ -21,7 +21,7 @@ class DoomDetectorPlugin:
         if ctx is None:
             return
 
-        tool_calls = ctx.tape.filter("tool_call")
+        tool_calls = self._current_turn_tool_calls(ctx)
         if not tool_calls:
             ctx.plugin_states[self.state_key] = {"doom_detected": False}
             return
@@ -49,6 +49,16 @@ class DoomDetectorPlugin:
             )
 
         ctx.plugin_states[self.state_key] = state
+
+    def _current_turn_tool_calls(self, ctx: Any) -> list[Any]:
+        entries = list(ctx.tape)
+        turn_start = 0
+        for index in range(len(entries) - 1, -1, -1):
+            entry = entries[index]
+            if entry.kind == "message" and entry.payload.get("role") == "user":
+                turn_start = index + 1
+                break
+        return [entry for entry in entries[turn_start:] if entry.kind == "tool_call"]
 
     def _hash_call(self, entry: Any) -> str:
         payload = entry.payload
