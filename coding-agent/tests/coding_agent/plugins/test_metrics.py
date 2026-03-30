@@ -292,3 +292,85 @@ class TestSessionMetricsNoCtx:
     def test_no_ctx_does_not_crash(self) -> None:
         plugin = SessionMetricsPlugin()
         plugin.on_checkpoint()  # Should not raise
+
+
+class TestSessionMetricsTopicTracking:
+    """P2: per-topic metrics via on_session_event."""
+
+    def test_hooks_include_on_session_event(self) -> None:
+        plugin = SessionMetricsPlugin()
+        hooks = plugin.hooks()
+        assert "on_session_event" in hooks
+
+    def test_topic_start_sets_current_topic(self) -> None:
+        plugin = SessionMetricsPlugin()
+        plugin.on_session_event(
+            event_type="topic_start", payload={"topic_id": "topic-abc"}
+        )
+        assert plugin._current_topic_id == "topic-abc"
+
+    def test_topic_end_archives_metrics(self) -> None:
+        plugin = SessionMetricsPlugin()
+        plugin.on_session_event(
+            event_type="topic_start", payload={"topic_id": "topic-abc"}
+        )
+
+        tape = Tape()
+        tape.append(_make_tool_call("file_read", {"path": "/a.py"}))
+        tape.append(_make_tool_result())
+        tape.append(_make_tool_call("grep", {"pattern": "foo"}))
+        tape.append(_make_tool_result())
+        ctx = FakePipelineContext(tape=tape)
+        plugin.on_checkpoint(ctx=ctx)
+
+        plugin.on_session_event(
+            event_type="topic_end", payload={"topic_id": "topic-abc"}
+        )
+
+        topic_metrics = plugin.get_topic_metrics("topic-abc")
+        assert topic_metrics is not None
+        assert topic_metrics["steps_count"] == 2
+        assert topic_metrics["tool_calls"]["file_read"] == 1
+        assert topic_metrics["tool_calls"]["grep"] == 1
+
+    def test_multiple_topics_tracked_independently(self) -> None:
+        plugin = SessionMetricsPlugin()
+
+        plugin.on_session_event(event_type="topic_start", payload={"topic_id": "t1"})
+        tape = Tape()
+        tape.append(_make_tool_call("file_read"))
+        tape.append(_make_tool_result())
+        ctx = FakePipelineContext(tape=tape)
+        plugin.on_checkpoint(ctx=ctx)
+        plugin.on_session_event(event_type="topic_end", payload={"topic_id": "t1"})
+
+        plugin.on_session_event(event_type="topic_start", payload={"topic_id": "t2"})
+        tape2 = Tape()
+        for _ in range(5):
+            tape2.append(_make_tool_call("grep"))
+            tape2.append(_make_tool_result())
+        ctx2 = FakePipelineContext(tape=tape2)
+        plugin.on_checkpoint(ctx=ctx2)
+        plugin.on_session_event(event_type="topic_end", payload={"topic_id": "t2"})
+
+        t1 = plugin.get_topic_metrics("t1")
+        t2 = plugin.get_topic_metrics("t2")
+        assert t1["steps_count"] == 1
+        assert t2["steps_count"] == 5
+
+    def test_get_all_topic_metrics(self) -> None:
+        plugin = SessionMetricsPlugin()
+        plugin.on_session_event(event_type="topic_start", payload={"topic_id": "t1"})
+        plugin.on_session_event(event_type="topic_end", payload={"topic_id": "t1"})
+
+        all_metrics = plugin.get_all_topic_metrics()
+        assert "t1" in all_metrics
+
+    def test_unknown_topic_returns_none(self) -> None:
+        plugin = SessionMetricsPlugin()
+        assert plugin.get_topic_metrics("nonexistent") is None
+
+    def test_non_topic_events_ignored(self) -> None:
+        plugin = SessionMetricsPlugin()
+        plugin.on_session_event(event_type="handoff", payload={"reason": "window"})
+        assert plugin._current_topic_id is None

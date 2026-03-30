@@ -16,9 +16,15 @@ class SessionMetricsPlugin:
         self._tool_calls: dict[str, int] = defaultdict(int)
         self._api_calls: int = 0
         self._api_latency_total: float = 0.0
+        # Topic tracking
+        self._current_topic_id: str | None = None
+        self._topic_metrics: dict[str, dict[str, Any]] = {}
 
     def hooks(self) -> dict[str, Callable[..., Any]]:
-        return {"on_checkpoint": self.on_checkpoint}
+        return {
+            "on_checkpoint": self.on_checkpoint,
+            "on_session_event": self.on_session_event,
+        }
 
     def on_checkpoint(self, ctx: Any = None, **kwargs: Any) -> None:
         if ctx is None:
@@ -51,6 +57,27 @@ class SessionMetricsPlugin:
                 else 0.0
             ),
         }
+
+    def on_session_event(
+        self, event_type: str = "", payload: dict[str, Any] | None = None, **kwargs: Any
+    ) -> None:
+        payload = payload or {}
+        if event_type == "topic_start":
+            self._current_topic_id = payload.get("topic_id")
+        elif event_type == "topic_end":
+            topic_id = payload.get("topic_id")
+            if topic_id:
+                self._topic_metrics[topic_id] = {
+                    "steps_count": self._steps_count,
+                    "tool_calls": dict(self._tool_calls),
+                    "topic_id": topic_id,
+                }
+
+    def get_topic_metrics(self, topic_id: str) -> dict[str, Any] | None:
+        return self._topic_metrics.get(topic_id)
+
+    def get_all_topic_metrics(self) -> dict[str, dict[str, Any]]:
+        return dict(self._topic_metrics)
 
     def get_metrics(self) -> dict[str, Any]:
         now = time.time()
