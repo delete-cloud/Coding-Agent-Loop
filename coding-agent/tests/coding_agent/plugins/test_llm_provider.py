@@ -1,7 +1,8 @@
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
-from coding_agent.plugins.llm_provider import LLMProviderPlugin
+
 from agentkit.providers.protocol import LLMProvider
+from coding_agent.plugins.llm_provider import LLMProviderPlugin
+from coding_agent.providers.copilot import CopilotProvider
 
 
 class TestLLMProviderPlugin:
@@ -30,6 +31,17 @@ class TestLLMProviderPlugin:
         result = plugin.provide_llm()
         assert isinstance(result, LLMProvider)
         assert result.model_name == "gpt-4"
+
+    def test_provide_llm_copilot(self):
+        plugin = LLMProviderPlugin(
+            provider="copilot", model="gpt-4.1", api_key="ghu-test"
+        )
+
+        result = plugin.provide_llm()
+
+        assert isinstance(result, LLMProvider)
+        assert isinstance(result, CopilotProvider)
+        assert result.model_name == "gpt-4.1"
 
     def test_unknown_provider_raises(self):
         plugin = LLMProviderPlugin(provider="unknown", model="x", api_key="sk-test")

@@ -63,3 +63,20 @@ class TestLoadConfig:
         monkeypatch.delenv("AGENT_API_KEY", raising=False)
         c = load_config()
         assert c.api_key is None
+
+    def test_copilot_uses_github_token_when_agent_api_key_missing(self, monkeypatch):
+        monkeypatch.delenv("AGENT_API_KEY", raising=False)
+        monkeypatch.setenv("GITHUB_TOKEN", "ghu-test-token")
+
+        c = load_config(cli_args={"provider": "copilot"})
+
+        assert c.provider == "copilot"
+        assert c.api_key.get_secret_value() == "ghu-test-token"
+
+    def test_cli_api_key_overrides_github_token_for_copilot(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_TOKEN", "ghu-test-token")
+
+        c = load_config(cli_args={"provider": "copilot", "api_key": "sk-cli"})
+
+        assert c.provider == "copilot"
+        assert c.api_key.get_secret_value() == "sk-cli"

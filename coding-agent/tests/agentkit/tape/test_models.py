@@ -51,3 +51,35 @@ class TestEntry:
         assert restored.id == original.id
         assert restored.kind == original.kind
         assert restored.payload == original.payload
+
+    def test_entry_default_meta_is_empty_dict(self):
+        entry = Entry(kind="message", payload={"role": "user", "content": "hi"})
+        assert entry.meta == {}
+
+    def test_entry_custom_meta(self):
+        entry = Entry(
+            kind="message",
+            payload={"role": "user", "content": "hi"},
+            meta={"tokens": 150, "anchor_type": "summary"},
+        )
+        assert entry.meta["tokens"] == 150
+        assert entry.meta["anchor_type"] == "summary"
+
+    def test_entry_meta_roundtrip(self):
+        original = Entry(
+            kind="message",
+            payload={"role": "user", "content": "hi"},
+            meta={"tokens": 150, "anchor_type": "summary"},
+        )
+        restored = Entry.from_dict(original.to_dict())
+        assert restored.meta == original.meta
+
+    def test_entry_from_dict_missing_meta_defaults_empty(self):
+        d = {
+            "id": "abc-123",
+            "kind": "message",
+            "payload": {"role": "user", "content": "hi"},
+            "timestamp": 1000.0,
+        }
+        entry = Entry.from_dict(d)
+        assert entry.meta == {}

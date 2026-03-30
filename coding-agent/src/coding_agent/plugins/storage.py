@@ -22,7 +22,8 @@ class JSONLTapeStore:
         path = self._base_dir / f"{tape_id}.jsonl"
 
         def _write() -> None:
-            with open(path, "w") as f:
+            mode = "a" if path.exists() else "w"
+            with open(path, mode) as f:
                 for entry in entries:
                     f.write(json.dumps(entry) + "\n")
 

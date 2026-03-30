@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 from typing import Any
 
 from rich.console import Console
@@ -11,13 +10,6 @@ from rich.console import Console
 from coding_agent.cli.commands import handle_command
 from coding_agent.cli.input_handler import InputHandler
 from coding_agent.core.config import Config
-from coding_agent.core.planner import PlanManager
-from coding_agent.providers.openai_compat import OpenAICompatProvider
-from coding_agent.tools.file import register_file_tools
-from coding_agent.tools.planner import register_planner_tools
-from coding_agent.tools.registry import ToolRegistry
-from coding_agent.tools.search import register_search_tools
-from coding_agent.tools.shell import register_shell_tools
 from coding_agent.ui.rich_tui import CodingAgentTUI
 from coding_agent.__main__ import create_agent
 from coding_agent.adapter import PipelineAdapter
@@ -40,37 +32,6 @@ class InteractiveSession:
 
     def _setup_agent(self):
         """Setup agent components."""
-        # Provider
-        if self.config.provider == "anthropic":
-            from coding_agent.providers.anthropic import AnthropicProvider
-
-            self.provider = AnthropicProvider(
-                model=self.config.model,
-                api_key=self.config.api_key,
-            )
-        else:
-            self.provider = OpenAICompatProvider(
-                model=self.config.model,
-                api_key=self.config.api_key,
-                base_url=self.config.base_url,
-            )
-
-        # Tools
-        self.tools = ToolRegistry(
-            repo_root=self.config.repo,
-            enable_cache=self.config.enable_cache,
-            cache_size=self.config.cache_size,
-        )
-        register_file_tools(self.tools, repo_root=self.config.repo)
-        register_shell_tools(self.tools, cwd=self.config.repo)
-        register_search_tools(self.tools, repo_root=self.config.repo)
-
-        self.planner = PlanManager()
-        register_planner_tools(self.tools, self.planner)
-
-        self.context["planner"] = self.planner
-        self.context["tool_registry"] = self.tools
-
         self._current_consumer = None
 
         pipeline, pipeline_ctx = create_agent(

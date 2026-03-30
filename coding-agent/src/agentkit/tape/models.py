@@ -14,14 +14,18 @@ class Entry:
     payload: dict[str, Any]
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     timestamp: float = field(default_factory=time.time)
+    meta: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "id": self.id,
             "kind": self.kind,
             "payload": self.payload,
             "timestamp": self.timestamp,
         }
+        if self.meta:
+            d["meta"] = self.meta
+        return d
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Entry:
@@ -30,4 +34,5 @@ class Entry:
             kind=data["kind"],
             payload=data["payload"],
             timestamp=data["timestamp"],
+            meta=data.get("meta", {}),
         )

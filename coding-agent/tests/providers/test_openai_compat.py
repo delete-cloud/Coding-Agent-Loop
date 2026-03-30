@@ -8,6 +8,17 @@ from agentkit.providers.models import TextEvent, ToolCallEvent, DoneEvent
 
 
 class TestOpenAICompatProvider:
+    def test_supports_custom_default_headers(self):
+        provider = OpenAICompatProvider(
+            model="gpt-4o",
+            api_key="sk-test",
+            default_headers={"Accept": "application/vnd.github+json"},
+        )
+
+        assert (
+            provider._client.default_headers["Accept"] == "application/vnd.github+json"
+        )
+
     def test_context_size_known_model(self):
         provider = OpenAICompatProvider(
             model="gpt-4o",

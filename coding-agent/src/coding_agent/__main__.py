@@ -13,6 +13,9 @@ from coding_agent.ui.headless import HeadlessConsumer
 from coding_agent.ui.rich_tui import CodingAgentTUI
 
 
+PROVIDER_CHOICES = ["openai", "anthropic", "copilot"]
+
+
 def create_agent(
     config_path: Path | None = None,
     data_dir: Path | None = None,
@@ -55,7 +58,10 @@ def create_agent(
     if max_steps_override is not None:
         cfg.max_turns = max_steps_override
 
-    resolved_key = api_key or os.environ.get("AGENT_API_KEY", "")
+    resolved_key = api_key or os.environ.get("AGENT_API_KEY")
+    if not resolved_key and cfg.provider == "copilot":
+        resolved_key = os.environ.get("GITHUB_TOKEN", "")
+    resolved_key = resolved_key or ""
 
     registry = PluginRegistry()
     shell_session = ShellSessionPlugin()
@@ -158,20 +164,62 @@ def create_agent(
 
 
 @click.group(invoke_without_command=True)
+@click.option("--repo", default=None, help="Repository path")
+@click.option("--model", default=None, help="Model name")
+@click.option(
+    "--provider",
+    "provider_name",
+    default=None,
+    type=click.Choice(PROVIDER_CHOICES),
+)
+@click.option("--base-url", default=None, help="OpenAI-compatible API base URL")
+@click.option("--api-key", envvar="AGENT_API_KEY", default=None, help="API key")
+@click.option("--max-steps", default=None, type=int, help="Max steps per turn")
 @click.pass_context
-def main(ctx):
+def main(ctx, repo, model, provider_name, base_url, api_key, max_steps):
     """Coding Agent CLI.
 
     Without subcommand: starts interactive REPL mode (default)
     """
     if ctx.invoked_subcommand is None:
-        # Default to interactive REPL mode
-        import asyncio
-        from coding_agent.cli.repl import run_repl
-        from coding_agent.core.config import load_config
+        _run_repl_command(
+            repo=repo,
+            model=model,
+            provider_name=provider_name,
+            base_url=base_url,
+            api_key=api_key,
+            max_steps=max_steps,
+        )
 
-        config = load_config()
-        asyncio.run(run_repl(config))
+
+def _load_runtime_config(**cli_args):
+    from coding_agent.core.config import load_config
+
+    return load_config(cli_args=cli_args)
+
+
+def _run_repl_command(
+    *,
+    repo=None,
+    model=None,
+    provider_name=None,
+    base_url=None,
+    api_key=None,
+    max_steps=None,
+):
+    import asyncio
+    from coding_agent.cli.repl import run_repl
+
+    config = _load_runtime_config(
+        repo=repo,
+        model=model,
+        provider=provider_name,
+        base_url=base_url,
+        api_key=api_key,
+        max_steps=max_steps,
+        approval_mode="yolo",
+    )
+    asyncio.run(run_repl(config))
 
 
 @main.command()
@@ -182,10 +230,10 @@ def main(ctx):
     "--provider",
     "provider_name",
     default="openai",
-    type=click.Choice(["openai", "anthropic"]),
+    type=click.Choice(PROVIDER_CHOICES),
 )
 @click.option("--base-url", default=None, help="OpenAI-compatible API base URL")
-@click.option("--api-key", envvar="AGENT_API_KEY", required=True, help="API key")
+@click.option("--api-key", envvar="AGENT_API_KEY", default=None, help="API key")
 @click.option("--max-steps", default=30, help="Max steps per turn")
 @click.option(
     "--approval", default="yolo", type=click.Choice(["yolo", "interactive", "auto"])
@@ -214,9 +262,8 @@ def run(
 ):
     """Run agent on a goal (batch mode)."""
     import asyncio
-    from coding_agent.core.config import Config
 
-    config = Config(
+    config = _load_runtime_config(
         provider=provider_name,
         model=model,
         api_key=api_key,
@@ -243,27 +290,21 @@ def run(
     "--provider",
     "provider_name",
     default="openai",
-    type=click.Choice(["openai", "anthropic"]),
+    type=click.Choice(PROVIDER_CHOICES),
 )
 @click.option("--base-url", default=None, help="OpenAI-compatible API base URL")
-@click.option("--api-key", envvar="AGENT_API_KEY", required=True, help="API key")
+@click.option("--api-key", envvar="AGENT_API_KEY", default=None, help="API key")
 @click.option("--max-steps", default=30, help="Max steps per turn")
 def repl(repo, model, provider_name, base_url, api_key, max_steps):
     """Start interactive REPL mode (explicit)."""
-    import asyncio
-    from coding_agent.cli.repl import run_repl
-    from coding_agent.core.config import Config
-
-    config = Config(
-        provider=provider_name,
-        model=model,
-        api_key=api_key,
-        base_url=base_url,
+    _run_repl_command(
         repo=repo,
+        model=model,
+        provider_name=provider_name,
+        base_url=base_url,
+        api_key=api_key,
         max_steps=max_steps,
-        approval_mode="yolo",
     )
-    asyncio.run(run_repl(config))
 
 
 async def _run_with_tui(config, goal):
@@ -314,6 +355,14 @@ def _create_provider(config):
         return AnthropicProvider(
             model=config.model,
             api_key=config.api_key,
+        )
+    if config.provider == "copilot":
+        from coding_agent.providers.copilot import CopilotProvider
+
+        return CopilotProvider(
+            model=config.model,
+            api_key=config.api_key,
+            base_url=config.base_url,
         )
     else:
         from coding_agent.providers.openai_compat import OpenAICompatProvider

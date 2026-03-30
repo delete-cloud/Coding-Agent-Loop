@@ -48,6 +48,7 @@ class OpenAICompatProvider:
         max_retries: int = 3,
         retry_base_delay: float = 1.0,
         retry_max_delay: float = 60.0,
+        default_headers: dict[str, str] | None = None,
     ):
         self._model = model
         # Handle SecretStr by extracting actual value
@@ -68,6 +69,7 @@ class OpenAICompatProvider:
         self._client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
+            default_headers=default_headers,
             http_client=self._http_client,
         )
         self._max_tokens = max_tokens

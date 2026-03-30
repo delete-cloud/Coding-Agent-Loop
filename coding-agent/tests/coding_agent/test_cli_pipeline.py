@@ -6,6 +6,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from click.testing import CliRunner
 
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.adapter_types import StopReason, TurnOutcome
@@ -251,6 +252,83 @@ class TestReplUsesPipeline:
 
         assert isinstance(session._pipeline_adapter, PipelineAdapter)
         mock_create_agent.assert_called_once()
+
+
+class TestMainDefaultEntry:
+    def test_default_entry_uses_same_repl_runner(self):
+        from coding_agent.__main__ import main
+
+        runner = CliRunner()
+
+        with patch("coding_agent.__main__._run_repl_command") as mock_run_repl_command:
+            result = runner.invoke(main, [])
+
+        assert result.exit_code == 0
+        mock_run_repl_command.assert_called_once_with(
+            repo=None,
+            model=None,
+            provider_name=None,
+            base_url=None,
+            api_key=None,
+            max_steps=None,
+        )
+
+    def test_explicit_repl_uses_same_repl_runner(self):
+        from coding_agent.__main__ import main
+
+        runner = CliRunner()
+
+        with patch("coding_agent.__main__._run_repl_command") as mock_run_repl_command:
+            result = runner.invoke(
+                main,
+                [
+                    "repl",
+                    "--repo",
+                    "/tmp/repo",
+                    "--model",
+                    "gpt-4.1",
+                    "--provider",
+                    "copilot",
+                    "--base-url",
+                    "https://example.test/v1",
+                    "--api-key",
+                    "token-123",
+                    "--max-steps",
+                    "17",
+                ],
+            )
+
+        assert result.exit_code == 0
+        mock_run_repl_command.assert_called_once_with(
+            repo="/tmp/repo",
+            model="gpt-4.1",
+            provider_name="copilot",
+            base_url="https://example.test/v1",
+            api_key="token-123",
+            max_steps=17,
+        )
+
+
+class TestCliConfigLoading:
+    def test_repl_copilot_accepts_github_token_without_api_key(self):
+        from coding_agent.__main__ import main
+
+        runner = CliRunner()
+
+        with patch(
+            "coding_agent.cli.repl.run_repl", new_callable=AsyncMock
+        ) as mock_run_repl:
+            result = runner.invoke(
+                main,
+                ["repl", "--provider", "copilot", "--model", "gpt-4.1"],
+                env={"GITHUB_TOKEN": "ghu-test-token"},
+            )
+
+        assert result.exit_code == 0
+        (config,), _ = mock_run_repl.await_args
+
+        assert config.provider == "copilot"
+        assert config.api_key.get_secret_value() == "ghu-test-token"
 
 
 class TestReplMultiturnContext:

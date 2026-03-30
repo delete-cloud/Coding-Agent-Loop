@@ -52,6 +52,14 @@ class LLMProviderPlugin:
                 api_key=self._api_key,
                 base_url=self._base_url,
             )
+        elif self._provider_name == "copilot":
+            from coding_agent.providers.copilot import CopilotProvider
+
+            self._instance = CopilotProvider(
+                model=self._model,
+                api_key=self._api_key,
+                base_url=self._base_url,
+            )
         else:
             raise ValueError(f"unsupported provider: {self._provider_name}")
 

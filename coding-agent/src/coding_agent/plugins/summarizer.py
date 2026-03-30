@@ -16,7 +16,7 @@ from agentkit.tape.tape import Tape
 
 
 class SummarizerPlugin:
-    """Plugin implementing summarize_context hook."""
+    """Plugin implementing resolve_context_window hook."""
 
     state_key = "summarizer"
 
@@ -29,16 +29,59 @@ class SummarizerPlugin:
         self._keep_recent = keep_recent
 
     def hooks(self) -> dict[str, Callable[..., Any]]:
-        return {"summarize_context": self.summarize_context}
+        return {"resolve_context_window": self.resolve_context_window}
+
+    def resolve_context_window(
+        self, tape: Tape | None = None, **kwargs: Any
+    ) -> tuple[int, Entry] | None:
+        """Determine context window boundaries.
+
+        Returns (window_start_index, summary_anchor_entry) or None if no
+        windowing is needed. Original entries are always preserved.
+        """
+        if tape is None:
+            return None
+
+        visible = tape.windowed_entries() if hasattr(tape, 'windowed_entries') else list(tape)
+        if len(visible) <= self._max_entries:
+            return None
+
+        split_point = len(visible) - self._keep_recent
+        old_entries = visible[:split_point]
+
+        summary_parts = []
+        for entry in old_entries:
+            if entry.kind == "message":
+                role = entry.payload.get("role", "?")
+                content = entry.payload.get("content", "")
+                preview = content[:100] + "..." if len(content) > 100 else content
+                summary_parts.append(f"[{role}] {preview}")
+            elif entry.kind == "tool_call":
+                name = entry.payload.get("name", "?")
+                summary_parts.append(f"[tool_call] {name}")
+            elif entry.kind == "tool_result":
+                summary_parts.append("[tool_result] ...")
+
+        summary_text = (
+            f"[Summarized {len(old_entries)} earlier entries]\n"
+            + "\n".join(summary_parts[-10:])
+        )
+
+        summary_anchor = Entry(
+            kind="anchor",
+            payload={"content": summary_text},
+            meta={
+                "anchor_type": "handoff",
+                "source_entry_count": len(old_entries),
+            },
+        )
+
+        return (split_point, summary_anchor)
 
     def summarize_context(
         self, tape: Tape | None = None, **kwargs: Any
     ) -> list[Entry] | None:
-        """Summarize tape if it exceeds max_entries.
-
-        Returns a new entry list with old entries compressed into an anchor,
-        or None if no summarization is needed.
-        """
+        """Legacy summarize_context hook — kept for backward compatibility."""
         if tape is None:
             return None
 
@@ -46,12 +89,10 @@ class SummarizerPlugin:
         if len(entries) <= self._max_entries:
             return None
 
-        # Split into old (to summarize) and recent (to keep)
         split_point = len(entries) - self._keep_recent
         old_entries = entries[:split_point]
         recent_entries = entries[split_point:]
 
-        # Create summary of old entries
         summary_parts = []
         for entry in old_entries:
             if entry.kind == "message":

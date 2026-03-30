@@ -247,6 +247,48 @@ class TestPipeline:
         assert ctx.messages[1]["content"] == "summary"
 
     @pytest.mark.asyncio
+    async def test_build_context_uses_windowing(self, setup):
+        pipeline, plugin = setup
+        tape = Tape()
+        for i in range(10):
+            tape.append(
+                Entry(kind="message", payload={"role": "user", "content": f"msg-{i}"})
+            )
+        ctx = PipelineContext(tape=tape, session_id="s1")
+
+        class WindowPlugin:
+            state_key = "window"
+
+            def hooks(self):
+                return {"resolve_context_window": self.resolve_context_window}
+
+            def resolve_context_window(self, tape=None, **kwargs):
+                if tape is None:
+                    return None
+                anchor = Entry(
+                    kind="anchor",
+                    payload={"content": "summary of old entries"},
+                    meta={"anchor_type": "handoff", "source_entry_count": 7},
+                )
+                return (7, anchor)
+
+        window_plugin = WindowPlugin()
+        registry = PluginRegistry()
+        registry.register(plugin)
+        registry.register(window_plugin)
+        runtime = HookRuntime(registry)
+        pipeline2 = Pipeline(runtime=runtime, registry=registry)
+
+        await pipeline2._stage_build_context(ctx)
+
+        # All original entries preserved + the anchor
+        assert len(ctx.tape) == 11  # 10 original + 1 anchor
+        # The anchor is in the tape
+        anchors = [e for e in ctx.tape if e.kind == "anchor"]
+        assert len(anchors) == 1
+        assert anchors[0].meta.get("anchor_type") == "handoff"
+
+    @pytest.mark.asyncio
     async def test_run_turn_records_one_tool_call_entry_per_call(self, setup):
         pipeline, plugin = setup
         tape = Tape()

@@ -127,14 +127,31 @@ class Pipeline:
                 ctx.tool_schemas.append(tool_list)
 
     async def _stage_build_context(self, ctx: PipelineContext) -> None:
-        summary = self._runtime.call_first("summarize_context", tape=ctx.tape)
-        if summary is not None:
-            ctx.tape = Tape(
-                entries=list(summary),
-                tape_id=ctx.tape.tape_id,
-                parent_id=ctx.tape.parent_id,
+        # Try new non-destructive windowing first
+        window_result = self._runtime.call_first(
+            "resolve_context_window", tape=ctx.tape
+        )
+        if window_result is not None:
+            window_start, summary_anchor = window_result
+            if summary_anchor is not None:
+                ctx.tape.handoff(summary_anchor)
+            logger.info(
+                "Context window advanced: %d entries visible (of %d total)",
+                len(ctx.tape.windowed_entries()),
+                len(ctx.tape),
             )
-            logger.info("Context summarized: %d entries remaining", len(ctx.tape))
+        else:
+            # Fallback to legacy summarize_context for backward compatibility
+            summary = self._runtime.call_first("summarize_context", tape=ctx.tape)
+            if summary is not None:
+                ctx.tape = Tape(
+                    entries=list(summary),
+                    tape_id=ctx.tape.tape_id,
+                    parent_id=ctx.tape.parent_id,
+                )
+                logger.info(
+                    "Context summarized (legacy): %d entries remaining", len(ctx.tape)
+                )
 
         grounding_results = self._runtime.call_many("build_context", tape=ctx.tape)
         grounding: list[dict[str, Any]] = []
@@ -146,7 +163,11 @@ class Pipeline:
 
         system_prompt = ctx.config.get("system_prompt", "You are a helpful assistant.")
         builder = ContextBuilder(system_prompt=system_prompt)
-        ctx.messages = builder.build(ctx.tape, grounding=grounding or None)
+        ctx.messages = builder.build(
+            ctx.tape,
+            grounding=grounding or None,
+            entries=ctx.tape.windowed_entries() if ctx.tape.window_start > 0 else None,
+        )
 
     async def _stage_run_model(self, ctx: PipelineContext) -> None:
         if ctx.llm_provider is None:

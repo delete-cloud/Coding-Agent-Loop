@@ -16,11 +16,28 @@ class Tape:
         entries: list[Entry] | None = None,
         tape_id: str | None = None,
         parent_id: str | None = None,
+        _window_start: int = 0,
+        _persisted_count: int = 0,
     ) -> None:
         self._entries: list[Entry] = list(entries or [])
         self.tape_id: str = tape_id or str(uuid.uuid4())
         self.parent_id: str | None = parent_id
+        self._window_start: int = _window_start
+        self._persisted_count: int = _persisted_count
         self._lock = Lock()
+
+    @property
+    def window_start(self) -> int:
+        return self._window_start
+
+    def windowed_entries(self) -> list[Entry]:
+        with self._lock:
+            return list(self._entries[self._window_start :])
+
+    def handoff(self, summary_anchor: Entry) -> None:
+        with self._lock:
+            self._entries.append(summary_anchor)
+            self._window_start = len(self._entries) - 1
 
     def append(self, entry: Entry) -> None:
         with self._lock:
@@ -35,6 +52,8 @@ class Tape:
             return Tape(
                 entries=list(self._entries),
                 parent_id=self.tape_id,
+                _window_start=self._window_start,
+                _persisted_count=self._persisted_count,
             )
 
     def to_list(self) -> list[dict[str, Any]]:
@@ -48,9 +67,18 @@ class Tape:
 
     def save_jsonl(self, path: Path) -> None:
         with self._lock:
-            with open(path, "w") as f:
-                for entry in self._entries:
+            if path.exists() and self._persisted_count > 0:
+                mode = "a"
+                start = self._persisted_count
+            else:
+                mode = "w"
+                start = 0
+
+            with open(path, mode) as f:
+                for entry in self._entries[start:]:
                     f.write(json.dumps(entry.to_dict()) + "\n")
+
+            self._persisted_count = len(self._entries)
 
     @classmethod
     def load_jsonl(cls, path: Path, **kwargs: Any) -> Tape:
@@ -60,7 +88,16 @@ class Tape:
                 line = line.strip()
                 if line:
                     entries.append(Entry.from_dict(json.loads(line)))
-        return cls(entries=entries, **kwargs)
+        window_start = 0
+        for i, entry in enumerate(entries):
+            if entry.meta.get("anchor_type") == "handoff":
+                window_start = i
+        return cls(
+            entries=entries,
+            _window_start=window_start,
+            _persisted_count=len(entries),
+            **kwargs,
+        )
 
     def __len__(self) -> int:
         with self._lock:

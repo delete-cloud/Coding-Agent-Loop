@@ -1,7 +1,7 @@
 [agent]
 name = "coding-agent"
-model = "claude-sonnet-4-20250514"
-provider = "anthropic"
+model = "gpt-4.1"
+provider = "copilot"
 system_prompt = """You are a skilled coding assistant. You help users write, debug, and improve code.
 You have access to file operations, shell commands, and search tools.
 Always explain your reasoning before making changes."""

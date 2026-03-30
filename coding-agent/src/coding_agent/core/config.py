@@ -13,7 +13,7 @@ class Config(BaseModel):
     """Validated agent configuration."""
 
     # Provider
-    provider: Literal["openai", "anthropic"] = "openai"
+    provider: Literal["openai", "anthropic", "copilot"] = "openai"
     model: str = "gpt-4o"
     api_key: SecretStr | None = None
     base_url: str | None = None
@@ -75,6 +75,11 @@ def load_config(cli_args: dict | None = None) -> Config:
         for k, v in cli_args.items():
             if v is not None:
                 values[k] = v
+
+    if values.get("provider") == "copilot" and "api_key" not in values:
+        github_token = os.environ.get("GITHUB_TOKEN")
+        if github_token:
+            values["api_key"] = github_token
 
     return Config(**values)
 
