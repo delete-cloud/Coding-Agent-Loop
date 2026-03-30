@@ -1,0 +1,16 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.14.0, pytest-9.0.2, pluggy-1.6.0 -- /Users/kina/Code/Agent/Coding-Agent-Loop/coding-agent/.venv/bin/python3
+cachedir: .pytest_cache
+rootdir: /Users/kina/Code/Agent/Coding-Agent-Loop/coding-agent
+configfile: pyproject.toml
+plugins: cov-7.1.0, asyncio-1.3.0, anyio-4.13.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 16 items / 11 deselected / 5 selected
+
+tests/coding_agent/plugins/test_doom_detector.py::TestDoomDetectorPlugin::test_2_identical_calls_no_doom PASSED [ 20%]
+tests/coding_agent/plugins/test_doom_detector.py::TestDoomDetectorPlugin::test_different_calls_no_doom PASSED [ 40%]
+tests/coding_agent/plugins/test_doom_detector.py::TestDoomDetectorPlugin::test_different_tool_names_no_doom PASSED [ 60%]
+tests/coding_agent/plugins/test_doom_detector.py::TestDoomDetectorPlugin::test_empty_tape_no_doom PASSED [ 80%]
+tests/coding_agent/plugins/test_doom_detector.py::TestDoomDetectorPlugin::test_no_tool_calls_in_tape PASSED [100%]
+
+======================= 5 passed, 11 deselected in 0.01s =======================

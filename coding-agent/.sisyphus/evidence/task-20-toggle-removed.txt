@@ -1,0 +1,95 @@
+TASK 20: Remove USE_PIPELINE Toggle - Evidence Report
+======================================================
+
+OBJECTIVE
+---------
+Remove all `use_pipeline()` branching so Pipeline is the ONLY execution path.
+Old AgentLoop code remains in codebase but is no longer reachable.
+
+CHANGES COMPLETED
+-----------------
+
+1. src/coding_agent/core/config.py
+   - Deleted use_pipeline() function (lines 86-97)
+   - Verification: No use_pipeline or USE_PIPELINE references remain
+
+2. src/coding_agent/__main__.py
+   - Removed: from coding_agent.core.config import use_pipeline (line 11)
+   - _run_with_tui(config, goal): 
+     * Removed if use_pipeline() check
+     * Deleted entire else-branch with old AgentLoop path (was lines 240-303)
+     * Kept ONLY Pipeline path (lines 226-238 now condensed)
+   - _run_headless(config, goal):
+     * Removed if use_pipeline() check  
+     * Deleted entire else-branch with old AgentLoop path (was lines 322-383)
+     * Kept ONLY Pipeline path (lines 308-320 now condensed)
+
+3. src/coding_agent/cli/repl.py
+   - Removed: use_pipeline import from line 13
+   - InteractiveSession._setup_agent():
+     * Removed if use_pipeline() / else: branch (lines 103-118)
+     * Removed self._use_pipeline attribute entirely
+     * Pipeline adapter now always initialized
+   - InteractiveSession._process_message():
+     * Removed if self._use_pipeline check (line 190)
+     * Deleted entire else-branch with old AgentLoop path (lines 200-223)
+     * Kept ONLY Pipeline path
+
+4. tests/coding_agent/test_feature_toggle.py
+   - DELETED entirely (toggle no longer exists)
+
+5. tests/coding_agent/test_cli_pipeline.py
+   - Updated module docstring: removed "behind USE_PIPELINE toggle" wording
+   - Removed all monkeypatch.setenv("USE_PIPELINE", "1") calls
+   - Removed all monkeypatch.delenv("USE_PIPELINE", raising=False) calls
+   - Deleted old-path tests:
+     * test_tui_run_uses_agent_loop_when_toggle_off
+     * test_headless_run_uses_agent_loop_when_toggle_off
+     * test_repl_uses_agent_loop_by_default
+   - Kept ALL Pipeline behavior tests (they test the only path now)
+   - Updated remaining tests to remove toggle mocking
+
+VERIFICATION RESULTS
+--------------------
+
+✓ Source code scan:
+  grep -r "use_pipeline" src/ --include="*.py"  → EMPTY (only pycache binary)
+  grep -r "USE_PIPELINE" src/ --include="*.py" → EMPTY (only pycache binary)
+
+✓ Test suite:
+  python3 -m pytest tests/coding_agent/ tests/agentkit/ tests/integration/ --no-header -q
+  Result: 385 passed, 2 pre-existing failures (unrelated shell tool test with python binary)
+  No new failures introduced
+
+✓ Pipeline is sole execution path:
+  - _run_with_tui: Always creates PipelineAdapter
+  - _run_headless: Always creates PipelineAdapter
+  - REPL: Always creates PipelineAdapter in InteractiveSession._setup_agent()
+
+✓ Old AgentLoop code remains intact:
+  - src/coding_agent/core/loop.py (not touched - T21 will delete)
+  - Related provider/tool files unchanged
+  - Old code is simply unreachable, not deleted
+
+MIGRATION STATUS
+----------------
+✅ All USE_PIPELINE branching removed
+✅ Pipeline now the ONLY execution path
+✅ Old AgentLoop code in place but unreachable
+✅ No regressions in test suite
+✅ All toggle references eliminated from source
+
+READY FOR COMMIT
+---------------
+Message: refactor: remove USE_PIPELINE toggle, Pipeline is default
+
+Files modified:
+  - src/coding_agent/core/config.py (use_pipeline function deleted)
+  - src/coding_agent/__main__.py (branching removed, Pipeline always used)
+  - src/coding_agent/cli/repl.py (branching removed, Pipeline always used)
+  - tests/coding_agent/test_cli_pipeline.py (toggle tests removed)
+
+Files deleted:
+  - tests/coding_agent/test_feature_toggle.py
+
+Execution status: COMPLETE ✓

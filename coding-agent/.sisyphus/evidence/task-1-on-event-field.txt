@@ -1,0 +1,90 @@
+# Task 1: Add on_event Streaming Callback to PipelineContext
+# Evidence Report
+
+## Implementation Summary
+
+### Files Modified
+1. src/agentkit/runtime/pipeline.py
+   - Added imports: `Awaitable`, `Callable` to typing
+   - Added field to PipelineContext dataclass:
+     ```python
+     on_event: Callable[[TextEvent | ToolCallEvent | DoneEvent], Awaitable[None]] | None = None
+     ```
+
+2. tests/agentkit/runtime/test_pipeline_streaming.py (NEW)
+   - Created comprehensive test suite with 7 tests
+   - Tests verify:
+     - on_event field exists
+     - Defaults to None
+     - Can be set to a callable
+     - Type signature accepts all event types (TextEvent, ToolCallEvent, DoneEvent)
+
+### TDD Flow
+✓ RED: All 7 tests failed initially (expected)
+✓ GREEN: All 7 tests pass after adding field
+✓ REFACTOR: Clean typing with proper defaults (None = no-op)
+
+## Test Results
+
+### test_pipeline_streaming.py (NEW)
+7 passed in 0.02s ✓
+
+### All agentkit tests
+156 passed in 0.08s ✓
+- Includes the 7 new streaming tests
+- No regressions
+
+## QA Scenarios - All Pass
+
+1. ✓ Dataclass fields check: True
+2. ✓ on_event field exists: True, has_attr: True, default: None
+3. ✓ test_pipeline_streaming.py: 7/7 passed
+4. ✓ All agentkit tests: 156/156 passed
+
+## Code Quality
+
+✓ Python syntax valid (compiles successfully)
+✓ No import violations:
+  - Only imports from agentkit (agentkit.providers.models)
+  - No imports from coding_agent.wire
+  - No WireMessage types added to agentkit
+✓ Simple callback field - not a complex event bus
+✓ Proper default value (None) for no-op behavior
+
+## Acceptance Criteria - ALL MET
+
+✓ on_event field exists on PipelineContext
+✓ Type: Callable[[TextEvent | ToolCallEvent | DoneEvent], Awaitable[None]] | None
+✓ Default: None (no-op)
+✓ Tests: uv run pytest tests/agentkit/runtime/test_pipeline_streaming.py -v → PASS
+✓ Regression: uv run pytest tests/agentkit/ -q → all 156 tests pass (no regression)
+✓ No imports from coding_agent.wire in agentkit
+✓ No WireMessage types in agentkit
+✓ Simple callback field, not complex event bus
+
+## Git Commit
+
+Commit: feat(agentkit): add on_event streaming callback to PipelineContext
+Hash: 7e48dd8
+Branch: feat/agentkit-v1
+
+Files:
+- modified:   src/agentkit/runtime/pipeline.py
+- new file:   tests/agentkit/runtime/test_pipeline_streaming.py
+
+## Self-Review
+
+STRENGTHS:
+- Clean, minimal implementation
+- Strong type hints with union types
+- Comprehensive test coverage
+- No regressions
+- Follows existing patterns in codebase
+- Simple callback field (no complexity)
+
+NOTES:
+- on_event callback is a placeholder for Wave 2
+- Wave 2 tasks will invoke this callback during model execution
+- Currently the field is not used in the pipeline - that's expected for Wave 1
+
+STATUS: COMPLETE ✓

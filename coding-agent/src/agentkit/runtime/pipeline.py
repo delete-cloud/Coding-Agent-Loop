@@ -6,8 +6,9 @@ Stages: resolve_session → load_state → build_context → run_model → save_
 from __future__ import annotations
 
 import logging
+from inspect import isawaitable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from agentkit._types import StageName
 from agentkit.errors import PipelineError
@@ -34,6 +35,9 @@ class PipelineContext:
     tool_schemas: list[Any] = field(default_factory=list)
     response_entries: list[Any] = field(default_factory=list)
     output: Any = None
+    on_event: (
+        Callable[[TextEvent | ToolCallEvent | DoneEvent], Awaitable[None]] | None
+    ) = None
 
 
 class Pipeline:
@@ -163,8 +167,12 @@ class Pipeline:
 
             async for event in ctx.llm_provider.stream(ctx.messages, tools=tool_dicts):
                 if isinstance(event, TextEvent):
+                    if ctx.on_event:
+                        await ctx.on_event(event)
                     text_chunks.append(event.text)
                 elif isinstance(event, ToolCallEvent):
+                    if ctx.on_event:
+                        await ctx.on_event(event)
                     tool_calls.append(
                         {
                             "id": event.tool_call_id,
@@ -173,6 +181,8 @@ class Pipeline:
                         }
                     )
                 elif isinstance(event, DoneEvent):
+                    if ctx.on_event:
+                        await ctx.on_event(event)
                     break
 
             if text_chunks and not tool_calls:
@@ -185,6 +195,20 @@ class Pipeline:
                 break
 
             if tool_calls:
+                if text_chunks:
+                    ctx.tape.append(
+                        Entry(
+                            kind="message",
+                            payload={
+                                "role": "assistant",
+                                "content": "".join(text_chunks),
+                            },
+                        )
+                    )
+
+                executable_calls: list[dict[str, Any]] = []
+                executable_metas: list[dict[str, Any]] = []
+
                 for tc in tool_calls:
                     ctx.tape.append(
                         Entry(
@@ -220,21 +244,63 @@ class Pipeline:
                         )
                         continue
 
-                    result = self._runtime.call_first(
-                        "execute_tool",
-                        name=tc["name"],
-                        arguments=tc["arguments"],
+                    executable_calls.append(
+                        {"name": tc["name"], "arguments": tc["arguments"]}
                     )
+                    executable_metas.append(tc)
 
-                    ctx.tape.append(
-                        Entry(
-                            kind="tool_result",
-                            payload={
-                                "tool_call_id": tc["id"],
-                                "content": str(result) if result is not None else "",
-                            },
+                if executable_calls:
+                    batch_results = (
+                        self._runtime.call_first(
+                            "execute_tools_batch",
+                            tool_calls=executable_calls,
                         )
+                        if len(executable_calls) > 1
+                        else None
                     )
+                    if isawaitable(batch_results):
+                        batch_results = await batch_results
+
+                    if batch_results is None:
+                        batch_results = []
+                        for call in executable_calls:
+                            try:
+                                result = self._runtime.call_first(
+                                    "execute_tool",
+                                    name=call["name"],
+                                    arguments=call["arguments"],
+                                )
+                                if isawaitable(result):
+                                    result = await result
+                                batch_results.append(result)
+                            except Exception as exc:
+                                batch_results.append(exc)
+
+                    for tc, result in zip(
+                        executable_metas, batch_results, strict=False
+                    ):
+                        if isinstance(result, Exception):
+                            result_str = (
+                                f"Error executing tool '{tc['name']}': {str(result)}"
+                            )
+                        else:
+                            result_str = str(result) if result is not None else ""
+                            max_size = ctx.config.get("max_tool_result_size", 10000)
+                            if len(result_str) > max_size:
+                                result_str = (
+                                    result_str[:max_size]
+                                    + f"\n... ({len(result_str) - max_size} chars truncated)"
+                                )
+
+                        ctx.tape.append(
+                            Entry(
+                                kind="tool_result",
+                                payload={
+                                    "tool_call_id": tc["id"],
+                                    "content": result_str,
+                                },
+                            )
+                        )
 
                 await self._stage_build_context(ctx)
                 continue

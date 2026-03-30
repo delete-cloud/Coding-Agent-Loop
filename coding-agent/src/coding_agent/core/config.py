@@ -36,6 +36,10 @@ class Config(BaseModel):
     enable_parallel_tools: bool = True
     max_parallel_tools: int = 5
 
+    # Caching
+    enable_cache: bool = True
+    cache_size: int = 100
+
     # HTTP Server settings
     http_api_key: str | None = None  # API key for HTTP API authentication
 

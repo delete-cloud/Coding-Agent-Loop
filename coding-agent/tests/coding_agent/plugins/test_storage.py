@@ -1,6 +1,8 @@
 import pytest
 from pathlib import Path
+import coding_agent.plugins.storage as storage_module
 from coding_agent.plugins.storage import StoragePlugin
+from coding_agent.plugins.storage import JSONLTapeStore
 from agentkit.storage.protocols import TapeStore, SessionStore
 from agentkit.tape.store import ForkTapeStore
 
@@ -26,3 +28,43 @@ class TestStoragePlugin:
         state = hooks["mount"]()
         assert "session_store" in state
         assert isinstance(state["session_store"], SessionStore)
+
+
+class TestJSONLTapeStore:
+    @pytest.mark.asyncio
+    async def test_save_uses_executor_for_file_io(self, tmp_path, monkeypatch):
+        store = JSONLTapeStore(tmp_path)
+        recorded: list[tuple[object | None, object]] = []
+
+        async def fake_run_in_executor(_self, executor, func):
+            recorded.append((executor, func))
+            return func()
+
+        loop = type("LoopStub", (), {"run_in_executor": fake_run_in_executor})()
+
+        monkeypatch.setattr(storage_module.asyncio, "get_running_loop", lambda: loop)
+
+        await store.save("test-tape", [{"kind": "message", "payload": {"x": 1}}])
+
+        assert len(recorded) == 1
+
+    @pytest.mark.asyncio
+    async def test_load_uses_executor_for_file_io(self, tmp_path, monkeypatch):
+        store = JSONLTapeStore(tmp_path)
+        path = tmp_path / "test-tape.jsonl"
+        path.write_text('{"kind": "message", "payload": {"x": 1}}\n')
+
+        recorded: list[tuple[object | None, object]] = []
+
+        async def fake_run_in_executor(_self, executor, func):
+            recorded.append((executor, func))
+            return func()
+
+        loop = type("LoopStub", (), {"run_in_executor": fake_run_in_executor})()
+
+        monkeypatch.setattr(storage_module.asyncio, "get_running_loop", lambda: loop)
+
+        entries = await store.load("test-tape")
+
+        assert len(recorded) == 1
+        assert entries == [{"kind": "message", "payload": {"x": 1}}]

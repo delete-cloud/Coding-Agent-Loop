@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any, Callable
@@ -19,21 +20,31 @@ class JSONLTapeStore:
 
     async def save(self, tape_id: str, entries: list[dict]) -> None:
         path = self._base_dir / f"{tape_id}.jsonl"
-        with open(path, "w") as f:
-            for entry in entries:
-                f.write(json.dumps(entry) + "\n")
+
+        def _write() -> None:
+            with open(path, "w") as f:
+                for entry in entries:
+                    f.write(json.dumps(entry) + "\n")
+
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _write)
 
     async def load(self, tape_id: str) -> list[dict]:
         path = self._base_dir / f"{tape_id}.jsonl"
         if not path.exists():
             return []
-        entries = []
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    entries.append(json.loads(line))
-        return entries
+
+        def _read() -> list[dict]:
+            entries = []
+            with open(path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        entries.append(json.loads(line))
+            return entries
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, _read)
 
     async def list_ids(self) -> list[str]:
         return [p.stem for p in self._base_dir.glob("*.jsonl")]

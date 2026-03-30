@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from coding_agent.providers.openai_compat import OpenAICompatProvider
-from coding_agent.providers.base import StreamEvent
+from agentkit.providers.models import TextEvent, ToolCallEvent, DoneEvent
 
 
 class TestOpenAICompatProvider:
@@ -43,13 +43,15 @@ class TestOpenAICompatProvider:
         provider._client.chat.completions.create = AsyncMock(return_value=mock_stream)
 
         events = []
-        async for event in provider.stream(messages=[{"role": "user", "content": "Hi"}]):
+        async for event in provider.stream(
+            messages=[{"role": "user", "content": "Hi"}]
+        ):
             events.append(event)
 
-        assert len(events) == 2  # delta + done
-        assert events[0].type == "delta"
+        assert len(events) == 2  # text + done
+        assert isinstance(events[0], TextEvent)
         assert events[0].text == "Hello"
-        assert events[1].type == "done"
+        assert isinstance(events[1], DoneEvent)
 
     @pytest.mark.asyncio
     async def test_stream_handles_rate_limit_with_retry(self):
@@ -63,7 +65,7 @@ class TestOpenAICompatProvider:
 
         # First call raises RateLimitError, second succeeds
         call_count = 0
-        
+
         async def mock_create(*args, **kwargs):
             nonlocal call_count
             call_count += 1
@@ -73,14 +75,14 @@ class TestOpenAICompatProvider:
                     response=MagicMock(status_code=429),
                     body=None,
                 )
-            
+
             # Return successful stream
             mock_chunk = MagicMock()
             mock_chunk.choices = [MagicMock()]
             mock_chunk.choices[0].delta.content = "Hello"
             mock_chunk.choices[0].delta.tool_calls = None
             mock_chunk.choices[0].finish_reason = None
-            
+
             mock_stream = AsyncMock()
             mock_stream.__aiter__.return_value = [mock_chunk]
             return mock_stream
@@ -90,12 +92,14 @@ class TestOpenAICompatProvider:
         # Patch asyncio.sleep to avoid waiting in tests
         with patch("asyncio.sleep", new_callable=AsyncMock):
             events = []
-            async for event in provider.stream(messages=[{"role": "user", "content": "Hi"}]):
+            async for event in provider.stream(
+                messages=[{"role": "user", "content": "Hi"}]
+            ):
                 events.append(event)
 
         # Should have retried once
         assert call_count == 2
-        assert events[0].type == "delta"
+        assert isinstance(events[0], TextEvent)
         assert events[0].text == "Hello"
 
     @pytest.mark.asyncio
@@ -120,14 +124,11 @@ class TestOpenAICompatProvider:
 
         # Patch asyncio.sleep
         with patch("asyncio.sleep", new_callable=AsyncMock):
-            events = []
-            async for event in provider.stream(messages=[{"role": "user", "content": "Hi"}]):
-                events.append(event)
-
-        # Should get error event
-        assert len(events) == 1
-        assert events[0].type == "error"
-        assert "Rate limit" in events[0].error
+            with pytest.raises(RateLimitError):
+                async for event in provider.stream(
+                    messages=[{"role": "user", "content": "Hi"}]
+                ):
+                    pass
 
     @pytest.mark.asyncio
     async def test_stream_no_retry_on_auth_error(self):
@@ -140,7 +141,7 @@ class TestOpenAICompatProvider:
         )
 
         call_count = 0
-        
+
         async def mock_create(*args, **kwargs):
             nonlocal call_count
             call_count += 1
@@ -152,19 +153,19 @@ class TestOpenAICompatProvider:
 
         provider._client.chat.completions.create = mock_create
 
-        events = []
-        async for event in provider.stream(messages=[{"role": "user", "content": "Hi"}]):
-            events.append(event)
+        with pytest.raises(AuthenticationError):
+            async for event in provider.stream(
+                messages=[{"role": "user", "content": "Hi"}]
+            ):
+                pass
 
         # Should not retry
         assert call_count == 1
-        assert events[0].type == "error"
-        assert "API error" in events[0].error
 
     @pytest.mark.asyncio
     async def test_stream_yields_tool_calls_on_stop_reason(self):
         """Test that tool calls are yielded even when finish_reason is 'stop'.
-        
+
         Some APIs (like right.codes) return finish_reason='stop' instead of 'tool_calls'
         when tool calls are present in the stream.
         """
@@ -180,7 +181,7 @@ class TestOpenAICompatProvider:
         mock_chunk1.choices = [MagicMock()]
         mock_chunk1.choices[0].delta.content = None
         mock_chunk1.choices[0].finish_reason = None
-        
+
         # Tool call delta
         mock_tool_call = MagicMock()
         mock_tool_call.index = 0
@@ -201,29 +202,32 @@ class TestOpenAICompatProvider:
 
         provider._client.chat.completions.create = AsyncMock(return_value=mock_stream)
 
-        tools = [ToolSchema(
-            type="function",
-            function={
-                "name": "bash",
-                "description": "Execute shell command",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"command": {"type": "string"}},
-                    "required": ["command"]
-                }
-            }
-        )]
+        tools = [
+            ToolSchema(
+                type="function",
+                function={
+                    "name": "bash",
+                    "description": "Execute shell command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"command": {"type": "string"}},
+                        "required": ["command"],
+                    },
+                },
+            )
+        ]
 
         events = []
         async for event in provider.stream(
-            messages=[{"role": "user", "content": "Run ls"}],
-            tools=tools
+            messages=[{"role": "user", "content": "Run ls"}], tools=tools
         ):
             events.append(event)
 
         # Should get tool_call + done
-        assert len(events) == 2, f"Expected 2 events, got {len(events)}: {[e.type for e in events]}"
-        assert events[0].type == "tool_call"
-        assert events[0].tool_call.name == "bash"
-        assert events[0].tool_call.arguments == {"command": "ls"}
-        assert events[1].type == "done"
+        assert len(events) == 2, (
+            f"Expected 2 events, got {len(events)}: {[type(e).__name__ for e in events]}"
+        )
+        assert isinstance(events[0], ToolCallEvent)
+        assert events[0].name == "bash"
+        assert events[0].arguments == {"command": "ls"}
+        assert isinstance(events[1], DoneEvent)
