@@ -98,6 +98,7 @@ def create_agent(
     from coding_agent.plugins.parallel_executor import ParallelExecutorPlugin
     from coding_agent.plugins.storage import StoragePlugin
     from coding_agent.plugins.summarizer import SummarizerPlugin
+    from coding_agent.plugins.topic import TopicPlugin
 
     approval_cfg = cfg.extra.get("approval", {})
     policy_str = approval_mode_override or approval_cfg.get("policy", "auto")
@@ -113,6 +114,7 @@ def create_agent(
     sum_cfg = cfg.extra.get("summarizer", {})
     parallel_cfg = cfg.extra.get("parallel", {})
     doom_cfg = cfg.extra.get("doom_detector", {})
+    topic_cfg = cfg.extra.get("topic", {})
 
     async def _execute_tool_async(name: str, arguments: dict[str, Any]) -> str:
         core_tools = registry.get("core_tools")
@@ -127,6 +129,10 @@ def create_agent(
             "parallel_executor": lambda: ParallelExecutorPlugin(
                 execute_fn=_execute_tool_async,
                 max_concurrency=int(parallel_cfg.get("max_concurrency", 5)),
+            ),
+            "topic": lambda: TopicPlugin(
+                overlap_threshold=float(topic_cfg.get("overlap_threshold", 0.2)),
+                min_entries_before_detect=int(topic_cfg.get("min_entries", 4)),
             ),
             "session_metrics": lambda: SessionMetricsPlugin(),
         }

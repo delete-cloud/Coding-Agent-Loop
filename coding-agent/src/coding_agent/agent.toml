@@ -15,6 +15,7 @@ enabled = [
     "approval",
     "doom_detector",
     "parallel_executor",
+    "topic",
     "summarizer",
     "memory",
     "session_metrics",
@@ -37,3 +38,7 @@ blocked_tools = []
 [summarizer]
 max_entries = 100
 keep_recent = 20
+
+[topic]
+overlap_threshold = 0.2
+min_entries_before_detect = 4

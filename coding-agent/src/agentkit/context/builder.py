@@ -19,10 +19,11 @@ class ContextBuilder:
         self,
         tape: Tape,
         grounding: list[dict[str, Any]] | None = None,
+        entries: list[Entry] | None = None,
     ) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = []
 
-        entries = list(tape)
+        entries = entries if entries is not None else list(tape)
         index = 0
         while index < len(entries):
             entry = entries[index]
@@ -117,9 +118,27 @@ class ContextBuilder:
                 "content": entry.payload.get("content", ""),
             }
         elif entry.kind == "anchor":
+            anchor_type = entry.meta.get("anchor_type", "")
+            content = entry.payload.get("content", "")
+
+            if anchor_type == "topic_finalized":
+                return None
+
+            if anchor_type == "handoff":
+                return {
+                    "role": "system",
+                    "content": f"[Context Summary] {content}",
+                }
+
+            if anchor_type == "topic_initial":
+                return {
+                    "role": "system",
+                    "content": f"[Topic Start] {content}",
+                }
+
             return {
                 "role": "system",
-                "content": entry.payload.get("content", ""),
+                "content": content,
             }
         elif entry.kind == "event":
             return None

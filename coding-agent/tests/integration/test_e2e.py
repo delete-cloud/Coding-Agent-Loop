@@ -182,8 +182,10 @@ class TestEndToEnd:
         assert kinds[0] == "message"
         assert "tool_call" in kinds
         assert "tool_result" in kinds
-        assert entries[-1].kind == "message"
-        assert entries[-1].payload["role"] == "assistant"
-        assert "hello world" in entries[-1].payload["content"]
+
+        message_entries = [e for e in entries if e.kind == "message"]
+        last_message = message_entries[-1]
+        assert last_message.payload["role"] == "assistant"
+        assert "hello world" in last_message.payload["content"]
 
         assert call_count == 2

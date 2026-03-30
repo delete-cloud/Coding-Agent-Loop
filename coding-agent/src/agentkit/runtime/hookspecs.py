@@ -1,4 +1,4 @@
-"""Hook specifications — metadata for the 11 agentkit hooks.
+"""Hook specifications — metadata for the 13 agentkit hooks.
 
 Each HookSpec declares:
   - name: the hook identifier
@@ -51,6 +51,12 @@ HOOK_SPECS: dict[str, HookSpec] = {
         firstresult=True,
         doc="Compress tape entries when context window is exhausted.",
     ),
+    "resolve_context_window": HookSpec(
+        name="resolve_context_window",
+        firstresult=True,
+        doc="Determine context window boundaries. Returns (window_start_index, summary_anchor_entry) "
+        "or None if no windowing needed. Original entries are always preserved.",
+    ),
     "on_error": HookSpec(
         name="on_error",
         is_observer=True,
@@ -81,5 +87,11 @@ HOOK_SPECS: dict[str, HookSpec] = {
         name="execute_tool",
         firstresult=True,
         doc="Execute a tool by name and return the result. Called by Pipeline.run_model.",
+    ),
+    "on_session_event": HookSpec(
+        name="on_session_event",
+        is_observer=True,
+        doc="Observer: notified on session-level events (topic_start, topic_end, handoff, etc). "
+        "Receives event_type: str and payload: dict. Cannot affect pipeline flow.",
     ),
 }

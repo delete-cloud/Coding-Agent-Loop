@@ -329,7 +329,7 @@ class Pipeline:
             break
 
     async def _stage_save_state(self, ctx: PipelineContext) -> None:
-        self._runtime.notify("on_checkpoint", ctx=ctx)
+        self._runtime.notify("on_checkpoint", ctx=ctx, runtime=self._runtime)
 
     async def _stage_render(self, ctx: PipelineContext) -> None:
         directives = self._runtime.call_many("on_turn_end", tape=ctx.tape)

@@ -3,19 +3,21 @@ from agentkit.runtime.hookspecs import HOOK_SPECS, HookSpec
 
 
 class TestHookSpecs:
-    def test_all_11_hooks_defined(self):
+    def test_all_13_hooks_defined(self):
         expected = {
             "provide_storage",
             "get_tools",
             "provide_llm",
             "approve_tool_call",
             "summarize_context",
+            "resolve_context_window",
             "on_error",
             "mount",
             "on_checkpoint",
             "build_context",
             "on_turn_end",
             "execute_tool",
+            "on_session_event",
         }
         assert set(HOOK_SPECS.keys()) == expected
 
@@ -60,3 +62,9 @@ class TestHookSpecs:
         spec = HOOK_SPECS["execute_tool"]
         assert spec.firstresult is True
         assert spec.is_observer is False
+
+    def test_on_session_event_is_observer(self):
+        spec = HOOK_SPECS["on_session_event"]
+        assert spec.is_observer is True
+        assert spec.firstresult is False
+        assert spec.returns_directive is False
