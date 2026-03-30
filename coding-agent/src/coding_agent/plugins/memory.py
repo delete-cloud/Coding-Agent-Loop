@@ -28,11 +28,13 @@ class MemoryPlugin:
     def __init__(self, max_grounding: int = 5) -> None:
         self._max_grounding = max_grounding
         self._memories: list[dict[str, Any]] = []
+        self._topic_file_tags: set[str] = set()
 
     def hooks(self) -> dict[str, Callable[..., Any]]:
         return {
             "build_context": self.build_context,
             "on_turn_end": self.on_turn_end,
+            "on_checkpoint": self.on_checkpoint,
             "mount": self.do_mount,
         }
 
@@ -40,16 +42,56 @@ class MemoryPlugin:
         """Initialize memory state."""
         return {"memories": self._memories}
 
+    def on_checkpoint(self, ctx: Any = None, **kwargs: Any) -> None:
+        """Cache current topic's file tags for scoped recall."""
+        if ctx is None:
+            return
+        entries = (
+            ctx.tape.windowed_entries()
+            if hasattr(ctx.tape, "windowed_entries")
+            else list(ctx.tape)
+        )
+        files: set[str] = set()
+        for entry in entries:
+            if entry.kind == "tool_call":
+                args = entry.payload.get("arguments")
+                if isinstance(args, dict):
+                    for key in ("path", "file", "filename", "file_path"):
+                        val = args.get(key, "")
+                        if val and isinstance(val, str):
+                            files.add(val)
+        self._topic_file_tags = files
+
     def build_context(
         self, tape: Tape | None = None, **kwargs: Any
     ) -> list[dict[str, Any]]:
-        """Grounding mode: inject relevant memories as system messages."""
+        """Grounding mode: inject relevant memories as system messages.
+
+        If topic file tags are available, filter memories to those with
+        overlapping tags. Falls back to importance-sorted top-N otherwise.
+        """
         if not self._memories:
             return []
 
-        sorted_memories = sorted(
-            self._memories, key=lambda m: m.get("importance", 0.5), reverse=True
-        )
+        if self._topic_file_tags:
+            relevant = [
+                m
+                for m in self._memories
+                if self._tags_overlap(m.get("tags", []), self._topic_file_tags)
+            ]
+            if relevant:
+                sorted_memories = sorted(
+                    relevant, key=lambda m: m.get("importance", 0.5), reverse=True
+                )
+            else:
+                sorted_memories = sorted(
+                    self._memories, key=lambda m: m.get("importance", 0.5), reverse=True
+                )
+        else:
+            sorted_memories = sorted(
+                self._memories, key=lambda m: m.get("importance", 0.5), reverse=True
+            )
+
         top = sorted_memories[: self._max_grounding]
 
         grounding_messages = []
@@ -60,6 +102,13 @@ class MemoryPlugin:
             grounding_messages.append({"role": "system", "content": content})
 
         return grounding_messages
+
+    def _tags_overlap(self, memory_tags: list[str], topic_files: set[str]) -> bool:
+        """Check if any memory tag overlaps with topic file paths."""
+        for tag in memory_tags:
+            if tag in topic_files:
+                return True
+        return False
 
     def on_turn_end(
         self, tape: Tape | None = None, **kwargs: Any
