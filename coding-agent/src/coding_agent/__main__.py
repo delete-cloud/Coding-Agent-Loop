@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,12 @@ def create_agent(
     data_dir: Path | None = None,
     api_key: str | None = None,
     model_override: str | None = None,
+    provider_override: str | None = None,
+    base_url_override: str | None = None,
+    workspace_root: Path | None = None,
+    max_steps_override: int | None = None,
+    approval_mode_override: str | None = None,
+    session_id_override: str | None = None,
 ) -> tuple:
     """Create a fully wired agent from config.
 
@@ -30,30 +37,40 @@ def create_agent(
     from agentkit.runtime.hook_runtime import HookRuntime
     from agentkit.runtime.pipeline import Pipeline, PipelineContext
     from agentkit.tape.tape import Tape
+    from coding_agent.plugins.shell_session import ShellSessionPlugin
 
     if config_path is None:
         config_path = Path(__file__).parent / "agent.toml"
     if data_dir is None:
         data_dir = Path("./data")
 
-    workspace_root = Path.cwd()
+    workspace_root = workspace_root or Path.cwd()
 
     cfg = load_config(config_path)
 
     if model_override:
         cfg.model = model_override
+    if provider_override:
+        cfg.provider = provider_override
+    if max_steps_override is not None:
+        cfg.max_turns = max_steps_override
 
     resolved_key = api_key or os.environ.get("AGENT_API_KEY", "")
 
     registry = PluginRegistry()
+    shell_session = ShellSessionPlugin()
     plugin_factories = {
         "llm_provider": lambda: LLMProviderPlugin(
             provider=cfg.provider,
             model=cfg.model,
             api_key=resolved_key,
+            base_url=base_url_override,
         ),
         "storage": lambda: StoragePlugin(data_dir=data_dir),
-        "core_tools": lambda: CoreToolsPlugin(workspace_root=workspace_root),
+        "core_tools": lambda: CoreToolsPlugin(
+            workspace_root=workspace_root,
+            shell_session=shell_session,
+        ),
         "approval": lambda: ApprovalPlugin(
             policy=policy,
             blocked_tools=set(approval_cfg.get("blocked_tools", [])),
@@ -63,22 +80,51 @@ def create_agent(
             keep_recent=sum_cfg.get("keep_recent", 20),
         ),
         "memory": lambda: MemoryPlugin(),
-        "shell_session": lambda: ShellSessionPlugin(),
+        "shell_session": lambda: shell_session,
     }
 
     from coding_agent.plugins.approval import ApprovalPlugin, ApprovalPolicy
     from coding_agent.plugins.core_tools import CoreToolsPlugin
+    from coding_agent.plugins.doom_detector import DoomDetectorPlugin
     from coding_agent.plugins.llm_provider import LLMProviderPlugin
     from coding_agent.plugins.memory import MemoryPlugin
-    from coding_agent.plugins.shell_session import ShellSessionPlugin
+    from coding_agent.plugins.metrics import SessionMetricsPlugin
+    from coding_agent.plugins.parallel_executor import ParallelExecutorPlugin
     from coding_agent.plugins.storage import StoragePlugin
     from coding_agent.plugins.summarizer import SummarizerPlugin
 
     approval_cfg = cfg.extra.get("approval", {})
-    policy_str = approval_cfg.get("policy", "auto")
-    policy = ApprovalPolicy(policy_str)
+    policy_str = approval_mode_override or approval_cfg.get("policy", "auto")
+    approval_policy_map = {
+        "yolo": ApprovalPolicy.AUTO,
+        "interactive": ApprovalPolicy.MANUAL,
+        "auto": ApprovalPolicy.AUTO,
+    }
+    policy = approval_policy_map.get(policy_str)
+    if policy is None:
+        raise ValueError(f"unsupported approval policy: {policy_str}")
 
     sum_cfg = cfg.extra.get("summarizer", {})
+    parallel_cfg = cfg.extra.get("parallel", {})
+    doom_cfg = cfg.extra.get("doom_detector", {})
+
+    async def _execute_tool_async(name: str, arguments: dict[str, Any]) -> str:
+        core_tools = registry.get("core_tools")
+        result = await core_tools.execute_tool_async(name=name, arguments=arguments)
+        return str(result) if result is not None else ""
+
+    plugin_factories.update(
+        {
+            "doom_detector": lambda: DoomDetectorPlugin(
+                threshold=int(doom_cfg.get("threshold", 3))
+            ),
+            "parallel_executor": lambda: ParallelExecutorPlugin(
+                execute_fn=_execute_tool_async,
+                max_concurrency=int(parallel_cfg.get("max_concurrency", 5)),
+            ),
+            "session_metrics": lambda: SessionMetricsPlugin(),
+        }
+    )
 
     enabled_plugins = cfg.plugins or list(plugin_factories.keys())
     for plugin_name in enabled_plugins:
@@ -99,12 +145,12 @@ def create_agent(
 
     ctx = PipelineContext(
         tape=Tape(),
-        session_id="",
+        session_id=session_id_override or uuid.uuid4().hex,
         config={
             "system_prompt": cfg.system_prompt,
             "model": cfg.model,
             "provider": cfg.provider,
-            "max_turns": cfg.max_turns,
+            "max_tool_rounds": cfg.max_turns,
         },
     )
 
@@ -226,6 +272,11 @@ async def _run_with_tui(config, goal):
     pipeline, ctx = create_agent(
         api_key=api_key,
         model_override=config.model,
+        provider_override=config.provider,
+        base_url_override=config.base_url,
+        workspace_root=config.repo,
+        max_steps_override=config.max_steps,
+        approval_mode_override=config.approval_mode,
     )
     tui = CodingAgentTUI(model_name=config.model, max_steps=config.max_steps)
     adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=tui.consumer)
@@ -241,6 +292,11 @@ async def _run_headless(config, goal):
     pipeline, ctx = create_agent(
         api_key=api_key,
         model_override=config.model,
+        provider_override=config.provider,
+        base_url_override=config.base_url,
+        workspace_root=config.repo,
+        max_steps_override=config.max_steps,
+        approval_mode_override=config.approval_mode,
     )
     consumer = HeadlessConsumer()
     adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)

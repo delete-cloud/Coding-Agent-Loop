@@ -15,13 +15,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncIterator
 
+from coding_agent.adapter import PipelineAdapter
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.approval.store import ApprovalStore
-from coding_agent.providers.base import ChatProvider, StreamingResponse, ToolSchema
+from coding_agent.providers.base import ChatProvider, ToolSchema
+from agentkit.providers.models import DoneEvent, TextEvent
 from coding_agent.wire.local import LocalWire
 from coding_agent.wire.protocol import (
     ApprovalRequest,
     ApprovalResponse,
+    CompletionStatus,
+    StreamDelta,
+    ToolCallDelta,
+    TurnEnd,
     WireMessage,
 )
 
@@ -51,19 +57,15 @@ class MockProvider:
         tools: list[ToolSchema] | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[Any]:
-        """Stream mock response."""
-        from coding_agent.providers.base import StreamEvent
-
-        # Simple mock response
         response_text = (
             "I'll help you with that request. Let me analyze the task... Done!"
         )
 
         for word in response_text.split():
-            yield StreamEvent(type="delta", text=word + " ", tool_call=None, error=None)
-            await asyncio.sleep(0.01)  # Small delay for streaming effect
+            yield TextEvent(text=word + " ")
+            await asyncio.sleep(0.01)
 
-        yield StreamEvent(type="done", text=None, tool_call=None, error=None)
+        yield DoneEvent()
 
     async def complete(self, messages: list[dict]) -> str:
         """Return complete mock response."""
@@ -79,6 +81,10 @@ class Session:
     approval_store: ApprovalStore
     created_at: datetime
     last_activity: datetime
+    repo_path: Path | None = None
+    approval_policy: ApprovalPolicy = ApprovalPolicy.AUTO
+    provider: Any | None = None
+    max_steps: int = 30
     task: asyncio.Task | None = None
 
 
@@ -132,6 +138,10 @@ class SessionManager:
             approval_store=approval_store,
             created_at=now,
             last_activity=now,
+            repo_path=repo_path,
+            approval_policy=approval_policy,
+            provider=provider,
+            max_steps=max_steps,
             task=None,
         )
 
@@ -204,14 +214,69 @@ class SessionManager:
         session_id: str,
         prompt: str,
     ) -> None:
-        """Run the agent with the given prompt.
+        session = self.get_session(session_id)
+        session.last_activity = datetime.now()
 
-        NOTE: Requires Pipeline migration. Currently raises NotImplementedError.
-        """
-        raise NotImplementedError(
-            "SessionManager.run_agent() requires Pipeline migration. "
-            "The old AgentLoop has been removed."
+        approval_mode_map = {
+            ApprovalPolicy.YOLO: "yolo",
+            ApprovalPolicy.INTERACTIVE: "interactive",
+            ApprovalPolicy.AUTO: "auto",
+        }
+
+        from coding_agent.__main__ import create_agent
+
+        pipeline, ctx = create_agent(
+            workspace_root=session.repo_path,
+            max_steps_override=session.max_steps,
+            approval_mode_override=approval_mode_map[session.approval_policy],
+            session_id_override=session_id,
+            api_key="http-session",
         )
+
+        llm_plugin = pipeline._registry.get("llm_provider")
+        llm_plugin._instance = session.provider or MockProvider()
+
+        class _WireConsumer:
+            def __init__(self, wire: LocalWire) -> None:
+                self._wire = wire
+
+            async def emit(self, msg: WireMessage) -> None:
+                await self._wire.send(msg)
+
+            async def request_approval(self, req: ApprovalRequest) -> ApprovalResponse:
+                await self._wire.send(req)
+                return await session.approval_store.wait_for_response(
+                    req.request_id,
+                    req.timeout_seconds,
+                ) or ApprovalResponse(
+                    session_id=req.session_id,
+                    request_id=req.request_id,
+                    approved=False,
+                    feedback="Approval timeout or error",
+                )
+
+        consumer = _WireConsumer(session.wire)
+        adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
+
+        try:
+            await adapter.run_turn(prompt)
+        except Exception as exc:
+            logger.exception("HTTP session turn failed")
+            await session.wire.send(
+                StreamDelta(
+                    session_id=session_id,
+                    content=f"Error: {exc}",
+                )
+            )
+            await session.wire.send(
+                TurnEnd(
+                    session_id=session_id,
+                    turn_id=uuid.uuid4().hex,
+                    completion_status=CompletionStatus.ERROR,
+                )
+            )
+        finally:
+            session.last_activity = datetime.now()
 
     async def submit_approval(
         self,

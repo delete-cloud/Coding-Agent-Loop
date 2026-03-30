@@ -45,16 +45,27 @@ class ContextBuilder:
                         )
                     index += 1
 
-                messages.append(
-                    {
-                        "role": role,
-                        "content": None,
-                        "tool_calls": [
-                            self._tool_call_to_message(tool_call)
-                            for tool_call in tool_calls
-                        ],
-                    }
-                )
+                tool_call_msg: dict[str, Any] = {
+                    "role": role,
+                    "content": None,
+                    "tool_calls": [
+                        self._tool_call_to_message(tool_call)
+                        for tool_call in tool_calls
+                    ],
+                }
+
+                # Merge with preceding assistant text to avoid adjacent
+                # same-role messages (Anthropic API rejects those).
+                if (
+                    messages
+                    and messages[-1].get("role") == role
+                    and messages[-1].get("content")
+                    and "tool_calls" not in messages[-1]
+                ):
+                    tool_call_msg["content"] = messages[-1]["content"]
+                    messages[-1] = tool_call_msg
+                else:
+                    messages.append(tool_call_msg)
                 continue
 
             msg = self._entry_to_message(entry)

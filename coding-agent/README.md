@@ -1,12 +1,11 @@
 # Coding Agent
 
-An AI-powered coding agent with interactive TUI, task planning, and sub-agent support.
+An AI-powered coding agent with interactive TUI, task planning, and safe repository tooling.
 
 ## Features
 
 - 🤖 **Interactive TUI** - Rich terminal interface with streaming output
 - 📋 **Task Planning** - Built-in todo management with `todo_write`/`todo_read`
-- 🔄 **Sub-agents** - Delegate tasks to independent sub-agents
 - 🎨 **Multiple Providers** - OpenAI and Anthropic support
 - 🔧 **File Operations** - Read, write, and replace files safely
 - 🔍 **Code Search** - Grep and glob for exploring codebases

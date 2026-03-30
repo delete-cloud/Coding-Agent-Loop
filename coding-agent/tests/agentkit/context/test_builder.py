@@ -135,6 +135,55 @@ class TestContextBuilder:
         # system + anchor-as-system + user
         assert len(messages) == 3
 
+    def test_assistant_text_then_tool_calls_merged_into_single_message(self):
+        tape = Tape()
+        tape.append(Entry(kind="message", payload={"role": "user", "content": "hi"}))
+        tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "assistant", "content": "Let me check."},
+            )
+        )
+        tape.append(
+            Entry(
+                kind="tool_call",
+                payload={"id": "tc_1", "name": "bash", "arguments": {"cmd": "ls"}},
+            )
+        )
+        builder = ContextBuilder(system_prompt="system")
+        messages = builder.build(tape)
+        assert len(messages) == 3  # system + user + merged-assistant
+        merged = messages[2]
+        assert merged["role"] == "assistant"
+        assert merged["content"] == "Let me check."
+        assert len(merged["tool_calls"]) == 1
+        assert merged["tool_calls"][0]["function"]["name"] == "bash"
+
+    def test_assistant_text_without_tool_calls_stays_separate(self):
+        tape = Tape()
+        tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "assistant", "content": "thinking..."},
+            )
+        )
+        tape.append(Entry(kind="message", payload={"role": "user", "content": "ok"}))
+        tape.append(
+            Entry(
+                kind="tool_call",
+                payload={"id": "tc_1", "name": "bash", "arguments": {"cmd": "ls"}},
+            )
+        )
+        builder = ContextBuilder(system_prompt="system")
+        messages = builder.build(tape)
+        # system + assistant-text + user + assistant-tool_call (no merge: user in between)
+        assert len(messages) == 4
+        assert messages[1]["role"] == "assistant"
+        assert messages[1]["content"] == "thinking..."
+        assert "tool_calls" not in messages[1]
+        assert messages[3]["role"] == "assistant"
+        assert messages[3]["content"] is None
+
     def test_event_entries_are_skipped(self):
         tape = Tape()
         tape.append(Entry(kind="event", payload={"type": "metrics", "data": {}}))

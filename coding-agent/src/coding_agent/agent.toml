@@ -13,8 +13,11 @@ enabled = [
     "storage",
     "core_tools",
     "approval",
+    "doom_detector",
+    "parallel_executor",
     "summarizer",
     "memory",
+    "session_metrics",
     "shell_session",
 ]
 

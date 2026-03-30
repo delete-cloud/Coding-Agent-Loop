@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from typing import TYPE_CHECKING, Any, Protocol
 
 from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
@@ -31,6 +32,7 @@ class PipelineAdapter:
         self._consumer = consumer
 
     async def run_turn(self, user_input: str) -> TurnOutcome:
+        initial_tool_calls = len(self._ctx.tape.filter("tool_call"))
         user_entry = Entry(
             kind="message", payload={"role": "user", "content": user_input}
         )
@@ -47,7 +49,10 @@ class PipelineAdapter:
             return await self._finish(StopReason.ERROR, error=str(exc))
 
         stop_reason = self._determine_stop_reason()
-        return await self._finish(stop_reason)
+        return await self._finish(
+            stop_reason,
+            initial_tool_calls=initial_tool_calls,
+        )
 
     def _ensure_user_message(self, user_entry: Entry) -> None:
         for entry in self._ctx.tape:
@@ -97,16 +102,19 @@ class PipelineAdapter:
                 return entry.payload.get("content")
         return None
 
-    def _count_steps(self) -> int:
-        return len(self._ctx.tape.filter("tool_call"))
+    def _count_steps(self, initial_tool_calls: int) -> int:
+        return max(0, len(self._ctx.tape.filter("tool_call")) - initial_tool_calls)
 
     async def _finish(
-        self, stop_reason: StopReason, error: str | None = None
+        self,
+        stop_reason: StopReason,
+        error: str | None = None,
+        initial_tool_calls: int = 0,
     ) -> TurnOutcome:
         outcome = TurnOutcome(
             stop_reason=stop_reason,
             final_message=self._extract_final_message(),
-            steps_taken=self._count_steps(),
+            steps_taken=self._count_steps(initial_tool_calls),
             error=error,
         )
 
@@ -121,7 +129,7 @@ class PipelineAdapter:
             await self._consumer.emit(
                 TurnEnd(
                     session_id=self._ctx.session_id,
-                    turn_id=stop_reason.value,
+                    turn_id=uuid.uuid4().hex,
                     completion_status=status,
                 )
             )

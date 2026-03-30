@@ -78,6 +78,11 @@ class InteractiveSession:
             if self.config.api_key
             else None,
             model_override=self.config.model,
+            provider_override=self.config.provider,
+            base_url_override=self.config.base_url,
+            workspace_root=self.config.repo,
+            max_steps_override=self.config.max_steps,
+            approval_mode_override=self.config.approval_mode,
         )
         if pipeline._directive_executor is not None:
             pipeline._directive_executor._ask_user = self._ask_user_for_approval

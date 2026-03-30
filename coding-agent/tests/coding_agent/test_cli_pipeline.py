@@ -529,6 +529,49 @@ class TestHeadlessPipelineIsolation:
 
         assert captured_kwargs.get("model_override") == "gpt-4o-test"
 
+    @pytest.mark.asyncio
+    async def test_headless_pipeline_forwards_runtime_config(self):
+        mock_outcome = _make_outcome()
+
+        mock_adapter_instance = AsyncMock()
+        mock_adapter_instance.run_turn = AsyncMock(return_value=mock_outcome)
+
+        captured_kwargs: dict = {}
+
+        def fake_create_agent(**kwargs):
+            captured_kwargs.update(kwargs)
+            return _mock_create_agent()
+
+        with (
+            patch(
+                "coding_agent.__main__.create_agent",
+                side_effect=fake_create_agent,
+            ),
+            patch(
+                "coding_agent.__main__.PipelineAdapter",
+                return_value=mock_adapter_instance,
+            ),
+            patch("coding_agent.__main__.HeadlessConsumer", MagicMock()),
+        ):
+            from coding_agent.__main__ import _run_headless
+
+            config = _make_repl_config(
+                provider="anthropic",
+                model="claude-test",
+                base_url="http://llm.local",
+                repo="/tmp/repo",
+                max_steps=7,
+                approval_mode="interactive",
+            )
+            await _run_headless(config, "goal")
+
+        assert captured_kwargs.get("model_override") == "claude-test"
+        assert captured_kwargs.get("provider_override") == "anthropic"
+        assert captured_kwargs.get("base_url_override") == "http://llm.local"
+        assert str(captured_kwargs.get("workspace_root")) == "/tmp/repo"
+        assert captured_kwargs.get("max_steps_override") == 7
+        assert captured_kwargs.get("approval_mode_override") == "interactive"
+
 
 class TestReplPipelineAdapterConsumerUpdated:
     @pytest.mark.asyncio
@@ -572,6 +615,34 @@ class TestReplPipelineAdapterConsumerUpdated:
         assert len(consumers_seen) == 2
         assert consumers_seen[0] is tui_1.consumer
         assert consumers_seen[1] is tui_2.consumer
+
+
+class TestReplCreateAgentConfigForwarding:
+    @patch("coding_agent.cli.repl.create_agent")
+    def test_repl_forwards_runtime_config(self, mock_create_agent):
+        mock_pipeline = MagicMock()
+        mock_ctx = MagicMock()
+        mock_create_agent.return_value = (mock_pipeline, mock_ctx)
+
+        from coding_agent.cli.repl import InteractiveSession
+
+        config = _make_repl_config(
+            provider="anthropic",
+            model="claude-repl",
+            base_url="http://llm.local",
+            repo="/tmp/repl-repo",
+            max_steps=9,
+            approval_mode="auto",
+        )
+        InteractiveSession(config)
+
+        call_kwargs = mock_create_agent.call_args.kwargs
+        assert call_kwargs["model_override"] == "claude-repl"
+        assert call_kwargs["provider_override"] == "anthropic"
+        assert call_kwargs["base_url_override"] == "http://llm.local"
+        assert str(call_kwargs["workspace_root"]) == "/tmp/repl-repo"
+        assert call_kwargs["max_steps_override"] == 9
+        assert call_kwargs["approval_mode_override"] == "auto"
 
 
 # ---------------------------------------------------------------------------

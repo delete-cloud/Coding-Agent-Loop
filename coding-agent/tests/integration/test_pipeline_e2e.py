@@ -179,7 +179,14 @@ class TestPipelineE2E:
         pipeline, ctx = _setup_agent(tmp_path)
 
         doom = DoomDetectorPlugin(threshold=3)
-        pipeline._registry.register(doom)
+        pipeline._registry._plugins[doom.state_key] = doom
+        for hook_name, hook_fn in doom.hooks().items():
+            pipeline._registry._hook_index[hook_name] = [
+                fn
+                for fn in pipeline._registry._hook_index.get(hook_name, [])
+                if getattr(fn, "__self__", None).__class__ is not DoomDetectorPlugin
+            ]
+            pipeline._registry._hook_index[hook_name].append(hook_fn)
         pipeline._runtime = HookRuntime(pipeline._registry)
 
         call_count = 0
@@ -324,7 +331,14 @@ class TestPipelineE2E:
             execute_fn=mock_execute_fn,
             max_concurrency=5,
         )
-        pipeline._registry.register(parallel_plugin)
+        pipeline._registry._plugins[parallel_plugin.state_key] = parallel_plugin
+        for hook_name, hook_fn in parallel_plugin.hooks().items():
+            pipeline._registry._hook_index[hook_name] = [
+                fn
+                for fn in pipeline._registry._hook_index.get(hook_name, [])
+                if getattr(fn, "__self__", None).__class__ is not ParallelExecutorPlugin
+            ]
+            pipeline._registry._hook_index[hook_name].append(hook_fn)
         pipeline._runtime = HookRuntime(pipeline._registry)
 
         call_count = 0
@@ -363,6 +377,10 @@ class TestPipelineE2E:
 
         tool_results = ctx.tape.filter("tool_result")
         assert len(tool_results) >= 2
+
+        assert executed_tools == ["file_read", "grep_search"]
+        assert "result_of_file_read" in tool_results[0].payload["content"]
+        assert "result_of_grep_search" in tool_results[1].payload["content"]
 
         assert outcome.final_message is not None
         assert "completed" in outcome.final_message

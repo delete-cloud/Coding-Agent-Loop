@@ -18,7 +18,6 @@ EXPECTED_TOOLS = {
     "todo_write",
     "todo_read",
     "file_patch",
-    "subagent",
 }
 
 
@@ -33,17 +32,12 @@ class TestToolRegistration:
     def test_total_tool_count_is_at_least_10(self):
         plugin = CoreToolsPlugin()
         schemas = plugin.get_tools()
-        assert len(schemas) >= 10
+        assert len(schemas) >= 9
 
     def test_file_patch_registered(self):
         plugin = CoreToolsPlugin()
         names = {s.name for s in plugin.get_tools()}
         assert "file_patch" in names
-
-    def test_subagent_registered(self):
-        plugin = CoreToolsPlugin()
-        names = {s.name for s in plugin.get_tools()}
-        assert "subagent" in names
 
 
 class TestFilePatchTool:
@@ -104,24 +98,6 @@ class TestFilePatchTool:
         )
         data = json.loads(result)
         assert data["success"] is False
-
-
-class TestSubagentTool:
-    def test_subagent_raises_not_implemented(self):
-        plugin = CoreToolsPlugin()
-        with pytest.raises(NotImplementedError, match="not yet wired"):
-            plugin.execute_tool(
-                name="subagent",
-                arguments={"goal": "test task"},
-            )
-
-    def test_subagent_schema_has_goal_parameter(self):
-        plugin = CoreToolsPlugin()
-        schemas = {s.name: s for s in plugin.get_tools()}
-        subagent_schema = schemas["subagent"]
-        params = subagent_schema.parameters
-        assert "goal" in params["properties"]
-        assert "goal" in params.get("required", [])
 
 
 class TestExistingToolsStillWork:
