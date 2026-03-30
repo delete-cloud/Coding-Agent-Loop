@@ -36,19 +36,76 @@ class SummarizerPlugin:
     ) -> tuple[int, Entry] | None:
         """Determine context window boundaries.
 
-        Returns (window_start_index, summary_anchor_entry) or None if no
-        windowing is needed. Original entries are always preserved.
+        Strategy:
+        1. If tape has topic_finalized anchors and exceeds max_entries,
+           fold at the last topic_finalized boundary.
+        2. Otherwise, fall back to entry-count truncation (keep_recent).
+
+        Returns (window_start_index, summary_anchor_entry) or None.
         """
         if tape is None:
             return None
 
-        visible = tape.windowed_entries() if hasattr(tape, 'windowed_entries') else list(tape)
+        visible = (
+            tape.windowed_entries() if hasattr(tape, "windowed_entries") else list(tape)
+        )
         if len(visible) <= self._max_entries:
             return None
 
+        # Strategy 1: find the last topic_finalized anchor
+        last_finalized_idx = self._find_last_finalized(visible)
+        if last_finalized_idx is not None:
+            split_point = last_finalized_idx + 1
+            old_entries = visible[:split_point]
+            summary_anchor = self._build_topic_summary(old_entries)
+            return (split_point, summary_anchor)
+
+        # Strategy 2: fallback to entry-count truncation
         split_point = len(visible) - self._keep_recent
         old_entries = visible[:split_point]
+        summary_anchor = self._build_entry_summary(old_entries)
+        return (split_point, summary_anchor)
 
+    def _find_last_finalized(self, entries: list[Entry]) -> int | None:
+        """Find index of the last topic_finalized anchor in entries."""
+        for i in range(len(entries) - 1, -1, -1):
+            if (
+                entries[i].kind == "anchor"
+                and entries[i].meta.get("anchor_type") == "topic_finalized"
+            ):
+                return i
+        return None
+
+    def _build_topic_summary(self, old_entries: list[Entry]) -> Entry:
+        """Build a handoff anchor summarizing folded topic entries."""
+        topic_ids = []
+        for e in old_entries:
+            tid = e.meta.get("topic_id")
+            if tid and tid not in topic_ids:
+                topic_ids.append(tid)
+
+        files: list[str] = []
+        for e in old_entries:
+            if e.meta.get("anchor_type") == "topic_finalized":
+                files.extend(e.meta.get("files", []))
+
+        topic_count = len(topic_ids) or 1
+        summary_text = f"[Summarized {len(old_entries)} entries from {topic_count} completed topic(s)]"
+        if files:
+            summary_text += f"\nFiles involved: {', '.join(sorted(set(files))[:10])}"
+
+        return Entry(
+            kind="anchor",
+            payload={"content": summary_text},
+            meta={
+                "anchor_type": "handoff",
+                "source_entry_count": len(old_entries),
+                "folded_topics": topic_ids,
+            },
+        )
+
+    def _build_entry_summary(self, old_entries: list[Entry]) -> Entry:
+        """Build a handoff anchor from raw entry list (fallback)."""
         summary_parts = []
         for entry in old_entries:
             if entry.kind == "message":
@@ -62,12 +119,11 @@ class SummarizerPlugin:
             elif entry.kind == "tool_result":
                 summary_parts.append("[tool_result] ...")
 
-        summary_text = (
-            f"[Summarized {len(old_entries)} earlier entries]\n"
-            + "\n".join(summary_parts[-10:])
+        summary_text = f"[Summarized {len(old_entries)} earlier entries]\n" + "\n".join(
+            summary_parts[-10:]
         )
 
-        summary_anchor = Entry(
+        return Entry(
             kind="anchor",
             payload={"content": summary_text},
             meta={
@@ -75,8 +131,6 @@ class SummarizerPlugin:
                 "source_entry_count": len(old_entries),
             },
         )
-
-        return (split_point, summary_anchor)
 
     def summarize_context(
         self, tape: Tape | None = None, **kwargs: Any
