@@ -101,6 +101,7 @@ class SummarizerPlugin:
                 "anchor_type": "handoff",
                 "source_entry_count": len(old_entries),
                 "folded_topics": topic_ids,
+                "prefix": "Context Summary",
             },
         )
 
@@ -129,6 +130,7 @@ class SummarizerPlugin:
             meta={
                 "anchor_type": "handoff",
                 "source_entry_count": len(old_entries),
+                "prefix": "Context Summary",
             },
         )
 
