@@ -1,7 +1,16 @@
 import pytest
 from agentkit.runtime.hook_runtime import HookRuntime
 from agentkit.plugin.registry import PluginRegistry
-from agentkit.errors import HookError
+from agentkit.errors import HookError, HookTypeError
+
+
+def test_hook_type_error_has_hook_name_and_detail():
+    err = HookTypeError(
+        "expected Directive, got dict",
+        hook_name="approve_tool_call",
+    )
+    assert err.hook_name == "approve_tool_call"
+    assert "expected Directive, got dict" in str(err)
 
 
 class ProviderPlugin:
