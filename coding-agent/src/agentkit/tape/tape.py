@@ -93,7 +93,12 @@ class Tape:
                     entries.append(Entry.from_dict(json.loads(line)))
         window_start = 0
         for i, entry in enumerate(entries):
-            if entry.meta.get("anchor_type") == "handoff":
+            anchor_type = entry.meta.get("anchor_type")
+            if anchor_type == "handoff" and "is_handoff" not in entry.meta:
+                entry.meta["is_handoff"] = True
+            if anchor_type == "topic_finalized" and "fold_boundary" not in entry.meta:
+                entry.meta["fold_boundary"] = True
+            if entry.meta.get("is_handoff"):
                 window_start = i
         return cls(
             entries=entries,

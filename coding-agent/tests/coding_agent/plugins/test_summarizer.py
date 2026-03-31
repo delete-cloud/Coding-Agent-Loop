@@ -9,9 +9,9 @@ def _make_topic_initial(topic_id: str, topic_number: int = 1) -> Entry:
         kind="anchor",
         payload={"content": f"Topic #{topic_number}"},
         meta={
-            "anchor_type": "topic_initial",
             "topic_id": topic_id,
             "topic_number": topic_number,
+            "prefix": "Topic Start",
         },
     )
 
@@ -21,9 +21,10 @@ def _make_topic_finalized(topic_id: str, files: list[str] | None = None) -> Entr
         kind="anchor",
         payload={"content": f"Topic involved files: {', '.join(files or [])}"},
         meta={
-            "anchor_type": "topic_finalized",
+            "fold_boundary": True,
             "topic_id": topic_id,
             "files": files or [],
+            "skip": True,
         },
     )
 
@@ -63,7 +64,7 @@ class TestSummarizerPlugin:
         split_point, anchor = result
         assert isinstance(split_point, int)
         assert anchor.kind == "anchor"
-        assert anchor.meta.get("anchor_type") == "handoff"
+        assert anchor.meta.get("is_handoff")
         assert "source_entry_count" in anchor.meta
 
     def test_preserves_recent_entries(self):
@@ -122,7 +123,7 @@ class TestSummarizerTopicAwareHandoff:
         split_point, anchor = result
         assert split_point == 8  # after topic_finalized (index 7 → split_point = 8)
         assert anchor.kind == "anchor"
-        assert anchor.meta.get("anchor_type") == "handoff"
+        assert anchor.meta.get("is_handoff")
 
     def test_no_fold_when_under_max(self):
         plugin = SummarizerPlugin(max_entries=50)
@@ -200,3 +201,28 @@ class TestSummarizerTopicAwareHandoff:
         _, anchor = result
         content = anchor.payload.get("content", "").lower()
         assert "topic" in content or "summarized" in content
+
+    def test_find_last_finalized_uses_fold_boundary(self):
+        plugin = SummarizerPlugin(max_entries=5)
+        entries = [
+            Entry(kind="message", payload={"role": "user", "content": "a"}),
+            Entry(
+                kind="anchor", payload={"content": "fold"}, meta={"fold_boundary": True}
+            ),
+            Entry(kind="message", payload={"role": "user", "content": "b"}),
+        ]
+        idx = plugin._find_last_finalized(entries)
+        assert idx == 1
+
+    def test_find_last_finalized_ignores_old_anchor_type(self):
+        plugin = SummarizerPlugin(max_entries=5)
+        entries = [
+            Entry(
+                kind="anchor",
+                payload={"content": "old"},
+                meta={"anchor_type": "topic_finalized"},
+            ),
+            Entry(kind="message", payload={"role": "user", "content": "msg"}),
+        ]
+        idx = plugin._find_last_finalized(entries)
+        assert idx is None

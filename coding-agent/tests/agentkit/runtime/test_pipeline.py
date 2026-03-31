@@ -268,7 +268,7 @@ class TestPipeline:
                 anchor = Entry(
                     kind="anchor",
                     payload={"content": "summary of old entries"},
-                    meta={"anchor_type": "handoff", "source_entry_count": 7},
+                    meta={"is_handoff": True, "source_entry_count": 7},
                 )
                 return (7, anchor)
 
@@ -286,7 +286,7 @@ class TestPipeline:
         # The anchor is in the tape
         anchors = [e for e in ctx.tape if e.kind == "anchor"]
         assert len(anchors) == 1
-        assert anchors[0].meta.get("anchor_type") == "handoff"
+        assert anchors[0].meta.get("is_handoff")
 
     @pytest.mark.asyncio
     async def test_build_context_passes_window_start_to_handoff(self, setup):

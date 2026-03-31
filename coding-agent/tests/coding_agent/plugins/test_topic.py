@@ -61,7 +61,7 @@ class TestTopicPlugin:
 
         anchors = tape.filter("anchor")
         assert len(anchors) == 1
-        assert anchors[0].meta.get("anchor_type") == "topic_initial"
+        assert anchors[0].meta.get("prefix") == "Topic Start"
 
     def test_topic_switch_on_file_path_change(self):
         plugin = TopicPlugin(overlap_threshold=0.2, min_entries_before_detect=2)
@@ -135,8 +135,8 @@ class TestTopicPlugin:
 
         anchors = tape.filter("anchor")
         assert len(anchors) == 3
-        types = [a.meta.get("anchor_type") for a in anchors]
-        assert types == ["topic_initial", "topic_finalized", "topic_initial"]
+        fold_flags = [bool(a.meta.get("fold_boundary")) for a in anchors]
+        assert fold_flags == [False, True, False]
 
     def test_no_switch_when_files_overlap(self):
         plugin = TopicPlugin(overlap_threshold=0.2, min_entries_before_detect=2)

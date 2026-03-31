@@ -67,17 +67,12 @@ class SummarizerPlugin:
         return (split_point, summary_anchor)
 
     def _find_last_finalized(self, entries: list[Entry]) -> int | None:
-        """Find index of the last topic_finalized anchor in entries."""
         for i in range(len(entries) - 1, -1, -1):
-            if (
-                entries[i].kind == "anchor"
-                and entries[i].meta.get("anchor_type") == "topic_finalized"
-            ):
+            if entries[i].kind == "anchor" and entries[i].meta.get("fold_boundary"):
                 return i
         return None
 
     def _build_topic_summary(self, old_entries: list[Entry]) -> Entry:
-        """Build a handoff anchor summarizing folded topic entries."""
         topic_ids = []
         for e in old_entries:
             tid = e.meta.get("topic_id")
@@ -86,7 +81,7 @@ class SummarizerPlugin:
 
         files: list[str] = []
         for e in old_entries:
-            if e.meta.get("anchor_type") == "topic_finalized":
+            if e.meta.get("fold_boundary"):
                 files.extend(e.meta.get("files", []))
 
         topic_count = len(topic_ids) or 1
@@ -98,7 +93,7 @@ class SummarizerPlugin:
             kind="anchor",
             payload={"content": summary_text},
             meta={
-                "anchor_type": "handoff",
+                "is_handoff": True,
                 "source_entry_count": len(old_entries),
                 "folded_topics": topic_ids,
                 "prefix": "Context Summary",
@@ -106,7 +101,6 @@ class SummarizerPlugin:
         )
 
     def _build_entry_summary(self, old_entries: list[Entry]) -> Entry:
-        """Build a handoff anchor from raw entry list (fallback)."""
         summary_parts = []
         for entry in old_entries:
             if entry.kind == "message":
@@ -128,7 +122,7 @@ class SummarizerPlugin:
             kind="anchor",
             payload={"content": summary_text},
             meta={
-                "anchor_type": "handoff",
+                "is_handoff": True,
                 "source_entry_count": len(old_entries),
                 "prefix": "Context Summary",
             },

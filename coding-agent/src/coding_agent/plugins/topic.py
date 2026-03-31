@@ -109,7 +109,6 @@ class TopicPlugin:
                 kind="anchor",
                 payload={"content": first_user_msg or f"Topic #{self._topic_count}"},
                 meta={
-                    "anchor_type": "topic_initial",
                     "topic_id": self._current_topic_id,
                     "topic_number": self._topic_count,
                     "prefix": "Topic Start",
@@ -144,7 +143,7 @@ class TopicPlugin:
                 kind="anchor",
                 payload={"content": summary},
                 meta={
-                    "anchor_type": "topic_finalized",
+                    "fold_boundary": True,
                     "topic_id": self._current_topic_id,
                     "files": file_list,
                     "skip": True,

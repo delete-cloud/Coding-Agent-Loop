@@ -90,7 +90,7 @@ class TestTape:
         anchor = Entry(
             kind="anchor",
             payload={"content": "summary"},
-            meta={"anchor_type": "handoff"},
+            meta={"is_handoff": True},
         )
         tape.handoff(anchor)
         windowed = tape.windowed_entries()
@@ -111,7 +111,7 @@ class TestTape:
         anchor = Entry(
             kind="anchor",
             payload={"content": "summary"},
-            meta={"anchor_type": "handoff"},
+            meta={"is_handoff": True},
         )
         tape.handoff(anchor)
         forked = tape.fork()
@@ -124,7 +124,7 @@ class TestTape:
         anchor = Entry(
             kind="anchor",
             payload={"content": "handoff-anchor"},
-            meta={"anchor_type": "handoff"},
+            meta={"is_handoff": True},
         )
         tape.handoff(anchor)
         windowed = tape.windowed_entries()
@@ -138,7 +138,7 @@ class TestTape:
         anchor = Entry(
             kind="anchor",
             payload={"content": "summary"},
-            meta={"anchor_type": "handoff"},
+            meta={"is_handoff": True},
         )
         tape.handoff(anchor)
         tape.append(Entry(kind="message", payload={"content": "after"}))
@@ -148,7 +148,7 @@ class TestTape:
         restored = Tape.load_jsonl(path)
         assert len(restored) == 7  # 5 + anchor + 1
         assert restored.window_start == 5  # index of the anchor
-        assert restored.windowed_entries()[0].meta.get("anchor_type") == "handoff"
+        assert restored.windowed_entries()[0].meta.get("is_handoff") is True
 
     def test_save_jsonl_append_only(self, tmp_path):
         tape = Tape()
@@ -222,6 +222,74 @@ class TestTape:
         windowed = tape.windowed_entries()
         assert len(windowed) == 6  # 5 original + 1 anchor
         assert windowed == entries + [anchor]
+
+    def test_load_jsonl_old_format_backward_compat(self, tmp_path):
+        path = tmp_path / "old.jsonl"
+        import json as _json
+        from agentkit.tape.models import Entry as _Entry
+
+        entries = [
+            {
+                "id": "a1",
+                "kind": "message",
+                "payload": {"role": "user", "content": "hi"},
+                "timestamp": 0,
+                "meta": {},
+            },
+            {
+                "id": "a2",
+                "kind": "anchor",
+                "payload": {"content": "summary"},
+                "timestamp": 0,
+                "meta": {"anchor_type": "handoff", "source_entry_count": 1},
+            },
+            {
+                "id": "a3",
+                "kind": "message",
+                "payload": {"role": "user", "content": "after"},
+                "timestamp": 0,
+                "meta": {},
+            },
+        ]
+        path.write_text("\n".join(_json.dumps(e) for e in entries) + "\n")
+        tape = Tape.load_jsonl(path)
+        assert tape.window_start == 1
+        assert tape[1].meta.get("is_handoff") is True
+        windowed = tape.windowed_entries()
+        assert len(windowed) == 2  # anchor + "after"
+
+    def test_load_jsonl_new_format_is_handoff(self, tmp_path):
+        path = tmp_path / "new.jsonl"
+        import json as _json
+
+        entries = [
+            {
+                "id": "b1",
+                "kind": "message",
+                "payload": {"role": "user", "content": "old"},
+                "timestamp": 0,
+                "meta": {},
+            },
+            {
+                "id": "b2",
+                "kind": "anchor",
+                "payload": {"content": "summary"},
+                "timestamp": 0,
+                "meta": {"is_handoff": True},
+            },
+            {
+                "id": "b3",
+                "kind": "message",
+                "payload": {"role": "user", "content": "new"},
+                "timestamp": 0,
+                "meta": {},
+            },
+        ]
+        path.write_text("\n".join(_json.dumps(e) for e in entries) + "\n")
+        tape = Tape.load_jsonl(path)
+        assert tape.window_start == 1
+        windowed = tape.windowed_entries()
+        assert len(windowed) == 2
 
     def test_save_jsonl_overwrites_when_persisted_count_unknown(self, tmp_path):
         path = tmp_path / "tape.jsonl"

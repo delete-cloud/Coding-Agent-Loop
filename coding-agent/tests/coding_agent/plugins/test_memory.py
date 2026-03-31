@@ -83,9 +83,9 @@ def _make_topic_initial(topic_id: str, topic_number: int = 1) -> Entry:
         kind="anchor",
         payload={"content": f"Topic #{topic_number}"},
         meta={
-            "anchor_type": "topic_initial",
             "topic_id": topic_id,
             "topic_number": topic_number,
+            "prefix": "Topic Start",
         },
     )
 
