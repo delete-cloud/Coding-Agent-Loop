@@ -192,13 +192,14 @@ class TestContextBuilder:
         messages = builder.build(tape)
         assert len(messages) == 2  # system + user (event skipped)
 
-    def test_handoff_anchor_rendered_with_prefix(self):
+    def test_anchor_with_prefix_rendered(self):
+        """Anchors with meta.prefix get [Prefix] prepended."""
         tape = Tape()
         tape.append(
             Entry(
                 kind="anchor",
                 payload={"content": "Earlier conversation about auth module"},
-                meta={"anchor_type": "handoff"},
+                meta={"prefix": "Context Summary"},
             )
         )
         tape.append(
@@ -206,35 +207,19 @@ class TestContextBuilder:
         )
         builder = ContextBuilder(system_prompt="system")
         messages = builder.build(tape)
-        # system + anchor + user
         assert len(messages) == 3
         assert messages[1]["role"] == "system"
         assert messages[1]["content"].startswith("[Context Summary]")
         assert "auth module" in messages[1]["content"]
 
-    def test_topic_initial_anchor_rendered_with_prefix(self):
-        tape = Tape()
-        tape.append(
-            Entry(
-                kind="anchor",
-                payload={"content": "Fix authentication bug"},
-                meta={"anchor_type": "topic_initial", "topic_id": "t-001"},
-            )
-        )
-        tape.append(Entry(kind="message", payload={"role": "user", "content": "start"}))
-        builder = ContextBuilder(system_prompt="system")
-        messages = builder.build(tape)
-        assert len(messages) == 3
-        assert messages[1]["role"] == "system"
-        assert messages[1]["content"].startswith("[Topic Start]")
-
-    def test_topic_finalized_anchor_skipped(self):
+    def test_anchor_with_skip_omitted(self):
+        """Anchors with meta.skip=True are not rendered."""
         tape = Tape()
         tape.append(
             Entry(
                 kind="anchor",
                 payload={"content": "Auth bug fixed successfully"},
-                meta={"anchor_type": "topic_finalized", "topic_id": "t-001"},
+                meta={"skip": True},
             )
         )
         tape.append(
@@ -242,11 +227,10 @@ class TestContextBuilder:
         )
         builder = ContextBuilder(system_prompt="system")
         messages = builder.build(tape)
-        # system + user only (topic_finalized anchor skipped)
-        assert len(messages) == 2
+        assert len(messages) == 2  # system + user only
 
     def test_plain_anchor_unchanged(self):
-        """Anchors without meta.anchor_type behave as before."""
+        """Anchors without meta.prefix or meta.skip behave as before."""
         tape = Tape()
         tape.append(Entry(kind="anchor", payload={"content": "Important context"}))
         tape.append(Entry(kind="message", payload={"role": "user", "content": "go"}))

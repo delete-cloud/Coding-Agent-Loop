@@ -112,6 +112,7 @@ class TopicPlugin:
                     "anchor_type": "topic_initial",
                     "topic_id": self._current_topic_id,
                     "topic_number": self._topic_count,
+                    "prefix": "Topic Start",
                 },
             )
         )
@@ -146,6 +147,7 @@ class TopicPlugin:
                     "anchor_type": "topic_finalized",
                     "topic_id": self._current_topic_id,
                     "files": file_list,
+                    "skip": True,
                 },
             )
         )

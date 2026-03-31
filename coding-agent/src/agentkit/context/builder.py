@@ -118,28 +118,15 @@ class ContextBuilder:
                 "content": entry.payload.get("content", ""),
             }
         elif entry.kind == "anchor":
-            anchor_type = entry.meta.get("anchor_type", "")
-            content = entry.payload.get("content", "")
-
-            if anchor_type == "topic_finalized":
+            if entry.meta.get("skip"):
                 return None
 
-            if anchor_type == "handoff":
-                return {
-                    "role": "system",
-                    "content": f"[Context Summary] {content}",
-                }
+            content = entry.payload.get("content", "")
+            prefix = entry.meta.get("prefix")
+            if prefix:
+                content = f"[{prefix}] {content}"
 
-            if anchor_type == "topic_initial":
-                return {
-                    "role": "system",
-                    "content": f"[Topic Start] {content}",
-                }
-
-            return {
-                "role": "system",
-                "content": content,
-            }
+            return {"role": "system", "content": content}
         elif entry.kind == "event":
             return None
         return None
