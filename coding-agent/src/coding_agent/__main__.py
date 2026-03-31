@@ -38,6 +38,7 @@ def create_agent(
     from agentkit.directive.executor import DirectiveExecutor
     from agentkit.plugin.registry import PluginRegistry
     from agentkit.runtime.hook_runtime import HookRuntime
+    from agentkit.runtime.hookspecs import HOOK_SPECS
     from agentkit.runtime.pipeline import Pipeline, PipelineContext
     from agentkit.tape.tape import Tape
     from coding_agent.plugins.shell_session import ShellSessionPlugin
@@ -145,7 +146,7 @@ def create_agent(
             raise ValueError(f"unsupported plugin in config: {plugin_name}")
         registry.register(factory())
 
-    runtime = HookRuntime(registry)
+    runtime = HookRuntime(registry, specs=HOOK_SPECS)
 
     memory_plugin = None
     if "memory" in registry.plugin_ids():
