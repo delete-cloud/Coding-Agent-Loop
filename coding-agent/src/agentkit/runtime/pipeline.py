@@ -20,6 +20,13 @@ from agentkit.tape.tape import Tape
 
 logger = logging.getLogger(__name__)
 
+try:
+    from agentkit.tracing import get_tracer as _get_tracer
+
+    _tracer = _get_tracer("agentkit.pipeline")
+except Exception:
+    _tracer = None
+
 
 @dataclass
 class PipelineContext:
@@ -86,7 +93,15 @@ class Pipeline:
                 try:
                     handler = getattr(self, f"_stage_{stage}", None)
                     if handler is not None:
+                        if _tracer is not None:
+                            _tracer.info(
+                                "stage_start", stage=stage, entry_count=len(ctx.tape)
+                            )
                         await handler(ctx)
+                        if _tracer is not None:
+                            _tracer.info(
+                                "stage_end", stage=stage, entry_count=len(ctx.tape)
+                            )
                         if stage == "load_state" and ctx.storage is not None:
                             begin = getattr(ctx.storage, "begin", None)
                             if callable(begin):
