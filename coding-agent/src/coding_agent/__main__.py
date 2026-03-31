@@ -64,7 +64,7 @@ def create_agent(
         resolved_key = os.environ.get("GITHUB_TOKEN", "")
     resolved_key = resolved_key or ""
 
-    registry = PluginRegistry()
+    registry = PluginRegistry(specs=HOOK_SPECS)
     shell_session = ShellSessionPlugin()
     plugin_factories = {
         "llm_provider": lambda: LLMProviderPlugin(

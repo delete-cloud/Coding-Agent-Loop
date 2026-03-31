@@ -921,3 +921,13 @@ class TestHookRuntimeHasSpecs:
 
         pipeline, _ = create_agent(api_key="sk-test")
         assert pipeline._runtime._specs == HOOK_SPECS
+
+
+class TestPluginRegistryHasSpecs:
+    @pytest.mark.asyncio
+    async def test_plugin_registry_has_specs(self):
+        from coding_agent.__main__ import create_agent
+        from agentkit.runtime.hookspecs import HOOK_SPECS
+
+        pipeline, _ = create_agent(api_key="sk-test")
+        assert pipeline._registry._specs == HOOK_SPECS
