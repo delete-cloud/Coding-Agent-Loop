@@ -2,8 +2,10 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from agentkit.directive.types import Approve, Directive
+from agentkit.errors import HookTypeError
 from agentkit.plugin.registry import PluginRegistry
 from agentkit.runtime.hook_runtime import HookRuntime
+from agentkit.runtime.hookspecs import HOOK_SPECS
 from agentkit.runtime.pipeline import Pipeline, PipelineContext
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
@@ -184,3 +186,75 @@ class TestPipelineTypeGuards:
         await pipeline._stage_render(ctx)
         assert mock_executor.execute.call_count == 1
         assert ctx.output == {"directives": [Approve()]}
+
+
+class TestEndToEndTypeEnforcement:
+    def test_bad_directive_caught_by_runtime_before_pipeline(self):
+        registry = PluginRegistry()
+
+        class BadApprovalPlugin:
+            state_key = "bad_approval"
+
+            def hooks(self):
+                return {"approve_tool_call": self.approve}
+
+            def approve(self, **kwargs):
+                return {"bad": "dict"}
+
+        registry.register(BadApprovalPlugin())
+        runtime = HookRuntime(registry, specs=HOOK_SPECS)
+
+        with pytest.raises(HookTypeError, match="approve_tool_call"):
+            runtime.call_first("approve_tool_call", tool_name="bash", arguments={})
+
+    def test_good_plugin_passes_both_layers(self):
+        registry = PluginRegistry(specs=HOOK_SPECS)
+
+        class GoodApprovalPlugin:
+            state_key = "good"
+
+            def hooks(self):
+                return {"approve_tool_call": self.approve}
+
+            def approve(self, **kwargs):
+                return Approve()
+
+        registry.register(GoodApprovalPlugin())
+        runtime = HookRuntime(registry, specs=HOOK_SPECS)
+
+        result = runtime.call_first("approve_tool_call", tool_name="bash", arguments={})
+        assert isinstance(result, Approve)
+
+    def test_unknown_hook_has_no_validation(self):
+        registry = PluginRegistry(specs=HOOK_SPECS)
+
+        class ExtensionPlugin:
+            state_key = "ext"
+
+            def hooks(self):
+                return {"custom_analysis": self.analyze}
+
+            def analyze(self, **kwargs):
+                return {"anything": True}
+
+        registry.register(ExtensionPlugin())
+        runtime = HookRuntime(registry, specs=HOOK_SPECS)
+        result = runtime.call_first("custom_analysis")
+        assert result == {"anything": True}
+
+    def test_none_always_allowed_with_specs(self):
+        registry = PluginRegistry(specs=HOOK_SPECS)
+
+        class NoneApprovalPlugin:
+            state_key = "none_approval"
+
+            def hooks(self):
+                return {"approve_tool_call": self.approve}
+
+            def approve(self, **kwargs):
+                return None
+
+        registry.register(NoneApprovalPlugin())
+        runtime = HookRuntime(registry, specs=HOOK_SPECS)
+        result = runtime.call_first("approve_tool_call", tool_name="bash", arguments={})
+        assert result is None
