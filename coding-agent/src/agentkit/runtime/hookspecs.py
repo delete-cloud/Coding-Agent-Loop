@@ -79,6 +79,7 @@ HOOK_SPECS: dict[str, HookSpec] = {
     "build_context": HookSpec(
         name="build_context",
         firstresult=False,
+        return_type=list,
         doc="Inject grounding context (memories, KB results) before prompt build.",
     ),
     "on_turn_end": HookSpec(
