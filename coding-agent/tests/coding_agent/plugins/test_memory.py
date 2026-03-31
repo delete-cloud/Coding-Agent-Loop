@@ -166,3 +166,82 @@ class TestMemoryTopicScopedRecall:
 
         assert len(result) == 1
         assert "Auth" in result[0]["content"]
+
+
+class TestMemoryPluginDirectiveFlow:
+    def test_on_turn_end_does_not_inline_append(self):
+        plugin = MemoryPlugin()
+        tape = Tape()
+        tape.append(
+            Entry(kind="message", payload={"role": "user", "content": "fix auth.py"})
+        )
+        tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "assistant", "content": "I fixed the bug in auth.py"},
+            )
+        )
+        plugin.on_turn_end(tape=tape)
+        assert plugin._memories == []
+
+    def test_on_turn_end_returns_memory_record_with_correct_fields(self):
+        plugin = MemoryPlugin()
+        tape = Tape()
+        tape.append(
+            Entry(
+                kind="message", payload={"role": "user", "content": "refactor auth.py"}
+            )
+        )
+        tape.append(
+            Entry(
+                kind="tool_call",
+                payload={"name": "file_read", "arguments": {"path": "auth.py"}},
+            )
+        )
+        tape.append(
+            Entry(
+                kind="message",
+                payload={
+                    "role": "assistant",
+                    "content": "Refactored auth.py successfully",
+                },
+            )
+        )
+        record = plugin.on_turn_end(tape=tape)
+        assert isinstance(record, MemoryRecord)
+        assert record.summary != ""
+        assert isinstance(record.tags, list)
+        assert 0.0 <= record.importance <= 1.0
+
+    def test_add_memory_persists_to_memories_list(self):
+        plugin = MemoryPlugin()
+        record = MemoryRecord(summary="Fixed a bug", tags=["auth.py"], importance=0.8)
+        plugin.add_memory(record)
+        assert len(plugin._memories) == 1
+        assert plugin._memories[0]["summary"] == "Fixed a bug"
+        assert plugin._memories[0]["tags"] == ["auth.py"]
+        assert plugin._memories[0]["importance"] == 0.8
+
+    def test_add_memory_called_by_handler_persists(self):
+        plugin = MemoryPlugin()
+
+        async def memory_handler(directive: MemoryRecord) -> None:
+            plugin.add_memory(directive)
+
+        import asyncio
+
+        tape = Tape()
+        tape.append(
+            Entry(kind="message", payload={"role": "user", "content": "fix something"})
+        )
+        tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "assistant", "content": "done fixing"},
+            )
+        )
+        record = plugin.on_turn_end(tape=tape)
+        assert record is not None
+        assert plugin._memories == []
+        asyncio.run(memory_handler(record))
+        assert len(plugin._memories) == 1

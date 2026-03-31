@@ -881,3 +881,33 @@ class TestBatchModeAutoApprove:
         directive = AskUser(question="Allow?")
         result = await executor.execute(directive)
         assert result is False
+
+
+class TestMemoryHandlerWiring:
+    @pytest.mark.asyncio
+    async def test_create_agent_directive_executor_has_memory_handler(self):
+        from coding_agent.__main__ import create_agent
+
+        pipeline, _ = create_agent(api_key="sk-test")
+        executor = pipeline._directive_executor
+        assert executor._memory is not None, (
+            "memory_handler must be wired in create_agent"
+        )
+
+    @pytest.mark.asyncio
+    async def test_memory_handler_calls_add_memory(self):
+        from coding_agent.plugins.memory import MemoryPlugin
+        from agentkit.directive.executor import DirectiveExecutor
+        from agentkit.directive.types import MemoryRecord
+
+        plugin = MemoryPlugin()
+
+        async def handler(directive: MemoryRecord) -> None:
+            plugin.add_memory(directive)
+
+        executor = DirectiveExecutor(memory_handler=handler)
+        record = MemoryRecord(summary="test memory", tags=["auth.py"], importance=0.7)
+        await executor.execute(record)
+
+        assert len(plugin._memories) == 1
+        assert plugin._memories[0]["summary"] == "test memory"

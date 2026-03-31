@@ -147,7 +147,21 @@ def create_agent(
 
     runtime = HookRuntime(registry)
 
-    directive_executor = DirectiveExecutor()
+    memory_plugin = None
+    if "memory" in registry.plugin_ids():
+        from coding_agent.plugins.memory import MemoryPlugin as _MemoryPlugin
+
+        _mem = registry.get("memory")
+        if isinstance(_mem, _MemoryPlugin):
+            memory_plugin = _mem
+
+    async def _memory_handler(directive: Any) -> None:
+        if memory_plugin is not None:
+            memory_plugin.add_memory(directive)
+
+    directive_executor = DirectiveExecutor(
+        memory_handler=_memory_handler if memory_plugin is not None else None,
+    )
 
     pipeline = Pipeline(
         runtime=runtime,

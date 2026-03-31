@@ -150,6 +150,9 @@ class MemoryPlugin:
             importance=importance,
         )
 
+        return record
+
+    def add_memory(self, record: MemoryRecord) -> None:
         self._memories.append(
             {
                 "summary": record.summary,
@@ -157,8 +160,6 @@ class MemoryPlugin:
                 "importance": record.importance,
             }
         )
-
-        return record
 
     def _extract_tags(self, entries: list[Entry]) -> list[str]:
         """Extract topic tags from tape entries."""
