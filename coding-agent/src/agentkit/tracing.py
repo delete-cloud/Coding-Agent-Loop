@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import os
-import sys
 from typing import Any
 
 import structlog
 
 
 _configured = False
+
+
+def _drop_all(logger: Any, method: str, event_dict: dict[str, Any]) -> dict[str, Any]:
+    raise structlog.DropEvent()
 
 
 def configure_tracing(enabled: bool | None = None, level: str = "INFO") -> None:
@@ -23,9 +26,9 @@ def configure_tracing(enabled: bool | None = None, level: str = "INFO") -> None:
 
     if not enabled:
         structlog.configure(
-            processors=[structlog.processors.JSONRenderer()],
+            processors=[_drop_all],
             wrapper_class=structlog.stdlib.BoundLogger,
-            logger_factory=structlog.PrintLoggerFactory(file=open(os.devnull, "w")),
+            logger_factory=structlog.PrintLoggerFactory(),
             cache_logger_on_first_use=False,
         )
         _configured = False
