@@ -38,6 +38,7 @@ class PipelineContext:
     on_event: (
         Callable[[TextEvent | ToolCallEvent | DoneEvent], Awaitable[None]] | None
     ) = None
+    _handoff_done: bool = False
 
 
 class Pipeline:
@@ -133,8 +134,10 @@ class Pipeline:
         )
         if window_result is not None:
             window_start, summary_anchor = window_result
-            if summary_anchor is not None:
-                ctx.tape.handoff(summary_anchor)
+            if summary_anchor is not None and not ctx._handoff_done:
+                abs_window_start = ctx.tape.window_start + window_start
+                ctx.tape.handoff(summary_anchor, window_start=abs_window_start)
+                ctx._handoff_done = True
             logger.info(
                 "Context window advanced: %d entries visible (of %d total)",
                 len(ctx.tape.windowed_entries()),

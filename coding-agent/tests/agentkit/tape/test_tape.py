@@ -183,6 +183,46 @@ class TestTape:
         lines = path.read_text().strip().split("\n")
         assert len(lines) == 1
 
+    def test_handoff_with_window_start(self):
+        tape = Tape()
+        entries = [
+            Entry(kind="message", payload={"content": str(i)}) for i in range(14)
+        ]
+        for e in entries:
+            tape.append(e)
+        anchor = Entry(
+            kind="anchor", payload={"content": "summary"}, meta={"is_handoff": True}
+        )
+        tape.handoff(anchor, window_start=8)
+        windowed = tape.windowed_entries()
+        assert len(windowed) == 7  # 6 from entries[8:14] + 1 anchor
+        assert windowed == entries[8:14] + [anchor]
+
+    def test_handoff_backward_compat(self):
+        tape = Tape()
+        for i in range(10):
+            tape.append(Entry(kind="message", payload={"content": str(i)}))
+        anchor = Entry(
+            kind="anchor", payload={"content": "summary"}, meta={"is_handoff": True}
+        )
+        tape.handoff(anchor)
+        windowed = tape.windowed_entries()
+        assert len(windowed) == 1
+        assert windowed[0] is anchor
+
+    def test_handoff_window_start_zero(self):
+        tape = Tape()
+        entries = [Entry(kind="message", payload={"content": str(i)}) for i in range(5)]
+        for e in entries:
+            tape.append(e)
+        anchor = Entry(
+            kind="anchor", payload={"content": "summary"}, meta={"is_handoff": True}
+        )
+        tape.handoff(anchor, window_start=0)
+        windowed = tape.windowed_entries()
+        assert len(windowed) == 6  # 5 original + 1 anchor
+        assert windowed == entries + [anchor]
+
     def test_save_jsonl_overwrites_when_persisted_count_unknown(self, tmp_path):
         path = tmp_path / "tape.jsonl"
         path.write_text('{"id":"x","kind":"message","payload":{},"timestamp":0}\n')

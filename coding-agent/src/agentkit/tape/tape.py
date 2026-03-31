@@ -34,10 +34,13 @@ class Tape:
         with self._lock:
             return list(self._entries[self._window_start :])
 
-    def handoff(self, summary_anchor: Entry) -> None:
+    def handoff(self, summary_anchor: Entry, window_start: int | None = None) -> None:
         with self._lock:
             self._entries.append(summary_anchor)
-            self._window_start = len(self._entries) - 1
+            if window_start is not None:
+                self._window_start = window_start
+            else:
+                self._window_start = len(self._entries) - 1
 
     def append(self, entry: Entry) -> None:
         with self._lock:

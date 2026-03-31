@@ -289,6 +289,76 @@ class TestPipeline:
         assert anchors[0].meta.get("anchor_type") == "handoff"
 
     @pytest.mark.asyncio
+    async def test_build_context_passes_window_start_to_handoff(self, setup):
+        pipeline, plugin = setup
+        tape = Tape()
+        for i in range(10):
+            tape.append(
+                Entry(kind="message", payload={"role": "user", "content": f"msg-{i}"})
+            )
+        ctx = PipelineContext(tape=tape, session_id="s1")
+
+        class WindowPlugin:
+            state_key = "window2"
+
+            def hooks(self):
+                return {"resolve_context_window": self.resolve_context_window}
+
+            def resolve_context_window(self, tape=None, **kwargs):
+                anchor = Entry(
+                    kind="anchor",
+                    payload={"content": "summary"},
+                    meta={"is_handoff": True},
+                )
+                return (7, anchor)
+
+        registry = PluginRegistry()
+        registry.register(plugin)
+        registry.register(WindowPlugin())
+        pipeline2 = Pipeline(runtime=HookRuntime(registry), registry=registry)
+
+        await pipeline2._stage_build_context(ctx)
+
+        windowed = ctx.tape.windowed_entries()
+        assert len(windowed) == 4  # entries[7:10] + anchor
+        assert windowed[-1].kind == "anchor"
+
+    @pytest.mark.asyncio
+    async def test_build_context_reentrant_does_not_double_handoff(self, setup):
+        pipeline, plugin = setup
+        tape = Tape()
+        for i in range(10):
+            tape.append(
+                Entry(kind="message", payload={"role": "user", "content": f"msg-{i}"})
+            )
+        ctx = PipelineContext(tape=tape, session_id="s1")
+
+        class WindowPlugin:
+            state_key = "window3"
+
+            def hooks(self):
+                return {"resolve_context_window": self.resolve_context_window}
+
+            def resolve_context_window(self, tape=None, **kwargs):
+                anchor = Entry(
+                    kind="anchor",
+                    payload={"content": "summary"},
+                    meta={"is_handoff": True},
+                )
+                return (7, anchor)
+
+        registry = PluginRegistry()
+        registry.register(plugin)
+        registry.register(WindowPlugin())
+        pipeline2 = Pipeline(runtime=HookRuntime(registry), registry=registry)
+
+        await pipeline2._stage_build_context(ctx)
+        await pipeline2._stage_build_context(ctx)
+
+        anchors = [e for e in ctx.tape if e.kind == "anchor"]
+        assert len(anchors) == 1
+
+    @pytest.mark.asyncio
     async def test_run_turn_records_one_tool_call_entry_per_call(self, setup):
         pipeline, plugin = setup
         tape = Tape()
