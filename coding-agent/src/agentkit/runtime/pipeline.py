@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 from agentkit._types import StageName
+from agentkit.directive.types import Directive
 from agentkit.errors import PipelineError
 from agentkit.plugin.registry import PluginRegistry
 from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
@@ -148,16 +149,26 @@ class Pipeline:
             "resolve_context_window", tape=ctx.tape
         )
         if window_result is not None:
-            window_start, summary_anchor = window_result
-            if summary_anchor is not None and not ctx._handoff_done:
-                abs_window_start = ctx.tape.window_start + window_start
-                ctx.tape.handoff(summary_anchor, window_start=abs_window_start)
-                ctx._handoff_done = True
-            logger.info(
-                "Context window advanced: %d entries visible (of %d total)",
-                len(ctx.tape.windowed_entries()),
-                len(ctx.tape),
-            )
+            if not (
+                isinstance(window_result, tuple)
+                and len(window_result) == 2
+                and isinstance(window_result[0], int)
+            ):
+                logger.warning(
+                    "resolve_context_window returned unexpected shape (%s), skipping windowing",
+                    type(window_result).__name__,
+                )
+            else:
+                window_start, summary_anchor = window_result
+                if summary_anchor is not None and not ctx._handoff_done:
+                    abs_window_start = ctx.tape.window_start + window_start
+                    ctx.tape.handoff(summary_anchor, window_start=abs_window_start)
+                    ctx._handoff_done = True
+                logger.info(
+                    "Context window advanced: %d entries visible (of %d total)",
+                    len(ctx.tape.windowed_entries()),
+                    len(ctx.tape),
+                )
         else:
             # Fallback to legacy summarize_context for backward compatibility
             summary = self._runtime.call_first("summarize_context", tape=ctx.tape)
@@ -268,8 +279,16 @@ class Pipeline:
                     )
 
                     approved = True
-                    if directive is not None and self._directive_executor is not None:
-                        approved = await self._directive_executor.execute(directive)
+                    if directive is not None:
+                        if not isinstance(directive, Directive):
+                            logger.warning(
+                                "approve_tool_call returned non-Directive type %s for tool %r, rejecting (fail-closed)",
+                                type(directive).__name__,
+                                tc["name"],
+                            )
+                            approved = False
+                        elif self._directive_executor is not None:
+                            approved = await self._directive_executor.execute(directive)
 
                     if not approved:
                         ctx.tape.append(
@@ -350,13 +369,21 @@ class Pipeline:
         self._runtime.notify("on_checkpoint", ctx=ctx, runtime=self._runtime)
 
     async def _stage_render(self, ctx: PipelineContext) -> None:
-        directives = self._runtime.call_many("on_turn_end", tape=ctx.tape)
+        raw_directives = self._runtime.call_many("on_turn_end", tape=ctx.tape)
+        directives: list[Directive] = []
+        for d in raw_directives:
+            if isinstance(d, Directive):
+                directives.append(d)
+            else:
+                logger.warning(
+                    "on_turn_end returned non-Directive type %s, dropping",
+                    type(d).__name__,
+                )
         ctx.output = {"directives": directives}
 
         if self._directive_executor is not None:
             for directive in directives:
-                if directive is not None:
-                    await self._directive_executor.execute(directive)
+                await self._directive_executor.execute(directive)
 
     async def _stage_dispatch(self, ctx: PipelineContext) -> None:
         pass
