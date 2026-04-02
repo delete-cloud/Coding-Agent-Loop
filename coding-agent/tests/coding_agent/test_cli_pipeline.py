@@ -65,12 +65,8 @@ class TestTuiRunUsesPipeline:
         mock_adapter_instance.run_turn = AsyncMock(return_value=mock_outcome)
         mock_adapter_cls = MagicMock(return_value=mock_adapter_instance)
 
-        # Mock CodingAgentTUI to avoid real terminal interaction
-        mock_tui = MagicMock()
-        mock_tui.consumer = MagicMock()
-        mock_tui.__enter__ = MagicMock(return_value=mock_tui)
-        mock_tui.__exit__ = MagicMock(return_value=False)
-        mock_tui_cls = MagicMock(return_value=mock_tui)
+        mock_renderer = MagicMock()
+        mock_consumer = MagicMock()
 
         with (
             patch(
@@ -80,24 +76,28 @@ class TestTuiRunUsesPipeline:
             patch(
                 "coding_agent.__main__.PipelineAdapter", mock_adapter_cls
             ) as p_adapter,
-            patch("coding_agent.__main__.CodingAgentTUI", mock_tui_cls),
+            patch(
+                "coding_agent.ui.stream_renderer.StreamingRenderer",
+                return_value=mock_renderer,
+            ),
+            patch(
+                "coding_agent.ui.rich_consumer.RichConsumer",
+                return_value=mock_consumer,
+            ),
         ):
             from coding_agent.__main__ import _run_with_tui
 
             config = _make_config()
             await _run_with_tui(config, "test goal")
 
-        # Verify create_agent was called
         p_create.assert_called_once()
 
-        # Verify PipelineAdapter was instantiated with the pipeline, ctx, and consumer
         mock_adapter_cls.assert_called_once_with(
             pipeline=mock_pipeline,
             ctx=mock_ctx,
-            consumer=mock_tui.consumer,
+            consumer=mock_consumer,
         )
 
-        # Verify run_turn was called with the goal
         mock_adapter_instance.run_turn.assert_awaited_once_with("test goal")
 
 
@@ -368,16 +368,9 @@ class TestReplMultiturnContext:
             )
             return _ok_outcome()
 
-        with patch("coding_agent.cli.repl.CodingAgentTUI") as mock_tui_cls:
-            mock_tui = MagicMock()
-            mock_tui.__enter__ = MagicMock(return_value=mock_tui)
-            mock_tui.__exit__ = MagicMock(return_value=False)
-            mock_tui.consumer = MagicMock()
-            mock_tui_cls.return_value = mock_tui
-
-            with patch.object(adapter, "run_turn", side_effect=fake_run_turn):
-                await session._process_message("first question")
-                await session._process_message("second question")
+        with patch.object(adapter, "run_turn", side_effect=fake_run_turn):
+            await session._process_message("first question")
+            await session._process_message("second question")
 
         assert call_messages == ["first question", "second question"]
         assert session._pipeline_adapter is adapter
@@ -408,7 +401,7 @@ class TestReplSlashCommands:
 
         call_count = 0
 
-        async def mock_get_input(prompt=""):
+        async def mock_get_input(prompt="", shell_mode=False, prompt_builder=None):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -449,20 +442,42 @@ class TestReplErrorRecovery:
             turn_results.append(outcome)
             return outcome
 
-        with patch("coding_agent.cli.repl.CodingAgentTUI") as mock_tui_cls:
-            mock_tui = MagicMock()
-            mock_tui.__enter__ = MagicMock(return_value=mock_tui)
-            mock_tui.__exit__ = MagicMock(return_value=False)
-            mock_tui.consumer = MagicMock()
-            mock_tui_cls.return_value = mock_tui
-
-            with patch.object(adapter, "run_turn", side_effect=side_effect_run_turn):
-                await session._process_message("bad input")
-                await session._process_message("good input")
+        with patch.object(adapter, "run_turn", side_effect=side_effect_run_turn):
+            await session._process_message("bad input")
+            await session._process_message("good input")
 
         assert len(turn_results) == 2
         assert turn_results[0].stop_reason == StopReason.ERROR
         assert turn_results[1].stop_reason == StopReason.NO_TOOL_CALLS
+
+
+class TestReplOutput:
+    @pytest.mark.asyncio
+    @patch("coding_agent.cli.repl.create_agent")
+    async def test_repl_process_message_renders_user_message(self, mock_create_agent):
+        mock_pipeline = MagicMock()
+        mock_ctx = MagicMock()
+        mock_create_agent.return_value = (mock_pipeline, mock_ctx)
+
+        from coding_agent.cli.repl import InteractiveSession
+
+        config = _make_repl_config()
+        session = InteractiveSession(config)
+
+        adapter = session._pipeline_adapter
+        assert adapter is not None
+
+        mock_renderer = MagicMock()
+        session._renderer = mock_renderer
+
+        with patch.object(
+            adapter,
+            "run_turn",
+            AsyncMock(return_value=_make_outcome(final_message="Hello from Kimi")),
+        ):
+            await session._process_message("hello")
+
+        mock_renderer.user_message.assert_called_once_with("hello")
 
 
 # ---------------------------------------------------------------------------
@@ -651,10 +666,10 @@ class TestHeadlessPipelineIsolation:
         assert captured_kwargs.get("approval_mode_override") == "interactive"
 
 
-class TestReplPipelineAdapterConsumerUpdated:
+class TestReplPipelineAdapterConsumerStable:
     @pytest.mark.asyncio
     @patch("coding_agent.cli.repl.create_agent")
-    async def test_consumer_updated_each_turn(self, mock_create_agent):
+    async def test_consumer_is_same_across_turns(self, mock_create_agent):
         mock_pipeline = MagicMock()
         mock_ctx = MagicMock()
         mock_create_agent.return_value = (mock_pipeline, mock_ctx)
@@ -671,28 +686,13 @@ class TestReplPipelineAdapterConsumerUpdated:
             consumers_seen.append(adapter._consumer)
             return _ok_outcome()
 
-        with patch("coding_agent.cli.repl.CodingAgentTUI") as mock_tui_cls:
-            tui_1 = MagicMock()
-            tui_1.__enter__ = MagicMock(return_value=tui_1)
-            tui_1.__exit__ = MagicMock(return_value=False)
-            tui_1.consumer = MagicMock(name="consumer_1")
-
-            tui_2 = MagicMock()
-            tui_2.__enter__ = MagicMock(return_value=tui_2)
-            tui_2.__exit__ = MagicMock(return_value=False)
-            tui_2.consumer = MagicMock(name="consumer_2")
-
-            mock_tui_cls.side_effect = [tui_1, tui_2]
-
-            with patch.object(
-                adapter, "run_turn", side_effect=capture_consumer_run_turn
-            ):
-                await session._process_message("turn 1")
-                await session._process_message("turn 2")
+        with patch.object(adapter, "run_turn", side_effect=capture_consumer_run_turn):
+            await session._process_message("turn 1")
+            await session._process_message("turn 2")
 
         assert len(consumers_seen) == 2
-        assert consumers_seen[0] is tui_1.consumer
-        assert consumers_seen[1] is tui_2.consumer
+        assert consumers_seen[0] is consumers_seen[1]
+        assert consumers_seen[0] is session._consumer
 
 
 class TestReplCreateAgentConfigForwarding:

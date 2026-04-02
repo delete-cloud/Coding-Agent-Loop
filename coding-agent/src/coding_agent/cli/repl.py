@@ -16,11 +16,7 @@ from coding_agent.cli.terminal_output import (
     print_pt,
     set_prompt_output,
 )
-from coding_agent.cli.bash_executor import (
-    BashExecutor,
-    is_bash_command,
-    extract_bash_command,
-)
+from coding_agent.cli.bash_executor import BashExecutor
 from coding_agent.core.config import Config
 from coding_agent.__main__ import create_agent
 from coding_agent.adapter import PipelineAdapter
@@ -94,7 +90,7 @@ class InteractiveSession:
 
         print_pt("🤖 Coding Agent - Interactive Mode", output=prompt_output)
         print_pt(
-            "Type /help for commands, ! for bash mode, !<cmd> for one-off shell, or just chat.\n",
+            "Type /help for commands, ! to enter bash mode, or just chat.\n",
             output=prompt_output,
         )
 
@@ -127,12 +123,6 @@ class InteractiveSession:
 
             if user_input.startswith("/"):
                 await handle_command(user_input, self.context)
-                continue
-
-            if is_bash_command(user_input):
-                cmd = extract_bash_command(user_input)
-                if cmd:
-                    await self._bash_executor.execute(cmd)
                 continue
 
             try:
