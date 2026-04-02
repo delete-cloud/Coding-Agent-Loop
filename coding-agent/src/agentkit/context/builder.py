@@ -30,9 +30,13 @@ class ContextBuilder:
             if entry.kind == "tool_call":
                 tool_calls: list[dict[str, Any]] = []
                 role = entry.payload.get("role", "assistant")
+                reasoning_content: str | None = None
 
                 while index < len(entries) and entries[index].kind == "tool_call":
                     current = entries[index]
+                    rc = current.payload.get("reasoning_content")
+                    if rc and reasoning_content is None:
+                        reasoning_content = rc
                     current_calls = current.payload.get("tool_calls")
                     if isinstance(current_calls, list):
                         tool_calls.extend(current_calls)
@@ -54,6 +58,8 @@ class ContextBuilder:
                         for tool_call in tool_calls
                     ],
                 }
+                if reasoning_content is not None:
+                    tool_call_msg["reasoning_content"] = reasoning_content
 
                 # Merge with preceding assistant text to avoid adjacent
                 # same-role messages (Anthropic API rejects those).
@@ -64,6 +70,13 @@ class ContextBuilder:
                     and "tool_calls" not in messages[-1]
                 ):
                     tool_call_msg["content"] = messages[-1]["content"]
+                    if (
+                        messages[-1].get("reasoning_content")
+                        and reasoning_content is None
+                    ):
+                        tool_call_msg["reasoning_content"] = messages[-1][
+                            "reasoning_content"
+                        ]
                     messages[-1] = tool_call_msg
                 else:
                     messages.append(tool_call_msg)
@@ -91,10 +104,14 @@ class ContextBuilder:
 
     def _entry_to_message(self, entry: Entry) -> dict[str, Any] | None:
         if entry.kind == "message":
-            return {
+            msg: dict[str, Any] = {
                 "role": entry.payload.get("role", "user"),
                 "content": entry.payload.get("content", ""),
             }
+            rc = entry.payload.get("reasoning_content")
+            if rc:
+                msg["reasoning_content"] = rc
+            return msg
         elif entry.kind == "tool_call":
             tool_calls = entry.payload.get("tool_calls")
             if not isinstance(tool_calls, list):
@@ -106,11 +123,15 @@ class ContextBuilder:
                     }
                 ]
 
-            return {
+            tc_msg: dict[str, Any] = {
                 "role": entry.payload.get("role", "assistant"),
                 "content": None,
                 "tool_calls": [self._tool_call_to_message(tc) for tc in tool_calls],
             }
+            rc = entry.payload.get("reasoning_content")
+            if rc:
+                tc_msg["reasoning_content"] = rc
+            return tc_msg
         elif entry.kind == "tool_result":
             return {
                 "role": "tool",

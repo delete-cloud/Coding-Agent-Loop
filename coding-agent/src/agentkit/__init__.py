@@ -42,7 +42,9 @@ from agentkit.providers import (
     LLMProvider,
     StreamEvent,
     TextEvent,
+    ThinkingEvent,
     ToolCallEvent,
+    ToolResultEvent,
 )
 from agentkit.runtime import HookRuntime, Pipeline, PipelineContext
 from agentkit.storage import DocIndex, SessionStore, TapeStore
@@ -81,7 +83,9 @@ __all__ = [
     "LLMProvider",
     "StreamEvent",
     "TextEvent",
+    "ThinkingEvent",
     "ToolCallEvent",
+    "ToolResultEvent",
     "DoneEvent",
     # Channel
     "Channel",

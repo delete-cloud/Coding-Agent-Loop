@@ -24,5 +24,20 @@ class ToolCallEvent(StreamEvent):
 
 
 @dataclass(frozen=True)
+class ThinkingEvent(StreamEvent):
+    text: str = ""
+    kind: str = field(init=False, default="thinking")
+
+
+@dataclass(frozen=True)
+class ToolResultEvent(StreamEvent):
+    tool_call_id: str = ""
+    name: str = ""
+    result: str = ""
+    is_error: bool = False
+    kind: str = field(init=False, default="tool_result")
+
+
+@dataclass(frozen=True)
 class DoneEvent(StreamEvent):
     kind: str = field(init=False, default="done")

@@ -14,7 +14,13 @@ from agentkit._types import StageName
 from agentkit.directive.types import Directive
 from agentkit.errors import PipelineError
 from agentkit.plugin.registry import PluginRegistry
-from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
+from agentkit.providers.models import (
+    DoneEvent,
+    TextEvent,
+    ThinkingEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+)
 from agentkit.runtime.hook_runtime import HookRuntime
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
@@ -44,7 +50,11 @@ class PipelineContext:
     response_entries: list[Any] = field(default_factory=list)
     output: Any = None
     on_event: (
-        Callable[[TextEvent | ToolCallEvent | DoneEvent], Awaitable[None]] | None
+        Callable[
+            [TextEvent | ThinkingEvent | ToolCallEvent | ToolResultEvent | DoneEvent],
+            Awaitable[None],
+        ]
+        | None
     ) = None
     _handoff_done: bool = False
 
@@ -214,9 +224,14 @@ class Pipeline:
 
             text_chunks: list[str] = []
             tool_calls: list[dict[str, Any]] = []
+            thinking_chunks: list[str] = []
 
             async for event in ctx.llm_provider.stream(ctx.messages, tools=tool_dicts):
-                if isinstance(event, TextEvent):
+                if isinstance(event, ThinkingEvent):
+                    if ctx.on_event:
+                        await ctx.on_event(event)
+                    thinking_chunks.append(event.text)
+                elif isinstance(event, TextEvent):
                     if ctx.on_event:
                         await ctx.on_event(event)
                     text_chunks.append(event.text)
@@ -236,39 +251,51 @@ class Pipeline:
                     break
 
             if text_chunks and not tool_calls:
+                payload: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": "".join(text_chunks),
+                }
+                if thinking_chunks:
+                    payload["reasoning_content"] = "".join(thinking_chunks)
                 ctx.tape.append(
                     Entry(
                         kind="message",
-                        payload={"role": "assistant", "content": "".join(text_chunks)},
+                        payload=payload,
                     )
                 )
                 break
 
             if tool_calls:
                 if text_chunks:
+                    payload = {
+                        "role": "assistant",
+                        "content": "".join(text_chunks),
+                    }
+                    if thinking_chunks:
+                        payload["reasoning_content"] = "".join(thinking_chunks)
                     ctx.tape.append(
                         Entry(
                             kind="message",
-                            payload={
-                                "role": "assistant",
-                                "content": "".join(text_chunks),
-                            },
+                            payload=payload,
                         )
                     )
 
                 executable_calls: list[dict[str, Any]] = []
                 executable_metas: list[dict[str, Any]] = []
 
-                for tc in tool_calls:
+                for i, tc in enumerate(tool_calls):
+                    tc_payload: dict[str, Any] = {
+                        "id": tc["id"],
+                        "name": tc["name"],
+                        "arguments": tc["arguments"],
+                        "role": "assistant",
+                    }
+                    if i == 0 and thinking_chunks and not text_chunks:
+                        tc_payload["reasoning_content"] = "".join(thinking_chunks)
                     ctx.tape.append(
                         Entry(
                             kind="tool_call",
-                            payload={
-                                "id": tc["id"],
-                                "name": tc["name"],
-                                "arguments": tc["arguments"],
-                                "role": "assistant",
-                            },
+                            payload=tc_payload,
                         )
                     )
 
@@ -291,15 +318,25 @@ class Pipeline:
                             approved = await self._directive_executor.execute(directive)
 
                     if not approved:
+                        rejection_msg = f"Tool call rejected: {getattr(directive, 'reason', 'policy')}"
                         ctx.tape.append(
                             Entry(
                                 kind="tool_result",
                                 payload={
                                     "tool_call_id": tc["id"],
-                                    "content": f"Tool call rejected: {getattr(directive, 'reason', 'policy')}",
+                                    "content": rejection_msg,
                                 },
                             )
                         )
+                        if ctx.on_event:
+                            await ctx.on_event(
+                                ToolResultEvent(
+                                    tool_call_id=tc["id"],
+                                    name=tc["name"],
+                                    result=rejection_msg,
+                                    is_error=True,
+                                )
+                            )
                         continue
 
                     executable_calls.append(
@@ -359,6 +396,15 @@ class Pipeline:
                                 },
                             )
                         )
+                        if ctx.on_event:
+                            await ctx.on_event(
+                                ToolResultEvent(
+                                    tool_call_id=tc["id"],
+                                    name=tc["name"],
+                                    result=result_str,
+                                    is_error=isinstance(result, Exception),
+                                )
+                            )
 
                 await self._stage_build_context(ctx)
                 continue

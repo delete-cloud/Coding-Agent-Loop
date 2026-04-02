@@ -238,3 +238,76 @@ class TestContextBuilder:
         messages = builder.build(tape)
         assert len(messages) == 3
         assert messages[1]["content"] == "Important context"
+
+    def test_reasoning_content_on_message_entry(self):
+        tape = Tape()
+        tape.append(
+            Entry(
+                kind="message",
+                payload={
+                    "role": "assistant",
+                    "content": "The answer is 42.",
+                    "reasoning_content": "Let me think step by step...",
+                },
+            )
+        )
+        builder = ContextBuilder(system_prompt="system")
+        messages = builder.build(tape)
+        assert messages[1]["reasoning_content"] == "Let me think step by step..."
+        assert messages[1]["content"] == "The answer is 42."
+
+    def test_reasoning_content_absent_when_not_in_payload(self):
+        tape = Tape()
+        tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "assistant", "content": "Hello"},
+            )
+        )
+        builder = ContextBuilder(system_prompt="system")
+        messages = builder.build(tape)
+        assert "reasoning_content" not in messages[1]
+
+    def test_reasoning_content_on_tool_call_entry(self):
+        tape = Tape()
+        tape.append(
+            Entry(
+                kind="tool_call",
+                payload={
+                    "id": "tc_1",
+                    "name": "bash",
+                    "arguments": {"cmd": "ls"},
+                    "role": "assistant",
+                    "reasoning_content": "I should list files first.",
+                },
+            )
+        )
+        builder = ContextBuilder(system_prompt="system")
+        messages = builder.build(tape)
+        assert messages[1]["reasoning_content"] == "I should list files first."
+        assert len(messages[1]["tool_calls"]) == 1
+
+    def test_reasoning_content_merged_from_preceding_text(self):
+        tape = Tape()
+        tape.append(
+            Entry(
+                kind="message",
+                payload={
+                    "role": "assistant",
+                    "content": "Let me check.",
+                    "reasoning_content": "Thinking about approach...",
+                },
+            )
+        )
+        tape.append(
+            Entry(
+                kind="tool_call",
+                payload={"id": "tc_1", "name": "bash", "arguments": {"cmd": "ls"}},
+            )
+        )
+        builder = ContextBuilder(system_prompt="system")
+        messages = builder.build(tape)
+        merged = messages[1]
+        assert merged["content"] == "Let me check."
+        assert merged["reasoning_content"] == "Thinking about approach..."
+        assert len(merged["tool_calls"]) == 1
