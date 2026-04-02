@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from coding_agent.providers.openai_compat import OpenAICompatProvider
-from agentkit.providers.models import TextEvent, ToolCallEvent, DoneEvent
+from agentkit.providers.models import TextEvent, ThinkingEvent, ToolCallEvent, DoneEvent
 
 
 class TestOpenAICompatProvider:
@@ -46,6 +46,7 @@ class TestOpenAICompatProvider:
         mock_chunk.choices = [MagicMock()]
         mock_chunk.choices[0].delta.content = "Hello"
         mock_chunk.choices[0].delta.tool_calls = None
+        mock_chunk.choices[0].delta.reasoning_content = None
         mock_chunk.choices[0].finish_reason = None
 
         mock_stream = AsyncMock()
@@ -87,11 +88,11 @@ class TestOpenAICompatProvider:
                     body=None,
                 )
 
-            # Return successful stream
             mock_chunk = MagicMock()
             mock_chunk.choices = [MagicMock()]
             mock_chunk.choices[0].delta.content = "Hello"
             mock_chunk.choices[0].delta.tool_calls = None
+            mock_chunk.choices[0].delta.reasoning_content = None
             mock_chunk.choices[0].finish_reason = None
 
             mock_stream = AsyncMock()
@@ -191,6 +192,7 @@ class TestOpenAICompatProvider:
         mock_chunk1 = MagicMock()
         mock_chunk1.choices = [MagicMock()]
         mock_chunk1.choices[0].delta.content = None
+        mock_chunk1.choices[0].delta.reasoning_content = None
         mock_chunk1.choices[0].finish_reason = None
 
         # Tool call delta
@@ -206,6 +208,7 @@ class TestOpenAICompatProvider:
         mock_chunk2.choices = [MagicMock()]
         mock_chunk2.choices[0].delta.content = None
         mock_chunk2.choices[0].delta.tool_calls = None
+        mock_chunk2.choices[0].delta.reasoning_content = None
         mock_chunk2.choices[0].finish_reason = "stop"
 
         mock_stream = AsyncMock()
@@ -242,3 +245,42 @@ class TestOpenAICompatProvider:
         assert events[0].name == "bash"
         assert events[0].arguments == {"command": "ls"}
         assert isinstance(events[1], DoneEvent)
+
+    @pytest.mark.asyncio
+    async def test_stream_captures_reasoning_content(self):
+        provider = OpenAICompatProvider(
+            model="kimi-for-coding",
+            api_key="sk-test",
+        )
+
+        mock_thinking_chunk = MagicMock()
+        mock_thinking_chunk.choices = [MagicMock()]
+        mock_thinking_chunk.choices[0].delta.content = None
+        mock_thinking_chunk.choices[0].delta.reasoning_content = "Let me think..."
+        mock_thinking_chunk.choices[0].delta.tool_calls = None
+        mock_thinking_chunk.choices[0].finish_reason = None
+
+        mock_text_chunk = MagicMock()
+        mock_text_chunk.choices = [MagicMock()]
+        mock_text_chunk.choices[0].delta.content = "Here's the answer"
+        mock_text_chunk.choices[0].delta.reasoning_content = None
+        mock_text_chunk.choices[0].delta.tool_calls = None
+        mock_text_chunk.choices[0].finish_reason = None
+
+        mock_stream = AsyncMock()
+        mock_stream.__aiter__.return_value = [mock_thinking_chunk, mock_text_chunk]
+
+        provider._client.chat.completions.create = AsyncMock(return_value=mock_stream)
+
+        events = []
+        async for event in provider.stream(
+            messages=[{"role": "user", "content": "Hi"}]
+        ):
+            events.append(event)
+
+        assert len(events) == 3  # thinking + text + done
+        assert isinstance(events[0], ThinkingEvent)
+        assert events[0].text == "Let me think..."
+        assert isinstance(events[1], TextEvent)
+        assert events[1].text == "Here's the answer"
+        assert isinstance(events[2], DoneEvent)

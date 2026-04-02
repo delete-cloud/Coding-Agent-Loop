@@ -14,6 +14,7 @@ from openai import AsyncOpenAI, APIError, RateLimitError, APIStatusError
 from agentkit.providers.models import (
     StreamEvent,
     TextEvent,
+    ThinkingEvent,
     ToolCallEvent,
     DoneEvent,
 )
@@ -33,6 +34,12 @@ class OpenAICompatProvider:
         "gpt-3.5-turbo": 16385,
         "deepseek-chat": 65536,
         "deepseek-coder": 65536,
+        "moonshot-v1-8k": 8192,
+        "moonshot-v1-32k": 32768,
+        "moonshot-v1-128k": 131072,
+        "kimi-k2-0711-preview": 131072,
+        "moonshot-v1-auto": 131072,
+        "kimi-for-coding": 262144,
     }
 
     def __init__(
@@ -130,6 +137,11 @@ class OpenAICompatProvider:
                         continue
 
                     delta = chunk.choices[0].delta
+
+                    # Capture reasoning/thinking content (Kimi, DeepSeek, etc.)
+                    reasoning = getattr(delta, "reasoning_content", None)
+                    if reasoning:
+                        yield ThinkingEvent(text=reasoning)
 
                     if delta.content:
                         yield TextEvent(text=delta.content)

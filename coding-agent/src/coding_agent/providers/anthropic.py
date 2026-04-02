@@ -35,6 +35,8 @@ class AnthropicProvider:
         self,
         model: str,
         api_key: str,
+        base_url: str | None = None,
+        default_headers: dict[str, str] | None = None,
         max_tokens: int = 8192,
         temperature: float = 0.7,
         timeout: float = 60.0,
@@ -42,13 +44,13 @@ class AnthropicProvider:
         retry_base_delay: float = 1.0,
         retry_max_delay: float = 60.0,
     ):
-        # Handle both plain strings and Pydantic SecretStr
         api_key_str = api_key
         if not isinstance(api_key, str):
-            # Assume it's a SecretStr or similar with get_secret_value
             api_key_str = api_key.get_secret_value()
         self._model = model
         self._api_key = api_key_str
+        self._base_url = base_url
+        self._default_headers = default_headers
         self._max_tokens = max_tokens
         self._temperature = temperature
         self._timeout = timeout
@@ -62,6 +64,8 @@ class AnthropicProvider:
         if self.__client is None:
             self.__client = AsyncAnthropic(
                 api_key=self._api_key,
+                base_url=self._base_url,
+                default_headers=self._default_headers,
                 timeout=self._timeout,
             )
         return self.__client
