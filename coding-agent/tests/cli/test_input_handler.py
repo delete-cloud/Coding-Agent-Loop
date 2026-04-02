@@ -49,11 +49,23 @@ class DummyApp:
         self.exit_result = result
 
 
+_PT_KEY_ALIASES: dict[str, str] = {
+    "backspace": "c-h",
+    "enter": "c-m",
+}
+
+
 def _get_key_binding_for_key(handler: InputHandler, key_str: str):
-    """Find first binding whose keys tuple contains the given key string."""
-    matches = [b for b in handler.bindings.bindings if key_str in b.keys]
+    """Find first binding whose keys tuple contains the given key string.
+
+    Handles prompt_toolkit key aliases (e.g. 'backspace' -> 'c-h').
+    """
+    normalized = _PT_KEY_ALIASES.get(key_str, key_str)
+    matches = [b for b in handler.bindings.bindings if normalized in b.keys]
     if not matches:
-        raise KeyError(f"No binding registered for key: {key_str!r}")
+        raise KeyError(
+            f"No binding registered for key: {key_str!r} (normalized: {normalized!r})"
+        )
     return matches[0]
 
 
@@ -166,14 +178,8 @@ class TestKeystrokeBashToggle:
         handler = InputHandler()
         handler._shell_mode = True
         binding = _get_key_binding_for_key(handler, "!")
-        buf = DummyBuffer(text="", cursor_position=0)
-        app = DummyApp(buffer=buf)
-        event = SimpleNamespace(app=app)
-
-        binding.handler(event)
-
-        # In shell mode the Condition filter should block the sentinel exit
-        assert app.exit_called is False
+        # The Condition filter should return False in shell mode, preventing the binding from firing
+        assert not binding.filter()
 
     def test_escape_in_shell_mode_empty_buffer_exits_with_chat_sentinel(self):
         """Escape in shell mode on empty buffer must call app.exit(result=SWITCH_TO_CHAT)."""

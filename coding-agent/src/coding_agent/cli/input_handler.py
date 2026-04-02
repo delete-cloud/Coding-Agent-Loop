@@ -1,70 +1,201 @@
-"""Interactive input handling with prompt-toolkit."""
+"""Interactive input handling with prompt-toolkit.
+
+Supports multiline editing:
+- Enter: insert newline (in non-empty multi-line buffer)
+- Alt+Enter (or Escape then Enter): submit input
+- On empty buffer or / ! prefixed commands, Enter submits immediately
+
+Bash mode toggle (Claude Code style):
+- ! on empty buffer: instantly switch to shell mode
+- Escape / Backspace on empty shell buffer: switch back to chat mode
+"""
 
 from __future__ import annotations
 
+import time
+
 from prompt_toolkit import PromptSession
+from prompt_toolkit.application import run_in_terminal
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.filters import Condition
+from prompt_toolkit.formatted_text import AnyFormattedText, FormattedText
+from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
 
 from coding_agent.cli.commands import get_command_completions
+from coding_agent.cli.terminal_output import print_pt
+
+_CTRLC_TIMEOUT = 2.0
+
+SWITCH_TO_SHELL = "__SWITCH_TO_SHELL__"
+SWITCH_TO_CHAT = "__SWITCH_TO_CHAT__"
 
 
 class SlashCommandCompleter(Completer):
-    """Completer for slash commands."""
-    
     def get_completions(self, document, complete_event):
         text = document.text
-        if text.startswith('/'):
+        if text.startswith("/"):
             for cmd in get_command_completions():
                 if cmd.startswith(text):
                     yield Completion(cmd, start_position=-len(text))
 
 
-# Custom style for prompt
-PROMPT_STYLE = Style.from_dict({
-    'prompt': 'bold cyan',
-    'input': 'white',
-})
+PROMPT_STYLE = Style.from_dict(
+    {
+        "prompt": "bold cyan",
+        "input": "white",
+        "shell": "bold yellow",
+        "shell.path": "yellow",
+        "shell.hint": "dim",
+    }
+)
 
 
 class InputHandler:
-    """Handles interactive user input with history and completion."""
-    
     def __init__(self):
-        self.session = PromptSession(
+        self.multiline = True
+        self.bindings = KeyBindings()
+        self._last_ctrlc: float = 0.0
+        self._shell_mode = False
+        self._setup_bindings()
+        self.chat_history = InMemoryHistory()
+        self.shell_history = InMemoryHistory()
+        self.chat_session = PromptSession(
             completer=SlashCommandCompleter(),
             auto_suggest=AutoSuggestFromHistory(),
+            history=self.chat_history,
             enable_history_search=True,
             style=PROMPT_STYLE,
+            multiline=True,
+            key_bindings=self.bindings,
+            prompt_continuation=self._continuation_prompt,
         )
-        self.bindings = KeyBindings()
-        self._setup_bindings()
-    
+        self.shell_session = PromptSession(
+            auto_suggest=AutoSuggestFromHistory(),
+            history=self.shell_history,
+            enable_history_search=True,
+            style=PROMPT_STYLE,
+            multiline=False,
+            key_bindings=self.bindings,
+        )
+
+    @staticmethod
+    def _continuation_prompt(width, line_number, is_soft_wrap):
+        return ". " + " " * (width - 2)
+
+    def _should_exit_on_ctrlc(self) -> bool:
+        return time.monotonic() - self._last_ctrlc < _CTRLC_TIMEOUT
+
+    def _simulate_ctrlc(self) -> None:
+        self._last_ctrlc = time.monotonic()
+
+    @property
+    def shell_mode(self) -> bool:
+        return self._shell_mode
+
+    def exit_shell_mode(self) -> None:
+        self._shell_mode = False
+
     def _setup_bindings(self):
-        """Setup custom key bindings."""
-        @self.bindings.add('c-c')
+        @self.bindings.add("c-c")
         def _(event):
-            """Ctrl+C to cancel current input."""
-            event.app.current_buffer.reset()
-        
-        @self.bindings.add('c-d')
+            if self._should_exit_on_ctrlc():
+                event.app.exit()
+            else:
+                self._simulate_ctrlc()
+                event.app.current_buffer.reset()
+
+                def _hint():
+                    print_pt("\n(Press Ctrl+C again to exit)")
+
+                run_in_terminal(_hint)
+
+        @self.bindings.add("c-d")
         def _(event):
-            """Ctrl+D to exit."""
             event.app.exit()
-    
-    async def get_input(self, prompt: str = "> ") -> str | None:
-        """Get input from user.
-        
-        Returns:
-            User input string, or None if user wants to exit
-        """
-        try:
-            result = await self.session.prompt_async(
-                prompt,
-                key_bindings=self.bindings,
+
+        @self.bindings.add("enter")
+        def _(event):
+            buf = event.app.current_buffer
+            text = buf.text.strip()
+            if self._shell_mode:
+                buf.validate_and_handle()
+            elif not text or text.startswith("/") or text.startswith("!"):
+                buf.validate_and_handle()
+            else:
+                buf.insert_text("\n")
+
+        @self.bindings.add("!", filter=Condition(lambda: not self._shell_mode))
+        def _(event):
+            buf = event.app.current_buffer
+            if buf.text == "" and buf.cursor_position == 0:
+                event.app.exit(result=SWITCH_TO_SHELL)
+            else:
+                buf.insert_text("!")
+
+        @self.bindings.add(
+            "escape", eager=True, filter=Condition(lambda: self._shell_mode)
+        )
+        def _(event):
+            buf = event.app.current_buffer
+            if buf.text == "":
+                event.app.exit(result=SWITCH_TO_CHAT)
+
+        @self.bindings.add("backspace", filter=Condition(lambda: self._shell_mode))
+        def _(event):
+            buf = event.app.current_buffer
+            if buf.text == "":
+                event.app.exit(result=SWITCH_TO_CHAT)
+            else:
+                buf.delete_before_cursor(1)
+
+    def build_prompt(
+        self,
+        *,
+        turn_count: int,
+        shell_mode: bool = False,
+        cwd: str | None = None,
+    ) -> FormattedText:
+        if shell_mode:
+            location = cwd or "~"
+            label = location.rstrip("/").split("/")[-1] or location
+            return FormattedText(
+                [
+                    ("class:shell", "bash"),
+                    ("class:shell.hint", " "),
+                    ("class:shell.path", f"{label}"),
+                    ("class:shell.hint", " $ "),
+                ]
             )
+
+        return FormattedText(
+            [
+                ("class:prompt", f"[{turn_count}]"),
+                ("class:prompt", " > "),
+            ]
+        )
+
+    async def get_input(
+        self,
+        prompt: AnyFormattedText | str = "> ",
+        *,
+        shell_mode: bool = False,
+    ) -> str | None:
+        self._shell_mode = shell_mode
+        while True:
+            session = self.shell_session if self._shell_mode else self.chat_session
+            try:
+                result = await session.prompt_async(prompt)
+            except (EOFError, KeyboardInterrupt):
+                return None
+            if result is None:
+                return None
+            if result == SWITCH_TO_SHELL:
+                self._shell_mode = True
+                continue
+            if result == SWITCH_TO_CHAT:
+                self._shell_mode = False
+                continue
             return result.strip()
-        except (EOFError, KeyboardInterrupt):
-            return None
