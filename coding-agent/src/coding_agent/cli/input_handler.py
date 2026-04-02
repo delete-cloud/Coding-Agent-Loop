@@ -1,9 +1,6 @@
 """Interactive input handling with prompt-toolkit.
 
-Supports multiline editing:
-- Enter: insert newline (in non-empty multi-line buffer)
-- Alt+Enter (or Escape then Enter): submit input
-- On empty buffer or / ! prefixed commands, Enter submits immediately
+Supports Enter-to-submit with Shift+Enter multi-line editing.
 
 Bash mode toggle (Claude Code style):
 - ! on empty buffer: instantly switch to shell mode
@@ -22,13 +19,19 @@ from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import AnyFormattedText, FormattedText
 from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.styles import Style
 
 from coding_agent.cli.commands import get_command_completions
 from coding_agent.cli.terminal_output import print_pt
 
 _CTRLC_TIMEOUT = 2.0
+_SHIFT_ENTER_SEQUENCE = (Keys.Escape, Keys.ControlJ)
+
+for _sequence in ("\x1b[27;2;13~", "\x1b[13;2u"):
+    ANSI_SEQUENCES[_sequence] = _SHIFT_ENTER_SEQUENCE
 
 SWITCH_TO_SHELL = "__SWITCH_TO_SHELL__"
 SWITCH_TO_CHAT = "__SWITCH_TO_CHAT__"
@@ -119,14 +122,11 @@ class InputHandler:
 
         @self.bindings.add("enter")
         def _(event):
-            buf = event.app.current_buffer
-            text = buf.text.strip()
-            if self._shell_mode:
-                buf.validate_and_handle()
-            elif not text or text.startswith("/") or text.startswith("!"):
-                buf.validate_and_handle()
-            else:
-                buf.insert_text("\n")
+            event.app.current_buffer.validate_and_handle()
+
+        @self.bindings.add("escape", "c-j")
+        def _(event):
+            event.app.current_buffer.insert_text("\n")
 
         @self.bindings.add("!", filter=Condition(lambda: not self._shell_mode))
         def _(event):

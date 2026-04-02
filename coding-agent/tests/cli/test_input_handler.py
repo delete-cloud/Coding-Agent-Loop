@@ -1,11 +1,15 @@
 """Tests for InputHandler multiline support."""
 
+from typing import cast
 from types import SimpleNamespace
 
 import pytest
-from coding_agent.cli.input_handler import InputHandler
+from coding_agent.cli.input_handler import InputHandler, _SHIFT_ENTER_SEQUENCE
+from prompt_toolkit.completion.base import CompleteEvent
 from prompt_toolkit.formatted_text import to_formatted_text
 from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
+from prompt_toolkit.key_binding.key_processor import KeyPressEvent
 
 # Sentinel constants — mirror production values (permanent test fixtures).
 # These will match the module-level constants added in Task 2.
@@ -26,6 +30,7 @@ class DummyBuffer:
         )
         self.insert_text_calls: list[str] = []
         self.delete_before_cursor_calls: list[int] = []
+        self.validate_and_handle_called = False
         self.reset_called = False
 
     def insert_text(self, text: str) -> None:
@@ -33,6 +38,9 @@ class DummyBuffer:
 
     def delete_before_cursor(self, count: int = 1) -> None:
         self.delete_before_cursor_calls.append(count)
+
+    def validate_and_handle(self) -> None:
+        self.validate_and_handle_called = True
 
     def reset(self) -> None:
         self.reset_called = True
@@ -49,10 +57,18 @@ class DummyApp:
         self.exit_result = result
 
 
+def _make_event(app: DummyApp) -> KeyPressEvent:
+    return cast(KeyPressEvent, cast(object, SimpleNamespace(app=app)))
+
+
 _PT_KEY_ALIASES: dict[str, str] = {
     "backspace": "c-h",
     "enter": "c-m",
 }
+
+
+def _normalize_key(key_str: str) -> str:
+    return _PT_KEY_ALIASES.get(key_str, key_str)
 
 
 def _get_key_binding_for_key(handler: InputHandler, key_str: str):
@@ -60,12 +76,20 @@ def _get_key_binding_for_key(handler: InputHandler, key_str: str):
 
     Handles prompt_toolkit key aliases (e.g. 'backspace' -> 'c-h').
     """
-    normalized = _PT_KEY_ALIASES.get(key_str, key_str)
+    normalized = _normalize_key(key_str)
     matches = [b for b in handler.bindings.bindings if normalized in b.keys]
     if not matches:
         raise KeyError(
             f"No binding registered for key: {key_str!r} (normalized: {normalized!r})"
         )
+    return matches[0]
+
+
+def _get_key_binding_for_keys(handler: InputHandler, *keys: str):
+    normalized = tuple(_normalize_key(key) for key in keys)
+    matches = [b for b in handler.bindings.bindings if b.keys == normalized]
+    if not matches:
+        raise KeyError(f"No binding registered for keys: {keys!r}")
     return matches[0]
 
 
@@ -104,7 +128,7 @@ class TestInputHandlerMultiline:
 
         completer = SlashCommandCompleter()
         doc = Document("/hel")
-        completions = list(completer.get_completions(doc, None))
+        completions = list(completer.get_completions(doc, CompleteEvent()))
         labels = [c.text for c in completions]
         assert any("/help" in label for label in labels) or len(completions) >= 0
 
@@ -114,7 +138,7 @@ class TestInputHandlerMultiline:
 
         completer = SlashCommandCompleter()
         doc = Document("!g")
-        completions = list(completer.get_completions(doc, None))
+        completions = list(completer.get_completions(doc, CompleteEvent()))
         assert isinstance(completions, list)
 
     def test_shell_prompt_is_visibly_different(self):
@@ -153,7 +177,7 @@ class TestKeystrokeBashToggle:
         binding = _get_key_binding_for_key(handler, "!")
         buf = DummyBuffer(text="", cursor_position=0)
         app = DummyApp(buffer=buf)
-        event = SimpleNamespace(app=app)
+        event = _make_event(app)
 
         binding.handler(event)
 
@@ -166,7 +190,7 @@ class TestKeystrokeBashToggle:
         binding = _get_key_binding_for_key(handler, "!")
         buf = DummyBuffer(text="hello", cursor_position=5)
         app = DummyApp(buffer=buf)
-        event = SimpleNamespace(app=app)
+        event = _make_event(app)
 
         binding.handler(event)
 
@@ -185,10 +209,10 @@ class TestKeystrokeBashToggle:
         """Escape in shell mode on empty buffer must call app.exit(result=SWITCH_TO_CHAT)."""
         handler = InputHandler()
         handler._shell_mode = True
-        binding = _get_key_binding_for_key(handler, "escape")
+        binding = _get_key_binding_for_keys(handler, "escape")
         buf = DummyBuffer(text="", cursor_position=0)
         app = DummyApp(buffer=buf)
-        event = SimpleNamespace(app=app)
+        event = _make_event(app)
 
         binding.handler(event)
 
@@ -199,10 +223,10 @@ class TestKeystrokeBashToggle:
         """Escape in shell mode with text in buffer must NOT exit (let default handle)."""
         handler = InputHandler()
         handler._shell_mode = True
-        binding = _get_key_binding_for_key(handler, "escape")
+        binding = _get_key_binding_for_keys(handler, "escape")
         buf = DummyBuffer(text="ls", cursor_position=2)
         app = DummyApp(buffer=buf)
-        event = SimpleNamespace(app=app)
+        event = _make_event(app)
 
         binding.handler(event)
 
@@ -212,7 +236,9 @@ class TestKeystrokeBashToggle:
         """Escape binding's Condition filter must be False in chat mode."""
         handler = InputHandler()
         handler._shell_mode = False
-        escape_bindings = [b for b in handler.bindings.bindings if "escape" in b.keys]
+        escape_bindings = [
+            b for b in handler.bindings.bindings if b.keys == ("escape",)
+        ]
         # If an escape binding exists, its filter must evaluate to False when not in shell mode
         for b in escape_bindings:
             assert not b.filter(), (
@@ -226,7 +252,7 @@ class TestKeystrokeBashToggle:
         binding = _get_key_binding_for_key(handler, "backspace")
         buf = DummyBuffer(text="", cursor_position=0)
         app = DummyApp(buffer=buf)
-        event = SimpleNamespace(app=app)
+        event = _make_event(app)
 
         binding.handler(event)
 
@@ -240,12 +266,42 @@ class TestKeystrokeBashToggle:
         binding = _get_key_binding_for_key(handler, "backspace")
         buf = DummyBuffer(text="ls", cursor_position=2)
         app = DummyApp(buffer=buf)
-        event = SimpleNamespace(app=app)
+        event = _make_event(app)
 
         binding.handler(event)
 
         assert app.exit_called is False
         assert 1 in buf.delete_before_cursor_calls
+
+
+class TestEnterBindings:
+    def test_enter_submits_nonempty_chat_input(self):
+        handler = InputHandler()
+        binding = _get_key_binding_for_keys(handler, "enter")
+        buf = DummyBuffer(text="hello", cursor_position=5)
+        app = DummyApp(buffer=buf)
+        event = _make_event(app)
+
+        binding.handler(event)
+
+        assert buf.validate_and_handle_called is True
+        assert buf.insert_text_calls == []
+
+    def test_shift_enter_escape_sequence_is_registered(self):
+        assert ANSI_SEQUENCES["\x1b[27;2;13~"] == _SHIFT_ENTER_SEQUENCE
+        assert ANSI_SEQUENCES["\x1b[13;2u"] == _SHIFT_ENTER_SEQUENCE
+
+    def test_shift_enter_inserts_newline(self):
+        handler = InputHandler()
+        binding = _get_key_binding_for_keys(handler, "escape", "c-j")
+        buf = DummyBuffer(text="hello", cursor_position=5)
+        app = DummyApp(buffer=buf)
+        event = _make_event(app)
+
+        binding.handler(event)
+
+        assert buf.insert_text_calls == ["\n"]
+        assert buf.validate_and_handle_called is False
 
 
 # ---------------------------------------------------------------------------
