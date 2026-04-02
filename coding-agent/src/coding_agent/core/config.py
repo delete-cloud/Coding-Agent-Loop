@@ -13,7 +13,14 @@ class Config(BaseModel):
     """Validated agent configuration."""
 
     # Provider
-    provider: Literal["openai", "anthropic", "copilot"] = "openai"
+    provider: Literal[
+        "openai",
+        "anthropic",
+        "copilot",
+        "kimi",
+        "kimi-code",
+        "kimi-code-anthropic",
+    ] = "openai"
     model: str = "gpt-4o"
     api_key: SecretStr | None = None
     base_url: str | None = None
@@ -80,6 +87,19 @@ def load_config(cli_args: dict | None = None) -> Config:
         github_token = os.environ.get("GITHUB_TOKEN")
         if github_token:
             values["api_key"] = github_token
+
+    if values.get("provider") == "kimi" and "api_key" not in values:
+        moonshot_token = os.environ.get("MOONSHOT_API_KEY")
+        if moonshot_token:
+            values["api_key"] = moonshot_token
+
+    if (
+        values.get("provider") in {"kimi-code", "kimi-code-anthropic"}
+        and "api_key" not in values
+    ):
+        kimi_code_token = os.environ.get("KIMI_CODE_API_KEY")
+        if kimi_code_token:
+            values["api_key"] = kimi_code_token
 
     return Config(**values)
 

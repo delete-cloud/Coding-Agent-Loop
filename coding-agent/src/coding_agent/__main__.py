@@ -10,10 +10,16 @@ import click
 
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.ui.headless import HeadlessConsumer
-from coding_agent.ui.rich_tui import CodingAgentTUI
 
 
-PROVIDER_CHOICES = ["openai", "anthropic", "copilot"]
+PROVIDER_CHOICES = [
+    "openai",
+    "anthropic",
+    "copilot",
+    "kimi",
+    "kimi-code",
+    "kimi-code-anthropic",
+]
 
 
 def create_agent(
@@ -62,6 +68,10 @@ def create_agent(
     resolved_key = api_key or os.environ.get("AGENT_API_KEY")
     if not resolved_key and cfg.provider == "copilot":
         resolved_key = os.environ.get("GITHUB_TOKEN", "")
+    if not resolved_key and cfg.provider == "kimi":
+        resolved_key = os.environ.get("MOONSHOT_API_KEY", "")
+    if not resolved_key and cfg.provider in ("kimi-code", "kimi-code-anthropic"):
+        resolved_key = os.environ.get("KIMI_CODE_API_KEY", "")
     resolved_key = resolved_key or ""
 
     registry = PluginRegistry(specs=HOOK_SPECS)
@@ -329,7 +339,13 @@ def repl(repo, model, provider_name, base_url, api_key, max_steps):
 
 
 async def _run_with_tui(config, goal):
-    """Run agent with TUI display."""
+    """Run agent with streaming TUI display."""
+    from agentkit.tracing import configure_tracing
+
+    from coding_agent.ui.rich_consumer import RichConsumer
+    from coding_agent.ui.stream_renderer import StreamingRenderer
+
+    configure_tracing()
     api_key = config.api_key.get_secret_value() if config.api_key else None
     pipeline, ctx = create_agent(
         api_key=api_key,
@@ -340,16 +356,19 @@ async def _run_with_tui(config, goal):
         max_steps_override=config.max_steps,
         approval_mode_override=config.approval_mode,
     )
-    tui = CodingAgentTUI(model_name=config.model, max_steps=config.max_steps)
-    adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=tui.consumer)
-    with tui:
-        tui.add_user_message(goal)
-        result = await adapter.run_turn(goal)
-        click.echo(f"\n--- Result ({result.stop_reason}) ---")
+    renderer = StreamingRenderer()
+    consumer = RichConsumer(renderer)
+    adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
+    renderer.user_message(goal)
+    result = await adapter.run_turn(goal)
+    click.echo(f"\n--- Result ({result.stop_reason}) ---")
 
 
 async def _run_headless(config, goal):
     """Run agent in headless mode."""
+    from agentkit.tracing import configure_tracing
+
+    configure_tracing()
     api_key = config.api_key.get_secret_value() if config.api_key else None
     pipeline, ctx = create_agent(
         api_key=api_key,

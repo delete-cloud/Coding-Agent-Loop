@@ -3,7 +3,13 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING, Any, Protocol
 
-from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
+from agentkit.providers.models import (
+    DoneEvent,
+    TextEvent,
+    ThinkingEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+)
 from agentkit.runtime.pipeline import Pipeline, PipelineContext
 from agentkit.tape.models import Entry
 
@@ -12,6 +18,7 @@ from coding_agent.wire.protocol import (
     CompletionStatus,
     StreamDelta,
     ToolCallDelta,
+    ToolResultDelta,
     TurnEnd,
     WireMessage,
 )
@@ -60,7 +67,10 @@ class PipelineAdapter:
                 return
         self._ctx.tape.append(user_entry)
 
-    async def _handle_event(self, event: TextEvent | ToolCallEvent | DoneEvent) -> None:
+    async def _handle_event(
+        self,
+        event: TextEvent | ThinkingEvent | ToolCallEvent | ToolResultEvent | DoneEvent,
+    ) -> None:
         if self._consumer is None:
             return
 
@@ -74,6 +84,16 @@ class PipelineAdapter:
                     tool_name=event.name,
                     arguments=event.arguments,
                     call_id=event.tool_call_id,
+                    session_id=self._ctx.session_id,
+                )
+            )
+        elif isinstance(event, ToolResultEvent):
+            await self._consumer.emit(
+                ToolResultDelta(
+                    call_id=event.tool_call_id,
+                    tool_name=event.name,
+                    result=event.result,
+                    is_error=event.is_error,
                     session_id=self._ctx.session_id,
                 )
             )
