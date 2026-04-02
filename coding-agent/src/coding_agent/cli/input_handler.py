@@ -13,6 +13,7 @@ Bash mode toggle (Claude Code style):
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.application import run_in_terminal
@@ -182,12 +183,16 @@ class InputHandler:
         prompt: AnyFormattedText | str = "> ",
         *,
         shell_mode: bool = False,
+        prompt_builder: Callable[[bool], AnyFormattedText] | None = None,
     ) -> str | None:
         self._shell_mode = shell_mode
         while True:
             session = self.shell_session if self._shell_mode else self.chat_session
+            current_prompt = (
+                prompt_builder(self._shell_mode) if prompt_builder else prompt
+            )
             try:
-                result = await session.prompt_async(prompt)
+                result = await session.prompt_async(current_prompt)
             except (EOFError, KeyboardInterrupt):
                 return None
             if result is None:
