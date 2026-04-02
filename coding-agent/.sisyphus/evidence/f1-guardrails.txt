@@ -1,0 +1,16 @@
+=== F1: Must NOT Have Guardrails ===
+
+--- No debug prints in input_handler.py (print_pt is allowed) ---
+
+--- No new source/test files created (only existing files modified) ---
+Commit: d5431c3 chore: remove dead bash toggle code and update help text
+Commit: 0a5cf41 refactor: update REPL to use InputHandler-managed shell mode
+Commit: bc3ddba feat: implement keystroke-level ! to shell mode switch
+Commit: 9f32a90 test: add failing tests for keystroke-level bash mode toggle
+
+--- BashExecutor not touched in input_handler.py ---
+       0
+
+--- Ctrl-C and Ctrl-D bindings unchanged ---
+103:        @self.bindings.add("c-c")
+116:        @self.bindings.add("c-d")
