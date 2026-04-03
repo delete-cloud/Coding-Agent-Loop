@@ -123,9 +123,61 @@ class TestCommands:
         assert "/quit" in completions
 
     def test_all_commands_have_descriptions(self):
-        """Test that all registered commands have descriptions."""
         from coding_agent.cli.commands import _COMMANDS
 
         for name, func in _COMMANDS.items():
             desc = getattr(func, "_command_description", None)
             assert desc is not None, f"Command {name} is missing description"
+
+    @pytest.mark.asyncio
+    async def test_skill_command_no_plugin(self, monkeypatch):
+        import coding_agent.cli.terminal_output as terminal_output_module
+
+        buf = StringIO()
+        monkeypatch.setattr(
+            terminal_output_module, "_prompt_output", create_output(stdout=buf)
+        )
+        context = {"should_exit": False}
+        handled = await handle_command("/skill", context)
+        assert handled is True
+        assert "not enabled" in buf.getvalue()
+
+    @pytest.mark.asyncio
+    async def test_mcp_command_no_plugin(self, monkeypatch):
+        import coding_agent.cli.terminal_output as terminal_output_module
+
+        buf = StringIO()
+        monkeypatch.setattr(
+            terminal_output_module, "_prompt_output", create_output(stdout=buf)
+        )
+        context = {"should_exit": False}
+        handled = await handle_command("/mcp", context)
+        assert handled is True
+        assert "not enabled" in buf.getvalue()
+
+    @pytest.mark.asyncio
+    async def test_help_output_has_commands_header(self, monkeypatch):
+        import coding_agent.cli.terminal_output as terminal_output_module
+
+        buf = StringIO()
+        monkeypatch.setattr(
+            terminal_output_module, "_prompt_output", create_output(stdout=buf)
+        )
+        context = {"should_exit": False}
+        await handle_command("/help", context)
+        output = buf.getvalue()
+        assert "Available Commands" in output
+        assert "/help" in output
+        assert "/exit" in output
+
+    @pytest.mark.asyncio
+    async def test_model_shows_current_model(self, monkeypatch):
+        import coding_agent.cli.terminal_output as terminal_output_module
+
+        buf = StringIO()
+        monkeypatch.setattr(
+            terminal_output_module, "_prompt_output", create_output(stdout=buf)
+        )
+        context = {"should_exit": False, "model": "claude-opus-4"}
+        await handle_command("/model", context)
+        assert "claude-opus-4" in buf.getvalue()
