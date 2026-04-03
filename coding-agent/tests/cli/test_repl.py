@@ -423,3 +423,84 @@ class TestBashIntegration:
         await session.run()
 
         assert observed == [True, False, True]
+
+
+class TestPasteFoldingInRepl:
+    @pytest.mark.asyncio
+    async def test_short_message_unchanged(self, monkeypatch):
+        from coding_agent.cli.repl import InteractiveSession
+
+        monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
+        config = SimpleNamespace(
+            model="test",
+            repo=None,
+            api_key=None,
+            provider="test",
+            base_url=None,
+            max_steps=None,
+            approval_mode=None,
+        )
+        session = InteractiveSession(config)
+
+        rendered_messages: list[str] = []
+        turned_messages: list[str] = []
+
+        class FakeAdapter:
+            async def run_turn(self, message: str):
+                turned_messages.append(message)
+                return SimpleNamespace(
+                    stop_reason=SimpleNamespace(ERROR=None), error=None
+                )
+
+        class FakeRenderer:
+            def user_message(self, msg: str):
+                rendered_messages.append(msg)
+
+        session._renderer = FakeRenderer()
+        session._pipeline_adapter = FakeAdapter()
+
+        await session._process_message("short message")
+        assert rendered_messages == ["short message"]
+        assert turned_messages == ["short message"]
+
+    @pytest.mark.asyncio
+    async def test_long_message_folded_for_display_but_expanded_for_agent(
+        self, monkeypatch
+    ):
+        from coding_agent.cli.repl import InteractiveSession
+
+        monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
+        config = SimpleNamespace(
+            model="test",
+            repo=None,
+            api_key=None,
+            provider="test",
+            base_url=None,
+            max_steps=None,
+            approval_mode=None,
+        )
+        session = InteractiveSession(config)
+
+        long_message = "\n".join(f"line {i}" for i in range(25))
+        rendered_messages: list[str] = []
+        turned_messages: list[str] = []
+
+        class FakeAdapter:
+            async def run_turn(self, message: str):
+                turned_messages.append(message)
+                return SimpleNamespace(
+                    stop_reason=SimpleNamespace(ERROR=None), error=None
+                )
+
+        class FakeRenderer:
+            def user_message(self, msg: str):
+                rendered_messages.append(msg)
+
+        session._renderer = FakeRenderer()
+        session._pipeline_adapter = FakeAdapter()
+
+        await session._process_message(long_message)
+        assert len(rendered_messages) == 1
+        assert "[Pasted text" in rendered_messages[0]
+        assert len(turned_messages) == 1
+        assert turned_messages[0] == long_message
