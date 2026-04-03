@@ -1,0 +1,2 @@
+Skill /var/folders/hf/y6kghzyx245bz3hjm3ll16500000gn/T/tmp3si53_8x/Invalid_Name: name 'Invalid_Name' doesn't match pattern ^[a-z0-9]+(?:-[a-z0-9]+)*$
+PASS: invalid name rejected
