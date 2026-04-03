@@ -1,105 +1,242 @@
-"""Tests for SkillsPlugin — skill activation timing and /skill off behaviour."""
+"""Tests for SkillsPlugin — summary mode, discovery, activation timing, public API."""
+
+from pathlib import Path
+from typing import Any
 
 import pytest
-from pathlib import Path
-from unittest.mock import MagicMock
 
 from coding_agent.plugins.skills import SkillsPlugin
-from coding_agent.skills import Skill
+from coding_agent.skills import SkillMetadata
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _make_plugin_with_skill(
-    tmp_path: Path, skill_name: str = "test-skill"
+def _make_plugin(
+    tmp_path: Path,
+    skills: dict[str, str] | None = None,
+    extra_dirs: list[str] | None = None,
 ) -> SkillsPlugin:
-    """Create a SkillsPlugin backed by a temp directory with one skill."""
-    skill_dir = tmp_path / "skills"
-    skill_dir.mkdir()
-    skill_file = skill_dir / f"{skill_name}.md"
-    skill_file.write_text(
-        "---\n"
-        f"name: {skill_name}\n"
-        "description: A test skill\n"
-        "inputs: []\n"
-        "---\n"
-        "You are a test skill prompt body.\n"
+    agents_dir = tmp_path / ".agents" / "skills"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    if skills:
+        for name, desc in skills.items():
+            d = agents_dir / name
+            d.mkdir()
+            (d / "SKILL.md").write_text(
+                f"---\nname: {name}\ndescription: {desc}\ninputs: []\n---\n"
+                f"You are the {name} skill prompt body.\n"
+            )
+    no_global = tmp_path / "no-global"
+    return SkillsPlugin(
+        workspace_root=tmp_path,
+        extra_dirs=extra_dirs or [],
+        global_skills_dir=no_global,
     )
-    return SkillsPlugin(skills_dir=skill_dir)
 
 
 class FakeCtx:
-    """Minimal pipeline context stub."""
-
-    def __init__(self):
-        self.plugin_states: dict = {}
+    def __init__(self) -> None:
+        self.plugin_states: dict[str, Any] = {}
 
 
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-
-
-class TestSkillActivationTiming:
-    """P1-1: build_context must return skill prompt on the first call after request_skill."""
-
-    def test_build_context_returns_prompt_after_request_skill(self, tmp_path: Path):
-        """After request_skill, the very next build_context call must inject the skill prompt."""
-        plugin = _make_plugin_with_skill(tmp_path)
-        ctx = FakeCtx()
-
-        # Set pending via request_skill
-        result = plugin.request_skill(ctx, "test-skill")
-        assert "activated" in result.lower() or "will be" in result.lower()
-
-        # First build_context call should return the skill prompt
+class TestSummaryMode:
+    def test_build_context_includes_available_skills_when_skills_exist(
+        self, tmp_path: Path
+    ):
+        plugin = _make_plugin(tmp_path, {"test-skill": "A test"})
         messages = plugin.build_context()
-        assert len(messages) == 1
-        assert messages[0]["role"] == "system"
-        assert "test skill prompt body" in messages[0]["content"].lower()
+        assert len(messages) >= 1
+        content = messages[0]["content"]
+        assert "<available_skills>" in content
+        assert "test-skill" in content
+        assert "A test" in content
 
-    def test_pending_skill_cleared_after_build_context(self, tmp_path: Path):
-        """After build_context consumes the pending skill, _pending_skill_name should be None."""
-        plugin = _make_plugin_with_skill(tmp_path)
-        ctx = FakeCtx()
-
-        plugin.request_skill(ctx, "test-skill")
-        plugin.build_context()  # consumes pending
-
-        # Pending should be cleared (but skill stays active)
-        assert plugin._pending_skill_name is None
-        # Skill is still active — subsequent build_context still returns prompt
-        messages = plugin.build_context()
-        assert len(messages) == 1
-
-    def test_skill_off_clears_both_active_and_pending(self, tmp_path: Path):
-        """deactivate() must clear both _active_skill AND _pending_skill_name."""
-        plugin = _make_plugin_with_skill(tmp_path)
-        ctx = FakeCtx()
-
-        plugin.request_skill(ctx, "test-skill")
-        # Before consuming, deactivate
-        plugin.deactivate()
-
-        assert plugin._active_skill is None
-        assert plugin._pending_skill_name is None
-
-        # build_context should return nothing
+    def test_build_context_returns_empty_when_no_skills(self, tmp_path: Path):
+        plugin = _make_plugin(tmp_path)
         messages = plugin.build_context()
         assert messages == []
 
-    def test_on_checkpoint_does_not_activate_pending(self, tmp_path: Path):
-        """on_checkpoint must NOT activate pending skill — only build_context() does."""
-        plugin = _make_plugin_with_skill(tmp_path)
-        ctx = FakeCtx()
+    def test_summary_xml_contains_skill_name_and_description(self, tmp_path: Path):
+        plugin = _make_plugin(tmp_path, {"alpha": "Alpha desc", "beta": "Beta desc"})
+        messages = plugin.build_context()
+        content = messages[0]["content"]
+        assert "<name>alpha</name>" in content
+        assert "<description>Alpha desc</description>" in content
+        assert "<name>beta</name>" in content
+        assert "<description>Beta desc</description>" in content
 
+    def test_summary_xml_excludes_skill_body(self, tmp_path: Path):
+        plugin = _make_plugin(tmp_path, {"test-skill": "Desc"})
+        messages = plugin.build_context()
+        content = messages[0]["content"]
+        assert "skill prompt body" not in content
+
+    def test_active_skill_body_injected_alongside_summary(self, tmp_path: Path):
+        plugin = _make_plugin(tmp_path, {"active-skill": "Active test"})
+        plugin._handle_skill_invoke({"name": "active-skill"})
+        messages = plugin.build_context()
+        assert len(messages) == 2
+        assert "<available_skills>" in messages[0]["content"]
+        assert "active-skill" in messages[0]["content"]
+        assert "active-skill skill prompt body" in messages[1]["content"]
+
+
+class TestNewDiscovery:
+    def test_plugin_discovers_from_workspace(self, tmp_path: Path):
+        plugin = _make_plugin(tmp_path, {"ws-skill": "Workspace skill"})
+        names = plugin.list_skill_names()
+        assert "ws-skill" in names
+
+    def test_plugin_discovers_from_extra_dirs(self, tmp_path: Path):
+        extra = tmp_path / "extra-skills"
+        extra.mkdir()
+        d = extra / "extra-skill"
+        d.mkdir()
+        (d / "SKILL.md").write_text(
+            "---\nname: extra-skill\ndescription: Extra\n---\nBody"
+        )
+        no_global = tmp_path / "no-global"
+        plugin = SkillsPlugin(
+            workspace_root=tmp_path,
+            extra_dirs=[str(extra)],
+            global_skills_dir=no_global,
+        )
+        names = plugin.list_skill_names()
+        assert "extra-skill" in names
+
+    def test_plugin_workspace_takes_precedence(self, tmp_path: Path):
+        ws_agents = tmp_path / ".agents" / "skills" / "dupe"
+        ws_agents.mkdir(parents=True)
+        (ws_agents / "SKILL.md").write_text(
+            "---\nname: dupe\ndescription: WS\n---\nWSBody"
+        )
+        extra = tmp_path / "extra"
+        extra.mkdir()
+        d = extra / "dupe"
+        d.mkdir()
+        (d / "SKILL.md").write_text(
+            "---\nname: dupe\ndescription: Extra\n---\nExtraBody"
+        )
+        plugin = SkillsPlugin(
+            workspace_root=tmp_path,
+            extra_dirs=[str(extra)],
+            global_skills_dir=tmp_path / "no-global",
+        )
+        skill = plugin.get_skill("dupe")
+        assert skill is not None
+        assert "WSBody" in skill.body()
+
+
+class TestSkillActivationTiming:
+    def test_build_context_returns_prompt_after_request_skill(self, tmp_path: Path):
+        plugin = _make_plugin(tmp_path, {"test-skill": "A test skill"})
+        ctx = FakeCtx()
+        result = plugin.request_skill(ctx, "test-skill")
+        assert "activated" in result.lower() or "will be" in result.lower()
+        messages = plugin.build_context()
+        assert len(messages) == 2
+        assert "test-skill skill prompt body" in messages[1]["content"].lower()
+
+    def test_pending_skill_cleared_after_build_context(self, tmp_path: Path):
+        plugin = _make_plugin(tmp_path, {"test-skill": "A test skill"})
+        ctx = FakeCtx()
+        plugin.request_skill(ctx, "test-skill")
+        plugin.build_context()
+        assert plugin._pending_skill_name is None
+        messages = plugin.build_context()
+        assert len(messages) == 2
+
+    def test_skill_off_clears_both_active_and_pending(self, tmp_path: Path):
+        plugin = _make_plugin(tmp_path, {"test-skill": "A test skill"})
+        ctx = FakeCtx()
+        plugin.request_skill(ctx, "test-skill")
+        plugin.deactivate()
+        assert plugin._active_skill is None
+        assert plugin._pending_skill_name is None
+        messages = plugin.build_context()
+        assert len(messages) == 1
+
+    def test_on_checkpoint_does_not_activate_pending(self, tmp_path: Path):
+        plugin = _make_plugin(tmp_path, {"test-skill": "A test skill"})
+        ctx = FakeCtx()
         plugin.request_skill(ctx, "test-skill")
         assert plugin._pending_skill_name == "test-skill"
-
         plugin.on_checkpoint(ctx=ctx)
-
         assert plugin._active_skill is None
         assert plugin._pending_skill_name == "test-skill"
+
+
+class TestPublicAPI:
+    def test_list_skill_names(self, tmp_path: Path):
+        plugin = _make_plugin(tmp_path, {"alpha": "A", "beta": "B"})
+        names = plugin.list_skill_names()
+        assert sorted(names) == ["alpha", "beta"]
+
+    def test_list_skills_with_descriptions(self, tmp_path: Path):
+        plugin = _make_plugin(tmp_path, {"alpha": "Desc A", "beta": "Desc B"})
+        descs = plugin.list_skills_with_descriptions()
+        desc_dict = dict(descs)
+        assert desc_dict["alpha"] == "Desc A"
+        assert desc_dict["beta"] == "Desc B"
+
+    def test_get_skill(self, tmp_path: Path):
+        plugin = _make_plugin(tmp_path, {"my-skill": "My desc"})
+        skill = plugin.get_skill("my-skill")
+        assert skill is not None
+        assert skill.name == "my-skill"
+        assert skill.description == "My desc"
+
+    def test_get_skill_not_found(self, tmp_path: Path):
+        plugin = _make_plugin(tmp_path, {"my-skill": "My desc"})
+        assert plugin.get_skill("nonexistent") is None
+
+    def test_active_skill_name_none_by_default(self, tmp_path: Path):
+        plugin = _make_plugin(tmp_path, {"test-skill": "Test"})
+        assert plugin.active_skill_name is None
+
+    def test_active_skill_name_after_invoke(self, tmp_path: Path):
+        plugin = _make_plugin(tmp_path, {"test-skill": "Test"})
+        plugin._handle_skill_invoke({"name": "test-skill"})
+        assert plugin.active_skill_name == "test-skill"
+
+
+class TestSkillInvoke:
+    def test_invoke_activates_skill(self, tmp_path: Path):
+        plugin = _make_plugin(tmp_path, {"my-skill": "Desc"})
+        result = plugin._handle_skill_invoke({"name": "my-skill"})
+        assert "activated" in result.lower()
+        assert plugin.active_skill_name == "my-skill"
+
+    def test_invoke_nonexistent_skill(self, tmp_path: Path):
+        plugin = _make_plugin(tmp_path, {"my-skill": "Desc"})
+        result = plugin._handle_skill_invoke({"name": "nonexistent"})
+        assert "not found" in result.lower()
+
+    def test_invoke_with_inputs_renders_placeholders(self, tmp_path: Path):
+        agents_dir = tmp_path / ".agents" / "skills" / "input-skill"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "SKILL.md").write_text(
+            "---\nname: input-skill\ndescription: Inputs test\n"
+            "inputs:\n  - name: scope\n    type: string\n---\n"
+            "Review {{scope}} files."
+        )
+        plugin = SkillsPlugin(
+            workspace_root=tmp_path, global_skills_dir=tmp_path / "no-global"
+        )
+        plugin._handle_skill_invoke(
+            {"name": "input-skill", "inputs": {"scope": "*.py"}}
+        )
+        messages = plugin.build_context()
+        assert "Review *.py files." in messages[1]["content"]
+
+
+class TestSkillList:
+    def test_skill_list_returns_formatted(self, tmp_path: Path):
+        plugin = _make_plugin(tmp_path, {"skill-a": "Desc A", "skill-b": "Desc B"})
+        result = plugin._handle_skill_list()
+        assert "skill-a" in result
+        assert "skill-b" in result
+        assert "Desc A" in result
+
+    def test_skill_list_empty(self, tmp_path: Path):
+        plugin = _make_plugin(tmp_path)
+        result = plugin._handle_skill_list()
+        assert "no skills" in result.lower()

@@ -151,7 +151,8 @@ def create_agent(
             ),
             "session_metrics": lambda: SessionMetricsPlugin(),
             "skills": lambda: SkillsPlugin(
-                skills_dir=skills_cfg.get("dir", None),
+                workspace_root=workspace_root,
+                extra_dirs=skills_cfg.get("extra_dirs", []),
             ),
             "mcp": lambda: MCPPlugin(
                 servers=mcp_cfg.get("servers", {}),

@@ -128,23 +128,21 @@ async def cmd_skill(args: list[str], context: dict[str, Any]) -> None:
 
     if not args:
         # List available skills
-        loader = skills_plugin._loader
-        frontmatters = loader.load_all_frontmatters()
-        active = skills_plugin._active_skill
-        if not frontmatters:
+        skills_with_descs = skills_plugin.list_skills_with_descriptions()
+        active_name = skills_plugin.active_skill_name
+        if not skills_with_descs:
             print_pt(
-                "No skills available. Add .md files to the skills/ directory.",
+                "No skills available. Add SKILL.md files to .agents/skills/ directories.",
                 output=output,
             )
             return
         print_pt("Available skills:\n", output=output)
-        for skill_name, fm in frontmatters.items():
-            desc = fm.get("description", "(no description)")
-            marker = " ← active" if (active and active.name == skill_name) else ""
+        for skill_name, desc in skills_with_descs:
+            marker = " ← active" if (active_name and active_name == skill_name) else ""
             print_pt(f"  • {skill_name}: {desc}{marker}", output=output)
         print_pt(output=output)
-        if active:
-            print_pt(f"Active skill: {active.name}", output=output)
+        if active_name:
+            print_pt(f"Active skill: {active_name}", output=output)
         else:
             print_pt("No skill is currently active.", output=output)
         return
@@ -162,14 +160,9 @@ async def cmd_skill(args: list[str], context: dict[str, Any]) -> None:
     if pipeline_ctx is not None:
         msg = skills_plugin.request_skill(pipeline_ctx, skill_name)
     else:
-        # Fallback: activate immediately if no pipeline ctx available
-        skill = skills_plugin._loader.get_skill(skill_name)
-        if skill is None:
-            available = ", ".join(skills_plugin._loader.list_skills()) or "(none)"
-            msg = f"Skill '{skill_name}' not found. Available: {available}"
-        else:
-            skills_plugin._active_skill = skill
-            msg = f"Skill '{skill_name}' activated."
+        # Fallback: invoke immediately if no pipeline ctx available
+        result = skills_plugin._handle_skill_invoke({"name": skill_name})
+        msg = result
     print_pt(msg, output=output)
 
 

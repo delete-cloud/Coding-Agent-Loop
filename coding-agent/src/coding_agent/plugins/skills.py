@@ -1,22 +1,8 @@
-"""SkillsPlugin — injects skill prompts into context and exposes skill_invoke tool.
+"""SkillsPlugin — summary mode context injection + skill_invoke/skill_list tools.
 
-A Skill is a markdown file with YAML frontmatter:
-
-    ---
-    name: code-review
-    description: Review code changes for bugs, security, and style
-    inputs:
-      - name: scope
-        type: string
-        description: "File pattern or 'staged' for git staged changes"
-    ---
-    You are a senior code reviewer. Analyze the following changes: ...
-
-Integration points:
-  - build_context : injects the active skill's system prompt before each LLM call
-  - get_tools     : exposes `skill_invoke` and `skill_list` tools to the LLM
-  - execute_tool  : handles skill_invoke / skill_list calls
-  - on_checkpoint : no-op (pending activation is handled entirely by build_context)
+Discovers skills from .agents/skills/ directories (project → global → extra),
+injects <available_skills> XML summary into every LLM call, and provides
+skill_invoke/skill_list tools for activation.
 """
 
 from __future__ import annotations
@@ -27,33 +13,45 @@ from typing import Any, Callable
 
 from agentkit.tools.schema import ToolSchema
 
-from coding_agent.skills import Skill, SkillLoader
+from coding_agent.skills import SkillMetadata, discover_skills
 
 logger = logging.getLogger(__name__)
 
 
 class SkillsPlugin:
-    """Plugin that integrates the Skills system into the agent pipeline."""
-
     state_key = "skills"
 
     def __init__(
         self,
-        skills_dir: Path | str | None = None,
+        workspace_root: Path | None = None,
+        extra_dirs: list[str] | None = None,
+        global_skills_dir: Path | None = None,
     ) -> None:
-        # Default to ~/.coding-agent/skills or local ./skills
-        if skills_dir is None:
-            local = Path("./skills")
-            home = Path.home() / ".coding-agent" / "skills"
-            skills_dir = local if local.exists() else home
+        workspace_root = workspace_root or Path.cwd()
+        dirs: list[Path] = []
+        sources: list[str] = []
 
-        self._loader = SkillLoader(Path(skills_dir))
-        self._active_skill: Skill | None = None
+        project_dir = workspace_root / ".agents" / "skills"
+        dirs.append(project_dir)
+        sources.append("project")
+
+        global_dir = (
+            global_skills_dir
+            if global_skills_dir is not None
+            else Path.home() / ".agents" / "skills"
+        )
+        dirs.append(global_dir)
+        sources.append("global")
+
+        for extra in extra_dirs or []:
+            dirs.append(Path(extra))
+            sources.append("extra")
+
+        discovered = discover_skills(dirs, sources=sources)
+        self._skills: dict[str, SkillMetadata] = {s.name: s for s in discovered}
+        self._active_skill: SkillMetadata | None = None
+        self._active_rendered_body: str | None = None
         self._pending_skill_name: str | None = None
-
-    # ------------------------------------------------------------------ #
-    # Plugin protocol
-    # ------------------------------------------------------------------ #
 
     def hooks(self) -> dict[str, Callable[..., Any]]:
         return {
@@ -65,26 +63,18 @@ class SkillsPlugin:
         }
 
     def do_mount(self, **kwargs: Any) -> dict[str, Any]:
-        """Return initial plugin state."""
         return {
             "active_skill": None,
             "pending_skill": None,
-            "available_skills": self._loader.list_skills(),
+            "available_skills": list(self._skills.keys()),
         }
 
-    # ------------------------------------------------------------------ #
-    # build_context — inject active skill prompt
-    # ------------------------------------------------------------------ #
-
     def build_context(self, **kwargs: Any) -> list[dict[str, Any]]:
-        """Inject the active skill's body as a system message."""
-        # Sole consumer of _pending_skill_name (set by request_skill). Fires during
-        # the build_context pipeline stage, BEFORE run_model — ensures the skill
-        # prompt is injected on the same turn the user requested it.
         if self._pending_skill_name is not None:
-            skill = self._loader.get_skill(self._pending_skill_name)
+            skill = self._skills.get(self._pending_skill_name)
             if skill is not None:
                 self._active_skill = skill
+                self._active_rendered_body = skill.body()
                 logger.info(
                     "SkillsPlugin: activated pending skill '%s' in build_context",
                     self._pending_skill_name,
@@ -96,21 +86,27 @@ class SkillsPlugin:
                 )
             self._pending_skill_name = None
 
-        if self._active_skill is None:
-            return []
+        messages: list[dict[str, Any]] = []
 
-        content = f"[Skill: {self._active_skill.name}]\n\n{self._active_skill.body}"
-        logger.debug(
-            "SkillsPlugin: injecting skill '%s' into context", self._active_skill.name
-        )
-        return [{"role": "system", "content": content}]
+        if self._skills:
+            lines = ["<available_skills>"]
+            for skill in self._skills.values():
+                lines.append("  <skill>")
+                lines.append(f"    <name>{skill.name}</name>")
+                lines.append(f"    <description>{skill.description}</description>")
+                lines.append(f"    <location>{skill.location}</location>")
+                lines.append("  </skill>")
+            lines.append("</available_skills>")
+            messages.append({"role": "system", "content": "\n".join(lines)})
 
-    # ------------------------------------------------------------------ #
-    # get_tools — expose skill_invoke and skill_list to LLM
-    # ------------------------------------------------------------------ #
+        if self._active_skill is not None:
+            body = self._active_rendered_body or self._active_skill.body()
+            content = f"[Skill: {self._active_skill.name}]\n\n{body}"
+            messages.append({"role": "system", "content": content})
+
+        return messages
 
     def get_tools(self, **kwargs: Any) -> list[ToolSchema]:
-        """Expose skill management tools."""
         return [
             ToolSchema(
                 name="skill_invoke",
@@ -147,44 +143,30 @@ class SkillsPlugin:
             ),
         ]
 
-    # ------------------------------------------------------------------ #
-    # execute_tool — handle skill_invoke and skill_list
-    # ------------------------------------------------------------------ #
-
     def execute_tool(
         self,
         name: str = "",
         arguments: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> Any:
-        """Handle skill tool calls."""
         if name == "skill_invoke":
             return self._handle_skill_invoke(arguments or {})
         if name == "skill_list":
             return self._handle_skill_list()
-        # Not our tool — return None so call_first tries next plugin
         return None
 
     def _handle_skill_invoke(self, arguments: dict[str, Any]) -> str:
         skill_name = arguments.get("name", "")
         inputs = arguments.get("inputs", {})
 
-        skill = self._loader.get_skill(skill_name)
+        skill = self._skills.get(skill_name)
         if skill is None:
-            available = ", ".join(self._loader.list_skills()) or "(none)"
+            available = ", ".join(self._skills.keys()) or "(none)"
             return f"Skill '{skill_name}' not found. Available skills: {available}"
 
-        # Render inputs into skill body if declared
         body = self._render_skill_body(skill, inputs)
-        activated_skill = Skill(
-            name=skill.name,
-            description=skill.description,
-            inputs=skill.inputs,
-            body=body,
-            source_path=skill.source_path,
-        )
-
-        self._active_skill = activated_skill
+        self._active_skill = skill
+        self._active_rendered_body = body
         logger.info("SkillsPlugin: activated skill '%s'", skill_name)
         return (
             f"Skill '{skill_name}' activated. "
@@ -192,19 +174,16 @@ class SkillsPlugin:
         )
 
     def _handle_skill_list(self) -> str:
-        frontmatters = self._loader.load_all_frontmatters()
-        if not frontmatters:
+        if not self._skills:
             return "No skills available."
 
         lines = ["Available skills:\n"]
-        for skill_name, fm in frontmatters.items():
-            desc = fm.get("description", "(no description)")
-            lines.append(f"  - {skill_name}: {desc}")
+        for name, skill in self._skills.items():
+            lines.append(f"  - {name}: {skill.description}")
         return "\n".join(lines)
 
-    def _render_skill_body(self, skill: Skill, inputs: dict[str, Any]) -> str:
-        """Simple template substitution: replace {{input_name}} placeholders."""
-        body = skill.body
+    def _render_skill_body(self, skill: SkillMetadata, inputs: dict[str, Any]) -> str:
+        body = skill.body()
         for inp in skill.inputs:
             placeholder = f"{{{{{inp['name']}}}}}"
             value = str(inputs.get(inp["name"], ""))
@@ -212,36 +191,30 @@ class SkillsPlugin:
                 body = body.replace(placeholder, value)
         return body
 
-    # ------------------------------------------------------------------ #
-    # on_checkpoint — no-op: pending activation handled by build_context()
-    # ------------------------------------------------------------------ #
-
     def on_checkpoint(self, ctx: Any = None, **kwargs: Any) -> None:
         pass
 
-    # ------------------------------------------------------------------ #
-    # Public API for CLI layer (e.g. /skill command)
-    # ------------------------------------------------------------------ #
-
     def request_skill(self, ctx: Any, skill_name: str) -> str:
-        """Called from CLI /skill command. Sets _pending_skill_name for build_context()."""
-        # Single source of truth: _pending_skill_name is consumed by build_context()
-        # on the next pipeline turn. build_context() receives only tape= kwarg (not ctx),
-        # so _pending_skill_name is the only channel that reaches it.
-        available = self._loader.list_skills()
-        if skill_name not in available:
-            return (
-                f"Skill '{skill_name}' not found. "
-                f"Available: {', '.join(available) or '(none)'}"
-            )
+        if skill_name not in self._skills:
+            available = ", ".join(self._skills.keys()) or "(none)"
+            return f"Skill '{skill_name}' not found. Available: {available}"
         self._pending_skill_name = skill_name
         return f"Skill '{skill_name}' will be activated on next turn."
 
     def deactivate(self) -> None:
-        """Deactivate the current skill."""
         self._active_skill = None
+        self._active_rendered_body = None
         self._pending_skill_name = None
 
     @property
     def active_skill_name(self) -> str | None:
         return self._active_skill.name if self._active_skill else None
+
+    def list_skill_names(self) -> list[str]:
+        return list(self._skills.keys())
+
+    def list_skills_with_descriptions(self) -> list[tuple[str, str]]:
+        return [(s.name, s.description) for s in self._skills.values()]
+
+    def get_skill(self, name: str) -> SkillMetadata | None:
+        return self._skills.get(name)

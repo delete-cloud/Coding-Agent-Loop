@@ -33,7 +33,6 @@ class Config(BaseModel):
     # Paths
     repo: Path = Path(".")
     tape_dir: Path = Path.home() / ".coding-agent" / "tapes"
-    skills_dir: Path = Path.home() / ".coding-agent" / "skills"
 
     # Sub-agents
     max_subagent_depth: int = 3
