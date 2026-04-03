@@ -419,3 +419,67 @@ class TestHybridStreamEnd:
         assert renderer._in_stream is False
         assert renderer._stream_buffer == ""
         assert renderer._stream_started_output is False
+
+
+class TestCollapsedGroupRendering:
+    def _make_renderer(self) -> tuple[StreamingRenderer, Console, StringIO]:
+        buf = StringIO()
+        console = Console(file=buf, force_terminal=True, width=80)
+        renderer = StreamingRenderer(console=console)
+        return renderer, console, buf
+
+    def test_collapsed_group_shows_summary(self):
+        renderer, _, buf = self._make_renderer()
+        renderer.collapsed_group(
+            summary="Searched for 2 patterns, read 3 files",
+            duration=1.23,
+            has_error=False,
+        )
+        output = buf.getvalue()
+        assert "Searched for 2 patterns" in output
+        assert "read 3 files" in output
+
+    def test_collapsed_group_shows_duration_sub_second(self):
+        renderer, _, buf = self._make_renderer()
+        renderer.collapsed_group(summary="Read 1 file", duration=0.45, has_error=False)
+        assert "0.45s" in buf.getvalue()
+
+    def test_collapsed_group_shows_duration_over_one_second(self):
+        renderer, _, buf = self._make_renderer()
+        renderer.collapsed_group(summary="Read 1 file", duration=2.3, has_error=False)
+        assert "2.3s" in buf.getvalue()
+
+    def test_collapsed_group_error_indicator(self):
+        renderer, _, buf = self._make_renderer()
+        renderer.collapsed_group(summary="Read 1 file", duration=0.1, has_error=True)
+        assert "\u26a0" in buf.getvalue()
+
+    def test_collapsed_group_success_indicator(self):
+        renderer, _, buf = self._make_renderer()
+        renderer.collapsed_group(summary="Read 1 file", duration=0.1, has_error=False)
+        assert "\u2713" in buf.getvalue()
+
+    def test_collapsed_group_shows_hint(self):
+        renderer, _, buf = self._make_renderer()
+        renderer.collapsed_group(
+            summary="Read 1 file", duration=0.1, has_error=False, hint="src/main.py"
+        )
+        assert "src/main.py" in buf.getvalue()
+
+    def test_collapsed_group_no_hint_omitted(self):
+        renderer, _, buf = self._make_renderer()
+        renderer.collapsed_group(summary="Read 1 file", duration=0.1, has_error=False)
+        output = buf.getvalue()
+        assert "Read 1 file" in output
+
+    def test_collapsed_group_slow_duration_highlighted(self):
+        renderer, _, buf = self._make_renderer()
+        renderer.collapsed_group(summary="Read 1 file", duration=6.0, has_error=False)
+        assert "6.0s" in buf.getvalue()
+
+    def test_collapsed_group_flushes_active_stream(self):
+        renderer, _, buf = self._make_renderer()
+        renderer.stream_start()
+        renderer.stream_text("thinking...")
+        renderer.collapsed_group(summary="Read 1 file", duration=0.1, has_error=False)
+        assert renderer._in_stream is False

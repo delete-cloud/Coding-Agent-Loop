@@ -211,6 +211,31 @@ class StreamingRenderer:
         )
         self.console.print(panel)
 
+    def collapsed_group(
+        self,
+        summary: str,
+        duration: float,
+        has_error: bool = False,
+        hint: str | None = None,
+    ) -> None:
+        self._flush_stream()
+        indicator = (
+            Text("⚠ ", style="yellow") if has_error else Text("✓ ", style="green")
+        )
+        line = Text()
+        line.append_text(indicator)
+        line.append(summary, style="dim")
+        if hint:
+            line.append("  ", style="dim")
+            line.append(hint, style="dim italic")
+        if duration >= 5.0:
+            line.append(f" ({duration:.1f}s)", style="red bold")
+        elif duration >= 1.0:
+            line.append(f" ({duration:.1f}s)", style="yellow")
+        elif duration > 0:
+            line.append(f" ({duration:.2f}s)", style="dim")
+        self.console.print(line)
+
     def turn_end(self, status: str) -> None:
         if self._in_stream:
             self.stream_end()
