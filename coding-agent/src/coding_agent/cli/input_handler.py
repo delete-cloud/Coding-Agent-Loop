@@ -204,3 +204,32 @@ class InputHandler:
                 self._shell_mode = False
                 continue
             return result.strip()
+
+
+import re as _re
+import uuid as _uuid
+
+_PASTE_RE = _re.compile(r"\[Pasted text #(\S+) \+\d+ lines\]")
+
+
+def fold_pasted_content(text: str, threshold: int = 20) -> tuple[str, dict[str, str]]:
+    refs: dict[str, str] = {}
+    lines = text.split("\n")
+    if len(lines) <= threshold:
+        return text, refs
+
+    ref_id = _uuid.uuid4().hex[:8]
+    refs[ref_id] = text
+    placeholder = f"[Pasted text #{ref_id} +{len(lines)} lines]"
+    return placeholder, refs
+
+
+def expand_pasted_refs(text: str, refs: dict[str, str]) -> str:
+    if not refs:
+        return text
+
+    def _replace(m: _re.Match) -> str:
+        ref_id = m.group(1)
+        return refs.get(ref_id, m.group(0))
+
+    return _PASTE_RE.sub(_replace, text)
