@@ -7,6 +7,7 @@ from typing import Any
 
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
+from agentkit.tape.view import TapeView
 
 
 class ContextBuilder:
@@ -17,13 +18,18 @@ class ContextBuilder:
 
     def build(
         self,
-        tape: Tape,
+        tape_or_view: Tape | TapeView,
         grounding: list[dict[str, Any]] | None = None,
         entries: list[Entry] | None = None,
     ) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = []
 
-        entries = entries if entries is not None else list(tape)
+        if isinstance(tape_or_view, TapeView):
+            entries = tape_or_view.entries
+        elif entries is not None:
+            pass  # caller provided explicit entries (legacy)
+        else:
+            entries = list(tape_or_view)
         index = 0
         while index < len(entries):
             entry = entries[index]
@@ -139,6 +145,14 @@ class ContextBuilder:
                 "content": entry.payload.get("content", ""),
             }
         elif entry.kind == "anchor":
+            from agentkit.tape.anchor import Anchor
+
+            # topic_end anchors use fold_boundary to suppress LLM-visible output.
+            # This is intentional — topic_end is a structural boundary marker, not
+            # user-facing content.  The "skip" meta on plain Entry anchors serves
+            # the same purpose for old-format entries.
+            if isinstance(entry, Anchor) and entry.fold_boundary:
+                return None
             if entry.meta.get("skip"):
                 return None
 

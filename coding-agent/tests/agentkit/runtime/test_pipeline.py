@@ -407,3 +407,54 @@ class TestPipeline:
             "arguments": {"path": "b.txt"},
             "role": "assistant",
         }
+
+
+class TestPipelineView:
+    @pytest.mark.asyncio
+    async def test_build_context_uses_view(self):
+        from agentkit.tape.view import TapeView
+
+        registry = PluginRegistry()
+
+        class ViewTestPlugin:
+            state_key = "view_test"
+
+            def hooks(self):
+                return {
+                    "provide_llm": lambda **kw: None,
+                    "provide_storage": lambda **kw: None,
+                    "get_tools": lambda **kw: [],
+                    "build_context": lambda **kw: [],
+                }
+
+        registry.register(ViewTestPlugin())
+        runtime = HookRuntime(registry)
+        pipeline = Pipeline(runtime=runtime, registry=registry)
+
+        tape = Tape()
+        for i in range(5):
+            tape.append(
+                Entry(kind="message", payload={"role": "user", "content": f"old-{i}"})
+            )
+        anchor = Entry(
+            kind="anchor",
+            payload={"content": "summary"},
+            meta={"is_handoff": True, "prefix": "Summary"},
+        )
+        tape.handoff(anchor)
+        tape.append(
+            Entry(kind="message", payload={"role": "user", "content": "new msg"})
+        )
+
+        ctx = PipelineContext(
+            tape=tape,
+            session_id="s1",
+            config={"system_prompt": "test"},
+        )
+        await pipeline.mount(ctx)
+        await pipeline._stage_build_context(ctx)
+
+        assert len(ctx.messages) == 3
+        assert "[Summary]" in ctx.messages[1]["content"]
+        assert ctx.messages[2]["content"] == "new msg"
+        assert not any("old-" in str(m.get("content", "")) for m in ctx.messages)

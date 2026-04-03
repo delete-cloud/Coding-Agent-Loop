@@ -239,6 +239,57 @@ class TestContextBuilder:
         assert len(messages) == 3
         assert messages[1]["content"] == "Important context"
 
+    def test_anchor_fold_boundary_skipped(self):
+        from agentkit.tape.anchor import Anchor
+
+        tape = Tape()
+        tape.append(
+            Anchor(
+                anchor_type="topic_end",
+                payload={"content": "topic done"},
+                meta={"topic_id": "t1"},
+            )
+        )
+        tape.append(Entry(kind="message", payload={"role": "user", "content": "next"}))
+        builder = ContextBuilder(system_prompt="system")
+        messages = builder.build(tape)
+        assert len(messages) == 2
+
+    def test_anchor_handoff_rendered_as_system(self):
+        from agentkit.tape.anchor import Anchor
+
+        tape = Tape()
+        tape.append(
+            Anchor(
+                anchor_type="handoff",
+                payload={"content": "Earlier context summary"},
+                meta={"prefix": "Context Summary"},
+            )
+        )
+        tape.append(Entry(kind="message", payload={"role": "user", "content": "go"}))
+        builder = ContextBuilder(system_prompt="system")
+        messages = builder.build(tape)
+        assert len(messages) == 3
+        assert messages[1]["role"] == "system"
+        assert messages[1]["content"].startswith("[Context Summary]")
+
+    def test_anchor_topic_start_rendered(self):
+        from agentkit.tape.anchor import Anchor
+
+        tape = Tape()
+        tape.append(
+            Anchor(
+                anchor_type="topic_start",
+                payload={"content": "New topic about auth"},
+                meta={"prefix": "Topic Start"},
+            )
+        )
+        tape.append(Entry(kind="message", payload={"role": "user", "content": "go"}))
+        builder = ContextBuilder(system_prompt="system")
+        messages = builder.build(tape)
+        assert len(messages) == 3
+        assert "[Topic Start]" in messages[1]["content"]
+
     def test_reasoning_content_on_message_entry(self):
         tape = Tape()
         tape.append(
@@ -311,3 +362,81 @@ class TestContextBuilder:
         assert merged["content"] == "Let me check."
         assert merged["reasoning_content"] == "Thinking about approach..."
         assert len(merged["tool_calls"]) == 1
+
+
+from agentkit.tape.view import TapeView
+
+
+class TestContextBuilderWithView:
+    def test_build_from_view(self):
+        tape = Tape()
+        tape.append(Entry(kind="message", payload={"role": "user", "content": "hello"}))
+        tape.append(
+            Entry(kind="message", payload={"role": "assistant", "content": "hi"})
+        )
+        view = TapeView.from_tape(tape)
+        builder = ContextBuilder(system_prompt="system")
+        messages = builder.build(view)
+        assert len(messages) == 3
+        assert messages[1]["content"] == "hello"
+        assert messages[2]["content"] == "hi"
+
+    def test_build_from_view_with_grounding(self):
+        tape = Tape()
+        tape.append(
+            Entry(kind="message", payload={"role": "user", "content": "fix the bug"})
+        )
+        view = TapeView.from_tape(tape)
+        builder = ContextBuilder(system_prompt="system")
+        grounding = [{"role": "system", "content": "[Memory] Use pytest"}]
+        messages = builder.build(view, grounding=grounding)
+        assert len(messages) == 3
+        assert messages[1]["content"] == "[Memory] Use pytest"
+
+    def test_build_from_windowed_view(self):
+        tape = Tape()
+        for i in range(5):
+            tape.append(
+                Entry(kind="message", payload={"role": "user", "content": f"old-{i}"})
+            )
+        anchor = Entry(
+            kind="anchor",
+            payload={"content": "summary of old messages"},
+            meta={"is_handoff": True, "prefix": "Context Summary"},
+        )
+        tape.handoff(anchor)
+        tape.append(
+            Entry(kind="message", payload={"role": "user", "content": "new message"})
+        )
+        view = TapeView.from_tape(tape)
+        builder = ContextBuilder(system_prompt="system")
+        messages = builder.build(view)
+        assert len(messages) == 3
+        assert "[Context Summary]" in messages[1]["content"]
+        assert messages[2]["content"] == "new message"
+
+    def test_build_from_tape_still_works(self):
+        tape = Tape()
+        tape.append(Entry(kind="message", payload={"role": "user", "content": "hi"}))
+        builder = ContextBuilder(system_prompt="system")
+        messages = builder.build(tape)
+        assert len(messages) == 2
+
+    def test_build_with_explicit_entries_uses_provided_list(self):
+        tape = Tape()
+        for i in range(5):
+            tape.append(
+                Entry(kind="message", payload={"role": "user", "content": f"tape-{i}"})
+            )
+        explicit = [
+            Entry(kind="message", payload={"role": "user", "content": "explicit-0"}),
+            Entry(
+                kind="message",
+                payload={"role": "assistant", "content": "explicit-1"},
+            ),
+        ]
+        builder = ContextBuilder(system_prompt="system")
+        messages = builder.build(tape, entries=explicit)
+        assert len(messages) == 3  # system + 2 explicit
+        assert messages[1]["content"] == "explicit-0"
+        assert messages[2]["content"] == "explicit-1"

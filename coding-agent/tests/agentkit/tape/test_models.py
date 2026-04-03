@@ -83,3 +83,70 @@ class TestEntry:
         }
         entry = Entry.from_dict(d)
         assert entry.meta == {}
+
+    def test_from_dict_returns_anchor_for_new_format(self):
+        from agentkit.tape.anchor import Anchor
+
+        d = {
+            "id": "a1",
+            "kind": "anchor",
+            "payload": {"content": "summary"},
+            "timestamp": 1000.0,
+            "anchor_type": "handoff",
+            "source_ids": ["id1", "id2"],
+        }
+        entry = Entry.from_dict(d)
+        assert isinstance(entry, Anchor)
+        assert entry.anchor_type == "handoff"
+        assert entry.source_ids == ("id1", "id2")
+
+    def test_from_dict_returns_plain_entry_for_old_anchor_format(self):
+        d = {
+            "id": "a2",
+            "kind": "anchor",
+            "payload": {"content": "old summary"},
+            "timestamp": 1000.0,
+            "meta": {"is_handoff": True},
+        }
+        entry = Entry.from_dict(d)
+        assert type(entry) is Entry
+        assert entry.kind == "anchor"
+        assert entry.meta["is_handoff"] is True
+
+    def test_from_dict_returns_plain_entry_for_non_anchor(self):
+        d = {
+            "id": "m1",
+            "kind": "message",
+            "payload": {"role": "user", "content": "hi"},
+            "timestamp": 1000.0,
+        }
+        entry = Entry.from_dict(d)
+        assert type(entry) is Entry
+
+    def test_from_dict_dispatches_old_format_meta_anchor_type(self):
+        from agentkit.tape.anchor import Anchor
+
+        d = {
+            "id": "old-1",
+            "kind": "anchor",
+            "payload": {"content": "old summary"},
+            "timestamp": 1000.0,
+            "meta": {"anchor_type": "handoff"},
+        }
+        entry = Entry.from_dict(d)
+        assert isinstance(entry, Anchor)
+        assert entry.anchor_type == "handoff"
+
+    def test_from_dict_bridges_topic_initial_to_topic_start(self):
+        from agentkit.tape.anchor import Anchor
+
+        d = {
+            "id": "old-2",
+            "kind": "anchor",
+            "payload": {},
+            "timestamp": 1000.0,
+            "meta": {"anchor_type": "topic_initial"},
+        }
+        entry = Entry.from_dict(d)
+        assert isinstance(entry, Anchor)
+        assert entry.anchor_type == "topic_start"

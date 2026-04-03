@@ -199,6 +199,10 @@ class TestTape:
         assert windowed == entries[8:14] + [anchor]
 
     def test_handoff_backward_compat(self):
+        # Tests Tape.handoff() directly with a plain Entry bearing meta.is_handoff.
+        # This is NOT testing load_jsonl compat — the anchor is passed directly,
+        # not loaded from disk. The load_jsonl bare-is_handoff path is covered by
+        # test_load_jsonl_new_format_is_handoff.
         tape = Tape()
         for i in range(10):
             tape.append(Entry(kind="message", payload={"content": str(i)}))
@@ -227,6 +231,7 @@ class TestTape:
         path = tmp_path / "old.jsonl"
         import json as _json
         from agentkit.tape.models import Entry as _Entry
+        from agentkit.tape.anchor import Anchor as _Anchor
 
         entries = [
             {
@@ -254,7 +259,8 @@ class TestTape:
         path.write_text("\n".join(_json.dumps(e) for e in entries) + "\n")
         tape = Tape.load_jsonl(path)
         assert tape.window_start == 1
-        assert tape[1].meta.get("is_handoff") is True
+        assert isinstance(tape[1], _Anchor)
+        assert tape[1].is_handoff is True
         windowed = tape.windowed_entries()
         assert len(windowed) == 2  # anchor + "after"
 
@@ -288,6 +294,9 @@ class TestTape:
         path.write_text("\n".join(_json.dumps(e) for e in entries) + "\n")
         tape = Tape.load_jsonl(path)
         assert tape.window_start == 1
+        # bare meta.is_handoff=True (no anchor_type) stays as plain Entry, not Anchor
+        assert type(tape[1]) is Entry
+        assert tape[1].meta.get("is_handoff") is True
         windowed = tape.windowed_entries()
         assert len(windowed) == 2
 
@@ -299,3 +308,84 @@ class TestTape:
         tape.save_jsonl(path)
         lines = path.read_text().strip().split("\n")
         assert len(lines) == 1
+
+    def test_load_jsonl_old_format_meta_topic_finalized(self, tmp_path):
+        """Old JSONL with meta.anchor_type=='topic_finalized' loads as Anchor with fold_boundary."""
+        import json as _json
+        from agentkit.tape.anchor import Anchor as _Anchor
+
+        path = tmp_path / "old_topic.jsonl"
+        entries = [
+            {
+                "id": "m1",
+                "kind": "message",
+                "payload": {"role": "user", "content": "old msg"},
+                "timestamp": 0,
+                "meta": {},
+            },
+            {
+                "id": "t1",
+                "kind": "anchor",
+                "payload": {"content": "Topic involved files: foo.py"},
+                "timestamp": 0,
+                "meta": {
+                    "anchor_type": "topic_finalized",
+                    "topic_id": "topic-abc",
+                    "files": ["foo.py"],
+                },
+            },
+            {
+                "id": "m2",
+                "kind": "message",
+                "payload": {"role": "user", "content": "new msg"},
+                "timestamp": 0,
+                "meta": {},
+            },
+        ]
+        path.write_text("\n".join(_json.dumps(e) for e in entries) + "\n")
+        tape = Tape.load_jsonl(path)
+
+        assert len(tape) == 3
+        # Entry.from_dict promotes meta.anchor_type and bridges topic_finalized→topic_end
+        assert isinstance(tape[1], _Anchor)
+        assert tape[1].anchor_type == "topic_end"
+        assert tape[1].fold_boundary is True
+        # window_start should stay at 0 (topic_end is not a handoff)
+        assert tape.window_start == 0
+
+    def test_load_jsonl_new_anchor_format(self, tmp_path):
+        import json as _json
+        from agentkit.tape.anchor import Anchor
+
+        path = tmp_path / "new_anchor.jsonl"
+        entries = [
+            {
+                "id": "m1",
+                "kind": "message",
+                "payload": {"role": "user", "content": "old"},
+                "timestamp": 0,
+            },
+            {
+                "id": "a1",
+                "kind": "anchor",
+                "payload": {"content": "summary"},
+                "timestamp": 0,
+                "anchor_type": "handoff",
+                "source_ids": ["m1"],
+            },
+            {
+                "id": "m2",
+                "kind": "message",
+                "payload": {"role": "user", "content": "new"},
+                "timestamp": 0,
+            },
+        ]
+        path.write_text("\n".join(_json.dumps(e) for e in entries) + "\n")
+        tape = Tape.load_jsonl(path)
+
+        assert tape.window_start == 1
+        assert isinstance(tape[1], Anchor)
+        assert tape[1].is_handoff is True
+        assert tape[1].source_ids == ("m1",)
+        windowed = tape.windowed_entries()
+        assert len(windowed) == 2

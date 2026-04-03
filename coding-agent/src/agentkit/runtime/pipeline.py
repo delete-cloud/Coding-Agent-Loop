@@ -154,7 +154,8 @@ class Pipeline:
                 ctx.tool_schemas.append(tool_list)
 
     async def _stage_build_context(self, ctx: PipelineContext) -> None:
-        # Try new non-destructive windowing first
+        from agentkit.tape.view import TapeView
+
         window_result = self._runtime.call_first(
             "resolve_context_window", tape=ctx.tape
         )
@@ -180,7 +181,6 @@ class Pipeline:
                     len(ctx.tape),
                 )
         else:
-            # Fallback to legacy summarize_context for backward compatibility
             summary = self._runtime.call_first("summarize_context", tape=ctx.tape)
             if summary is not None:
                 ctx.tape = Tape(
@@ -192,6 +192,8 @@ class Pipeline:
                     "Context summarized (legacy): %d entries remaining", len(ctx.tape)
                 )
 
+        view = TapeView.from_tape(ctx.tape)
+
         grounding_results = self._runtime.call_many("build_context", tape=ctx.tape)
         grounding: list[dict[str, Any]] = []
         for result in grounding_results:
@@ -202,11 +204,7 @@ class Pipeline:
 
         system_prompt = ctx.config.get("system_prompt", "You are a helpful assistant.")
         builder = ContextBuilder(system_prompt=system_prompt)
-        ctx.messages = builder.build(
-            ctx.tape,
-            grounding=grounding or None,
-            entries=ctx.tape.windowed_entries() if ctx.tape.window_start > 0 else None,
-        )
+        ctx.messages = builder.build(view, grounding=grounding or None)
 
     async def _stage_run_model(self, ctx: PipelineContext) -> None:
         if ctx.llm_provider is None:
