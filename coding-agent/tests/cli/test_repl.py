@@ -504,3 +504,47 @@ class TestPasteFoldingInRepl:
         assert "[Pasted text" in rendered_messages[0]
         assert len(turned_messages) == 1
         assert turned_messages[0] == long_message
+
+    @pytest.mark.asyncio
+    async def test_mixed_context_and_large_block_keeps_context_in_display(
+        self, monkeypatch
+    ):
+        from coding_agent.cli.repl import InteractiveSession
+
+        monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
+        config = SimpleNamespace(
+            model="test",
+            repo=None,
+            api_key=None,
+            provider="test",
+            base_url=None,
+            max_steps=None,
+            approval_mode=None,
+        )
+        session = InteractiveSession(config)
+
+        block = "\n".join(f"line {i}" for i in range(25))
+        mixed_message = f"before context\n\n{block}\n\nafter context"
+        rendered_messages: list[str] = []
+        turned_messages: list[str] = []
+
+        class FakeAdapter:
+            async def run_turn(self, message: str):
+                turned_messages.append(message)
+                return SimpleNamespace(
+                    stop_reason=SimpleNamespace(ERROR=None), error=None
+                )
+
+        class FakeRenderer:
+            def user_message(self, msg: str):
+                rendered_messages.append(msg)
+
+        session._renderer = FakeRenderer()
+        session._pipeline_adapter = FakeAdapter()
+
+        await session._process_message(mixed_message)
+        assert len(rendered_messages) == 1
+        assert "before context" in rendered_messages[0]
+        assert "after context" in rendered_messages[0]
+        assert "[Pasted text" in rendered_messages[0]
+        assert turned_messages == [mixed_message]

@@ -181,3 +181,65 @@ class TestCommands:
         context = {"should_exit": False, "model": "claude-opus-4"}
         await handle_command("/model", context)
         assert "claude-opus-4" in buf.getvalue()
+
+    @pytest.mark.asyncio
+    async def test_model_command_escapes_html_like_input(self, monkeypatch):
+        import coding_agent.cli.terminal_output as terminal_output_module
+
+        buf = StringIO()
+        monkeypatch.setattr(
+            terminal_output_module, "_prompt_output", create_output(stdout=buf)
+        )
+        context = {"should_exit": False, "model": "gpt-4o"}
+
+        handled = await handle_command("/model <danger>&name", context)
+
+        assert handled is True
+        output = buf.getvalue()
+        assert "<danger>&name" in output
+        assert "Command error" not in output
+
+    @pytest.mark.asyncio
+    async def test_unknown_command_escapes_html_like_input(self, monkeypatch):
+        import coding_agent.cli.terminal_output as terminal_output_module
+
+        buf = StringIO()
+        monkeypatch.setattr(
+            terminal_output_module, "_prompt_output", create_output(stdout=buf)
+        )
+        context = {"should_exit": False}
+
+        handled = await handle_command("/<bad>&cmd", context)
+
+        assert handled is True
+        output = buf.getvalue()
+        assert "Unknown command" in output
+        assert "/<bad>&cmd" in output
+        assert "Command error" not in output
+
+    @pytest.mark.asyncio
+    async def test_skill_command_escapes_dynamic_values(self, monkeypatch):
+        import coding_agent.cli.terminal_output as terminal_output_module
+
+        class FakeSkillsPlugin:
+            active_skill_name = "<active>&skill"
+
+            def list_skills_with_descriptions(self):
+                return [
+                    ("<active>&skill", "desc with <b>tag</b> & more"),
+                    ("plain", "plain desc"),
+                ]
+
+        buf = StringIO()
+        monkeypatch.setattr(
+            terminal_output_module, "_prompt_output", create_output(stdout=buf)
+        )
+        context = {"should_exit": False, "skills_plugin": FakeSkillsPlugin()}
+
+        handled = await handle_command("/skill", context)
+
+        assert handled is True
+        output = buf.getvalue()
+        assert "<active>&skill" in output
+        assert "desc with <b>tag</b> & more" in output
+        assert "Command error" not in output

@@ -10,13 +10,17 @@ def _out():
     return get_prompt_output()
 
 
+def _h(value: object) -> str:
+    return _html.escape(str(value), quote=False)
+
+
 _COMMANDS: dict[str, Callable[..., Coroutine[Any, Any, None]]] = {}
 
 
 def command(name: str, description: str = ""):
     def decorator(func: Callable[..., Coroutine[Any, Any, None]]):
-        func._command_name = name
-        func._command_description = description
+        setattr(func, "_command_name", name)
+        setattr(func, "_command_description", description)
         _COMMANDS[name] = func
         return func
 
@@ -29,9 +33,9 @@ async def cmd_help(args: list[str], context: dict[str, Any]) -> None:
     print_html("<b>Available Commands:</b>", output=output)
     print_pt(output=output)
     for name, func in sorted(_COMMANDS.items()):
-        desc = _html.escape(getattr(func, "_command_description", ""))
+        desc = _h(getattr(func, "_command_description", ""))
         print_html(
-            f"  <ansicyan>/{name}</ansicyan>  <ansibrightblack>{desc}</ansibrightblack>",
+            f"  <ansicyan>/{_h(name)}</ansicyan>  <ansibrightblack>{desc}</ansibrightblack>",
             output=output,
         )
     print_pt(output=output)
@@ -82,13 +86,15 @@ async def cmd_model(args: list[str], context: dict[str, Any]) -> None:
         new_model = args[0]
         if len(new_model) < 2 or len(new_model) > 100:
             print_html(
-                f"<ansired>Invalid model name: {new_model}</ansired>", output=_out()
+                f"<ansired>Invalid model name: {_h(new_model)}</ansired>",
+                output=_out(),
             )
             return
         context["model"] = new_model
         output = _out()
         print_html(
-            f"Model changed to: <ansicyan><b>{new_model}</b></ansicyan>", output=output
+            f"Model changed to: <ansicyan><b>{_h(new_model)}</b></ansicyan>",
+            output=output,
         )
         print_html(
             "<ansibrightblack>Note: Model change will take effect on next turn.</ansibrightblack>",
@@ -97,7 +103,8 @@ async def cmd_model(args: list[str], context: dict[str, Any]) -> None:
     else:
         current = context.get("model", "unknown")
         print_html(
-            f"Current model: <ansicyan><b>{current}</b></ansicyan>", output=_out()
+            f"Current model: <ansicyan><b>{_h(current)}</b></ansicyan>",
+            output=_out(),
         )
 
 
@@ -109,7 +116,7 @@ async def cmd_tools(args: list[str], context: dict[str, Any]) -> None:
         print_html("<b>Available Tools:</b>", output=output)
         print_pt(output=output)
         for name in sorted(registry.list_tools()):
-            print_html(f"  <ansicyan>•</ansicyan> {name}", output=output)
+            print_html(f"  <ansicyan>•</ansicyan> {_h(name)}", output=output)
         print_pt(output=output)
     else:
         print_pt("No tool registry available", output=_out())
@@ -135,21 +142,23 @@ async def cmd_skill(args: list[str], context: dict[str, Any]) -> None:
         print_html("<b>Available skills:</b>", output=output)
         print_pt(output=output)
         for skill_name, desc in skills_with_descs:
+            safe_name = _h(skill_name)
+            safe_desc = _h(desc)
             if active_name and active_name == skill_name:
                 print_html(
-                    f"  <ansicyan><b>• {skill_name}</b></ansicyan>  <ansibrightblack>{desc}</ansibrightblack>"
+                    f"  <ansicyan><b>• {safe_name}</b></ansicyan>  <ansibrightblack>{safe_desc}</ansibrightblack>"
                     f"  <ansigreen>← active</ansigreen>",
                     output=output,
                 )
             else:
                 print_html(
-                    f"  <ansicyan>•</ansicyan> <b>{skill_name}</b>  <ansibrightblack>{desc}</ansibrightblack>",
+                    f"  <ansicyan>•</ansicyan> <b>{safe_name}</b>  <ansibrightblack>{safe_desc}</ansibrightblack>",
                     output=output,
                 )
         print_pt(output=output)
         if active_name:
             print_html(
-                f"Active skill: <ansigreen><b>{active_name}</b></ansigreen>",
+                f"Active skill: <ansigreen><b>{_h(active_name)}</b></ansigreen>",
                 output=output,
             )
         else:
@@ -205,11 +214,11 @@ async def cmd_mcp(args: list[str], context: dict[str, Any]) -> None:
             status_html = "<ansigreen>✓ running</ansigreen>"
         else:
             status_html = "<ansired>✗ stopped</ansired>"
-        print_html(f"  <b>{srv['name']}</b>  [{status_html}]", output=output)
+        print_html(f"  <b>{_h(srv['name'])}</b>  [{status_html}]", output=output)
         if srv["tools"]:
             for t in srv["tools"]:
                 print_html(
-                    f"    <ansibrightblack>• {t}</ansibrightblack>", output=output
+                    f"    <ansibrightblack>• {_h(t)}</ansibrightblack>", output=output
                 )
         else:
             print_html(
@@ -239,11 +248,11 @@ async def handle_command(input_text: str, context: dict[str, Any]) -> bool:
         try:
             await _COMMANDS[cmd_name](args, context)
         except Exception as e:
-            print_html(f"<ansired>Command error: {e}</ansired>", output=_out())
+            print_html(f"<ansired>Command error: {_h(e)}</ansired>", output=_out())
         return True
     else:
         print_html(
-            f"<ansired>Unknown command: /{cmd_name}.</ansired> Type /help for available commands.",
+            f"<ansired>Unknown command: /{_h(cmd_name)}.</ansired> Type /help for available commands.",
             output=_out(),
         )
         return True

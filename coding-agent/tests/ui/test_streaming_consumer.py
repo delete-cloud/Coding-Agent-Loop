@@ -401,3 +401,34 @@ class TestCollapseGrouping:
         )
         output = buf.getvalue()
         assert "\u26a0" in output
+
+    @pytest.mark.asyncio
+    async def test_non_collapsible_call_waits_for_pending_collapsible_result(self):
+        consumer, _, buf = self._make_consumer()
+        await consumer.emit(
+            ToolCallDelta(
+                tool_name="file_read", arguments={"path": "a.py"}, call_id="c1"
+            )
+        )
+        await consumer.emit(
+            ToolCallDelta(
+                tool_name="bash_run", arguments={"command": "ls"}, call_id="c2"
+            )
+        )
+        interim_output = buf.getvalue()
+        assert "Read 1 file" not in interim_output
+        assert "bash_run" in interim_output
+
+        await consumer.emit(
+            ToolResultDelta(call_id="c1", tool_name="file_read", result="content")
+        )
+        await consumer.emit(
+            ToolResultDelta(call_id="c2", tool_name="bash_run", result="file.py")
+        )
+        await consumer.emit(
+            TurnEnd(turn_id="t1", completion_status=CompletionStatus.COMPLETED)
+        )
+
+        output = buf.getvalue()
+        assert "Read 1 file" in output
+        assert "content" not in output

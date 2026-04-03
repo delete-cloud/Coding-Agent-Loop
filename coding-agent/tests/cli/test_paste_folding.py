@@ -51,6 +51,21 @@ class TestFoldPastedContent:
         assert len(refs) == 1
         assert "[Pasted text" in folded
 
+    def test_preserves_context_around_long_block(self):
+        block = "\n".join(f"line {i}" for i in range(25))
+        text = f"before context\n\n{block}\n\nafter context"
+        folded, refs = fold_pasted_content(text, threshold=20)
+        assert "before context" in folded
+        assert "after context" in folded
+        assert "[Pasted text" in folded
+        assert len(refs) == 1
+
+    def test_long_single_line_is_folded(self):
+        text = "x" * 5000
+        folded, refs = fold_pasted_content(text, threshold=20)
+        assert "[Pasted text" in folded
+        assert len(refs) == 1
+
 
 class TestExpandPastedRefs:
     def test_expand_restores_original(self):
@@ -69,6 +84,13 @@ class TestExpandPastedRefs:
         lines = [f"line {i}" for i in range(25)]
         paste = "\n".join(lines)
         text = f"Please look at this:\n{paste}\nAnd fix it."
+        folded, refs = fold_pasted_content(text, threshold=20)
+        expanded = expand_pasted_refs(folded, refs)
+        assert expanded == text
+
+    def test_expand_preserves_surrounding_context_for_folded_block(self):
+        block = "\n".join(f"line {i}" for i in range(25))
+        text = f"before context\n\n{block}\n\nafter context"
         folded, refs = fold_pasted_content(text, threshold=20)
         expanded = expand_pasted_refs(folded, refs)
         assert expanded == text

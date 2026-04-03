@@ -29,10 +29,12 @@ class RichConsumer:
         self._session_approved_tools: set[str] = set()
         self._collapse_group: CollapseGroup | None = None
 
-    def _flush_collapse_group(self) -> None:
+    def _flush_collapse_group(self, *, force: bool = False) -> None:
         group = self._collapse_group
         if group is None or group.is_empty:
             self._collapse_group = None
+            return
+        if group.pending_call_ids and not force:
             return
         hint: str | None = None
         if group.read_file_paths:
@@ -80,7 +82,7 @@ class RichConsumer:
                     self.renderer.tool_result(cid, tool, result, is_error=err)
 
             case TurnEnd(completion_status=status):
-                self._flush_collapse_group()
+                self._flush_collapse_group(force=True)
                 if self._stream_active:
                     self.renderer.stream_end()
                     self._stream_active = False

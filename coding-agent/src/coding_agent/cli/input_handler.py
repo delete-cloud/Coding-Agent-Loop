@@ -210,26 +210,59 @@ import re as _re
 import uuid as _uuid
 
 _PASTE_RE = _re.compile(r"\[Pasted text #(\S+) \+\d+ lines\]")
+_LONG_BLOCK_SPLIT_RE = _re.compile(r"\n{2,}")
+_INLINE_LENGTH_THRESHOLD = 2000
+
+
+def _make_paste_placeholder(ref_id: str, text: str) -> str:
+    line_count = text.count("\n") + 1
+    return f"[Pasted text #{ref_id} +{line_count} lines]"
+
+
+def _should_fold_block(text: str, threshold: int) -> bool:
+    line_count = text.count("\n") + 1
+    return line_count > threshold or len(text) >= _INLINE_LENGTH_THRESHOLD
 
 
 def fold_pasted_content(text: str, threshold: int = 20) -> tuple[str, dict[str, str]]:
     refs: dict[str, str] = {}
-    lines = text.split("\n")
-    if len(lines) <= threshold:
+    if not _should_fold_block(text, threshold):
         return text, refs
 
-    ref_id = _uuid.uuid4().hex[:8]
-    refs[ref_id] = text
-    placeholder = f"[Pasted text #{ref_id} +{len(lines)} lines]"
-    return placeholder, refs
+    if "\n\n" not in text:
+        ref_id = _uuid.uuid4().hex[:8]
+        refs[ref_id] = text
+        return _make_paste_placeholder(ref_id, text), refs
+
+    parts = _LONG_BLOCK_SPLIT_RE.split(text)
+    separators = _LONG_BLOCK_SPLIT_RE.findall(text)
+
+    folded_parts: list[str] = []
+    for part in parts:
+        if _should_fold_block(part, threshold):
+            ref_id = _uuid.uuid4().hex[:8]
+            refs[ref_id] = part
+            folded_parts.append(_make_paste_placeholder(ref_id, part))
+        else:
+            folded_parts.append(part)
+
+    rebuilt: list[str] = []
+    for index, part in enumerate(folded_parts):
+        rebuilt.append(part)
+        if index < len(separators):
+            rebuilt.append(separators[index])
+    return "".join(rebuilt), refs
 
 
 def expand_pasted_refs(text: str, refs: dict[str, str]) -> str:
     if not refs:
         return text
 
-    def _replace(m: _re.Match) -> str:
+    def _replace(m: _re.Match[str]) -> str:
         ref_id = m.group(1)
-        return refs.get(ref_id, m.group(0))
+        replacement = refs.get(ref_id)
+        if replacement is None:
+            return m.group(0)
+        return replacement
 
     return _PASTE_RE.sub(_replace, text)
