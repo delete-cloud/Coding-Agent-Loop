@@ -112,6 +112,108 @@ async def cmd_tools(args: list[str], context: dict[str, Any]) -> None:
         print_pt("No tool registry available", output=_command_output())
 
 
+@command("skill", "List or activate skills  (/skill | /skill <name> | /skill off)")
+async def cmd_skill(args: list[str], context: dict[str, Any]) -> None:
+    """Manage skills.
+
+    /skill          — list all available skills
+    /skill <name>   — activate the named skill on next agent turn
+    /skill off      — deactivate the current skill
+    """
+    output = _command_output()
+    skills_plugin = context.get("skills_plugin")
+    if skills_plugin is None:
+        print_pt("Skills plugin is not enabled.", output=output)
+        return
+
+    if not args:
+        # List available skills
+        loader = skills_plugin._loader
+        frontmatters = loader.load_all_frontmatters()
+        active = skills_plugin._active_skill
+        if not frontmatters:
+            print_pt(
+                "No skills available. Add .md files to the skills/ directory.",
+                output=output,
+            )
+            return
+        print_pt("Available skills:\n", output=output)
+        for skill_name, fm in frontmatters.items():
+            desc = fm.get("description", "(no description)")
+            marker = " ← active" if (active and active.name == skill_name) else ""
+            print_pt(f"  • {skill_name}: {desc}{marker}", output=output)
+        print_pt(output=output)
+        if active:
+            print_pt(f"Active skill: {active.name}", output=output)
+        else:
+            print_pt("No skill is currently active.", output=output)
+        return
+
+    cmd = args[0]
+
+    if cmd == "off":
+        skills_plugin.deactivate()
+        print_pt("Skill deactivated.", output=output)
+        return
+
+    # Activate by name
+    skill_name = cmd
+    pipeline_ctx = context.get("pipeline_ctx")
+    if pipeline_ctx is not None:
+        msg = skills_plugin.request_skill(pipeline_ctx, skill_name)
+    else:
+        # Fallback: activate immediately if no pipeline ctx available
+        skill = skills_plugin._loader.get_skill(skill_name)
+        if skill is None:
+            available = ", ".join(skills_plugin._loader.list_skills()) or "(none)"
+            msg = f"Skill '{skill_name}' not found. Available: {available}"
+        else:
+            skills_plugin._active_skill = skill
+            msg = f"Skill '{skill_name}' activated."
+    print_pt(msg, output=output)
+
+
+@command("mcp", "Manage MCP servers  (/mcp | /mcp reload)")
+async def cmd_mcp(args: list[str], context: dict[str, Any]) -> None:
+    """Manage MCP servers.
+
+    /mcp          — list all servers and their tools
+    /mcp reload   — restart all servers and rediscover tools
+    """
+    output = _command_output()
+    mcp_plugin = context.get("mcp_plugin")
+    if mcp_plugin is None:
+        print_pt(
+            "MCP plugin is not enabled. Add [mcp.servers.*] to agent.toml to configure servers.",
+            output=output,
+        )
+        return
+
+    if args and args[0] == "reload":
+        msg = mcp_plugin.reload_servers()
+        print_pt(msg, output=output)
+        return
+
+    # Default: list servers and tools
+    servers = mcp_plugin.list_servers()
+    if not servers:
+        print_pt("No MCP servers configured.", output=output)
+        return
+
+    print_pt("MCP Servers:\n", output=output)
+    for srv in servers:
+        status = "✓ running" if srv["alive"] else "✗ stopped"
+        print_pt(f"  {srv['name']}  [{status}]", output=output)
+        if srv["tools"]:
+            for t in srv["tools"]:
+                print_pt(f"    • {t}", output=output)
+        else:
+            print_pt("    (no tools)", output=output)
+    print_pt(output=output)
+    total = sum(len(s["tools"]) for s in servers)
+    print_pt(f"{len(servers)} server(s), {total} tool(s) total.", output=output)
+
+
 async def handle_command(input_text: str, context: dict[str, Any]) -> bool:
     """Handle a slash command.
 

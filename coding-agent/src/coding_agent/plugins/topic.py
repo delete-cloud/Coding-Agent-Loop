@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import Any, Callable
 
+from agentkit.tape.anchor import Anchor
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
 
@@ -105,8 +106,8 @@ class TopicPlugin:
                 break
 
         tape.append(
-            Entry(
-                kind="anchor",
+            Anchor(
+                anchor_type="topic_start",
                 payload={"content": first_user_msg or f"Topic #{self._topic_count}"},
                 meta={
                     "topic_id": self._current_topic_id,
@@ -138,12 +139,15 @@ class TopicPlugin:
             else "Topic completed"
         )
 
+        # "skip": True tells ContextBuilder to omit this anchor from LLM messages.
+        # topic_end is a structural boundary (fold_boundary==True on the Anchor),
+        # not content the model should see.  The skip meta provides the same
+        # suppression for older code paths that check meta directly.
         tape.append(
-            Entry(
-                kind="anchor",
+            Anchor(
+                anchor_type="topic_end",
                 payload={"content": summary},
                 meta={
-                    "fold_boundary": True,
                     "topic_id": self._current_topic_id,
                     "files": file_list,
                     "skip": True,

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from agentkit.tape.anchor import Anchor
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
 
@@ -68,11 +69,14 @@ class SummarizerPlugin:
 
     def _find_last_finalized(self, entries: list[Entry]) -> int | None:
         for i in range(len(entries) - 1, -1, -1):
-            if entries[i].kind == "anchor" and entries[i].meta.get("fold_boundary"):
+            entry = entries[i]
+            if isinstance(entry, Anchor) and entry.fold_boundary:
+                return i
+            if entry.kind == "anchor" and entry.meta.get("fold_boundary"):
                 return i
         return None
 
-    def _build_topic_summary(self, old_entries: list[Entry]) -> Entry:
+    def _build_topic_summary(self, old_entries: list[Entry]) -> Anchor:
         topic_ids = []
         for e in old_entries:
             tid = e.meta.get("topic_id")
@@ -81,7 +85,9 @@ class SummarizerPlugin:
 
         files: list[str] = []
         for e in old_entries:
-            if e.meta.get("fold_boundary"):
+            if isinstance(e, Anchor) and e.fold_boundary:
+                files.extend(e.meta.get("files", []))
+            elif e.kind == "anchor" and e.meta.get("fold_boundary"):
                 files.extend(e.meta.get("files", []))
 
         topic_count = len(topic_ids) or 1
@@ -89,18 +95,21 @@ class SummarizerPlugin:
         if files:
             summary_text += f"\nFiles involved: {', '.join(sorted(set(files))[:10])}"
 
-        return Entry(
-            kind="anchor",
+        source_ids: tuple[str, ...] = ()
+        if old_entries:
+            source_ids = (old_entries[0].id, old_entries[-1].id)
+
+        return Anchor(
+            anchor_type="handoff",
+            source_ids=source_ids,
             payload={"content": summary_text},
             meta={
-                "is_handoff": True,
-                "source_entry_count": len(old_entries),
                 "folded_topics": topic_ids,
                 "prefix": "Context Summary",
             },
         )
 
-    def _build_entry_summary(self, old_entries: list[Entry]) -> Entry:
+    def _build_entry_summary(self, old_entries: list[Entry]) -> Anchor:
         summary_parts = []
         for entry in old_entries:
             if entry.kind == "message":
@@ -118,14 +127,15 @@ class SummarizerPlugin:
             summary_parts[-10:]
         )
 
-        return Entry(
-            kind="anchor",
+        source_ids: tuple[str, ...] = ()
+        if old_entries:
+            source_ids = (old_entries[0].id, old_entries[-1].id)
+
+        return Anchor(
+            anchor_type="handoff",
+            source_ids=source_ids,
             payload={"content": summary_text},
-            meta={
-                "is_handoff": True,
-                "source_entry_count": len(old_entries),
-                "prefix": "Context Summary",
-            },
+            meta={"prefix": "Context Summary"},
         )
 
     def summarize_context(
@@ -160,8 +170,9 @@ class SummarizerPlugin:
             summary_parts[-10:]
         )
 
-        anchor = Entry(
-            kind="anchor",
+        anchor = Anchor(
+            anchor_type="handoff",
+            source_ids=(old_entries[0].id, old_entries[-1].id) if old_entries else (),
             payload={"content": summary_text},
         )
 

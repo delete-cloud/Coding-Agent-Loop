@@ -4,6 +4,7 @@ from coding_agent.plugins.memory import MemoryPlugin
 from agentkit.directive.types import MemoryRecord
 from agentkit.tape.tape import Tape
 from agentkit.tape.models import Entry
+from agentkit.tape.anchor import Anchor
 
 
 class TestMemoryPlugin:
@@ -78,9 +79,9 @@ class TestMemoryPlugin:
         assert result.importance > 0.3  # Multi-step should score higher
 
 
-def _make_topic_initial(topic_id: str, topic_number: int = 1) -> Entry:
-    return Entry(
-        kind="anchor",
+def _make_topic_initial(topic_id: str, topic_number: int = 1) -> Anchor:
+    return Anchor(
+        anchor_type="topic_start",
         payload={"content": f"Topic #{topic_number}"},
         meta={
             "topic_id": topic_id,

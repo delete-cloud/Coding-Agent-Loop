@@ -2,11 +2,12 @@ import pytest
 from coding_agent.plugins.summarizer import SummarizerPlugin
 from agentkit.tape.tape import Tape
 from agentkit.tape.models import Entry
+from agentkit.tape.anchor import Anchor
 
 
-def _make_topic_initial(topic_id: str, topic_number: int = 1) -> Entry:
-    return Entry(
-        kind="anchor",
+def _make_topic_initial(topic_id: str, topic_number: int = 1) -> Anchor:
+    return Anchor(
+        anchor_type="topic_start",
         payload={"content": f"Topic #{topic_number}"},
         meta={
             "topic_id": topic_id,
@@ -16,15 +17,13 @@ def _make_topic_initial(topic_id: str, topic_number: int = 1) -> Entry:
     )
 
 
-def _make_topic_finalized(topic_id: str, files: list[str] | None = None) -> Entry:
-    return Entry(
-        kind="anchor",
+def _make_topic_finalized(topic_id: str, files: list[str] | None = None) -> Anchor:
+    return Anchor(
+        anchor_type="topic_end",
         payload={"content": f"Topic involved files: {', '.join(files or [])}"},
         meta={
-            "fold_boundary": True,
             "topic_id": topic_id,
             "files": files or [],
-            "skip": True,
         },
     )
 
@@ -47,7 +46,7 @@ class TestSummarizerPlugin:
                 Entry(kind="message", payload={"role": "user", "content": f"msg {i}"})
             )
         result = plugin.resolve_context_window(tape=tape)
-        assert result is None  # No windowing needed
+        assert result is None
 
     def test_long_tape_gets_summarized(self):
         plugin = SummarizerPlugin(max_entries=5)
@@ -63,9 +62,9 @@ class TestSummarizerPlugin:
         assert result is not None
         split_point, anchor = result
         assert isinstance(split_point, int)
-        assert anchor.kind == "anchor"
-        assert anchor.meta.get("is_handoff")
-        assert "source_entry_count" in anchor.meta
+        assert isinstance(anchor, Anchor)
+        assert anchor.is_handoff is True
+        assert len(anchor.source_ids) == 2
 
     def test_preserves_recent_entries(self):
         plugin = SummarizerPlugin(max_entries=5, keep_recent=3)
@@ -77,7 +76,7 @@ class TestSummarizerPlugin:
         result = plugin.resolve_context_window(tape=tape)
         assert result is not None
         split_point, anchor = result
-        assert split_point == len(list(tape)) - 3  # 20 - 3 = 17
+        assert split_point == len(list(tape)) - 3
 
     def test_legacy_summarize_context_still_works(self):
         plugin = SummarizerPlugin(max_entries=5)
@@ -93,14 +92,43 @@ class TestSummarizerPlugin:
         assert result is not None
         assert len(result) < 20
 
+    def test_legacy_summarize_context_includes_source_ids(self):
+        plugin = SummarizerPlugin(max_entries=5, keep_recent=3)
+        tape = Tape()
+        entries = []
+        for i in range(20):
+            e = Entry(kind="message", payload={"role": "user", "content": f"msg-{i}"})
+            entries.append(e)
+            tape.append(e)
+        result = plugin.summarize_context(tape=tape)
+        assert result is not None
+        anchor = result[0]
+        assert isinstance(anchor, Anchor)
+        assert len(anchor.source_ids) == 2
+        assert anchor.source_ids == (entries[0].id, entries[16].id)
+
+    def test_summary_anchor_has_source_ids(self):
+        plugin = SummarizerPlugin(max_entries=5, keep_recent=3)
+        tape = Tape()
+        entries = []
+        for i in range(20):
+            e = Entry(
+                kind="message",
+                payload={"role": "user", "content": f"msg-{i}"},
+            )
+            entries.append(e)
+            tape.append(e)
+        result = plugin.resolve_context_window(tape=tape)
+        assert result is not None
+        _, anchor = result
+        assert isinstance(anchor, Anchor)
+        assert anchor.source_ids == (entries[0].id, entries[16].id)
+
 
 class TestSummarizerTopicAwareHandoff:
-    """P2: topic-boundary windowing instead of entry-count truncation."""
-
     def test_folds_at_topic_boundary_when_over_max(self):
         plugin = SummarizerPlugin(max_entries=10, keep_recent=5)
         tape = Tape()
-        # Completed topic 1: 8 entries
         tape.append(_make_topic_initial("t1", 1))
         for i in range(6):
             tape.append(
@@ -109,7 +137,6 @@ class TestSummarizerTopicAwareHandoff:
                 )
             )
         tape.append(_make_topic_finalized("t1", files=["src/auth.py"]))
-        # Active topic 2: 6 entries
         tape.append(_make_topic_initial("t2", 2))
         for i in range(5):
             tape.append(
@@ -117,13 +144,12 @@ class TestSummarizerTopicAwareHandoff:
                     kind="message", payload={"role": "user", "content": f"t2 msg {i}"}
                 )
             )
-        # Total: 14 entries > max_entries=10
         result = plugin.resolve_context_window(tape=tape)
         assert result is not None
         split_point, anchor = result
-        assert split_point == 8  # after topic_finalized (index 7 → split_point = 8)
-        assert anchor.kind == "anchor"
-        assert anchor.meta.get("is_handoff")
+        assert split_point == 8
+        assert isinstance(anchor, Anchor)
+        assert anchor.is_handoff is True
 
     def test_no_fold_when_under_max(self):
         plugin = SummarizerPlugin(max_entries=50)
@@ -146,12 +172,11 @@ class TestSummarizerTopicAwareHandoff:
         result = plugin.resolve_context_window(tape=tape)
         assert result is not None
         split_point, anchor = result
-        assert split_point == 17  # 20 - 3
+        assert split_point == 17
 
     def test_multiple_completed_topics_folds_all(self):
         plugin = SummarizerPlugin(max_entries=10)
         tape = Tape()
-        # Topic 1: 4 entries
         tape.append(_make_topic_initial("t1", 1))
         tape.append(
             Entry(kind="message", payload={"role": "user", "content": "t1 work"})
@@ -160,7 +185,6 @@ class TestSummarizerTopicAwareHandoff:
             Entry(kind="message", payload={"role": "assistant", "content": "t1 done"})
         )
         tape.append(_make_topic_finalized("t1"))
-        # Topic 2: 4 entries
         tape.append(_make_topic_initial("t2", 2))
         tape.append(
             Entry(kind="message", payload={"role": "user", "content": "t2 work"})
@@ -169,7 +193,6 @@ class TestSummarizerTopicAwareHandoff:
             Entry(kind="message", payload={"role": "assistant", "content": "t2 done"})
         )
         tape.append(_make_topic_finalized("t2"))
-        # Topic 3 (active): 5 entries
         tape.append(_make_topic_initial("t3", 3))
         for i in range(4):
             tape.append(
@@ -177,11 +200,10 @@ class TestSummarizerTopicAwareHandoff:
                     kind="message", payload={"role": "user", "content": f"t3 msg {i}"}
                 )
             )
-        # Total: 13 > max=10. Last finalized is t2 at index 7 → split_point=8
         result = plugin.resolve_context_window(tape=tape)
         assert result is not None
         split_point, anchor = result
-        assert split_point == 8  # after t2's topic_finalized
+        assert split_point == 8
 
     def test_handoff_anchor_contains_topic_summary(self):
         plugin = SummarizerPlugin(max_entries=5)
@@ -206,23 +228,24 @@ class TestSummarizerTopicAwareHandoff:
         plugin = SummarizerPlugin(max_entries=5)
         entries = [
             Entry(kind="message", payload={"role": "user", "content": "a"}),
-            Entry(
-                kind="anchor", payload={"content": "fold"}, meta={"fold_boundary": True}
+            Anchor(
+                anchor_type="topic_end",
+                payload={"content": "fold"},
             ),
             Entry(kind="message", payload={"role": "user", "content": "b"}),
         ]
         idx = plugin._find_last_finalized(entries)
         assert idx == 1
 
-    def test_find_last_finalized_ignores_old_anchor_type(self):
+    def test_find_last_finalized_recognizes_old_meta_anchor_type(self):
         plugin = SummarizerPlugin(max_entries=5)
         entries = [
             Entry(
                 kind="anchor",
                 payload={"content": "old"},
-                meta={"anchor_type": "topic_finalized"},
+                meta={"anchor_type": "topic_finalized", "fold_boundary": True},
             ),
             Entry(kind="message", payload={"role": "user", "content": "msg"}),
         ]
         idx = plugin._find_last_finalized(entries)
-        assert idx is None
+        assert idx == 0

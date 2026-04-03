@@ -2,6 +2,7 @@ import pytest
 from coding_agent.plugins.topic import TopicPlugin
 from agentkit.tape.tape import Tape
 from agentkit.tape.models import Entry
+from agentkit.tape.anchor import Anchor
 
 
 class TestTopicPlugin:
@@ -135,7 +136,14 @@ class TestTopicPlugin:
 
         anchors = tape.filter("anchor")
         assert len(anchors) == 3
-        fold_flags = [bool(a.meta.get("fold_boundary")) for a in anchors]
+        fold_flags = [
+            (
+                a.fold_boundary
+                if isinstance(a, Anchor)
+                else bool(a.meta.get("fold_boundary"))
+            )
+            for a in anchors
+        ]
         assert fold_flags == [False, True, False]
 
     def test_no_switch_when_files_overlap(self):

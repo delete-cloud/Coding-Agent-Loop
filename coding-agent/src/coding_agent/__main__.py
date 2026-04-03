@@ -104,9 +104,11 @@ def create_agent(
     from coding_agent.plugins.core_tools import CoreToolsPlugin
     from coding_agent.plugins.doom_detector import DoomDetectorPlugin
     from coding_agent.plugins.llm_provider import LLMProviderPlugin
+    from coding_agent.plugins.mcp import MCPPlugin
     from coding_agent.plugins.memory import MemoryPlugin
     from coding_agent.plugins.metrics import SessionMetricsPlugin
     from coding_agent.plugins.parallel_executor import ParallelExecutorPlugin
+    from coding_agent.plugins.skills import SkillsPlugin
     from coding_agent.plugins.storage import StoragePlugin
     from coding_agent.plugins.summarizer import SummarizerPlugin
     from coding_agent.plugins.topic import TopicPlugin
@@ -126,6 +128,8 @@ def create_agent(
     parallel_cfg = cfg.extra.get("parallel", {})
     doom_cfg = cfg.extra.get("doom_detector", {})
     topic_cfg = cfg.extra.get("topic", {})
+    skills_cfg = cfg.extra.get("skills", {})
+    mcp_cfg = cfg.extra.get("mcp", {})
 
     async def _execute_tool_async(name: str, arguments: dict[str, Any]) -> str:
         core_tools = registry.get("core_tools")
@@ -146,6 +150,12 @@ def create_agent(
                 min_entries_before_detect=int(topic_cfg.get("min_entries", 4)),
             ),
             "session_metrics": lambda: SessionMetricsPlugin(),
+            "skills": lambda: SkillsPlugin(
+                skills_dir=skills_cfg.get("dir", None),
+            ),
+            "mcp": lambda: MCPPlugin(
+                servers=mcp_cfg.get("servers", {}),
+            ),
         }
     )
 
@@ -190,6 +200,12 @@ def create_agent(
             "max_tool_rounds": cfg.max_turns,
         },
     )
+
+    # Expose plugin references so CLI commands can interact with them directly
+    if "skills" in registry.plugin_ids():
+        ctx.config["skills_plugin"] = registry.get("skills")
+    if "mcp" in registry.plugin_ids():
+        ctx.config["mcp_plugin"] = registry.get("mcp")
 
     return pipeline, ctx
 

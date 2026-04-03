@@ -65,6 +65,14 @@ class InteractiveSession:
         self._pipeline_adapter = PipelineAdapter(
             pipeline=pipeline, ctx=pipeline_ctx, consumer=self._consumer
         )
+        self._pipeline_ctx = pipeline_ctx
+
+        # Make plugin references available to CLI commands
+        if "skills_plugin" in pipeline_ctx.config:
+            self.context["skills_plugin"] = pipeline_ctx.config["skills_plugin"]
+            self.context["pipeline_ctx"] = pipeline_ctx
+        if "mcp_plugin" in pipeline_ctx.config:
+            self.context["mcp_plugin"] = pipeline_ctx.config["mcp_plugin"]
 
     async def _ask_user_for_approval(self, question: str) -> bool:
         print_pt("\nApproval Required", output=get_prompt_output(sys.__stdout__))
