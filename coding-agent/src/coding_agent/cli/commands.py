@@ -161,7 +161,7 @@ async def cmd_skill(args: list[str], context: dict[str, Any]) -> None:
         msg = skills_plugin.request_skill(pipeline_ctx, skill_name)
     else:
         # Fallback: invoke immediately if no pipeline ctx available
-        result = skills_plugin._handle_skill_invoke({"name": skill_name})
+        result = skills_plugin.activate_immediately(skill_name)
         msg = result
     print_pt(msg, output=output)
 

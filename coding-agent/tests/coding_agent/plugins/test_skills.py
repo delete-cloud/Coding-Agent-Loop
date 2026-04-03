@@ -240,3 +240,33 @@ class TestSkillList:
         plugin = _make_plugin(tmp_path)
         result = plugin._handle_skill_list()
         assert "no skills" in result.lower()
+
+
+class TestReviewFixes:
+    def test_activate_immediately_activates_without_pending(self, tmp_path: Path):
+        plugin = _make_plugin(tmp_path, {"my-skill": "Desc"})
+        result = plugin.activate_immediately("my-skill")
+        assert "activated" in result.lower()
+        assert plugin.active_skill_name == "my-skill"
+        assert plugin._pending_skill_name is None
+
+    def test_xml_escapes_special_chars_in_description(self, tmp_path: Path):
+        agents_dir = tmp_path / ".agents" / "skills" / "bad-skill"
+        agents_dir.mkdir(parents=True)
+        (agents_dir / "SKILL.md").write_text(
+            "---\nname: bad-skill\ndescription: 'A & B <test> \"quotes\"'\n---\nBody"
+        )
+        plugin = SkillsPlugin(
+            workspace_root=tmp_path, global_skills_dir=tmp_path / "no-global"
+        )
+        messages = plugin.build_context()
+        content = messages[0]["content"]
+        assert "&amp;" in content
+        assert "<test>" not in content
+
+    def test_do_mount_only_exposes_available_skills(self, tmp_path: Path):
+        plugin = _make_plugin(tmp_path, {"test-skill": "Test"})
+        state = plugin.do_mount()
+        assert "available_skills" in state
+        assert "active_skill" not in state
+        assert "pending_skill" not in state

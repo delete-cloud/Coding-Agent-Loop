@@ -7,6 +7,7 @@ skill_invoke/skill_list tools for activation.
 
 from __future__ import annotations
 
+import html
 import logging
 from pathlib import Path
 from typing import Any, Callable
@@ -64,8 +65,6 @@ class SkillsPlugin:
 
     def do_mount(self, **kwargs: Any) -> dict[str, Any]:
         return {
-            "active_skill": None,
-            "pending_skill": None,
             "available_skills": list(self._skills.keys()),
         }
 
@@ -93,8 +92,10 @@ class SkillsPlugin:
             for skill in self._skills.values():
                 lines.append("  <skill>")
                 lines.append(f"    <name>{skill.name}</name>")
-                lines.append(f"    <description>{skill.description}</description>")
-                lines.append(f"    <location>{skill.location}</location>")
+                lines.append(
+                    f"    <description>{html.escape(skill.description)}</description>"
+                )
+                lines.append(f"    <location>{html.escape(skill.location)}</location>")
                 lines.append("  </skill>")
             lines.append("</available_skills>")
             messages.append({"role": "system", "content": "\n".join(lines)})
@@ -218,3 +219,8 @@ class SkillsPlugin:
 
     def get_skill(self, name: str) -> SkillMetadata | None:
         return self._skills.get(name)
+
+    def activate_immediately(
+        self, skill_name: str, inputs: dict[str, Any] | None = None
+    ) -> str:
+        return self._handle_skill_invoke({"name": skill_name, "inputs": inputs or {}})
