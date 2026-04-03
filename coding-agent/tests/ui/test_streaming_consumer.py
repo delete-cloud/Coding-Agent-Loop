@@ -170,6 +170,12 @@ class TestStreamingConsumer:
         assert resp.feedback == "too dangerous"
 
     @pytest.mark.asyncio
+    async def test_collapse_group_attribute_exists(self):
+        consumer, _, _ = self._make_consumer()
+        assert hasattr(consumer, "_collapse_group")
+        assert consumer._collapse_group is None
+
+    @pytest.mark.asyncio
     async def test_session_approve_skips_future_prompts(self, monkeypatch):
         from coding_agent.wire.protocol import ApprovalRequest
         from coding_agent.ui import approval_prompt
@@ -204,3 +210,194 @@ class TestStreamingConsumer:
         resp2 = await consumer.request_approval(req2)
         assert resp2.approved is True
         assert call_count == 1
+
+
+class TestCollapseGrouping:
+    def _make_consumer(self) -> tuple[RichConsumer, StreamingRenderer, StringIO]:
+        buf = StringIO()
+        console = Console(file=buf, force_terminal=True, width=80)
+        renderer = StreamingRenderer(console=console)
+        consumer = RichConsumer(renderer)
+        return consumer, renderer, buf
+
+    @pytest.mark.asyncio
+    async def test_single_read_collapsed(self):
+        consumer, _, buf = self._make_consumer()
+        await consumer.emit(
+            ToolCallDelta(
+                tool_name="file_read", arguments={"path": "a.py"}, call_id="c1"
+            )
+        )
+        await consumer.emit(
+            ToolResultDelta(call_id="c1", tool_name="file_read", result="some content")
+        )
+        await consumer.emit(
+            TurnEnd(turn_id="t1", completion_status=CompletionStatus.COMPLETED)
+        )
+        output = buf.getvalue()
+        assert "Read 1 file" in output
+        assert "some content" not in output
+
+    @pytest.mark.asyncio
+    async def test_consecutive_reads_collapsed(self):
+        consumer, _, buf = self._make_consumer()
+        await consumer.emit(
+            ToolCallDelta(
+                tool_name="file_read", arguments={"path": "a.py"}, call_id="c1"
+            )
+        )
+        await consumer.emit(
+            ToolResultDelta(call_id="c1", tool_name="file_read", result="aaa")
+        )
+        await consumer.emit(
+            ToolCallDelta(
+                tool_name="file_read", arguments={"path": "b.py"}, call_id="c2"
+            )
+        )
+        await consumer.emit(
+            ToolResultDelta(call_id="c2", tool_name="file_read", result="bbb")
+        )
+        await consumer.emit(
+            TurnEnd(turn_id="t1", completion_status=CompletionStatus.COMPLETED)
+        )
+        output = buf.getvalue()
+        assert "Read 2 files" in output
+        assert "aaa" not in output
+        assert "bbb" not in output
+
+    @pytest.mark.asyncio
+    async def test_grep_search_collapsed(self):
+        consumer, _, buf = self._make_consumer()
+        await consumer.emit(
+            ToolCallDelta(
+                tool_name="grep_search", arguments={"pattern": "TODO"}, call_id="c1"
+            )
+        )
+        await consumer.emit(
+            ToolResultDelta(
+                call_id="c1", tool_name="grep_search", result="main.py:42: TODO"
+            )
+        )
+        await consumer.emit(
+            TurnEnd(turn_id="t1", completion_status=CompletionStatus.COMPLETED)
+        )
+        output = buf.getvalue()
+        assert "Searched for 1 pattern" in output
+        assert "main.py:42" not in output
+
+    @pytest.mark.asyncio
+    async def test_non_collapsible_flushes_group(self):
+        consumer, _, buf = self._make_consumer()
+        await consumer.emit(
+            ToolCallDelta(
+                tool_name="file_read", arguments={"path": "a.py"}, call_id="c1"
+            )
+        )
+        await consumer.emit(
+            ToolResultDelta(call_id="c1", tool_name="file_read", result="aaa")
+        )
+        await consumer.emit(
+            ToolCallDelta(
+                tool_name="bash_run", arguments={"command": "ls"}, call_id="c2"
+            )
+        )
+        output = buf.getvalue()
+        assert "Read 1 file" in output
+        assert "bash_run" in output
+
+    @pytest.mark.asyncio
+    async def test_stream_delta_flushes_group(self):
+        consumer, _, buf = self._make_consumer()
+        await consumer.emit(
+            ToolCallDelta(
+                tool_name="file_read", arguments={"path": "a.py"}, call_id="c1"
+            )
+        )
+        await consumer.emit(
+            ToolResultDelta(call_id="c1", tool_name="file_read", result="x")
+        )
+        await consumer.emit(StreamDelta(content="Here is my analysis"))
+        await consumer.emit(
+            TurnEnd(turn_id="t1", completion_status=CompletionStatus.COMPLETED)
+        )
+        output = buf.getvalue()
+        assert "Read 1 file" in output
+        assert "Here is my analysis" in output
+
+    @pytest.mark.asyncio
+    async def test_bash_renders_full_panel(self):
+        consumer, _, buf = self._make_consumer()
+        await consumer.emit(
+            ToolCallDelta(
+                tool_name="bash_run", arguments={"command": "ls"}, call_id="c1"
+            )
+        )
+        await consumer.emit(
+            ToolResultDelta(call_id="c1", tool_name="bash_run", result="file.py")
+        )
+        await consumer.emit(
+            TurnEnd(turn_id="t1", completion_status=CompletionStatus.COMPLETED)
+        )
+        output = buf.getvalue()
+        assert "file.py" in output
+
+    @pytest.mark.asyncio
+    async def test_mixed_collapsed_then_bash(self):
+        consumer, _, buf = self._make_consumer()
+        await consumer.emit(
+            ToolCallDelta(
+                tool_name="file_read", arguments={"path": "a.py"}, call_id="c1"
+            )
+        )
+        await consumer.emit(
+            ToolResultDelta(call_id="c1", tool_name="file_read", result="data")
+        )
+        await consumer.emit(
+            ToolCallDelta(
+                tool_name="bash_run", arguments={"command": "echo hi"}, call_id="c2"
+            )
+        )
+        await consumer.emit(
+            ToolResultDelta(call_id="c2", tool_name="bash_run", result="hi")
+        )
+        await consumer.emit(
+            TurnEnd(turn_id="t1", completion_status=CompletionStatus.COMPLETED)
+        )
+        output = buf.getvalue()
+        assert "Read 1 file" in output
+        assert "hi" in output
+
+    @pytest.mark.asyncio
+    async def test_collapse_group_cleared_after_turnend(self):
+        consumer, _, _ = self._make_consumer()
+        await consumer.emit(
+            ToolCallDelta(
+                tool_name="file_read", arguments={"path": "a.py"}, call_id="c1"
+            )
+        )
+        await consumer.emit(
+            ToolResultDelta(call_id="c1", tool_name="file_read", result="x")
+        )
+        await consumer.emit(
+            TurnEnd(turn_id="t1", completion_status=CompletionStatus.COMPLETED)
+        )
+        assert consumer._collapse_group is None
+
+    @pytest.mark.asyncio
+    async def test_error_in_collapsed_group_shows_warning(self):
+        consumer, _, buf = self._make_consumer()
+        await consumer.emit(
+            ToolCallDelta(
+                tool_name="file_read", arguments={"path": "a.py"}, call_id="c1"
+            )
+        )
+        await consumer.emit(
+            ToolResultDelta(
+                call_id="c1", tool_name="file_read", result="err", is_error=True
+            )
+        )
+        await consumer.emit(
+            TurnEnd(turn_id="t1", completion_status=CompletionStatus.COMPLETED)
+        )
+        output = buf.getvalue()
+        assert "\u26a0" in output
