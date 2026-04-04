@@ -1,3 +1,7 @@
+import asyncio
+import time
+from unittest.mock import MagicMock
+
 import pytest
 from io import StringIO
 from rich.console import Console
@@ -6,9 +10,11 @@ from coding_agent.ui.stream_renderer import StreamingRenderer
 from coding_agent.ui.rich_consumer import RichConsumer
 from coding_agent.wire.protocol import (
     StreamDelta,
+    ThinkingDelta,
     ToolCallDelta,
     ToolResultDelta,
     TurnEnd,
+    TurnStatusDelta,
     CompletionStatus,
 )
 
@@ -432,3 +438,286 @@ class TestCollapseGrouping:
         output = buf.getvalue()
         assert "Read 1 file" in output
         assert "content" not in output
+
+
+class TestThinkingAndStatusHandling:
+    def _make_consumer(self) -> tuple[RichConsumer, StreamingRenderer, StringIO]:
+        buf = StringIO()
+        console = Console(file=buf, force_terminal=True, width=80)
+        renderer = StreamingRenderer(console=console)
+        consumer = RichConsumer(renderer)
+        return consumer, renderer, buf
+
+    # ── ThinkingDelta: basic thinking state ──
+
+    @pytest.mark.asyncio
+    async def test_thinking_delta_calls_thinking_start(self):
+        consumer, renderer, _ = self._make_consumer()
+        renderer.thinking_start = MagicMock()
+        renderer.thinking_end = MagicMock()
+
+        await consumer.emit(ThinkingDelta(text="reasoning..."))
+        renderer.thinking_start.assert_called_once()
+        assert consumer._phase == "thinking"
+
+    @pytest.mark.asyncio
+    async def test_subsequent_thinking_delta_does_not_re_call_start(self):
+        consumer, renderer, _ = self._make_consumer()
+        renderer.thinking_start = MagicMock()
+        renderer.thinking_update = MagicMock()
+        renderer.thinking_end = MagicMock()
+
+        await consumer.emit(ThinkingDelta(text="first"))
+        await consumer.emit(ThinkingDelta(text="second"))
+
+        renderer.thinking_start.assert_called_once()
+
+    # ── Phase transition: thinking → streaming ──
+
+    @pytest.mark.asyncio
+    async def test_stream_delta_after_thinking_calls_thinking_end(self):
+        consumer, renderer, _ = self._make_consumer()
+        renderer.thinking_start = MagicMock()
+        renderer.thinking_end = MagicMock()
+
+        await consumer.emit(ThinkingDelta(text="reasoning"))
+        assert consumer._phase == "thinking"
+
+        await consumer.emit(StreamDelta(content="Answer text"))
+        renderer.thinking_end.assert_called_once()
+        assert consumer._phase != "thinking"
+        assert consumer._stream_active is True
+
+    # ── TurnStatusDelta: token tracking ──
+
+    @pytest.mark.asyncio
+    async def test_turn_status_delta_stores_tokens(self):
+        consumer, renderer, _ = self._make_consumer()
+        renderer.update_status = MagicMock()
+
+        await consumer.emit(TurnStatusDelta(phase="idle", tokens_in=150, tokens_out=75))
+
+        assert consumer._turn_tokens_in == 150
+        assert consumer._turn_tokens_out == 75
+
+    @pytest.mark.asyncio
+    async def test_turn_status_delta_calls_renderer_update_status(self):
+        consumer, renderer, _ = self._make_consumer()
+        renderer.update_status = MagicMock()
+
+        await consumer.emit(
+            TurnStatusDelta(phase="idle", tokens_in=200, tokens_out=100)
+        )
+
+        renderer.update_status.assert_called_once()
+        call_kwargs = renderer.update_status.call_args
+        assert call_kwargs[1]["tokens_in"] == 200 or call_kwargs[0][0] == 200
+
+    # ── TurnEnd: state reset ──
+
+    @pytest.mark.asyncio
+    async def test_turn_end_resets_turn_state(self):
+        consumer, renderer, _ = self._make_consumer()
+        renderer.thinking_start = MagicMock()
+        renderer.thinking_end = MagicMock()
+        renderer.update_status = MagicMock()
+
+        await consumer.emit(ThinkingDelta(text="thinking"))
+        await consumer.emit(StreamDelta(content="response"))
+        await consumer.emit(TurnStatusDelta(phase="idle", tokens_in=50, tokens_out=25))
+        await consumer.emit(
+            TurnEnd(turn_id="t1", completion_status=CompletionStatus.COMPLETED)
+        )
+
+        assert consumer._phase == "idle"
+        assert consumer._turn_start is None
+        assert consumer._turn_tokens_in == 0
+        assert consumer._turn_tokens_out == 0
+
+    @pytest.mark.asyncio
+    async def test_turn_end_during_thinking_calls_thinking_end(self):
+        consumer, renderer, _ = self._make_consumer()
+        renderer.thinking_start = MagicMock()
+        renderer.thinking_end = MagicMock()
+
+        await consumer.emit(ThinkingDelta(text="still thinking"))
+        assert consumer._phase == "thinking"
+
+        await consumer.emit(
+            TurnEnd(turn_id="t1", completion_status=CompletionStatus.COMPLETED)
+        )
+        renderer.thinking_end.assert_called_once()
+        assert consumer._phase == "idle"
+
+    # ── Turn timing ──
+
+    @pytest.mark.asyncio
+    async def test_first_event_starts_turn_timer(self):
+        consumer, renderer, _ = self._make_consumer()
+        renderer.thinking_start = MagicMock()
+
+        assert consumer._turn_start is None
+        await consumer.emit(ThinkingDelta(text="think"))
+        assert consumer._turn_start is not None
+        assert isinstance(consumer._turn_start, float)
+
+    @pytest.mark.asyncio
+    async def test_turn_timer_starts_on_stream_delta_too(self):
+        consumer, renderer, _ = self._make_consumer()
+        assert consumer._turn_start is None
+        await consumer.emit(StreamDelta(content="direct answer"))
+        assert consumer._turn_start is not None
+
+    # ── Heartbeat ──
+
+    @pytest.mark.asyncio
+    async def test_thinking_heartbeat_starts_during_thinking(self):
+        consumer, renderer, _ = self._make_consumer()
+        renderer.thinking_start = MagicMock()
+        renderer.thinking_update = MagicMock()
+        renderer.thinking_end = MagicMock()
+
+        await consumer.emit(ThinkingDelta(text="reasoning"))
+        assert consumer._thinking_heartbeat_task is not None
+        assert not consumer._thinking_heartbeat_task.done()
+
+        await consumer.emit(
+            TurnEnd(turn_id="t1", completion_status=CompletionStatus.COMPLETED)
+        )
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_calls_thinking_update_periodically(self):
+        consumer, renderer, _ = self._make_consumer()
+        renderer.thinking_start = MagicMock()
+        renderer.thinking_update = MagicMock()
+        renderer.thinking_end = MagicMock()
+
+        await consumer.emit(ThinkingDelta(text="thinking hard"))
+
+        await asyncio.sleep(0.3)
+
+        assert renderer.thinking_update.call_count >= 1
+        args = renderer.thinking_update.call_args
+        elapsed = args[1].get("elapsed_seconds", args[0][0] if args[0] else None)
+        assert elapsed is not None
+        assert elapsed > 0
+
+        await consumer.emit(
+            TurnEnd(turn_id="t1", completion_status=CompletionStatus.COMPLETED)
+        )
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_stopped_on_stream_transition(self):
+        consumer, renderer, _ = self._make_consumer()
+        renderer.thinking_start = MagicMock()
+        renderer.thinking_update = MagicMock()
+        renderer.thinking_end = MagicMock()
+
+        await consumer.emit(ThinkingDelta(text="think"))
+        assert consumer._thinking_heartbeat_task is not None
+
+        await consumer.emit(StreamDelta(content="answer"))
+        assert (
+            consumer._thinking_heartbeat_task is None
+            or consumer._thinking_heartbeat_task.done()
+        )
+
+        await consumer.emit(
+            TurnEnd(turn_id="t1", completion_status=CompletionStatus.COMPLETED)
+        )
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_stopped_on_turn_end(self):
+        consumer, renderer, _ = self._make_consumer()
+        renderer.thinking_start = MagicMock()
+        renderer.thinking_update = MagicMock()
+        renderer.thinking_end = MagicMock()
+
+        await consumer.emit(ThinkingDelta(text="think"))
+        assert consumer._thinking_heartbeat_task is not None
+
+        await consumer.emit(
+            TurnEnd(turn_id="t1", completion_status=CompletionStatus.COMPLETED)
+        )
+        assert (
+            consumer._thinking_heartbeat_task is None
+            or consumer._thinking_heartbeat_task.done()
+        )
+
+
+class TestThinkingControlsAndStatusCallbacks:
+    def _make_consumer(
+        self,
+        *,
+        thinking_enabled=lambda: True,
+        thinking_effort=lambda: "medium",
+    ) -> tuple[RichConsumer, StreamingRenderer, StringIO, list[dict[str, object]]]:
+        buf = StringIO()
+        console = Console(file=buf, force_terminal=True, width=80)
+        renderer = StreamingRenderer(console=console)
+        calls: list[dict[str, object]] = []
+        consumer = RichConsumer(
+            renderer,
+            thinking_enabled=thinking_enabled,
+            thinking_effort=thinking_effort,
+            on_status=lambda snapshot: calls.append(snapshot),
+        )
+        return consumer, renderer, buf, calls
+
+    @pytest.mark.asyncio
+    async def test_thinking_delta_is_ignored_when_thinking_disabled(self):
+        consumer, renderer, _, _ = self._make_consumer(thinking_enabled=lambda: False)
+        renderer.thinking_start = MagicMock()
+
+        await consumer.emit(ThinkingDelta(text="hidden"))
+
+        renderer.thinking_start.assert_not_called()
+        assert consumer._phase == "idle"
+
+    @pytest.mark.asyncio
+    async def test_turn_status_delta_ends_thinking_before_status_update(self):
+        consumer, renderer, _, _ = self._make_consumer()
+        renderer.thinking_start = MagicMock()
+        renderer.thinking_end = MagicMock()
+        renderer.update_status = MagicMock()
+
+        await consumer.emit(ThinkingDelta(text="reasoning"))
+        await consumer.emit(TurnStatusDelta(phase="idle", tokens_in=10, tokens_out=5))
+
+        renderer.thinking_end.assert_called_once()
+        renderer.update_status.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_status_callback_receives_token_snapshot(self):
+        consumer, renderer, _, calls = self._make_consumer()
+        renderer.update_status = MagicMock()
+
+        await consumer.emit(
+            TurnStatusDelta(
+                phase="idle",
+                tokens_in=321,
+                tokens_out=123,
+                model_name="gpt-4o",
+                context_percent=12.5,
+            )
+        )
+
+        assert calls
+        assert calls[-1]["tokens_in"] == 321
+        assert calls[-1]["tokens_out"] == 123
+        assert calls[-1]["model_name"] == "gpt-4o"
+        assert calls[-1]["context_percent"] == 12.5
+
+    def test_thinking_effort_changes_heartbeat_interval(self):
+        low_consumer, _, _, _ = self._make_consumer(thinking_effort=lambda: "low")
+        medium_consumer, _, _, _ = self._make_consumer(thinking_effort=lambda: "medium")
+        high_consumer, _, _, _ = self._make_consumer(thinking_effort=lambda: "high")
+
+        assert (
+            low_consumer._thinking_heartbeat_interval()
+            > medium_consumer._thinking_heartbeat_interval()
+        )
+        assert (
+            medium_consumer._thinking_heartbeat_interval()
+            > high_consumer._thinking_heartbeat_interval()
+        )

@@ -1,6 +1,11 @@
 import time
 
-from coding_agent.ui.collapse import CollapseGroup, is_collapsible
+from coding_agent.ui.collapse import (
+    CollapseGroup,
+    is_collapsible,
+    is_compact,
+    is_hidden,
+)
 
 
 class TestIsCollapsible:
@@ -30,6 +35,46 @@ class TestIsCollapsible:
 
     def test_unknown_tool_is_not_collapsible(self):
         assert is_collapsible("custom_tool") is False
+
+
+class TestIsHidden:
+    def test_todo_write_is_hidden(self):
+        assert is_hidden("todo_write") is True
+
+    def test_todo_read_is_hidden(self):
+        assert is_hidden("todo_read") is True
+
+    def test_file_read_is_not_hidden(self):
+        assert is_hidden("file_read") is False
+
+    def test_bash_run_is_not_hidden(self):
+        assert is_hidden("bash_run") is False
+
+
+class TestIsCompact:
+    def test_file_write_is_compact(self):
+        assert is_compact("file_write") is True
+
+    def test_file_replace_is_compact(self):
+        assert is_compact("file_replace") is True
+
+    def test_file_patch_is_compact(self):
+        assert is_compact("file_patch") is True
+
+    def test_bash_run_is_compact(self):
+        assert is_compact("bash_run") is True
+
+    def test_subagent_is_compact(self):
+        assert is_compact("subagent") is True
+
+    def test_file_read_is_not_compact(self):
+        assert is_compact("file_read") is False
+
+    def test_todo_write_is_not_compact(self):
+        assert is_compact("todo_write") is False
+
+    def test_unknown_tool_is_not_compact(self):
+        assert is_compact("custom_tool") is False
 
 
 class TestCollapseGroup:

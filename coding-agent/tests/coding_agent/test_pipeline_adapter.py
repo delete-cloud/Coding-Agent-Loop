@@ -4,7 +4,13 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from agentkit.errors import PipelineError
-from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
+from agentkit.providers.models import (
+    DoneEvent,
+    TextEvent,
+    ToolCallEvent,
+    ThinkingEvent,
+    UsageEvent,
+)
 from agentkit.runtime.pipeline import Pipeline, PipelineContext
 from agentkit.runtime.hook_runtime import HookRuntime
 from agentkit.plugin.registry import PluginRegistry
@@ -13,11 +19,14 @@ from agentkit.tape.models import Entry
 
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.adapter_types import StopReason, TurnOutcome
+from coding_agent.plugins.metrics import SessionMetricsPlugin
 from coding_agent.wire.protocol import (
     CompletionStatus,
     StreamDelta,
+    ThinkingDelta,
     ToolCallDelta,
     TurnEnd,
+    TurnStatusDelta,
     WireMessage,
 )
 
@@ -42,10 +51,22 @@ class _MinimalPlugin:
         return f"result:{name}"
 
 
+class _MetricsPlugin:
+    state_key = "session_metrics"
+
+    def __init__(self) -> None:
+        self.plugin = SessionMetricsPlugin()
+
+    def hooks(self):
+        return self.plugin.hooks()
+
+
 def _make_pipeline_and_ctx(
     mock_stream_fn,
     session_id: str = "test-session",
     config: dict | None = None,
+    *,
+    with_metrics: bool = False,
 ) -> tuple[Pipeline, PipelineContext, _MinimalPlugin]:
     plugin = _MinimalPlugin()
 
@@ -55,6 +76,8 @@ def _make_pipeline_and_ctx(
 
     registry = PluginRegistry()
     registry.register(plugin)
+    if with_metrics:
+        registry.register(_MetricsPlugin())
     runtime = HookRuntime(registry)
     pipeline = Pipeline(runtime=runtime, registry=registry)
 
@@ -474,6 +497,7 @@ class TestErrorRecovery:
         outcome = await adapter.run_turn("do stuff")
 
         assert outcome.stop_reason == StopReason.ERROR
+        assert outcome.error is not None
         assert "unexpected failure" in outcome.error
 
     # ── 5. Multiple consecutive errors → adapter stays functional ────────
@@ -497,14 +521,17 @@ class TestErrorRecovery:
 
         o1 = await adapter.run_turn("msg1")
         assert o1.stop_reason == StopReason.ERROR
+        assert o1.error is not None
         assert "error #1" in o1.error
 
         o2 = await adapter.run_turn("msg2")
         assert o2.stop_reason == StopReason.ERROR
+        assert o2.error is not None
         assert "error #2" in o2.error
 
         o3 = await adapter.run_turn("msg3")
         assert o3.stop_reason == StopReason.ERROR
+        assert o3.error is not None
         assert "error #3" in o3.error
 
         user_entries = [
@@ -532,3 +559,125 @@ class TestErrorRecovery:
         assert len(turn_ends) == 1
         assert turn_ends[0].completion_status == CompletionStatus.ERROR
         assert turn_ends[0].session_id == "s-consumer-err"
+
+
+class TestThinkingAndUsageEventHandling:
+    @pytest.mark.asyncio
+    async def test_thinking_event_emits_thinking_delta(self):
+        async def mock_stream(messages, tools=None, **kw):
+            yield ThinkingEvent(text="Let me reason...")
+            yield TextEvent(text="Answer")
+            yield DoneEvent()
+
+        pipeline, ctx, _ = _make_pipeline_and_ctx(mock_stream, session_id="s-think")
+        consumer = _RecordingConsumer()
+        adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
+
+        await adapter.run_turn("question")
+
+        thinking_deltas = [m for m in consumer.messages if isinstance(m, ThinkingDelta)]
+        assert len(thinking_deltas) == 1
+        assert thinking_deltas[0].text == "Let me reason..."
+        assert thinking_deltas[0].session_id == "s-think"
+
+    @pytest.mark.asyncio
+    async def test_usage_event_emits_turn_status_delta(self):
+        async def mock_stream(messages, tools=None, **kw):
+            yield TextEvent(text="Hi")
+            yield UsageEvent(input_tokens=100, output_tokens=50, provider_name="gpt-4o")
+            yield DoneEvent()
+
+        pipeline, ctx, _ = _make_pipeline_and_ctx(mock_stream, session_id="s-usage")
+        consumer = _RecordingConsumer()
+        adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
+
+        await adapter.run_turn("hello")
+
+        status_deltas = [m for m in consumer.messages if isinstance(m, TurnStatusDelta)]
+        assert len(status_deltas) == 1
+        assert status_deltas[0].tokens_in == 100
+        assert status_deltas[0].tokens_out == 50
+        assert status_deltas[0].phase == "idle"
+        assert status_deltas[0].session_id == "s-usage"
+
+    @pytest.mark.asyncio
+    async def test_usage_event_updates_session_metrics_plugin(self):
+        async def mock_stream(messages, tools=None, **kw):
+            yield UsageEvent(input_tokens=11, output_tokens=7, provider_name="gpt-4o")
+            yield DoneEvent()
+
+        pipeline, ctx, _ = _make_pipeline_and_ctx(
+            mock_stream, session_id="s-metrics", with_metrics=True
+        )
+        consumer = _RecordingConsumer()
+        adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
+
+        await adapter.run_turn("hello")
+
+        plugin_state = ctx.plugin_states.get("session_metrics", {})
+        assert plugin_state.get("tokens_input") == 11
+        assert plugin_state.get("tokens_output") == 7
+
+    @pytest.mark.asyncio
+    async def test_mixed_event_stream_converts_in_order(self):
+        async def mock_stream(messages, tools=None, **kw):
+            yield ThinkingEvent(text="hmm")
+            yield TextEvent(text="result")
+            yield UsageEvent(input_tokens=10, output_tokens=5, provider_name="test")
+            yield DoneEvent()
+
+        pipeline, ctx, _ = _make_pipeline_and_ctx(mock_stream, session_id="s-mix")
+        consumer = _RecordingConsumer()
+        adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
+
+        await adapter.run_turn("test")
+
+        msgs_before_turn_end = [
+            m for m in consumer.messages if not isinstance(m, TurnEnd)
+        ]
+        assert isinstance(msgs_before_turn_end[0], ThinkingDelta)
+        assert isinstance(msgs_before_turn_end[1], StreamDelta)
+        assert isinstance(msgs_before_turn_end[2], TurnStatusDelta)
+
+    @pytest.mark.asyncio
+    async def test_usage_event_with_zero_tokens_still_emits(self):
+        async def mock_stream(messages, tools=None, **kw):
+            yield TextEvent(text="text")
+            yield UsageEvent(input_tokens=0, output_tokens=0, provider_name="test")
+            yield DoneEvent()
+
+        pipeline, ctx, _ = _make_pipeline_and_ctx(mock_stream, session_id="s-zero")
+        consumer = _RecordingConsumer()
+        adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
+
+        await adapter.run_turn("hi")
+
+        status_deltas = [m for m in consumer.messages if isinstance(m, TurnStatusDelta)]
+        assert len(status_deltas) == 1
+        assert status_deltas[0].tokens_in == 0
+        assert status_deltas[0].tokens_out == 0
+
+    @pytest.mark.asyncio
+    async def test_thinking_interleaved_with_text(self):
+        async def mock_stream(messages, tools=None, **kw):
+            yield ThinkingEvent(text="first thought")
+            yield TextEvent(text="partial")
+            yield ThinkingEvent(text="second thought")
+            yield TextEvent(text="done")
+            yield DoneEvent()
+
+        pipeline, ctx, _ = _make_pipeline_and_ctx(mock_stream, session_id="s-inter")
+        consumer = _RecordingConsumer()
+        adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
+
+        await adapter.run_turn("complex")
+
+        msgs_before_end = [m for m in consumer.messages if not isinstance(m, TurnEnd)]
+        assert isinstance(msgs_before_end[0], ThinkingDelta)
+        assert msgs_before_end[0].text == "first thought"
+        assert isinstance(msgs_before_end[1], StreamDelta)
+        assert msgs_before_end[1].content == "partial"
+        assert isinstance(msgs_before_end[2], ThinkingDelta)
+        assert msgs_before_end[2].text == "second thought"
+        assert isinstance(msgs_before_end[3], StreamDelta)
+        assert msgs_before_end[3].content == "done"

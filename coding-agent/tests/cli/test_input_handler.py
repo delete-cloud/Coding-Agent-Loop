@@ -10,6 +10,7 @@ from prompt_toolkit.completion.base import CompleteEvent
 from prompt_toolkit.formatted_text import to_formatted_text
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.key_binding.key_processor import KeyPressEvent
 
 # Sentinel constants — mirror production values (permanent test fixtures).
@@ -31,20 +32,39 @@ class DummyBuffer:
         )
         self.insert_text_calls: list[str] = []
         self.delete_before_cursor_calls: list[int] = []
+        self.delete_calls: list[int] = []
         self.validate_and_handle_called = False
         self.reset_called = False
 
     def insert_text(self, text: str) -> None:
         self.insert_text_calls.append(text)
+        before = self.text[: self.cursor_position]
+        after = self.text[self.cursor_position :]
+        self.text = before + text + after
+        self.cursor_position += len(text)
 
     def delete_before_cursor(self, count: int = 1) -> None:
         self.delete_before_cursor_calls.append(count)
+        start = max(0, self.cursor_position - count)
+        self.text = self.text[:start] + self.text[self.cursor_position :]
+        self.cursor_position = start
+
+    def delete(self, count: int = 1) -> None:
+        self.delete_calls.append(count)
+        self.text = (
+            self.text[: self.cursor_position]
+            + self.text[self.cursor_position + count :]
+        )
 
     def validate_and_handle(self) -> None:
         self.validate_and_handle_called = True
 
     def reset(self) -> None:
         self.reset_called = True
+
+    @property
+    def document(self):
+        return SimpleNamespace(cursor_position=self.cursor_position, text=self.text)
 
 
 class DummyApp:
@@ -64,7 +84,10 @@ def _make_event(app: DummyApp) -> KeyPressEvent:
 
 _PT_KEY_ALIASES: dict[str, str] = {
     "backspace": "c-h",
+    "delete": "delete",
     "enter": "c-m",
+    "left": "left",
+    "right": "right",
 }
 
 
@@ -92,6 +115,29 @@ def _get_key_binding_for_keys(handler: InputHandler, *keys: str):
     if not matches:
         raise KeyError(f"No binding registered for keys: {keys!r}")
     return matches[0]
+
+
+def _get_active_key_binding_for_keys(handler: InputHandler, *keys: str):
+    normalized = tuple(_normalize_key(key) for key in keys)
+    matches = [b for b in handler.bindings.bindings if b.keys == normalized]
+    if not matches:
+        raise KeyError(f"No binding registered for keys: {keys!r}")
+    for binding in matches:
+        filter_fn = getattr(binding, "filter", None)
+        if filter_fn is None or filter_fn():
+            return binding
+    raise KeyError(f"No active binding registered for keys: {keys!r}")
+
+
+def _get_active_any_key_binding(handler: InputHandler):
+    matches = [b for b in handler.bindings.bindings if b.keys == (Keys.Any,)]
+    if not matches:
+        raise KeyError("No any-key binding registered")
+    for binding in matches:
+        filter_fn = getattr(binding, "filter", None)
+        if filter_fn is None or filter_fn():
+            return binding
+    raise KeyError("No active any-key binding registered")
 
 
 # ---------------------------------------------------------------------------
@@ -189,17 +235,138 @@ class TestTUISeparators:
         assert handler.chat_session.bottom_toolbar is not None
         assert callable(handler.chat_session.bottom_toolbar)
 
-    def test_bottom_toolbar_returns_formatted_text_with_hints(self):
+    def test_bottom_toolbar_is_empty_without_slash_input(self):
         handler = InputHandler()
 
-        toolbar = handler.chat_session.bottom_toolbar
-        assert toolbar is not None
-        assert callable(toolbar)
-        toolbar_fn = cast(Callable[[], Any], toolbar)
-        rendered = "".join(text for _, text, *_ in to_formatted_text(toolbar_fn()))
+        rendered = "".join(
+            text
+            for _, text, *_ in to_formatted_text(handler._build_slash_toolbar("hello"))
+        )
+
+        assert rendered == ""
+
+    def test_bottom_toolbar_shows_available_commands_for_slash(self):
+        handler = InputHandler()
+
+        rendered = "".join(
+            text for _, text, *_ in to_formatted_text(handler._build_slash_toolbar("/"))
+        )
 
         assert "/help" in rendered
-        assert "bash" in rendered.lower()
+        assert "/clear" in rendered
+        assert "available commands" in rendered.lower()
+
+    def test_bottom_toolbar_filters_commands_by_prefix(self):
+        handler = InputHandler()
+
+        rendered = "".join(
+            text
+            for _, text, *_ in to_formatted_text(handler._build_slash_toolbar("/mo"))
+        )
+
+        assert "/model" in rendered
+        assert "/help" not in rendered
+
+    def test_bottom_toolbar_shows_descriptions(self):
+        handler = InputHandler()
+        fragments = to_formatted_text(handler._build_slash_toolbar("/"))
+        rendered = "".join(text for _, text, *_ in fragments)
+
+        assert "Show available commands" in rendered
+
+    def test_bottom_toolbar_highlights_best_match(self):
+        handler = InputHandler()
+        fragments = to_formatted_text(handler._build_slash_toolbar("/mo"))
+
+        best_matches = [
+            text
+            for style, text, *_ in fragments
+            if style == "class:toolbar.key.bestmatch"
+        ]
+
+        assert best_matches == ["/model"]
+
+    def test_bottom_toolbar_uses_sorted_command_order(self):
+        handler = InputHandler()
+        fragments = to_formatted_text(handler._build_slash_toolbar("/"))
+
+        commands = [
+            text
+            for style, text, *_ in fragments
+            if style in {"class:toolbar.key", "class:toolbar.key.bestmatch"}
+            and text.startswith("/")
+        ]
+
+        assert commands == ["/clear", "/exit", "/help", "/mcp", "/model"]
+
+    def test_bottom_toolbar_limits_to_5_items(self):
+        handler = InputHandler()
+        fragments = to_formatted_text(handler._build_slash_toolbar("/"))
+
+        keys = [
+            text
+            for style, text, *_ in fragments
+            if style == "class:toolbar.key" or style == "class:toolbar.key.bestmatch"
+        ]
+
+        commands = [k for k in keys if k.startswith("/")]
+        assert len(commands) == 5
+
+    def test_bottom_toolbar_falls_back_to_sorted_commands_when_no_prefix_matches(self):
+        handler = InputHandler()
+        fragments = to_formatted_text(handler._build_slash_toolbar("/zzz"))
+
+        commands = [
+            text
+            for style, text, *_ in fragments
+            if style in {"class:toolbar.key", "class:toolbar.key.bestmatch"}
+            and text.startswith("/")
+        ]
+
+        assert commands == ["/clear", "/exit", "/help", "/mcp", "/model"]
+        assert all(
+            style != "class:toolbar.key.bestmatch"
+            for style, text, *_ in fragments
+            if text.startswith("/")
+        )
+
+    def test_bottom_toolbar_truncates_long_descriptions(self, monkeypatch):
+        handler = InputHandler()
+
+        monkeypatch.setattr(
+            "coding_agent.cli.input_handler.get_commands_with_descriptions",
+            lambda: [("/demo", "x" * 80)],
+        )
+
+        rendered = "".join(
+            text for _, text, *_ in to_formatted_text(handler._build_slash_toolbar("/"))
+        )
+
+        assert "x" * 80 not in rendered
+        assert "x" * 24 in rendered
+        assert "…" in rendered
+
+    def test_bottom_toolbar_shows_status_when_not_in_slash_mode(self):
+        handler = InputHandler()
+        handler.set_status_text("gpt-4o | 12% | 321↑ 123↓ | 9s")
+
+        rendered = "".join(
+            text for _, text, *_ in to_formatted_text(handler._build_bottom_toolbar())
+        )
+
+        assert "gpt-4o" in rendered
+        assert "321↑ 123↓" in rendered
+
+    def test_slash_toolbar_still_wins_over_status_text(self):
+        handler = InputHandler()
+        handler.set_status_text("gpt-4o | 12% | 321↑ 123↓ | 9s")
+
+        rendered = "".join(
+            text for _, text, *_ in to_formatted_text(handler._build_slash_toolbar("/"))
+        )
+
+        assert "Available commands" in rendered
+        assert "321↑ 123↓" not in rendered
 
     def test_prompt_style_has_separator_class(self):
         from coding_agent.cli.input_handler import PROMPT_STYLE
@@ -318,6 +485,143 @@ class TestKeystrokeBashToggle:
 
         assert app.exit_called is False
         assert 1 in buf.delete_before_cursor_calls
+
+    def test_escape_in_chat_mode_deletes_entire_paste_placeholder(self):
+        handler = InputHandler()
+        placeholder = "[Pasted text #2 +35 lines]"
+        handler._shell_mode = False
+        handler._chat_buffer_has_paste_placeholder = lambda: True
+        binding = _get_active_key_binding_for_keys(handler, "escape")
+        buf = DummyBuffer(text=placeholder, cursor_position=len(placeholder))
+        app = DummyApp(buffer=buf)
+        event = _make_event(app)
+
+        binding.handler(event)
+
+        assert app.exit_called is False
+        assert buf.text == ""
+        assert buf.delete_before_cursor_calls == [len(placeholder)]
+
+    def test_backspace_in_chat_mode_deletes_entire_paste_placeholder(self):
+        handler = InputHandler()
+        placeholder = "[Pasted text #2 +35 lines]"
+        handler._shell_mode = False
+        binding = _get_active_key_binding_for_keys(handler, "backspace")
+        buf = DummyBuffer(text=placeholder, cursor_position=len(placeholder))
+        app = DummyApp(buffer=buf)
+        event = _make_event(app)
+
+        binding.handler(event)
+
+        assert app.exit_called is False
+        assert buf.text == ""
+        assert buf.delete_before_cursor_calls == [len(placeholder)]
+
+    def test_backspace_in_chat_mode_deletes_single_character_outside_placeholder(self):
+        handler = InputHandler()
+        handler._shell_mode = False
+        binding = _get_active_key_binding_for_keys(handler, "backspace")
+        buf = DummyBuffer(text="hello", cursor_position=5)
+        app = DummyApp(buffer=buf)
+        event = _make_event(app)
+
+        binding.handler(event)
+
+        assert app.exit_called is False
+        assert buf.text == "hell"
+        assert buf.delete_before_cursor_calls == [1]
+
+    def test_delete_in_chat_mode_deletes_entire_paste_placeholder(self):
+        handler = InputHandler()
+        placeholder = "[Pasted text #2 +35 lines]"
+        handler._shell_mode = False
+        binding = _get_active_key_binding_for_keys(handler, "delete")
+        buf = DummyBuffer(text=placeholder, cursor_position=0)
+        app = DummyApp(buffer=buf)
+        event = _make_event(app)
+
+        binding.handler(event)
+
+        assert app.exit_called is False
+        assert buf.text == ""
+        assert buf.delete_calls == [len(placeholder)]
+
+    def test_delete_inside_placeholder_preserves_surrounding_text(self):
+        handler = InputHandler()
+        placeholder = "[Pasted text #2 +35 lines]"
+        handler._shell_mode = False
+        binding = _get_active_key_binding_for_keys(handler, "delete")
+        buf = DummyBuffer(text=f"hi {placeholder} ok", cursor_position=8)
+        app = DummyApp(buffer=buf)
+        event = _make_event(app)
+
+        binding.handler(event)
+
+        assert buf.text == "hi  ok"
+
+    def test_left_arrow_skips_to_placeholder_start(self):
+        handler = InputHandler()
+        placeholder = "[Pasted text #2 +35 lines]"
+        handler._shell_mode = False
+        binding = _get_active_key_binding_for_keys(handler, "left")
+        buf = DummyBuffer(text=f"hi {placeholder} ok", cursor_position=8)
+        app = DummyApp(buffer=buf)
+        event = _make_event(app)
+
+        binding.handler(event)
+
+        assert buf.cursor_position == 3
+
+    def test_right_arrow_skips_to_placeholder_end(self):
+        handler = InputHandler()
+        placeholder = "[Pasted text #2 +35 lines]"
+        handler._shell_mode = False
+        binding = _get_active_key_binding_for_keys(handler, "right")
+        start = 3
+        buf = DummyBuffer(text=f"hi {placeholder} ok", cursor_position=start + 1)
+        app = DummyApp(buffer=buf)
+        event = _make_event(app)
+
+        binding.handler(event)
+
+        assert buf.cursor_position == start + len(placeholder)
+
+    def test_printable_text_inserts_after_placeholder_instead_of_splitting_it(self):
+        handler = InputHandler()
+        placeholder = "[Pasted text #2 +35 lines]"
+        handler._shell_mode = False
+        binding = _get_active_any_key_binding(handler)
+        buf = DummyBuffer(text=f"hi {placeholder} ok", cursor_position=8)
+        app = DummyApp(buffer=buf)
+        event = cast(
+            KeyPressEvent,
+            cast(object, SimpleNamespace(app=app, data="x")),
+        )
+
+        binding.handler(event)
+
+        assert buf.text == f"hi {placeholder}x ok"
+
+    def test_placeholder_toolbar_render_uses_distinct_style(self):
+        handler = InputHandler()
+        placeholder = "[Pasted text #2 +35 lines]"
+
+        fragments = to_formatted_text(
+            handler._highlight_paste_placeholders(placeholder)
+        )
+
+        assert any(
+            style == "class:paste.placeholder" and text == placeholder
+            for style, text, *_ in fragments
+        )
+
+    def test_chat_session_uses_input_processors_for_placeholder_chip_rendering(self):
+        handler = InputHandler()
+
+        processors = getattr(handler.chat_session, "input_processors", None)
+
+        assert processors is not None
+        assert processors
 
 
 class TestEnterBindings:

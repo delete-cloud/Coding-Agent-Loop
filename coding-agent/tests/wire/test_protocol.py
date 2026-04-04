@@ -12,8 +12,10 @@ from coding_agent.wire.protocol import (
     ApprovalResponse,
     CompletionStatus,
     StreamDelta,
+    ThinkingDelta,
     ToolCallDelta,
     TurnEnd,
+    TurnStatusDelta,
     WireMessage,
 )
 
@@ -24,10 +26,10 @@ class TestWireMessage:
     def test_wire_message_creation(self):
         """Test basic WireMessage creation."""
         msg = WireMessage(session_id="test-session-123")
-        
+
         assert msg.session_id == "test-session-123"
         assert isinstance(msg.timestamp, datetime)
-    
+
     def test_wire_message_custom_timestamp(self):
         """Test WireMessage with custom timestamp."""
         custom_time = datetime(2024, 1, 15, 10, 30, 0)
@@ -35,7 +37,7 @@ class TestWireMessage:
             session_id="test-session",
             timestamp=custom_time,
         )
-        
+
         assert msg.timestamp == custom_time
 
 
@@ -48,7 +50,7 @@ class TestStreamDelta:
             session_id="session-1",
             content="Hello, world!",
         )
-        
+
         assert msg.session_id == "session-1"
         assert msg.content == "Hello, world!"
         assert msg.role == "assistant"
@@ -61,7 +63,7 @@ class TestStreamDelta:
             content="Some content",
             role="user",
         )
-        
+
         assert msg.role == "user"
 
     def test_stream_delta_is_wire_message(self):
@@ -70,7 +72,7 @@ class TestStreamDelta:
             session_id="session-1",
             content="test",
         )
-        
+
         assert isinstance(msg, WireMessage)
 
 
@@ -86,7 +88,7 @@ class TestToolCallDelta:
             arguments=args,
             call_id="call-123",
         )
-        
+
         assert msg.session_id == "session-1"
         assert msg.tool_name == "write_file"
         assert msg.arguments == args
@@ -100,7 +102,7 @@ class TestToolCallDelta:
             arguments={},
             call_id="call-456",
         )
-        
+
         assert msg.arguments == {}
 
     def test_tool_call_delta_nested_args(self):
@@ -115,7 +117,7 @@ class TestToolCallDelta:
             arguments=args,
             call_id="call-789",
         )
-        
+
         assert msg.arguments["config"]["timeout"] == 30
         assert msg.arguments["items"] == ["a", "b", "c"]
 
@@ -136,7 +138,7 @@ class TestApprovalRequest:
             request_id="req-456",
             tool_call=tool_call,
         )
-        
+
         assert msg.session_id == "session-1"
         assert msg.request_id == "req-456"
         assert msg.tool_call == tool_call
@@ -156,7 +158,7 @@ class TestApprovalRequest:
             tool_call=tool_call,
             timeout_seconds=60,
         )
-        
+
         assert msg.timeout_seconds == 60
 
 
@@ -170,7 +172,7 @@ class TestApprovalResponse:
             request_id="req-456",
             approved=True,
         )
-        
+
         assert msg.session_id == "session-1"
         assert msg.request_id == "req-456"
         assert msg.approved is True
@@ -184,7 +186,7 @@ class TestApprovalResponse:
             approved=False,
             feedback="This operation looks dangerous",
         )
-        
+
         assert msg.approved is False
         assert msg.feedback == "This operation looks dangerous"
 
@@ -195,7 +197,7 @@ class TestApprovalResponse:
             request_id="req-456",
             approved=False,
         )
-        
+
         assert msg.approved is False
         assert msg.feedback is None
 
@@ -210,7 +212,7 @@ class TestTurnEnd:
             turn_id="turn-123",
             completion_status=CompletionStatus.COMPLETED,
         )
-        
+
         assert msg.session_id == "session-1"
         assert msg.turn_id == "turn-123"
         assert msg.completion_status == "completed"
@@ -222,7 +224,7 @@ class TestTurnEnd:
             turn_id="turn-456",
             completion_status=CompletionStatus.BLOCKED,
         )
-        
+
         assert msg.completion_status == "blocked"
 
     def test_turn_end_error(self):
@@ -232,7 +234,7 @@ class TestTurnEnd:
             turn_id="turn-789",
             completion_status=CompletionStatus.ERROR,
         )
-        
+
         assert msg.completion_status == "error"
 
     def test_turn_end_string_status(self):
@@ -242,7 +244,7 @@ class TestTurnEnd:
             turn_id="turn-abc",
             completion_status="completed",
         )
-        
+
         assert msg.completion_status == "completed"
 
 
@@ -260,20 +262,79 @@ class TestCompletionStatus:
         assert isinstance(CompletionStatus.COMPLETED, str)
 
 
+class TestThinkingDelta:
+    def test_creation_with_text(self):
+        msg = ThinkingDelta(text="reasoning about the problem")
+        assert msg.text == "reasoning about the problem"
+
+    def test_is_wire_message(self):
+        msg = ThinkingDelta(text="thinking")
+        assert isinstance(msg, WireMessage)
+
+    def test_has_session_id_and_timestamp(self):
+        msg = ThinkingDelta(session_id="sess-1", text="thought")
+        assert msg.session_id == "sess-1"
+        assert isinstance(msg.timestamp, datetime)
+
+    def test_custom_timestamp(self):
+        ts = datetime(2025, 6, 1, 12, 0, 0)
+        msg = ThinkingDelta(text="thought", timestamp=ts)
+        assert msg.timestamp == ts
+
+
+class TestTurnStatusDelta:
+    def test_creation_with_all_fields(self):
+        msg = TurnStatusDelta(
+            phase="thinking",
+            elapsed_seconds=5.2,
+            tokens_in=100,
+            tokens_out=50,
+            model_name="gpt-4",
+            context_percent=42.5,
+        )
+        assert msg.phase == "thinking"
+        assert msg.elapsed_seconds == 5.2
+        assert msg.tokens_in == 100
+        assert msg.tokens_out == 50
+        assert msg.model_name == "gpt-4"
+        assert msg.context_percent == 42.5
+
+    def test_defaults(self):
+        msg = TurnStatusDelta(phase="idle")
+        assert msg.elapsed_seconds == 0.0
+        assert msg.tokens_in == 0
+        assert msg.tokens_out == 0
+        assert msg.model_name == ""
+        assert msg.context_percent == 0.0
+
+    def test_is_wire_message(self):
+        msg = TurnStatusDelta(phase="streaming")
+        assert isinstance(msg, WireMessage)
+
+    def test_phase_values(self):
+        for phase in ("thinking", "streaming", "tool_call", "idle"):
+            msg = TurnStatusDelta(phase=phase)
+            assert msg.phase == phase
+
+    def test_has_session_id(self):
+        msg = TurnStatusDelta(session_id="sess-2", phase="tool_call")
+        assert msg.session_id == "sess-2"
+
+
 class TestMessageSerialization:
     """Tests for message serialization-like behavior."""
 
     def test_dataclass_asdict(self):
         """Test converting message to dict."""
         from dataclasses import asdict
-        
+
         msg = StreamDelta(
             session_id="session-1",
             content="test content",
         )
-        
+
         data = asdict(msg)
-        
+
         assert data["session_id"] == "session-1"
         assert data["content"] == "test content"
         assert data["role"] == "assistant"
@@ -282,7 +343,7 @@ class TestMessageSerialization:
     def test_nested_dataclass_asdict(self):
         """Test converting ApprovalRequest with nested ToolCallDelta to dict."""
         from dataclasses import asdict
-        
+
         tool_call = ToolCallDelta(
             session_id="session-1",
             tool_name="test_tool",
@@ -294,9 +355,9 @@ class TestMessageSerialization:
             request_id="req-456",
             tool_call=tool_call,
         )
-        
+
         data = asdict(request)
-        
+
         assert data["session_id"] == "session-1"
         assert data["request_id"] == "req-456"
         assert data["timeout_seconds"] == 120

@@ -509,6 +509,7 @@ class TestPasteFoldingInRepl:
         assert "[Pasted text" in rendered_messages[0]
         assert len(turned_messages) == 1
         assert turned_messages[0] == long_message
+        assert session.input_handler._paste_refs == {}
 
     @pytest.mark.asyncio
     async def test_mixed_context_and_large_block_keeps_context_in_display(
@@ -558,3 +559,228 @@ class TestPasteFoldingInRepl:
         assert "after context" not in rendered_messages[0]
         assert "[Pasted text" in rendered_messages[0]
         assert turned_messages == [mixed_message]
+        assert session.input_handler._paste_refs == {}
+
+
+class TestFooterIntegration:
+    def _make_config(self):
+        return SimpleNamespace(
+            model="gpt-4o",
+            repo=None,
+            api_key=None,
+            provider="openai",
+            base_url=None,
+            max_steps=None,
+            approval_mode=None,
+        )
+
+    def test_init_creates_footer(self, monkeypatch):
+        from coding_agent.cli.repl import InteractiveSession
+
+        monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
+        session = InteractiveSession(self._make_config())
+        assert hasattr(session, "_footer")
+        assert session._footer is not None
+
+    def test_footer_mode_is_spike_pending_before_run(self, monkeypatch):
+        from coding_agent.cli.repl import InteractiveSession
+
+        monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
+        session = InteractiveSession(self._make_config())
+        assert session._footer.mode == "spike-pending"
+
+    @pytest.mark.asyncio
+    async def test_run_enables_and_disables_footer(self, monkeypatch):
+        from coding_agent.cli.repl import InteractiveSession
+
+        monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
+        session = InteractiveSession(self._make_config())
+
+        enable_calls: list[str] = []
+        disable_calls: list[str] = []
+
+        def fake_spike():
+            session._footer._mode = "persistent"
+            return "persistent"
+
+        monkeypatch.setattr(session._footer, "run_spike_check", fake_spike)
+        monkeypatch.setattr(
+            session._footer, "enable", lambda: enable_calls.append("enable")
+        )
+        monkeypatch.setattr(
+            session._footer, "disable", lambda: disable_calls.append("disable")
+        )
+
+        async def fake_get_input(**kwargs):
+            return None
+
+        monkeypatch.setattr(session.input_handler, "get_input", fake_get_input)
+        await session.run()
+
+        assert enable_calls == ["enable"]
+        assert disable_calls == ["disable"]
+
+    @pytest.mark.asyncio
+    async def test_footer_update_called_during_process_message(self, monkeypatch):
+        from coding_agent.cli.repl import InteractiveSession
+
+        monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
+        session = InteractiveSession(self._make_config())
+
+        update_calls: list[dict[str, object]] = []
+
+        def tracking_update(**kwargs):
+            update_calls.append(kwargs)
+
+        monkeypatch.setattr(session._footer, "update", tracking_update)
+        session._footer._mode = "persistent"
+        session._footer._enabled = True
+
+        session._renderer = SimpleNamespace(user_message=lambda msg: None)
+        session._pipeline_adapter = SimpleNamespace(
+            run_turn=lambda msg: _async_return(
+                SimpleNamespace(stop_reason=SimpleNamespace(ERROR=None), error=None)
+            )
+        )
+
+        await session._process_message("hello")
+        assert any("phase" in c for c in update_calls)
+
+    @pytest.mark.asyncio
+    async def test_footer_disabled_during_approval(self, monkeypatch):
+        from coding_agent.cli.repl import InteractiveSession
+
+        monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
+        session = InteractiveSession(self._make_config())
+
+        session._footer._mode = "persistent"
+        session._footer._enabled = True
+
+        lifecycle: list[str] = []
+        monkeypatch.setattr(
+            session._footer, "disable", lambda: lifecycle.append("disable")
+        )
+        monkeypatch.setattr(
+            session._footer, "enable", lambda: lifecycle.append("enable")
+        )
+
+        monkeypatch.setattr("builtins.input", lambda prompt: "y")
+
+        import asyncio
+
+        result = await session._ask_user_for_approval("Allow?")
+
+        assert "disable" in lifecycle
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_clear_command_triggers_footer_redraw(self, monkeypatch):
+        from coding_agent.cli.repl import InteractiveSession
+
+        monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
+        session = InteractiveSession(self._make_config())
+
+        session._footer._mode = "persistent"
+        session._footer._enabled = True
+
+        redraw_calls: list[str] = []
+        monkeypatch.setattr(
+            session._footer, "clear_and_redraw", lambda: redraw_calls.append("redraw")
+        )
+
+        from coding_agent.cli.commands import handle_command
+
+        await handle_command("/clear", session.context)
+
+        if hasattr(session, "_on_clear"):
+            session._on_clear()
+            assert redraw_calls == ["redraw"]
+
+    def test_footer_not_enabled_in_nontty(self, monkeypatch):
+        from coding_agent.cli.repl import InteractiveSession
+
+        monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
+        session = InteractiveSession(self._make_config())
+
+        spike_result = session._footer.run_spike_check()
+        if not session._footer._console.is_terminal:
+            assert spike_result == "fallback-toolbar"
+
+    @pytest.mark.asyncio
+    async def test_footer_disable_in_finally_on_error(self, monkeypatch):
+        from coding_agent.cli.repl import InteractiveSession
+
+        monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
+        session = InteractiveSession(self._make_config())
+
+        disable_calls: list[str] = []
+        monkeypatch.setattr(session._footer, "run_spike_check", lambda: "persistent")
+        monkeypatch.setattr(session._footer, "enable", lambda: None)
+        monkeypatch.setattr(
+            session._footer, "disable", lambda: disable_calls.append("disable")
+        )
+
+        async def exploding_get_input(**kwargs):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(session.input_handler, "get_input", exploding_get_input)
+
+        with pytest.raises(RuntimeError, match="boom"):
+            await session.run()
+
+        assert disable_calls == ["disable"]
+
+    def test_status_update_updates_input_toolbar_text(self, monkeypatch):
+        from coding_agent.cli.repl import InteractiveSession
+
+        monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
+        session = InteractiveSession(self._make_config())
+
+        session._handle_status_update(
+            {
+                "phase": "idle",
+                "tokens_in": 321,
+                "tokens_out": 123,
+                "elapsed_seconds": 9.0,
+                "model_name": "gpt-4o",
+                "context_percent": 12.5,
+            }
+        )
+
+        assert "gpt-4o" in session.input_handler._status_text
+        assert "321↑ 123↓" in session.input_handler._status_text
+
+    def test_status_update_pushes_live_data_to_footer_in_persistent_mode(
+        self, monkeypatch
+    ):
+        from coding_agent.cli.repl import InteractiveSession
+
+        monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
+        session = InteractiveSession(self._make_config())
+        session._footer._mode = "persistent"
+        session._footer._enabled = True
+
+        calls: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            session._footer, "update", lambda **kwargs: calls.append(kwargs)
+        )
+
+        session._handle_status_update(
+            {
+                "phase": "thinking",
+                "tokens_in": 10,
+                "tokens_out": 5,
+                "elapsed_seconds": 2.0,
+                "model_name": "gpt-4o",
+                "context_percent": 33.3,
+            }
+        )
+
+        assert calls
+        assert calls[-1]["tokens_in"] == 10
+        assert calls[-1]["tokens_out"] == 5
+        assert calls[-1]["phase"] == "thinking"
+
+
+async def _async_return(value):
+    return value

@@ -374,3 +374,56 @@ class TestSessionMetricsTopicTracking:
         plugin = SessionMetricsPlugin()
         plugin.on_session_event(event_type="handoff", payload={"reason": "window"})
         assert plugin._current_topic_id is None
+
+
+class TestSessionMetricsTokenTracking:
+    def test_record_token_usage(self) -> None:
+        plugin = SessionMetricsPlugin()
+        plugin.record_token_usage(100, 50)
+        metrics = plugin.get_metrics()
+        assert metrics["tokens_input"] == 100
+        assert metrics["tokens_output"] == 50
+
+    def test_token_accumulation_across_calls(self) -> None:
+        plugin = SessionMetricsPlugin()
+        plugin.record_token_usage(100, 50)
+        plugin.record_token_usage(200, 80)
+        metrics = plugin.get_metrics()
+        assert metrics["tokens_input"] == 300
+        assert metrics["tokens_output"] == 130
+
+    def test_session_tokens_accumulate_across_turns(self) -> None:
+        plugin = SessionMetricsPlugin()
+        plugin.record_token_usage(100, 50)
+        plugin.reset_turn()
+        plugin.record_token_usage(200, 80)
+        metrics = plugin.get_metrics()
+        assert metrics["session_tokens_input"] == 300
+        assert metrics["session_tokens_output"] == 130
+
+    def test_reset_turn_clears_per_turn_tokens(self) -> None:
+        plugin = SessionMetricsPlugin()
+        plugin.record_token_usage(100, 50)
+        plugin.reset_turn()
+        metrics = plugin.get_metrics()
+        assert metrics["tokens_input"] == 0
+        assert metrics["tokens_output"] == 0
+
+    def test_default_token_values_are_zero(self) -> None:
+        plugin = SessionMetricsPlugin()
+        metrics = plugin.get_metrics()
+        assert metrics["tokens_input"] == 0
+        assert metrics["tokens_output"] == 0
+        assert metrics["session_tokens_input"] == 0
+        assert metrics["session_tokens_output"] == 0
+
+    def test_on_checkpoint_includes_token_data(self) -> None:
+        plugin = SessionMetricsPlugin()
+        plugin.record_token_usage(500, 200)
+        ctx = FakePipelineContext(tape=Tape())
+        plugin.on_checkpoint(ctx=ctx)
+        state = ctx.plugin_states["session_metrics"]
+        assert state["tokens_input"] == 500
+        assert state["tokens_output"] == 200
+        assert state["session_tokens_input"] == 500
+        assert state["session_tokens_output"] == 200

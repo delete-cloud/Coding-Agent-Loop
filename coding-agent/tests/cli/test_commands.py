@@ -5,7 +5,11 @@ from io import StringIO
 import pytest
 from prompt_toolkit.output.defaults import create_output
 
-from coding_agent.cli.commands import get_command_completions, handle_command
+from coding_agent.cli.commands import (
+    get_command_completions,
+    get_commands_with_descriptions,
+    handle_command,
+)
 
 
 class TestCommands:
@@ -121,6 +125,20 @@ class TestCommands:
         assert "/model" in completions
         assert "/tools" in completions
         assert "/quit" in completions
+        assert completions == sorted(completions)
+
+    def test_commands_with_descriptions_match_sorted_completions(self):
+        completions = get_command_completions()
+        commands_with_descriptions = get_commands_with_descriptions()
+
+        assert [name for name, _ in commands_with_descriptions] == completions
+        assert all(description for _, description in commands_with_descriptions)
+
+    def test_cli_package_exports_commands_with_descriptions(self):
+        from coding_agent import cli
+
+        assert "get_commands_with_descriptions" in cli.__all__
+        assert cli.get_commands_with_descriptions() == get_commands_with_descriptions()
 
     def test_all_commands_have_descriptions(self):
         from coding_agent.cli.commands import _COMMANDS
@@ -243,3 +261,208 @@ class TestCommands:
         assert "<active>&skill" in output
         assert "desc with <b>tag</b> & more" in output
         assert "Command error" not in output
+
+
+class TestSkillColorHighlighting:
+    @pytest.mark.asyncio
+    async def test_inactive_skill_name_has_color_tag(self, monkeypatch):
+        import coding_agent.cli.commands as commands_module
+
+        class FakeSkillsPlugin:
+            active_skill_name = None
+
+            def list_skills_with_descriptions(self):
+                return [("my-skill", "A test skill")]
+
+        html_calls: list[str] = []
+        original_print_html = commands_module.print_html
+
+        def capture_print_html(html_str, **kwargs):
+            html_calls.append(html_str)
+            original_print_html(html_str, **kwargs)
+
+        monkeypatch.setattr(commands_module, "print_html", capture_print_html)
+
+        import coding_agent.cli.terminal_output as terminal_output_module
+
+        buf = StringIO()
+        monkeypatch.setattr(
+            terminal_output_module, "_prompt_output", create_output(stdout=buf)
+        )
+
+        context = {"should_exit": False, "skills_plugin": FakeSkillsPlugin()}
+        await handle_command("/skill", context)
+
+        skill_line = [h for h in html_calls if "my-skill" in h]
+        assert len(skill_line) == 1
+        assert "<ansiyellow>" in skill_line[0]
+        assert "my-skill" in skill_line[0]
+
+    @pytest.mark.asyncio
+    async def test_active_skill_name_uses_cyan(self, monkeypatch):
+        import coding_agent.cli.commands as commands_module
+
+        class FakeSkillsPlugin:
+            active_skill_name = "active-skill"
+
+            def list_skills_with_descriptions(self):
+                return [("active-skill", "An active skill")]
+
+        html_calls: list[str] = []
+        original_print_html = commands_module.print_html
+
+        def capture_print_html(html_str, **kwargs):
+            html_calls.append(html_str)
+            original_print_html(html_str, **kwargs)
+
+        monkeypatch.setattr(commands_module, "print_html", capture_print_html)
+
+        import coding_agent.cli.terminal_output as terminal_output_module
+
+        buf = StringIO()
+        monkeypatch.setattr(
+            terminal_output_module, "_prompt_output", create_output(stdout=buf)
+        )
+
+        context = {"should_exit": False, "skills_plugin": FakeSkillsPlugin()}
+        await handle_command("/skill", context)
+
+        skill_line = [h for h in html_calls if "active-skill" in h and "active" in h]
+        assert len(skill_line) >= 1
+        assert "<ansicyan>" in skill_line[0]
+
+    @pytest.mark.asyncio
+    async def test_description_uses_dim_color(self, monkeypatch):
+        import coding_agent.cli.commands as commands_module
+
+        class FakeSkillsPlugin:
+            active_skill_name = None
+
+            def list_skills_with_descriptions(self):
+                return [("test-skill", "Test description")]
+
+        html_calls: list[str] = []
+        original_print_html = commands_module.print_html
+
+        def capture_print_html(html_str, **kwargs):
+            html_calls.append(html_str)
+            original_print_html(html_str, **kwargs)
+
+        monkeypatch.setattr(commands_module, "print_html", capture_print_html)
+
+        import coding_agent.cli.terminal_output as terminal_output_module
+
+        buf = StringIO()
+        monkeypatch.setattr(
+            terminal_output_module, "_prompt_output", create_output(stdout=buf)
+        )
+
+        context = {"should_exit": False, "skills_plugin": FakeSkillsPlugin()}
+        await handle_command("/skill", context)
+
+        skill_line = [h for h in html_calls if "Test description" in h]
+        assert len(skill_line) == 1
+        assert "<ansibrightblack>" in skill_line[0]
+
+
+class TestThinkingCommand:
+    @pytest.mark.asyncio
+    async def test_thinking_no_args_shows_current_state(self, monkeypatch):
+        import coding_agent.cli.terminal_output as terminal_output_module
+
+        buf = StringIO()
+        monkeypatch.setattr(
+            terminal_output_module, "_prompt_output", create_output(stdout=buf)
+        )
+        context = {}
+        await handle_command("/thinking", context)
+        output = buf.getvalue()
+        assert "on" in output.lower()
+        assert "medium" in output.lower()
+
+    @pytest.mark.asyncio
+    async def test_thinking_on_sets_enabled(self, monkeypatch):
+        import coding_agent.cli.terminal_output as terminal_output_module
+
+        buf = StringIO()
+        monkeypatch.setattr(
+            terminal_output_module, "_prompt_output", create_output(stdout=buf)
+        )
+        context = {"thinking_enabled": False}
+        await handle_command("/thinking on", context)
+        assert context["thinking_enabled"] is True
+
+    @pytest.mark.asyncio
+    async def test_thinking_off_sets_disabled(self, monkeypatch):
+        import coding_agent.cli.terminal_output as terminal_output_module
+
+        buf = StringIO()
+        monkeypatch.setattr(
+            terminal_output_module, "_prompt_output", create_output(stdout=buf)
+        )
+        context = {"thinking_enabled": True}
+        await handle_command("/thinking off", context)
+        assert context["thinking_enabled"] is False
+
+    @pytest.mark.asyncio
+    async def test_thinking_effort_low(self, monkeypatch):
+        import coding_agent.cli.terminal_output as terminal_output_module
+
+        buf = StringIO()
+        monkeypatch.setattr(
+            terminal_output_module, "_prompt_output", create_output(stdout=buf)
+        )
+        context = {}
+        await handle_command("/thinking effort low", context)
+        assert context["thinking_effort"] == "low"
+
+    @pytest.mark.asyncio
+    async def test_thinking_effort_medium(self, monkeypatch):
+        import coding_agent.cli.terminal_output as terminal_output_module
+
+        buf = StringIO()
+        monkeypatch.setattr(
+            terminal_output_module, "_prompt_output", create_output(stdout=buf)
+        )
+        context = {}
+        await handle_command("/thinking effort medium", context)
+        assert context["thinking_effort"] == "medium"
+
+    @pytest.mark.asyncio
+    async def test_thinking_effort_high(self, monkeypatch):
+        import coding_agent.cli.terminal_output as terminal_output_module
+
+        buf = StringIO()
+        monkeypatch.setattr(
+            terminal_output_module, "_prompt_output", create_output(stdout=buf)
+        )
+        context = {}
+        await handle_command("/thinking effort high", context)
+        assert context["thinking_effort"] == "high"
+
+    @pytest.mark.asyncio
+    async def test_thinking_effort_invalid_shows_error(self, monkeypatch):
+        import coding_agent.cli.terminal_output as terminal_output_module
+
+        buf = StringIO()
+        monkeypatch.setattr(
+            terminal_output_module, "_prompt_output", create_output(stdout=buf)
+        )
+        context = {"thinking_effort": "medium"}
+        await handle_command("/thinking effort invalid", context)
+        assert context["thinking_effort"] == "medium"
+        output = buf.getvalue()
+        assert "low" in output and "medium" in output and "high" in output
+
+    @pytest.mark.asyncio
+    async def test_thinking_garbage_shows_usage(self, monkeypatch):
+        import coding_agent.cli.terminal_output as terminal_output_module
+
+        buf = StringIO()
+        monkeypatch.setattr(
+            terminal_output_module, "_prompt_output", create_output(stdout=buf)
+        )
+        context = {}
+        await handle_command("/thinking garbage", context)
+        output = buf.getvalue()
+        assert "usage" in output.lower() or "on" in output.lower()
