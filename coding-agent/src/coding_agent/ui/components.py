@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from rich.console import Group
+from rich.console import Group, RenderableType
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
@@ -13,26 +13,31 @@ from rich.text import Text
 from coding_agent.ui.theme import theme
 
 
-def create_message_panel(role: str, content: str, is_streaming: bool = False) -> Panel:
+def create_message_panel(
+    role: str, content: RenderableType | str, is_streaming: bool = False
+) -> Panel:
     """Create a message panel for user/assistant messages."""
     if role == "user":
         icon = theme.Icons.USER
-        color = theme.Colors.USER_MSG
+        border_color = theme.Colors.USER_PANEL_BORDER
         title = "You"
     else:
         icon = theme.Icons.AGENT
-        color = theme.Colors.ASSISTANT_MSG
+        border_color = theme.Colors.ASSISTANT_PANEL_BORDER
         title = "Agent"
-    
+
     if is_streaming:
         title += " " + theme.Icons.THINKING
-    
-    text = Text(content, style=color)
-    
+
+    if isinstance(content, str):
+        renderable = Text(content, style="bold white")
+    else:
+        renderable = content
+
     return Panel(
-        text,
+        renderable,
         title=f"[bold]{icon} {title}[/]",
-        border_style=color,
+        border_style=border_color,
         padding=theme.Layout.PANEL_PADDING,
     )
 
@@ -49,9 +54,9 @@ def create_tool_panel(
     for key, value in args.items():
         args_text.append(f"{key}=", style="dim")
         args_text.append(f"{value!r}\n", style="cyan")
-    
+
     content_parts = [args_text]
-    
+
     # Add result if available
     if result is not None:
         result_text = Text("\n" + "─" * 40 + "\n", style="dim")
@@ -61,7 +66,7 @@ def create_tool_panel(
             result = result[:500] + "..."
         result_text.append(result, style="green")
         content_parts.append(result_text)
-    
+
     # Choose icon based on tool name
     icon = theme.Icons.TOOL
     if "file" in name.lower():
@@ -70,15 +75,15 @@ def create_tool_panel(
         icon = theme.Icons.SEARCH
     elif "bash" in name.lower():
         icon = theme.Icons.BASH
-    
+
     status = theme.Icons.THINKING if result is None else theme.Icons.SUCCESS
-    
+
     # Build title with optional timing
     title_parts = [f"[bold]{icon} {name}[/]", status]
     if timing_text is not None:
         title_parts.append(str(timing_text))
     title = " ".join(title_parts)
-    
+
     return Panel(
         Group(*content_parts),
         title=title,
@@ -92,20 +97,20 @@ def create_plan_panel(tasks: list[dict[str, Any]]) -> Panel:
     table = Table(show_header=False, box=None, padding=(0, 1))
     table.add_column("Status", width=3)
     table.add_column("Task", style="white")
-    
+
     status_icons = {
         "todo": "[ ]",
         "in_progress": "[bold yellow][>][/]",
         "done": "[bold green][x][/]",
         "blocked": "[bold red][!][/]",
     }
-    
+
     for task in tasks:
         status = task.get("status", "todo")
         title = task.get("title", "Unknown")
         icon = status_icons.get(status, "[ ]")
         table.add_row(icon, title)
-    
+
     return Panel(
         table,
         title=f"[bold]{theme.Icons.PLAN} Plan[/]",
@@ -125,7 +130,7 @@ def create_header_panel(model: str, step: int, max_steps: int) -> Panel:
     text.append("  |  ", style="dim")
     text.append(f"Step: ", style="dim")
     text.append(f"{step}/{max_steps}", style="yellow" if step < max_steps else "green")
-    
+
     return Panel(
         text,
         border_style=theme.Colors.BORDER_DEFAULT,

@@ -18,6 +18,9 @@ class Theme:
         USER_MSG = "green"
         ASSISTANT_MSG = "blue"
         SYSTEM_MSG = "yellow"
+        SEPARATOR = "dim"
+        USER_PANEL_BORDER = "green"
+        ASSISTANT_PANEL_BORDER = "blue"
 
     # ==================== ICONS ====================
     class Icons:
@@ -39,6 +42,7 @@ class Theme:
         TOOL_PANEL_HEIGHT = 12
         PANEL_PADDING = (0, 1)
         BOX_STYLE = "ROUNDED"
+        SEPARATOR_CHAR = "─"
 
     # ==================== TEXT STYLES ====================
     class Styles:

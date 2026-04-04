@@ -483,3 +483,105 @@ class TestCollapsedGroupRendering:
         renderer.stream_text("thinking...")
         renderer.collapsed_group(summary="Read 1 file", duration=0.1, has_error=False)
         assert renderer._in_stream is False
+
+
+class TestEnhancedBoundaries:
+    def _make_renderer(
+        self,
+        *,
+        force_terminal: bool = True,
+        enhanced_boundaries: bool = True,
+        width: int = 80,
+    ) -> tuple[StreamingRenderer, Console, StringIO]:
+        buf = StringIO()
+        console = Console(file=buf, force_terminal=force_terminal, width=width)
+        renderer = StreamingRenderer(
+            console=console, enhanced_boundaries=enhanced_boundaries
+        )
+        return renderer, console, buf
+
+    def test_user_message_panel_when_enhanced(self):
+        renderer, _, buf = self._make_renderer()
+        renderer.user_message("Hello agent")
+        output = buf.getvalue()
+        assert "You" in output
+        assert "Hello agent" in output
+
+    def test_user_message_no_panel_when_not_terminal(self):
+        renderer, _, buf = self._make_renderer(force_terminal=False)
+        renderer.user_message("Hello agent")
+        output = buf.getvalue()
+        assert "❯" in output
+        assert "Hello agent" in output
+
+    def test_user_message_no_panel_when_disabled(self):
+        renderer, _, buf = self._make_renderer(enhanced_boundaries=False)
+        renderer.user_message("Hello agent")
+        output = buf.getvalue()
+        assert "❯" in output
+        assert "Hello agent" in output
+
+    def test_assistant_markdown_panel_when_enhanced(self):
+        renderer, _, buf = self._make_renderer()
+        renderer.stream_start()
+        renderer.stream_text("# Hello\n\nThis is **bold** text.")
+        renderer.stream_end()
+        output = buf.getvalue()
+        assert "Agent" in output
+        assert "Hello" in output
+
+    def test_assistant_plain_text_no_panel(self):
+        renderer, _, buf = self._make_renderer()
+        renderer.stream_start()
+        renderer.stream_text("Just a simple answer.")
+        renderer.stream_end()
+        output = buf.getvalue()
+        assert "Agent" not in output
+        assert "Just a simple answer." in output
+
+    def test_assistant_no_panel_when_not_terminal(self):
+        renderer, _, buf = self._make_renderer(force_terminal=False)
+        renderer.stream_start()
+        renderer.stream_text("# Hello\n\n**Bold** text.")
+        renderer.stream_end()
+        output = buf.getvalue()
+        assert "Agent" not in output
+
+    def test_assistant_no_panel_when_disabled(self):
+        renderer, _, buf = self._make_renderer(enhanced_boundaries=False)
+        renderer.stream_start()
+        renderer.stream_text("# Hello\n\n**Bold** text.")
+        renderer.stream_end()
+        output = buf.getvalue()
+        assert "Agent" not in output
+
+    def test_turn_separator_on_completed(self):
+        renderer, _, buf = self._make_renderer()
+        renderer.turn_end("completed")
+        output = buf.getvalue()
+        assert "─" in output
+
+    def test_turn_separator_on_error(self):
+        renderer, _, buf = self._make_renderer()
+        renderer.turn_end("error")
+        output = buf.getvalue()
+        assert "─" in output
+        assert "error" in output.lower()
+
+    def test_turn_separator_on_blocked(self):
+        renderer, _, buf = self._make_renderer()
+        renderer.turn_end("blocked")
+        output = buf.getvalue()
+        assert "─" in output
+
+    def test_no_separator_when_not_terminal(self):
+        renderer, _, buf = self._make_renderer(force_terminal=False)
+        renderer.turn_end("completed")
+        output = buf.getvalue()
+        assert "─" not in output
+
+    def test_no_separator_when_disabled(self):
+        renderer, _, buf = self._make_renderer(enhanced_boundaries=False)
+        renderer.turn_end("completed")
+        output = buf.getvalue()
+        assert "─" not in output

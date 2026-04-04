@@ -9,8 +9,12 @@ from rich.console import Console
 from rich.control import Control
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.rule import Rule
 from rich.segment import ControlType
 from rich.text import Text
+
+from coding_agent.ui.components import create_message_panel
+from coding_agent.ui.theme import theme
 
 _MAX_RESULT_DISPLAY = 1000
 
@@ -53,16 +57,22 @@ def _has_markdown_syntax(text: str) -> bool:
 
 
 class StreamingRenderer:
-    def __init__(self, console: Console | None = None) -> None:
+    def __init__(
+        self, console: Console | None = None, *, enhanced_boundaries: bool = False
+    ) -> None:
         self.console: Console = console or Console()
+        self._enhanced_boundaries = enhanced_boundaries
         self._stream_buffer: str = ""
         self._in_stream: bool = False
         self._tool_start_times: dict[str, float] = {}
         self._stream_started_output: bool = False
 
     def user_message(self, content: str) -> None:
-        self.console.print(Text("❯ ", style="bold green"), end="")
-        self.console.print(Text(content, style="bold white"))
+        if self._enhanced_boundaries and self.console.is_terminal:
+            self.console.print(create_message_panel("user", content))
+        else:
+            self.console.print(Text("❯ ", style="bold green"), end="")
+            self.console.print(Text(content, style="bold white"))
 
     def thinking(self, text: str) -> None:
         self.console.print(Text(text, style="dim italic"))
@@ -123,7 +133,11 @@ class StreamingRenderer:
                 try:
                     line_count = self._count_terminal_lines(self._stream_buffer)
                     self._clear_streamed_output(line_count)
-                    self.console.print(Markdown(self._stream_buffer))
+                    md = Markdown(self._stream_buffer)
+                    if self._enhanced_boundaries:
+                        self.console.print(create_message_panel("assistant", md))
+                    else:
+                        self.console.print(md)
                 except Exception:
                     self.console.print()
             else:
@@ -241,3 +255,9 @@ class StreamingRenderer:
             self.stream_end()
         if status == "error":
             self.console.print(Text("⚠ Turn ended with an error", style="red"))
+        if self._enhanced_boundaries and self.console.is_terminal:
+            self.console.print(
+                Rule(
+                    characters=theme.Layout.SEPARATOR_CHAR, style=theme.Colors.SEPARATOR
+                )
+            )

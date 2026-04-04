@@ -10,11 +10,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 from rich.console import Console
 
 from coding_agent.cli.commands import handle_command
-from coding_agent.cli.input_handler import (
-    InputHandler,
-    expand_pasted_refs,
-    fold_pasted_content,
-)
+from coding_agent.cli.input_handler import InputHandler, expand_pasted_refs
 from coding_agent.cli.terminal_output import (
     get_prompt_output,
     print_pt,
@@ -46,7 +42,7 @@ class InteractiveSession:
         )
 
         # Scrollback-based renderer — created once, persists across turns
-        self._renderer = StreamingRenderer(console=console)
+        self._renderer = StreamingRenderer(console=console, enhanced_boundaries=True)
         self._consumer = RichConsumer(self._renderer)
 
         self._setup_agent()
@@ -147,9 +143,11 @@ class InteractiveSession:
         print_pt("\nSession ended.\n", output=prompt_output)
 
     async def _process_message(self, message: str):
-        folded, refs = fold_pasted_content(message)
-        self._renderer.user_message(folded)
-        full_message = expand_pasted_refs(folded, refs)
+        # message is already folded (BracketedPaste handler replaced long
+        # pastes with [Pasted text #xx +N lines] in the input buffer).
+        # Display the folded version, but expand refs before sending.
+        self._renderer.user_message(message)
+        full_message = expand_pasted_refs(message, self.input_handler._paste_refs)
         result = await self._pipeline_adapter.run_turn(full_message)
 
         if result.stop_reason == result.stop_reason.ERROR and result.error:
