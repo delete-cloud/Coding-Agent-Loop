@@ -1,6 +1,7 @@
 """Tests for InputHandler multiline support."""
 
-from typing import cast
+from collections.abc import Callable
+from typing import Any, cast
 from types import SimpleNamespace
 
 import pytest
@@ -161,6 +162,51 @@ class TestInputHandlerMultiline:
 
         assert "[7]" in rendered
         assert ">" in rendered
+
+
+class TestTUISeparators:
+    def test_build_prompt_contains_separator_line(self):
+        handler = InputHandler()
+
+        prompt = handler.build_prompt(turn_count=0)
+        fragments = to_formatted_text(prompt)
+        rendered = "".join(text for _, text, *_ in fragments)
+
+        assert "─" in rendered
+
+    def test_build_prompt_shell_mode_contains_separator(self):
+        handler = InputHandler()
+
+        prompt = handler.build_prompt(turn_count=0, shell_mode=True, cwd="/tmp")
+        fragments = to_formatted_text(prompt)
+        rendered = "".join(text for _, text, *_ in fragments)
+
+        assert "─" in rendered
+
+    def test_chat_session_has_bottom_toolbar(self):
+        handler = InputHandler()
+
+        assert handler.chat_session.bottom_toolbar is not None
+        assert callable(handler.chat_session.bottom_toolbar)
+
+    def test_bottom_toolbar_returns_formatted_text_with_hints(self):
+        handler = InputHandler()
+
+        toolbar = handler.chat_session.bottom_toolbar
+        assert toolbar is not None
+        assert callable(toolbar)
+        toolbar_fn = cast(Callable[[], Any], toolbar)
+        rendered = "".join(text for _, text, *_ in to_formatted_text(toolbar_fn()))
+
+        assert "/help" in rendered
+        assert "bash" in rendered.lower()
+
+    def test_prompt_style_has_separator_class(self):
+        from coding_agent.cli.input_handler import PROMPT_STYLE
+
+        style_rules = dict(PROMPT_STYLE.style_rules)
+
+        assert "separator" in style_rules
 
 
 # ---------------------------------------------------------------------------

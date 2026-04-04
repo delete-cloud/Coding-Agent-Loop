@@ -50,9 +50,12 @@ PROMPT_STYLE = Style.from_dict(
     {
         "prompt": "bold cyan",
         "input": "white",
+        "separator": "dim",
         "shell": "bold yellow",
         "shell.path": "yellow",
         "shell.hint": "dim",
+        "toolbar": "bg:#333333 #bbbbbb",
+        "toolbar.key": "bg:#333333 bold #ffffff",
     }
 )
 
@@ -63,6 +66,8 @@ class InputHandler:
         self.bindings = KeyBindings()
         self._last_ctrlc: float = 0.0
         self._shell_mode = False
+        self._paste_refs: dict[str, str] = {}
+        self._paste_counter: int = 0
         self._setup_bindings()
         self.chat_history = InMemoryHistory()
         self.shell_history = InMemoryHistory()
@@ -75,6 +80,7 @@ class InputHandler:
             multiline=True,
             key_bindings=self.bindings,
             prompt_continuation=self._continuation_prompt,
+            bottom_toolbar=self._build_bottom_toolbar,
         )
         self.shell_session = PromptSession(
             auto_suggest=AutoSuggestFromHistory(),
@@ -152,6 +158,25 @@ class InputHandler:
             else:
                 buf.delete_before_cursor(1)
 
+        @self.bindings.add(
+            Keys.BracketedPaste, filter=Condition(lambda: not self._shell_mode)
+        )
+        def _(event):
+            pasted = event.data
+            self._paste_counter += 1
+            folded, refs = fold_pasted_content(pasted, ref_id=str(self._paste_counter))
+            if refs:
+                self._paste_refs.update(refs)
+            event.app.current_buffer.insert_text(folded)
+
+    def _build_bottom_toolbar(self) -> FormattedText:
+        return FormattedText(
+            [
+                ("class:toolbar.key", " ⏵⏵ "),
+                ("class:toolbar", "Type /help for commands | ! for bash mode "),
+            ]
+        )
+
     def build_prompt(
         self,
         *,
@@ -159,11 +184,13 @@ class InputHandler:
         shell_mode: bool = False,
         cwd: str | None = None,
     ) -> FormattedText:
+        separator = [("class:separator", "─" * 50 + "\n")]
         if shell_mode:
             location = cwd or "~"
             label = location.rstrip("/").split("/")[-1] or location
             return FormattedText(
-                [
+                separator
+                + [
                     ("class:shell", "bash"),
                     ("class:shell.hint", " "),
                     ("class:shell.path", f"{label}"),
@@ -172,7 +199,8 @@ class InputHandler:
             )
 
         return FormattedText(
-            [
+            separator
+            + [
                 ("class:prompt", f"[{turn_count}]"),
                 ("class:prompt", " > "),
             ]
@@ -210,7 +238,6 @@ import re as _re
 import uuid as _uuid
 
 _PASTE_RE = _re.compile(r"\[Pasted text #(\S+) \+\d+ lines\]")
-_LONG_BLOCK_SPLIT_RE = _re.compile(r"\n{2,}")
 _INLINE_LENGTH_THRESHOLD = 2000
 
 
@@ -224,34 +251,17 @@ def _should_fold_block(text: str, threshold: int) -> bool:
     return line_count > threshold or len(text) >= _INLINE_LENGTH_THRESHOLD
 
 
-def fold_pasted_content(text: str, threshold: int = 20) -> tuple[str, dict[str, str]]:
+def fold_pasted_content(
+    text: str, threshold: int = 20, *, ref_id: str | None = None
+) -> tuple[str, dict[str, str]]:
     refs: dict[str, str] = {}
     if not _should_fold_block(text, threshold):
         return text, refs
 
-    if "\n\n" not in text:
+    if ref_id is None:
         ref_id = _uuid.uuid4().hex[:8]
-        refs[ref_id] = text
-        return _make_paste_placeholder(ref_id, text), refs
-
-    parts = _LONG_BLOCK_SPLIT_RE.split(text)
-    separators = _LONG_BLOCK_SPLIT_RE.findall(text)
-
-    folded_parts: list[str] = []
-    for part in parts:
-        if _should_fold_block(part, threshold):
-            ref_id = _uuid.uuid4().hex[:8]
-            refs[ref_id] = part
-            folded_parts.append(_make_paste_placeholder(ref_id, part))
-        else:
-            folded_parts.append(part)
-
-    rebuilt: list[str] = []
-    for index, part in enumerate(folded_parts):
-        rebuilt.append(part)
-        if index < len(separators):
-            rebuilt.append(separators[index])
-    return "".join(rebuilt), refs
+    refs[ref_id] = text
+    return _make_paste_placeholder(ref_id, text), refs
 
 
 def expand_pasted_refs(text: str, refs: dict[str, str]) -> str:

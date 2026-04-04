@@ -467,6 +467,7 @@ class TestPasteFoldingInRepl:
     async def test_long_message_folded_for_display_but_expanded_for_agent(
         self, monkeypatch
     ):
+        from coding_agent.cli.input_handler import fold_pasted_content
         from coding_agent.cli.repl import InteractiveSession
 
         monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
@@ -499,7 +500,11 @@ class TestPasteFoldingInRepl:
         session._renderer = FakeRenderer()
         session._pipeline_adapter = FakeAdapter()
 
-        await session._process_message(long_message)
+        # Simulate what BracketedPaste handler does: fold and store refs
+        folded, refs = fold_pasted_content(long_message, ref_id="test")
+        session.input_handler._paste_refs.update(refs)
+
+        await session._process_message(folded)
         assert len(rendered_messages) == 1
         assert "[Pasted text" in rendered_messages[0]
         assert len(turned_messages) == 1
@@ -509,6 +514,7 @@ class TestPasteFoldingInRepl:
     async def test_mixed_context_and_large_block_keeps_context_in_display(
         self, monkeypatch
     ):
+        from coding_agent.cli.input_handler import fold_pasted_content
         from coding_agent.cli.repl import InteractiveSession
 
         monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
@@ -542,9 +548,13 @@ class TestPasteFoldingInRepl:
         session._renderer = FakeRenderer()
         session._pipeline_adapter = FakeAdapter()
 
-        await session._process_message(mixed_message)
+        # Simulate BracketedPaste: fold and store refs
+        folded, refs = fold_pasted_content(mixed_message, ref_id="test")
+        session.input_handler._paste_refs.update(refs)
+
+        await session._process_message(folded)
         assert len(rendered_messages) == 1
-        assert "before context" in rendered_messages[0]
-        assert "after context" in rendered_messages[0]
+        assert "before context" not in rendered_messages[0]
+        assert "after context" not in rendered_messages[0]
         assert "[Pasted text" in rendered_messages[0]
         assert turned_messages == [mixed_message]

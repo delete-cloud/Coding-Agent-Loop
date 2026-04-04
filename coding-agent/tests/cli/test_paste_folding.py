@@ -55,10 +55,46 @@ class TestFoldPastedContent:
         block = "\n".join(f"line {i}" for i in range(25))
         text = f"before context\n\n{block}\n\nafter context"
         folded, refs = fold_pasted_content(text, threshold=20)
-        assert "before context" in folded
-        assert "after context" in folded
+        assert "before context" not in folded
+        assert "after context" not in folded
         assert "[Pasted text" in folded
         assert len(refs) == 1
+        assert expand_pasted_refs(folded, refs) == text
+
+    def test_paste_with_blank_lines_folds_as_single_block(self):
+        blocks = [
+            "\n".join(f"line {i}" for i in range(start, start + 15))
+            for start in range(0, 105, 15)
+        ]
+        text = "\n\n".join(blocks)
+
+        folded, refs = fold_pasted_content(text, threshold=20, ref_id="1")
+
+        assert "[Pasted text #1" in folded
+        assert len(refs) == 1
+        assert refs == {"1": text}
+
+    def test_sequential_ref_id_in_placeholder(self):
+        text = "\n".join(f"line {i}" for i in range(25))
+
+        folded, refs = fold_pasted_content(text, threshold=20, ref_id="1")
+
+        assert "#1" in folded
+        assert refs == {"1": text}
+
+    def test_sequential_ref_id_round_trips(self):
+        text = "\n".join(f"line {i}" for i in range(50))
+
+        folded, refs = fold_pasted_content(text, threshold=20, ref_id="42")
+
+        assert expand_pasted_refs(folded, refs) == text
+
+    def test_no_uuid_hex_in_ref_keys(self):
+        text = "\n".join(f"line {i}" for i in range(25))
+
+        _, refs = fold_pasted_content(text, threshold=20, ref_id="7")
+
+        assert set(refs) == {"7"}
 
     def test_long_single_line_is_folded(self):
         text = "x" * 5000
