@@ -61,6 +61,8 @@ class CoreToolsPlugin:
         self, name: str = "", arguments: dict[str, Any] | None = None, **kwargs: Any
     ) -> Any:
         args = self._prepare_arguments(name, arguments)
+        # Remove 'name' from args to avoid conflict with positional arg
+        args.pop("name", None)
         result = self._registry.execute(name, **args)
         self._sync_shell_session(name, args, result)
         return result
@@ -69,6 +71,8 @@ class CoreToolsPlugin:
         self, name: str = "", arguments: dict[str, Any] | None = None, **kwargs: Any
     ) -> Any:
         args = self._prepare_arguments(name, arguments)
+        # Remove 'name' from args to avoid conflict with positional arg
+        args.pop("name", None)
         result = await self._registry.execute_async(name, **args)
         self._sync_shell_session(name, args, result)
         return result
