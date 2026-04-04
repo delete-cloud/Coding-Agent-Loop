@@ -71,6 +71,21 @@ class ToolResultDelta(WireMessage):
 
 
 @dataclass(kw_only=True)
+class ThinkingDelta(WireMessage):
+    text: str
+
+
+@dataclass(kw_only=True)
+class TurnStatusDelta(WireMessage):
+    phase: str  # "thinking" | "streaming" | "tool_call" | "idle"
+    elapsed_seconds: float = 0.0
+    tokens_in: int = 0
+    tokens_out: int = 0
+    model_name: str = ""
+    context_percent: float = 0.0
+
+
+@dataclass(kw_only=True)
 class ApprovalRequest(WireMessage):
     """Request for user approval.
 

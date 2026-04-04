@@ -15,6 +15,7 @@ from agentkit.providers.models import (
     TextEvent,
     ToolCallEvent,
     DoneEvent,
+    UsageEvent,
 )
 from coding_agent.utils.retry import _extract_status_code, RETRYABLE_STATUS_CODES
 
@@ -208,10 +209,20 @@ class AnthropicProvider:
             try:
                 # Track tool use blocks being accumulated
                 tool_blocks: dict[int, dict[str, Any]] = {}
+                _input_tokens = 0
+                _output_tokens = 0
 
                 async with self._client.messages.stream(**api_kwargs) as stream:
                     async for event in stream:
                         match event.type:
+                            case "message_start":
+                                msg_usage = getattr(
+                                    getattr(event, "message", None), "usage", None
+                                )
+                                if msg_usage:
+                                    _input_tokens = (
+                                        getattr(msg_usage, "input_tokens", 0) or 0
+                                    )
                             case "content_block_start":
                                 block = event.content_block
                                 if block.type == "tool_use":
@@ -247,9 +258,20 @@ class AnthropicProvider:
                                         name=block["name"],
                                         arguments=args,
                                     )
+                            case "message_delta":
+                                delta_usage = getattr(event, "usage", None)
+                                if delta_usage:
+                                    _output_tokens = (
+                                        getattr(delta_usage, "output_tokens", 0) or 0
+                                    )
                             case "message_stop":
                                 pass
 
+                yield UsageEvent(
+                    input_tokens=_input_tokens,
+                    output_tokens=_output_tokens,
+                    provider_name=self._model,
+                )
                 yield DoneEvent()
                 return  # Success, exit the retry loop
 

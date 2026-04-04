@@ -22,6 +22,7 @@ from coding_agent.__main__ import create_agent
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.ui.stream_renderer import StreamingRenderer
 from coding_agent.ui.rich_consumer import RichConsumer
+from coding_agent.ui.status_footer import StatusFooter
 
 
 console = Console()
@@ -35,6 +36,8 @@ class InteractiveSession:
         self.context: dict[str, Any] = {
             "should_exit": False,
             "model": config.model,
+            "thinking_enabled": True,
+            "thinking_effort": "medium",
         }
         self.input_handler = InputHandler()
         self._bash_executor = BashExecutor(
@@ -43,9 +46,48 @@ class InteractiveSession:
 
         # Scrollback-based renderer — created once, persists across turns
         self._renderer = StreamingRenderer(console=console, enhanced_boundaries=True)
-        self._consumer = RichConsumer(self._renderer)
+        self._consumer = RichConsumer(
+            self._renderer,
+            thinking_enabled=lambda: bool(self.context.get("thinking_enabled", True)),
+            thinking_effort=lambda: str(self.context.get("thinking_effort", "medium")),
+            on_status=self._handle_status_update,
+        )
+        self._footer = StatusFooter(console=console)
 
         self._setup_agent()
+
+    def _format_status_text(self, snapshot: dict[str, Any]) -> str:
+        phase_icons = {
+            "thinking": "⠋",
+            "streaming": "▸",
+            "tool": "⚡",
+            "idle": "—",
+        }
+        phase = str(snapshot.get("phase", "idle"))
+        model_name = str(snapshot.get("model_name") or self.context.get("model", ""))
+        context_percent = float(snapshot.get("context_percent", 0.0) or 0.0)
+        tokens_in = int(snapshot.get("tokens_in", 0) or 0)
+        tokens_out = int(snapshot.get("tokens_out", 0) or 0)
+        elapsed = int(float(snapshot.get("elapsed_seconds", 0.0) or 0.0))
+        parts = [f"{phase_icons.get(phase, '—')} {model_name}".strip()]
+        if context_percent > 0:
+            parts.append(f"{context_percent:.0f}%")
+        parts.append(f"{tokens_in}↑ {tokens_out}↓")
+        parts.append(f"{elapsed}s")
+        return " | ".join(parts)
+
+    def _handle_status_update(self, snapshot: dict[str, Any]) -> None:
+        status_text = self._format_status_text(snapshot)
+        self.input_handler.set_status_text(status_text)
+        if self._footer.mode == "persistent" and self._footer.enabled:
+            self._footer.update(
+                model=str(snapshot.get("model_name") or self.context.get("model", "")),
+                context_pct=float(snapshot.get("context_percent", 0.0) or 0.0),
+                tokens_in=int(snapshot.get("tokens_in", 0) or 0),
+                tokens_out=int(snapshot.get("tokens_out", 0) or 0),
+                elapsed=float(snapshot.get("elapsed_seconds", 0.0) or 0.0),
+                phase=str(snapshot.get("phase", "idle")),
+            )
 
     def _setup_agent(self):
         """Setup agent components."""
@@ -75,12 +117,17 @@ class InteractiveSession:
             self.context["mcp_plugin"] = pipeline_ctx.config["mcp_plugin"]
 
     async def _ask_user_for_approval(self, question: str) -> bool:
+        if self._footer.enabled:
+            self._footer.disable()
         print_pt("\nApproval Required", output=get_prompt_output(sys.__stdout__))
         print_pt(question, output=get_prompt_output(sys.__stdout__))
         response = await asyncio.get_event_loop().run_in_executor(
             None, lambda: input("[y/N] > ").strip().lower()
         )
-        return response in ("y", "yes")
+        approved = response in ("y", "yes")
+        if self._footer.mode == "persistent":
+            self._footer.enable()
+        return approved
 
     # Proxy methods for WireConsumer protocol (used by subagent tool)
     async def emit(self, msg) -> None:
@@ -102,53 +149,74 @@ class InteractiveSession:
             output=prompt_output,
         )
 
+        self._footer.run_spike_check()
+        if self._footer.mode == "persistent":
+            self._footer.enable()
+
         turn_count = 0
 
-        while not self.context["should_exit"]:
-            with patch_stdout():
-                user_input = await self.input_handler.get_input(
-                    prompt_builder=lambda shell: self.input_handler.build_prompt(
-                        turn_count=turn_count,
-                        shell_mode=shell,
-                        cwd=str(self.config.repo) if self.config.repo else None,
-                    ),
-                )
+        try:
+            while not self.context["should_exit"]:
+                with patch_stdout():
+                    user_input = await self.input_handler.get_input(
+                        prompt_builder=lambda shell: self.input_handler.build_prompt(
+                            turn_count=turn_count,
+                            shell_mode=shell,
+                            cwd=str(self.config.repo) if self.config.repo else None,
+                        ),
+                    )
 
-            if user_input is None:
-                break
+                if user_input is None:
+                    break
 
-            if not user_input:
-                continue
-
-            if self.input_handler.shell_mode:
-                if user_input.strip() in {"exit", "quit"}:
-                    self.input_handler.exit_shell_mode()
-                    print_pt("Left bash mode.", output=prompt_output)
+                if not user_input:
                     continue
 
-                await self._bash_executor.execute(user_input)
-                continue
+                if self.input_handler.shell_mode:
+                    if user_input.strip() in {"exit", "quit"}:
+                        self.input_handler.exit_shell_mode()
+                        print_pt("Left bash mode.", output=prompt_output)
+                        continue
 
-            if user_input.startswith("/"):
-                await handle_command(user_input, self.context)
-                continue
+                    await self._bash_executor.execute(user_input)
+                    continue
 
-            try:
-                await self._process_message(user_input)
-            except Exception as e:
-                print_pt(f"\nError during agent execution: {e}", output=prompt_output)
-                print_pt("You can continue with a new message.\n", output=prompt_output)
-            turn_count += 1
+                if user_input.startswith("/"):
+                    await handle_command(user_input, self.context)
+                    if user_input.strip() == "/clear" and self._footer.enabled:
+                        self._footer.clear_and_redraw()
+                    continue
+
+                try:
+                    await self._process_message(user_input)
+                except Exception as e:
+                    print_pt(
+                        f"\nError during agent execution: {e}", output=prompt_output
+                    )
+                    print_pt(
+                        "You can continue with a new message.\n", output=prompt_output
+                    )
+                turn_count += 1
+        finally:
+            self._footer.disable()
 
         print_pt("\nSession ended.\n", output=prompt_output)
 
     async def _process_message(self, message: str):
-        # message is already folded (BracketedPaste handler replaced long
-        # pastes with [Pasted text #xx +N lines] in the input buffer).
-        # Display the folded version, but expand refs before sending.
         self._renderer.user_message(message)
         full_message = expand_pasted_refs(message, self.input_handler._paste_refs)
+        self.input_handler._paste_refs.clear()
+
+        if self._footer.enabled:
+            self._footer.update(
+                model=self.context.get("model", ""),
+                phase="streaming",
+            )
+
         result = await self._pipeline_adapter.run_turn(full_message)
+
+        if self._footer.enabled:
+            self._footer.update(phase="idle")
 
         if result.stop_reason == result.stop_reason.ERROR and result.error:
             print_pt(

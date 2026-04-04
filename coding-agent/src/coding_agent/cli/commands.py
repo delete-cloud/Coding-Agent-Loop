@@ -27,15 +27,28 @@ def command(name: str, description: str = ""):
     return decorator
 
 
+def get_commands_with_descriptions() -> list[tuple[str, str]]:
+    return sorted(
+        [
+            (f"/{name}", getattr(func, "_command_description", ""))
+            for name, func in _COMMANDS.items()
+        ],
+        key=lambda item: item[0],
+    )
+
+
+def get_command_completions() -> list[str]:
+    return [name for name, _ in get_commands_with_descriptions()]
+
+
 @command("help", "Show available commands")
 async def cmd_help(args: list[str], context: dict[str, Any]) -> None:
     output = _out()
     print_html("<b>Available Commands:</b>", output=output)
     print_pt(output=output)
-    for name, func in sorted(_COMMANDS.items()):
-        desc = _h(getattr(func, "_command_description", ""))
+    for name, desc in get_commands_with_descriptions():
         print_html(
-            f"  <ansicyan>/{_h(name)}</ansicyan>  <ansibrightblack>{desc}</ansibrightblack>",
+            f"  <ansicyan>{_h(name)}</ansicyan>  <ansibrightblack>{_h(desc)}</ansibrightblack>",
             output=output,
         )
     print_pt(output=output)
@@ -152,7 +165,7 @@ async def cmd_skill(args: list[str], context: dict[str, Any]) -> None:
                 )
             else:
                 print_html(
-                    f"  <ansicyan>•</ansicyan> <b>{safe_name}</b>  <ansibrightblack>{safe_desc}</ansibrightblack>",
+                    f"  <ansicyan>•</ansicyan> <ansiyellow><b>{safe_name}</b></ansiyellow>  <ansibrightblack>{safe_desc}</ansibrightblack>",
                     output=output,
                 )
         print_pt(output=output)
@@ -184,6 +197,56 @@ async def cmd_skill(args: list[str], context: dict[str, Any]) -> None:
     else:
         msg = skills_plugin.activate_immediately(skill_name)
     print_pt(msg, output=output)
+
+
+@command(
+    "thinking",
+    "Toggle thinking mode  (/thinking | /thinking on|off | /thinking effort low|medium|high)",
+)
+async def cmd_thinking(args: list[str], context: dict[str, Any]) -> None:
+    output = _out()
+    valid_efforts = ("low", "medium", "high")
+
+    if not args:
+        enabled = context.get("thinking_enabled", True)
+        effort = context.get("thinking_effort", "medium")
+        state = "on" if enabled else "off"
+        print_html(
+            f"Thinking: <ansicyan><b>{_h(state)}</b></ansicyan>  "
+            f"Effort: <ansicyan><b>{_h(effort)}</b></ansicyan>",
+            output=output,
+        )
+        return
+
+    subcmd = args[0].lower()
+
+    if subcmd == "on":
+        context["thinking_enabled"] = True
+        print_html("Thinking <ansigreen><b>enabled</b></ansigreen>.", output=output)
+    elif subcmd == "off":
+        context["thinking_enabled"] = False
+        print_html("Thinking <ansired><b>disabled</b></ansired>.", output=output)
+    elif subcmd == "effort":
+        if len(args) >= 2 and args[1].lower() in valid_efforts:
+            level = args[1].lower()
+            context["thinking_effort"] = level
+            print_html(
+                f"Thinking effort set to <ansicyan><b>{_h(level)}</b></ansicyan>.",
+                output=output,
+            )
+        else:
+            print_html(
+                f"<ansired>Invalid effort level.</ansired> "
+                f"Usage: /thinking effort <ansicyan>low</ansicyan>|<ansicyan>medium</ansicyan>|<ansicyan>high</ansicyan>",
+                output=output,
+            )
+    else:
+        print_html(
+            "Usage: <ansicyan>/thinking</ansicyan> | "
+            "<ansicyan>/thinking on|off</ansicyan> | "
+            "<ansicyan>/thinking effort low|medium|high</ansicyan>",
+            output=output,
+        )
 
 
 @command("mcp", "Manage MCP servers  (/mcp | /mcp reload)")
@@ -256,7 +319,3 @@ async def handle_command(input_text: str, context: dict[str, Any]) -> bool:
             output=_out(),
         )
         return True
-
-
-def get_command_completions() -> list[str]:
-    return [f"/{name}" for name in _COMMANDS.keys()]

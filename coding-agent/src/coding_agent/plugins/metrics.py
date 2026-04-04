@@ -19,6 +19,11 @@ class SessionMetricsPlugin:
         # Topic tracking
         self._current_topic_id: str | None = None
         self._topic_metrics: dict[str, dict[str, Any]] = {}
+        # Token tracking (per-turn + session cumulative)
+        self._turn_tokens_in: int = 0
+        self._turn_tokens_out: int = 0
+        self._session_tokens_in: int = 0
+        self._session_tokens_out: int = 0
 
     def hooks(self) -> dict[str, Callable[..., Any]]:
         return {
@@ -56,6 +61,10 @@ class SessionMetricsPlugin:
                 if self._api_calls > 0
                 else 0.0
             ),
+            "tokens_input": self._turn_tokens_in,
+            "tokens_output": self._turn_tokens_out,
+            "session_tokens_input": self._session_tokens_in,
+            "session_tokens_output": self._session_tokens_out,
         }
 
     def on_session_event(
@@ -94,13 +103,25 @@ class SessionMetricsPlugin:
                 if self._api_calls > 0
                 else 0.0
             ),
+            "tokens_input": self._turn_tokens_in,
+            "tokens_output": self._turn_tokens_out,
+            "session_tokens_input": self._session_tokens_in,
+            "session_tokens_output": self._session_tokens_out,
         }
 
     def reset_turn(self) -> None:
         self._turn_start = None
         self._steps_count = 0
         self._tool_calls = defaultdict(int)
+        self._turn_tokens_in = 0
+        self._turn_tokens_out = 0
 
     def record_api_call(self, latency: float) -> None:
         self._api_calls += 1
         self._api_latency_total += latency
+
+    def record_token_usage(self, input_tokens: int, output_tokens: int) -> None:
+        self._turn_tokens_in += input_tokens
+        self._turn_tokens_out += output_tokens
+        self._session_tokens_in += input_tokens
+        self._session_tokens_out += output_tokens

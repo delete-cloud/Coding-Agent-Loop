@@ -21,6 +21,10 @@ class Theme:
         SEPARATOR = "dim"
         USER_PANEL_BORDER = "green"
         ASSISTANT_PANEL_BORDER = "blue"
+        DIFF_ADD = "green"
+        DIFF_DELETE = "red"
+        DIFF_HUNK = "cyan"
+        DIFF_META = "bold"
 
     # ==================== ICONS ====================
     class Icons:

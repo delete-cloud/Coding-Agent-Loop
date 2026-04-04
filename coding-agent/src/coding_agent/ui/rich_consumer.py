@@ -1,15 +1,25 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol
+import asyncio
+import time
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Protocol
 
-from coding_agent.ui.collapse import CollapseGroup, is_collapsible
+from coding_agent.ui.collapse import (
+    CollapseGroup,
+    is_collapsible,
+    is_compact,
+    is_hidden,
+)
 from coding_agent.wire.protocol import (
     ApprovalRequest,
     ApprovalResponse,
     StreamDelta,
+    ThinkingDelta,
     ToolCallDelta,
     ToolResultDelta,
     TurnEnd,
+    TurnStatusDelta,
     WireMessage,
 )
 
@@ -23,11 +33,104 @@ class WireConsumer(Protocol):
 
 
 class RichConsumer:
-    def __init__(self, renderer: StreamingRenderer) -> None:
-        self.renderer = renderer
-        self._stream_active = False
+    def __init__(
+        self,
+        renderer: StreamingRenderer,
+        thinking_enabled: Callable[[], bool] | None = None,
+        thinking_effort: Callable[[], str] | None = None,
+        on_status: Callable[[dict[str, Any]], None] | None = None,
+    ) -> None:
+        self.renderer: StreamingRenderer = renderer
+        self._stream_active: bool = False
         self._session_approved_tools: set[str] = set()
         self._collapse_group: CollapseGroup | None = None
+        self._hidden_call_ids: set[str] = set()
+        self._turn_start: float | None = None
+        self._phase: str = "idle"
+        self._turn_tokens_in: int = 0
+        self._turn_tokens_out: int = 0
+        self._thinking_heartbeat_task: asyncio.Task[None] | None = None
+        self._model_name: str = ""
+        self._context_percent: float = 0.0
+        self._thinking_enabled = thinking_enabled or (lambda: True)
+        self._thinking_effort = thinking_effort or (lambda: "medium")
+        self._on_status = on_status
+
+    def _start_turn_timer(self) -> None:
+        if self._turn_start is None:
+            self._turn_start = time.perf_counter()
+
+    def _elapsed(self) -> float:
+        if self._turn_start is None:
+            return 0.0
+        return time.perf_counter() - self._turn_start
+
+    def _thinking_heartbeat_interval(self) -> float:
+        effort = self._thinking_effort().lower()
+        if effort == "high":
+            return 0.1
+        if effort == "low":
+            return 0.4
+        return 0.2
+
+    def _publish_status(self) -> None:
+        if self._on_status is None:
+            return
+        self._on_status(
+            {
+                "phase": self._phase,
+                "tokens_in": self._turn_tokens_in,
+                "tokens_out": self._turn_tokens_out,
+                "elapsed_seconds": self._elapsed(),
+                "model_name": self._model_name,
+                "context_percent": self._context_percent,
+            }
+        )
+
+    def _ensure_thinking_heartbeat(self) -> None:
+        if (
+            self._thinking_heartbeat_task is not None
+            and not self._thinking_heartbeat_task.done()
+        ):
+            return
+        self._thinking_heartbeat_task = asyncio.create_task(
+            self._thinking_heartbeat_loop()
+        )
+
+    async def _thinking_heartbeat_loop(self) -> None:
+        try:
+            while self._phase == "thinking":
+                await asyncio.sleep(self._thinking_heartbeat_interval())
+                if self._phase == "thinking":
+                    self.renderer.thinking_update(elapsed_seconds=self._elapsed())
+                    self._publish_status()
+        except asyncio.CancelledError:
+            pass
+
+    def _stop_thinking_heartbeat(self) -> None:
+        if (
+            self._thinking_heartbeat_task is not None
+            and not self._thinking_heartbeat_task.done()
+        ):
+            self._thinking_heartbeat_task.cancel()
+        self._thinking_heartbeat_task = None
+
+    def _end_thinking(self) -> None:
+        if self._phase == "thinking":
+            self._stop_thinking_heartbeat()
+            self.renderer.thinking_end()
+            self._phase = "streaming"
+            self._publish_status()
+
+    def _reset_turn_state(self) -> None:
+        self._stop_thinking_heartbeat()
+        self._turn_start = None
+        self._phase = "idle"
+        self._turn_tokens_in = 0
+        self._turn_tokens_out = 0
+        self._model_name = ""
+        self._context_percent = 0.0
+        self._publish_status()
 
     def _flush_collapse_group(self, *, force: bool = False) -> None:
         group = self._collapse_group
@@ -51,7 +154,22 @@ class RichConsumer:
 
     async def emit(self, msg: WireMessage) -> None:
         match msg:
+            case ThinkingDelta():
+                self._start_turn_timer()
+                if not self._thinking_enabled():
+                    return
+                if self._phase != "thinking":
+                    self._phase = "thinking"
+                    self.renderer.thinking_start()
+                    self._ensure_thinking_heartbeat()
+                    self._publish_status()
+
             case StreamDelta(content=text):
+                self._start_turn_timer()
+                self._end_thinking()
+                if self._phase != "streaming":
+                    self._phase = "streaming"
+                    self._publish_status()
                 self._flush_collapse_group()
                 if text:
                     if not self._stream_active:
@@ -59,14 +177,38 @@ class RichConsumer:
                         self._stream_active = True
                     self.renderer.stream_text(text)
 
+            case TurnStatusDelta(tokens_in=t_in, tokens_out=t_out):
+                self._end_thinking()
+                self._phase = msg.phase
+                self._turn_tokens_in = t_in
+                self._turn_tokens_out = t_out
+                self._model_name = msg.model_name
+                self._context_percent = msg.context_percent
+                self.renderer.update_status(
+                    tokens_in=t_in,
+                    tokens_out=t_out,
+                    elapsed_seconds=self._elapsed(),
+                    model=msg.model_name,
+                    context_pct=msg.context_percent,
+                )
+                self._publish_status()
+
             case ToolCallDelta(tool_name=tool, arguments=args, call_id=cid):
+                self._phase = "tool"
+                self._publish_status()
                 if self._stream_active:
                     self.renderer.stream_end()
                     self._stream_active = False
-                if is_collapsible(tool):
+                if is_hidden(tool):
+                    self._flush_collapse_group()
+                    self._hidden_call_ids.add(cid)
+                elif is_collapsible(tool):
                     if self._collapse_group is None:
                         self._collapse_group = CollapseGroup()
                     self._collapse_group.add_tool_call(cid, tool, args)
+                elif is_compact(tool):
+                    self._flush_collapse_group()
+                    self.renderer.compact_tool_call(cid, tool, args)
                 else:
                     self._flush_collapse_group()
                     self.renderer.tool_call(cid, tool, args)
@@ -74,19 +216,25 @@ class RichConsumer:
             case ToolResultDelta(
                 call_id=cid, tool_name=tool, result=result, is_error=err
             ):
-                if self._collapse_group is not None and self._collapse_group.has_call(
+                if cid in self._hidden_call_ids:
+                    self._hidden_call_ids.discard(cid)
+                elif self._collapse_group is not None and self._collapse_group.has_call(
                     cid
                 ):
                     self._collapse_group.add_tool_result(cid, is_error=err)
+                elif is_compact(tool):
+                    self.renderer.compact_tool_result(cid, tool, result, is_error=err)
                 else:
                     self.renderer.tool_result(cid, tool, result, is_error=err)
 
             case TurnEnd(completion_status=status):
+                self._end_thinking()
                 self._flush_collapse_group(force=True)
                 if self._stream_active:
                     self.renderer.stream_end()
                     self._stream_active = False
                 self.renderer.turn_end(status.value)
+                self._reset_turn_state()
 
             case _:
                 pass

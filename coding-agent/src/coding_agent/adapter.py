@@ -9,17 +9,21 @@ from agentkit.providers.models import (
     ThinkingEvent,
     ToolCallEvent,
     ToolResultEvent,
+    UsageEvent,
 )
 from agentkit.runtime.pipeline import Pipeline, PipelineContext
 from agentkit.tape.models import Entry
 
 from coding_agent.adapter_types import StopReason, TurnOutcome
+from coding_agent.plugins.metrics import SessionMetricsPlugin
 from coding_agent.wire.protocol import (
     CompletionStatus,
     StreamDelta,
+    ThinkingDelta,
     ToolCallDelta,
     ToolResultDelta,
     TurnEnd,
+    TurnStatusDelta,
     WireMessage,
 )
 
@@ -37,6 +41,18 @@ class PipelineAdapter:
         self._pipeline = pipeline
         self._ctx = ctx
         self._consumer = consumer
+
+    def _metrics_plugin(self) -> SessionMetricsPlugin | None:
+        try:
+            plugin = self._pipeline._registry.get("session_metrics")
+        except Exception:
+            return None
+        if isinstance(plugin, SessionMetricsPlugin):
+            return plugin
+        wrapped = getattr(plugin, "plugin", None)
+        if isinstance(wrapped, SessionMetricsPlugin):
+            return wrapped
+        return None
 
     async def run_turn(self, user_input: str) -> TurnOutcome:
         initial_tool_calls = len(self._ctx.tape.filter("tool_call"))
@@ -69,7 +85,12 @@ class PipelineAdapter:
 
     async def _handle_event(
         self,
-        event: TextEvent | ThinkingEvent | ToolCallEvent | ToolResultEvent | DoneEvent,
+        event: TextEvent
+        | ThinkingEvent
+        | ToolCallEvent
+        | ToolResultEvent
+        | UsageEvent
+        | DoneEvent,
     ) -> None:
         if self._consumer is None:
             return
@@ -77,6 +98,27 @@ class PipelineAdapter:
         if isinstance(event, TextEvent):
             await self._consumer.emit(
                 StreamDelta(content=event.text, session_id=self._ctx.session_id)
+            )
+        elif isinstance(event, ThinkingEvent):
+            await self._consumer.emit(
+                ThinkingDelta(text=event.text, session_id=self._ctx.session_id)
+            )
+        elif isinstance(event, UsageEvent):
+            metrics_plugin = self._metrics_plugin()
+            if metrics_plugin is not None:
+                metrics_plugin.record_token_usage(
+                    event.input_tokens,
+                    event.output_tokens,
+                )
+                metrics_plugin.on_checkpoint(ctx=self._ctx)
+            await self._consumer.emit(
+                TurnStatusDelta(
+                    phase="idle",
+                    tokens_in=event.input_tokens,
+                    tokens_out=event.output_tokens,
+                    model_name=event.provider_name,
+                    session_id=self._ctx.session_id,
+                )
             )
         elif isinstance(event, ToolCallEvent):
             await self._consumer.emit(

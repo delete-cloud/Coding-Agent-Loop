@@ -17,6 +17,7 @@ from agentkit.providers.models import (
     ThinkingEvent,
     ToolCallEvent,
     DoneEvent,
+    UsageEvent,
 )
 from coding_agent.utils.retry import _extract_status_code, RETRYABLE_STATUS_CODES
 
@@ -125,18 +126,33 @@ class OpenAICompatProvider:
                     messages=messages,
                     tools=openai_tools,
                     stream=True,
+                    stream_options={"include_usage": True},
                     temperature=self._temperature,
                     max_tokens=self._max_tokens,
                     **kwargs,
                 )
 
                 accumulating_calls: dict[int, dict[str, Any]] = {}
+                _usage_in = 0
+                _usage_out = 0
 
                 async for chunk in stream:
+                    chunk_usage = getattr(chunk, "usage", None)
+                    if chunk_usage:
+                        _usage_in = getattr(chunk_usage, "prompt_tokens", 0) or 0
+                        _usage_out = getattr(chunk_usage, "completion_tokens", 0) or 0
+
                     if not chunk.choices:
                         continue
 
-                    delta = chunk.choices[0].delta
+                    choice = chunk.choices[0]
+
+                    choice_usage = getattr(choice, "usage", None)
+                    if choice_usage:
+                        _usage_in = getattr(choice_usage, "prompt_tokens", 0) or 0
+                        _usage_out = getattr(choice_usage, "completion_tokens", 0) or 0
+
+                    delta = choice.delta
 
                     # Capture reasoning/thinking content (Kimi, DeepSeek, etc.)
                     reasoning = getattr(delta, "reasoning_content", None)
@@ -164,7 +180,7 @@ class OpenAICompatProvider:
                                         tc.function.arguments
                                     )
 
-                    finish_reason = chunk.choices[0].finish_reason
+                    finish_reason = choice.finish_reason
                     if finish_reason in ("tool_calls", "stop") and accumulating_calls:
                         for idx in sorted(accumulating_calls.keys()):
                             call_data = accumulating_calls[idx]
@@ -184,6 +200,11 @@ class OpenAICompatProvider:
                             )
                         accumulating_calls.clear()
 
+                yield UsageEvent(
+                    input_tokens=_usage_in,
+                    output_tokens=_usage_out,
+                    provider_name=self._model,
+                )
                 yield DoneEvent()
                 return  # Success, exit the retry loop
 

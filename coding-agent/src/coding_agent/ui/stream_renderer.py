@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import re
 import time
+from collections.abc import Mapping
 from typing import Final
 
 from rich.cells import cell_len
@@ -16,7 +18,7 @@ from rich.text import Text
 from coding_agent.ui.components import create_message_panel
 from coding_agent.ui.theme import theme
 
-_MAX_RESULT_DISPLAY = 1000
+_SPINNER: Final[str] = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 _TOOL_ICONS: Final[dict[str, str]] = {
     "file": "📄",
@@ -56,26 +58,201 @@ def _has_markdown_syntax(text: str) -> bool:
     return bool(_MD_PATTERN.search(text))
 
 
+_DIFF_GIT_HEADER = re.compile(r"^diff --git ", re.MULTILINE)
+_DIFF_UNIFIED_HEADER = re.compile(r"^--- a/.+\n\+\+\+ b/", re.MULTILINE)
+
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_ESCAPE.sub("", text)
+
+
+def _sanitize_display_text(text: str) -> str:
+    return _strip_ansi(text).replace("\r", "")
+
+
+def _is_diff_output(text: str) -> bool:
+    if not text:
+        return False
+    return bool(_DIFF_GIT_HEADER.search(text) or _DIFF_UNIFIED_HEADER.search(text))
+
+
+def _smart_truncate(
+    text: str, max_lines: int = 50, tail_lines: int = 5
+) -> tuple[str, bool]:
+    if not text:
+        return text, False
+    lines = text.split("\n")
+    if len(lines) <= max_lines:
+        return text, False
+    head_lines = max_lines - tail_lines
+    hidden = len(lines) - max_lines
+    head = lines[:head_lines]
+    tail = lines[-tail_lines:]
+    indicator = f"\u2026 [{hidden} lines hidden] \u2026"
+    return "\n".join([*head, indicator, *tail]), True
+
+
+def _render_diff(text: str) -> Text:
+    result = Text()
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        if i > 0:
+            result.append("\n")
+        if line.startswith("diff --git "):
+            result.append(line, style=theme.Colors.DIFF_META)
+        elif line.startswith("index "):
+            result.append(line, style=theme.Colors.DIFF_META)
+        elif line.startswith("+++ "):
+            result.append(line, style=theme.Colors.DIFF_META)
+        elif line.startswith("--- "):
+            result.append(line, style=theme.Colors.DIFF_META)
+        elif line.startswith("@@ "):
+            result.append(line, style=theme.Colors.DIFF_HUNK)
+        elif line.startswith("+"):
+            result.append(line, style=theme.Colors.DIFF_ADD)
+        elif line.startswith("-"):
+            result.append(line, style=theme.Colors.DIFF_DELETE)
+        else:
+            result.append(line)
+    return result
+
+
+def _compact_call_summary(name: str, args: dict[str, object]) -> str:
+    if name == "bash_run":
+        command = str(args.get("command", "")).strip()
+        return command[:80] + "…" if len(command) > 80 else command
+
+    if name in {"file_write", "file_replace", "file_patch"}:
+        path = str(args.get("path", args.get("file_path", ""))).strip()
+        return path
+
+    if name == "subagent":
+        goal = str(args.get("goal", "")).strip()
+        return goal[:60] + "…" if len(goal) > 60 else goal
+
+    return ""
+
+
+def _extract_path_from_result(result: str) -> str:
+    try:
+        data: object = json.loads(result)
+    except Exception:
+        return ""
+    if isinstance(data, Mapping):
+        path = data.get("path")
+        if path is not None:
+            return str(path)
+    return ""
+
+
+def _compact_result_summary(name: str, result: str, is_error: bool) -> str:
+    lines = [line for line in result.strip().split("\n") if line]
+
+    if is_error:
+        return lines[0][:80] if lines else ""
+
+    if name == "bash_run":
+        if not lines:
+            return ""
+        if len(lines) == 1:
+            return lines[0][:80]
+        return f"{len(lines)} lines output"
+
+    if name in {"file_write", "file_replace", "file_patch"}:
+        path = _extract_path_from_result(result)
+        if path:
+            return path
+        return lines[0][:80] if lines else ""
+
+    if name == "subagent":
+        return lines[0][:80] if lines else ""
+
+    return lines[0][:80] if lines else ""
+
+
 class StreamingRenderer:
     def __init__(
         self, console: Console | None = None, *, enhanced_boundaries: bool = False
     ) -> None:
         self.console: Console = console or Console()
-        self._enhanced_boundaries = enhanced_boundaries
+        self._enhanced_boundaries: bool = enhanced_boundaries
         self._stream_buffer: str = ""
         self._in_stream: bool = False
         self._tool_start_times: dict[str, float] = {}
         self._stream_started_output: bool = False
+        self._spinner_idx: int = 0
+        self._thinking_active: bool = False
 
     def user_message(self, content: str) -> None:
+        clean_content = _sanitize_display_text(content)
         if self._enhanced_boundaries and self.console.is_terminal:
-            self.console.print(create_message_panel("user", content))
+            self.console.print(create_message_panel("user", clean_content))
         else:
             self.console.print(Text("❯ ", style="bold green"), end="")
-            self.console.print(Text(content, style="bold white"))
+            self.console.print(Text(clean_content, style="bold white"))
 
     def thinking(self, text: str) -> None:
         self.console.print(Text(text, style="dim italic"))
+
+    def _clear_current_line(self) -> None:
+        if self.console.is_terminal:
+            self.console.control(
+                Control(
+                    ControlType.CARRIAGE_RETURN,
+                    (ControlType.ERASE_IN_LINE, 2),
+                )
+            )
+
+    def thinking_start(self) -> None:
+        self._thinking_active = True
+        self._spinner_idx = 0
+        if self.console.is_terminal:
+            char = _SPINNER[self._spinner_idx]
+            self.console.print(Text(f"{char} Thinking...", style="dim"), end="")
+
+    def thinking_update(self, elapsed_seconds: float = 0.0) -> None:
+        if not self._thinking_active:
+            return
+        self._spinner_idx = (self._spinner_idx + 1) % len(_SPINNER)
+        if self.console.is_terminal:
+            self._clear_current_line()
+            char = _SPINNER[self._spinner_idx]
+            elapsed_str = f" {int(elapsed_seconds)}s" if elapsed_seconds >= 1 else ""
+            self.console.print(
+                Text(f"{char} Thinking...{elapsed_str}", style="dim"), end=""
+            )
+
+    def thinking_end(self) -> None:
+        if not self._thinking_active:
+            return
+        if self.console.is_terminal:
+            self._clear_current_line()
+        self._thinking_active = False
+        self._spinner_idx = 0
+
+    def update_status(
+        self,
+        tokens_in: int = 0,
+        tokens_out: int = 0,
+        elapsed_seconds: float = 0.0,
+        model: str = "",
+        context_pct: float = 0.0,
+    ) -> None:
+        if not self.console.is_terminal:
+            return
+        parts: list[str] = []
+        if model:
+            parts.append(model)
+        if context_pct > 0:
+            parts.append(f"{context_pct:.0f}%")
+        parts.append(f"{tokens_in} in / {tokens_out} out")
+        if elapsed_seconds > 0:
+            parts.append(f"{elapsed_seconds:.1f}s")
+        line = " | ".join(parts)
+        self._clear_current_line()
+        self.console.print(Text(line, style="dim"), end="")
 
     def stream_start(self) -> None:
         """Start a new streaming text block."""
@@ -186,11 +363,8 @@ class StreamingRenderer:
         if call_id in self._tool_start_times:
             duration = time.perf_counter() - self._tool_start_times.pop(call_id)
 
-        truncated = False
-        display_result = result
-        if len(display_result) > _MAX_RESULT_DISPLAY:
-            display_result = display_result[:_MAX_RESULT_DISPLAY]
-            truncated = True
+        clean_result = _strip_ansi(result)
+        display_result, _ = _smart_truncate(clean_result)
 
         icon = _tool_icon(name)
 
@@ -210,20 +384,70 @@ class StreamingRenderer:
         else:
             timing = ""
 
-        result_text = display_result
-        if truncated:
-            result_text += (
-                f"\n[dim]… ({len(result) - _MAX_RESULT_DISPLAY} chars truncated)[/]"
-            )
+        if _is_diff_output(display_result):
+            renderable = _render_diff(display_result)
+        else:
+            renderable = display_result
 
         panel = Panel(
-            result_text,
+            renderable,
             title=f"{status} {icon} [bold]{name}[/]{timing}",
             border_style=style,
             padding=(0, 1),
             expand=False,
         )
         self.console.print(panel)
+
+    def compact_tool_call(
+        self, call_id: str, name: str, args: dict[str, object]
+    ) -> None:
+        self._flush_stream()
+        self._tool_start_times[call_id] = time.perf_counter()
+
+        icon = _tool_icon(name)
+        summary = _compact_call_summary(name, args)
+
+        line = Text()
+        line.append(f"⏳ {icon} ", style="yellow")
+        line.append(name, style="bold")
+        if summary:
+            line.append("  ", style="dim")
+            line.append(summary, style="dim")
+        self.console.print(line)
+
+    def compact_tool_result(
+        self, call_id: str, name: str, result: str, *, is_error: bool = False
+    ) -> None:
+        duration = 0.0
+        if call_id in self._tool_start_times:
+            duration = time.perf_counter() - self._tool_start_times.pop(call_id)
+
+        icon = _tool_icon(name)
+        status = "✗" if is_error else "✓"
+        style = "red" if is_error else "green"
+        summary = _compact_result_summary(name, _strip_ansi(result), is_error)
+
+        line = Text()
+        line.append(f"{status} {icon} ", style=style)
+        line.append(name, style="bold")
+        if summary:
+            line.append("  ", style="dim")
+            line.append(summary, style="dim")
+
+        if duration >= 5.0:
+            line.append(f" ({duration:.1f}s)", style="red bold")
+        elif duration >= 1.0:
+            line.append(f" ({duration:.1f}s)", style="yellow")
+        elif duration > 0:
+            line.append(f" ({duration:.2f}s)", style="dim")
+
+        self.console.print(line)
+
+        if is_error and name == "bash_run":
+            clean_result = _strip_ansi(result)
+            excerpt, _ = _smart_truncate(clean_result, max_lines=5, tail_lines=2)
+            if excerpt:
+                self.console.print(Text(excerpt, style="red dim"))
 
     def collapsed_group(
         self,

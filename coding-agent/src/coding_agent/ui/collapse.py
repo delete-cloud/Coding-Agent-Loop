@@ -12,6 +12,10 @@ _COLLAPSIBLE_TOOLS: frozenset[str] = frozenset(
         "glob",
     }
 )
+_HIDDEN_TOOLS: frozenset[str] = frozenset({"todo_write", "todo_read"})
+_COMPACT_TOOLS: frozenset[str] = frozenset(
+    {"file_write", "file_replace", "file_patch", "bash_run", "subagent"}
+)
 _SEARCH_TOOLS: frozenset[str] = frozenset({"grep_search", "grep"})
 _READ_TOOLS: frozenset[str] = frozenset({"file_read"})
 _LIST_TOOLS: frozenset[str] = frozenset({"glob_files", "glob"})
@@ -19,6 +23,14 @@ _LIST_TOOLS: frozenset[str] = frozenset({"glob_files", "glob"})
 
 def is_collapsible(tool_name: str) -> bool:
     return tool_name in _COLLAPSIBLE_TOOLS
+
+
+def is_hidden(tool_name: str) -> bool:
+    return tool_name in _HIDDEN_TOOLS
+
+
+def is_compact(tool_name: str) -> bool:
+    return tool_name in _COMPACT_TOOLS
 
 
 def classify_tool(tool_name: str) -> str:
