@@ -39,5 +39,13 @@ class ToolResultEvent(StreamEvent):
 
 
 @dataclass(frozen=True)
+class UsageEvent(StreamEvent):
+    input_tokens: int = 0
+    output_tokens: int = 0
+    provider_name: str = ""
+    kind: str = field(init=False, default="usage")
+
+
+@dataclass(frozen=True)
 class DoneEvent(StreamEvent):
     kind: str = field(init=False, default="done")

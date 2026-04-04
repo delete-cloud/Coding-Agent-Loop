@@ -20,6 +20,7 @@ from agentkit.providers.models import (
     ThinkingEvent,
     ToolCallEvent,
     ToolResultEvent,
+    UsageEvent,
 )
 from agentkit.runtime.hook_runtime import HookRuntime
 from agentkit.tape.models import Entry
@@ -51,7 +52,14 @@ class PipelineContext:
     output: Any = None
     on_event: (
         Callable[
-            [TextEvent | ThinkingEvent | ToolCallEvent | ToolResultEvent | DoneEvent],
+            [
+                TextEvent
+                | ThinkingEvent
+                | ToolCallEvent
+                | ToolResultEvent
+                | UsageEvent
+                | DoneEvent
+            ],
             Awaitable[None],
         ]
         | None
@@ -243,6 +251,9 @@ class Pipeline:
                             "arguments": event.arguments,
                         }
                     )
+                elif isinstance(event, UsageEvent):
+                    if ctx.on_event:
+                        await ctx.on_event(event)
                 elif isinstance(event, DoneEvent):
                     if ctx.on_event:
                         await ctx.on_event(event)
