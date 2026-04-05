@@ -47,9 +47,7 @@ class TopicPlugin:
         runtime = kwargs.get("runtime")
 
         tape: Tape = ctx.tape
-        entries = (
-            tape.windowed_entries() if hasattr(tape, "windowed_entries") else list(tape)
-        )
+        entries = tape.windowed_entries()
 
         if len(entries) < self._min_entries:
             if self._current_topic_id is None:

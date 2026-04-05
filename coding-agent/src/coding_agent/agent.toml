@@ -36,6 +36,9 @@ sessions = "./data/sessions"
 policy = "auto"
 blocked_tools = []
 
+[web_search]
+backend = "mock"
+
 [summarizer]
 max_entries = 100
 keep_recent = 20

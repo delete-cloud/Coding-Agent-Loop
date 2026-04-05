@@ -10,10 +10,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any
 
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.approval import ApprovalPolicy
@@ -53,7 +54,7 @@ class MockProvider:
 
     async def stream(
         self,
-        messages: list[dict],
+        messages: list[dict[str, Any]],
         tools: list[ToolSchema] | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[Any]:
@@ -67,7 +68,7 @@ class MockProvider:
 
         yield DoneEvent()
 
-    async def complete(self, messages: list[dict]) -> str:
+    async def complete(self, messages: list[dict[str, Any]]) -> str:
         """Return complete mock response."""
         return "Mock response"
 
@@ -77,15 +78,23 @@ class Session:
     """A managed agent session."""
 
     id: str
-    wire: LocalWire
-    approval_store: ApprovalStore
     created_at: datetime
     last_activity: datetime
+    wire: LocalWire = field(init=False)
+    approval_store: ApprovalStore = field(default_factory=ApprovalStore)
     repo_path: Path | None = None
     approval_policy: ApprovalPolicy = ApprovalPolicy.AUTO
     provider: Any | None = None
     max_steps: int = 30
-    task: asyncio.Task | None = None
+    task: asyncio.Task[Any] | None = None
+    turn_in_progress: bool = False
+    pending_approval: dict[str, Any] | None = None
+    approval_event: asyncio.Event = field(default_factory=asyncio.Event)
+    approval_response: dict[str, Any] | None = None
+    event_queues: list[asyncio.Queue[dict[str, Any]]] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.wire = LocalWire(self.id)
 
 
 class SessionManager:
@@ -125,16 +134,11 @@ class SessionManager:
         if provider is None:
             provider = MockProvider()
 
-        # Create LocalWire for this session
-        wire = LocalWire(session_id)
-
-        # Create ApprovalStore for this session
         approval_store = ApprovalStore()
         self._approval_stores[session_id] = approval_store
 
         session = Session(
             id=session_id,
-            wire=wire,
             approval_store=approval_store,
             created_at=now,
             last_activity=now,
@@ -178,6 +182,20 @@ class SessionManager:
         """
         return session_id in self._sessions
 
+    def register_session(self, session: Session) -> None:
+        self._sessions[session.id] = session
+        self._approval_stores[session.id] = session.approval_store
+
+    def remove_session(self, session_id: str) -> None:
+        if session_id not in self._sessions:
+            raise KeyError(f"Session not found: {session_id}")
+        del self._sessions[session_id]
+        self._approval_stores.pop(session_id, None)
+
+    def clear_sessions(self) -> None:
+        self._sessions.clear()
+        self._approval_stores.clear()
+
     async def close_session(self, session_id: str) -> None:
         """Close a session and clean up resources.
 
@@ -201,11 +219,7 @@ class SessionManager:
                 except (asyncio.CancelledError, asyncio.TimeoutError):
                     pass
 
-            # Remove from store
-            del self._sessions[session_id]
-
-            # Cleanup approval store
-            self._approval_stores.pop(session_id, None)
+            self.remove_session(session_id)
 
         logger.info(f"Closed session: {session_id}")
 
@@ -244,21 +258,39 @@ class SessionManager:
                 await self._wire.send(msg)
 
             async def request_approval(self, req: ApprovalRequest) -> ApprovalResponse:
+                session.pending_approval = {
+                    "request_id": req.request_id,
+                    "tool_name": req.tool_call.tool_name if req.tool_call else "",
+                    "arguments": req.tool_call.arguments if req.tool_call else {},
+                }
+                session.approval_event.clear()
+                session.approval_response = None
+                session.approval_store.add_request(req)
                 await self._wire.send(req)
-                return await session.approval_store.wait_for_response(
+                response = await session.approval_store.wait_for_response(
                     req.request_id,
                     req.timeout_seconds,
-                ) or ApprovalResponse(
-                    session_id=req.session_id,
-                    request_id=req.request_id,
-                    approved=False,
-                    feedback="Approval timeout or error",
                 )
+                if response is None:
+                    return ApprovalResponse(
+                        session_id=req.session_id,
+                        request_id=req.request_id,
+                        approved=False,
+                        feedback="Approval timeout or error",
+                    )
+
+                session.approval_response = {
+                    "decision": "approve" if response.approved else "deny",
+                    "feedback": response.feedback,
+                }
+                session.approval_event.set()
+                return response
 
         consumer = _WireConsumer(session.wire)
         adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
 
         try:
+            session.turn_in_progress = True
             await adapter.run_turn(prompt)
         except Exception as exc:
             logger.exception("HTTP session turn failed")
@@ -276,6 +308,7 @@ class SessionManager:
                 )
             )
         finally:
+            session.turn_in_progress = False
             session.last_activity = datetime.now()
 
     async def submit_approval(
@@ -313,7 +346,16 @@ class SessionManager:
         success = session.approval_store.respond(response)
         session.last_activity = datetime.now()
 
+        if not success and session.pending_approval is not None:
+            success = session.pending_approval.get("request_id") == request_id
+
         if success:
+            session.pending_approval = None
+            session.approval_response = {
+                "decision": "approve" if approved else "deny",
+                "feedback": feedback,
+            }
+            session.approval_event.set()
             logger.info(f"Approval submitted for session {session_id}: {approved}")
         else:
             logger.warning(
@@ -347,7 +389,8 @@ class SessionManager:
             "id": session.id,
             "created_at": session.created_at.isoformat(),
             "last_activity": session.last_activity.isoformat(),
-            "turn_in_progress": session.task is not None and not session.task.done(),
+            "turn_in_progress": session.turn_in_progress,
+            "pending_approval": session.pending_approval is not None,
         }
 
     async def cleanup_idle_sessions(self, max_idle_minutes: int = 30) -> list[str]:

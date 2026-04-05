@@ -16,10 +16,12 @@ class CoreToolsPlugin:
         workspace_root: Path | str = ".",
         planner: Any = None,
         shell_session: ShellSessionPlugin | None = None,
+        web_search_backend: Any = None,
     ) -> None:
         self._workspace_root = Path(workspace_root).resolve()
         self._planner = planner
         self._shell_session = shell_session
+        self._web_search_backend = web_search_backend
         self._registry = ToolRegistry()
         self._register_tools()
 
@@ -28,12 +30,14 @@ class CoreToolsPlugin:
         from coding_agent.tools.file_patch_tool import build_file_patch_tool
         from coding_agent.tools.planner import build_planner_tools
         from coding_agent.tools.shell import bash_run
+        from coding_agent.tools.web_search import build_web_search_tool
 
         file_read, file_write, file_replace, glob_files, grep_search = build_file_tools(
             self._workspace_root
         )
         file_patch = build_file_patch_tool(self._workspace_root)
         todo_write, todo_read = build_planner_tools(self._planner)
+        web_search = build_web_search_tool(self._web_search_backend)
 
         for fn in (
             file_read,
@@ -45,6 +49,7 @@ class CoreToolsPlugin:
             todo_write,
             todo_read,
             file_patch,
+            web_search,
         ):
             self._registry.register(fn)
 

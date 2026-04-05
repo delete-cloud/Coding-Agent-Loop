@@ -51,7 +51,7 @@ class DoomDetectorPlugin:
         ctx.plugin_states[self.state_key] = state
 
     def _current_turn_tool_calls(self, ctx: Any) -> list[Any]:
-        entries = list(ctx.tape)
+        entries = list(ctx.tape.snapshot())
         turn_start = 0
         for index in range(len(entries) - 1, -1, -1):
             entry = entries[index]

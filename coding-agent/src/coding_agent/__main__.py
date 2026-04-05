@@ -33,7 +33,7 @@ def create_agent(
     max_steps_override: int | None = None,
     approval_mode_override: str | None = None,
     session_id_override: str | None = None,
-) -> tuple:
+) -> tuple[Any, Any]:
     """Create a fully wired agent from config.
 
     Returns (Pipeline, PipelineContext) ready for run_turn().
@@ -47,7 +47,20 @@ def create_agent(
     from agentkit.runtime.hookspecs import HOOK_SPECS
     from agentkit.runtime.pipeline import Pipeline, PipelineContext
     from agentkit.tape.tape import Tape
+    from coding_agent.plugins.approval import ApprovalPlugin, ApprovalPolicy
+    from coding_agent.plugins.core_tools import CoreToolsPlugin
+    from coding_agent.plugins.doom_detector import DoomDetectorPlugin
+    from coding_agent.plugins.llm_provider import LLMProviderPlugin
+    from coding_agent.plugins.mcp import MCPPlugin
+    from coding_agent.plugins.memory import MemoryPlugin
+    from coding_agent.plugins.metrics import SessionMetricsPlugin
+    from coding_agent.plugins.parallel_executor import ParallelExecutorPlugin
     from coding_agent.plugins.shell_session import ShellSessionPlugin
+    from coding_agent.plugins.skills import SkillsPlugin
+    from coding_agent.plugins.storage import StoragePlugin
+    from coding_agent.plugins.summarizer import SummarizerPlugin
+    from coding_agent.plugins.topic import TopicPlugin
+    from coding_agent.tools.web_search import create_web_search_backend
 
     if config_path is None:
         config_path = Path(__file__).parent / "agent.toml"
@@ -74,9 +87,23 @@ def create_agent(
         resolved_key = os.environ.get("KIMI_CODE_API_KEY", "")
     resolved_key = resolved_key or ""
 
+    approval_cfg = cfg.extra.get("approval", {})
+    web_search_cfg = cfg.extra.get("web_search", {})
+    policy_str = approval_mode_override or approval_cfg.get("policy", "auto")
+    approval_policy_map = {
+        "yolo": ApprovalPolicy.YOLO,
+        "interactive": ApprovalPolicy.INTERACTIVE,
+        "auto": ApprovalPolicy.AUTO,
+    }
+    policy = approval_policy_map.get(policy_str)
+    if policy is None:
+        raise ValueError(f"unsupported approval policy: {policy_str}")
+
+    web_search_backend = create_web_search_backend(web_search_cfg)
+
     registry = PluginRegistry(specs=HOOK_SPECS)
     shell_session = ShellSessionPlugin()
-    plugin_factories = {
+    plugin_factories: dict[str, Any] = {
         "llm_provider": lambda: LLMProviderPlugin(
             provider=cfg.provider,
             model=cfg.model,
@@ -87,10 +114,12 @@ def create_agent(
         "core_tools": lambda: CoreToolsPlugin(
             workspace_root=workspace_root,
             shell_session=shell_session,
+            web_search_backend=web_search_backend,
         ),
         "approval": lambda: ApprovalPlugin(
             policy=policy,
             blocked_tools=set(approval_cfg.get("blocked_tools", [])),
+            external_request_tools={"web_search"},
         ),
         "summarizer": lambda: SummarizerPlugin(
             max_entries=sum_cfg.get("max_entries", 100),
@@ -99,30 +128,6 @@ def create_agent(
         "memory": lambda: MemoryPlugin(),
         "shell_session": lambda: shell_session,
     }
-
-    from coding_agent.plugins.approval import ApprovalPlugin, ApprovalPolicy
-    from coding_agent.plugins.core_tools import CoreToolsPlugin
-    from coding_agent.plugins.doom_detector import DoomDetectorPlugin
-    from coding_agent.plugins.llm_provider import LLMProviderPlugin
-    from coding_agent.plugins.mcp import MCPPlugin
-    from coding_agent.plugins.memory import MemoryPlugin
-    from coding_agent.plugins.metrics import SessionMetricsPlugin
-    from coding_agent.plugins.parallel_executor import ParallelExecutorPlugin
-    from coding_agent.plugins.skills import SkillsPlugin
-    from coding_agent.plugins.storage import StoragePlugin
-    from coding_agent.plugins.summarizer import SummarizerPlugin
-    from coding_agent.plugins.topic import TopicPlugin
-
-    approval_cfg = cfg.extra.get("approval", {})
-    policy_str = approval_mode_override or approval_cfg.get("policy", "auto")
-    approval_policy_map = {
-        "yolo": ApprovalPolicy.AUTO,
-        "interactive": ApprovalPolicy.MANUAL,
-        "auto": ApprovalPolicy.AUTO,
-    }
-    policy = approval_policy_map.get(policy_str)
-    if policy is None:
-        raise ValueError(f"unsupported approval policy: {policy_str}")
 
     sum_cfg = cfg.extra.get("summarizer", {})
     parallel_cfg = cfg.extra.get("parallel", {})
@@ -133,6 +138,8 @@ def create_agent(
 
     async def _execute_tool_async(name: str, arguments: dict[str, Any]) -> str:
         core_tools = registry.get("core_tools")
+        if not isinstance(core_tools, CoreToolsPlugin):
+            raise TypeError("core_tools plugin must be CoreToolsPlugin")
         result = await core_tools.execute_tool_async(name=name, arguments=arguments)
         return str(result) if result is not None else ""
 
@@ -199,6 +206,7 @@ def create_agent(
             "model": cfg.model,
             "provider": cfg.provider,
             "max_tool_rounds": cfg.max_turns,
+            "web_search": web_search_cfg,
         },
     )
 
