@@ -22,14 +22,26 @@ class ContextBuilder:
         grounding: list[dict[str, Any]] | None = None,
         entries: list[Entry] | None = None,
     ) -> list[dict[str, Any]]:
-        messages: list[dict[str, Any]] = []
-
         if isinstance(tape_or_view, TapeView):
             entries = tape_or_view.entries
         elif entries is not None:
             pass  # caller provided explicit entries (legacy)
         else:
             entries = list(tape_or_view)
+
+        core_messages = self.build_core_messages(entries)
+        return self.compose_messages(core_messages, grounding=grounding)
+
+    def build_core_messages(self, entries: list[Entry]) -> list[dict[str, Any]]:
+        messages: list[dict[str, Any]] = []
+        self.append_to_core_messages(messages, entries)
+        return messages
+
+    def append_to_core_messages(
+        self,
+        messages: list[dict[str, Any]],
+        entries: list[Entry],
+    ) -> None:
         index = 0
         while index < len(entries):
             entry = entries[index]
@@ -92,6 +104,13 @@ class ContextBuilder:
             if msg is not None:
                 messages.append(msg)
             index += 1
+
+    def compose_messages(
+        self,
+        core_messages: list[dict[str, Any]],
+        grounding: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        messages = list(core_messages)
 
         if grounding:
             last_user_idx = None

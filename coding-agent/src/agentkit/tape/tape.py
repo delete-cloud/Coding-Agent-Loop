@@ -34,6 +34,10 @@ class Tape:
         with self._lock:
             return list(self._entries[self._window_start :])
 
+    def snapshot(self) -> tuple[Entry, ...]:
+        with self._lock:
+            return tuple(self._entries)
+
     def handoff(self, summary_anchor: Entry, window_start: int | None = None) -> None:
         with self._lock:
             self._entries.append(summary_anchor)

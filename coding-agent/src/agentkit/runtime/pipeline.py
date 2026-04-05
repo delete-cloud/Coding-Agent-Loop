@@ -50,6 +50,10 @@ class PipelineContext:
     tool_schemas: list[Any] = field(default_factory=list)
     response_entries: list[Any] = field(default_factory=list)
     output: Any = None
+    context_builder: Any = None
+    incremental_core_messages: list[dict[str, Any]] = field(default_factory=list)
+    incremental_entry_count: int = 0
+    incremental_tool_round_count: int = 0
     on_event: (
         Callable[
             [
@@ -106,6 +110,7 @@ class Pipeline:
     async def run_turn(self, ctx: PipelineContext) -> PipelineContext:
         fork = None
         original_tape = ctx.tape
+        ctx._handoff_done = False
 
         try:
             for stage in self.STAGES:
@@ -125,6 +130,11 @@ class Pipeline:
                             begin = getattr(ctx.storage, "begin", None)
                             if callable(begin):
                                 fork = begin(ctx.tape)
+                                if not isinstance(fork, Tape):
+                                    raise PipelineError(
+                                        "storage.begin() must return Tape",
+                                        stage=stage,
+                                    )
                                 ctx.tape = fork
                     else:
                         logger.debug("Stage '%s' has no handler, skipping", stage)
@@ -163,6 +173,15 @@ class Pipeline:
 
     async def _stage_build_context(self, ctx: PipelineContext) -> None:
         from agentkit.tape.view import TapeView
+        from agentkit.context.builder import ContextBuilder
+
+        system_prompt = ctx.config.get("system_prompt", "You are a helpful assistant.")
+        if ctx.context_builder is None:
+            ctx.context_builder = ContextBuilder(system_prompt=system_prompt)
+        builder = ctx.context_builder
+
+        incremental_enabled = bool(ctx.config.get("incremental_context"))
+        force_full_rebuild = False
 
         window_result = self._runtime.call_first(
             "resolve_context_window", tape=ctx.tape
@@ -183,6 +202,7 @@ class Pipeline:
                     abs_window_start = ctx.tape.window_start + window_start
                     ctx.tape.handoff(summary_anchor, window_start=abs_window_start)
                     ctx._handoff_done = True
+                    force_full_rebuild = True
                 logger.info(
                     "Context window advanced: %d entries visible (of %d total)",
                     len(ctx.tape.windowed_entries()),
@@ -196,11 +216,10 @@ class Pipeline:
                     tape_id=ctx.tape.tape_id,
                     parent_id=ctx.tape.parent_id,
                 )
+                force_full_rebuild = True
                 logger.info(
                     "Context summarized (legacy): %d entries remaining", len(ctx.tape)
                 )
-
-        view = TapeView.from_tape(ctx.tape)
 
         grounding_results = self._runtime.call_many("build_context", tape=ctx.tape)
         grounding: list[dict[str, Any]] = []
@@ -208,11 +227,35 @@ class Pipeline:
             if isinstance(result, list):
                 grounding.extend(result)
 
-        from agentkit.context.builder import ContextBuilder
+        interval = max(
+            1, int(ctx.config.get("incremental_context_rebuild_interval", 5))
+        )
+        should_full_rebuild = (
+            not incremental_enabled
+            or force_full_rebuild
+            or ctx.incremental_entry_count == 0
+            or ctx.incremental_entry_count > len(ctx.tape)
+            or ctx.incremental_tool_round_count % interval == 0
+        )
 
-        system_prompt = ctx.config.get("system_prompt", "You are a helpful assistant.")
-        builder = ContextBuilder(system_prompt=system_prompt)
-        ctx.messages = builder.build(view, grounding=grounding or None)
+        if should_full_rebuild:
+            view = TapeView.from_tape(ctx.tape)
+            ctx.incremental_core_messages = builder.build_core_messages(view.entries)
+            ctx.incremental_entry_count = len(ctx.tape)
+            ctx.messages = builder.compose_messages(
+                ctx.incremental_core_messages,
+                grounding=grounding or None,
+            )
+            return
+
+        snapshot = ctx.tape.snapshot()
+        new_entries = list(snapshot[ctx.incremental_entry_count :])
+        builder.append_to_core_messages(ctx.incremental_core_messages, new_entries)
+        ctx.incremental_entry_count = len(snapshot)
+        ctx.messages = builder.compose_messages(
+            ctx.incremental_core_messages,
+            grounding=grounding or None,
+        )
 
     async def _stage_run_model(self, ctx: PipelineContext) -> None:
         if ctx.llm_provider is None:
@@ -291,6 +334,7 @@ class Pipeline:
 
                 executable_calls: list[dict[str, Any]] = []
                 executable_metas: list[dict[str, Any]] = []
+                checkpoint_entry_count: int | None = None
 
                 for i, tc in enumerate(tool_calls):
                     tc_payload: dict[str, Any] = {
@@ -354,6 +398,7 @@ class Pipeline:
                     executable_metas.append(tc)
 
                 if executable_calls:
+                    checkpoint_entry_count = len(ctx.tape)
                     batch_results = (
                         self._runtime.call_first(
                             "execute_tools_batch",
@@ -415,7 +460,13 @@ class Pipeline:
                                 )
                             )
 
+                if executable_calls:
+                    ctx.incremental_tool_round_count += 1
                 await self._stage_build_context(ctx)
+                if checkpoint_entry_count is not None and len(
+                    ctx.tape
+                ) != checkpoint_entry_count + len(executable_metas):
+                    ctx.incremental_tool_round_count = 0
                 continue
 
             break
