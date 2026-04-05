@@ -3,6 +3,7 @@ from coding_agent.plugins.core_tools import CoreToolsPlugin
 from coding_agent.plugins.shell_session import ShellSessionPlugin
 from agentkit.tools.schema import ToolSchema
 from coding_agent.core.planner import PlanManager
+import json
 
 
 class TestCoreToolsPlugin:
@@ -72,6 +73,49 @@ class TestCoreToolsPlugin:
         names = {s.name for s in plugin.get_tools()}
         assert "grep_search" in names
         assert "glob_files" in names
+
+    def test_includes_web_search_tool(self):
+        plugin = CoreToolsPlugin()
+        names = {s.name for s in plugin.get_tools()}
+        assert "web_search" in names
+
+    def test_execute_web_search_uses_backend(self, tmp_path):
+        class RecordingBackend:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def search(self, query: str, limit: int):
+                self.calls.append((query, limit))
+                return [
+                    {
+                        "title": "Result",
+                        "url": "https://example.com",
+                        "snippet": "Snippet",
+                    }
+                ]
+
+        backend = RecordingBackend()
+        plugin = CoreToolsPlugin(workspace_root=tmp_path, web_search_backend=backend)
+
+        result = plugin.execute_tool(
+            name="web_search",
+            arguments={"query": "agent", "limit": 2},
+        )
+        payload = json.loads(result)
+
+        assert backend.calls == [("agent", 2)]
+        assert payload["results"][0]["url"] == "https://example.com"
+
+    def test_execute_web_search_without_backend_uses_default_backend(self, tmp_path):
+        plugin = CoreToolsPlugin(workspace_root=tmp_path)
+
+        result = plugin.execute_tool(
+            name="web_search",
+            arguments={"query": "agent", "limit": 1},
+        )
+        payload = json.loads(result)
+
+        assert payload["results"][0]["title"] == "Mock result for agent"
 
     def test_bash_run_uses_and_updates_shell_session(self, tmp_path):
         shell_session = ShellSessionPlugin()

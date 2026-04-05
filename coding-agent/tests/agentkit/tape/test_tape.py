@@ -24,6 +24,17 @@ class TestTape:
         tape.append(e2)
         assert list(tape) == [e1, e2]
 
+    def test_snapshot_returns_immutable_tuple(self):
+        tape = Tape()
+        entry = Entry(kind="message", payload={"role": "user", "content": "a"})
+        tape.append(entry)
+
+        snapshot = tape.snapshot()
+
+        assert isinstance(snapshot, tuple)
+        assert snapshot == (entry,)
+        assert not hasattr(snapshot, "append")
+
     def test_slice(self):
         tape = Tape()
         entries = [Entry(kind="message", payload={"content": str(i)}) for i in range(5)]

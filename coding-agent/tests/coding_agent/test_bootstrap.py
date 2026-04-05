@@ -103,4 +103,38 @@ enabled = ["storage", "core_tools"]
         assert core_tools._workspace_root == workspace_root.resolve()
 
         approval_plugin = pipeline._registry.get("approval")
-        assert approval_plugin._policy.name == "MANUAL"
+        assert approval_plugin._policy.name == "INTERACTIVE"
+
+    def test_create_agent_loads_web_search_config(self, tmp_path):
+        config_path = tmp_path / "agent.toml"
+        config_path.write_text(
+            """
+[agent]
+name = "test-agent"
+model = "gpt-4.1"
+provider = "copilot"
+
+[agent.plugins]
+enabled = ["core_tools", "approval"]
+
+[approval]
+policy = "auto"
+
+[web_search]
+backend = "mock"
+""".strip()
+        )
+
+        pipeline, ctx = create_agent(
+            config_path=config_path,
+            data_dir=tmp_path / "data",
+            api_key="sk-test",
+        )
+
+        core_tools = pipeline._registry.get("core_tools")
+        approval_plugin = pipeline._registry.get("approval")
+
+        assert core_tools._web_search_backend is not None
+        assert ctx.config["web_search"] == {"backend": "mock"}
+        assert "web_search" in {schema.name for schema in core_tools.get_tools()}
+        assert "web_search" in approval_plugin._external_request_tools

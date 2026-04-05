@@ -64,6 +64,80 @@ class TestTopicPlugin:
         assert len(anchors) == 1
         assert anchors[0].meta.get("prefix") == "Topic Start"
 
+    def test_on_checkpoint_uses_windowed_entries(self):
+        class WindowOnlyTape(Tape):
+            def snapshot(self):
+                raise AssertionError("windowed path should be used")
+
+        plugin = TopicPlugin()
+        tape = WindowOnlyTape()
+        tape.append(
+            Entry(kind="message", payload={"role": "user", "content": "fix auth.py"})
+        )
+        tape.append(
+            Entry(
+                kind="tool_call",
+                payload={"name": "file_read", "arguments": {"path": "src/auth.py"}},
+            )
+        )
+        tape.append(
+            Entry(
+                kind="tool_result",
+                payload={"tool_call_id": "tc1", "content": "file contents"},
+            )
+        )
+        tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "assistant", "content": "I see the issue"},
+            )
+        )
+
+        class FakeCtx:
+            def __init__(self, tape):
+                self.tape = tape
+                self.plugin_states = {}
+
+        ctx = FakeCtx(tape)
+        plugin.on_checkpoint(ctx=ctx)
+
+        assert plugin.topic_count == 1
+        assert len(tape.filter("anchor")) == 1
+
+    def test_handoff_window_excludes_old_user_prompt_from_topic_start(self):
+        plugin = TopicPlugin()
+        tape = Tape()
+        tape.append(
+            Entry(kind="message", payload={"role": "user", "content": "old auth task"})
+        )
+        tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "assistant", "content": "finished old task"},
+            )
+        )
+        tape.handoff(Anchor(anchor_type="handoff", payload={"content": "summary"}))
+        tape.append(
+            Entry(
+                kind="tool_call",
+                payload={"name": "file_read", "arguments": {"path": "src/ui/app.tsx"}},
+            )
+        )
+        tape.append(
+            Entry(kind="message", payload={"role": "assistant", "content": "new task"})
+        )
+
+        class FakeCtx:
+            def __init__(self, tape):
+                self.tape = tape
+                self.plugin_states = {}
+
+        ctx = FakeCtx(tape)
+        plugin.on_checkpoint(ctx=ctx)
+
+        anchors = tape.filter("anchor")
+        assert anchors[-1].payload["content"] == "Topic #1"
+
     def test_topic_switch_on_file_path_change(self):
         plugin = TopicPlugin(overlap_threshold=0.2, min_entries_before_detect=2)
         tape = Tape()
@@ -266,7 +340,7 @@ class TestTopicPlugin:
     def test_emits_session_events_on_topic_start_and_end(self):
         class FakeRuntime:
             def __init__(self) -> None:
-                self.events: list[tuple[str, dict]] = []
+                self.events: list[tuple[str, dict[str, object]]] = []
 
             def notify(self, hook_name: str, **kwargs):
                 if hook_name == "on_session_event":

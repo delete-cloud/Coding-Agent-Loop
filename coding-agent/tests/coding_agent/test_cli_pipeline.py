@@ -855,12 +855,11 @@ class TestBatchModeAutoApprove:
 
     @pytest.mark.asyncio
     async def test_batch_yolo_policy_returns_approve(self):
-        """ApprovalPlugin with AUTO policy always returns Approve — no AskUser."""
         from agentkit.directive.executor import DirectiveExecutor
         from agentkit.directive.types import Approve
         from coding_agent.plugins.approval import ApprovalPlugin, ApprovalPolicy
 
-        plugin = ApprovalPlugin(policy=ApprovalPolicy.AUTO)
+        plugin = ApprovalPlugin(policy=ApprovalPolicy.YOLO)
         directive = plugin.approve_tool_call(
             tool_name="shell_exec", arguments={"cmd": "ls"}
         )
@@ -870,6 +869,18 @@ class TestBatchModeAutoApprove:
         executor = DirectiveExecutor()
         result = await executor.execute(directive)
         assert result is True
+
+    @pytest.mark.asyncio
+    async def test_batch_auto_policy_requires_approval_for_unsafe_tool(self):
+        from agentkit.directive.types import AskUser
+        from coding_agent.plugins.approval import ApprovalPlugin, ApprovalPolicy
+
+        plugin = ApprovalPlugin(policy=ApprovalPolicy.AUTO, safe_tools={"file_read"})
+        directive = plugin.approve_tool_call(
+            tool_name="shell_exec", arguments={"cmd": "ls"}
+        )
+
+        assert isinstance(directive, AskUser)
 
     @pytest.mark.asyncio
     async def test_batch_no_handler_rejects_ask_user(self):

@@ -62,6 +62,22 @@ class TestDoomDetectorPlugin:
 
         assert ctx.plugin_states["doom_detector"]["doom_detected"] is True
 
+    def test_uses_tape_snapshot_for_current_turn_calls(self) -> None:
+        class SnapshotOnlyTape(Tape):
+            def __iter__(self):
+                raise AssertionError("snapshot path should be used")
+
+        plugin = DoomDetectorPlugin()
+        tape = SnapshotOnlyTape()
+        for _ in range(3):
+            tape.append(_make_tool_call("file_read", {"path": "/foo/bar.py"}))
+            tape.append(_make_tool_result("file_read"))
+
+        ctx = FakePipelineContext(tape=tape)
+        plugin.on_checkpoint(ctx=ctx)
+
+        assert ctx.plugin_states["doom_detector"]["doom_detected"] is True
+
     def test_4_identical_calls_triggers_doom(self) -> None:
         """4 consecutive identical tool calls → doom_detected=True"""
         plugin = DoomDetectorPlugin()
