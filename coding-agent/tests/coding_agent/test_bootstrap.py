@@ -45,6 +45,38 @@ class TestBootstrap:
         assert "doom_detector" in plugin_ids
         assert "parallel_executor" in plugin_ids
         assert "session_metrics" in plugin_ids
+        assert "kb" not in plugin_ids
+
+    def test_kb_plugin_requires_explicit_enablement(self, tmp_path):
+        config_path = tmp_path / "agent.toml"
+        config_path.write_text(
+            """
+[agent]
+name = "test-agent"
+model = "claude-sonnet-4-20250514"
+provider = "anthropic"
+
+[agent.plugins]
+enabled = ["storage", "core_tools", "kb"]
+
+[kb]
+db_path = "kb"
+embedding_model = "text-embedding-3-small"
+embedding_dim = 1536
+chunk_size = 1200
+chunk_overlap = 200
+top_k = 5
+index_extensions = [".md"]
+""".strip()
+        )
+
+        pipeline, _ = create_agent(
+            config_path=config_path,
+            data_dir=tmp_path / "data",
+            api_key="sk-test",
+        )
+
+        assert "kb" in pipeline._registry.plugin_ids()
 
     def test_create_agent_respects_enabled_plugins_order(self, tmp_path):
         config_path = tmp_path / "agent.toml"

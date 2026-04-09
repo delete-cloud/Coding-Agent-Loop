@@ -67,18 +67,8 @@ class KB:
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
         embedding_fn: Callable[[list[str]], list[list[float]]] | None = None,
+        text_extensions: set[str] | None = None,
     ):
-        """Initialize the knowledge base.
-
-        Args:
-            db_path: Path to the LanceDB database directory.
-            embedding_model: OpenAI embedding model name.
-            embedding_dim: Dimension of embedding vectors.
-            chunk_size: Number of tokens per chunk.
-            chunk_overlap: Number of tokens to overlap between chunks.
-            embedding_fn: Optional custom embedding function for testing.
-                         If not provided, uses OpenAI API.
-        """
         self.db_path = Path(db_path)
         self.embedding_model = embedding_model
         self.embedding_dim = embedding_dim
@@ -86,6 +76,29 @@ class KB:
         self.chunk_overlap = chunk_overlap
         self._embedding_fn = embedding_fn
         self._openai_client = None
+        self._openai_sync_client = None
+        self._text_extensions = text_extensions or {
+            ".py",
+            ".md",
+            ".txt",
+            ".rst",
+            ".json",
+            ".yaml",
+            ".yml",
+            ".toml",
+            ".ini",
+            ".cfg",
+            ".js",
+            ".ts",
+            ".jsx",
+            ".tsx",
+            ".html",
+            ".css",
+            ".sh",
+            ".bash",
+            ".zsh",
+            ".fish",
+        }
 
         # Ensure directory exists
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -93,6 +106,17 @@ class KB:
         # Connect to LanceDB
         self._db = lancedb.connect(str(self.db_path))
         self._table: lancedb.table.Table | None = None
+
+    def _table_names(self) -> set[str]:
+        listed = self._db.list_tables()
+        if isinstance(listed, list):
+            return {str(name) for name in listed}
+
+        tables = getattr(listed, "tables", None)
+        if isinstance(tables, list):
+            return {str(name) for name in tables}
+
+        raise TypeError(f"unsupported list_tables() result: {type(listed)!r}")
 
     def _get_openai_client(self):
         """Get or create OpenAI client."""
@@ -114,6 +138,26 @@ class KB:
             self._openai_client = AsyncOpenAI(api_key=api_key)
         return self._openai_client
 
+    def _get_openai_sync_client(self):
+        if self._openai_sync_client is None:
+            try:
+                from openai import OpenAI
+            except ImportError:
+                raise ImportError(
+                    "OpenAI package is required for embeddings. "
+                    "Install it with: pip install openai"
+                )
+
+            api_key = os.environ.get("OPENAI_API_KEY")
+            if not api_key:
+                raise ValueError(
+                    "OPENAI_API_KEY environment variable is required "
+                    "when not using a custom embedding function"
+                )
+
+            self._openai_sync_client = OpenAI(api_key=api_key)
+        return self._openai_sync_client
+
     async def _embed(self, texts: list[str]) -> list[list[float]]:
         """Embed texts using OpenAI or custom embedding function.
 
@@ -128,6 +172,17 @@ class KB:
 
         client = self._get_openai_client()
         response = await client.embeddings.create(
+            model=self.embedding_model,
+            input=texts,
+        )
+        return [item.embedding for item in response.data]
+
+    def _embed_sync(self, texts: list[str]) -> list[list[float]]:
+        if self._embedding_fn is not None:
+            return self._embedding_fn(texts)
+
+        client = self._get_openai_sync_client()
+        response = client.embeddings.create(
             model=self.embedding_model,
             input=texts,
         )
@@ -177,20 +232,25 @@ class KB:
 
         table_name = "chunks"
 
-        if table_name in self._db.list_tables():
+        if table_name in self._table_names():
             self._table = self._db.open_table(table_name)
         else:
             # Create table with schema
-            schema = pa.schema([
-                ("id", pa.string()),
-                ("content", pa.string()),
-                ("source", pa.string()),
-                ("metadata", pa.string()),  # JSON string
-                ("vector", pa.list_(pa.float64(), self.embedding_dim)),
-            ])
+            schema = pa.schema(
+                [
+                    ("id", pa.string()),
+                    ("content", pa.string()),
+                    ("source", pa.string()),
+                    ("metadata", pa.string()),  # JSON string
+                    ("vector", pa.list_(pa.float64(), self.embedding_dim)),
+                ]
+            )
             self._table = self._db.create_table(table_name, schema=schema)
 
         return self._table
+
+    def has_table(self, table_name: str = "chunks") -> bool:
+        return table_name in self._table_names()
 
     async def index_file(self, path: Path, content: str) -> None:
         """Index a single file into the knowledge base.
@@ -227,13 +287,15 @@ class KB:
                 "total_chunks": len(chunks),
             }
 
-            data.append({
-                "id": chunk_id,
-                "content": chunk_content,
-                "source": source,
-                "metadata": json.dumps(metadata),
-                "vector": embedding,
-            })
+            data.append(
+                {
+                    "id": chunk_id,
+                    "content": chunk_content,
+                    "source": source,
+                    "metadata": json.dumps(metadata),
+                    "vector": embedding,
+                }
+            )
 
         # Insert into LanceDB
         table.add(data)
@@ -252,16 +314,12 @@ class KB:
             show_progress: Whether to show progress bar (default: True).
         """
         root = Path(root)
-        text_extensions = {
-            ".py", ".md", ".txt", ".rst", ".json", ".yaml", ".yml",
-            ".toml", ".ini", ".cfg", ".js", ".ts", ".jsx", ".tsx",
-            ".html", ".css", ".sh", ".bash", ".zsh", ".fish",
-        }
 
         # Collect all files to index
         files = [
-            path for path in root.rglob(pattern)
-            if path.is_file() and path.suffix in text_extensions
+            path
+            for path in root.rglob(pattern)
+            if path.is_file() and path.suffix in self._text_extensions
         ]
 
         if not files:
@@ -314,7 +372,9 @@ class KB:
 
         # Summary
         if errors:
-            console.print(f"[yellow]⚠[/yellow] Indexed {len(files) - len(errors)}/{len(files)} files ({len(errors)} errors)")
+            console.print(
+                f"[yellow]⚠[/yellow] Indexed {len(files) - len(errors)}/{len(files)} files ({len(errors)} errors)"
+            )
         else:
             console.print(f"[green]✓[/green] Indexed {len(files)} files")
 
@@ -340,11 +400,35 @@ class KB:
         # Perform vector search
         import json
 
-        results = (
-            table.search(query_vector)
-            .limit(k)
-            .to_list()
-        )
+        results = table.search(query_vector).limit(k).to_list()
+
+        return [
+            KBSearchResult(
+                chunk=DocumentChunk(
+                    id=r["id"],
+                    content=r["content"],
+                    source=r["source"],
+                    metadata=json.loads(r["metadata"]),
+                ),
+                score=r["_distance"],
+            )
+            for r in results
+        ]
+
+    def search_sync(self, query: str, k: int = 5) -> list[KBSearchResult]:
+        if not query.strip():
+            return []
+
+        if not self.has_table():
+            return []
+
+        table = self._get_table()
+        embeddings = self._embed_sync([query])
+        query_vector = embeddings[0]
+
+        import json
+
+        results = table.search(query_vector).limit(k).to_list()
 
         return [
             KBSearchResult(
@@ -385,20 +469,12 @@ class KB:
         import json
 
         # Vector search
-        vector_results = (
-            table.search(query_vector)
-            .limit(k)
-            .to_list()
-        )
+        vector_results = table.search(query_vector).limit(k).to_list()
 
         # Full-text search (using LanceDB's full-text search)
         fts_results: list[dict] = []
         try:
-            fts_results = (
-                table.search(query, query_type="fts")
-                .limit(k)
-                .to_list()
-            )
+            fts_results = table.search(query, query_type="fts").limit(k).to_list()
         except (RuntimeError, NotImplementedError):
             # FTS might not be available or index not built, fall back to vector only
             logger.debug("Full-text search not available, using vector search only")
@@ -411,6 +487,7 @@ class KB:
         for r in vector_results:
             if r["id"] not in seen_ids:
                 seen_ids.add(r["id"])
+                raw_distance = float(r["_distance"])
                 merged.append(
                     KBSearchResult(
                         chunk=DocumentChunk(
@@ -419,7 +496,7 @@ class KB:
                             source=r["source"],
                             metadata=json.loads(r["metadata"]),
                         ),
-                        score=r["_distance"] * 0.9,  # Slight boost for vector results
+                        score=raw_distance * 0.9,
                     )
                 )
 
@@ -427,6 +504,7 @@ class KB:
         for r in fts_results:
             if r["id"] not in seen_ids:
                 seen_ids.add(r["id"])
+                raw_score = float(r.get("_score", 0.0))
                 merged.append(
                     KBSearchResult(
                         chunk=DocumentChunk(
@@ -435,13 +513,10 @@ class KB:
                             source=r["source"],
                             metadata=json.loads(r["metadata"]),
                         ),
-                        score=r.get("_score", 1.0),  # FTS uses _score, not _distance
+                        score=-raw_score,
                     )
                 )
 
-        # Sort by score (lower is better for vector distance)
-        # For FTS, higher score is better, so we need to normalize
-        # We'll just use the original scores and sort
         merged.sort(key=lambda x: x.score)
 
         return merged[:k]

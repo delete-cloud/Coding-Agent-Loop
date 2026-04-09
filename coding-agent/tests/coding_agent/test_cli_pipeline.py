@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from click.testing import CliRunner
 
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.adapter_types import StopReason, TurnOutcome
@@ -251,6 +253,130 @@ class TestReplUsesPipeline:
 
         assert isinstance(session._pipeline_adapter, PipelineAdapter)
         mock_create_agent.assert_called_once()
+
+
+def _fake_embed(texts: list[str]) -> list[list[float]]:
+    vectors: list[list[float]] = []
+    for text in texts:
+        lower = text.lower()
+        vector = [0.0] * 8
+        if "auth" in lower or "jwt" in lower:
+            vector[0] = 10.0
+        if "api" in lower or "rest" in lower:
+            vector[1] = 10.0
+        if vector == [0.0] * 8:
+            vector[2] = 1.0
+        vectors.append(vector)
+    return vectors
+
+
+class TestKbCli:
+    def test_kb_index_creates_table(self, tmp_path: Path, monkeypatch):
+        from coding_agent import kb as kb_module
+        from coding_agent.__main__ import main
+
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        (docs / "readme.md").write_text(
+            "# Hello World\nThis is a test document.", encoding="utf-8"
+        )
+
+        original_init = kb_module.KB.__init__
+
+        def patched_init(self_kb, *args, **kwargs):
+            kwargs["embedding_fn"] = _fake_embed
+            kwargs["embedding_dim"] = 8
+            kwargs.setdefault("text_extensions", {".md"})
+            original_init(self_kb, *args, **kwargs)
+
+        monkeypatch.setattr(kb_module.KB, "__init__", patched_init)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["kb", "index", str(docs), "--db-path", str(tmp_path / "kb-db")],
+            catch_exceptions=False,
+        )
+
+        assert result.exit_code == 0
+        assert "Done." in result.output
+
+    def test_kb_index_skips_when_table_exists(self, tmp_path: Path):
+        from coding_agent.__main__ import main
+        from coding_agent.kb import KB
+
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        (docs / "readme.md").write_text("# Test", encoding="utf-8")
+
+        kb = KB(db_path=tmp_path / "kb-db", embedding_dim=8, embedding_fn=_fake_embed)
+        asyncio.run(kb.index_file(Path("existing.md"), "existing auth content"))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["kb", "index", str(docs), "--db-path", str(tmp_path / "kb-db")],
+            catch_exceptions=False,
+        )
+
+        assert result.exit_code == 0
+        assert "already exists" in result.output.lower()
+
+    def test_kb_search_prints_results(self, tmp_path: Path, monkeypatch):
+        from coding_agent import kb as kb_module
+        from coding_agent.__main__ import main
+        from coding_agent.kb import KB
+
+        db_path = tmp_path / "kb-db"
+        kb = KB(db_path=db_path, embedding_dim=8, embedding_fn=_fake_embed)
+        asyncio.run(
+            kb.index_file(
+                Path("src/auth.py"), "Authentication module with JWT token validation."
+            )
+        )
+
+        original_init = kb_module.KB.__init__
+
+        def patched_init(self_kb, *args, **kwargs):
+            kwargs["embedding_fn"] = _fake_embed
+            kwargs.setdefault("embedding_dim", 8)
+            original_init(self_kb, *args, **kwargs)
+
+        monkeypatch.setattr(kb_module.KB, "__init__", patched_init)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["kb", "search", "auth", "--db-path", str(db_path)],
+            catch_exceptions=False,
+        )
+
+        assert result.exit_code == 0
+        assert "src/auth.py" in result.output
+        assert "Authentication module" in result.output
+
+    def test_kb_search_reports_missing_index(self, tmp_path: Path, monkeypatch):
+        from coding_agent import kb as kb_module
+        from coding_agent.__main__ import main
+
+        original_init = kb_module.KB.__init__
+
+        def patched_init(self_kb, *args, **kwargs):
+            kwargs["embedding_fn"] = _fake_embed
+            kwargs.setdefault("embedding_dim", 8)
+            original_init(self_kb, *args, **kwargs)
+
+        monkeypatch.setattr(kb_module.KB, "__init__", patched_init)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["kb", "search", "auth", "--db-path", str(tmp_path / "missing-kb")],
+            catch_exceptions=False,
+        )
+
+        assert result.exit_code == 0
+        assert "No index found" in result.output
 
 
 class TestReplMultiturnContext:
