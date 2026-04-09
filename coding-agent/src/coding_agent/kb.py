@@ -487,6 +487,7 @@ class KB:
         for r in vector_results:
             if r["id"] not in seen_ids:
                 seen_ids.add(r["id"])
+                raw_distance = float(r["_distance"])
                 merged.append(
                     KBSearchResult(
                         chunk=DocumentChunk(
@@ -495,7 +496,7 @@ class KB:
                             source=r["source"],
                             metadata=json.loads(r["metadata"]),
                         ),
-                        score=r["_distance"] * 0.9,  # Slight boost for vector results
+                        score=raw_distance * 0.9,
                     )
                 )
 
@@ -503,6 +504,7 @@ class KB:
         for r in fts_results:
             if r["id"] not in seen_ids:
                 seen_ids.add(r["id"])
+                raw_score = float(r.get("_score", 0.0))
                 merged.append(
                     KBSearchResult(
                         chunk=DocumentChunk(
@@ -511,13 +513,10 @@ class KB:
                             source=r["source"],
                             metadata=json.loads(r["metadata"]),
                         ),
-                        score=r.get("_score", 1.0),  # FTS uses _score, not _distance
+                        score=-raw_score,
                     )
                 )
 
-        # Sort by score (lower is better for vector distance)
-        # For FTS, higher score is better, so we need to normalize
-        # We'll just use the original scores and sort
         merged.sort(key=lambda x: x.score)
 
         return merged[:k]
