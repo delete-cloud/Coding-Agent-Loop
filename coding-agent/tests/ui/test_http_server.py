@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timedelta
+from typing import Any
 
 import pytest
 from httpx import AsyncClient, ASGITransport
@@ -28,6 +29,7 @@ from coding_agent.wire import ToolCallEnd
 from coding_agent.wire.protocol import (
     ApprovalRequest,
     ApprovalResponse,
+    CompletionStatus,
     StreamDelta,
     ToolCallDelta,
     ToolResultDelta,
@@ -440,7 +442,7 @@ class TestWireMessageConversion:
         msg = TurnEnd(
             session_id="test123",
             turn_id="turn456",
-            completion_status="completed",
+            completion_status=CompletionStatus.COMPLETED,
         )
         event = _wire_message_to_event(msg)
         assert event["event"] == "TurnEnd"
@@ -592,6 +594,24 @@ class TestBroadcastEvent:
         assert await queue1.get() == event
         assert await queue2.get() == event
 
+    async def test_broadcast_keeps_slow_but_connected_queue(self):
+        session = SessionState(
+            id="test",
+            created_at=datetime.now(),
+            last_activity=datetime.now(),
+        )
+        slow_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1)
+        fast_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=2)
+        await slow_queue.put({"event": "old", "data": "{}"})
+        session.event_queues = [slow_queue, fast_queue]
+
+        event = {"event": "Test", "data": "{}"}
+        await _broadcast_event(session, event)
+
+        assert slow_queue in session.event_queues
+        assert fast_queue in session.event_queues
+        assert await fast_queue.get() == event
+
 
 class TestWaitForApproval:
     """Tests for the approval wait function."""
@@ -612,6 +632,7 @@ class TestWaitForApproval:
         response = await wait_for_approval("nonexistent", req)
         assert isinstance(response, ApprovalResponse)
         assert response.approved is False
+        assert response.feedback is not None
         assert "Session not found" in response.feedback
 
     async def test_wait_for_approval_timeout(self):
@@ -645,6 +666,7 @@ class TestWaitForApproval:
         try:
             response = await wait_for_approval(session_id, req)
             assert response.approved is False
+            assert response.feedback is not None
             assert "timeout" in response.feedback.lower()
         finally:
             http_server.APPROVAL_TIMEOUT_SECONDS = original_timeout

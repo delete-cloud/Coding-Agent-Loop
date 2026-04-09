@@ -294,14 +294,17 @@ def _wire_message_to_event(msg: WireMessage) -> dict[str, Any]:
 
 async def _broadcast_event(session: SessionState, event: dict[str, Any]) -> None:
     """Broadcast event to all connected clients."""
-    # Remove closed queues
-    session.event_queues = [q for q in session.event_queues if not q.full()]
+    surviving_queues: list[asyncio.Queue[dict[str, Any]]] = []
     for queue in session.event_queues:
         try:
-            await queue.put(event)
+            queue.put_nowait(event)
+            surviving_queues.append(queue)
+        except asyncio.QueueFull:
+            surviving_queues.append(queue)
         except Exception:
             # Queue might be closed
             pass
+    session.event_queues = surviving_queues
 
 
 async def _cleanup_idle_sessions() -> None:
