@@ -19,7 +19,6 @@ enabled = [
     "memory",
     "session_metrics",
     "shell_session",
-    "kb",
 ]
 
 [storage]
