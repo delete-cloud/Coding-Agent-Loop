@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timedelta
+from typing import Any
 
 import pytest
 from httpx import AsyncClient, ASGITransport
@@ -24,11 +25,14 @@ from coding_agent.ui.http_server import (
     sessions,
     wait_for_approval,
 )
+from coding_agent.wire import ToolCallEnd
 from coding_agent.wire.protocol import (
     ApprovalRequest,
     ApprovalResponse,
+    CompletionStatus,
     StreamDelta,
     ToolCallDelta,
+    ToolResultDelta,
     TurnEnd,
 )
 
@@ -281,13 +285,13 @@ class TestApprovalEndpoint:
             session_id=session_id,
             tool_name="bash",
             arguments={"command": "ls"},
-            call_id="call1"
+            call_id="call1",
         )
         approval_req = ApprovalRequest(
             session_id=session_id,
             request_id="req123",
             tool_call=tool_call,
-            timeout_seconds=120
+            timeout_seconds=120,
         )
         session.approval_store.add_request(approval_req)
 
@@ -299,7 +303,7 @@ class TestApprovalEndpoint:
             session_id=session_id,
             request_id="req123",
             approved=True,
-            feedback="Looks good"
+            feedback="Looks good",
         )
         assert success is True
 
@@ -331,7 +335,7 @@ class TestEventsFanOut:
         session_id = create_resp.json()["session_id"]
 
         # Verify the session has event_queues list
-        assert hasattr(sessions[session_id], 'event_queues')
+        assert hasattr(sessions[session_id], "event_queues")
         assert isinstance(sessions[session_id].event_queues, list)
 
 
@@ -438,7 +442,7 @@ class TestWireMessageConversion:
         msg = TurnEnd(
             session_id="test123",
             turn_id="turn456",
-            completion_status="completed",
+            completion_status=CompletionStatus.COMPLETED,
         )
         event = _wire_message_to_event(msg)
         assert event["event"] == "TurnEnd"
@@ -476,6 +480,41 @@ class TestWireMessageConversion:
         assert data["tool_name"] == "bash"
         assert data["call_id"] == "call1"
         assert data["arguments"]["command"] == "ls"
+
+    def test_tool_result_delta_conversion_redacts_raw_result_payload(self):
+        msg = ToolResultDelta(
+            session_id="test123",
+            call_id="call1",
+            tool_name="bash_run",
+            result={"stdout": "SECRET=abc123", "stderr": "", "exit_code": 0},
+            display_result="command succeeded",
+        )
+
+        event = _wire_message_to_event(msg)
+
+        assert event["event"] == "ToolResultDelta"
+        data = json.loads(event["data"])
+        assert data["session_id"] == "test123"
+        assert data["call_id"] == "call1"
+        assert data["tool_name"] == "bash_run"
+        assert data["display_result"] == "command succeeded"
+        assert data["is_error"] is False
+        assert data["result"] is None
+
+    def test_tool_call_end_conversion_redacts_raw_result_payload(self):
+        msg = ToolCallEnd(
+            session_id="test123",
+            call_id="call1",
+            result="SECRET=abc123\nfull command output",
+        )
+
+        event = _wire_message_to_event(msg)
+
+        assert event["event"] == "ToolCallEnd"
+        data = json.loads(event["data"])
+        assert data["session_id"] == "test123"
+        assert data["call_id"] == "call1"
+        assert data["result"] is None
 
     def test_approval_request_conversion(self):
         """Test ApprovalRequest message conversion."""
@@ -555,6 +594,24 @@ class TestBroadcastEvent:
         assert await queue1.get() == event
         assert await queue2.get() == event
 
+    async def test_broadcast_keeps_slow_but_connected_queue(self):
+        session = SessionState(
+            id="test",
+            created_at=datetime.now(),
+            last_activity=datetime.now(),
+        )
+        slow_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1)
+        fast_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=2)
+        await slow_queue.put({"event": "old", "data": "{}"})
+        session.event_queues = [slow_queue, fast_queue]
+
+        event = {"event": "Test", "data": "{}"}
+        await _broadcast_event(session, event)
+
+        assert slow_queue in session.event_queues
+        assert fast_queue in session.event_queues
+        assert await fast_queue.get() == event
+
 
 class TestWaitForApproval:
     """Tests for the approval wait function."""
@@ -575,6 +632,7 @@ class TestWaitForApproval:
         response = await wait_for_approval("nonexistent", req)
         assert isinstance(response, ApprovalResponse)
         assert response.approved is False
+        assert response.feedback is not None
         assert "Session not found" in response.feedback
 
     async def test_wait_for_approval_timeout(self):
@@ -601,12 +659,14 @@ class TestWaitForApproval:
 
         # Use a very short timeout for testing
         import coding_agent.ui.http_server as http_server
+
         original_timeout = http_server.APPROVAL_TIMEOUT_SECONDS
         http_server.APPROVAL_TIMEOUT_SECONDS = 0.1
 
         try:
             response = await wait_for_approval(session_id, req)
             assert response.approved is False
+            assert response.feedback is not None
             assert "timeout" in response.feedback.lower()
         finally:
             http_server.APPROVAL_TIMEOUT_SECONDS = original_timeout
@@ -662,7 +722,7 @@ class TestApprovalStoreIntegration:
         session_id = create_resp.json()["session_id"]
 
         session = session_manager.get_session(session_id)
-        assert hasattr(session, 'approval_store')
+        assert hasattr(session, "approval_store")
         assert isinstance(session.approval_store, ApprovalStore)
 
     async def test_approval_store_request_response(self, client):
@@ -677,13 +737,13 @@ class TestApprovalStoreIntegration:
             session_id=session_id,
             tool_name="bash",
             arguments={"command": "echo test"},
-            call_id="call1"
+            call_id="call1",
         )
         approval_req = ApprovalRequest(
             session_id=session_id,
             request_id="req-test",
             tool_call=tool_call,
-            timeout_seconds=120
+            timeout_seconds=120,
         )
         session.approval_store.add_request(approval_req)
 
@@ -697,7 +757,7 @@ class TestApprovalStoreIntegration:
             session_id=session_id,
             request_id="req-test",
             approved=True,
-            feedback="Approved"
+            feedback="Approved",
         )
         success = session.approval_store.respond(approval_resp)
         assert success is True
@@ -712,7 +772,7 @@ class TestApprovalStoreIntegration:
             session_id=session_id,
             request_id="nonexistent",
             approved=True,
-            feedback=None
+            feedback=None,
         )
         # Should return False since request wasn't added to store
         assert result is False
@@ -720,24 +780,18 @@ class TestApprovalStoreIntegration:
         # Now add the request and try again
         session = session_manager.get_session(session_id)
         tool_call = ToolCallDelta(
-            session_id=session_id,
-            tool_name="bash",
-            arguments={},
-            call_id="call1"
+            session_id=session_id, tool_name="bash", arguments={}, call_id="call1"
         )
         approval_req = ApprovalRequest(
             session_id=session_id,
             request_id="real-req",
             tool_call=tool_call,
-            timeout_seconds=120
+            timeout_seconds=120,
         )
         session.approval_store.add_request(approval_req)
 
         result = await session_manager.submit_approval(
-            session_id=session_id,
-            request_id="real-req",
-            approved=True,
-            feedback="Good"
+            session_id=session_id, request_id="real-req", approved=True, feedback="Good"
         )
         assert result is True
 
