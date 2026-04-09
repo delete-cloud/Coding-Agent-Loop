@@ -56,7 +56,7 @@ class MockProvider:
 
     async def stream(
         self,
-        messages: list[dict],
+        messages: list[dict[str, Any]],
         tools: list[ToolSchema] | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[Any]:
@@ -70,7 +70,7 @@ class MockProvider:
 
         yield DoneEvent()
 
-    async def complete(self, messages: list[dict]) -> str:
+    async def complete(self, messages: list[dict[str, Any]]) -> str:
         """Return complete mock response."""
         return "Mock response"
 

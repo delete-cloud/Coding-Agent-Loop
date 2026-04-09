@@ -1,5 +1,3 @@
-# pyright: reportMissingTypeStubs=false
-
 from __future__ import annotations
 
 import json
@@ -61,9 +59,6 @@ class InMemorySessionStore:
 
     def delete(self, session_id: str) -> None:
         _ = self._sessions.pop(session_id, None)
-
-    def get(self, session_id: str) -> SessionPayload | None:
-        return self.load(session_id)
 
     def check_health(self) -> bool:
         return True

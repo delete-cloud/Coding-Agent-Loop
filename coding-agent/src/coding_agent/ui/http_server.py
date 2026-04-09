@@ -9,6 +9,7 @@ import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, AsyncIterator
 
 from fastapi import FastAPI, HTTPException, Depends, Request
@@ -63,7 +64,7 @@ class SessionState:
     pending_approval: dict[str, Any] | None = None
     approval_event: asyncio.Event = field(default_factory=asyncio.Event)
     approval_response: dict[str, Any] | None = None
-    event_queues: list[asyncio.Queue[dict]] = field(default_factory=list)
+    event_queues: list[asyncio.Queue[dict[str, Any]]] = field(default_factory=list)
 
 
 # Global session manager
@@ -91,7 +92,7 @@ async def lifespan(app: FastAPI):
 
     # Close all sessions
     for session_id in list(sessions.keys()):
-        await close_session(session_id)
+        await _close_session_state(session_id)
 
     logger.info("HTTP server shut down")
 
@@ -117,7 +118,7 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
     raise HTTPException(status_code=429, detail=str(exc))
 
 
-def _session_to_dict(session: SessionState) -> dict:
+def _session_to_dict(session: SessionState) -> dict[str, Any]:
     """Convert session state to dictionary."""
     return {
         "id": session.id,
@@ -149,7 +150,7 @@ def _http_safe_tool_call_end_payload(msg: ToolCallEnd) -> dict[str, Any]:
     }
 
 
-def _wire_message_to_event(msg: WireMessage) -> dict:
+def _wire_message_to_event(msg: WireMessage) -> dict[str, Any]:
     """Convert wire message to SSE event."""
     match msg:
         case TurnEnd():
@@ -291,7 +292,7 @@ def _wire_message_to_event(msg: WireMessage) -> dict:
             }
 
 
-async def _broadcast_event(session: SessionState, event: dict) -> None:
+async def _broadcast_event(session: SessionState, event: dict[str, Any]) -> None:
     """Broadcast event to all connected clients."""
     # Remove closed queues
     session.event_queues = [q for q in session.event_queues if not q.full()]
@@ -325,7 +326,7 @@ async def _cleanup_idle_sessions() -> None:
             logger.exception("Error during idle session cleanup")
 
 
-async def stream_wire_messages(wire: LocalWire) -> AsyncIterator[dict]:
+async def stream_wire_messages(wire: LocalWire) -> AsyncIterator[dict[str, Any]]:
     """Stream wire messages as SSE events.
 
     Consumes messages from the wire's outgoing queue and yields SSE events.
@@ -368,7 +369,7 @@ async def create_session(
 ) -> SessionResponse:
     """Create new session with AgentLoop integration."""
     # Use defaults if no body provided
-    repo_path = body.repo_path if body else None
+    repo_path = Path(body.repo_path) if body and body.repo_path is not None else None
     approval_policy_str = body.approval_policy if body else "auto"
 
     # Map string to ApprovalPolicy enum
@@ -442,7 +443,7 @@ async def send_prompt(
         sessions[session_id].turn_in_progress = True
         sessions[session_id].last_activity = datetime.now()
 
-    async def event_generator() -> AsyncIterator[dict]:
+    async def event_generator() -> AsyncIterator[dict[str, Any]]:
         """Generate SSE events for the turn."""
         # If no session_manager session, just yield TurnEnd for legacy compatibility
         if not session:
@@ -581,10 +582,10 @@ async def get_events(
         raise HTTPException(status_code=404, detail="Session not found")
 
     session = sessions[session_id]
-    queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=100)
+    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=100)
     session.event_queues.append(queue)
 
-    async def event_generator() -> AsyncIterator[dict]:
+    async def event_generator() -> AsyncIterator[dict[str, Any]]:
         """Generate events from queue."""
         try:
             while True:
@@ -609,7 +610,7 @@ async def get_session(
     request: Request,
     session_id: str,
     api_key: str | None = Depends(verify_api_key),
-) -> dict:
+) -> dict[str, Any]:
     """Get session state."""
     # Check in legacy sessions first (for backward compatibility)
     if session_id in sessions:
@@ -634,24 +635,7 @@ async def close_session(
     if not session_manager.has_session(session_id) and session_id not in sessions:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Close in session manager
-    if session_manager.has_session(session_id):
-        try:
-            await session_manager.close_session(session_id)
-        except Exception as e:
-            logger.exception(f"Error closing session in manager: {e}")
-
-    # Close in legacy sessions if exists
-    if session_id in sessions:
-        session = sessions[session_id]
-
-        # Notify all connected clients
-        await _broadcast_event(
-            session,
-            {"event": "SessionClosed", "data": json.dumps({"session_id": session_id})},
-        )
-
-        del sessions[session_id]
+    await _close_session_state(session_id)
 
     logger.info(f"Closed session: {session_id}")
     return CloseSessionResponse(status="closed", session_id=session_id)
@@ -734,3 +718,19 @@ async def wait_for_approval(
         approved=False,
         feedback="Approval timeout or error",
     )
+
+
+async def _close_session_state(session_id: str) -> None:
+    if session_manager.has_session(session_id):
+        try:
+            await session_manager.close_session(session_id)
+        except Exception as e:
+            logger.exception(f"Error closing session in manager: {e}")
+
+    if session_id in sessions:
+        session = sessions[session_id]
+        await _broadcast_event(
+            session,
+            {"event": "SessionClosed", "data": json.dumps({"session_id": session_id})},
+        )
+        del sessions[session_id]

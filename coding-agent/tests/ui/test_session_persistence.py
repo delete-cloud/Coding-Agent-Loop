@@ -50,7 +50,7 @@ async def test_create_session_persists_to_store_backing() -> None:
     manager = SessionManager(store=store)
 
     session_id = await manager.create_session()
-    payload = store.get(session_id)
+    payload = store.load(session_id)
 
     assert manager.has_session(session_id)
     assert payload is not None
