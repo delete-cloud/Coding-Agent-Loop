@@ -19,6 +19,7 @@ enabled = [
     "memory",
     "session_metrics",
     "shell_session",
+    "kb",
 ]
 
 [storage]
@@ -37,3 +38,12 @@ blocked_tools = []
 [summarizer]
 max_entries = 100
 keep_recent = 20
+
+[kb]
+db_path = "kb"
+embedding_model = "text-embedding-3-small"
+embedding_dim = 1536
+chunk_size = 1200
+chunk_overlap = 200
+top_k = 5
+index_extensions = [".md", ".txt", ".rst", ".yaml", ".yml", ".toml"]
