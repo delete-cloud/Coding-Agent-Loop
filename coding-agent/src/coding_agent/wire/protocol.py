@@ -15,11 +15,12 @@ from typing import Any, Literal
 @dataclass(kw_only=True)
 class WireMessage:
     """Base class for all wire messages.
-    
+
     Attributes:
         session_id: Unique identifier for the session
         timestamp: When the message was created
     """
+
     session_id: str = ""  # Default to empty string for backward compatibility
     timestamp: datetime = field(default_factory=datetime.now)
 
@@ -27,11 +28,12 @@ class WireMessage:
 @dataclass(kw_only=True)
 class StreamDelta(WireMessage):
     """Streaming content delta from agent.
-    
+
     Attributes:
         content: The content delta text
         role: The role of the message sender (default: "assistant")
     """
+
     content: str
     role: str = "assistant"
 
@@ -39,24 +41,34 @@ class StreamDelta(WireMessage):
 @dataclass(kw_only=True)
 class ToolCallDelta(WireMessage):
     """Tool call being streamed.
-    
+
     Attributes:
         tool_name: Name of the tool being called
         arguments: Arguments for the tool call
         call_id: Unique identifier for this tool call
     """
+
     tool_name: str
     arguments: dict[str, Any]
     call_id: str
 
 
 @dataclass(kw_only=True)
+class ToolResultDelta(WireMessage):
+    call_id: str
+    tool_name: str
+    result: str | dict[str, Any]
+    display_result: str = ""
+    is_error: bool = False
+
+
+@dataclass(kw_only=True)
 class ApprovalRequest(WireMessage):
     """Request for user approval.
-    
+
     Supports both new protocol format (request_id, tool_call) and
     legacy format (call_id, tool, args, risk_level).
-    
+
     Attributes:
         request_id: Unique identifier for this approval request
         tool_call: The tool call requiring approval
@@ -67,6 +79,7 @@ class ApprovalRequest(WireMessage):
         args: Tool arguments (legacy, use tool_call.arguments)
         risk_level: Risk level string (legacy)
     """
+
     request_id: str = ""
     tool_call: ToolCallDelta | None = None
     timeout_seconds: int = 120
@@ -75,7 +88,7 @@ class ApprovalRequest(WireMessage):
     tool: str = ""
     args: dict[str, Any] = field(default_factory=dict)
     risk_level: Literal["low", "medium", "high"] = "low"
-    
+
     def __post_init__(self):
         """Sync legacy and new format fields."""
         # Sync request_id and call_id
@@ -83,7 +96,7 @@ class ApprovalRequest(WireMessage):
             self.request_id = self.call_id
         elif self.request_id and not self.call_id:
             self.call_id = self.request_id
-        
+
         # Build tool_call from legacy fields if needed
         if self.tool_call is None and self.tool:
             self.tool_call = ToolCallDelta(
@@ -105,10 +118,10 @@ class ApprovalRequest(WireMessage):
 @dataclass(kw_only=True)
 class ApprovalResponse(WireMessage):
     """User response to approval request.
-    
+
     Supports both new protocol format (request_id, approved) and
     legacy format (call_id, decision).
-    
+
     Attributes:
         request_id: Identifier matching the ApprovalRequest
         approved: Whether the request was approved
@@ -118,6 +131,7 @@ class ApprovalResponse(WireMessage):
         decision: "approve" or "deny" (legacy, maps to approved)
         scope: Approval scope (legacy)
     """
+
     request_id: str = ""
     approved: bool = True
     feedback: str | None = None
@@ -126,7 +140,7 @@ class ApprovalResponse(WireMessage):
     # Use empty string as sentinel for "not explicitly set"
     decision: str = ""  # Literal["approve", "deny"] = ""
     scope: Literal["once", "session", "always"] = "once"
-    
+
     def __post_init__(self):
         """Sync legacy and new format fields."""
         # Sync request_id and call_id
@@ -134,7 +148,7 @@ class ApprovalResponse(WireMessage):
             self.request_id = self.call_id
         elif self.request_id and not self.call_id:
             self.call_id = self.request_id
-        
+
         # Sync decision and approved
         if self.decision == "deny":
             self.approved = False
@@ -147,6 +161,7 @@ class ApprovalResponse(WireMessage):
 
 class CompletionStatus(str, Enum):
     """Status values for turn completion."""
+
     COMPLETED = "completed"
     BLOCKED = "blocked"
     ERROR = "error"
@@ -155,10 +170,11 @@ class CompletionStatus(str, Enum):
 @dataclass(kw_only=True)
 class TurnEnd(WireMessage):
     """End of current turn.
-    
+
     Attributes:
         turn_id: Unique identifier for this turn
         completion_status: Status of the turn completion
     """
+
     turn_id: str
     completion_status: CompletionStatus
