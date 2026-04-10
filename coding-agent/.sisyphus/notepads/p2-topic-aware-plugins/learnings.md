@@ -12,7 +12,7 @@
 
 ### Current state
 - 826 tests passing (P0 + P1 committed)
-- P2 NOT STARTED
+- Historical note: this file originally marked P2 as `NOT STARTED`, but closure verification on 2026-04-10 showed the implementation was already present and green.
 
 ### Plugin hook patterns
 - `hooks()` returns dict mapping hook name → method
@@ -35,3 +35,22 @@
 ### Task independence
 - Task 1 (Memory), Task 2 (Metrics), Task 3 (Summarizer) are independent — can run in parallel
 - Task 4 (verification) runs after all three complete
+
+## 2026-04-10 — Closure verification
+
+### Fresh verification
+- `uv run pytest tests/coding_agent/plugins/test_memory.py tests/coding_agent/plugins/test_metrics.py tests/coding_agent/plugins/test_summarizer.py tests/coding_agent/plugins/test_topic.py -q` → `83 passed`
+- `uv run pytest tests/coding_agent/plugins/ -v` → `264 passed, 3 warnings`
+- `uv run pytest tests/ -v` → `1623 passed, 31 warnings`
+- `uv run mypy src/coding_agent/plugins/memory.py src/coding_agent/plugins/metrics.py src/coding_agent/plugins/summarizer.py src/coding_agent/plugins/topic.py` → success, 0 issues
+
+### Grounded findings
+- MemoryPlugin already has topic-scoped recall (`_topic_file_tags`, `on_checkpoint`, filtered `build_context`).
+- SessionMetricsPlugin already archives per-topic metrics via `on_session_event(topic_start/topic_end)`.
+- SummarizerPlugin already folds at topic boundaries via `resolve_context_window` and fold-boundary anchors.
+- TopicPlugin already emits `topic_start` / `topic_end` session events.
+
+### Closure note
+- The main blocker to closing P2 was stale tracking, not missing implementation.
+- The plan's smoke example still mentions `split point at index 12`, but the current tests and live smoke agree on `split_point == 8` for the covered scenario.
+- Closure evidence saved to `.sisyphus/evidence/p2-closure-2026-04-10.txt`.

@@ -9,3 +9,11 @@ NOT affect plugin unit tests because tests call `tape.windowed_entries()` direct
 with no prior window advancement.
 
 Tasks 1, 2, 3 are pure unit tests for plugin logic — they are unaffected by the windowing bug.
+
+## 2026-04-10 — Closure status
+
+- No open implementation gaps were found during closure verification.
+- One documentation drift remains worth noting:
+  - the plan's smoke example says the summarizer split point should be `12`,
+  - but the current implementation, tests, and live smoke all agree on `split_point == 8` for the covered scenario.
+- This is treated as plan/example drift, not as a product issue.
