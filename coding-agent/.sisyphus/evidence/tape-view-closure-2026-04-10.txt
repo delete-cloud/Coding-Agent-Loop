@@ -1,0 +1,34 @@
+Tape-View Closure Evidence — 2026-04-10
+
+Final verdict: minimal-tail-then-closure
+Task 7 status: executed to close the localized incremental append inconsistency
+Gate status from anchor: satisfied
+
+Fresh closure verification
+- Command:
+  uv run pytest tests/agentkit/tape/test_view.py tests/agentkit/context/test_builder.py tests/agentkit/runtime/test_pipeline.py -v
+- Result: PASS
+- Evidence: 47 passed in 0.07s
+
+Three-layer findings summary
+- Layer A — TapeView core: `TapeView.from_tape()` and `TapeView.full()` preserve current window semantics, anchor tracking, iteration, and empty-tape behavior.
+- Layer B — ContextBuilder integration: builder accepts `TapeView` directly, renders windowed anchors/messages correctly, and preserves raw `Tape` backward compatibility.
+- Layer C — Pipeline integration: pipeline builds context from `TapeView.from_tape(ctx.tape)` and the view-backed path remains covered by `TestPipelineView::test_build_context_uses_view`.
+
+Task 7 closure note
+- Task 6 identified one bounded semantic tail: the localized incremental append path could diverge from tape-view semantics.
+- Task 7 executed and approved the fix by routing incremental append through `TapeView.from_tape(ctx.tape)` and appending `view.entries[visible_start:]`.
+- Regression coverage exists in `tests/agentkit/test_incremental_context.py::test_incremental_context_routes_append_path_through_tape_view`, and its red→green verification was already recorded before this closure step.
+
+Diagnostics on touched tape-view source files
+- Checked:
+  - `src/agentkit/tape/view.py`
+  - `src/agentkit/context/builder.py`
+  - `src/agentkit/runtime/pipeline.py`
+- Result: no LSP errors.
+- Note: basedpyright still reports pre-existing warnings in these files, but Task 8 found no closure-blocking diagnostic errors.
+
+Closure decision
+- Tape-view remains a closure bucket and closes after one minimal semantic tail.
+- Final classification: `minimal-tail-then-closure`.
+- The final closure record includes Task 7 as the executed tail that resolved the localized incremental append inconsistency.
