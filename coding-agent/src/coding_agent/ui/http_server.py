@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 from collections.abc import AsyncIterator
 
-from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi import FastAPI, HTTPException, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 
@@ -25,6 +25,7 @@ from coding_agent.ui.schemas import (
     ApprovalResponseSchema,
     CloseSessionResponse,
     HealthResponse,
+    ReadinessResponse,
 )
 from coding_agent.ui.auth import verify_api_key
 from coding_agent.ui.rate_limit import limiter, RateLimits
@@ -43,65 +44,18 @@ from coding_agent.wire import (
     TurnEnd,
     WireMessage,
 )
+from coding_agent.wire.protocol import ToolResultDelta
+from coding_agent.wire.protocol import ThinkingDelta, TurnStatusDelta
 
 logger = logging.getLogger(__name__)
 
 # Constants
 APPROVAL_TIMEOUT_SECONDS = 120
 SESSION_IDLE_TIMEOUT_MINUTES = 30
-SessionState = Session
 
 
 # Global session manager
 session_manager = SessionManager()
-
-
-class _SessionStoreView:
-    def __contains__(self, session_id: str) -> bool:
-        return session_manager.has_session(session_id)
-
-    def __getitem__(self, session_id: str):
-        return session_manager.get_session(session_id)
-
-    def __setitem__(self, session_id: str, session: Session) -> None:
-        if session.id != session_id:
-            raise ValueError("session key must match session.id")
-        session_manager.register_session(session)
-
-    def __delitem__(self, session_id: str) -> None:
-        session_manager.remove_session(session_id)
-
-    def clear(self) -> None:
-        session_manager.clear_sessions()
-
-    def keys(self):
-        return session_manager.list_sessions()
-
-    def items(self):
-        return [
-            (session_id, session_manager.get_session(session_id))
-            for session_id in session_manager.list_sessions()
-        ]
-
-    def values(self):
-        return [
-            session_manager.get_session(session_id)
-            for session_id in session_manager.list_sessions()
-        ]
-
-    def get(self, session_id: str, default: Session | None = None) -> Session | None:
-        if not session_manager.has_session(session_id):
-            return default
-        return session_manager.get_session(session_id)
-
-    def __iter__(self):
-        return iter(session_manager.list_sessions())
-
-    def __len__(self) -> int:
-        return len(session_manager.list_sessions())
-
-
-sessions = _SessionStoreView()
 
 
 @asynccontextmanager
@@ -150,12 +104,19 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
 
 def _session_to_dict(session: Session) -> dict[str, Any]:
     """Convert session state to dictionary."""
+    return session.as_dict()
+
+
+def _http_safe_tool_result_payload(msg: ToolResultDelta) -> dict[str, Any]:
     return {
-        "id": session.id,
-        "created_at": session.created_at.isoformat(),
-        "last_activity": session.last_activity.isoformat(),
-        "turn_in_progress": session.turn_in_progress,
-        "pending_approval": session.pending_approval is not None,
+        "session_id": msg.session_id,
+        "agent_id": msg.agent_id,
+        "tool_name": msg.tool_name,
+        "call_id": msg.call_id,
+        "result": None,
+        "display_result": msg.display_result,
+        "is_error": msg.is_error,
+        "timestamp": msg.timestamp.isoformat(),
     }
 
 
@@ -168,6 +129,7 @@ def _wire_message_to_event(msg: WireMessage) -> dict[str, str]:
                 "data": json.dumps(
                     {
                         "session_id": msg.session_id,
+                        "agent_id": msg.agent_id,
                         "turn_id": msg.turn_id,
                         "completion_status": msg.completion_status,
                         "timestamp": msg.timestamp.isoformat(),
@@ -180,6 +142,7 @@ def _wire_message_to_event(msg: WireMessage) -> dict[str, str]:
                 "data": json.dumps(
                     {
                         "session_id": msg.session_id,
+                        "agent_id": msg.agent_id,
                         "timestamp": msg.timestamp.isoformat(),
                     }
                 ),
@@ -190,8 +153,38 @@ def _wire_message_to_event(msg: WireMessage) -> dict[str, str]:
                 "data": json.dumps(
                     {
                         "session_id": msg.session_id,
+                        "agent_id": msg.agent_id,
                         "content": msg.content,
                         "role": msg.role,
+                        "timestamp": msg.timestamp.isoformat(),
+                    }
+                ),
+            }
+        case ThinkingDelta():
+            return {
+                "event": "ThinkingDelta",
+                "data": json.dumps(
+                    {
+                        "session_id": msg.session_id,
+                        "agent_id": msg.agent_id,
+                        "text": msg.text,
+                        "timestamp": msg.timestamp.isoformat(),
+                    }
+                ),
+            }
+        case TurnStatusDelta():
+            return {
+                "event": "TurnStatusDelta",
+                "data": json.dumps(
+                    {
+                        "session_id": msg.session_id,
+                        "agent_id": msg.agent_id,
+                        "phase": msg.phase,
+                        "elapsed_seconds": msg.elapsed_seconds,
+                        "tokens_in": msg.tokens_in,
+                        "tokens_out": msg.tokens_out,
+                        "model_name": msg.model_name,
+                        "context_percent": msg.context_percent,
                         "timestamp": msg.timestamp.isoformat(),
                     }
                 ),
@@ -202,6 +195,7 @@ def _wire_message_to_event(msg: WireMessage) -> dict[str, str]:
                 "data": json.dumps(
                     {
                         "session_id": msg.session_id,
+                        "agent_id": msg.agent_id,
                         "tool_name": msg.tool_name,
                         "arguments": msg.arguments,
                         "call_id": msg.call_id,
@@ -209,12 +203,18 @@ def _wire_message_to_event(msg: WireMessage) -> dict[str, str]:
                     }
                 ),
             }
+        case ToolResultDelta():
+            return {
+                "event": "ToolResultDelta",
+                "data": json.dumps(_http_safe_tool_result_payload(msg)),
+            }
         case ToolCallBegin():
             return {
                 "event": "ToolCallBegin",
                 "data": json.dumps(
                     {
                         "session_id": msg.session_id,
+                        "agent_id": msg.agent_id,
                         "call_id": msg.call_id,
                         "tool": msg.tool,
                         "args": msg.args,
@@ -228,6 +228,7 @@ def _wire_message_to_event(msg: WireMessage) -> dict[str, str]:
                 "data": json.dumps(
                     {
                         "session_id": msg.session_id,
+                        "agent_id": msg.agent_id,
                         "call_id": msg.call_id,
                         "result": msg.result,
                         "timestamp": msg.timestamp.isoformat(),
@@ -240,6 +241,7 @@ def _wire_message_to_event(msg: WireMessage) -> dict[str, str]:
                 "data": json.dumps(
                     {
                         "session_id": msg.session_id,
+                        "agent_id": msg.agent_id,
                         "request_id": msg.request_id,
                         "tool_call": {
                             "tool_name": msg.tool_call.tool_name
@@ -261,6 +263,7 @@ def _wire_message_to_event(msg: WireMessage) -> dict[str, str]:
                 "data": json.dumps(
                     {
                         "session_id": msg.session_id,
+                        "agent_id": msg.agent_id,
                         "request_id": msg.request_id,
                         "approved": msg.approved,
                         "feedback": msg.feedback,
@@ -274,6 +277,7 @@ def _wire_message_to_event(msg: WireMessage) -> dict[str, str]:
                 "data": json.dumps(
                     {
                         "session_id": msg.session_id,
+                        "agent_id": msg.agent_id,
                         "content": msg.content,
                         "timestamp": msg.timestamp.isoformat(),
                     }
@@ -285,6 +289,7 @@ def _wire_message_to_event(msg: WireMessage) -> dict[str, str]:
                 "data": json.dumps(
                     {
                         "session_id": msg.session_id,
+                        "agent_id": msg.agent_id,
                         "step_number": msg.step_number,
                         "max_steps": msg.max_steps,
                         "timestamp": msg.timestamp.isoformat(),
@@ -298,6 +303,7 @@ def _wire_message_to_event(msg: WireMessage) -> dict[str, str]:
                     {
                         "type": type(msg).__name__,
                         "session_id": getattr(msg, "session_id", None),
+                        "agent_id": getattr(msg, "agent_id", None),
                     }
                 ),
             }
@@ -305,14 +311,7 @@ def _wire_message_to_event(msg: WireMessage) -> dict[str, str]:
 
 async def _broadcast_event(session: Session, event: dict[str, str]) -> None:
     """Broadcast event to all connected clients."""
-    # Remove closed queues
-    session.event_queues = [q for q in session.event_queues if not q.full()]
-    for queue in session.event_queues:
-        try:
-            await queue.put(event)
-        except Exception:
-            # Queue might be closed
-            pass
+    await session_manager.broadcast_event(session.id, event)
 
 
 async def _cleanup_idle_sessions() -> None:
@@ -337,8 +336,7 @@ async def stream_wire_messages(wire: LocalWire) -> AsyncIterator[dict[str, str]]
             event = _wire_message_to_event(msg)
             yield event
 
-            # Stop streaming on TurnEnd
-            if isinstance(msg, TurnEnd):
+            if isinstance(msg, TurnEnd) and not msg.agent_id:
                 break
         except asyncio.CancelledError:
             # Client disconnected
@@ -352,12 +350,39 @@ async def stream_wire_messages(wire: LocalWire) -> AsyncIterator[dict[str, str]]
             break
 
 
-@app.get("/health", response_model=HealthResponse)
+@app.get("/healthz", response_model=HealthResponse)
 @limiter.limit(RateLimits.HEALTH)
-async def health_check(request: Request):
-    """Health check endpoint."""
+async def liveness_check(request: Request) -> HealthResponse:
     return HealthResponse(
         status="healthy", sessions=len(session_manager.list_sessions()), version="2.0.0"
+    )
+
+
+@app.get("/readyz", response_model=ReadinessResponse)
+@limiter.limit(RateLimits.HEALTH)
+async def readiness_check(request: Request, response: Response) -> ReadinessResponse:
+    try:
+        session_store_ok = bool(session_manager._store.check_health())
+    except Exception:
+        logger.exception("Session store readiness check failed")
+        session_store_ok = False
+
+    try:
+        rate_limiter_ok = bool(limiter._storage.check())
+    except Exception:
+        logger.exception("Rate limiter readiness check failed")
+        rate_limiter_ok = False
+
+    checks = {
+        "session_store": "ok" if session_store_ok else "error",
+        "rate_limiter": "ok" if rate_limiter_ok else "error",
+    }
+    ready = session_store_ok and rate_limiter_ok
+    if not ready:
+        response.status_code = 503
+    return ReadinessResponse(
+        status="ready" if ready else "not_ready",
+        checks=checks,
     )
 
 
@@ -487,18 +512,18 @@ async def approve_request(
         raise HTTPException(status_code=404, detail="Session not found")
 
     session = session_manager.get_session(session_id)
-    if session.pending_approval is None:
+    if session.approval_store.get_request(req_id) is None:
         raise HTTPException(status_code=400, detail="No pending approval request")
-    if session.pending_approval.get("request_id") != req_id:
-        raise HTTPException(status_code=400, detail="Request ID mismatch")
 
     try:
-        await session_manager.submit_approval(
+        success = await session_manager.submit_approval(
             session_id=session_id,
             request_id=req_id,
             approved=is_approved,
             feedback=fb,
         )
+        if not success:
+            raise HTTPException(status_code=400, detail="No pending approval request")
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -522,7 +547,7 @@ async def get_events(
 
     session = session_manager.get_session(session_id)
     queue: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=100)
-    session.event_queues.append(queue)
+    session_manager.add_event_queue(session_id, queue)
 
     async def event_generator() -> AsyncIterator[dict[str, str]]:
         """Generate events from queue."""
@@ -536,8 +561,7 @@ async def get_events(
                     yield {"event": "ping", "data": ""}
         except asyncio.CancelledError:
             # Client disconnected
-            if queue in session.event_queues:
-                session.event_queues.remove(queue)
+            session_manager.remove_event_queue(session_id, queue)
             raise
 
     return EventSourceResponse(event_generator())
@@ -602,50 +626,17 @@ async def wait_for_approval(
         )
 
     session = session_manager.get_session(session_id)
-
-    if session.turn_in_progress:
-        session.pending_approval = {
-            "request_id": approval_req.request_id,
-            "tool_name": approval_req.tool_call.tool_name
-            if approval_req.tool_call
-            else "",
-            "arguments": approval_req.tool_call.arguments
-            if approval_req.tool_call
-            else {},
-        }
-        session.approval_event.clear()
-        session.approval_response = None
-
-        event = _wire_message_to_event(approval_req)
-        await _broadcast_event(session, event)
-
-        try:
-            await asyncio.wait_for(
-                session.approval_event.wait(),
-                timeout=APPROVAL_TIMEOUT_SECONDS,
-            )
-
-            if session.approval_response:
-                return ApprovalResponse(
-                    session_id=session_id,
-                    request_id=approval_req.request_id,
-                    approved=session.approval_response["decision"] == "approve",
-                    feedback=session.approval_response.get("feedback"),
-                )
-        except asyncio.TimeoutError:
-            logger.warning(f"Approval timeout for session {session_id}")
-            timeout_event = {
-                "event": "ApprovalTimeout",
-                "data": json.dumps({"request_id": approval_req.request_id}),
-            }
-            await _broadcast_event(session, timeout_event)
-        finally:
-            session.pending_approval = None
-            session.approval_response = None
-
-    return ApprovalResponse(
+    event = _wire_message_to_event(approval_req)
+    await _broadcast_event(session, event)
+    response = await session_manager.wait_for_http_approval(
         session_id=session_id,
-        request_id=approval_req.request_id,
-        approved=False,
-        feedback="Approval timeout or error",
+        approval_req=approval_req,
+        timeout_seconds=APPROVAL_TIMEOUT_SECONDS,
     )
+    if not response.approved and response.feedback == "Approval timeout or error":
+        timeout_event = {
+            "event": "ApprovalTimeout",
+            "data": json.dumps({"request_id": approval_req.request_id}),
+        }
+        await _broadcast_event(session, timeout_event)
+    return response

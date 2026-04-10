@@ -16,7 +16,7 @@ def sample_tool_call():
         session_id="test-session",
         tool_name="test_tool",
         arguments={"arg": "value"},
-        call_id="call-123"
+        call_id="call-123",
     )
 
 
@@ -27,7 +27,7 @@ def sample_approval_request(sample_tool_call):
         session_id="test-session",
         request_id="req-123",
         tool_call=sample_tool_call,
-        timeout_seconds=120
+        timeout_seconds=120,
     )
 
 
@@ -38,7 +38,7 @@ def sample_approval_response():
         session_id="test-session",
         request_id="req-123",
         approved=True,
-        feedback="Looks good"
+        feedback="Looks good",
     )
 
 
@@ -54,7 +54,7 @@ class TestPendingRequest:
     def test_pending_request_creation(self, sample_approval_request):
         """PendingRequest can be created with defaults."""
         pending = PendingRequest(request=sample_approval_request)
-        
+
         assert pending.request == sample_approval_request
         assert isinstance(pending.created_at, datetime)
         assert pending.response is None
@@ -68,7 +68,7 @@ class TestApprovalStoreAddRequest:
     def test_add_request_stores_pending(self, store, sample_approval_request):
         """Adding a request stores it in pending."""
         store.add_request(sample_approval_request)
-        
+
         assert "req-123" in store._pending
         pending = store._pending["req-123"]
         assert pending.request == sample_approval_request
@@ -76,11 +76,11 @@ class TestApprovalStoreAddRequest:
     def test_add_request_overwrites_existing(self, store, sample_approval_request):
         """Adding a request with same ID overwrites existing."""
         store.add_request(sample_approval_request)
-        
+
         # Modify and re-add
         new_request = sample_approval_request
         store.add_request(new_request)
-        
+
         assert len(store._pending) == 1
         assert store._pending["req-123"].request == new_request
 
@@ -91,27 +91,38 @@ class TestApprovalStoreGetRequest:
     def test_get_request_returns_request(self, store, sample_approval_request):
         """Getting a request returns the ApprovalRequest."""
         store.add_request(sample_approval_request)
-        
+
         result = store.get_request("req-123")
-        
+
         assert result == sample_approval_request
 
     def test_get_request_not_found_returns_none(self, store):
         """Getting a non-existent request returns None."""
         result = store.get_request("non-existent")
-        
+
         assert result is None
+
+    def test_remove_request_deletes_pending_entry(
+        self, store, sample_approval_request
+    ) -> None:
+        store.add_request(sample_approval_request)
+
+        store.remove_request(sample_approval_request.request_id)
+
+        assert store.get_request(sample_approval_request.request_id) is None
 
 
 class TestApprovalStoreRespond:
     """Tests for ApprovalStore.respond method."""
 
-    def test_respond_records_response(self, store, sample_approval_request, sample_approval_response):
+    def test_respond_records_response(
+        self, store, sample_approval_request, sample_approval_response
+    ):
         """Responding records the response and sets the event."""
         store.add_request(sample_approval_request)
-        
+
         success = store.respond(sample_approval_response)
-        
+
         assert success is True
         pending = store._pending["req-123"]
         assert pending.response == sample_approval_response
@@ -120,20 +131,20 @@ class TestApprovalStoreRespond:
     def test_respond_not_found_returns_false(self, store, sample_approval_response):
         """Responding to non-existent request returns False."""
         success = store.respond(sample_approval_response)
-        
+
         assert success is False
 
-    def test_respond_wrong_request_id_returns_false(self, store, sample_approval_request):
+    def test_respond_wrong_request_id_returns_false(
+        self, store, sample_approval_request
+    ):
         """Responding with wrong request_id returns False."""
         store.add_request(sample_approval_request)
-        
+
         wrong_response = ApprovalResponse(
-            session_id="test-session",
-            request_id="wrong-id",
-            approved=True
+            session_id="test-session", request_id="wrong-id", approved=True
         )
         success = store.respond(wrong_response)
-        
+
         assert success is False
 
 
@@ -146,31 +157,31 @@ class TestApprovalStoreWaitForResponse:
     ):
         """Waiting returns response when it's ready."""
         store.add_request(sample_approval_request)
-        
+
         # Schedule response after short delay
         async def respond_later():
             await asyncio.sleep(0.05)
             store.respond(sample_approval_response)
-        
+
         asyncio.create_task(respond_later())
         result = await store.wait_for_response("req-123", timeout=1)
-        
+
         assert result == sample_approval_response
 
     @pytest.mark.asyncio
     async def test_wait_returns_none_on_timeout(self, store, sample_approval_request):
         """Waiting returns None when timeout occurs (not raises)."""
         store.add_request(sample_approval_request)
-        
+
         result = await store.wait_for_response("req-123", timeout=0.05)
-        
+
         assert result is None
 
     @pytest.mark.asyncio
     async def test_wait_not_found_returns_none(self, store):
         """Waiting for non-existent request returns None."""
         result = await store.wait_for_response("non-existent", timeout=0.1)
-        
+
         assert result is None
 
     @pytest.mark.asyncio
@@ -180,10 +191,21 @@ class TestApprovalStoreWaitForResponse:
         """Waiting on already-responded request returns response immediately."""
         store.add_request(sample_approval_request)
         store.respond(sample_approval_response)
-        
+
         result = await store.wait_for_response("req-123", timeout=0.1)
-        
+
         assert result == sample_approval_response
+
+    @pytest.mark.asyncio
+    async def test_wait_propagates_cancellation(self, store, sample_approval_request):
+        store.add_request(sample_approval_request)
+
+        task = asyncio.create_task(store.wait_for_response("req-123", timeout=1))
+        await asyncio.sleep(0)
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
 
 
 class TestApprovalStoreConcurrent:
@@ -199,28 +221,28 @@ class TestApprovalStoreConcurrent:
                 session_id="test-session",
                 tool_name=f"tool_{i}",
                 arguments={},
-                call_id=f"call-{i}"
+                call_id=f"call-{i}",
             )
             req = ApprovalRequest(
                 session_id="test-session",
                 request_id=f"req-{i}",
                 tool_call=tool_call,
-                timeout_seconds=120
+                timeout_seconds=120,
             )
             requests.append(req)
             store.add_request(req)
-        
+
         # Respond to each independently
         responses = []
         for i, req in enumerate(requests):
             resp = ApprovalResponse(
                 session_id="test-session",
                 request_id=req.request_id,
-                approved=(i % 2 == 0)  # Alternate approve/reject
+                approved=(i % 2 == 0),  # Alternate approve/reject
             )
             responses.append(resp)
             store.respond(resp)
-        
+
         # Verify all responses are correct
         for i, resp in enumerate(responses):
             result = store._pending[f"req-{i}"].response
@@ -228,20 +250,22 @@ class TestApprovalStoreConcurrent:
             assert result.approved == (i % 2 == 0)
 
     @pytest.mark.asyncio
-    async def test_multiple_waiters_same_request(self, store, sample_approval_request, sample_approval_response):
+    async def test_multiple_waiters_same_request(
+        self, store, sample_approval_request, sample_approval_response
+    ):
         """Multiple waiters on same request all get the response."""
         store.add_request(sample_approval_request)
-        
+
         async def waiter():
             return await store.wait_for_response("req-123", timeout=1)
-        
+
         # Start multiple waiters
         tasks = [asyncio.create_task(waiter()) for _ in range(3)]
-        
+
         # Respond
         await asyncio.sleep(0.05)
         store.respond(sample_approval_response)
-        
+
         # All should get the response
         results = await asyncio.gather(*tasks)
         for result in results:
