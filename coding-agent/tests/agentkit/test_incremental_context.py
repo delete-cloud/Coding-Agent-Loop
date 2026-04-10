@@ -343,7 +343,25 @@ async def test_incremental_context_skips_full_rebuild_work_between_intervals(
     )
 
     assert full_counts == {"from_tape": 11, "build_core": 11}
-    assert incremental_counts == {"from_tape": 3, "build_core": 3}
+    assert incremental_counts == {"from_tape": 11, "build_core": 3}
+
+
+@pytest.mark.asyncio
+async def test_incremental_context_routes_append_path_through_tape_view(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from_tape_calls = 0
+
+    def counting_from_tape(cls, tape: Tape):
+        nonlocal from_tape_calls
+        from_tape_calls += 1
+        return ORIGINAL_FROM_TAPE(cls, tape)
+
+    monkeypatch.setattr(TapeView, "from_tape", classmethod(counting_from_tape))
+
+    messages_seen, _ = await _run_multi_round_turn(incremental_context=True)
+
+    assert from_tape_calls == len(messages_seen)
 
 
 @pytest.mark.asyncio
