@@ -83,8 +83,8 @@ Eliminate the type black hole in hook dispatch so that plugin return type violat
 
 ### Definition of Done
 
-- [ ] `uv run pytest tests/ -v` all pass, 0 failures
-- [ ] `uv run mypy src/agentkit/runtime/hook_runtime.py src/agentkit/runtime/hookspecs.py src/agentkit/plugin/registry.py src/agentkit/errors.py src/agentkit/runtime/pipeline.py` — no new errors
+- [x] `uv run pytest tests/ -v` all pass, 0 failures
+- [x] `uv run mypy src/agentkit/runtime/hook_runtime.py src/agentkit/runtime/hookspecs.py src/agentkit/plugin/registry.py src/agentkit/errors.py src/agentkit/runtime/pipeline.py` — no new errors
 - [ ] Each task = one atomic commit with all tests green
 
 ### Must Have
@@ -1560,13 +1560,23 @@ Scenario: Total test count includes all P4 new tests
 uv run pytest tests/ -x -q --tb=short  # ALL PASS, 0 failures
 ```
 
-- [ ] HookRuntime raises HookTypeError when hook returns wrong type (with specs wired)
-- [ ] HookRuntime without specs works exactly as before (backward compat)
-- [ ] PluginRegistry warns on unknown hook names (with specs wired)
-- [ ] PluginRegistry without specs works exactly as before (backward compat)
-- [ ] Pipeline guards at 3 consumption sites: `resolve_context_window` structural check, `approve_tool_call` **fail closed**, `on_turn_end` filter-before-store
-- [ ] `execute_tools_batch` is in HOOK_SPECS (no spurious warnings from ParallelExecutorPlugin)
-- [ ] `approve_tool_call` guard rejects (not auto-approves) on invalid return type
-- [ ] P3 `abs_window_start` + `ctx._handoff_done` logic preserved in `_stage_build_context`
-- [ ] Total test count >= 866 + ~15 new tests
-- [ ] agentkit does NOT import coding_agent
+- [x] HookRuntime raises HookTypeError when hook returns wrong type (with specs wired)
+- [x] HookRuntime without specs works exactly as before (backward compat)
+- [x] PluginRegistry warns on unknown hook names (with specs wired)
+- [x] PluginRegistry without specs works exactly as before (backward compat)
+- [x] Pipeline guards at 3 consumption sites: `resolve_context_window` structural check, `approve_tool_call` **fail closed**, `on_turn_end` filter-before-store
+- [x] `execute_tools_batch` is in HOOK_SPECS (no spurious warnings from ParallelExecutorPlugin)
+- [x] `approve_tool_call` guard rejects (not auto-approves) on invalid return type
+- [x] P3 `abs_window_start` + `ctx._handoff_done` logic preserved in `_stage_build_context`
+- [x] Total test count >= 866 + ~15 new tests
+- [x] agentkit does NOT import coding_agent
+
+## Closure Note — 2026-04-10
+
+- Fresh closure verification passed:
+  - `uv run pytest tests/ -v` → `1623 passed, 31 warnings`
+  - `uv run mypy src/agentkit/runtime/hook_runtime.py src/agentkit/runtime/hookspecs.py src/agentkit/plugin/registry.py src/agentkit/errors.py src/agentkit/runtime/pipeline.py` → success, 0 issues
+- Closure was briefly blocked by `tests/integration/test_wire_http_integration.py::TestPromptStreamingFlow::test_prompt_streaming_events`.
+- The blocker was not missing P4 functionality. It was a non-hermetic HTTP streaming integration test that expected `StreamDelta` while relying on the default real-provider path in an environment without provider credentials.
+- The test was made deterministic by injecting `MockProvider()` into the HTTP-created session inside that integration test, preserving the separate contract checked in `tests/ui/test_http_server.py` that HTTP session creation defaults to `session.provider is None`.
+- Closure evidence: `.sisyphus/evidence/p4-closure-2026-04-10.txt`

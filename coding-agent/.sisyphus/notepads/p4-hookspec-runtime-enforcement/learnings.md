@@ -29,3 +29,13 @@
 ### Task Dependencies
 - T1 (quick) → T2 (deep) → T3 (deep) → T4 (quick) and T7 (deep) in parallel → T5 (quick, independent until T6) → T6 (quick, after T4+T5) → T8 (quick, after T6+T7)
 - T1 and T5 can actually start independently (T5 has no dependencies)
+
+## [2026-04-10] Closure verification
+
+- Fresh closure verification is now green:
+  - `uv run pytest tests/ -v` → `1623 passed, 31 warnings`
+  - `uv run mypy src/agentkit/runtime/hook_runtime.py src/agentkit/runtime/hookspecs.py src/agentkit/plugin/registry.py src/agentkit/errors.py src/agentkit/runtime/pipeline.py` → success, 0 issues
+- The only closure blocker was not a P4 implementation gap. It was a non-hermetic integration test in `tests/integration/test_wire_http_integration.py` that expected streamed text while depending on the HTTP default real-provider path.
+- In the local verification environment, both `AGENT_API_KEY` and `GITHUB_TOKEN` were unset, so that test could no longer rely on real-provider text output.
+- The deterministic fix was to inject `MockProvider()` into the HTTP-created session inside the test, keeping the test focused on the SSE bridge rather than external provider availability.
+- This preserves the separate HTTP contract already covered by `tests/ui/test_http_server.py::test_create_session_uses_real_provider_by_default`.

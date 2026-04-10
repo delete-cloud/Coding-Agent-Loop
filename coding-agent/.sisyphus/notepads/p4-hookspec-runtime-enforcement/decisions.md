@@ -11,3 +11,9 @@
 6. approve_tool_call fail-closed = return Reject() on bad type, not skip
 7. resolve_context_window guard: tuple + len==2 + isinstance(first, int) structural check
 8. on_turn_end guard: filter-before-store (drop bad items, log warning, continue)
+
+## [2026-04-10] Closure decisions
+
+1. Keep HTTP session creation defaulting to the real provider path (`session.provider is None`) because that repository contract is already explicitly tested.
+2. Fix the streaming integration failure at the test boundary, not in production code, because the failure was caused by non-hermetic test setup rather than broken SSE or HookSpec runtime enforcement logic.
+3. Use `MockProvider()` only inside `tests/integration/test_wire_http_integration.py::test_prompt_streaming_events` so the test verifies deterministic `StreamDelta` emission without weakening the HTTP default-provider contract.
