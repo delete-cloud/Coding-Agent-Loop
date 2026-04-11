@@ -432,6 +432,13 @@ class Pipeline:
                             result_str = (
                                 f"Error executing tool '{tc['name']}': {str(result)}"
                             )
+                            is_error = True
+                        elif result is None:
+                            result_str = (
+                                f"Error executing tool '{tc['name']}': "
+                                f"tool '{tc['name']}' not found"
+                            )
+                            is_error = True
                         else:
                             result_str = str(result) if result is not None else ""
                             max_size = ctx.config.get("max_tool_result_size", 10000)
@@ -440,6 +447,7 @@ class Pipeline:
                                     result_str[:max_size]
                                     + f"\n... ({len(result_str) - max_size} chars truncated)"
                                 )
+                            is_error = False
 
                         ctx.tape.append(
                             Entry(
@@ -456,7 +464,7 @@ class Pipeline:
                                     tool_call_id=tc["id"],
                                     name=tc["name"],
                                     result=result_str,
-                                    is_error=isinstance(result, Exception),
+                                    is_error=is_error,
                                 )
                             )
 
