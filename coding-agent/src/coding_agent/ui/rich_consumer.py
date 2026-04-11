@@ -154,7 +154,7 @@ class RichConsumer:
 
     async def emit(self, msg: WireMessage) -> None:
         match msg:
-            case ThinkingDelta():
+            case ThinkingDelta(text=text):
                 self._start_turn_timer()
                 if not self._thinking_enabled():
                     return
@@ -163,6 +163,8 @@ class RichConsumer:
                     self.renderer.thinking_start()
                     self._ensure_thinking_heartbeat()
                     self._publish_status()
+                if text:
+                    self.renderer.thinking(text)
 
             case StreamDelta(content=text):
                 self._start_turn_timer()
@@ -178,19 +180,13 @@ class RichConsumer:
                     self.renderer.stream_text(text)
 
             case TurnStatusDelta(tokens_in=t_in, tokens_out=t_out):
-                self._end_thinking()
+                if msg.phase != "thinking":
+                    self._end_thinking()
                 self._phase = msg.phase
                 self._turn_tokens_in = t_in
                 self._turn_tokens_out = t_out
                 self._model_name = msg.model_name
                 self._context_percent = msg.context_percent
-                self.renderer.update_status(
-                    tokens_in=t_in,
-                    tokens_out=t_out,
-                    elapsed_seconds=self._elapsed(),
-                    model=msg.model_name,
-                    context_pct=msg.context_percent,
-                )
                 self._publish_status()
 
             case ToolCallDelta(tool_name=tool, arguments=args, call_id=cid):

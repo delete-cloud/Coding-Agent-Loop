@@ -454,10 +454,12 @@ class TestThinkingAndStatusHandling:
     async def test_thinking_delta_calls_thinking_start(self):
         consumer, renderer, _ = self._make_consumer()
         renderer.thinking_start = MagicMock()
+        renderer.thinking = MagicMock()
         renderer.thinking_end = MagicMock()
 
         await consumer.emit(ThinkingDelta(text="reasoning..."))
         renderer.thinking_start.assert_called_once()
+        renderer.thinking.assert_called_once_with("reasoning...")
         assert consumer._phase == "thinking"
 
     @pytest.mark.asyncio
@@ -501,7 +503,7 @@ class TestThinkingAndStatusHandling:
         assert consumer._turn_tokens_out == 75
 
     @pytest.mark.asyncio
-    async def test_turn_status_delta_calls_renderer_update_status(self):
+    async def test_turn_status_delta_updates_internal_status_only(self):
         consumer, renderer, _ = self._make_consumer()
         renderer.update_status = MagicMock()
 
@@ -509,9 +511,36 @@ class TestThinkingAndStatusHandling:
             TurnStatusDelta(phase="idle", tokens_in=200, tokens_out=100)
         )
 
-        renderer.update_status.assert_called_once()
-        call_kwargs = renderer.update_status.call_args
-        assert call_kwargs[1]["tokens_in"] == 200 or call_kwargs[0][0] == 200
+        renderer.update_status.assert_not_called()
+        assert consumer._turn_tokens_in == 200
+        assert consumer._turn_tokens_out == 100
+
+    @pytest.mark.asyncio
+    async def test_turn_status_delta_does_not_write_renderer_status_line(self):
+        consumer, renderer, _ = self._make_consumer()
+        renderer.update_status = MagicMock()
+
+        await consumer.emit(
+            TurnStatusDelta(phase="idle", tokens_in=200, tokens_out=100)
+        )
+
+        renderer.update_status.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_turn_status_delta_during_thinking_does_not_end_thinking(self):
+        consumer, renderer, _ = self._make_consumer()
+        renderer.thinking_start = MagicMock()
+        renderer.thinking_end = MagicMock()
+        renderer.thinking = MagicMock()
+        renderer.update_status = MagicMock()
+
+        await consumer.emit(ThinkingDelta(text="reasoning"))
+        await consumer.emit(
+            TurnStatusDelta(phase="thinking", tokens_in=10, tokens_out=5)
+        )
+
+        renderer.thinking_end.assert_not_called()
+        assert consumer._phase == "thinking"
 
     # ── TurnEnd: state reset ──
 
@@ -675,7 +704,7 @@ class TestThinkingControlsAndStatusCallbacks:
         assert consumer._phase == "idle"
 
     @pytest.mark.asyncio
-    async def test_turn_status_delta_ends_thinking_before_status_update(self):
+    async def test_turn_status_delta_ends_thinking_without_renderer_status_line(self):
         consumer, renderer, _, _ = self._make_consumer()
         renderer.thinking_start = MagicMock()
         renderer.thinking_end = MagicMock()
@@ -685,7 +714,7 @@ class TestThinkingControlsAndStatusCallbacks:
         await consumer.emit(TurnStatusDelta(phase="idle", tokens_in=10, tokens_out=5))
 
         renderer.thinking_end.assert_called_once()
-        renderer.update_status.assert_called_once()
+        renderer.update_status.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_status_callback_receives_token_snapshot(self):
