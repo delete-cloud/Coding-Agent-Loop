@@ -391,7 +391,9 @@ class SessionManager:
                 )
             )
         finally:
-            session.turn_in_progress = False
+            current_task = asyncio.current_task()
+            if session.task is None or session.task is not current_task:
+                session.turn_in_progress = False
             session.last_activity = datetime.now()
             self._persist_session(session)
 

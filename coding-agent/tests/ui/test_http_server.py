@@ -129,6 +129,20 @@ class TestPromptStreaming:
         create_resp = await client.post("/sessions", json={})
         session_id = create_resp.json()["session_id"]
 
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def fake_run_agent(_session_id: str, _prompt: str) -> None:
+            started.set()
+            await release.wait()
+            await session_manager.get_session(session_id).wire.send(
+                TurnEnd(
+                    session_id=session_id,
+                    completion_status=CompletionStatus.COMPLETED,
+                    turn_id="test-turn",
+                )
+            )
+
         # Start prompt in background
         async def send_prompt():
             async with aconnect_sse(
@@ -142,11 +156,106 @@ class TestPromptStreaming:
                         break
 
         # Check turn_in_progress during execution
-        task = asyncio.create_task(send_prompt())
-        await asyncio.sleep(0.05)  # Let it start
-        assert sessions[session_id].turn_in_progress
-        await task
-        assert not sessions[session_id].turn_in_progress
+        with patch.object(session_manager, "run_agent", side_effect=fake_run_agent):
+            task = asyncio.create_task(send_prompt())
+            await asyncio.wait_for(started.wait(), timeout=1)
+            assert session_manager.get_session(session_id).turn_in_progress
+            release.set()
+            await task
+
+        assert not session_manager.get_session(session_id).turn_in_progress
+
+    async def test_prompt_surfaces_subagent_tool_failure_in_real_http_session(
+        self, client, tmp_path
+    ):
+        class ScriptedSubagentProvider:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            @property
+            def model_name(self) -> str:
+                return "scripted-subagent"
+
+            @property
+            def max_context_size(self) -> int:
+                return 128000
+
+            async def stream(self, messages, tools=None, **kwargs):
+                del messages, kwargs
+                self.calls += 1
+                if self.calls == 1:
+                    yield ToolCallEvent(
+                        tool_call_id="tc-http-subagent",
+                        name="subagent",
+                        arguments={"goal": "Inspect child task"},
+                    )
+                    yield DoneEvent()
+                    return
+
+                if self.calls == 2:
+                    assert tools is not None
+                    tool_names = {
+                        tool["function"]["name"]
+                        for tool in tools
+                        if isinstance(tool, dict)
+                        and isinstance(tool.get("function"), dict)
+                    }
+                    assert "subagent" not in tool_names
+                    yield TextEvent(text="Child finished summary")
+                    yield DoneEvent()
+                    return
+
+                yield TextEvent(text="Parent received child result")
+                yield DoneEvent()
+
+        provider = ScriptedSubagentProvider()
+        session_id = "http-subagent-session"
+        register_session(
+            session_id,
+            provider=provider,
+            repo_path=tmp_path,
+            approval_policy=ApprovalPolicy.YOLO,
+        )
+
+        events = []
+        async with aconnect_sse(
+            client,
+            "POST",
+            f"/sessions/{session_id}/prompt",
+            json={"prompt": "Please delegate this to a subagent"},
+        ) as event_source:
+            async for sse in event_source.aiter_sse():
+                events.append({"event": sse.event, "data": json.loads(sse.data)})
+                if sse.event == "TurnEnd" and not events[-1]["data"]["agent_id"]:
+                    break
+
+        assert any(
+            event["event"] == "ToolCallDelta"
+            and event["data"]["tool_name"] == "subagent"
+            for event in events
+        )
+        assert any(
+            event["event"] == "ToolResultDelta"
+            and event["data"]["tool_name"] == "subagent"
+            and event["data"]["display_result"]
+            == "Subagent completed: Child finished summary"
+            and event["data"]["is_error"] is False
+            and event["data"]["result"] is None
+            for event in events
+        )
+        assert any(
+            event["event"] == "StreamDelta"
+            and event["data"]["agent_id"] == "child-1"
+            and event["data"]["content"] == "Child finished summary"
+            for event in events
+        )
+        assert any(
+            event["event"] == "StreamDelta"
+            and event["data"]["agent_id"] == ""
+            and event["data"]["content"] == "Parent received child result"
+            for event in events
+        )
+        assert provider.calls == 3
 
 
 class TestConcurrentTurns:

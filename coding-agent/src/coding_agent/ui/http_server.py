@@ -493,9 +493,14 @@ async def send_prompt(
                 await _broadcast_event(sessions[session_id], error_data)
             yield error_data
         finally:
-            if session_id in sessions:
-                sessions[session_id].turn_in_progress = False
-                sessions[session_id].last_activity = datetime.now()
+            if session.task is not None:
+                try:
+                    await session.task
+                except Exception:
+                    pass
+                session.task = None
+            session.turn_in_progress = False
+            session.last_activity = datetime.now()
 
     # Return SSE stream from wire
     return EventSourceResponse(
