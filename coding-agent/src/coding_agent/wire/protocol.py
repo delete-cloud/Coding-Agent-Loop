@@ -18,10 +18,12 @@ class WireMessage:
 
     Attributes:
         session_id: Unique identifier for the session
+        agent_id: Identifier for the emitting agent within the session
         timestamp: When the message was created
     """
 
     session_id: str = ""  # Default to empty string for backward compatibility
+    agent_id: str = ""
     timestamp: datetime = field(default_factory=datetime.now)
 
 
@@ -60,13 +62,15 @@ class ToolResultDelta(WireMessage):
     Attributes:
         call_id: ID matching the original ToolCallDelta
         tool_name: Name of the tool that was executed
-        result: The tool execution result string
+        result: The raw tool execution result payload
+        display_result: A redacted or user-safe display string
         is_error: Whether the result is an error
     """
 
     call_id: str
     tool_name: str
-    result: str
+    result: Any
+    display_result: str = ""
     is_error: bool = False
 
 

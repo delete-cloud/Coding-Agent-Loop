@@ -135,6 +135,7 @@ class PipelineAdapter:
                     call_id=event.tool_call_id,
                     tool_name=event.name,
                     result=event.result,
+                    display_result=event.result,
                     is_error=event.is_error,
                     session_id=self._ctx.session_id,
                 )

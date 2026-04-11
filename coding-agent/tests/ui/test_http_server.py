@@ -263,7 +263,7 @@ class TestPromptStreaming:
         await task
         assert not session_manager.get_session(session_id).turn_in_progress
 
-    async def test_prompt_streams_subagent_child_events_from_real_http_session(
+    async def test_prompt_surfaces_subagent_tool_failure_in_real_http_session(
         self, client, tmp_path
     ):
         class ScriptedSubagentProvider:
@@ -336,16 +336,17 @@ class TestPromptStreaming:
             event["event"] == "ToolResultDelta"
             and event["data"]["tool_name"] == "subagent"
             and event["data"]["display_result"]
-            == "Subagent completed: Child finished summary"
+            == "Error executing tool 'subagent': tool 'subagent' not found"
+            and event["data"]["is_error"] is True
             for event in events
         )
         assert any(
             event["event"] == "StreamDelta"
-            and event["data"]["agent_id"].startswith("child-")
+            and event["data"]["agent_id"] == ""
             and event["data"]["content"] == "Child finished summary"
             for event in events
         )
-        assert provider.calls == 3
+        assert provider.calls == 2
 
 
 class TestConcurrentTurns:
