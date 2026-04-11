@@ -248,10 +248,11 @@ class Pipeline:
             )
             return
 
-        snapshot = ctx.tape.snapshot()
-        new_entries = list(snapshot[ctx.incremental_entry_count :])
+        view = TapeView.from_tape(ctx.tape)
+        visible_start = max(ctx.incremental_entry_count - ctx.tape.window_start, 0)
+        new_entries = view.entries[visible_start:]
         builder.append_to_core_messages(ctx.incremental_core_messages, new_entries)
-        ctx.incremental_entry_count = len(snapshot)
+        ctx.incremental_entry_count = len(ctx.tape)
         ctx.messages = builder.compose_messages(
             ctx.incremental_core_messages,
             grounding=grounding or None,

@@ -1,0 +1,53 @@
+Anchor Type System Closure Evidence — 2026-04-10
+
+Final verdict: minimal-tail-then-closure
+Task 3 status: executed to remove the import-cycle tail
+Gate status for tape-view: open
+
+Fresh closure verification
+- Command:
+  uv run pytest tests/agentkit/tape/test_anchor.py tests/agentkit/tape/test_models.py tests/agentkit/tape/test_tape.py tests/agentkit/context/test_builder.py tests/coding_agent/plugins/test_summarizer.py tests/coding_agent/plugins/test_topic.py -v
+- Result: PASS
+- Evidence: 105 passed in 0.56s
+
+Three-layer findings summary
+- Layer A — core Anchor type/serialization: structured Anchor exists, is frozen, serializes `anchor_type` and `source_ids`, and round-trips through `Anchor.from_dict`.
+- Layer B — tape/model compatibility: `Entry.from_dict` dispatches typed anchors, legacy anchor metadata is promoted where required, and tape loading/window reconstruction honors handoff anchors.
+- Layer C — builder/plugin migration: ContextBuilder renders user-visible anchors correctly while suppressing fold boundaries, and summarizer/topic plugins emit typed Anchor instances consumed by tests.
+
+Proven anchor invariants required for tape-view entry
+1. Typed anchor dispatch
+   - Proven by `tests/agentkit/tape/test_models.py`:
+     - `test_from_dict_returns_anchor_for_new_format`
+     - `test_from_dict_dispatches_old_format_meta_anchor_type`
+     - `test_from_dict_bridges_topic_initial_to_topic_start`
+   - Meaning: anchor-bearing tape data resolves into typed `Anchor` objects instead of remaining ambiguous plain `Entry` records.
+
+2. Anchor-aware tape/window behavior
+   - Proven by `tests/agentkit/tape/test_tape.py`:
+     - `test_handoff_anchor_is_first_windowed_entry`
+     - `test_jsonl_roundtrip_reconstructs_window_start`
+     - `test_load_jsonl_new_anchor_format`
+     - `test_load_jsonl_old_format_backward_compat`
+   - Meaning: tape loading and window reconstruction treat handoff anchors as structural window boundaries while preserving backward compatibility.
+
+3. Consumer-visible anchor handling
+   - Proven by `tests/agentkit/context/test_builder.py`:
+     - `test_anchor_fold_boundary_skipped`
+     - `test_anchor_handoff_rendered_as_system`
+     - `test_anchor_topic_start_rendered`
+   - Proven by plugin migration tests:
+     - `tests/coding_agent/plugins/test_summarizer.py::test_long_tape_gets_summarized`
+     - `tests/coding_agent/plugins/test_summarizer.py::test_summary_anchor_has_source_ids`
+     - `tests/coding_agent/plugins/test_topic.py::test_first_turn_creates_initial_topic`
+     - `tests/coding_agent/plugins/test_topic.py::test_topic_switch_on_file_path_change`
+   - Meaning: downstream consumers both emit and interpret typed anchors in LLM-visible paths.
+
+Minimal tail executed
+- Tail addressed in Task 3: import-cycle between anchor typing and model dispatch.
+- Post-fix diagnostics show no LSP errors on touched anchor source files.
+
+Closure decision
+- Anchor remains a closure bucket and closes after one minimal semantic tail.
+- Final classification: `minimal-tail-then-closure`.
+- Tape-view may proceed because all three gate invariants are now explicitly evidenced.
