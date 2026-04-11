@@ -5,18 +5,33 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import os
 import time
 import uuid
 from inspect import isawaitable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
-from agentkit.storage.protocols import TapeStore
-from agentkit.storage.pg import PGPool, PGSessionLock, PGSessionStore, PGTapeStore
+from agentkit.storage.protocols import SessionStore, TapeStore
 from agentkit.storage.session import FileSessionStore
 from agentkit.tape.store import ForkTapeStore
+
+
+def _load_pg_types() -> tuple[Any, Any, Any, Any]:
+    try:
+        pg_module = importlib.import_module("agentkit.storage.pg")
+    except ImportError as exc:
+        raise RuntimeError(
+            "PG backend is not available; add agentkit.storage.pg before using backend='pg'"
+        ) from exc
+    return (
+        getattr(pg_module, "PGPool"),
+        getattr(pg_module, "PGSessionLock"),
+        getattr(pg_module, "PGSessionStore"),
+        getattr(pg_module, "PGTapeStore"),
+    )
 
 
 class JSONLTapeStore:
@@ -128,7 +143,7 @@ class StoragePlugin:
         data_dir: Path | None,
         config: dict[str, Any] | None = None,
         backend: str | None = None,
-        pg_pool: PGPool | None = None,
+        pg_pool: object | None = None,
     ) -> None:
         resolved_data_dir = data_dir or Path(os.environ.get("AGENT_DATA_DIR", "./data"))
         self._data_dir = resolved_data_dir
@@ -138,11 +153,12 @@ class StoragePlugin:
         )
         self._pg_pool = pg_pool
         self._fork_store: ForkTapeStore | None = None
-        self._session_store: object | None = None
+        self._session_store: SessionStore | None = None
         self._jsonl_store: JSONLTapeStore | None = None
-        self._session_lock: PGSessionLock | None = None
+        self._session_lock: object | None = None
 
         if self._backend == "pg" and self._pg_pool is not None:
+            _, PGSessionLock, _, _ = _load_pg_types()
             self._session_lock = PGSessionLock(pool=self._pg_pool)
 
     def hooks(self) -> dict[str, Callable[..., Any]]:
@@ -158,7 +174,8 @@ class StoragePlugin:
             self._fork_store = ForkTapeStore(backing)
         return self._fork_store
 
-    def _get_pg_pool(self) -> PGPool:
+    def _get_pg_pool(self) -> object:
+        PGPool, _, _, _ = _load_pg_types()
         if self._pg_pool is not None:
             return self._pg_pool
 
@@ -171,10 +188,11 @@ class StoragePlugin:
 
     def _create_tape_store(self) -> TapeStore:
         if self._backend == "pg":
+            _, PGSessionLock, _, PGTapeStore = _load_pg_types()
             pool = self._get_pg_pool()
             if self._session_lock is None:
                 self._session_lock = PGSessionLock(pool=pool)
-            return PGTapeStore(pool=pool)
+            return cast(TapeStore, PGTapeStore(pool=pool))
         return self._get_jsonl_store()
 
     def _get_jsonl_store(self) -> JSONLTapeStore:
@@ -193,7 +211,7 @@ class StoragePlugin:
     ) -> None:
         self._get_jsonl_store().replace_memory_records(session_id, records)
 
-    def _create_session_store(self) -> object:
+    def _create_session_store(self) -> SessionStore:
         backend = (
             str(
                 self._config.get(
@@ -206,12 +224,13 @@ class StoragePlugin:
         if backend == "file":
             return FileSessionStore(self._data_dir / "sessions")
         if backend == "pg":
+            _, _, PGSessionStore, _ = _load_pg_types()
             dsn = self._config.get("dsn")
             if self._backend != "pg" and (not isinstance(dsn, str) or not dsn.strip()):
                 raise ValueError(
                     "storage.dsn is required when storage.session_backend='pg'"
                 )
-            return PGSessionStore(pool=self._get_pg_pool())
+            return cast(SessionStore, PGSessionStore(pool=self._get_pg_pool()))
         raise ValueError(f"unsupported storage.session_backend: {backend}")
 
     def do_mount(self, **kwargs: Any) -> dict[str, Any]:
@@ -234,5 +253,5 @@ class StoragePlugin:
                 await close_result
 
     @property
-    def session_lock(self) -> PGSessionLock | None:
+    def session_lock(self) -> object | None:
         return self._session_lock
