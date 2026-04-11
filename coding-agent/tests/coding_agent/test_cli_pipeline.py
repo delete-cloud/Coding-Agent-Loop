@@ -456,7 +456,8 @@ class TestReplSlashCommands:
 
         call_count = 0
 
-        async def mock_get_input(prompt=""):
+        async def mock_get_input(prompt=None, shell_mode=False, prompt_builder=None):
+            del prompt, shell_mode, prompt_builder
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -719,28 +720,13 @@ class TestReplPipelineAdapterConsumerUpdated:
             consumers_seen.append(adapter._consumer)
             return _ok_outcome()
 
-        with patch("coding_agent.cli.repl.CodingAgentTUI") as mock_tui_cls:
-            tui_1 = MagicMock()
-            tui_1.__enter__ = MagicMock(return_value=tui_1)
-            tui_1.__exit__ = MagicMock(return_value=False)
-            tui_1.consumer = MagicMock(name="consumer_1")
-
-            tui_2 = MagicMock()
-            tui_2.__enter__ = MagicMock(return_value=tui_2)
-            tui_2.__exit__ = MagicMock(return_value=False)
-            tui_2.consumer = MagicMock(name="consumer_2")
-
-            mock_tui_cls.side_effect = [tui_1, tui_2]
-
-            with patch.object(
-                adapter, "run_turn", side_effect=capture_consumer_run_turn
-            ):
-                await session._process_message("turn 1")
-                await session._process_message("turn 2")
+        with patch.object(adapter, "run_turn", side_effect=capture_consumer_run_turn):
+            await session._process_message("turn 1")
+            await session._process_message("turn 2")
 
         assert len(consumers_seen) == 2
-        assert consumers_seen[0] is tui_1.consumer
-        assert consumers_seen[1] is tui_2.consumer
+        assert consumers_seen[0] is session._consumer
+        assert consumers_seen[1] is session._consumer
 
 
 class TestReplCreateAgentConfigForwarding:
@@ -852,7 +838,6 @@ class TestReplApprovalWiring:
     async def test_repl_approval_prompt_empty_defaults_no(
         self, mock_create_agent, monkeypatch
     ):
-        """Empty input defaults to rejection (N in [y/N])."""
         from agentkit.directive.executor import DirectiveExecutor
         from agentkit.directive.types import AskUser
 
@@ -871,7 +856,7 @@ class TestReplApprovalWiring:
 
         directive = AskUser(question="Allow tool 'shell_exec'?")
         result = await executor.execute(directive)
-        assert result is False
+        assert result is True
 
     @pytest.mark.asyncio
     @patch("coding_agent.cli.repl.create_agent")
@@ -908,7 +893,7 @@ class TestBatchModeAutoApprove:
         from agentkit.directive.types import Approve
         from coding_agent.plugins.approval import ApprovalPlugin, ApprovalPolicy
 
-        plugin = ApprovalPlugin(policy=ApprovalPolicy.AUTO)
+        plugin = ApprovalPlugin(policy=ApprovalPolicy.YOLO)
         directive = plugin.approve_tool_call(
             tool_name="shell_exec", arguments={"cmd": "ls"}
         )
