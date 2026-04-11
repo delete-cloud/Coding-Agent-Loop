@@ -1,120 +1,148 @@
-"""Sub-agent dispatch tool."""
-
 from __future__ import annotations
 
-import json
-from typing import TYPE_CHECKING, Any, Protocol
+import asyncio
+from collections.abc import Callable
+from inspect import isawaitable
+from typing import Any
 
-from coding_agent.agents.subagent import SubAgent
-from coding_agent.tools.registry import ToolRegistry
+from agentkit.runtime.pipeline import Pipeline, PipelineContext
+from agentkit.tape.models import Entry
+from agentkit.tape.tape import Tape
+from agentkit.tools import tool
 
-if TYPE_CHECKING:
-    from agentkit.tape.tape import Tape
-    from coding_agent.providers.base import ChatProvider
-    from coding_agent.wire.protocol import WireMessage
-
-    class WireConsumer(Protocol):
-        async def emit(self, msg: WireMessage) -> None: ...
-        async def request_approval(self, req: Any) -> Any: ...
+from coding_agent.adapter import PipelineAdapter
+from coding_agent.adapter_types import StopReason, TurnOutcome
 
 
-def register_subagent_tool(
-    registry: ToolRegistry,
-    provider: ChatProvider,
-    tape: Tape,
-    consumer: WireConsumer,
-    max_steps: int = 15,
-    max_depth: int = 3,
-    enable_parallel: bool = True,
-    max_parallel: int = 5,
-) -> None:
-    """Register the subagent dispatch tool."""
+ChildPipelineBuilder = Callable[..., tuple[Pipeline, PipelineContext]]
 
-    subagent = SubAgent(
-        provider=provider,
-        consumer=consumer,
-        max_steps=max_steps,
-        max_depth=max_depth,
-        enable_parallel=enable_parallel,
-        max_parallel=max_parallel,
+
+async def _close_adapter_if_supported(adapter: object) -> None:
+    close = getattr(adapter, "close", None)
+    if not callable(close):
+        return
+    maybe_awaitable = close()
+    if not isawaitable(maybe_awaitable):
+        return
+    await maybe_awaitable
+
+
+def _child_agent_id(parent_agent_id: str) -> str:
+    if parent_agent_id:
+        return f"{parent_agent_id}.child-1"
+    return "child-1"
+
+
+def _summarize_subagent_outcome(outcome: TurnOutcome) -> str:
+    if outcome.stop_reason == StopReason.ERROR:
+        if outcome.error is None:
+            raise ValueError("subagent error outcome missing error message")
+        return f"Subagent failed: {outcome.error}"
+
+    if outcome.final_message:
+        return f"Subagent completed: {outcome.final_message}"
+
+    return (
+        f"Subagent finished ({outcome.stop_reason.value}, steps={outcome.steps_taken})"
     )
 
-    async def subagent_dispatch(goal: str, tools: list[str] | None = None) -> str:
-        """Dispatch a sub-agent to work on a specific sub-task.
 
-        Args:
-            goal: Clear description of what the sub-agent should accomplish
-            tools: Optional list of tool names to restrict which tools the sub-agent can use.
-                   If not provided, the sub-agent has access to all tools.
-        """
-        # If tools filter is provided, create a filtered registry
-        if tools is not None:
-            filtered_registry = ToolRegistry(enable_cache=False)
-            invalid_tools = []
-            for tool_name in tools:
-                tool_def = registry.get(tool_name)
-                if tool_def is not None:
-                    filtered_registry.register(
-                        name=tool_def.name,
-                        description=tool_def.description,
-                        parameters=tool_def.parameters,
-                        handler=tool_def.handler,
-                    )
-                else:
-                    invalid_tools.append(tool_name)
+def _subagent_timeout_seconds(pipeline_ctx: PipelineContext) -> float:
+    timeout = pipeline_ctx.config.get("subagent_timeout")
+    if timeout is None:
+        raise ValueError("subagent_timeout missing from pipeline config")
+    return float(timeout)
 
-            # Return error if any requested tools are invalid
-            if invalid_tools:
-                return json.dumps(
-                    {
-                        "success": False,
-                        "error": f"Invalid tools requested: {', '.join(invalid_tools)}. "
-                        f"Available tools: {', '.join(registry.list_tools())}",
-                    }
-                )
 
-            target_registry = filtered_registry
-        else:
-            target_registry = registry
+def _fork_child_tape(parent_tape: Tape) -> Tape:
+    entries = list(parent_tape)
+    while entries and entries[-1].kind == "tool_call":
+        entries.pop()
+    return Tape(
+        entries=entries,
+        parent_id=parent_tape.tape_id,
+        _window_start=parent_tape.window_start,
+    )
 
-        result = await subagent.run(
-            goal=goal,
-            parent_tape=tape,
-            tools=target_registry,
-        )
-        return json.dumps(
-            {
-                "success": result.success,
-                "output": result.output,
-                "stop_reason": result.stop_reason,
-                "steps_taken": result.steps_taken,
-                "entries_count": result.tape_entries,
-            }
+
+def _append_child_trace_to_parent(
+    parent_tape: Tape,
+    child_tape: Tape,
+    *,
+    base_length: int,
+    child_agent_id: str,
+) -> None:
+    for entry in list(child_tape)[base_length:]:
+        parent_tape.append(
+            Entry(
+                kind=entry.kind,
+                payload=dict(entry.payload),
+                meta={
+                    **entry.meta,
+                    "skip_context": True,
+                    "subagent_child": True,
+                    "child_agent_id": child_agent_id,
+                    "source_tape_id": child_tape.tape_id,
+                    "source_entry_id": entry.id,
+                },
+            )
         )
 
-    registry.register(
+
+def build_subagent_tool(child_pipeline_builder: ChildPipelineBuilder):
+    @tool(
         name="subagent",
         description=(
             "Dispatch a sub-agent to work on a specific sub-task independently. "
-            "The sub-agent gets its own context and tool access. Use this for: "
-            "reading large codebases, running tests in isolation, or any task "
-            "that can be done independently. The sub-agent's results are merged "
-            "back if successful."
+            "The sub-agent gets its own context and tool access."
         ),
-        parameters={
-            "type": "object",
-            "properties": {
-                "goal": {
-                    "type": "string",
-                    "description": "Clear, specific description of the sub-task",
-                },
-                "tools": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Optional list of tool names to restrict which tools the sub-agent can use",
-                },
-            },
-            "required": ["goal"],
-        },
-        handler=subagent_dispatch,
     )
+    async def subagent_dispatch(
+        goal: str, __pipeline_ctx__: PipelineContext | None = None
+    ) -> str:
+        if __pipeline_ctx__ is None:
+            raise ValueError("subagent requires active pipeline context")
+
+        child_tape = _fork_child_tape(__pipeline_ctx__.tape)
+        child_pipeline, child_ctx = child_pipeline_builder(
+            parent_provider=__pipeline_ctx__.llm_provider,
+            tape_fork=child_tape,
+            tool_filter=lambda tool_name: tool_name != "subagent",
+            session_id_override=__pipeline_ctx__.session_id,
+        )
+        child_agent_id = _child_agent_id(
+            str(__pipeline_ctx__.config.get("agent_id", ""))
+        )
+        child_ctx.config["agent_id"] = child_agent_id
+        timeout_seconds = _subagent_timeout_seconds(__pipeline_ctx__)
+        child_base_length = len(child_tape)
+        child_adapter = PipelineAdapter(
+            pipeline=child_pipeline,
+            ctx=child_ctx,
+            consumer=__pipeline_ctx__.config.get("wire_consumer"),
+            agent_id=child_agent_id,
+        )
+        try:
+            outcome = await asyncio.wait_for(
+                child_adapter.run_turn(goal),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            await _close_adapter_if_supported(child_adapter)
+            _append_child_trace_to_parent(
+                __pipeline_ctx__.tape,
+                child_ctx.tape,
+                base_length=child_base_length,
+                child_agent_id=child_agent_id,
+            )
+            return f"Subagent timed out after {timeout_seconds:g} seconds"
+        await _close_adapter_if_supported(child_adapter)
+        _append_child_trace_to_parent(
+            __pipeline_ctx__.tape,
+            child_ctx.tape,
+            base_length=child_base_length,
+            child_agent_id=child_agent_id,
+        )
+        return _summarize_subagent_outcome(outcome)
+
+    return subagent_dispatch
