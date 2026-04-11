@@ -24,6 +24,54 @@ class SessionMetricsPlugin:
         self._turn_tokens_out: int = 0
         self._session_tokens_in: int = 0
         self._session_tokens_out: int = 0
+        self._current_agent_id: str = ""
+
+    def _agent_bucket_name(self, agent_id: str) -> str:
+        return "child" if agent_id else "parent"
+
+    def _breakdown_metrics(self) -> dict[str, dict[str, Any]]:
+        bucket = self._agent_bucket_name(self._current_agent_id)
+        empty = {
+            "steps_count": 0,
+            "tool_calls": {},
+            "tokens_input": 0,
+            "tokens_output": 0,
+            "session_tokens_input": 0,
+            "session_tokens_output": 0,
+        }
+        active = {
+            "steps_count": self._steps_count,
+            "tool_calls": dict(self._tool_calls),
+            "tokens_input": self._turn_tokens_in,
+            "tokens_output": self._turn_tokens_out,
+            "session_tokens_input": self._session_tokens_in,
+            "session_tokens_output": self._session_tokens_out,
+        }
+        if bucket == "parent":
+            return {"parent": active, "child": dict(empty)}
+        return {"parent": dict(empty), "child": active}
+
+    def _metrics_payload(self, total_turn_time: float) -> dict[str, Any]:
+        breakdown = self._breakdown_metrics()
+        return {
+            "steps_count": self._steps_count,
+            "tool_calls": dict(self._tool_calls),
+            "turn_start_time": self._turn_start,
+            "total_turn_time": total_turn_time,
+            "api_calls": self._api_calls,
+            "api_latency_total": self._api_latency_total,
+            "avg_api_latency": (
+                self._api_latency_total / self._api_calls
+                if self._api_calls > 0
+                else 0.0
+            ),
+            "tokens_input": self._turn_tokens_in,
+            "tokens_output": self._turn_tokens_out,
+            "session_tokens_input": self._session_tokens_in,
+            "session_tokens_output": self._session_tokens_out,
+            "parent": breakdown["parent"],
+            "child": breakdown["child"],
+        }
 
     def hooks(self) -> dict[str, Callable[..., Any]]:
         return {
@@ -41,6 +89,7 @@ class SessionMetricsPlugin:
 
         tool_call_entries = ctx.tape.filter("tool_call")
         self._steps_count = len(tool_call_entries)
+        self._current_agent_id = str(getattr(ctx, "config", {}).get("agent_id", ""))
 
         self._tool_calls = defaultdict(int)
         for entry in tool_call_entries:
@@ -49,23 +98,7 @@ class SessionMetricsPlugin:
 
         total_turn_time = now - self._turn_start
 
-        ctx.plugin_states[self.state_key] = {
-            "steps_count": self._steps_count,
-            "tool_calls": dict(self._tool_calls),
-            "turn_start_time": self._turn_start,
-            "total_turn_time": total_turn_time,
-            "api_calls": self._api_calls,
-            "api_latency_total": self._api_latency_total,
-            "avg_api_latency": (
-                self._api_latency_total / self._api_calls
-                if self._api_calls > 0
-                else 0.0
-            ),
-            "tokens_input": self._turn_tokens_in,
-            "tokens_output": self._turn_tokens_out,
-            "session_tokens_input": self._session_tokens_in,
-            "session_tokens_output": self._session_tokens_out,
-        }
+        ctx.plugin_states[self.state_key] = self._metrics_payload(total_turn_time)
 
     def on_session_event(
         self, event_type: str = "", payload: dict[str, Any] | None = None, **kwargs: Any
@@ -91,23 +124,7 @@ class SessionMetricsPlugin:
     def get_metrics(self) -> dict[str, Any]:
         now = time.time()
         total_turn_time = (now - self._turn_start) if self._turn_start else 0.0
-        return {
-            "steps_count": self._steps_count,
-            "tool_calls": dict(self._tool_calls),
-            "turn_start_time": self._turn_start,
-            "total_turn_time": total_turn_time,
-            "api_calls": self._api_calls,
-            "api_latency_total": self._api_latency_total,
-            "avg_api_latency": (
-                self._api_latency_total / self._api_calls
-                if self._api_calls > 0
-                else 0.0
-            ),
-            "tokens_input": self._turn_tokens_in,
-            "tokens_output": self._turn_tokens_out,
-            "session_tokens_input": self._session_tokens_in,
-            "session_tokens_output": self._session_tokens_out,
-        }
+        return self._metrics_payload(total_turn_time)
 
     def reset_turn(self) -> None:
         self._turn_start = None
@@ -115,6 +132,7 @@ class SessionMetricsPlugin:
         self._tool_calls = defaultdict(int)
         self._turn_tokens_in = 0
         self._turn_tokens_out = 0
+        self._current_agent_id = ""
 
     def record_api_call(self, latency: float) -> None:
         self._api_calls += 1

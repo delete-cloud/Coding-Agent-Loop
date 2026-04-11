@@ -1178,3 +1178,13 @@ class TestThinkingSpinner:
         output = buf.getvalue()
         assert "500" in output
         assert "200" in output
+
+    def test_update_status_skips_inline_redraw_during_stream(self):
+        renderer, _, buf = self._make_renderer()
+        renderer.stream_start()
+        renderer.stream_text("streaming output")
+        before = buf.getvalue()
+
+        renderer.update_status(tokens_in=500, tokens_out=200, elapsed_seconds=12.3)
+
+        assert buf.getvalue() == before

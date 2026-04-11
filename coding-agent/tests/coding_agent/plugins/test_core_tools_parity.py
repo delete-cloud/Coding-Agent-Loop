@@ -19,6 +19,7 @@ EXPECTED_TOOLS = {
     "todo_read",
     "file_patch",
     "web_search",
+    "subagent",
 }
 
 

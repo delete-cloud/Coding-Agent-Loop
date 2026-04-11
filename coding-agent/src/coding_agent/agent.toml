@@ -21,11 +21,14 @@ enabled = [
     "session_metrics",
     "shell_session",
     "skills",
+    "mcp",
+    "kb",
 ]
 
 [storage]
 tape_backend = "jsonl"
 doc_backend = "lancedb"
+session_backend = "file"
 
 [storage.paths]
 tapes = "./data/tapes"
@@ -35,6 +38,14 @@ sessions = "./data/sessions"
 [approval]
 policy = "auto"
 blocked_tools = []
+
+[subagent]
+timeout = 30.0
+
+[shell]
+sandbox_mode = "none"
+cpu_limit_seconds = 10
+docker_image = "python:3.11-slim"
 
 [web_search]
 backend = "mock"
@@ -46,3 +57,43 @@ keep_recent = 20
 [topic]
 overlap_threshold = 0.2
 min_entries_before_detect = 4
+
+[kb]
+db_path = "kb"
+embedding_model = "text-embedding-3-small"
+embedding_dim = 1536
+chunk_size = 1200
+chunk_overlap = 200
+top_k = 5
+index_extensions = [".md", ".txt", ".rst", ".yaml", ".yml", ".toml"]
+
+# ============================================================
+# MCP (Model Context Protocol) 服务器配置
+# ============================================================
+
+[mcp.servers.filesystem]
+type = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/Users/kina"]
+
+# 示例：添加其他 MCP 服务器（取消注释使用）
+# [mcp.servers.github]
+# type = "stdio"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-github"]
+# env = { GITHUB_PERSONAL_ACCESS_TOKEN = "your-token-here" }
+
+# [mcp.servers.puppeteer]
+# type = "stdio"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-puppeteer"]
+
+# [mcp.servers.fetch]
+# type = "stdio"
+# command = "uvx"
+# args = ["mcp-server-fetch"]
+
+# 远程 SSE 服务器示例
+# [mcp.servers.remote]
+# type = "sse"
+# url = "http://localhost:3000/sse"

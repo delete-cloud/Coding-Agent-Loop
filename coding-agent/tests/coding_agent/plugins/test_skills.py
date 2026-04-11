@@ -5,6 +5,12 @@ from typing import Any
 
 import pytest
 
+from agentkit.tape.models import Entry
+from agentkit.tape.tape import Tape
+from agentkit.plugin.registry import PluginRegistry
+from agentkit.runtime.hook_runtime import HookRuntime
+from agentkit.runtime.hookspecs import HOOK_SPECS
+from coding_agent.plugins.doom_detector import DoomDetectorPlugin
 from coding_agent.plugins.skills import SkillsPlugin
 from coding_agent.skills import SkillMetadata
 
@@ -35,6 +41,31 @@ def _make_plugin(
 class FakeCtx:
     def __init__(self) -> None:
         self.plugin_states: dict[str, Any] = {}
+
+
+class FakePipelineContext:
+    def __init__(self, tape: Tape) -> None:
+        self.tape = tape
+        self.plugin_states: dict[str, Any] = {}
+
+
+def _make_tool_call(name: str, arguments: dict[str, Any] | None = None) -> Entry:
+    return Entry(
+        kind="tool_call",
+        payload={
+            "id": "call_001",
+            "name": name,
+            "arguments": arguments or {},
+            "role": "assistant",
+        },
+    )
+
+
+def _make_tool_result(name: str, content: str = "ok") -> Entry:
+    return Entry(
+        kind="tool_result",
+        payload={"name": name, "content": content, "role": "tool"},
+    )
 
 
 class TestSummaryMode:
@@ -270,3 +301,42 @@ class TestReviewFixes:
         assert "available_skills" in state
         assert "active_skill" not in state
         assert "pending_skill" not in state
+
+
+class TestSkillsPluginSessionEvents:
+    def test_hooks_register_on_session_event(self, tmp_path: Path):
+        plugin = _make_plugin(tmp_path, {"test-skill": "Test"})
+
+        assert "on_session_event" in plugin.hooks()
+
+    def test_doom_detected_event_deactivates_active_skill(self, tmp_path: Path):
+        plugin = _make_plugin(tmp_path, {"test-skill": "Test"})
+        plugin.activate_immediately("test-skill")
+
+        plugin.on_session_event(
+            event_type="doom_detected",
+            payload={"reason": "doom_loop detected"},
+        )
+
+        assert plugin.active_skill_name is None
+
+    def test_doom_detector_event_bus_deactivates_skill(self, tmp_path: Path):
+        skills = _make_plugin(tmp_path, {"test-skill": "Test"})
+        skills.activate_immediately("test-skill")
+        doom_detector = DoomDetectorPlugin()
+
+        registry = PluginRegistry(specs=HOOK_SPECS)
+        registry.register(doom_detector)
+        registry.register(skills)
+        runtime = HookRuntime(registry, specs=HOOK_SPECS)
+
+        tape = Tape()
+        for _ in range(3):
+            tape.append(_make_tool_call("file_read", {"path": "/foo.py"}))
+            tape.append(_make_tool_result("file_read"))
+
+        ctx = FakePipelineContext(tape=tape)
+
+        doom_detector.on_checkpoint(ctx=ctx, runtime=runtime)
+
+        assert skills.active_skill_name is None

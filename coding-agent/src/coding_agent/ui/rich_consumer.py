@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol
@@ -55,6 +56,16 @@ class RichConsumer:
         self._thinking_enabled = thinking_enabled or (lambda: True)
         self._thinking_effort = thinking_effort or (lambda: "medium")
         self._on_status = on_status
+
+    def _prefix_child_text(self, text: str, agent_id: str) -> str:
+        if not agent_id or not text:
+            return text
+        return f"[{agent_id}] {text}"
+
+    def _prefix_child_tool_name(self, tool_name: str, agent_id: str) -> str:
+        if not agent_id:
+            return tool_name
+        return f"[{agent_id}] {tool_name}"
 
     def _start_turn_timer(self) -> None:
         if self._turn_start is None:
@@ -166,13 +177,14 @@ class RichConsumer:
                 if text:
                     self.renderer.thinking(text)
 
-            case StreamDelta(content=text):
+            case StreamDelta(content=text, agent_id=agent_id):
                 self._start_turn_timer()
                 self._end_thinking()
                 if self._phase != "streaming":
                     self._phase = "streaming"
                     self._publish_status()
                 self._flush_collapse_group()
+                text = self._prefix_child_text(text, agent_id)
                 if text:
                     if not self._stream_active:
                         self.renderer.stream_start()
@@ -189,12 +201,16 @@ class RichConsumer:
                 self._context_percent = msg.context_percent
                 self._publish_status()
 
-            case ToolCallDelta(tool_name=tool, arguments=args, call_id=cid):
+            case ToolCallDelta(
+                tool_name=tool, arguments=args, call_id=cid, agent_id=agent_id
+            ):
+                self._end_thinking()
                 self._phase = "tool"
                 self._publish_status()
                 if self._stream_active:
                     self.renderer.stream_end()
                     self._stream_active = False
+                display_tool = self._prefix_child_tool_name(tool, agent_id)
                 if is_hidden(tool):
                     self._flush_collapse_group()
                     self._hidden_call_ids.add(cid)
@@ -204,14 +220,27 @@ class RichConsumer:
                     self._collapse_group.add_tool_call(cid, tool, args)
                 elif is_compact(tool):
                     self._flush_collapse_group()
-                    self.renderer.compact_tool_call(cid, tool, args)
+                    self.renderer.compact_tool_call(cid, display_tool, args)
                 else:
                     self._flush_collapse_group()
-                    self.renderer.tool_call(cid, tool, args)
+                    self.renderer.tool_call(cid, display_tool, args)
 
-            case ToolResultDelta(
-                call_id=cid, tool_name=tool, result=result, is_error=err
+            case (
+                ToolResultDelta(
+                    call_id=cid,
+                    tool_name=tool,
+                    result=result,
+                    display_result=display_result,
+                    is_error=err,
+                    agent_id=agent_id,
+                ) as msg
             ):
+                rendered_result = msg.display_result or display_result
+                if not rendered_result:
+                    rendered_result = (
+                        result if isinstance(result, str) else json.dumps(result)
+                    )
+                display_tool = self._prefix_child_tool_name(tool, agent_id)
                 if cid in self._hidden_call_ids:
                     self._hidden_call_ids.discard(cid)
                 elif self._collapse_group is not None and self._collapse_group.has_call(
@@ -219,9 +248,13 @@ class RichConsumer:
                 ):
                     self._collapse_group.add_tool_result(cid, is_error=err)
                 elif is_compact(tool):
-                    self.renderer.compact_tool_result(cid, tool, result, is_error=err)
+                    self.renderer.compact_tool_result(
+                        cid, display_tool, rendered_result, is_error=err
+                    )
                 else:
-                    self.renderer.tool_result(cid, tool, result, is_error=err)
+                    self.renderer.tool_result(
+                        cid, display_tool, rendered_result, is_error=err
+                    )
 
             case TurnEnd(completion_status=status):
                 self._end_thinking()

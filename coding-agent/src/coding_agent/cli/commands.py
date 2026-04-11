@@ -55,6 +55,14 @@ async def cmd_help(args: list[str], context: dict[str, Any]) -> None:
     print_html("<b>Shell Mode:</b>", output=output)
     print_pt("  ! - Instantly enter bash mode (no Enter needed)", output=output)
     print_pt("  Escape or Backspace on empty prompt - Return to chat", output=output)
+    print_pt(
+        "  ! shell mode uses a real shell and supports chaining like && and |",
+        output=output,
+    )
+    print_pt(
+        "  bash_run is a tool, not shell mode; it blocks chaining, pipes, redirects, and backgrounding",
+        output=output,
+    )
     print_pt(output=output)
     print_html("<b>Input:</b>", output=output)
     print_pt("  Enter - Submit message", output=output)
@@ -128,7 +136,7 @@ async def cmd_tools(args: list[str], context: dict[str, Any]) -> None:
         output = _out()
         print_html("<b>Available Tools:</b>", output=output)
         print_pt(output=output)
-        for name in sorted(registry.list_tools()):
+        for name in sorted(registry.names()):
             print_html(f"  <ansicyan>•</ansicyan> {_h(name)}", output=output)
         print_pt(output=output)
     else:

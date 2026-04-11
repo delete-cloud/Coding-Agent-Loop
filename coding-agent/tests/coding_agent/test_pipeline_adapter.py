@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import pytest
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 from agentkit.errors import PipelineError
@@ -25,6 +27,7 @@ from coding_agent.wire.protocol import (
     StreamDelta,
     ThinkingDelta,
     ToolCallDelta,
+    ToolResultDelta,
     TurnEnd,
     TurnStatusDelta,
     WireMessage,
@@ -47,8 +50,18 @@ class _MinimalPlugin:
             "execute_tool": self._execute_tool,
         }
 
-    def _execute_tool(self, name: str = "", **kwargs):
+    def _execute_tool(self, name: str = "", **kwargs) -> str | dict[str, Any]:
         return f"result:{name}"
+
+
+class _StructuredResult(dict[str, Any]):
+    def __str__(self) -> str:
+        return "stdout: ok"
+
+
+class _StructuredToolPlugin(_MinimalPlugin):
+    def _execute_tool(self, name: str = "", **kwargs):
+        return _StructuredResult(stdout="ok", stderr="", exit_code=0)
 
 
 class _MetricsPlugin:
@@ -64,11 +77,12 @@ class _MetricsPlugin:
 def _make_pipeline_and_ctx(
     mock_stream_fn,
     session_id: str = "test-session",
-    config: dict | None = None,
+    config: dict[str, Any] | None = None,
     *,
     with_metrics: bool = False,
+    plugin_override: _MinimalPlugin | None = None,
 ) -> tuple[Pipeline, PipelineContext, _MinimalPlugin]:
-    plugin = _MinimalPlugin()
+    plugin = plugin_override or _MinimalPlugin()
 
     mock_llm = MagicMock()
     mock_llm.stream = mock_stream_fn
@@ -103,6 +117,28 @@ class _RecordingConsumer:
         return ApprovalResponse(
             session_id=req.session_id, request_id=req.request_id, approved=True
         )
+
+
+class _MountTrackingPlugin(_MinimalPlugin):
+    def __init__(self) -> None:
+        super().__init__()
+        self.mount_calls = 0
+        self.shutdown_calls = 0
+
+    def hooks(self):
+        hooks: dict[str, Any] = super().hooks()
+        hooks["mount"] = self.do_mount
+        hooks["on_shutdown"] = self.on_shutdown
+        return hooks
+
+    def do_mount(self, **kwargs):
+        del kwargs
+        self.mount_calls += 1
+        return {"mounted": True}
+
+    def on_shutdown(self, **kwargs):
+        del kwargs
+        self.shutdown_calls += 1
 
 
 class TestRunTurnReturnsOutcome:
@@ -203,6 +239,38 @@ class TestRunTurnReturnsOutcome:
         outcome = await adapter.run_turn("read both files")
         assert outcome.steps_taken == 2
 
+    @pytest.mark.asyncio
+    async def test_run_turn_mounts_pipeline_once_before_first_turn(self):
+        async def mock_stream(messages, tools=None, **kw):
+            yield TextEvent(text="mounted")
+            yield DoneEvent()
+
+        plugin = _MountTrackingPlugin()
+        pipeline, ctx, _ = _make_pipeline_and_ctx(mock_stream, plugin_override=plugin)
+        adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx)
+
+        await adapter.run_turn("first")
+        await adapter.run_turn("second")
+
+        assert plugin.mount_calls == 1
+        assert ctx.plugin_states["minimal"] == {"mounted": True}
+
+    @pytest.mark.asyncio
+    async def test_close_triggers_pipeline_shutdown_once(self):
+        async def mock_stream(messages, tools=None, **kw):
+            yield TextEvent(text="mounted")
+            yield DoneEvent()
+
+        plugin = _MountTrackingPlugin()
+        pipeline, ctx, _ = _make_pipeline_and_ctx(mock_stream, plugin_override=plugin)
+        adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx)
+
+        await adapter.run_turn("first")
+        await adapter.close()
+        await adapter.close()
+
+        assert plugin.shutdown_calls == 1
+
 
 class TestStopReasonMapping:
     @pytest.mark.asyncio
@@ -222,6 +290,62 @@ class TestStopReasonMapping:
         assert outcome.stop_reason == StopReason.DOOM_LOOP
 
     @pytest.mark.asyncio
+    async def test_doom_loop_detected_from_session_event_tape_marker(self):
+        async def mock_stream(messages: list[dict[str, Any]], tools=None, **kw):
+            yield TextEvent(text="stuck")
+            yield DoneEvent()
+
+        pipeline, ctx, _ = _make_pipeline_and_ctx(mock_stream)
+        original_run_turn = pipeline.run_turn
+
+        async def patched_run_turn(ctx: PipelineContext) -> PipelineContext:
+            ctx.tape.append(
+                Entry(
+                    kind="event",
+                    payload={"event_type": "doom_detected", "reason": "doom loop"},
+                )
+            )
+            return await original_run_turn(ctx)
+
+        pipeline.run_turn = cast(Any, patched_run_turn)
+
+        adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx)
+        outcome = await adapter.run_turn("hello")
+
+        assert outcome.stop_reason == StopReason.DOOM_LOOP
+
+    @pytest.mark.asyncio
+    async def test_old_doom_event_does_not_poison_later_clean_turn(self):
+        async def mock_stream(messages: list[dict[str, Any]], tools=None, **kw):
+            yield TextEvent(text="all clear")
+            yield DoneEvent()
+
+        pipeline, ctx, _ = _make_pipeline_and_ctx(mock_stream)
+        ctx.tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "user", "content": "old turn"},
+            )
+        )
+        ctx.tape.append(
+            Entry(
+                kind="event",
+                payload={"event_type": "doom_detected", "reason": "old doom loop"},
+            )
+        )
+        ctx.tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "assistant", "content": "old response"},
+            )
+        )
+
+        adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx)
+        outcome = await adapter.run_turn("new clean turn")
+
+        assert outcome.stop_reason == StopReason.NO_TOOL_CALLS
+
+    @pytest.mark.asyncio
     async def test_max_steps_reached(self):
         """When tool rounds exhaust max_tool_rounds → MAX_STEPS_REACHED."""
 
@@ -237,6 +361,121 @@ class TestStopReasonMapping:
 
         outcome = await adapter.run_turn("loop forever")
         assert outcome.stop_reason == StopReason.MAX_STEPS_REACHED
+
+    @pytest.mark.asyncio
+    async def test_last_assistant_message_after_tool_calls_means_completed_even_with_later_entries(
+        self,
+    ):
+        async def mock_stream(messages, tools=None, **kw):
+            yield ToolCallEvent(
+                tool_call_id="tc-subagent",
+                name="subagent",
+                arguments={"goal": "delegate"},
+            )
+            yield DoneEvent()
+
+        pipeline, ctx, _ = _make_pipeline_and_ctx(mock_stream)
+        adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx)
+
+        ctx.tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "user", "content": "delegate work"},
+            )
+        )
+        ctx.tape.append(
+            Entry(
+                kind="tool_call",
+                payload={
+                    "id": "tc-subagent",
+                    "name": "subagent",
+                    "arguments": {"goal": "delegate"},
+                    "role": "assistant",
+                },
+            )
+        )
+        ctx.tape.append(
+            Entry(
+                kind="tool_result",
+                payload={
+                    "tool_call_id": "tc-subagent",
+                    "content": "Subagent completed: Child finished summary",
+                },
+            )
+        )
+        ctx.tape.append(
+            Entry(
+                kind="message",
+                payload={
+                    "role": "assistant",
+                    "content": "Parent received child result",
+                },
+            )
+        )
+        ctx.tape.append(
+            Entry(
+                kind="event",
+                payload={"event_type": "topic_start", "summary": "next turn anchor"},
+            )
+        )
+
+        assert adapter._determine_stop_reason() == StopReason.NO_TOOL_CALLS
+
+    @pytest.mark.asyncio
+    async def test_hidden_child_entries_do_not_mark_parent_turn_completed(self):
+        async def mock_stream(messages, tools=None, **kw):
+            yield DoneEvent()
+
+        pipeline, ctx, _ = _make_pipeline_and_ctx(mock_stream)
+        adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx)
+
+        ctx.tape.append(
+            Entry(kind="message", payload={"role": "user", "content": "delegate work"})
+        )
+        ctx.tape.append(
+            Entry(
+                kind="tool_call",
+                payload={
+                    "id": "tc-subagent",
+                    "name": "subagent",
+                    "arguments": {"goal": "delegate"},
+                    "role": "assistant",
+                },
+            )
+        )
+        ctx.tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "assistant", "content": "child finished"},
+                meta={"skip_context": True},
+            )
+        )
+
+        assert adapter._determine_stop_reason() == StopReason.MAX_STEPS_REACHED
+
+    @pytest.mark.asyncio
+    async def test_hidden_child_entries_do_not_override_parent_final_message(self):
+        async def mock_stream(messages, tools=None, **kw):
+            yield DoneEvent()
+
+        pipeline, ctx, _ = _make_pipeline_and_ctx(mock_stream)
+        adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx)
+
+        ctx.tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "assistant", "content": "parent result"},
+            )
+        )
+        ctx.tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "assistant", "content": "hidden child result"},
+                meta={"skip_context": True},
+            )
+        )
+
+        assert adapter._extract_final_message() == "parent result"
 
     @pytest.mark.asyncio
     async def test_error_on_pipeline_exception(self):
@@ -274,6 +513,43 @@ class TestEventToWireMessage:
         assert len(deltas) >= 1
         assert deltas[0].content == "Hello!"
         assert deltas[0].session_id == "s1"
+        assert deltas[0].agent_id == ""
+
+    @pytest.mark.asyncio
+    async def test_child_consumer_emits_agent_id_on_wire_messages(self):
+        async def mock_stream(messages, tools=None, **kw):
+            yield ThinkingEvent(text="thinking")
+            yield ToolCallEvent(
+                tool_call_id="tc-child",
+                name="bash_run",
+                arguments={"command": "pwd"},
+            )
+            yield TextEvent(text="child says hi")
+            yield UsageEvent(
+                input_tokens=11,
+                output_tokens=7,
+                provider_name="test-provider",
+            )
+            yield DoneEvent()
+
+        pipeline, ctx, _ = _make_pipeline_and_ctx(
+            mock_stream, session_id="parent-session"
+        )
+        consumer = _RecordingConsumer()
+        adapter = PipelineAdapter(
+            pipeline=pipeline,
+            ctx=ctx,
+            consumer=consumer,
+            agent_id="child-agent-1",
+        )
+
+        await adapter.run_turn("delegate")
+
+        assert consumer.messages
+        assert {message.agent_id for message in consumer.messages} == {"child-agent-1"}
+        assert {message.session_id for message in consumer.messages} == {
+            "parent-session"
+        }
 
     @pytest.mark.asyncio
     async def test_tool_call_event_emits_tool_call_delta(self):
@@ -370,6 +646,79 @@ class TestEventToWireMessage:
         assert len(turn_ends) == 1
         assert turn_ends[0].completion_status == CompletionStatus.ERROR
 
+    @pytest.mark.asyncio
+    async def test_tool_result_stays_string_when_structured_results_disabled(self):
+        call_count = 0
+
+        async def mock_stream(messages, tools=None, **kw):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                yield ToolCallEvent(
+                    tool_call_id="tc-structured-off",
+                    name="bash_run",
+                    arguments={"command": "echo ok"},
+                )
+                yield DoneEvent()
+            else:
+                yield TextEvent(text="done")
+                yield DoneEvent()
+
+        pipeline, ctx, _ = _make_pipeline_and_ctx(
+            mock_stream,
+            session_id="s-structured-off",
+            plugin_override=_StructuredToolPlugin(),
+        )
+        consumer = _RecordingConsumer()
+        adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
+
+        await adapter.run_turn("run tool")
+
+        tool_results = [m for m in consumer.messages if isinstance(m, ToolResultDelta)]
+        assert len(tool_results) == 1
+        tool_result = tool_results[0]
+        assert tool_result.result == "stdout: ok"
+        assert tool_result.display_result == "stdout: ok"
+        assert ctx.tape.filter("tool_result")[0].payload["content"] == "stdout: ok"
+
+    @pytest.mark.asyncio
+    async def test_tool_result_keeps_dict_when_structured_results_enabled(self):
+        call_count = 0
+
+        async def mock_stream(messages, tools=None, **kw):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                yield ToolCallEvent(
+                    tool_call_id="tc-structured-on",
+                    name="bash_run",
+                    arguments={"command": "echo ok"},
+                )
+                yield DoneEvent()
+            else:
+                yield TextEvent(text="done")
+                yield DoneEvent()
+
+        pipeline, ctx, _ = _make_pipeline_and_ctx(
+            mock_stream,
+            session_id="s-structured-on",
+            config={"structured_results": True},
+            plugin_override=_StructuredToolPlugin(),
+        )
+        consumer = _RecordingConsumer()
+        adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
+
+        await adapter.run_turn("run tool")
+
+        tool_results = [m for m in consumer.messages if isinstance(m, ToolResultDelta)]
+        assert len(tool_results) == 1
+        tool_result = tool_results[0]
+        assert tool_result.result == {"stdout": "ok", "stderr": "", "exit_code": 0}
+        assert tool_result.display_result == "stdout: ok"
+        assert ctx.tape.filter("tool_result")[0].payload["content"] == json.dumps(
+            {"stdout": "ok", "stderr": "", "exit_code": 0}
+        )
+
 
 class TestNoConsumer:
     @pytest.mark.asyncio
@@ -453,6 +802,7 @@ class TestErrorRecovery:
         tape = Tape()
         ctx = PipelineContext(tape=tape, session_id=session_id, config={})
         mock_pipeline = AsyncMock(spec=Pipeline)
+        mock_pipeline._directive_executor = None
         mock_pipeline.run_turn = AsyncMock(side_effect=side_effect)
         adapter = PipelineAdapter(pipeline=mock_pipeline, ctx=ctx, consumer=consumer)
         return adapter, ctx, mock_pipeline

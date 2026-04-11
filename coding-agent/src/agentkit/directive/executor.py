@@ -60,7 +60,7 @@ class DirectiveExecutor:
             return False
         elif isinstance(directive, AskUser):
             if self._ask_user is not None:
-                result = await self._ask_user(directive.question)
+                result = await self._ask_user(directive.question, directive.metadata)
                 if _tracer is not None:
                     _tracer.info(
                         "directive_execute",

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from rich.console import Group, RenderableType
+from rich.console import Console, Group, RenderableType
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
@@ -13,8 +13,22 @@ from rich.text import Text
 from coding_agent.ui.theme import theme
 
 
+_WIDTH_SCRATCH_CONSOLE = Console()
+
+
+def _get_safe_width(console: Console | None = None) -> int:
+    """Get safe width for panels, accounting for border characters."""
+    console = console or _WIDTH_SCRATCH_CONSOLE
+    width = console.size.width
+    # Reserve 2 characters for borders to prevent truncation
+    return max(width - 2, 40)
+
+
 def create_message_panel(
-    role: str, content: RenderableType | str, is_streaming: bool = False
+    role: str,
+    content: RenderableType | str,
+    is_streaming: bool = False,
+    console: Console | None = None,
 ) -> Panel:
     """Create a message panel for user/assistant messages."""
     if role == "user":
@@ -39,6 +53,8 @@ def create_message_panel(
         title=f"[bold]{icon} {title}[/]",
         border_style=border_color,
         padding=theme.Layout.PANEL_PADDING,
+        width=_get_safe_width(console),
+        safe_box=True,
     )
 
 
@@ -89,6 +105,7 @@ def create_tool_panel(
         title=title,
         border_style=theme.Colors.INFO if result is None else theme.Colors.SUCCESS,
         padding=theme.Layout.PANEL_PADDING,
+        safe_box=True,
     )
 
 
@@ -116,6 +133,7 @@ def create_plan_panel(tasks: list[dict[str, Any]]) -> Panel:
         title=f"[bold]{theme.Icons.PLAN} Plan[/]",
         border_style=theme.Colors.PRIMARY,
         padding=theme.Layout.PANEL_PADDING,
+        safe_box=True,
     )
 
 
@@ -135,4 +153,5 @@ def create_header_panel(model: str, step: int, max_steps: int) -> Panel:
         text,
         border_style=theme.Colors.BORDER_DEFAULT,
         padding=(0, 1),
+        safe_box=True,
     )

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import uuid
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 
@@ -34,189 +36,18 @@ def create_agent(
     approval_mode_override: str | None = None,
     session_id_override: str | None = None,
 ) -> tuple[Any, Any]:
-    """Create a fully wired agent from config.
-
-    Returns (Pipeline, PipelineContext) ready for run_turn().
-    """
-    import os
-
-    from agentkit.config.loader import AgentConfig, load_config
-    from agentkit.directive.executor import DirectiveExecutor
-    from agentkit.plugin.registry import PluginRegistry
-    from agentkit.runtime.hook_runtime import HookRuntime
-    from agentkit.runtime.hookspecs import HOOK_SPECS
-    from agentkit.runtime.pipeline import Pipeline, PipelineContext
-    from agentkit.tape.tape import Tape
-    from coding_agent.plugins.approval import ApprovalPlugin, ApprovalPolicy
-    from coding_agent.plugins.core_tools import CoreToolsPlugin
-    from coding_agent.plugins.doom_detector import DoomDetectorPlugin
-    from coding_agent.plugins.llm_provider import LLMProviderPlugin
-    from coding_agent.plugins.mcp import MCPPlugin
-    from coding_agent.plugins.memory import MemoryPlugin
-    from coding_agent.plugins.metrics import SessionMetricsPlugin
-    from coding_agent.plugins.parallel_executor import ParallelExecutorPlugin
-    from coding_agent.plugins.shell_session import ShellSessionPlugin
-    from coding_agent.plugins.skills import SkillsPlugin
-    from coding_agent.plugins.storage import StoragePlugin
-    from coding_agent.plugins.summarizer import SummarizerPlugin
-    from coding_agent.plugins.topic import TopicPlugin
-    from coding_agent.tools.web_search import create_web_search_backend
-
-    if config_path is None:
-        config_path = Path(__file__).parent / "agent.toml"
-    if data_dir is None:
-        data_dir = Path("./data")
-
-    workspace_root = workspace_root or Path.cwd()
-
-    cfg = load_config(config_path)
-
-    if model_override:
-        cfg.model = model_override
-    if provider_override:
-        cfg.provider = provider_override
-    if max_steps_override is not None:
-        cfg.max_turns = max_steps_override
-
-    resolved_key = api_key or os.environ.get("AGENT_API_KEY")
-    if not resolved_key and cfg.provider == "copilot":
-        resolved_key = os.environ.get("GITHUB_TOKEN", "")
-    if not resolved_key and cfg.provider == "kimi":
-        resolved_key = os.environ.get("MOONSHOT_API_KEY", "")
-    if not resolved_key and cfg.provider in ("kimi-code", "kimi-code-anthropic"):
-        resolved_key = os.environ.get("KIMI_CODE_API_KEY", "")
-    resolved_key = resolved_key or ""
-
-    approval_cfg = cfg.extra.get("approval", {})
-    web_search_cfg = cfg.extra.get("web_search", {})
-    policy_str = approval_mode_override or approval_cfg.get("policy", "auto")
-    approval_policy_map = {
-        "yolo": ApprovalPolicy.YOLO,
-        "interactive": ApprovalPolicy.INTERACTIVE,
-        "auto": ApprovalPolicy.AUTO,
-    }
-    policy = approval_policy_map.get(policy_str)
-    if policy is None:
-        raise ValueError(f"unsupported approval policy: {policy_str}")
-
-    web_search_backend = create_web_search_backend(web_search_cfg)
-
-    registry = PluginRegistry(specs=HOOK_SPECS)
-    shell_session = ShellSessionPlugin()
-    plugin_factories: dict[str, Any] = {
-        "llm_provider": lambda: LLMProviderPlugin(
-            provider=cfg.provider,
-            model=cfg.model,
-            api_key=resolved_key,
-            base_url=base_url_override,
-        ),
-        "storage": lambda: StoragePlugin(data_dir=data_dir),
-        "core_tools": lambda: CoreToolsPlugin(
-            workspace_root=workspace_root,
-            shell_session=shell_session,
-            web_search_backend=web_search_backend,
-        ),
-        "approval": lambda: ApprovalPlugin(
-            policy=policy,
-            blocked_tools=set(approval_cfg.get("blocked_tools", [])),
-            external_request_tools={"web_search"},
-        ),
-        "summarizer": lambda: SummarizerPlugin(
-            max_entries=sum_cfg.get("max_entries", 100),
-            keep_recent=sum_cfg.get("keep_recent", 20),
-        ),
-        "memory": lambda: MemoryPlugin(),
-        "shell_session": lambda: shell_session,
-    }
-
-    sum_cfg = cfg.extra.get("summarizer", {})
-    parallel_cfg = cfg.extra.get("parallel", {})
-    doom_cfg = cfg.extra.get("doom_detector", {})
-    topic_cfg = cfg.extra.get("topic", {})
-    skills_cfg = cfg.extra.get("skills", {})
-    mcp_cfg = cfg.extra.get("mcp", {})
-
-    async def _execute_tool_async(name: str, arguments: dict[str, Any]) -> str:
-        core_tools = registry.get("core_tools")
-        if not isinstance(core_tools, CoreToolsPlugin):
-            raise TypeError("core_tools plugin must be CoreToolsPlugin")
-        result = await core_tools.execute_tool_async(name=name, arguments=arguments)
-        return str(result) if result is not None else ""
-
-    plugin_factories.update(
-        {
-            "doom_detector": lambda: DoomDetectorPlugin(
-                threshold=int(doom_cfg.get("threshold", 3))
-            ),
-            "parallel_executor": lambda: ParallelExecutorPlugin(
-                execute_fn=_execute_tool_async,
-                max_concurrency=int(parallel_cfg.get("max_concurrency", 5)),
-            ),
-            "topic": lambda: TopicPlugin(
-                overlap_threshold=float(topic_cfg.get("overlap_threshold", 0.2)),
-                min_entries_before_detect=int(topic_cfg.get("min_entries", 4)),
-            ),
-            "session_metrics": lambda: SessionMetricsPlugin(),
-            "skills": lambda: SkillsPlugin(
-                workspace_root=workspace_root,
-                extra_dirs=skills_cfg.get("extra_dirs", []),
-            ),
-            "mcp": lambda: MCPPlugin(
-                servers=mcp_cfg.get("servers", {}),
-            ),
-        }
+    return import_module("coding_agent.app").create_agent(
+        config_path=config_path,
+        data_dir=data_dir,
+        api_key=api_key,
+        model_override=model_override,
+        provider_override=provider_override,
+        base_url_override=base_url_override,
+        workspace_root=workspace_root,
+        max_steps_override=max_steps_override,
+        approval_mode_override=approval_mode_override,
+        session_id_override=session_id_override,
     )
-
-    enabled_plugins = cfg.plugins or list(plugin_factories.keys())
-    for plugin_name in enabled_plugins:
-        factory = plugin_factories.get(plugin_name)
-        if factory is None:
-            raise ValueError(f"unsupported plugin in config: {plugin_name}")
-        registry.register(factory())
-
-    runtime = HookRuntime(registry, specs=HOOK_SPECS)
-
-    memory_plugin = None
-    if "memory" in registry.plugin_ids():
-        from coding_agent.plugins.memory import MemoryPlugin as _MemoryPlugin
-
-        _mem = registry.get("memory")
-        if isinstance(_mem, _MemoryPlugin):
-            memory_plugin = _mem
-
-    async def _memory_handler(directive: Any) -> None:
-        if memory_plugin is not None:
-            memory_plugin.add_memory(directive)
-
-    directive_executor = DirectiveExecutor(
-        memory_handler=_memory_handler if memory_plugin is not None else None,
-    )
-
-    pipeline = Pipeline(
-        runtime=runtime,
-        registry=registry,
-        directive_executor=directive_executor,
-    )
-
-    ctx = PipelineContext(
-        tape=Tape(),
-        session_id=session_id_override or uuid.uuid4().hex,
-        config={
-            "system_prompt": cfg.system_prompt,
-            "model": cfg.model,
-            "provider": cfg.provider,
-            "max_tool_rounds": cfg.max_turns,
-            "web_search": web_search_cfg,
-        },
-    )
-
-    # Expose plugin references so CLI commands can interact with them directly
-    if "skills" in registry.plugin_ids():
-        ctx.config["skills_plugin"] = registry.get("skills")
-    if "mcp" in registry.plugin_ids():
-        ctx.config["mcp_plugin"] = registry.get("mcp")
-
-    return pipeline, ctx
 
 
 @click.group(invoke_without_command=True)
@@ -383,9 +214,14 @@ async def _run_with_tui(config, goal):
     )
     renderer = StreamingRenderer()
     consumer = RichConsumer(renderer)
+    ctx.config["wire_consumer"] = consumer
+    ctx.config["agent_id"] = ""
     adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
     renderer.user_message(goal)
-    result = await adapter.run_turn(goal)
+    try:
+        result = await adapter.run_turn(goal)
+    finally:
+        await adapter.close()
     click.echo(f"\n--- Result ({result.stop_reason}) ---")
 
 
@@ -405,11 +241,153 @@ async def _run_headless(config, goal):
         approval_mode_override=config.approval_mode,
     )
     consumer = HeadlessConsumer()
+    ctx.config["wire_consumer"] = consumer
+    ctx.config["agent_id"] = ""
     adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
-    result = await adapter.run_turn(goal)
+    try:
+        result = await adapter.run_turn(goal)
+    finally:
+        await adapter.close()
     click.echo(f"\n--- Result ({result.stop_reason}) ---")
     if result.final_message:
         click.echo(result.final_message)
+
+
+@main.group()
+def kb():
+    pass
+
+
+@kb.command("index")
+@click.argument("path", type=click.Path(exists=True))
+@click.option(
+    "--db-path",
+    default=None,
+    help="LanceDB database path (default: from agent.toml [kb].db_path)",
+)
+def kb_index(path: str, db_path: str | None):
+    import asyncio
+
+    from agentkit.config.loader import load_config as load_agent_config
+
+    from coding_agent.kb import KB
+
+    root = Path(path)
+
+    kb_cfg: dict[str, object] = {}
+    config_path = Path(__file__).parent / "agent.toml"
+    if config_path.exists():
+        agent_cfg = load_agent_config(config_path)
+        kb_cfg = agent_cfg.extra.get("kb", {})
+
+    data_dir = Path(os.environ.get("AGENT_DATA_DIR", "./data"))
+    resolved_db = (
+        Path(db_path)
+        if db_path is not None
+        else data_dir / str(kb_cfg.get("db_path", "kb"))
+    )
+
+    raw_extensions = kb_cfg.get(
+        "index_extensions",
+        [".md", ".txt", ".rst", ".yaml", ".yml", ".toml"],
+    )
+    text_extensions = (
+        set(raw_extensions)
+        if isinstance(raw_extensions, list)
+        else {".md", ".txt", ".rst", ".yaml", ".yml", ".toml"}
+    )
+    embedding_dim_raw = kb_cfg.get("embedding_dim", 1536)
+    chunk_size_raw = kb_cfg.get("chunk_size", 1200)
+    chunk_overlap_raw = kb_cfg.get("chunk_overlap", 200)
+    embedding_dim = (
+        int(embedding_dim_raw) if isinstance(embedding_dim_raw, int | str) else 1536
+    )
+    chunk_size = int(chunk_size_raw) if isinstance(chunk_size_raw, int | str) else 1200
+    chunk_overlap = (
+        int(chunk_overlap_raw) if isinstance(chunk_overlap_raw, int | str) else 200
+    )
+
+    probe_kb = KB(
+        db_path=resolved_db,
+        embedding_dim=embedding_dim,
+        text_extensions=text_extensions,
+    )
+    if probe_kb.has_table():
+        click.echo(
+            "Chunks table already exists. Skipping. "
+            "(Phase 1 does not support incremental updates.)"
+        )
+        return
+
+    kb_instance = KB(
+        db_path=resolved_db,
+        embedding_model=str(kb_cfg.get("embedding_model", "text-embedding-3-small")),
+        embedding_dim=embedding_dim,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        text_extensions=text_extensions,
+    )
+
+    asyncio.run(kb_instance.index_directory(root))
+
+    click.echo("Done.")
+
+
+@kb.command("search")
+@click.argument("query")
+@click.option("--k", default=5, type=int, help="Number of results to return")
+@click.option(
+    "--db-path",
+    default=None,
+    help="LanceDB database path (default: from agent.toml [kb].db_path)",
+)
+def kb_search(query: str, k: int, db_path: str | None):
+    from coding_agent.kb import KB
+
+    kb_cfg: dict[str, object] = {}
+    config_path = Path(__file__).parent / "agent.toml"
+    if config_path.exists():
+        from agentkit.config.loader import load_config as load_agent_config
+
+        agent_cfg = load_agent_config(config_path)
+        kb_cfg = agent_cfg.extra.get("kb", {})
+
+    data_dir = Path(os.environ.get("AGENT_DATA_DIR", "./data"))
+    resolved_db = (
+        Path(db_path)
+        if db_path is not None
+        else data_dir / str(kb_cfg.get("db_path", "kb"))
+    )
+
+    embedding_dim_raw = kb_cfg.get("embedding_dim", 1536)
+    embedding_dim = (
+        int(embedding_dim_raw) if isinstance(embedding_dim_raw, int | str) else 1536
+    )
+    embedding_model = str(kb_cfg.get("embedding_model", "text-embedding-3-small"))
+
+    kb_instance = KB(
+        db_path=resolved_db,
+        embedding_model=embedding_model,
+        embedding_dim=embedding_dim,
+    )
+
+    if not kb_instance.has_table():
+        click.echo("No index found. Run 'kb index <path>' first.")
+        return
+
+    results = kb_instance.search_sync(query, k=k)
+
+    if not results:
+        click.echo("No results found.")
+        return
+
+    for i, result in enumerate(results, 1):
+        click.echo(f"\n--- Result {i} (score: {result.score:.4f}) ---")
+        click.echo(f"Source: {result.chunk.source}")
+        content = result.chunk.content
+        if len(content) > 200:
+            content = content[:200] + "..."
+        click.echo(content)
 
 
 def _create_provider(config):

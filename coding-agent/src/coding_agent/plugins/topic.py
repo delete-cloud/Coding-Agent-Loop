@@ -47,7 +47,7 @@ class TopicPlugin:
         runtime = kwargs.get("runtime")
 
         tape: Tape = ctx.tape
-        entries = tape.windowed_entries()
+        entries = list(tape.snapshot()[tape.window_start :])
 
         if len(entries) < self._min_entries:
             if self._current_topic_id is None:
@@ -160,6 +160,7 @@ class TopicPlugin:
                 payload={
                     "topic_id": self._current_topic_id,
                     "files": file_list,
+                    "summary": summary,
                 },
             )
 

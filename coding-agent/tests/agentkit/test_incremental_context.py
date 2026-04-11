@@ -1,3 +1,5 @@
+# pyright: reportUnannotatedClassAttribute=false, reportExplicitAny=false, reportUnusedParameter=false, reportAny=false, reportUnknownParameterType=false, reportMissingParameterType=false, reportUnknownArgumentType=false, reportUnusedCallResult=false
+
 from __future__ import annotations
 
 from copy import deepcopy
@@ -18,6 +20,7 @@ from agentkit.tape.view import TapeView
 
 ORIGINAL_FROM_TAPE = TapeView.from_tape.__func__
 ORIGINAL_BUILD_CORE_MESSAGES = ContextBuilder.build_core_messages
+ORIGINAL_COMPOSE_MESSAGES = ContextBuilder.compose_messages
 ORIGINAL_CONTEXT_BUILDER_INIT = ContextBuilder.__init__
 
 
@@ -64,6 +67,33 @@ class SimpleReplyProvider:
         yield DoneEvent()
 
 
+class CheckpointAfterToolProvider:
+    def __init__(self) -> None:
+        self._call_count = 0
+        self.messages_seen: list[list[dict[str, Any]]] = []
+
+    async def stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        **kwargs: Any,
+    ):
+        self.messages_seen.append(deepcopy(messages))
+        self._call_count += 1
+
+        if self._call_count == 1:
+            yield ToolCallEvent(
+                tool_call_id="tc-checkpoint",
+                name="demo_tool",
+                arguments={"round": 1},
+            )
+            yield DoneEvent()
+            return
+
+        yield TextEvent(text=f"done-{self._call_count}")
+        yield DoneEvent()
+
+
 class IncrementalContextPlugin:
     state_key = "incremental_test"
 
@@ -91,7 +121,7 @@ class IncrementalContextPlugin:
             "resolve_context_window": self.resolve_context_window,
         }
 
-    def do_mount(self) -> dict[str, object]:
+    def do_mount(self, **kwargs: Any) -> dict[str, object]:
         return {}
 
     def provide_llm(self, **kwargs: Any) -> Any:
@@ -185,7 +215,7 @@ async def _count_full_rebuild_calls(
     monkeypatch: pytest.MonkeyPatch,
     incremental_context: bool,
 ) -> dict[str, int]:
-    counts = {"from_tape": 0, "build_core": 0}
+    counts = {"from_tape": 0, "build_core": 0, "compose": 0}
 
     def counting_from_tape(cls, tape: Tape):
         counts["from_tape"] += 1
@@ -198,15 +228,113 @@ async def _count_full_rebuild_calls(
         counts["build_core"] += 1
         return ORIGINAL_BUILD_CORE_MESSAGES(self, entries)
 
+    def counting_compose_messages(
+        self,
+        core_messages: list[dict[str, Any]],
+        grounding: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        counts["compose"] += 1
+        return ORIGINAL_COMPOSE_MESSAGES(self, core_messages, grounding)
+
     monkeypatch.setattr(TapeView, "from_tape", classmethod(counting_from_tape))
     monkeypatch.setattr(
         ContextBuilder,
         "build_core_messages",
         counting_build_core_messages,
     )
+    monkeypatch.setattr(ContextBuilder, "compose_messages", counting_compose_messages)
 
     await _run_multi_round_turn(incremental_context=incremental_context)
     return counts
+
+
+async def _count_rebuild_calls_across_checkpoint_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+    incremental_context: bool,
+) -> dict[str, int]:
+    counts = {"from_tape": 0, "build_core": 0, "compose": 0}
+
+    def counting_from_tape(cls, tape: Tape):
+        counts["from_tape"] += 1
+        return ORIGINAL_FROM_TAPE(cls, tape)
+
+    def counting_build_core_messages(
+        self,
+        entries: list[Entry],
+    ) -> list[dict[str, Any]]:
+        counts["build_core"] += 1
+        return ORIGINAL_BUILD_CORE_MESSAGES(self, entries)
+
+    def counting_compose_messages(
+        self,
+        core_messages: list[dict[str, Any]],
+        grounding: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        counts["compose"] += 1
+        return ORIGINAL_COMPOSE_MESSAGES(self, core_messages, grounding)
+
+    monkeypatch.setattr(TapeView, "from_tape", classmethod(counting_from_tape))
+    monkeypatch.setattr(
+        ContextBuilder,
+        "build_core_messages",
+        counting_build_core_messages,
+    )
+    monkeypatch.setattr(ContextBuilder, "compose_messages", counting_compose_messages)
+
+    provider = CheckpointAfterToolProvider()
+    plugin = IncrementalContextPlugin(provider, append_checkpoint_anchor=True)
+    registry = PluginRegistry()
+    registry.register(plugin)
+    pipeline = Pipeline(runtime=HookRuntime(registry), registry=registry)
+
+    ctx = PipelineContext(
+        tape=Tape(),
+        session_id="ses-checkpoint",
+        config={
+            "system_prompt": "system",
+            "incremental_context": incremental_context,
+            "incremental_context_rebuild_interval": 5,
+        },
+    )
+    await pipeline.mount(ctx)
+
+    ctx.tape.append(Entry(kind="message", payload={"role": "user", "content": "first"}))
+    await pipeline.run_turn(ctx)
+
+    ctx.tape.append(
+        Entry(kind="message", payload={"role": "user", "content": "second"})
+    )
+    await pipeline.run_turn(ctx)
+
+    return counts
+
+
+def _message_shapes(
+    messages: list[list[dict[str, Any]]],
+) -> list[list[tuple[str | None, bool, str | None]]]:
+    return [
+        [
+            (
+                message.get("role"),
+                "tool_calls" in message,
+                message.get("tool_call_id"),
+            )
+            for message in snapshot
+        ]
+        for snapshot in messages
+    ]
+
+
+def _grounding_contents(messages: list[list[dict[str, Any]]]) -> list[list[str]]:
+    return [
+        [
+            str(message.get("content"))
+            for message in snapshot
+            if message.get("role") == "system"
+            and str(message.get("content", "")).startswith("grounding:")
+        ]
+        for snapshot in messages
+    ]
 
 
 async def _run_two_turns_with_checkpoint_anchor(
@@ -329,6 +457,10 @@ async def test_incremental_context_matches_full_rebuild_for_ten_tool_rounds() ->
     assert len(full_messages) == 11
     assert incremental_messages == full_messages
     assert incremental_final_messages == full_final_messages
+    assert _message_shapes(incremental_messages) == _message_shapes(full_messages)
+    assert _grounding_contents(incremental_messages) == _grounding_contents(
+        full_messages
+    )
 
 
 @pytest.mark.asyncio
@@ -342,8 +474,8 @@ async def test_incremental_context_skips_full_rebuild_work_between_intervals(
         monkeypatch, incremental_context=True
     )
 
-    assert full_counts == {"from_tape": 11, "build_core": 11}
-    assert incremental_counts == {"from_tape": 11, "build_core": 3}
+    assert full_counts == {"from_tape": 11, "build_core": 11, "compose": 11}
+    assert incremental_counts == {"from_tape": 11, "build_core": 3, "compose": 3}
 
 
 @pytest.mark.asyncio
@@ -362,6 +494,21 @@ async def test_incremental_context_routes_append_path_through_tape_view(
     messages_seen, _ = await _run_multi_round_turn(incremental_context=True)
 
     assert from_tape_calls == len(messages_seen)
+
+
+@pytest.mark.asyncio
+async def test_incremental_context_forces_full_rebuild_next_turn_after_checkpoint_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    full_counts = await _count_rebuild_calls_across_checkpoint_anchor(
+        monkeypatch, incremental_context=False
+    )
+    incremental_counts = await _count_rebuild_calls_across_checkpoint_anchor(
+        monkeypatch, incremental_context=True
+    )
+
+    assert full_counts == {"from_tape": 3, "build_core": 3, "compose": 3}
+    assert incremental_counts == {"from_tape": 3, "build_core": 2, "compose": 2}
 
 
 @pytest.mark.asyncio

@@ -176,7 +176,7 @@ class StreamingRenderer:
     def __init__(
         self, console: Console | None = None, *, enhanced_boundaries: bool = False
     ) -> None:
-        self.console: Console = console or Console()
+        self.console: Console = console or Console(force_terminal=True, soft_wrap=False)
         self._enhanced_boundaries: bool = enhanced_boundaries
         self._stream_buffer: str = ""
         self._in_stream: bool = False
@@ -189,7 +189,9 @@ class StreamingRenderer:
     def user_message(self, content: str) -> None:
         clean_content = _sanitize_display_text(content)
         if self._enhanced_boundaries and self.console.is_terminal:
-            self.console.print(create_message_panel("user", clean_content))
+            self.console.print(
+                create_message_panel("user", clean_content, console=self.console)
+            )
         else:
             self.console.print(Text("❯ ", style="bold green"), end="")
             self.console.print(Text(clean_content, style="bold white"))
@@ -250,6 +252,8 @@ class StreamingRenderer:
     ) -> None:
         if not self.console.is_terminal:
             return
+        if self._in_stream:
+            return
         parts: list[str] = []
         if model:
             parts.append(model)
@@ -274,7 +278,7 @@ class StreamingRenderer:
             return
 
         self._stream_buffer += text
-        self.console.print(text, end="", soft_wrap=True, highlight=False)
+        self.console.print(text, end="", soft_wrap=True, highlight=False, markup=False)
         self._stream_started_output = True
 
     def _count_terminal_lines(self, text: str) -> int:
@@ -320,7 +324,9 @@ class StreamingRenderer:
                     self._clear_streamed_output(line_count)
                     md = Markdown(self._stream_buffer)
                     if self._enhanced_boundaries:
-                        self.console.print(create_message_panel("assistant", md))
+                        self.console.print(
+                            create_message_panel("assistant", md, console=self.console)
+                        )
                     else:
                         self.console.print(md)
                 except Exception:

@@ -1,18 +1,25 @@
 """End-to-end pipeline integration tests — all layers wire together through real Pipeline."""
 
+import json
 import asyncio
-import pytest
 from pathlib import Path
 from unittest.mock import AsyncMock
 
-from agentkit.providers.models import TextEvent, ToolCallEvent, DoneEvent
+import pytest
+
+from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
 from agentkit.runtime.hook_runtime import HookRuntime
 from agentkit.tape.models import Entry
 
 from coding_agent.__main__ import create_agent
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.adapter_types import StopReason, TurnOutcome
-from coding_agent.wire.protocol import StreamDelta, ToolCallDelta, TurnEnd
+from coding_agent.wire.protocol import (
+    StreamDelta,
+    ToolCallDelta,
+    ToolResultDelta,
+    TurnEnd,
+)
 
 CONFIG_PATH = (
     Path(__file__).parent.parent.parent / "src" / "coding_agent" / "agent.toml"
@@ -24,12 +31,13 @@ def _skip_if_no_config():
         pytest.skip("agent.toml not found")
 
 
-def _setup_agent(tmp_path):
+def _setup_agent(tmp_path, *, approval_mode: str | None = None):
     _skip_if_no_config()
     pipeline, ctx = create_agent(
         config_path=CONFIG_PATH,
         data_dir=tmp_path,
         api_key="sk-test",
+        approval_mode_override=approval_mode,
     )
     return pipeline, ctx
 
@@ -43,6 +51,62 @@ def _mock_provider(pipeline, stream_fn):
 
 
 class TestPipelineE2E:
+    @pytest.mark.asyncio
+    async def test_subagent_tool_executes_from_real_pipeline_turn(self, tmp_path):
+        pipeline, ctx = _setup_agent(tmp_path, approval_mode="yolo")
+        ctx.config["max_tool_rounds"] = 3
+
+        call_count = 0
+
+        async def mock_stream(messages, tools=None, **kwargs):
+            del messages, tools, kwargs
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                yield ToolCallEvent(
+                    tool_call_id="tc-subagent",
+                    name="subagent",
+                    arguments={"goal": "Inspect child task"},
+                )
+                yield DoneEvent()
+            elif call_count == 2:
+                yield TextEvent(text="Child finished summary")
+                yield DoneEvent()
+            else:
+                yield TextEvent(text="Parent received child result")
+                yield DoneEvent()
+
+        _mock_provider(pipeline, mock_stream)
+        await pipeline.mount(ctx)
+
+        adapter = PipelineAdapter(pipeline, ctx, consumer=None)
+        outcome = await adapter.run_turn("Use a subagent")
+
+        assert outcome.stop_reason == StopReason.NO_TOOL_CALLS
+        assert outcome.final_message == "Parent received child result"
+
+        tool_results = ctx.tape.filter("tool_result")
+        visible_tool_results = [
+            entry for entry in tool_results if not entry.meta.get("skip_context")
+        ]
+        hidden_child_entries = [
+            entry for entry in list(ctx.tape) if entry.meta.get("skip_context")
+        ]
+        assert len(visible_tool_results) == 1
+        assert visible_tool_results[0].payload["content"] == (
+            "Subagent completed: Child finished summary"
+        )
+        assert any(
+            entry.kind == "message"
+            and entry.payload.get("content") == "Inspect child task"
+            for entry in hidden_child_entries
+        )
+        assert any(
+            entry.kind == "message"
+            and entry.payload.get("content") == "Child finished summary"
+            for entry in hidden_child_entries
+        )
+
     @pytest.mark.asyncio
     async def test_run_command_streaming_events(self, tmp_path):
         """Given mock LLM emitting text+tool+done, when run via adapter with consumer, then StreamDelta/ToolCallDelta/TurnEnd emitted."""
@@ -101,7 +165,7 @@ class TestPipelineE2E:
         """Given 2-turn conversation via PipelineAdapter, when second turn runs, then tape has both exchanges and LLM sees first turn's context."""
         pipeline, ctx = _setup_agent(tmp_path)
 
-        turn_messages_seen: list[list[dict]] = []
+        turn_messages_seen: list[list[dict[str, object]]] = []
 
         async def mock_stream(messages, tools=None, **kwargs):
             turn_messages_seen.append(list(messages))
@@ -115,10 +179,12 @@ class TestPipelineE2E:
 
         outcome1 = await adapter.run_turn("Hello, what is Python?")
         assert outcome1.stop_reason == StopReason.NO_TOOL_CALLS
+        assert outcome1.final_message is not None
         assert "turn 1" in outcome1.final_message
 
         outcome2 = await adapter.run_turn("Tell me more about decorators")
         assert outcome2.stop_reason == StopReason.NO_TOOL_CALLS
+        assert outcome2.final_message is not None
         assert "turn 2" in outcome2.final_message
 
         all_entries = list(ctx.tape)
@@ -138,7 +204,7 @@ class TestPipelineE2E:
         assert len(turn_messages_seen) == 2
         second_call_messages = turn_messages_seen[1]
         user_contents = [
-            m.get("content", "")
+            str(m.get("content", ""))
             for m in second_call_messages
             if m.get("role") == "user"
         ]
@@ -217,7 +283,7 @@ class TestPipelineE2E:
     @pytest.mark.asyncio
     async def test_tool_error_recovery(self, tmp_path):
         """Given a tool that raises RuntimeError, when pipeline executes it, then error is recorded in tape and LLM recovers with text response."""
-        pipeline, ctx = _setup_agent(tmp_path)
+        pipeline, ctx = _setup_agent(tmp_path, approval_mode="yolo")
 
         call_count = 0
 
@@ -266,7 +332,7 @@ class TestPipelineE2E:
     @pytest.mark.asyncio
     async def test_large_tool_result_truncated(self, tmp_path):
         """Given a tool returning 20k chars and max_tool_result_size=10000, when pipeline processes it, then tape entry is truncated with notice."""
-        pipeline, ctx = _setup_agent(tmp_path)
+        pipeline, ctx = _setup_agent(tmp_path, approval_mode="yolo")
 
         ctx.config["max_tool_result_size"] = 10000
         large_result = "X" * 20000
@@ -322,7 +388,7 @@ class TestPipelineE2E:
 
         executed_tools: list[str] = []
 
-        async def mock_execute_fn(name: str, arguments: dict) -> str:
+        async def mock_execute_fn(name: str, arguments: dict[str, object]) -> str:
             executed_tools.append(name)
             await asyncio.sleep(0.01)
             return f"result_of_{name}({arguments})"
@@ -378,9 +444,83 @@ class TestPipelineE2E:
         tool_results = ctx.tape.filter("tool_result")
         assert len(tool_results) >= 2
 
-        assert executed_tools == ["file_read", "grep_search"]
-        assert "result_of_file_read" in tool_results[0].payload["content"]
-        assert "result_of_grep_search" in tool_results[1].payload["content"]
+    @pytest.mark.asyncio
+    async def test_parallel_structured_results_preserved_in_events(self, tmp_path):
+        pipeline, ctx = _setup_agent(tmp_path, approval_mode="yolo")
+        ctx.config["structured_results"] = True
+
+        core_tools = pipeline._registry.get("core_tools")
+        execute_calls: list[tuple[str, dict[str, object]]] = []
+
+        async def fake_execute_tool_async(
+            name: str, arguments: dict[str, object]
+        ) -> dict[str, object]:
+            execute_calls.append((name, arguments))
+            return {"tool": name, "arguments": arguments, "kind": "structured"}
+
+        core_tools.execute_tool_async = fake_execute_tool_async
+
+        call_count = 0
+
+        async def mock_stream(messages, tools=None, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                yield ToolCallEvent(
+                    tool_call_id="tc-s1",
+                    name="file_read",
+                    arguments={"path": "file_a.txt"},
+                )
+                yield ToolCallEvent(
+                    tool_call_id="tc-s2",
+                    name="grep_search",
+                    arguments={"pattern": "test", "path": "."},
+                )
+                yield DoneEvent()
+            else:
+                yield TextEvent(text="Both tools completed.")
+                yield DoneEvent()
+
+        _mock_provider(pipeline, mock_stream)
+        await pipeline.mount(ctx)
+
+        consumer = AsyncMock()
+        consumer.emit = AsyncMock()
+        adapter = PipelineAdapter(pipeline, ctx, consumer=consumer)
+        outcome = await adapter.run_turn("read two files")
+
+        tool_result_deltas = [
+            call.args[0]
+            for call in consumer.emit.call_args_list
+            if isinstance(call.args[0], ToolResultDelta)
+        ]
+
+        assert isinstance(outcome, TurnOutcome)
+        assert len(tool_result_deltas) == 2
+        assert all(isinstance(delta.result, dict) for delta in tool_result_deltas)
+        assert {delta.result["tool"] for delta in tool_result_deltas} == {
+            "file_read",
+            "grep_search",
+        }
+
+        assert execute_calls == [
+            ("file_read", {"path": "file_a.txt"}),
+            ("grep_search", {"pattern": "test", "path": "."}),
+        ]
+
+        tool_results = ctx.tape.filter("tool_result")
+        assert [json.loads(result.payload["content"]) for result in tool_results] == [
+            {
+                "tool": "file_read",
+                "arguments": {"path": "file_a.txt"},
+                "kind": "structured",
+            },
+            {
+                "tool": "grep_search",
+                "arguments": {"pattern": "test", "path": "."},
+                "kind": "structured",
+            },
+        ]
 
         assert outcome.final_message is not None
         assert "completed" in outcome.final_message

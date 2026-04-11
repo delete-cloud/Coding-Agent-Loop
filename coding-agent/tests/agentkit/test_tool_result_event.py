@@ -39,3 +39,12 @@ class TestToolResultEvent:
         from agentkit import ToolResultEvent as TR2
 
         assert TR2 is ToolResultEvent
+
+    def test_result_accepts_structured_payload(self):
+        event = ToolResultEvent(
+            tool_call_id="call_123",
+            name="bash",
+            result={"stdout": "ok", "exit_code": 0},
+        )
+
+        assert event.result == {"stdout": "ok", "exit_code": 0}

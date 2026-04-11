@@ -1,4 +1,5 @@
 import pytest
+from typing import cast
 from agentkit.tape.tape import Tape
 from agentkit.tape.models import Entry
 
@@ -270,14 +271,16 @@ class TestTape:
         path.write_text("\n".join(_json.dumps(e) for e in entries) + "\n")
         tape = Tape.load_jsonl(path)
         assert tape.window_start == 1
-        assert isinstance(tape[1], _Anchor)
-        assert tape[1].is_handoff is True
+        anchor = cast(_Anchor, tape[1])
+        assert isinstance(anchor, _Anchor)
+        assert anchor.is_handoff is True
         windowed = tape.windowed_entries()
         assert len(windowed) == 2  # anchor + "after"
 
     def test_load_jsonl_new_format_is_handoff(self, tmp_path):
         path = tmp_path / "new.jsonl"
         import json as _json
+        from agentkit.tape.anchor import Anchor as _Anchor
 
         entries = [
             {
@@ -305,11 +308,49 @@ class TestTape:
         path.write_text("\n".join(_json.dumps(e) for e in entries) + "\n")
         tape = Tape.load_jsonl(path)
         assert tape.window_start == 1
-        # bare meta.is_handoff=True (no anchor_type) stays as plain Entry, not Anchor
-        assert type(tape[1]) is Entry
-        assert tape[1].meta.get("is_handoff") is True
+        anchor = cast(_Anchor, tape[1])
+        assert isinstance(anchor, _Anchor)
+        assert anchor.is_handoff is True
         windowed = tape.windowed_entries()
         assert len(windowed) == 2
+
+    def test_load_jsonl_bare_anchor_without_handoff_metadata_does_not_window(
+        self, tmp_path
+    ):
+        path = tmp_path / "bare_anchor.jsonl"
+        import json as _json
+        from agentkit.tape.anchor import Anchor as _Anchor
+
+        entries = [
+            {
+                "id": "c1",
+                "kind": "message",
+                "payload": {"role": "user", "content": "before"},
+                "timestamp": 0,
+                "meta": {},
+            },
+            {
+                "id": "c2",
+                "kind": "anchor",
+                "payload": {"content": "plain anchor"},
+                "timestamp": 0,
+                "meta": {},
+            },
+            {
+                "id": "c3",
+                "kind": "message",
+                "payload": {"role": "user", "content": "after"},
+                "timestamp": 0,
+                "meta": {},
+            },
+        ]
+        path.write_text("\n".join(_json.dumps(e) for e in entries) + "\n")
+        tape = Tape.load_jsonl(path)
+
+        assert tape.window_start == 0
+        anchor = cast(_Anchor, tape[1])
+        assert isinstance(anchor, _Anchor)
+        assert anchor.is_handoff is False
 
     def test_save_jsonl_overwrites_when_persisted_count_unknown(self, tmp_path):
         path = tmp_path / "tape.jsonl"
@@ -358,9 +399,10 @@ class TestTape:
 
         assert len(tape) == 3
         # Entry.from_dict promotes meta.anchor_type and bridges topic_finalized→topic_end
-        assert isinstance(tape[1], _Anchor)
-        assert tape[1].anchor_type == "topic_end"
-        assert tape[1].fold_boundary is True
+        anchor = cast(_Anchor, tape[1])
+        assert isinstance(anchor, _Anchor)
+        assert anchor.anchor_type == "topic_end"
+        assert anchor.fold_boundary is True
         # window_start should stay at 0 (topic_end is not a handoff)
         assert tape.window_start == 0
 
@@ -395,8 +437,65 @@ class TestTape:
         tape = Tape.load_jsonl(path)
 
         assert tape.window_start == 1
-        assert isinstance(tape[1], Anchor)
-        assert tape[1].is_handoff is True
-        assert tape[1].source_ids == ("m1",)
+        anchor = cast(Anchor, tape[1])
+        assert isinstance(anchor, Anchor)
+        assert anchor.is_handoff is True
+        assert anchor.source_ids == ("m1",)
         windowed = tape.windowed_entries()
+        assert len(windowed) == 2
+
+    def test_jsonl_roundtrip_uses_latest_handoff_anchor_for_window_start(
+        self, tmp_path
+    ):
+        import json as _json
+        from agentkit.tape.anchor import Anchor
+
+        path = tmp_path / "multi_handoff.jsonl"
+        entries = [
+            {
+                "id": "m1",
+                "kind": "message",
+                "payload": {"role": "user", "content": "old-1"},
+                "timestamp": 0,
+                "meta": {},
+            },
+            {
+                "id": "a1",
+                "kind": "anchor",
+                "payload": {"content": "summary-1"},
+                "timestamp": 0,
+                "anchor_type": "handoff",
+            },
+            {
+                "id": "m2",
+                "kind": "message",
+                "payload": {"role": "user", "content": "mid"},
+                "timestamp": 0,
+                "meta": {},
+            },
+            {
+                "id": "a2",
+                "kind": "anchor",
+                "payload": {"content": "summary-2"},
+                "timestamp": 0,
+                "meta": {"is_handoff": True},
+            },
+            {
+                "id": "m3",
+                "kind": "message",
+                "payload": {"role": "user", "content": "new"},
+                "timestamp": 0,
+                "meta": {},
+            },
+        ]
+        path.write_text("\n".join(_json.dumps(e) for e in entries) + "\n")
+
+        tape = Tape.load_jsonl(path)
+
+        assert tape.window_start == 3
+        anchor = cast(Anchor, tape[3])
+        assert isinstance(anchor, Anchor)
+        assert anchor.is_handoff is True
+        windowed = tape.windowed_entries()
+        assert windowed[0] is anchor
         assert len(windowed) == 2

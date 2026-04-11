@@ -4,7 +4,7 @@ from agentkit.directive.types import Directive
 
 
 class TestHookSpecs:
-    def test_all_14_hooks_defined(self):
+    def test_all_15_hooks_defined(self):
         expected = {
             "provide_storage",
             "get_tools",
@@ -14,6 +14,7 @@ class TestHookSpecs:
             "resolve_context_window",
             "on_error",
             "mount",
+            "on_shutdown",
             "on_checkpoint",
             "build_context",
             "on_turn_end",
@@ -97,7 +98,7 @@ class TestHookSpecReturnTypes:
         assert spec.return_type is None
 
     def test_observer_hooks_have_no_return_type(self):
-        for name in ("on_error", "on_checkpoint", "on_session_event"):
+        for name in ("on_error", "on_checkpoint", "on_session_event", "on_shutdown"):
             spec = HOOK_SPECS[name]
             assert spec.return_type is None, f"{name} should not declare return_type"
 

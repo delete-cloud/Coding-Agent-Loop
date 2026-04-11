@@ -1,6 +1,15 @@
+# pyright: reportPrivateUsage=false, reportMissingTypeStubs=false, reportUnusedImport=false, reportUnknownParameterType=false, reportMissingParameterType=false, reportUnannotatedClassAttribute=false, reportUnusedFunction=false, reportUnusedCallResult=false
+
 import pytest
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
+from agentkit.plugin.registry import PluginRegistry
+from agentkit.runtime.pipeline import Pipeline, PipelineContext
+from agentkit.runtime.hook_runtime import HookRuntime
+from agentkit.runtime.hookspecs import HOOK_SPECS
 from coding_agent.plugins.memory import MemoryPlugin
+from coding_agent.plugins.storage import StoragePlugin
+from coding_agent.plugins.topic import TopicPlugin
 from agentkit.directive.types import MemoryRecord
 from agentkit.tape.tape import Tape
 from agentkit.tape.models import Entry
@@ -17,6 +26,7 @@ class TestMemoryPlugin:
         hooks = plugin.hooks()
         assert "build_context" in hooks  # Grounding mode
         assert "on_turn_end" in hooks  # finish_action
+        assert "on_session_event" in hooks
         assert "mount" in hooks
 
     def test_mount_returns_initial_state(self):
@@ -218,10 +228,10 @@ class TestMemoryPluginDirectiveFlow:
         plugin = MemoryPlugin()
         record = MemoryRecord(summary="Fixed a bug", tags=["auth.py"], importance=0.8)
         plugin.add_memory(record)
-        assert len(plugin._memories) == 1
-        assert plugin._memories[0]["summary"] == "Fixed a bug"
-        assert plugin._memories[0]["tags"] == ["auth.py"]
-        assert plugin._memories[0]["importance"] == 0.8
+        assert len(plugin._working_memories) == 1
+        assert plugin._working_memories[0]["summary"] == "Fixed a bug"
+        assert plugin._working_memories[0]["tags"] == ["auth.py"]
+        assert plugin._working_memories[0]["importance"] == 0.8
 
     def test_add_memory_called_by_handler_persists(self):
         plugin = MemoryPlugin()
@@ -245,4 +255,157 @@ class TestMemoryPluginDirectiveFlow:
         assert record is not None
         assert plugin._memories == []
         asyncio.run(memory_handler(record))
+        assert plugin._memories == []
+        assert len(plugin._working_memories) == 1
+
+
+class TestMemoryPluginSessionEvents:
+    def test_topic_end_event_adds_compacted_memory(self):
+        plugin = MemoryPlugin()
+
+        plugin.on_session_event(
+            event_type="topic_end",
+            payload={"topic_id": "topic-1", "files": ["src/auth.py"]},
+        )
+
         assert len(plugin._memories) == 1
+        assert plugin._memories[0]["summary"] == "Topic topic-1 completed"
+        assert plugin._memories[0]["tags"] == ["src/auth.py"]
+
+    def test_topic_end_event_uses_emitted_summary_from_topic_plugin(self):
+        registry = PluginRegistry(specs=HOOK_SPECS)
+        topic = TopicPlugin(overlap_threshold=0.2, min_entries_before_detect=2)
+        memory = MemoryPlugin()
+        registry.register(topic)
+        registry.register(memory)
+        runtime = HookRuntime(registry, specs=HOOK_SPECS)
+
+        tape = Tape()
+
+        class FakeCtx:
+            def __init__(self, tape):
+                self.tape = tape
+                self.plugin_states = {}
+
+        ctx = FakeCtx(tape)
+
+        tape.append(
+            Entry(kind="message", payload={"role": "user", "content": "fix auth"})
+        )
+        tape.append(
+            Entry(
+                kind="tool_call",
+                payload={"name": "file_read", "arguments": {"path": "src/auth.py"}},
+            )
+        )
+        tape.append(
+            Entry(kind="message", payload={"role": "assistant", "content": "done"})
+        )
+        topic.on_checkpoint(ctx=ctx, runtime=runtime)
+
+        tape.append(
+            Entry(kind="message", payload={"role": "user", "content": "fix ui"})
+        )
+        tape.append(
+            Entry(
+                kind="tool_call",
+                payload={"name": "file_read", "arguments": {"path": "src/ui/app.tsx"}},
+            )
+        )
+        tape.append(
+            Entry(kind="message", payload={"role": "assistant", "content": "done"})
+        )
+        topic.on_checkpoint(ctx=ctx, runtime=runtime)
+
+        assert len(memory._memories) == 1
+        assert memory._memories[0]["summary"] == "Topic involved files: src/auth.py"
+        assert memory._memories[0]["tags"] == ["src/auth.py"]
+
+
+class TestMemoryPersistence:
+    @pytest.mark.asyncio
+    async def test_mount_loads_persisted_memory_records_with_importance_decay(
+        self, tmp_path: Path
+    ):
+        storage = StoragePlugin(data_dir=tmp_path)
+        tape_store = storage._get_jsonl_store()
+        tape_store.append_memory_record(
+            "session-1",
+            {"summary": "Persisted memory", "tags": ["src/auth.py"], "importance": 1.0},
+        )
+
+        registry = PluginRegistry(specs=HOOK_SPECS)
+        registry.register(storage)
+        memory = MemoryPlugin()
+        registry.register(memory)
+        runtime = HookRuntime(registry, specs=HOOK_SPECS)
+        pipeline = Pipeline(runtime=runtime, registry=registry)
+        ctx = PipelineContext(tape=Tape(), session_id="session-1", config={})
+
+        await pipeline.mount(ctx)
+
+        assert memory._memories == [
+            {
+                "summary": "Persisted memory",
+                "tags": ["src/auth.py"],
+                "importance": 0.9,
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_topic_end_compacts_working_memory_into_persistent_record(
+        self, tmp_path: Path
+    ):
+        storage = StoragePlugin(data_dir=tmp_path)
+        registry = PluginRegistry(specs=HOOK_SPECS)
+        registry.register(storage)
+        memory = MemoryPlugin()
+        registry.register(memory)
+        runtime = HookRuntime(registry, specs=HOOK_SPECS)
+        pipeline = Pipeline(runtime=runtime, registry=registry)
+        ctx = PipelineContext(tape=Tape(), session_id="session-2", config={})
+
+        await pipeline.mount(ctx)
+
+        memory.add_memory(
+            MemoryRecord(summary="Step 1", tags=["src/auth.py"], importance=0.7)
+        )
+        memory.add_memory(
+            MemoryRecord(summary="Step 2", tags=["tests/test_auth.py"], importance=0.9)
+        )
+
+        memory.on_session_event(
+            event_type="topic_end",
+            payload={
+                "topic_id": "topic-1",
+                "summary": "Topic involved files: src/auth.py",
+                "files": ["src/auth.py"],
+            },
+        )
+
+        assert memory._working_memories == []
+        assert memory._memories == [
+            {
+                "summary": "Topic involved files: src/auth.py",
+                "tags": ["src/auth.py", "tests/test_auth.py"],
+                "importance": 0.8,
+            }
+        ]
+
+        reloaded_memory = MemoryPlugin()
+        reload_registry = PluginRegistry(specs=HOOK_SPECS)
+        reload_registry.register(storage)
+        reload_registry.register(reloaded_memory)
+        reload_runtime = HookRuntime(reload_registry, specs=HOOK_SPECS)
+        reload_pipeline = Pipeline(runtime=reload_runtime, registry=reload_registry)
+        reload_ctx = PipelineContext(tape=Tape(), session_id="session-2", config={})
+
+        await reload_pipeline.mount(reload_ctx)
+
+        assert reloaded_memory._memories == [
+            {
+                "summary": "Topic involved files: src/auth.py",
+                "tags": ["src/auth.py", "tests/test_auth.py"],
+                "importance": 0.72,
+            }
+        ]

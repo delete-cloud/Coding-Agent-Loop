@@ -71,6 +71,11 @@ HOOK_SPECS: dict[str, HookSpec] = {
         firstresult=False,
         doc="Plugin initialization. Returns initial plugin state dict.",
     ),
+    "on_shutdown": HookSpec(
+        name="on_shutdown",
+        is_observer=True,
+        doc="Observer: notified when a pipeline instance is shutting down.",
+    ),
     "on_checkpoint": HookSpec(
         name="on_checkpoint",
         is_observer=True,

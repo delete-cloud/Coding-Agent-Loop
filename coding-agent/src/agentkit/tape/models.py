@@ -8,7 +8,7 @@ from typing import Literal, cast, override
 
 from agentkit._types import EntryKind, JsonDict
 
-AnchorType = Literal["handoff", "topic_start", "topic_end", "fold"]
+AnchorType = Literal["handoff", "topic_start", "topic_end", "fold", "context"]
 
 
 def _require_str(data: Mapping[str, object], key: str) -> str:
@@ -79,6 +79,7 @@ class Entry:
             anchor_type = data.get("anchor_type")
             if anchor_type is None:
                 anchor_type = _optional_json_dict(data, "meta").get("anchor_type")
+            promoted = dict(data)
             if anchor_type is not None:
                 if not isinstance(anchor_type, str):
                     raise TypeError("anchor_type must be a str")
@@ -86,11 +87,14 @@ class Entry:
                     "topic_initial": "topic_start",
                     "topic_finalized": "topic_end",
                 }
-                promoted = dict(data)
                 promoted["anchor_type"] = legacy_anchor_map.get(
                     anchor_type, anchor_type
                 )
-                return Anchor.from_dict(promoted)
+            elif _optional_json_dict(data, "meta").get("is_handoff"):
+                promoted["anchor_type"] = "handoff"
+            else:
+                promoted["anchor_type"] = "context"
+            return Anchor.from_dict(promoted)
         return cls(
             id=_require_str(data, "id"),
             kind=cast(EntryKind, kind),

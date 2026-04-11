@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import sys
 from typing import Any
 
@@ -18,14 +19,17 @@ from coding_agent.cli.terminal_output import (
 )
 from coding_agent.cli.bash_executor import BashExecutor
 from coding_agent.core.config import Config
-from coding_agent.__main__ import create_agent
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.ui.stream_renderer import StreamingRenderer
 from coding_agent.ui.rich_consumer import RichConsumer
 from coding_agent.ui.status_footer import StatusFooter
 
 
-console = Console()
+console = Console(force_terminal=True, soft_wrap=False)
+
+
+def create_agent(*args: Any, **kwargs: Any):
+    return importlib.import_module("coding_agent.app").create_agent(*args, **kwargs)
 
 
 class InteractiveSession:
@@ -102,32 +106,21 @@ class InteractiveSession:
             max_steps_override=self.config.max_steps,
             approval_mode_override=self.config.approval_mode,
         )
-        if pipeline._directive_executor is not None:
-            pipeline._directive_executor._ask_user = self._ask_user_for_approval
         self._pipeline_adapter = PipelineAdapter(
             pipeline=pipeline, ctx=pipeline_ctx, consumer=self._consumer
         )
+        pipeline_ctx.config["wire_consumer"] = self._consumer
+        pipeline_ctx.config["agent_id"] = ""
         self._pipeline_ctx = pipeline_ctx
 
         # Make plugin references available to CLI commands
+        if "tool_registry" in pipeline_ctx.config:
+            self.context["tool_registry"] = pipeline_ctx.config["tool_registry"]
         if "skills_plugin" in pipeline_ctx.config:
             self.context["skills_plugin"] = pipeline_ctx.config["skills_plugin"]
             self.context["pipeline_ctx"] = pipeline_ctx
         if "mcp_plugin" in pipeline_ctx.config:
             self.context["mcp_plugin"] = pipeline_ctx.config["mcp_plugin"]
-
-    async def _ask_user_for_approval(self, question: str) -> bool:
-        if self._footer.enabled:
-            self._footer.disable()
-        print_pt("\nApproval Required", output=get_prompt_output(sys.__stdout__))
-        print_pt(question, output=get_prompt_output(sys.__stdout__))
-        response = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: input("[y/N] > ").strip().lower()
-        )
-        approved = response in ("y", "yes")
-        if self._footer.mode == "persistent":
-            self._footer.enable()
-        return approved
 
     # Proxy methods for WireConsumer protocol (used by subagent tool)
     async def emit(self, msg) -> None:
@@ -138,14 +131,21 @@ class InteractiveSession:
         """Proxy approval to current consumer."""
         return await self._consumer.request_approval(req)
 
+    async def initialize(self) -> None:
+        if not hasattr(self, "_pipeline_adapter"):
+            return
+        await self._pipeline_adapter.initialize()
+
     async def run(self):
         """Run the REPL loop."""
         prompt_output = get_prompt_output()
         set_prompt_output(prompt_output)
 
+        await self.initialize()
+
         print_pt("🤖 Coding Agent - Interactive Mode", output=prompt_output)
         print_pt(
-            "Type /help for commands, ! to enter bash mode, or just chat.\n",
+            "Type /help for commands, ! for real shell mode, or just chat.\n",
             output=prompt_output,
         )
 
@@ -199,6 +199,8 @@ class InteractiveSession:
                 turn_count += 1
         finally:
             self._footer.disable()
+            if hasattr(self, "_pipeline_adapter"):
+                await self._pipeline_adapter.close()
 
         print_pt("\nSession ended.\n", output=prompt_output)
 

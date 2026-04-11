@@ -390,7 +390,9 @@ class InputHandler:
             (cmd, desc) for cmd, desc in commands_with_desc if cmd.startswith(text)
         ]
 
-        showing_matches = text != "/" and bool(matches)
+        has_partial_input = text != "/"
+        showing_matches = has_partial_input and bool(matches)
+
         visible_commands = matches if showing_matches else commands_with_desc
         visible_commands = visible_commands[:_SLASH_TOOLBAR_LIMIT]
 

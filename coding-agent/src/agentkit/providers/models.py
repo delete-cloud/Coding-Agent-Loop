@@ -33,7 +33,7 @@ class ThinkingEvent(StreamEvent):
 class ToolResultEvent(StreamEvent):
     tool_call_id: str = ""
     name: str = ""
-    result: str = ""
+    result: str | dict[str, Any] = ""
     is_error: bool = False
     kind: str = field(init=False, default="tool_result")
 

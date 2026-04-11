@@ -60,6 +60,7 @@ class SkillsPlugin:
             "get_tools": self.get_tools,
             "execute_tool": self.execute_tool,
             "on_checkpoint": self.on_checkpoint,
+            "on_session_event": self.on_session_event,
             "mount": self.do_mount,
         }
 
@@ -194,6 +195,12 @@ class SkillsPlugin:
 
     def on_checkpoint(self, ctx: Any = None, **kwargs: Any) -> None:
         pass
+
+    def on_session_event(
+        self, event_type: str = "", payload: dict[str, Any] | None = None, **kwargs: Any
+    ) -> None:
+        if event_type == "doom_detected":
+            self.deactivate()
 
     def request_skill(self, ctx: Any, skill_name: str) -> str:
         if skill_name not in self._skills:

@@ -45,6 +45,9 @@ class ContextBuilder:
         index = 0
         while index < len(entries):
             entry = entries[index]
+            if entry.meta.get("skip_context"):
+                index += 1
+                continue
             if entry.kind == "tool_call":
                 tool_calls: list[dict[str, Any]] = []
                 role = entry.payload.get("role", "assistant")
@@ -52,6 +55,9 @@ class ContextBuilder:
 
                 while index < len(entries) and entries[index].kind == "tool_call":
                     current = entries[index]
+                    if current.meta.get("skip_context"):
+                        index += 1
+                        continue
                     rc = current.payload.get("reasoning_content")
                     if rc and reasoning_content is None:
                         reasoning_content = rc
@@ -113,19 +119,50 @@ class ContextBuilder:
         messages = list(core_messages)
 
         if grounding:
-            last_user_idx = None
-            for i in range(len(messages) - 1, -1, -1):
-                if messages[i].get("role") == "user":
-                    last_user_idx = i
-                    break
-            if last_user_idx is not None:
-                for j, g in enumerate(grounding):
-                    messages.insert(last_user_idx + j, g)
-            else:
-                messages.extend(grounding)
+            insert_at = self.grounding_insert_index(messages)
+            messages[insert_at:insert_at] = grounding
 
         system = {"role": "system", "content": self._system_prompt}
         return [system] + messages
+
+    def grounding_insert_index(self, core_messages: list[dict[str, Any]]) -> int:
+        for i in range(len(core_messages) - 1, -1, -1):
+            if core_messages[i].get("role") == "user":
+                return i
+        return len(core_messages)
+
+    def patch_messages(
+        self,
+        messages: list[dict[str, Any]],
+        core_messages: list[dict[str, Any]],
+        grounding: list[dict[str, Any]] | None = None,
+        *,
+        grounding_start: int,
+        grounding_count: int,
+    ) -> tuple[int, int]:
+        system = {"role": "system", "content": self._system_prompt}
+        if messages:
+            messages[0] = system
+        else:
+            messages.append(system)
+
+        if grounding_count > 0:
+            del messages[grounding_start : grounding_start + grounding_count]
+
+        existing_core_count = len(messages) - 1
+        if existing_core_count < 0:
+            existing_core_count = 0
+        if existing_core_count > len(core_messages):
+            raise ValueError("cannot patch incremental messages after core shrink")
+
+        messages.extend(core_messages[existing_core_count:])
+
+        if not grounding:
+            return len(messages), 0
+
+        insert_at = 1 + self.grounding_insert_index(core_messages)
+        messages[insert_at:insert_at] = grounding
+        return insert_at, len(grounding)
 
     def _entry_to_message(self, entry: Entry) -> dict[str, Any] | None:
         if entry.kind == "message":

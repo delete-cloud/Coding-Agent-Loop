@@ -113,6 +113,49 @@ class TestContextBuilder:
         messages = builder.build(tape)
         assert messages[1]["role"] == "tool"
 
+    def test_entries_marked_skip_context_are_omitted_from_messages(self):
+        tape = Tape()
+        tape.append(
+            Entry(kind="message", payload={"role": "user", "content": "visible"})
+        )
+        tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "assistant", "content": "hidden child"},
+                meta={"skip_context": True},
+            )
+        )
+        tape.append(
+            Entry(
+                kind="tool_call",
+                payload={"id": "tc_hidden", "name": "bash", "arguments": {"cmd": "ls"}},
+                meta={"skip_context": True},
+            )
+        )
+        tape.append(
+            Entry(
+                kind="tool_result",
+                payload={"tool_call_id": "tc_hidden", "content": "ignored"},
+                meta={"skip_context": True},
+            )
+        )
+        tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "assistant", "content": "visible reply"},
+            )
+        )
+
+        builder = ContextBuilder(system_prompt="system")
+
+        messages = builder.build(tape)
+
+        assert messages == [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "visible"},
+            {"role": "assistant", "content": "visible reply"},
+        ]
+
     def test_grounding_injected_before_last_user_message(self):
         tape = Tape()
         tape.append(

@@ -25,7 +25,7 @@ class BashExecutor:
         cwd: str | None = None,
         output: Output | None = None,
     ) -> None:
-        self.console = console or Console(file=sys.__stdout__)
+        self.console = console or Console(file=sys.__stdout__, force_terminal=True, soft_wrap=False)
         self.cwd = cwd
         self.output = output
 

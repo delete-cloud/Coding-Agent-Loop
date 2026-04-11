@@ -24,7 +24,7 @@ class TestAnchor:
             payload={"content": "summary"},
         )
         with pytest.raises(AttributeError):
-            anchor.anchor_type = "fold"
+            setattr(anchor, "anchor_type", "fold")
 
     def test_is_handoff_property(self):
         assert Anchor(anchor_type="handoff", payload={}).is_handoff is True
@@ -35,6 +35,11 @@ class TestAnchor:
         assert Anchor(anchor_type="topic_end", payload={}).fold_boundary is True
         assert Anchor(anchor_type="handoff", payload={}).fold_boundary is False
         assert Anchor(anchor_type="topic_start", payload={}).fold_boundary is False
+        assert Anchor(anchor_type="context", payload={}).fold_boundary is False
+
+    def test_context_anchor_is_not_handoff(self):
+        anchor = Anchor(anchor_type="context", payload={"content": "plain anchor"})
+        assert anchor.is_handoff is False
 
     def test_source_ids_default_empty(self):
         anchor = Anchor(anchor_type="handoff", payload={})

@@ -73,3 +73,22 @@ class TestApprovalPlugin:
             arguments={"query": "agentkit"},
         )
         assert isinstance(result, AskUser)
+
+    def test_ask_user_carries_tool_metadata(self):
+        plugin = ApprovalPlugin(policy=ApprovalPolicy.INTERACTIVE)
+        result = plugin.approve_tool_call(
+            tool_name="bash_run", arguments={"command": "ls"}
+        )
+        assert isinstance(result, AskUser)
+        assert result.metadata is not None
+        assert result.metadata["tool_name"] == "bash_run"
+        assert result.metadata["arguments"] == {"command": "ls"}
+
+    def test_external_request_ask_user_carries_metadata(self):
+        plugin = ApprovalPlugin(policy=ApprovalPolicy.AUTO)
+        result = plugin.approve_tool_call(
+            tool_name="web_search", arguments={"query": "test"}
+        )
+        assert isinstance(result, AskUser)
+        assert result.metadata["tool_name"] == "web_search"
+        assert result.metadata["arguments"] == {"query": "test"}

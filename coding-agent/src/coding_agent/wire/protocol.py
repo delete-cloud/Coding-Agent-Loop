@@ -18,7 +18,7 @@ class WireMessage:
 
     Attributes:
         session_id: Unique identifier for the session
-        agent_id: Identifier for the emitting agent within the session
+        agent_id: Originating agent identifier for child/UI scoping
         timestamp: When the message was created
     """
 
@@ -69,7 +69,7 @@ class ToolResultDelta(WireMessage):
 
     call_id: str
     tool_name: str
-    result: Any
+    result: str | dict[str, Any]
     display_result: str = ""
     is_error: bool = False
 
@@ -128,6 +128,7 @@ class ApprovalRequest(WireMessage):
         if self.tool_call is None and self.tool:
             self.tool_call = ToolCallDelta(
                 session_id=self.session_id,
+                agent_id=self.agent_id,
                 tool_name=self.tool,
                 arguments=self.args,
                 call_id=self.call_id or self.request_id,
@@ -136,6 +137,8 @@ class ApprovalRequest(WireMessage):
         elif self.tool_call and not self.tool:
             self.tool = self.tool_call.tool_name
             self.args = self.tool_call.arguments
+            if not self.agent_id:
+                self.agent_id = self.tool_call.agent_id
             if not self.call_id:
                 self.call_id = self.tool_call.call_id
             if not self.request_id:

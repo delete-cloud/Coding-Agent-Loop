@@ -40,6 +40,7 @@ class FakePipelineContext:
 
     tape: Tape
     plugin_states: dict[str, Any] = field(default_factory=dict)
+    config: dict[str, Any] = field(default_factory=dict)
 
 
 class TestSessionMetricsPluginStructure:
@@ -355,6 +356,8 @@ class TestSessionMetricsTopicTracking:
 
         t1 = plugin.get_topic_metrics("t1")
         t2 = plugin.get_topic_metrics("t2")
+        assert t1 is not None
+        assert t2 is not None
         assert t1["steps_count"] == 1
         assert t2["steps_count"] == 5
 
@@ -427,3 +430,45 @@ class TestSessionMetricsTokenTracking:
         assert state["tokens_output"] == 200
         assert state["session_tokens_input"] == 500
         assert state["session_tokens_output"] == 200
+
+
+class TestSessionMetricsAgentBreakdown:
+    def test_default_agent_metrics_count_as_parent(self) -> None:
+        plugin = SessionMetricsPlugin()
+        tape = Tape()
+        tape.append(_make_tool_call("file_read"))
+        tape.append(_make_tool_result())
+        ctx = FakePipelineContext(tape=tape)
+
+        plugin.on_checkpoint(ctx=ctx)
+
+        state = ctx.plugin_states["session_metrics"]
+        assert state["parent"]["steps_count"] == 1
+        assert state["parent"]["tool_calls"]["file_read"] == 1
+        assert state["child"]["steps_count"] == 0
+        assert state["child"]["tool_calls"] == {}
+
+    def test_child_agent_metrics_count_as_child(self) -> None:
+        plugin = SessionMetricsPlugin()
+        tape = Tape()
+        tape.append(_make_tool_call("grep"))
+        tape.append(_make_tool_result())
+        ctx = FakePipelineContext(tape=tape, config={"agent_id": "child-1"})
+
+        plugin.record_token_usage(12, 5)
+        plugin.on_checkpoint(ctx=ctx)
+
+        state = ctx.plugin_states["session_metrics"]
+        assert state["parent"]["steps_count"] == 0
+        assert state["child"]["steps_count"] == 1
+        assert state["child"]["tool_calls"]["grep"] == 1
+        assert state["child"]["tokens_input"] == 12
+        assert state["child"]["tokens_output"] == 5
+
+    def test_get_metrics_reports_parent_and_child_breakdown(self) -> None:
+        plugin = SessionMetricsPlugin()
+        plugin.on_checkpoint(ctx=FakePipelineContext(tape=Tape()))
+        metrics = plugin.get_metrics()
+
+        assert "parent" in metrics
+        assert "child" in metrics

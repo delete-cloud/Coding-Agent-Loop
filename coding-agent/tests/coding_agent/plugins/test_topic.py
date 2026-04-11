@@ -64,33 +64,31 @@ class TestTopicPlugin:
         assert len(anchors) == 1
         assert anchors[0].meta.get("prefix") == "Topic Start"
 
-    def test_on_checkpoint_uses_windowed_entries(self):
-        class WindowOnlyTape(Tape):
-            def snapshot(self):
-                raise AssertionError("windowed path should be used")
+    def test_on_checkpoint_uses_snapshot_and_respects_window_start(self):
+        class SnapshotOnlyTape(Tape):
+            def windowed_entries(self):
+                raise AssertionError("snapshot path should be used")
 
         plugin = TopicPlugin()
-        tape = WindowOnlyTape()
+        tape = SnapshotOnlyTape()
         tape.append(
-            Entry(kind="message", payload={"role": "user", "content": "fix auth.py"})
-        )
-        tape.append(
-            Entry(
-                kind="tool_call",
-                payload={"name": "file_read", "arguments": {"path": "src/auth.py"}},
-            )
-        )
-        tape.append(
-            Entry(
-                kind="tool_result",
-                payload={"tool_call_id": "tc1", "content": "file contents"},
-            )
+            Entry(kind="message", payload={"role": "user", "content": "old auth task"})
         )
         tape.append(
             Entry(
                 kind="message",
-                payload={"role": "assistant", "content": "I see the issue"},
+                payload={"role": "assistant", "content": "finished old task"},
             )
+        )
+        tape.handoff(Anchor(anchor_type="handoff", payload={"content": "summary"}))
+        tape.append(
+            Entry(
+                kind="tool_call",
+                payload={"name": "file_read", "arguments": {"path": "src/ui/app.tsx"}},
+            )
+        )
+        tape.append(
+            Entry(kind="message", payload={"role": "assistant", "content": "new task"})
         )
 
         class FakeCtx:
@@ -102,7 +100,9 @@ class TestTopicPlugin:
         plugin.on_checkpoint(ctx=ctx)
 
         assert plugin.topic_count == 1
-        assert len(tape.filter("anchor")) == 1
+        anchors = tape.filter("anchor")
+        assert len(anchors) == 2
+        assert anchors[-1].payload["content"] == "Topic #1"
 
     def test_handoff_window_excludes_old_user_prompt_from_topic_start(self):
         plugin = TopicPlugin()
@@ -390,3 +390,7 @@ class TestTopicPlugin:
         types = [t for t, _ in runtime.events]
         assert "topic_end" in types
         assert types.count("topic_start") == 2
+        topic_end_payload = next(
+            payload for t, payload in runtime.events if t == "topic_end"
+        )
+        assert topic_end_payload["summary"] == "Topic involved files: src/auth.py"

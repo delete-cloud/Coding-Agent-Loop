@@ -46,7 +46,7 @@ from agentkit.providers import (
     ToolCallEvent,
     ToolResultEvent,
 )
-from agentkit.runtime import HookRuntime, Pipeline, PipelineContext
+from agentkit.runtime import HookRuntime, Lifecycle, Pipeline, PipelineContext
 from agentkit.storage import DocIndex, SessionStore, TapeStore
 from agentkit.tape import Entry, ForkTapeStore, Tape
 from agentkit.tools import ToolRegistry, ToolSchema, tool
@@ -54,6 +54,7 @@ from agentkit.tools import ToolRegistry, ToolSchema, tool
 __all__ = [
     # Runtime
     "HookRuntime",
+    "Lifecycle",
     "Pipeline",
     "PipelineContext",
     # Plugins

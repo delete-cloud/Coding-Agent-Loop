@@ -1,3 +1,5 @@
+# pyright: reportUnusedImport=false, reportMissingTypeStubs=false, reportUnknownParameterType=false, reportMissingParameterType=false, reportUnknownArgumentType=false, reportAny=false, reportPrivateUsage=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportArgumentType=false, reportGeneralTypeIssues=false, reportAttributeAccessIssue=false, reportMissingTypeArgument=false, reportUnusedVariable=false, reportUnusedCallResult=false, reportUnusedParameter=false
+
 """Tests: run + repl command wiring to PipelineAdapter (Pipeline is always active)."""
 
 from __future__ import annotations
@@ -7,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
+from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
 
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.adapter_types import StopReason, TurnOutcome
@@ -63,6 +66,7 @@ class TestTuiRunUsesPipeline:
         # Mock PipelineAdapter
         mock_adapter_instance = AsyncMock()
         mock_adapter_instance.run_turn = AsyncMock(return_value=mock_outcome)
+        mock_adapter_instance.close = AsyncMock()
         mock_adapter_cls = MagicMock(return_value=mock_adapter_instance)
 
         mock_renderer = MagicMock()
@@ -99,6 +103,7 @@ class TestTuiRunUsesPipeline:
         )
 
         mock_adapter_instance.run_turn.assert_awaited_once_with("test goal")
+        mock_adapter_instance.close.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +121,7 @@ class TestHeadlessRunUsesPipeline:
 
         mock_adapter_instance = AsyncMock()
         mock_adapter_instance.run_turn = AsyncMock(return_value=mock_outcome)
+        mock_adapter_instance.close = AsyncMock()
         mock_adapter_cls = MagicMock(return_value=mock_adapter_instance)
 
         mock_consumer = MagicMock()
@@ -143,6 +149,7 @@ class TestHeadlessRunUsesPipeline:
         )
 
         mock_adapter_instance.run_turn.assert_awaited_once_with("headless goal")
+        mock_adapter_instance.close.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_headless_run_does_not_use_agent_loop(self):
@@ -391,6 +398,7 @@ class TestReplSlashCommands:
     @patch("coding_agent.cli.repl.create_agent")
     async def test_repl_slash_commands_still_work(self, mock_create_agent):
         mock_pipeline = MagicMock()
+        mock_pipeline.mount = AsyncMock()
         mock_ctx = MagicMock()
         mock_create_agent.return_value = (mock_pipeline, mock_ctx)
 
@@ -695,6 +703,129 @@ class TestReplPipelineAdapterConsumerStable:
         assert consumers_seen[0] is session._consumer
 
 
+class _RecordingConsumer:
+    def __init__(self) -> None:
+        self.messages: list[object] = []
+
+    async def emit(self, msg: object) -> None:
+        self.messages.append(msg)
+
+    async def request_approval(self, req):
+        from coding_agent.wire.protocol import ApprovalResponse
+
+        return ApprovalResponse(
+            session_id=req.session_id,
+            request_id=req.request_id,
+            approved=True,
+        )
+
+
+class _ScriptedSubagentProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    @property
+    def model_name(self) -> str:
+        return "scripted-subagent"
+
+    @property
+    def max_context_size(self) -> int:
+        return 128000
+
+    async def stream(self, messages, tools=None, **kwargs):
+        del messages, kwargs
+        self.calls += 1
+        if self.calls == 1:
+            yield ToolCallEvent(
+                tool_call_id="tc-repl-subagent",
+                name="subagent",
+                arguments={"goal": "Inspect child task"},
+            )
+            yield DoneEvent()
+            return
+
+        if self.calls == 2:
+            assert tools is not None
+            tool_names = {
+                tool["function"]["name"]
+                for tool in tools
+                if isinstance(tool, dict) and isinstance(tool.get("function"), dict)
+            }
+            assert "subagent" not in tool_names
+            yield TextEvent(text="Child finished summary")
+            yield DoneEvent()
+            return
+
+        yield TextEvent(text="Parent received child result")
+        yield DoneEvent()
+
+
+class TestReplSubagentEndToEnd:
+    @pytest.mark.asyncio
+    async def test_repl_process_message_runs_real_subagent_pipeline(self, tmp_path):
+        from coding_agent.app import create_agent as create_real_agent
+        from coding_agent.cli.repl import InteractiveSession
+        from coding_agent.wire.protocol import (
+            StreamDelta,
+            ToolCallDelta,
+            ToolResultDelta,
+        )
+
+        pipeline, ctx = create_real_agent(
+            data_dir=tmp_path,
+            api_key="sk-test",
+            workspace_root=tmp_path,
+            approval_mode_override="yolo",
+        )
+        provider = _ScriptedSubagentProvider()
+        llm_plugin = pipeline._registry.get("llm_provider")
+        llm_plugin._instance = provider
+
+        recording_consumer = _RecordingConsumer()
+        mock_renderer = MagicMock()
+
+        with (
+            patch(
+                "coding_agent.cli.repl.create_agent",
+                return_value=(pipeline, ctx),
+            ),
+            patch(
+                "coding_agent.cli.repl.StreamingRenderer", return_value=mock_renderer
+            ),
+            patch(
+                "coding_agent.cli.repl.RichConsumer", return_value=recording_consumer
+            ),
+        ):
+            session = InteractiveSession(_make_repl_config(repo=str(tmp_path)))
+
+        await session._process_message("Please delegate this to a subagent")
+
+        tool_calls = [
+            msg for msg in recording_consumer.messages if isinstance(msg, ToolCallDelta)
+        ]
+        assert any(msg.tool_name == "subagent" for msg in tool_calls)
+
+        tool_results = [
+            msg
+            for msg in recording_consumer.messages
+            if isinstance(msg, ToolResultDelta)
+        ]
+        assert any(
+            msg.tool_name == "subagent"
+            and msg.display_result == "Subagent completed: Child finished summary"
+            for msg in tool_results
+        )
+
+        child_streams = [
+            msg
+            for msg in recording_consumer.messages
+            if isinstance(msg, StreamDelta) and msg.agent_id.startswith("child-")
+        ]
+        assert child_streams
+        assert any(msg.content == "Child finished summary" for msg in child_streams)
+        assert provider.calls == 3
+
+
 class TestReplCreateAgentConfigForwarding:
     @patch("coding_agent.cli.repl.create_agent")
     def test_repl_forwards_runtime_config(self, mock_create_agent):
@@ -728,126 +859,106 @@ class TestReplCreateAgentConfigForwarding:
 # ---------------------------------------------------------------------------
 
 
-class TestReplApprovalWiring:
-    """REPL wires an ask_user_handler to DirectiveExecutor for interactive approval."""
+class TestApprovalWiringViaPipelineAdapter:
+    """PipelineAdapter wires ask_user_handler to DirectiveExecutor via consumer."""
 
-    @patch("coding_agent.cli.repl.create_agent")
-    def test_repl_sets_ask_user_handler_on_directive_executor(self, mock_create_agent):
-        """After setup, the pipeline's DirectiveExecutor has an ask_user handler."""
+    def test_adapter_wires_handler_when_consumer_present(self):
+        """After PipelineAdapter init, the DirectiveExecutor has an ask_user handler."""
         from agentkit.directive.executor import DirectiveExecutor
-
-        mock_pipeline = MagicMock()
-        mock_pipeline._directive_executor = DirectiveExecutor()
-        mock_ctx = MagicMock()
-        mock_create_agent.return_value = (mock_pipeline, mock_ctx)
-
-        from coding_agent.cli.repl import InteractiveSession
-
-        config = _make_repl_config()
-        session = InteractiveSession(config)
-
-        assert mock_pipeline._directive_executor._ask_user is not None
-        assert callable(mock_pipeline._directive_executor._ask_user)
-
-    @pytest.mark.asyncio
-    @patch("coding_agent.cli.repl.create_agent")
-    async def test_repl_approval_prompt_approved(self, mock_create_agent, monkeypatch):
-        """When AskUser directive fires, the handler prompts and user approves."""
-        from agentkit.directive.executor import DirectiveExecutor
-        from agentkit.directive.types import AskUser
+        from agentkit.runtime.pipeline import PipelineContext
+        from agentkit.tape.tape import Tape
+        from coding_agent.adapter import PipelineAdapter
 
         executor = DirectiveExecutor()
         mock_pipeline = MagicMock()
         mock_pipeline._directive_executor = executor
-        mock_ctx = MagicMock()
-        mock_create_agent.return_value = (mock_pipeline, mock_ctx)
+        ctx = PipelineContext(tape=Tape(), session_id="test")
+        consumer = AsyncMock()
 
-        from coding_agent.cli.repl import InteractiveSession
-
-        config = _make_repl_config()
-        session = InteractiveSession(config)
+        PipelineAdapter(pipeline=mock_pipeline, ctx=ctx, consumer=consumer)
 
         assert executor._ask_user is not None
+        assert callable(executor._ask_user)
 
-        monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+    def test_adapter_no_consumer_leaves_handler_none(self):
+        """Without consumer, DirectiveExecutor handler stays None."""
+        from agentkit.directive.executor import DirectiveExecutor
+        from agentkit.runtime.pipeline import PipelineContext
+        from agentkit.tape.tape import Tape
+        from coding_agent.adapter import PipelineAdapter
 
-        directive = AskUser(question="Allow tool 'shell_exec'?")
+        executor = DirectiveExecutor()
+        mock_pipeline = MagicMock()
+        mock_pipeline._directive_executor = executor
+        ctx = PipelineContext(tape=Tape(), session_id="test")
+
+        PipelineAdapter(pipeline=mock_pipeline, ctx=ctx, consumer=None)
+
+        assert executor._ask_user is None
+
+    @pytest.mark.asyncio
+    async def test_ask_user_handler_calls_consumer_request_approval(self):
+        """Handler bridges to consumer.request_approval with correct ApprovalRequest."""
+        from agentkit.directive.executor import DirectiveExecutor
+        from agentkit.directive.types import AskUser
+        from agentkit.runtime.pipeline import PipelineContext
+        from agentkit.tape.tape import Tape
+        from coding_agent.adapter import PipelineAdapter
+        from coding_agent.wire.protocol import ApprovalResponse
+
+        executor = DirectiveExecutor()
+        mock_pipeline = MagicMock()
+        mock_pipeline._directive_executor = executor
+        ctx = PipelineContext(tape=Tape(), session_id="test-session")
+
+        consumer = AsyncMock()
+        consumer.request_approval.return_value = ApprovalResponse(
+            session_id="test-session", request_id="r1", approved=True
+        )
+
+        PipelineAdapter(pipeline=mock_pipeline, ctx=ctx, consumer=consumer)
+
+        directive = AskUser(
+            question="Allow web_search?",
+            metadata={"tool_name": "web_search", "arguments": {"query": "test"}},
+        )
         result = await executor.execute(directive)
+
         assert result is True
+        consumer.request_approval.assert_called_once()
+        req = consumer.request_approval.call_args[0][0]
+        assert req.tool == "web_search"
+        assert req.args == {"query": "test"}
 
     @pytest.mark.asyncio
-    @patch("coding_agent.cli.repl.create_agent")
-    async def test_repl_approval_prompt_denied(self, mock_create_agent, monkeypatch):
-        """When user denies approval, AskUser returns False."""
+    async def test_ask_user_handler_denied_returns_false(self):
+        """When consumer denies, executor returns False."""
         from agentkit.directive.executor import DirectiveExecutor
         from agentkit.directive.types import AskUser
+        from agentkit.runtime.pipeline import PipelineContext
+        from agentkit.tape.tape import Tape
+        from coding_agent.adapter import PipelineAdapter
+        from coding_agent.wire.protocol import ApprovalResponse
 
         executor = DirectiveExecutor()
         mock_pipeline = MagicMock()
         mock_pipeline._directive_executor = executor
-        mock_ctx = MagicMock()
-        mock_create_agent.return_value = (mock_pipeline, mock_ctx)
+        ctx = PipelineContext(tape=Tape(), session_id="test")
 
-        from coding_agent.cli.repl import InteractiveSession
+        consumer = AsyncMock()
+        consumer.request_approval.return_value = ApprovalResponse(
+            session_id="test", request_id="r1", approved=False
+        )
 
-        config = _make_repl_config()
-        session = InteractiveSession(config)
+        PipelineAdapter(pipeline=mock_pipeline, ctx=ctx, consumer=consumer)
 
-        monkeypatch.setattr("builtins.input", lambda prompt="": "n")
-
-        directive = AskUser(question="Allow tool 'shell_exec'?")
+        directive = AskUser(
+            question="Allow bash_run?",
+            metadata={"tool_name": "bash_run", "arguments": {"command": "rm -rf /"}},
+        )
         result = await executor.execute(directive)
+
         assert result is False
-
-    @pytest.mark.asyncio
-    @patch("coding_agent.cli.repl.create_agent")
-    async def test_repl_approval_prompt_empty_defaults_no(
-        self, mock_create_agent, monkeypatch
-    ):
-        """Empty input defaults to rejection (N in [y/N])."""
-        from agentkit.directive.executor import DirectiveExecutor
-        from agentkit.directive.types import AskUser
-
-        executor = DirectiveExecutor()
-        mock_pipeline = MagicMock()
-        mock_pipeline._directive_executor = executor
-        mock_ctx = MagicMock()
-        mock_create_agent.return_value = (mock_pipeline, mock_ctx)
-
-        from coding_agent.cli.repl import InteractiveSession
-
-        config = _make_repl_config()
-        session = InteractiveSession(config)
-
-        monkeypatch.setattr("builtins.input", lambda prompt="": "")
-
-        directive = AskUser(question="Allow tool 'shell_exec'?")
-        result = await executor.execute(directive)
-        assert result is False
-
-    @pytest.mark.asyncio
-    @patch("coding_agent.cli.repl.create_agent")
-    async def test_repl_approval_yes_variants(self, mock_create_agent, monkeypatch):
-        """'yes', 'Y', 'YES' all approve."""
-        from agentkit.directive.executor import DirectiveExecutor
-        from agentkit.directive.types import AskUser
-
-        executor = DirectiveExecutor()
-        mock_pipeline = MagicMock()
-        mock_pipeline._directive_executor = executor
-        mock_ctx = MagicMock()
-        mock_create_agent.return_value = (mock_pipeline, mock_ctx)
-
-        from coding_agent.cli.repl import InteractiveSession
-
-        config = _make_repl_config()
-        session = InteractiveSession(config)
-
-        for variant in ("y", "Y", "yes", "YES", "Yes"):
-            monkeypatch.setattr("builtins.input", lambda prompt="", v=variant: v)
-            directive = AskUser(question="Allow?")
-            result = await executor.execute(directive)
-            assert result is True, f"Expected True for input '{variant}'"
 
 
 class TestBatchModeAutoApprove:
@@ -920,8 +1031,8 @@ class TestMemoryHandlerWiring:
         record = MemoryRecord(summary="test memory", tags=["auth.py"], importance=0.7)
         await executor.execute(record)
 
-        assert len(plugin._memories) == 1
-        assert plugin._memories[0]["summary"] == "test memory"
+        assert len(plugin._working_memories) == 1
+        assert plugin._working_memories[0]["summary"] == "test memory"
 
 
 class TestHookRuntimeHasSpecs:

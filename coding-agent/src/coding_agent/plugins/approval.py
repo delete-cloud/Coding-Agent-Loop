@@ -39,20 +39,29 @@ class ApprovalPlugin:
         if tool_name in self._blocked_tools:
             return Reject(reason=f"tool '{tool_name}' is blocked")
 
+        _meta = {"tool_name": tool_name, "arguments": arguments or {}}
+
         if tool_name in self._external_request_tools:
             if self._policy == ApprovalPolicy.YOLO:
                 return Approve()
             return AskUser(
-                question=f"Tool '{tool_name}' performs an external request. Allow?"
+                question=f"Tool '{tool_name}' performs an external request. Allow?",
+                metadata=_meta,
             )
 
         if self._policy == ApprovalPolicy.YOLO:
             return Approve()
         elif self._policy == ApprovalPolicy.INTERACTIVE:
-            return AskUser(question=f"Allow tool '{tool_name}' with args {arguments}?")
+            return AskUser(
+                question=f"Allow tool '{tool_name}' with args {arguments}?",
+                metadata=_meta,
+            )
         elif self._policy == ApprovalPolicy.AUTO:
             if tool_name in self._safe_tools:
                 return Approve()
-            return AskUser(question=f"Tool '{tool_name}' requires approval. Allow?")
+            return AskUser(
+                question=f"Tool '{tool_name}' requires approval. Allow?",
+                metadata=_meta,
+            )
 
         return Approve()

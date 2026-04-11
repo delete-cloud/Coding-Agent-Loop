@@ -3,6 +3,8 @@
 from io import StringIO
 
 import pytest
+from agentkit.tools.decorator import tool
+from agentkit.tools.registry import ToolRegistry
 from prompt_toolkit.output.defaults import create_output
 
 from coding_agent.cli.commands import (
@@ -93,6 +95,38 @@ class TestCommands:
         handled = await handle_command("/tools", context)
         assert handled is True
         assert context["should_exit"] is False
+
+    @pytest.mark.asyncio
+    async def test_tools_command_lists_registered_tool_names(self, monkeypatch):
+        import coding_agent.cli.terminal_output as terminal_output_module
+
+        @tool(description="Alpha test tool.")
+        def alpha_tool() -> str:
+            return "ok"
+
+        @tool(description="Beta test tool.")
+        def beta_tool() -> str:
+            return "ok"
+
+        registry = ToolRegistry()
+        registry.register(beta_tool)
+        registry.register(alpha_tool)
+
+        buf = StringIO()
+        monkeypatch.setattr(
+            terminal_output_module, "_prompt_output", create_output(stdout=buf)
+        )
+
+        context = {"should_exit": False, "tool_registry": registry}
+
+        handled = await handle_command("/tools", context)
+
+        assert handled is True
+        output = buf.getvalue()
+        assert "Available Tools:" in output
+        assert "alpha_tool" in output
+        assert "beta_tool" in output
+        assert output.index("alpha_tool") < output.index("beta_tool")
 
     @pytest.mark.asyncio
     async def test_unknown_command(self, capsys):

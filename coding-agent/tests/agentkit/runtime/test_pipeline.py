@@ -15,6 +15,7 @@ class MinimalPlugin:
     def __init__(self):
         self.mounted = False
         self.mount_called = False
+        self.shutdown_called = False
         self._mock_llm = MagicMock()
         self._mock_storage = object()
         self._summary_result = None
@@ -22,6 +23,7 @@ class MinimalPlugin:
     def hooks(self):
         return {
             "mount": self.do_mount,
+            "on_shutdown": self.on_shutdown,
             "provide_llm": self.provide_llm,
             "provide_storage": self.provide_storage,
             "get_tools": self.get_tools,
@@ -32,6 +34,9 @@ class MinimalPlugin:
     def do_mount(self, **kwargs):
         self.mount_called = True
         return {"ready": True}
+
+    def on_shutdown(self, **kwargs):
+        self.shutdown_called = True
 
     def provide_llm(self, **kwargs):
         return self._mock_llm
@@ -141,6 +146,15 @@ class TestPipeline:
         ctx = PipelineContext(tape=Tape(), session_id="s1")
         await pipeline.mount(ctx)
         assert "minimal" in ctx.plugin_states
+
+    @pytest.mark.asyncio
+    async def test_shutdown_notifies_plugins(self, setup):
+        pipeline, plugin = setup
+        ctx = PipelineContext(tape=Tape(), session_id="s1")
+
+        await pipeline.shutdown(ctx)
+
+        assert plugin.shutdown_called is True
 
     def test_pipeline_stages_defined(self, setup):
         pipeline, _ = setup

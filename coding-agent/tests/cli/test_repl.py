@@ -1,6 +1,7 @@
 """Tests for REPL functionality."""
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from prompt_toolkit.keys import Keys
@@ -647,33 +648,6 @@ class TestFooterIntegration:
         assert any("phase" in c for c in update_calls)
 
     @pytest.mark.asyncio
-    async def test_footer_disabled_during_approval(self, monkeypatch):
-        from coding_agent.cli.repl import InteractiveSession
-
-        monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
-        session = InteractiveSession(self._make_config())
-
-        session._footer._mode = "persistent"
-        session._footer._enabled = True
-
-        lifecycle: list[str] = []
-        monkeypatch.setattr(
-            session._footer, "disable", lambda: lifecycle.append("disable")
-        )
-        monkeypatch.setattr(
-            session._footer, "enable", lambda: lifecycle.append("enable")
-        )
-
-        monkeypatch.setattr("builtins.input", lambda prompt: "y")
-
-        import asyncio
-
-        result = await session._ask_user_for_approval("Allow?")
-
-        assert "disable" in lifecycle
-        assert result is True
-
-    @pytest.mark.asyncio
     async def test_clear_command_triggers_footer_redraw(self, monkeypatch):
         from coding_agent.cli.repl import InteractiveSession
 
@@ -730,6 +704,35 @@ class TestFooterIntegration:
 
         assert disable_calls == ["disable"]
 
+    @pytest.mark.asyncio
+    async def test_run_closes_pipeline_adapter_on_exit(self, monkeypatch):
+        from coding_agent.cli.repl import InteractiveSession
+
+        monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
+        session = InteractiveSession(self._make_config())
+
+        close_calls: list[str] = []
+        monkeypatch.setattr(session._footer, "run_spike_check", lambda: "persistent")
+        monkeypatch.setattr(session._footer, "enable", lambda: None)
+        monkeypatch.setattr(session._footer, "disable", lambda: None)
+
+        async def fake_get_input(**kwargs):
+            return None
+
+        class FakeAdapter:
+            async def initialize(self) -> None:
+                return None
+
+            async def close(self) -> None:
+                close_calls.append("close")
+
+        session._pipeline_adapter = FakeAdapter()
+        monkeypatch.setattr(session.input_handler, "get_input", fake_get_input)
+
+        await session.run()
+
+        assert close_calls == ["close"]
+
     def test_status_update_updates_input_toolbar_text(self, monkeypatch):
         from coding_agent.cli.repl import InteractiveSession
 
@@ -780,6 +783,52 @@ class TestFooterIntegration:
         assert calls[-1]["tokens_in"] == 10
         assert calls[-1]["tokens_out"] == 5
         assert calls[-1]["phase"] == "thinking"
+
+
+class TestReplInitialization:
+    @pytest.mark.asyncio
+    async def test_initialize_mounts_pipeline_before_first_command(self, monkeypatch):
+        from agentkit.runtime.pipeline import PipelineContext
+        from agentkit.tape.tape import Tape
+        from coding_agent.cli.repl import InteractiveSession
+
+        mock_pipeline = MagicMock()
+        mock_pipeline.mount = AsyncMock()
+        mock_ctx = PipelineContext(tape=Tape(), session_id="repl-init", config={})
+        mock_ctx.config["mcp_plugin"] = MagicMock()
+
+        monkeypatch.setattr(
+            "coding_agent.cli.repl.create_agent",
+            lambda *args, **kwargs: (mock_pipeline, mock_ctx),
+        )
+
+        session = InteractiveSession(TestFooterIntegration()._make_config())
+
+        assert "mcp_plugin" in session.context
+        await session.initialize()
+        mock_pipeline.mount.assert_awaited_once_with(mock_ctx)
+
+    @pytest.mark.asyncio
+    async def test_run_initializes_pipeline_before_prompt_loop(self, monkeypatch):
+        from coding_agent.cli.repl import InteractiveSession
+
+        monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
+        session = InteractiveSession(TestFooterIntegration()._make_config())
+
+        initialize_calls: list[str] = []
+
+        async def fake_initialize():
+            initialize_calls.append("init")
+
+        async def fake_get_input(**kwargs):
+            return None
+
+        monkeypatch.setattr(session, "initialize", fake_initialize)
+        monkeypatch.setattr(session.input_handler, "get_input", fake_get_input)
+
+        await session.run()
+
+        assert initialize_calls == ["init"]
 
 
 async def _async_return(value):

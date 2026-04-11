@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -28,6 +28,7 @@ class TestWireMessage:
         msg = WireMessage(session_id="test-session-123")
 
         assert msg.session_id == "test-session-123"
+        assert msg.agent_id == ""
         assert isinstance(msg.timestamp, datetime)
 
     def test_wire_message_custom_timestamp(self):
@@ -35,9 +36,11 @@ class TestWireMessage:
         custom_time = datetime(2024, 1, 15, 10, 30, 0)
         msg = WireMessage(
             session_id="test-session",
+            agent_id="child-1",
             timestamp=custom_time,
         )
 
+        assert msg.agent_id == "child-1"
         assert msg.timestamp == custom_time
 
 
@@ -161,6 +164,18 @@ class TestApprovalRequest:
 
         assert msg.timeout_seconds == 60
 
+    def test_approval_request_legacy_tool_call_inherits_agent_id(self):
+        msg = ApprovalRequest(
+            session_id="session-1",
+            agent_id="child-2",
+            request_id="req-legacy",
+            tool="delete_file",
+            args={"path": "/important/file"},
+        )
+
+        assert msg.tool_call is not None
+        assert msg.tool_call.agent_id == "child-2"
+
 
 class TestApprovalResponse:
     """Tests for ApprovalResponse message."""
@@ -242,7 +257,7 @@ class TestTurnEnd:
         msg = TurnEnd(
             session_id="session-1",
             turn_id="turn-abc",
-            completion_status="completed",
+            completion_status=cast(CompletionStatus, "completed"),
         )
 
         assert msg.completion_status == "completed"
@@ -330,12 +345,14 @@ class TestMessageSerialization:
 
         msg = StreamDelta(
             session_id="session-1",
+            agent_id="child-1",
             content="test content",
         )
 
         data = asdict(msg)
 
         assert data["session_id"] == "session-1"
+        assert data["agent_id"] == "child-1"
         assert data["content"] == "test content"
         assert data["role"] == "assistant"
         assert "timestamp" in data

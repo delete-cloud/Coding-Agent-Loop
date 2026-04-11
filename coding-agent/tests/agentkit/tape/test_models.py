@@ -14,7 +14,7 @@ class TestEntry:
     def test_entry_is_frozen(self):
         entry = Entry(kind="message", payload={"role": "user", "content": "hi"})
         with pytest.raises(AttributeError):
-            entry.kind = "tool_call"
+            setattr(entry, "kind", "tool_call")
 
     def test_entry_kinds(self):
         for kind in ("message", "tool_call", "tool_result", "anchor", "event"):
@@ -100,7 +100,9 @@ class TestEntry:
         assert entry.anchor_type == "handoff"
         assert entry.source_ids == ("id1", "id2")
 
-    def test_from_dict_returns_plain_entry_for_old_anchor_format(self):
+    def test_from_dict_returns_anchor_for_old_anchor_format(self):
+        from agentkit.tape.anchor import Anchor
+
         d = {
             "id": "a2",
             "kind": "anchor",
@@ -109,9 +111,24 @@ class TestEntry:
             "meta": {"is_handoff": True},
         }
         entry = Entry.from_dict(d)
-        assert type(entry) is Entry
+        assert isinstance(entry, Anchor)
         assert entry.kind == "anchor"
-        assert entry.meta["is_handoff"] is True
+        assert entry.is_handoff is True
+
+    def test_from_dict_returns_anchor_for_kind_anchor_without_anchor_type(self):
+        from agentkit.tape.anchor import Anchor
+
+        d = {
+            "id": "a3",
+            "kind": "anchor",
+            "payload": {"content": "bare anchor"},
+            "timestamp": 1000.0,
+            "meta": {},
+        }
+        entry = Entry.from_dict(d)
+        assert isinstance(entry, Anchor)
+        assert entry.anchor_type == "context"
+        assert entry.is_handoff is False
 
     def test_from_dict_returns_plain_entry_for_non_anchor(self):
         d = {

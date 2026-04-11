@@ -58,6 +58,64 @@ class TestStreamingConsumer:
         assert "file.py" in output
 
     @pytest.mark.asyncio
+    async def test_tool_result_delta_prefers_display_result_string(self):
+        consumer, _, buf = self._make_consumer()
+        await consumer.emit(
+            ToolCallDelta(tool_name="bash", arguments={"command": "ls"}, call_id="c1")
+        )
+        await consumer.emit(
+            ToolResultDelta(
+                call_id="c1",
+                tool_name="bash",
+                result={"stdout": "file.py", "exit_code": 0},
+                display_result="file.py",
+            )
+        )
+        output = buf.getvalue()
+        assert "file.py" in output
+        assert "stdout" not in output
+
+    @pytest.mark.asyncio
+    async def test_child_stream_delta_is_prefixed(self):
+        consumer, _, buf = self._make_consumer()
+        await consumer.emit(StreamDelta(agent_id="child-7", content="Hello from child"))
+        await consumer.emit(
+            TurnEnd(
+                agent_id="child-7",
+                turn_id="t-child",
+                completion_status=CompletionStatus.COMPLETED,
+            )
+        )
+
+        output = buf.getvalue()
+        assert "[child-7]" in output
+        assert "Hello from child" in output
+
+    @pytest.mark.asyncio
+    async def test_child_tool_activity_is_prefixed(self):
+        consumer, _, buf = self._make_consumer()
+        await consumer.emit(
+            ToolCallDelta(
+                agent_id="child-9",
+                tool_name="bash_run",
+                arguments={"command": "ls"},
+                call_id="c1",
+            )
+        )
+        await consumer.emit(
+            ToolResultDelta(
+                agent_id="child-9",
+                call_id="c1",
+                tool_name="bash_run",
+                result="file.py",
+            )
+        )
+
+        output = buf.getvalue()
+        assert "[child-9] bash_run" in output
+        assert "file.py" in output
+
+    @pytest.mark.asyncio
     async def test_turn_end_completed_no_jargon(self):
         consumer, _, buf = self._make_consumer()
         await consumer.emit(
@@ -374,6 +432,95 @@ class TestCollapseGrouping:
         assert "hi" in output
 
     @pytest.mark.asyncio
+    async def test_realistic_multi_tool_sequence(self):
+        consumer, _, buf = self._make_consumer()
+        await consumer.emit(
+            ToolCallDelta(
+                tool_name="glob_files", arguments={"pattern": "**/*.py"}, call_id="c1"
+            )
+        )
+        await consumer.emit(
+            ToolResultDelta(call_id="c1", tool_name="glob_files", result="a.py\nb.py")
+        )
+        await consumer.emit(
+            ToolCallDelta(
+                tool_name="file_read", arguments={"path": "a.py"}, call_id="c2"
+            )
+        )
+        await consumer.emit(
+            ToolResultDelta(
+                call_id="c2", tool_name="file_read", result="def run(): pass"
+            )
+        )
+        await consumer.emit(
+            ToolCallDelta(
+                tool_name="grep_search", arguments={"pattern": "TODO"}, call_id="c3"
+            )
+        )
+        await consumer.emit(
+            ToolResultDelta(
+                call_id="c3", tool_name="grep_search", result="a.py:1: TODO"
+            )
+        )
+        await consumer.emit(
+            ToolCallDelta(
+                tool_name="bash_run", arguments={"command": "pytest -q"}, call_id="c4"
+            )
+        )
+        await consumer.emit(
+            ToolResultDelta(call_id="c4", tool_name="bash_run", result="3 passed")
+        )
+        await consumer.emit(StreamDelta(content="I found the issue in a.py."))
+        await consumer.emit(
+            TurnEnd(turn_id="t1", completion_status=CompletionStatus.COMPLETED)
+        )
+
+        output = buf.getvalue()
+        lowered = output.lower()
+        assert "searched for 1 pattern" in lowered
+        assert "read 1 file" in lowered
+        assert "listed 1 pattern" in lowered
+        assert "3 passed" in output
+        assert "I found the issue in a.py." in output
+        assert "def run(): pass" not in output
+        assert "a.py:1: TODO" not in output
+
+    @pytest.mark.asyncio
+    async def test_two_separate_groups(self):
+        consumer, _, buf = self._make_consumer()
+        await consumer.emit(
+            ToolCallDelta(
+                tool_name="file_read", arguments={"path": "a.py"}, call_id="c1"
+            )
+        )
+        await consumer.emit(
+            ToolResultDelta(call_id="c1", tool_name="file_read", result="alpha")
+        )
+        await consumer.emit(StreamDelta(content="First group complete."))
+        await consumer.emit(
+            ToolCallDelta(
+                tool_name="grep_search", arguments={"pattern": "TODO"}, call_id="c2"
+            )
+        )
+        await consumer.emit(
+            ToolResultDelta(
+                call_id="c2", tool_name="grep_search", result="b.py:5: TODO"
+            )
+        )
+        await consumer.emit(
+            TurnEnd(turn_id="t1", completion_status=CompletionStatus.COMPLETED)
+        )
+
+        output = buf.getvalue()
+        assert "Read 1 file" in output
+        assert "First group complete." in output
+        assert "Searched for 1 pattern" in output
+        assert output.index("Read 1 file") < output.index("First group complete.")
+        assert output.index("First group complete.") < output.index(
+            "Searched for 1 pattern"
+        )
+
+    @pytest.mark.asyncio
     async def test_collapse_group_cleared_after_turnend(self):
         consumer, _, _ = self._make_consumer()
         await consumer.emit(
@@ -541,6 +688,23 @@ class TestThinkingAndStatusHandling:
 
         renderer.thinking_end.assert_not_called()
         assert consumer._phase == "thinking"
+
+    @pytest.mark.asyncio
+    async def test_tool_call_after_thinking_ends_thinking_before_rendering_tool(self):
+        consumer, renderer, _ = self._make_consumer()
+        renderer.thinking_start = MagicMock()
+        renderer.thinking_end = MagicMock()
+        renderer.tool_call = MagicMock()
+
+        await consumer.emit(ThinkingDelta(text="reasoning"))
+        await consumer.emit(
+            ToolCallDelta(
+                tool_name="custom_tool", arguments={"path": "a.txt"}, call_id="c1"
+            )
+        )
+
+        renderer.thinking_end.assert_called_once()
+        renderer.tool_call.assert_called_once()
 
     # ── TurnEnd: state reset ──
 
