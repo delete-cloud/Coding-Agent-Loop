@@ -176,6 +176,39 @@ class TestApprovalRequest:
         assert msg.tool_call is not None
         assert msg.tool_call.agent_id == "child-2"
 
+    def test_approval_request_syncs_call_id_and_request_id(self):
+        msg = ApprovalRequest(
+            session_id="session-1",
+            call_id="call-legacy",
+            tool="bash",
+            args={"command": "pwd"},
+        )
+
+        assert msg.request_id == "call-legacy"
+        assert msg.call_id == "call-legacy"
+        assert msg.tool_call is not None
+        assert msg.tool_call.call_id == "call-legacy"
+
+    def test_approval_request_extracts_legacy_fields_from_tool_call(self):
+        tool_call = ToolCallDelta(
+            session_id="session-1",
+            agent_id="child-7",
+            tool_name="read_file",
+            arguments={"path": "/tmp/x"},
+            call_id="call-777",
+        )
+
+        msg = ApprovalRequest(
+            session_id="session-1",
+            tool_call=tool_call,
+        )
+
+        assert msg.tool == "read_file"
+        assert msg.args == {"path": "/tmp/x"}
+        assert msg.agent_id == "child-7"
+        assert msg.call_id == "call-777"
+        assert msg.request_id == "call-777"
+
 
 class TestApprovalResponse:
     """Tests for ApprovalResponse message."""
@@ -215,6 +248,27 @@ class TestApprovalResponse:
 
         assert msg.approved is False
         assert msg.feedback is None
+
+    def test_approval_response_syncs_call_id_and_request_id(self):
+        msg = ApprovalResponse(
+            session_id="session-1",
+            call_id="call-legacy",
+            approved=True,
+        )
+
+        assert msg.request_id == "call-legacy"
+        assert msg.call_id == "call-legacy"
+        assert msg.decision == "approve"
+
+    def test_approval_response_maps_legacy_decision_to_approved(self):
+        msg = ApprovalResponse(
+            session_id="session-1",
+            request_id="req-456",
+            decision="deny",
+        )
+
+        assert msg.approved is False
+        assert msg.decision == "deny"
 
 
 class TestTurnEnd:
@@ -257,7 +311,7 @@ class TestTurnEnd:
         msg = TurnEnd(
             session_id="session-1",
             turn_id="turn-abc",
-            completion_status=cast(CompletionStatus, "completed"),
+            completion_status=cast(CompletionStatus, cast(object, "completed")),
         )
 
         assert msg.completion_status == "completed"

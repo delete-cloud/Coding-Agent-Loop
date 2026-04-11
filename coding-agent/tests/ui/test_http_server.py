@@ -336,17 +336,24 @@ class TestPromptStreaming:
             event["event"] == "ToolResultDelta"
             and event["data"]["tool_name"] == "subagent"
             and event["data"]["display_result"]
-            == "Error executing tool 'subagent': tool 'subagent' not found"
-            and event["data"]["is_error"] is True
+            == "Subagent completed: Child finished summary"
+            and event["data"]["is_error"] is False
+            and event["data"]["result"] is None
+            for event in events
+        )
+        assert any(
+            event["event"] == "StreamDelta"
+            and event["data"]["agent_id"] == "child-1"
+            and event["data"]["content"] == "Child finished summary"
             for event in events
         )
         assert any(
             event["event"] == "StreamDelta"
             and event["data"]["agent_id"] == ""
-            and event["data"]["content"] == "Child finished summary"
+            and event["data"]["content"] == "Parent received child result"
             for event in events
         )
-        assert provider.calls == 2
+        assert provider.calls == 3
 
 
 class TestConcurrentTurns:

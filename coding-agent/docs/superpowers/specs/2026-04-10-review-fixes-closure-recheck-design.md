@@ -27,8 +27,8 @@ This bucket is a strong closure candidate because:
 
 - `docs/superpowers/plans/2026-04-09-http-session-hardening-review-fixes.md` shows implementation steps checked off
 - `.sisyphus/notepads/review-fixes/issues.md` still records a concrete unresolved-looking tail
-- current code still contains `/approve` legacy compatibility behavior in both the HTTP boundary and `SessionManager.submit_approval()`
-- tests still explicitly describe part of the current `/approve` behavior as `legacy check`
+- current runtime approval flow has already converged on `ApprovalStore` as the gating source of truth
+- the remaining drift risk is stale closure documentation and session-level projection fields that can still look like fallback semantics even though they no longer create success paths
 
 This means the bucket is **not** safely closable by documentation alone. It requires a focused re-check against runtime behavior and plan intent.
 
@@ -90,8 +90,8 @@ Validate `submit_approval()` and related session-manager approval state handling
 
 Questions this layer must answer:
 
-- Can approval succeed only because `session.pending_approval` matches while `ApprovalStore` no longer knows the request?
-- Does `submit_approval()` still encode legacy success semantics that contradict the plan’s single-source-of-truth direction?
+- Does `submit_approval()` still depend exclusively on `ApprovalStore.respond()` for success?
+- Are `session.pending_approval` and `session.approval_response` now only projections of store-backed lifecycle state rather than a fallback success path?
 - Are session state and store state kept aligned after approval success, mismatch, timeout, or cleanup?
 
 #### Layer B — HTTP `/sessions/{id}/approve` boundary behavior
@@ -172,8 +172,8 @@ Allowed only if all of the following are true:
 
 Required if any of the following is true:
 
-- `submit_approval()` still succeeds via session-only fallback after the store no longer knows the request
-- the HTTP approval endpoint still gates primarily on legacy session-only state in a way that contradicts current plan intent
+- the spec and closure artifacts still claim a session-only fallback path that the implementation no longer contains
+- session projection fields (`pending_approval`, `approval_response`) still mislead follow-up work into assuming a fallback success path exists
 - runtime approval lifecycle still relies on legacy semantics for correctness
 - the note in `review-fixes/issues.md` still corresponds to real behavior
 
@@ -185,14 +185,14 @@ In that case, the follow-up work must be narrowed to one smallest blocking tail,
 
 ### Main risk
 
-The biggest risk is misclassifying legacy approval behavior as a protected contract when the plan actually intended to collapse truth into `ApprovalStore`.
+The biggest risk is continuing to reason from stale documentation after the implementation already collapsed approval truth into `ApprovalStore`.
 
-That would preserve complexity in two layers:
+That would preserve confusion across two layers:
 
 - session state
 - store state
 
-and keep the bucket “green-looking” without actually resolving the review finding.
+and keep follow-up work aimed at a fallback path that no longer exists.
 
 ### Non-goal
 
