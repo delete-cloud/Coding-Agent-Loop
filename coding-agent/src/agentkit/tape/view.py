@@ -19,7 +19,18 @@ class TapeView:
     @classmethod
     def from_tape(cls, tape: Tape) -> TapeView:
         if tape.window_start > 0:
-            entries = tape.windowed_entries()
+            windowed_entries = tape.windowed_entries()
+            handoff_anchors = [
+                entry
+                for entry in windowed_entries
+                if entry.kind == "anchor" and entry.meta.get("is_handoff")
+            ]
+            other_entries = [
+                entry
+                for entry in windowed_entries
+                if not (entry.kind == "anchor" and entry.meta.get("is_handoff"))
+            ]
+            entries = handoff_anchors + other_entries
         else:
             entries = list(tape)
         anchor_ids = tuple(e.id for e in entries if e.kind == "anchor")

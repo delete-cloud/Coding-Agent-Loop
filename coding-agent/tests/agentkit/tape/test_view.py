@@ -35,6 +35,30 @@ class TestTapeView:
         assert view.entries[0] is anchor
         assert view.window_start == tape.window_start
 
+    def test_from_tape_moves_handoff_anchor_before_recent_entries(self):
+        tape = Tape()
+        for i in range(6):
+            tape.append(Entry(kind="message", payload={"content": f"old-{i}"}))
+        anchor = Entry(
+            kind="anchor",
+            payload={"content": "summary"},
+            meta={"is_handoff": True},
+        )
+        tape.handoff(anchor, window_start=3)
+        tape.append(Entry(kind="message", payload={"content": "new-0"}))
+        tape.append(Entry(kind="message", payload={"content": "new-1"}))
+
+        view = TapeView.from_tape(tape)
+
+        assert view.entries[0] is anchor
+        assert [entry.payload.get("content") for entry in view.entries[1:]] == [
+            "old-3",
+            "old-4",
+            "old-5",
+            "new-0",
+            "new-1",
+        ]
+
     def test_from_tape_tracks_anchor_ids(self):
         tape = Tape()
         tape.append(Entry(kind="message", payload={"content": "old"}))
