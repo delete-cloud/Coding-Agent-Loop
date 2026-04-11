@@ -252,11 +252,18 @@ class Pipeline:
                 )
             else:
                 window_start, summary_anchor = window_result
-                if summary_anchor is not None and not ctx._handoff_done:
+                visible_entries = ctx.tape.windowed_entries()
+                if not 0 <= window_start <= len(visible_entries):
+                    logger.warning(
+                        "resolve_context_window returned out-of-range window_start=%s for %s visible entries; skipping windowing",
+                        window_start,
+                        len(visible_entries),
+                    )
+                elif summary_anchor is not None and window_start > 0:
                     abs_window_start = ctx.tape.window_start + window_start
-                    ctx.tape.handoff(summary_anchor, window_start=abs_window_start)
-                    ctx._handoff_done = True
-                    force_full_rebuild = True
+                    if abs_window_start > ctx.tape.window_start:
+                        ctx.tape.handoff(summary_anchor, window_start=abs_window_start)
+                        force_full_rebuild = True
                 logger.info(
                     "Context window advanced: %d entries visible (of %d total)",
                     len(ctx.tape.windowed_entries()),
@@ -507,6 +514,12 @@ class Pipeline:
                                 batch_results.append(result)
                             except Exception as exc:
                                 batch_results.append(exc)
+
+                    if len(batch_results) != len(executable_calls):
+                        raise PipelineError(
+                            "execute_tools_batch returned "
+                            f"{len(batch_results)} results for {len(executable_calls)} tool calls"
+                        )
 
                     for tc, result in zip(
                         executable_metas, batch_results, strict=False

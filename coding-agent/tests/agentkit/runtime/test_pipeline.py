@@ -5,6 +5,7 @@ from agentkit.runtime.hook_runtime import HookRuntime
 from agentkit.plugin.registry import PluginRegistry
 from agentkit.tape.tape import Tape
 from agentkit.tape.models import Entry
+from agentkit.tape.anchor import Anchor
 from agentkit.errors import PipelineError
 from agentkit.tools.schema import ToolSchema
 
@@ -98,6 +99,22 @@ class SkillsLikePlugin:
         if name != "skill_invoke":
             return None
         return f"activated:{(arguments or {}).get('name', '')}"
+
+
+class BatchToolPlugin:
+    state_key = "batch_tool"
+
+    def __init__(self, batch_results):
+        self.batch_results = batch_results
+
+    def hooks(self):
+        return {
+            "execute_tools_batch": self.execute_tools_batch,
+        }
+
+    def execute_tools_batch(self, tool_calls=None, **kwargs):
+        del tool_calls, kwargs
+        return self.batch_results
 
 
 class TestPipelineContext:
@@ -408,10 +425,9 @@ class TestPipeline:
                 return {"resolve_context_window": self.resolve_context_window}
 
             def resolve_context_window(self, tape=None, **kwargs):
-                anchor = Entry(
-                    kind="anchor",
+                anchor = Anchor(
+                    anchor_type="handoff",
                     payload={"content": "summary"},
-                    meta={"is_handoff": True},
                 )
                 return (7, anchor)
 
@@ -425,6 +441,55 @@ class TestPipeline:
         windowed = ctx.tape.windowed_entries()
         assert len(windowed) == 4  # entries[7:10] + anchor
         assert windowed[-1].kind == "anchor"
+
+    @pytest.mark.asyncio
+    async def test_build_context_can_advance_window_multiple_times_in_same_turn(
+        self, setup
+    ):
+        pipeline, plugin = setup
+        tape = Tape()
+        for i in range(12):
+            tape.append(
+                Entry(kind="message", payload={"role": "user", "content": f"msg-{i}"})
+            )
+        ctx = PipelineContext(tape=tape, session_id="s1")
+
+        class WindowPlugin:
+            state_key = "window-multi"
+
+            def hooks(self):
+                return {"resolve_context_window": self.resolve_context_window}
+
+            def resolve_context_window(self, tape=None, **kwargs):
+                if tape is None:
+                    return None
+                visible = tape.windowed_entries()
+                if len(visible) > 6:
+                    return (
+                        len(visible) - 5,
+                        Anchor(anchor_type="handoff", payload={"content": "summary"}),
+                    )
+                return None
+
+        registry = PluginRegistry()
+        registry.register(plugin)
+        registry.register(WindowPlugin())
+        pipeline2 = Pipeline(runtime=HookRuntime(registry), registry=registry)
+
+        await pipeline2._stage_build_context(ctx)
+        first_window_start = ctx.tape.window_start
+
+        ctx.tape.append(
+            Entry(kind="message", payload={"role": "user", "content": "after-1"})
+        )
+        ctx.tape.append(
+            Entry(kind="message", payload={"role": "assistant", "content": "after-2"})
+        )
+        await pipeline2._stage_build_context(ctx)
+
+        anchors = [entry for entry in ctx.tape if entry.kind == "anchor"]
+        assert len(anchors) == 2
+        assert ctx.tape.window_start > first_window_start
 
     @pytest.mark.asyncio
     async def test_build_context_reentrant_does_not_double_handoff(self, setup):
@@ -510,6 +575,76 @@ class TestPipeline:
             "arguments": {"path": "b.txt"},
             "role": "assistant",
         }
+
+    @pytest.mark.asyncio
+    async def test_run_turn_raises_when_batch_results_are_too_few(self, setup):
+        pipeline, plugin = setup
+        registry = PluginRegistry()
+        registry.register(plugin)
+        registry.register(BatchToolPlugin(["only-one-result"]))
+        pipeline = Pipeline(runtime=HookRuntime(registry), registry=registry)
+
+        tape = Tape()
+        tape.append(
+            Entry(kind="message", payload={"role": "user", "content": "do two things"})
+        )
+        ctx = PipelineContext(tape=tape, session_id="s1")
+        await pipeline.mount(ctx)
+
+        from agentkit.providers.models import ToolCallEvent, DoneEvent
+
+        async def mock_stream(messages, tools=None, **kwargs):
+            yield ToolCallEvent(
+                tool_call_id="tc1", name="file_read", arguments={"path": "a.txt"}
+            )
+            yield ToolCallEvent(
+                tool_call_id="tc2", name="file_read", arguments={"path": "b.txt"}
+            )
+            yield DoneEvent()
+
+        plugin._mock_llm = MagicMock()
+        plugin._mock_llm.stream = mock_stream
+
+        with pytest.raises(
+            PipelineError,
+            match="execute_tools_batch returned 1 results for 2 tool calls",
+        ):
+            await pipeline.run_turn(ctx)
+
+    @pytest.mark.asyncio
+    async def test_run_turn_raises_when_batch_results_are_too_many(self, setup):
+        pipeline, plugin = setup
+        registry = PluginRegistry()
+        registry.register(plugin)
+        registry.register(BatchToolPlugin(["r1", "r2", "r3"]))
+        pipeline = Pipeline(runtime=HookRuntime(registry), registry=registry)
+
+        tape = Tape()
+        tape.append(
+            Entry(kind="message", payload={"role": "user", "content": "do two things"})
+        )
+        ctx = PipelineContext(tape=tape, session_id="s1")
+        await pipeline.mount(ctx)
+
+        from agentkit.providers.models import ToolCallEvent, DoneEvent
+
+        async def mock_stream(messages, tools=None, **kwargs):
+            yield ToolCallEvent(
+                tool_call_id="tc1", name="file_read", arguments={"path": "a.txt"}
+            )
+            yield ToolCallEvent(
+                tool_call_id="tc2", name="file_read", arguments={"path": "b.txt"}
+            )
+            yield DoneEvent()
+
+        plugin._mock_llm = MagicMock()
+        plugin._mock_llm.stream = mock_stream
+
+        with pytest.raises(
+            PipelineError,
+            match="execute_tools_batch returned 3 results for 2 tool calls",
+        ):
+            await pipeline.run_turn(ctx)
 
 
 class TestPipelineView:
