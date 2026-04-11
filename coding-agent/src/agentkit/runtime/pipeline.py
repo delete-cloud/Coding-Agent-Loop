@@ -3,22 +3,80 @@
 Stages: resolve_session → load_state → build_context → run_model → save_state → render → dispatch
 """
 
+# pyright: reportAny=false, reportExplicitAny=false, reportUnknownArgumentType=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnannotatedClassAttribute=false, reportUnusedParameter=false, reportPrivateUsage=false, reportDeprecated=false
+
 from __future__ import annotations
 
+import json
 import logging
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, contextmanager
 from inspect import isawaitable
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, cast
 
 from agentkit._types import StageName
+from agentkit.directive.types import Directive
 from agentkit.errors import PipelineError
 from agentkit.plugin.registry import PluginRegistry
-from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
+from agentkit.providers.models import (
+    DoneEvent,
+    TextEvent,
+    ThinkingEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+    UsageEvent,
+)
 from agentkit.runtime.hook_runtime import HookRuntime
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
 
 logger = logging.getLogger(__name__)
+
+StructuredToolResultScopeFactory = Callable[[bool], AbstractContextManager[None]]
+
+
+@contextmanager
+def _noop_structured_tool_result_scope(enabled: bool) -> Iterator[None]:
+    yield
+
+
+def _structured_tool_result_scope(
+    ctx: "PipelineContext", enabled: bool
+) -> AbstractContextManager[None]:
+    scope_factory = ctx.config.get("structured_tool_result_scope")
+    if scope_factory is None:
+        return _noop_structured_tool_result_scope(enabled)
+    if not callable(scope_factory):
+        raise TypeError("structured_tool_result_scope must be callable")
+    return cast(StructuredToolResultScopeFactory, scope_factory)(enabled)
+
+
+try:
+    from agentkit.tracing import get_tracer as _get_tracer
+
+    _tracer = _get_tracer("agentkit.pipeline")
+except Exception:
+    _tracer = None
+
+
+def _format_result(
+    result: Any,
+    *,
+    structured: bool = False,
+    max_size: int = 10000,
+) -> str:
+    if structured and isinstance(result, dict):
+        result_str = json.dumps(result)
+    else:
+        result_str = str(result) if result is not None else ""
+
+    if len(result_str) > max_size:
+        result_str = (
+            result_str[:max_size]
+            + f"\n... ({len(result_str) - max_size} chars truncated)"
+        )
+    return result_str
 
 
 @dataclass
@@ -35,9 +93,29 @@ class PipelineContext:
     tool_schemas: list[Any] = field(default_factory=list)
     response_entries: list[Any] = field(default_factory=list)
     output: Any = None
+    context_builder: Any = None
+    incremental_core_messages: list[dict[str, Any]] = field(default_factory=list)
+    incremental_entry_count: int = 0
+    incremental_tool_round_count: int = 0
+    incremental_grounding_start: int = 0
+    incremental_grounding_count: int = 0
+    incremental_window_start: int = 0
+    incremental_requires_full_rebuild: bool = False
     on_event: (
-        Callable[[TextEvent | ToolCallEvent | DoneEvent], Awaitable[None]] | None
+        Callable[
+            [
+                TextEvent
+                | ThinkingEvent
+                | ToolCallEvent
+                | ToolResultEvent
+                | UsageEvent
+                | DoneEvent
+            ],
+            Awaitable[None],
+        ]
+        | None
     ) = None
+    _handoff_done: bool = False
 
 
 class Pipeline:
@@ -72,24 +150,45 @@ class Pipeline:
             plugin = self._registry.get(plugin_id)
             mount_hook = plugin.hooks().get("mount")
             if mount_hook is not None:
-                state = mount_hook()
+                state = mount_hook(ctx=ctx, runtime=self._runtime)
                 if state is not None:
                     ctx.plugin_states[plugin_id] = state
+
+    async def shutdown(self, ctx: PipelineContext) -> None:
+        callables = self._registry.get_hooks("on_shutdown")
+        for fn in callables:
+            result = fn(ctx=ctx, runtime=self._runtime)
+            if isawaitable(result):
+                await result
 
     async def run_turn(self, ctx: PipelineContext) -> PipelineContext:
         fork = None
         original_tape = ctx.tape
+        ctx._handoff_done = False
 
         try:
             for stage in self.STAGES:
                 try:
                     handler = getattr(self, f"_stage_{stage}", None)
                     if handler is not None:
+                        if _tracer is not None:
+                            _tracer.info(
+                                "stage_start", stage=stage, entry_count=len(ctx.tape)
+                            )
                         await handler(ctx)
+                        if _tracer is not None:
+                            _tracer.info(
+                                "stage_end", stage=stage, entry_count=len(ctx.tape)
+                            )
                         if stage == "load_state" and ctx.storage is not None:
                             begin = getattr(ctx.storage, "begin", None)
                             if callable(begin):
                                 fork = begin(ctx.tape)
+                                if not isinstance(fork, Tape):
+                                    raise PipelineError(
+                                        "storage.begin() must return Tape",
+                                        stage=stage,
+                                    )
                                 ctx.tape = fork
                     else:
                         logger.debug("Stage '%s' has no handler, skipping", stage)
@@ -127,14 +226,61 @@ class Pipeline:
                 ctx.tool_schemas.append(tool_list)
 
     async def _stage_build_context(self, ctx: PipelineContext) -> None:
-        summary = self._runtime.call_first("summarize_context", tape=ctx.tape)
-        if summary is not None:
-            ctx.tape = Tape(
-                entries=list(summary),
-                tape_id=ctx.tape.tape_id,
-                parent_id=ctx.tape.parent_id,
-            )
-            logger.info("Context summarized: %d entries remaining", len(ctx.tape))
+        from agentkit.tape.view import TapeView
+        from agentkit.context.builder import ContextBuilder
+
+        system_prompt = ctx.config.get("system_prompt", "You are a helpful assistant.")
+        if ctx.context_builder is None:
+            ctx.context_builder = ContextBuilder(system_prompt=system_prompt)
+        builder = ctx.context_builder
+
+        incremental_enabled = bool(ctx.config.get("incremental_context"))
+        force_full_rebuild = False
+
+        window_result = self._runtime.call_first(
+            "resolve_context_window", tape=ctx.tape
+        )
+        if window_result is not None:
+            if not (
+                isinstance(window_result, tuple)
+                and len(window_result) == 2
+                and isinstance(window_result[0], int)
+            ):
+                logger.warning(
+                    "resolve_context_window returned unexpected shape (%s), skipping windowing",
+                    type(window_result).__name__,
+                )
+            else:
+                window_start, summary_anchor = window_result
+                visible_entries = ctx.tape.windowed_entries()
+                if not 0 <= window_start <= len(visible_entries):
+                    logger.warning(
+                        "resolve_context_window returned out-of-range window_start=%s for %s visible entries; skipping windowing",
+                        window_start,
+                        len(visible_entries),
+                    )
+                elif summary_anchor is not None and window_start > 0:
+                    abs_window_start = ctx.tape.window_start + window_start
+                    if abs_window_start > ctx.tape.window_start:
+                        ctx.tape.handoff(summary_anchor, window_start=abs_window_start)
+                        force_full_rebuild = True
+                logger.info(
+                    "Context window advanced: %d entries visible (of %d total)",
+                    len(ctx.tape.windowed_entries()),
+                    len(ctx.tape),
+                )
+        else:
+            summary = self._runtime.call_first("summarize_context", tape=ctx.tape)
+            if summary is not None:
+                ctx.tape = Tape(
+                    entries=list(summary),
+                    tape_id=ctx.tape.tape_id,
+                    parent_id=ctx.tape.parent_id,
+                )
+                force_full_rebuild = True
+                logger.info(
+                    "Context summarized (legacy): %d entries remaining", len(ctx.tape)
+                )
 
         grounding_results = self._runtime.call_many("build_context", tape=ctx.tape)
         grounding: list[dict[str, Any]] = []
@@ -142,11 +288,54 @@ class Pipeline:
             if isinstance(result, list):
                 grounding.extend(result)
 
-        from agentkit.context.builder import ContextBuilder
+        interval = max(
+            1, int(ctx.config.get("incremental_context_rebuild_interval", 5))
+        )
+        should_full_rebuild = (
+            not incremental_enabled
+            or force_full_rebuild
+            or ctx.incremental_requires_full_rebuild
+            or ctx.incremental_entry_count == 0
+            or ctx.incremental_entry_count > len(ctx.tape)
+            or ctx.incremental_window_start != ctx.tape.window_start
+            or ctx.incremental_tool_round_count % interval == 0
+        )
 
-        system_prompt = ctx.config.get("system_prompt", "You are a helpful assistant.")
-        builder = ContextBuilder(system_prompt=system_prompt)
-        ctx.messages = builder.build(ctx.tape, grounding=grounding or None)
+        if should_full_rebuild:
+            view = TapeView.from_tape(ctx.tape)
+            ctx.incremental_core_messages = builder.build_core_messages(view.entries)
+            ctx.incremental_entry_count = len(ctx.tape)
+            ctx.incremental_window_start = ctx.tape.window_start
+            ctx.messages = builder.compose_messages(
+                ctx.incremental_core_messages,
+                grounding=grounding or None,
+            )
+            if grounding:
+                ctx.incremental_grounding_start = 1 + builder.grounding_insert_index(
+                    ctx.incremental_core_messages
+                )
+                ctx.incremental_grounding_count = len(grounding)
+            else:
+                ctx.incremental_grounding_start = len(ctx.messages)
+                ctx.incremental_grounding_count = 0
+            ctx.incremental_requires_full_rebuild = False
+            return
+
+        view = TapeView.from_tape(ctx.tape)
+        visible_start = max(ctx.incremental_entry_count - ctx.tape.window_start, 0)
+        new_entries = view.entries[visible_start:]
+        builder.append_to_core_messages(ctx.incremental_core_messages, new_entries)
+        ctx.incremental_entry_count = len(ctx.tape)
+        ctx.incremental_window_start = ctx.tape.window_start
+        grounding_start, grounding_count = builder.patch_messages(
+            ctx.messages,
+            ctx.incremental_core_messages,
+            grounding=grounding or None,
+            grounding_start=ctx.incremental_grounding_start,
+            grounding_count=ctx.incremental_grounding_count,
+        )
+        ctx.incremental_grounding_start = grounding_start
+        ctx.incremental_grounding_count = grounding_count
 
     async def _stage_run_model(self, ctx: PipelineContext) -> None:
         if ctx.llm_provider is None:
@@ -164,9 +353,14 @@ class Pipeline:
 
             text_chunks: list[str] = []
             tool_calls: list[dict[str, Any]] = []
+            thinking_chunks: list[str] = []
 
             async for event in ctx.llm_provider.stream(ctx.messages, tools=tool_dicts):
-                if isinstance(event, TextEvent):
+                if isinstance(event, ThinkingEvent):
+                    if ctx.on_event:
+                        await ctx.on_event(event)
+                    thinking_chunks.append(event.text)
+                elif isinstance(event, TextEvent):
                     if ctx.on_event:
                         await ctx.on_event(event)
                     text_chunks.append(event.text)
@@ -180,45 +374,61 @@ class Pipeline:
                             "arguments": event.arguments,
                         }
                     )
+                elif isinstance(event, UsageEvent):
+                    if ctx.on_event:
+                        await ctx.on_event(event)
                 elif isinstance(event, DoneEvent):
                     if ctx.on_event:
                         await ctx.on_event(event)
                     break
 
             if text_chunks and not tool_calls:
+                payload: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": "".join(text_chunks),
+                }
+                if thinking_chunks:
+                    payload["reasoning_content"] = "".join(thinking_chunks)
                 ctx.tape.append(
                     Entry(
                         kind="message",
-                        payload={"role": "assistant", "content": "".join(text_chunks)},
+                        payload=payload,
                     )
                 )
                 break
 
             if tool_calls:
                 if text_chunks:
+                    payload = {
+                        "role": "assistant",
+                        "content": "".join(text_chunks),
+                    }
+                    if thinking_chunks:
+                        payload["reasoning_content"] = "".join(thinking_chunks)
                     ctx.tape.append(
                         Entry(
                             kind="message",
-                            payload={
-                                "role": "assistant",
-                                "content": "".join(text_chunks),
-                            },
+                            payload=payload,
                         )
                     )
 
                 executable_calls: list[dict[str, Any]] = []
                 executable_metas: list[dict[str, Any]] = []
+                checkpoint_entry_count: int | None = None
 
-                for tc in tool_calls:
+                for i, tc in enumerate(tool_calls):
+                    tc_payload: dict[str, Any] = {
+                        "id": tc["id"],
+                        "name": tc["name"],
+                        "arguments": tc["arguments"],
+                        "role": "assistant",
+                    }
+                    if i == 0 and thinking_chunks and not text_chunks:
+                        tc_payload["reasoning_content"] = "".join(thinking_chunks)
                     ctx.tape.append(
                         Entry(
                             kind="tool_call",
-                            payload={
-                                "id": tc["id"],
-                                "name": tc["name"],
-                                "arguments": tc["arguments"],
-                                "role": "assistant",
-                            },
+                            payload=tc_payload,
                         )
                     )
 
@@ -229,19 +439,37 @@ class Pipeline:
                     )
 
                     approved = True
-                    if directive is not None and self._directive_executor is not None:
-                        approved = await self._directive_executor.execute(directive)
+                    if directive is not None:
+                        if not isinstance(directive, Directive):
+                            logger.warning(
+                                "approve_tool_call returned non-Directive type %s for tool %r, rejecting (fail-closed)",
+                                type(directive).__name__,
+                                tc["name"],
+                            )
+                            approved = False
+                        elif self._directive_executor is not None:
+                            approved = await self._directive_executor.execute(directive)
 
                     if not approved:
+                        rejection_msg = f"Tool call rejected: {getattr(directive, 'reason', 'policy')}"
                         ctx.tape.append(
                             Entry(
                                 kind="tool_result",
                                 payload={
                                     "tool_call_id": tc["id"],
-                                    "content": f"Tool call rejected: {getattr(directive, 'reason', 'policy')}",
+                                    "content": rejection_msg,
                                 },
                             )
                         )
+                        if ctx.on_event:
+                            await ctx.on_event(
+                                ToolResultEvent(
+                                    tool_call_id=tc["id"],
+                                    name=tc["name"],
+                                    result=rejection_msg,
+                                    is_error=True,
+                                )
+                            )
                         continue
 
                     executable_calls.append(
@@ -250,14 +478,21 @@ class Pipeline:
                     executable_metas.append(tc)
 
                 if executable_calls:
-                    batch_results = (
-                        self._runtime.call_first(
-                            "execute_tools_batch",
-                            tool_calls=executable_calls,
-                        )
-                        if len(executable_calls) > 1
-                        else None
+                    max_size = ctx.config.get("max_tool_result_size", 10000)
+                    structured_results_enabled = bool(
+                        ctx.config.get("structured_results", False)
                     )
+                    checkpoint_entry_count = len(ctx.tape)
+                    with _structured_tool_result_scope(ctx, structured_results_enabled):
+                        batch_results = (
+                            self._runtime.call_first(
+                                "execute_tools_batch",
+                                tool_calls=executable_calls,
+                                ctx=ctx,
+                            )
+                            if len(executable_calls) > 1
+                            else None
+                        )
                     if isawaitable(batch_results):
                         batch_results = await batch_results
 
@@ -265,16 +500,26 @@ class Pipeline:
                         batch_results = []
                         for call in executable_calls:
                             try:
-                                result = self._runtime.call_first(
-                                    "execute_tool",
-                                    name=call["name"],
-                                    arguments=call["arguments"],
-                                )
-                                if isawaitable(result):
-                                    result = await result
+                                with _structured_tool_result_scope(
+                                    ctx, structured_results_enabled
+                                ):
+                                    result = self._runtime.call_first(
+                                        "execute_tool",
+                                        name=call["name"],
+                                        arguments=call["arguments"],
+                                        ctx=ctx,
+                                    )
+                                    if isawaitable(result):
+                                        result = await result
                                 batch_results.append(result)
                             except Exception as exc:
                                 batch_results.append(exc)
+
+                    if len(batch_results) != len(executable_calls):
+                        raise PipelineError(
+                            "execute_tools_batch returned "
+                            f"{len(batch_results)} results for {len(executable_calls)} tool calls"
+                        )
 
                     for tc, result in zip(
                         executable_metas, batch_results, strict=False
@@ -283,14 +528,28 @@ class Pipeline:
                             result_str = (
                                 f"Error executing tool '{tc['name']}': {str(result)}"
                             )
+                            event_result: str | dict[str, Any] = result_str
+                            is_error = True
+                        elif result is None:
+                            result_str = (
+                                f"Error executing tool '{tc['name']}': "
+                                f"tool '{tc['name']}' not found"
+                            )
+                            event_result = result_str
+                            is_error = True
                         else:
-                            result_str = str(result) if result is not None else ""
-                            max_size = ctx.config.get("max_tool_result_size", 10000)
-                            if len(result_str) > max_size:
-                                result_str = (
-                                    result_str[:max_size]
-                                    + f"\n... ({len(result_str) - max_size} chars truncated)"
-                                )
+                            result_str = _format_result(
+                                result,
+                                structured=structured_results_enabled,
+                                max_size=max_size,
+                            )
+                            event_result = (
+                                result
+                                if structured_results_enabled
+                                and isinstance(result, dict)
+                                else result_str
+                            )
+                            is_error = False
 
                         ctx.tape.append(
                             Entry(
@@ -301,23 +560,50 @@ class Pipeline:
                                 },
                             )
                         )
+                        if ctx.on_event:
+                            await ctx.on_event(
+                                ToolResultEvent(
+                                    tool_call_id=tc["id"],
+                                    name=tc["name"],
+                                    result=event_result,
+                                    is_error=is_error,
+                                )
+                            )
 
+                if executable_calls:
+                    ctx.incremental_tool_round_count += 1
                 await self._stage_build_context(ctx)
+                if checkpoint_entry_count is not None and len(
+                    ctx.tape
+                ) != checkpoint_entry_count + len(executable_metas):
+                    ctx.incremental_tool_round_count = 0
+                    ctx.incremental_entry_count = 0
                 continue
 
             break
 
     async def _stage_save_state(self, ctx: PipelineContext) -> None:
-        self._runtime.notify("on_checkpoint", ctx=ctx)
+        tape_len_before_checkpoint = len(ctx.tape)
+        self._runtime.notify("on_checkpoint", ctx=ctx, runtime=self._runtime)
+        if len(ctx.tape) != tape_len_before_checkpoint:
+            ctx.incremental_requires_full_rebuild = True
 
     async def _stage_render(self, ctx: PipelineContext) -> None:
-        directives = self._runtime.call_many("on_turn_end", tape=ctx.tape)
+        raw_directives = self._runtime.call_many("on_turn_end", tape=ctx.tape)
+        directives: list[Directive] = []
+        for d in raw_directives:
+            if isinstance(d, Directive):
+                directives.append(d)
+            else:
+                logger.warning(
+                    "on_turn_end returned non-Directive type %s, dropping",
+                    type(d).__name__,
+                )
         ctx.output = {"directives": directives}
 
         if self._directive_executor is not None:
             for directive in directives:
-                if directive is not None:
-                    await self._directive_executor.execute(directive)
+                await self._directive_executor.execute(directive)
 
     async def _stage_dispatch(self, ctx: PipelineContext) -> None:
         pass

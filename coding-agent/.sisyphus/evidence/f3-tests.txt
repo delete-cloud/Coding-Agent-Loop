@@ -1,0 +1,26 @@
+=== F3: Real Manual QA ===
+
+--- CLI tests full count ---
+      67
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+67 passed, 7 warnings in 0.65s
+
+--- UI tests ---
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+101 passed, 7 warnings in 1.59s
+
+--- Test quality: no assert True ---
+0
+
+--- test_ count ---
+21
+
+--- SWITCH_TO_SHELL|SWITCH_TO_CHAT usage ---
+21
+
+--- Each binding has >=2 tests (!, Escape, Backspace) ---
+! binding tests: 5
+escape binding tests: 9
+backspace binding tests: 6

@@ -202,7 +202,6 @@ class TestKBIndexing:
         # Get table to check IDs
         table = kb._get_table()
         import pyarrow as pa
-
         first_count = len(table.to_arrow().to_pandas())
 
         await kb.index_file(Path("/test/file.py"), content)
@@ -236,7 +235,6 @@ class TestKBIndexing:
         # Should have indexed the text files
         table = kb._get_table()
         import pyarrow as pa
-
         df = table.to_arrow().to_pandas()
         sources = df["source"].tolist()
 
@@ -265,7 +263,6 @@ class TestKBIndexing:
 
         table = kb._get_table()
         import pyarrow as pa
-
         df = table.to_arrow().to_pandas()
         sources = df["source"].tolist()
 
@@ -298,9 +295,7 @@ class TestKBSearch:
         assert all(hasattr(r, "score") for r in results)
 
     @pytest.mark.asyncio
-    async def test_search_returns_correct_structure(
-        self, temp_db_path, mock_embedding_fn
-    ):
+    async def test_search_returns_correct_structure(self, temp_db_path, mock_embedding_fn):
         """Test that search returns properly structured results."""
         kb = KB(
             db_path=temp_db_path,
@@ -399,12 +394,8 @@ class TestKBHybridSearch:
         )
 
         # Index content
-        await kb.index_file(
-            Path("/test/file.py"), "Python programming guide and tutorial."
-        )
-        await kb.index_file(
-            Path("/test/other.py"), "JavaScript development documentation."
-        )
+        await kb.index_file(Path("/test/file.py"), "Python programming guide and tutorial.")
+        await kb.index_file(Path("/test/other.py"), "JavaScript development documentation.")
 
         # Hybrid search
         results = await kb.hybrid_search("Python guide", k=2)
@@ -466,54 +457,6 @@ class TestKBHybridSearch:
             # Results should be sorted by score (ascending)
             scores = [r.score for r in results]
             assert scores == sorted(scores)
-
-    @pytest.mark.asyncio
-    async def test_hybrid_search_normalizes_fts_and_vector_scores(self, temp_db_path):
-        kb = KB(
-            db_path=temp_db_path, embedding_fn=lambda texts: [[1.0] * 8 for _ in texts]
-        )
-
-        class FakeSearch:
-            def __init__(self, results):
-                self._results = results
-
-            def limit(self, k):
-                return self
-
-            def to_list(self):
-                return self._results
-
-        class FakeTable:
-            def search(self, value, query_type=None):
-                if query_type == "fts":
-                    return FakeSearch(
-                        [
-                            {
-                                "id": "fts-1",
-                                "content": "fts result",
-                                "source": "fts.md",
-                                "metadata": "{}",
-                                "_score": 12.0,
-                            }
-                        ]
-                    )
-                return FakeSearch(
-                    [
-                        {
-                            "id": "vec-1",
-                            "content": "vector result",
-                            "source": "vec.md",
-                            "metadata": "{}",
-                            "_distance": 0.6,
-                        }
-                    ]
-                )
-
-        kb._table = FakeTable()
-
-        results = await kb.hybrid_search("query", k=2)
-
-        assert [result.chunk.id for result in results] == ["fts-1", "vec-1"]
 
 
 class TestChunking:

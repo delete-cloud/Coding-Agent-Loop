@@ -294,3 +294,53 @@ class TestToolResultTruncation:
         assert "500 chars truncated" in content, (
             "Should use default 10000 and show 10500 - 10000 = 500 chars truncated"
         )
+
+    @pytest.mark.asyncio
+    async def test_dict_result_keeps_raw_event_payload_but_tape_stores_truncated_string(
+        self, truncation_setup
+    ):
+        pipeline, plugin = truncation_setup
+
+        large_stdout = "x" * 5000
+        plugin._tool_result = {"stdout": large_stdout, "exit_code": 0}
+
+        tape = Tape()
+        tape.append(Entry(kind="message", payload={"role": "user", "content": "test"}))
+
+        seen_events = []
+
+        async def on_event(event):
+            seen_events.append(event)
+
+        ctx = PipelineContext(
+            tape=tape,
+            session_id="s1",
+            config={"max_tool_result_size": 1000, "structured_results": True},
+            on_event=on_event,
+        )
+        await pipeline.mount(ctx)
+
+        from agentkit.providers.models import ToolCallEvent, DoneEvent
+
+        async def mock_stream(messages, tools=None, **kwargs):
+            yield ToolCallEvent(
+                tool_call_id="call_1",
+                name="test_tool",
+                arguments={"arg": "value"},
+            )
+            yield DoneEvent()
+
+        mock_llm = MagicMock()
+        mock_llm.stream = mock_stream
+        plugin._mock_llm = mock_llm
+
+        await pipeline.run_turn(ctx)
+
+        tool_result_entry = next(
+            entry for entry in ctx.tape if entry.kind == "tool_result"
+        )
+        assert isinstance(tool_result_entry.payload["content"], str)
+        assert "chars truncated" in tool_result_entry.payload["content"]
+
+        tool_event = next(event for event in seen_events if event.kind == "tool_result")
+        assert tool_event.result == {"stdout": large_stdout, "exit_code": 0}

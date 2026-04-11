@@ -135,4 +135,4 @@ enabled = ["storage", "core_tools"]
         assert core_tools._workspace_root == workspace_root.resolve()
 
         approval_plugin = pipeline._registry.get("approval")
-        assert approval_plugin._policy.name == "MANUAL"
+        assert approval_plugin._policy.name == "INTERACTIVE"

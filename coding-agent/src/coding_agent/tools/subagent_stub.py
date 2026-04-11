@@ -10,5 +10,6 @@ from agentkit.tools import tool
         "The sub-agent gets its own context and tool access."
     ),
 )
-def subagent_dispatch(goal: str, tools: list = None) -> str:
+def subagent_dispatch(goal: str, tools: list[str] | None = None) -> str:
+    del goal, tools
     raise NotImplementedError("subagent tool not yet wired for Pipeline mode")

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, cast
 
 _FILE_TOOLS = frozenset({"file_read", "file_write", "file_replace"})
 
@@ -29,7 +30,7 @@ _READ_WRITE_PAIRS: frozenset[tuple[str, str]] = frozenset(
 )
 
 ToolCallDict = dict[str, Any]
-ExecuteFn = Callable[[str, dict[str, Any]], Awaitable[str]]
+ExecuteFn = Callable[[str, dict[str, Any]], Awaitable[Any]]
 
 
 class DependencyAnalyzer:
@@ -68,6 +69,11 @@ class ParallelExecutorPlugin:
         self.execute_fn = execute_fn
         self.max_concurrency = max_concurrency
         self._semaphore = asyncio.Semaphore(max_concurrency)
+        signature = inspect.signature(execute_fn)
+        self._execute_fn_accepts_ctx = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD or parameter.name == "ctx"
+            for parameter in signature.parameters.values()
+        )
 
     def hooks(self) -> dict[str, Callable[..., Any]]:
         return {"execute_tools_batch": self.execute_batch}
@@ -108,19 +114,35 @@ class ParallelExecutorPlugin:
 
     async def execute_batch(
         self, tool_calls: list[ToolCallDict] | None = None, **kwargs: Any
-    ) -> list[str]:
+    ) -> list[Any]:
         if not tool_calls:
             return []
 
+        pipeline_ctx = kwargs.get("ctx")
+
         batches = self._group_by_dependencies(tool_calls)
-        results_by_index: dict[int, str] = {}
+        results_by_index: dict[int, Any] = {}
 
         for batch in batches:
 
-            async def _run_one(idx: int, call: ToolCallDict) -> tuple[int, str]:
+            async def _run_one(idx: int, call: ToolCallDict) -> tuple[int, Any]:
                 async with self._semaphore:
                     try:
-                        result = await self.execute_fn(call["name"], call["arguments"])
+                        if self._execute_fn_accepts_ctx:
+                            execute_with_ctx = cast(
+                                Callable[..., Awaitable[Any]],
+                                self.execute_fn,
+                            )
+                            result = await execute_with_ctx(
+                                call["name"],
+                                call["arguments"],
+                                ctx=pipeline_ctx,
+                            )
+                        else:
+                            result = await self.execute_fn(
+                                call["name"],
+                                call["arguments"],
+                            )
                         return idx, result
                     except Exception as exc:
                         return idx, json.dumps({"error": str(exc)})

@@ -18,7 +18,6 @@ from coding_agent.wire.protocol import (
     CompletionStatus,
     StreamDelta,
     ToolCallDelta,
-    ToolResultDelta,
     TurnEnd,
     WireMessage,
 )
@@ -31,14 +30,12 @@ from typing import Any
 @dataclass(kw_only=True)
 class TurnBegin(WireMessage):
     """A new turn is starting."""
-
     session_id: str = ""
 
 
 @dataclass(kw_only=True)
 class ToolCallBegin(WireMessage):
     """Tool call is about to be executed."""
-
     session_id: str = ""
     call_id: str = ""
     tool: str = ""
@@ -48,7 +45,6 @@ class ToolCallBegin(WireMessage):
 @dataclass(kw_only=True)
 class ToolCallEnd(WireMessage):
     """Tool call has completed."""
-
     session_id: str = ""
     call_id: str = ""
     result: str = ""
@@ -57,7 +53,6 @@ class ToolCallEnd(WireMessage):
 @dataclass(kw_only=True)
 class StepInfo(WireMessage):
     """Information about current step."""
-
     session_id: str = ""
     step_number: int = 0
     max_steps: int = 0
@@ -66,7 +61,6 @@ class StepInfo(WireMessage):
 @dataclass(kw_only=True)
 class ErrorMessage(WireMessage):
     """Error message to display to the user."""
-
     session_id: str = ""
     content: str = ""
 
@@ -76,7 +70,6 @@ __all__ = [
     "WireMessage",
     "StreamDelta",
     "ToolCallDelta",
-    "ToolResultDelta",
     "ApprovalRequest",
     "ApprovalResponse",
     "TurnEnd",

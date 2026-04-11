@@ -18,10 +18,12 @@ class WireMessage:
 
     Attributes:
         session_id: Unique identifier for the session
+        agent_id: Originating agent identifier for child/UI scoping
         timestamp: When the message was created
     """
 
     session_id: str = ""  # Default to empty string for backward compatibility
+    agent_id: str = ""
     timestamp: datetime = field(default_factory=datetime.now)
 
 
@@ -55,11 +57,36 @@ class ToolCallDelta(WireMessage):
 
 @dataclass(kw_only=True)
 class ToolResultDelta(WireMessage):
+    """Tool execution result.
+
+    Attributes:
+        call_id: ID matching the original ToolCallDelta
+        tool_name: Name of the tool that was executed
+        result: The raw tool execution result payload
+        display_result: A redacted or user-safe display string
+        is_error: Whether the result is an error
+    """
+
     call_id: str
     tool_name: str
     result: str | dict[str, Any]
     display_result: str = ""
     is_error: bool = False
+
+
+@dataclass(kw_only=True)
+class ThinkingDelta(WireMessage):
+    text: str
+
+
+@dataclass(kw_only=True)
+class TurnStatusDelta(WireMessage):
+    phase: str  # "thinking" | "streaming" | "tool_call" | "idle"
+    elapsed_seconds: float = 0.0
+    tokens_in: int = 0
+    tokens_out: int = 0
+    model_name: str = ""
+    context_percent: float = 0.0
 
 
 @dataclass(kw_only=True)
@@ -101,6 +128,7 @@ class ApprovalRequest(WireMessage):
         if self.tool_call is None and self.tool:
             self.tool_call = ToolCallDelta(
                 session_id=self.session_id,
+                agent_id=self.agent_id,
                 tool_name=self.tool,
                 arguments=self.args,
                 call_id=self.call_id or self.request_id,
@@ -109,6 +137,8 @@ class ApprovalRequest(WireMessage):
         elif self.tool_call and not self.tool:
             self.tool = self.tool_call.tool_name
             self.args = self.tool_call.arguments
+            if not self.agent_id:
+                self.agent_id = self.tool_call.agent_id
             if not self.call_id:
                 self.call_id = self.tool_call.call_id
             if not self.request_id:

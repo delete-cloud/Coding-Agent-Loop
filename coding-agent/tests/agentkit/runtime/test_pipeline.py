@@ -5,7 +5,9 @@ from agentkit.runtime.hook_runtime import HookRuntime
 from agentkit.plugin.registry import PluginRegistry
 from agentkit.tape.tape import Tape
 from agentkit.tape.models import Entry
+from agentkit.tape.anchor import Anchor
 from agentkit.errors import PipelineError
+from agentkit.tools.schema import ToolSchema
 
 
 class MinimalPlugin:
@@ -14,6 +16,7 @@ class MinimalPlugin:
     def __init__(self):
         self.mounted = False
         self.mount_called = False
+        self.shutdown_called = False
         self._mock_llm = MagicMock()
         self._mock_storage = object()
         self._summary_result = None
@@ -21,17 +24,20 @@ class MinimalPlugin:
     def hooks(self):
         return {
             "mount": self.do_mount,
+            "on_shutdown": self.on_shutdown,
             "provide_llm": self.provide_llm,
             "provide_storage": self.provide_storage,
             "get_tools": self.get_tools,
             "build_context": self.build_context,
             "summarize_context": self.summarize_context,
-            "execute_tool": self.execute_tool,
         }
 
     def do_mount(self, **kwargs):
         self.mount_called = True
         return {"ready": True}
+
+    def on_shutdown(self, **kwargs):
+        self.shutdown_called = True
 
     def provide_llm(self, **kwargs):
         return self._mock_llm
@@ -48,8 +54,67 @@ class MinimalPlugin:
     def summarize_context(self, **kwargs):
         return self._summary_result
 
+
+class GreedyToolPlugin:
+    state_key = "greedy_tool"
+
+    def hooks(self):
+        return {
+            "execute_tool": self.execute_tool,
+        }
+
     def execute_tool(self, name: str = "", **kwargs):
-        return f"executed:{name}"
+        if name != "known_tool":
+            return None
+        return "known-tool-result"
+
+
+class SkillsLikePlugin:
+    state_key = "skills_like"
+
+    def hooks(self):
+        return {
+            "get_tools": self.get_tools,
+            "execute_tool": self.execute_tool,
+        }
+
+    def get_tools(self, **kwargs):
+        return [
+            ToolSchema(
+                name="skill_invoke",
+                description="Activate a skill",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                    },
+                    "required": ["name"],
+                },
+            )
+        ]
+
+    def execute_tool(
+        self, name: str = "", arguments: dict[str, object] | None = None, **kwargs
+    ):
+        if name != "skill_invoke":
+            return None
+        return f"activated:{(arguments or {}).get('name', '')}"
+
+
+class BatchToolPlugin:
+    state_key = "batch_tool"
+
+    def __init__(self, batch_results):
+        self.batch_results = batch_results
+
+    def hooks(self):
+        return {
+            "execute_tools_batch": self.execute_tools_batch,
+        }
+
+    def execute_tools_batch(self, tool_calls=None, **kwargs):
+        del tool_calls, kwargs
+        return self.batch_results
 
 
 class TestPipelineContext:
@@ -98,6 +163,15 @@ class TestPipeline:
         ctx = PipelineContext(tape=Tape(), session_id="s1")
         await pipeline.mount(ctx)
         assert "minimal" in ctx.plugin_states
+
+    @pytest.mark.asyncio
+    async def test_shutdown_notifies_plugins(self, setup):
+        pipeline, plugin = setup
+        ctx = PipelineContext(tape=Tape(), session_id="s1")
+
+        await pipeline.shutdown(ctx)
+
+        assert plugin.shutdown_called is True
 
     def test_pipeline_stages_defined(self, setup):
         pipeline, _ = setup
@@ -174,6 +248,52 @@ class TestPipeline:
         assert entries[-1].payload["role"] == "assistant"
 
     @pytest.mark.asyncio
+    async def test_run_turn_allows_later_plugin_to_handle_unknown_tool(self):
+        registry = PluginRegistry()
+        llm_plugin = MinimalPlugin()
+        greedy_tool = GreedyToolPlugin()
+        skills = SkillsLikePlugin()
+        registry.register(llm_plugin)
+        registry.register(greedy_tool)
+        registry.register(skills)
+        runtime = HookRuntime(registry)
+        pipeline = Pipeline(runtime=runtime, registry=registry)
+
+        async def mock_stream(messages, tools=None, **kwargs):
+            from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
+
+            if not any(entry.kind == "tool_result" for entry in ctx.tape):
+                assert tools is not None
+                yield ToolCallEvent(
+                    tool_call_id="tc-skill-1",
+                    name="skill_invoke",
+                    arguments={"name": "using-superpowers"},
+                )
+                yield DoneEvent()
+                return
+
+            yield TextEvent(text="Skill activated")
+            yield DoneEvent()
+
+        mock_llm = MagicMock()
+        mock_llm.stream = mock_stream
+        llm_plugin._mock_llm = mock_llm
+
+        tape = Tape()
+        tape.append(Entry(kind="message", payload={"role": "user", "content": "hello"}))
+        ctx = PipelineContext(tape=tape, session_id="s-skill")
+        await pipeline.mount(ctx)
+
+        result = await pipeline.run_turn(ctx)
+
+        tool_result_entries = [e for e in ctx.tape if e.kind == "tool_result"]
+        assert tool_result_entries
+        assert (
+            tool_result_entries[0].payload["content"] == "activated:using-superpowers"
+        )
+        assert result is not None
+
+    @pytest.mark.asyncio
     async def test_run_turn_commits_active_fork_and_updates_context_tape(self, setup):
         pipeline, plugin = setup
 
@@ -247,6 +367,166 @@ class TestPipeline:
         assert ctx.messages[1]["content"] == "summary"
 
     @pytest.mark.asyncio
+    async def test_build_context_uses_windowing(self, setup):
+        pipeline, plugin = setup
+        tape = Tape()
+        for i in range(10):
+            tape.append(
+                Entry(kind="message", payload={"role": "user", "content": f"msg-{i}"})
+            )
+        ctx = PipelineContext(tape=tape, session_id="s1")
+
+        class WindowPlugin:
+            state_key = "window"
+
+            def hooks(self):
+                return {"resolve_context_window": self.resolve_context_window}
+
+            def resolve_context_window(self, tape=None, **kwargs):
+                if tape is None:
+                    return None
+                anchor = Entry(
+                    kind="anchor",
+                    payload={"content": "summary of old entries"},
+                    meta={"is_handoff": True, "source_entry_count": 7},
+                )
+                return (7, anchor)
+
+        window_plugin = WindowPlugin()
+        registry = PluginRegistry()
+        registry.register(plugin)
+        registry.register(window_plugin)
+        runtime = HookRuntime(registry)
+        pipeline2 = Pipeline(runtime=runtime, registry=registry)
+
+        await pipeline2._stage_build_context(ctx)
+
+        # All original entries preserved + the anchor
+        assert len(ctx.tape) == 11  # 10 original + 1 anchor
+        # The anchor is in the tape
+        anchors = [e for e in ctx.tape if e.kind == "anchor"]
+        assert len(anchors) == 1
+        assert anchors[0].meta.get("is_handoff")
+
+    @pytest.mark.asyncio
+    async def test_build_context_passes_window_start_to_handoff(self, setup):
+        pipeline, plugin = setup
+        tape = Tape()
+        for i in range(10):
+            tape.append(
+                Entry(kind="message", payload={"role": "user", "content": f"msg-{i}"})
+            )
+        ctx = PipelineContext(tape=tape, session_id="s1")
+
+        class WindowPlugin:
+            state_key = "window2"
+
+            def hooks(self):
+                return {"resolve_context_window": self.resolve_context_window}
+
+            def resolve_context_window(self, tape=None, **kwargs):
+                anchor = Anchor(
+                    anchor_type="handoff",
+                    payload={"content": "summary"},
+                )
+                return (7, anchor)
+
+        registry = PluginRegistry()
+        registry.register(plugin)
+        registry.register(WindowPlugin())
+        pipeline2 = Pipeline(runtime=HookRuntime(registry), registry=registry)
+
+        await pipeline2._stage_build_context(ctx)
+
+        windowed = ctx.tape.windowed_entries()
+        assert len(windowed) == 4  # entries[7:10] + anchor
+        assert windowed[-1].kind == "anchor"
+
+    @pytest.mark.asyncio
+    async def test_build_context_can_advance_window_multiple_times_in_same_turn(
+        self, setup
+    ):
+        pipeline, plugin = setup
+        tape = Tape()
+        for i in range(12):
+            tape.append(
+                Entry(kind="message", payload={"role": "user", "content": f"msg-{i}"})
+            )
+        ctx = PipelineContext(tape=tape, session_id="s1")
+
+        class WindowPlugin:
+            state_key = "window-multi"
+
+            def hooks(self):
+                return {"resolve_context_window": self.resolve_context_window}
+
+            def resolve_context_window(self, tape=None, **kwargs):
+                if tape is None:
+                    return None
+                visible = tape.windowed_entries()
+                if len(visible) > 6:
+                    return (
+                        len(visible) - 5,
+                        Anchor(anchor_type="handoff", payload={"content": "summary"}),
+                    )
+                return None
+
+        registry = PluginRegistry()
+        registry.register(plugin)
+        registry.register(WindowPlugin())
+        pipeline2 = Pipeline(runtime=HookRuntime(registry), registry=registry)
+
+        await pipeline2._stage_build_context(ctx)
+        first_window_start = ctx.tape.window_start
+
+        ctx.tape.append(
+            Entry(kind="message", payload={"role": "user", "content": "after-1"})
+        )
+        ctx.tape.append(
+            Entry(kind="message", payload={"role": "assistant", "content": "after-2"})
+        )
+        await pipeline2._stage_build_context(ctx)
+
+        anchors = [entry for entry in ctx.tape if entry.kind == "anchor"]
+        assert len(anchors) == 2
+        assert ctx.tape.window_start > first_window_start
+
+    @pytest.mark.asyncio
+    async def test_build_context_reentrant_does_not_double_handoff(self, setup):
+        pipeline, plugin = setup
+        tape = Tape()
+        for i in range(10):
+            tape.append(
+                Entry(kind="message", payload={"role": "user", "content": f"msg-{i}"})
+            )
+        ctx = PipelineContext(tape=tape, session_id="s1")
+
+        class WindowPlugin:
+            state_key = "window3"
+
+            def hooks(self):
+                return {"resolve_context_window": self.resolve_context_window}
+
+            def resolve_context_window(self, tape=None, **kwargs):
+                anchor = Entry(
+                    kind="anchor",
+                    payload={"content": "summary"},
+                    meta={"is_handoff": True},
+                )
+                return (7, anchor)
+
+        registry = PluginRegistry()
+        registry.register(plugin)
+        registry.register(WindowPlugin())
+        pipeline2 = Pipeline(runtime=HookRuntime(registry), registry=registry)
+
+        await pipeline2._stage_build_context(ctx)
+        await pipeline2._stage_build_context(ctx)
+
+        anchors = [e for e in ctx.tape if e.kind == "anchor"]
+        assert len(anchors) == 1
+
+    @pytest.mark.asyncio
     async def test_run_turn_records_one_tool_call_entry_per_call(self, setup):
         pipeline, plugin = setup
         tape = Tape()
@@ -295,3 +575,124 @@ class TestPipeline:
             "arguments": {"path": "b.txt"},
             "role": "assistant",
         }
+
+    @pytest.mark.asyncio
+    async def test_run_turn_raises_when_batch_results_are_too_few(self, setup):
+        pipeline, plugin = setup
+        registry = PluginRegistry()
+        registry.register(plugin)
+        registry.register(BatchToolPlugin(["only-one-result"]))
+        pipeline = Pipeline(runtime=HookRuntime(registry), registry=registry)
+
+        tape = Tape()
+        tape.append(
+            Entry(kind="message", payload={"role": "user", "content": "do two things"})
+        )
+        ctx = PipelineContext(tape=tape, session_id="s1")
+        await pipeline.mount(ctx)
+
+        from agentkit.providers.models import ToolCallEvent, DoneEvent
+
+        async def mock_stream(messages, tools=None, **kwargs):
+            yield ToolCallEvent(
+                tool_call_id="tc1", name="file_read", arguments={"path": "a.txt"}
+            )
+            yield ToolCallEvent(
+                tool_call_id="tc2", name="file_read", arguments={"path": "b.txt"}
+            )
+            yield DoneEvent()
+
+        plugin._mock_llm = MagicMock()
+        plugin._mock_llm.stream = mock_stream
+
+        with pytest.raises(
+            PipelineError,
+            match="execute_tools_batch returned 1 results for 2 tool calls",
+        ):
+            await pipeline.run_turn(ctx)
+
+    @pytest.mark.asyncio
+    async def test_run_turn_raises_when_batch_results_are_too_many(self, setup):
+        pipeline, plugin = setup
+        registry = PluginRegistry()
+        registry.register(plugin)
+        registry.register(BatchToolPlugin(["r1", "r2", "r3"]))
+        pipeline = Pipeline(runtime=HookRuntime(registry), registry=registry)
+
+        tape = Tape()
+        tape.append(
+            Entry(kind="message", payload={"role": "user", "content": "do two things"})
+        )
+        ctx = PipelineContext(tape=tape, session_id="s1")
+        await pipeline.mount(ctx)
+
+        from agentkit.providers.models import ToolCallEvent, DoneEvent
+
+        async def mock_stream(messages, tools=None, **kwargs):
+            yield ToolCallEvent(
+                tool_call_id="tc1", name="file_read", arguments={"path": "a.txt"}
+            )
+            yield ToolCallEvent(
+                tool_call_id="tc2", name="file_read", arguments={"path": "b.txt"}
+            )
+            yield DoneEvent()
+
+        plugin._mock_llm = MagicMock()
+        plugin._mock_llm.stream = mock_stream
+
+        with pytest.raises(
+            PipelineError,
+            match="execute_tools_batch returned 3 results for 2 tool calls",
+        ):
+            await pipeline.run_turn(ctx)
+
+
+class TestPipelineView:
+    @pytest.mark.asyncio
+    async def test_build_context_uses_view(self):
+        from agentkit.tape.view import TapeView
+
+        registry = PluginRegistry()
+
+        class ViewTestPlugin:
+            state_key = "view_test"
+
+            def hooks(self):
+                return {
+                    "provide_llm": lambda **kw: None,
+                    "provide_storage": lambda **kw: None,
+                    "get_tools": lambda **kw: [],
+                    "build_context": lambda **kw: [],
+                }
+
+        registry.register(ViewTestPlugin())
+        runtime = HookRuntime(registry)
+        pipeline = Pipeline(runtime=runtime, registry=registry)
+
+        tape = Tape()
+        for i in range(5):
+            tape.append(
+                Entry(kind="message", payload={"role": "user", "content": f"old-{i}"})
+            )
+        anchor = Entry(
+            kind="anchor",
+            payload={"content": "summary"},
+            meta={"is_handoff": True, "prefix": "Summary"},
+        )
+        tape.handoff(anchor)
+        tape.append(
+            Entry(kind="message", payload={"role": "user", "content": "new msg"})
+        )
+
+        ctx = PipelineContext(
+            tape=tape,
+            session_id="s1",
+            config={"system_prompt": "test"},
+        )
+        await pipeline.mount(ctx)
+        await pipeline._stage_build_context(ctx)
+
+        assert len(ctx.messages) == 3
+        assert "[Summary]" in ctx.messages[1]["content"]
+        assert ctx.messages[2]["content"] == "new msg"
+        assert not any("old-" in str(m.get("content", "")) for m in ctx.messages)
