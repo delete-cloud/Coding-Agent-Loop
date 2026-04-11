@@ -29,10 +29,12 @@ class TestPlanManager:
 
     def test_set_plan_from_list(self):
         pm = PlanManager()
-        pm.set_tasks([
-            {"title": "Read code", "status": "todo"},
-            {"title": "Write tests", "status": "todo"},
-        ])
+        pm.set_tasks(
+            [
+                {"title": "Read code", "status": "todo"},
+                {"title": "Write tests", "status": "todo"},
+            ]
+        )
         assert len(pm.tasks) == 2
         assert pm.tasks[0].id == 1
         assert pm.tasks[0].title == "Read code"
@@ -65,12 +67,14 @@ class TestPlanManager:
 
     def test_to_text_formatting(self):
         pm = PlanManager()
-        pm.set_tasks([
-            {"title": "Read code", "status": "done"},
-            {"title": "Write tests", "status": "in_progress"},
-            {"title": "Implement", "status": "todo"},
-            {"title": "Waiting on review", "status": "blocked"},
-        ])
+        pm.set_tasks(
+            [
+                {"title": "Read code", "status": "done"},
+                {"title": "Write tests", "status": "in_progress"},
+                {"title": "Implement", "status": "todo"},
+                {"title": "Waiting on review", "status": "blocked"},
+            ]
+        )
         text = pm.to_text()
         assert "[x] 1. Read code" in text
         assert "[>] 2. Write tests" in text
@@ -79,10 +83,12 @@ class TestPlanManager:
 
     def test_to_dict_roundtrip(self):
         pm = PlanManager()
-        pm.set_tasks([
-            {"title": "Read code", "status": "done"},
-            {"title": "Write tests", "status": "todo"},
-        ])
+        pm.set_tasks(
+            [
+                {"title": "Read code", "status": "done"},
+                {"title": "Write tests", "status": "todo"},
+            ]
+        )
         data = pm.to_dict()
         assert len(data) == 2
         assert data[0]["id"] == 1
@@ -97,21 +103,29 @@ class TestPlanManager:
 
     def test_next_task(self):
         pm = PlanManager()
-        pm.set_tasks([
-            {"title": "Done task", "status": "done"},
-            {"title": "Current task", "status": "in_progress"},
-            {"title": "Next task", "status": "todo"},
-        ])
-        assert pm.next_task().title == "Current task"
+        pm.set_tasks(
+            [
+                {"title": "Done task", "status": "done"},
+                {"title": "Current task", "status": "in_progress"},
+                {"title": "Next task", "status": "todo"},
+            ]
+        )
+        next_task = pm.next_task()
+        assert next_task is not None
+        assert next_task.title == "Current task"
 
     def test_next_task_skips_done(self):
         pm = PlanManager()
-        pm.set_tasks([
-            {"title": "Done", "status": "done"},
-            {"title": "Also done", "status": "done"},
-            {"title": "Todo", "status": "todo"},
-        ])
-        assert pm.next_task().title == "Todo"
+        pm.set_tasks(
+            [
+                {"title": "Done", "status": "done"},
+                {"title": "Also done", "status": "done"},
+                {"title": "Todo", "status": "todo"},
+            ]
+        )
+        next_task = pm.next_task()
+        assert next_task is not None
+        assert next_task.title == "Todo"
 
     def test_next_task_none_when_all_done(self):
         pm = PlanManager()

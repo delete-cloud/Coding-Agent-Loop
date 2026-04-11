@@ -17,4 +17,5 @@ class TestShellTool:
 
     def test_rejects_shell_metacharacters(self):
         result = bash_run(command="echo hello && rm -rf /tmp/nope")
+        assert isinstance(result, str)
         assert "unsupported shell syntax" in result.lower()

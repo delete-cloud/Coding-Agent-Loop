@@ -69,6 +69,7 @@ class TestKimiProvider:
             api_key="sk-test",
         )
         result = plugin.provide_llm()
+        assert isinstance(result, OpenAICompatProvider)
         assert "moonshot.cn" in str(result._client.base_url)
 
     def test_kimi_context_sizes(self):
@@ -90,6 +91,7 @@ class TestKimiProvider:
             api_key="",
         )
         result = plugin.provide_llm()
+        assert isinstance(result, OpenAICompatProvider)
         assert "sk-from-env" in str(result._client.api_key)
 
     def test_kimi_explicit_key_takes_priority_over_env(self, monkeypatch):
@@ -100,6 +102,7 @@ class TestKimiProvider:
             api_key="sk-explicit",
         )
         result = plugin.provide_llm()
+        assert isinstance(result, OpenAICompatProvider)
         assert "sk-explicit" in str(result._client.api_key)
 
 
@@ -121,6 +124,7 @@ class TestKimiCodeOpenAIProvider:
             api_key="sk-kimi-test",
         )
         result = plugin.provide_llm()
+        assert isinstance(result, OpenAICompatProvider)
         assert "api.kimi.com/coding/v1" in str(result._client.base_url)
 
     def test_kimi_code_sets_claude_code_user_agent(self):
@@ -130,6 +134,7 @@ class TestKimiCodeOpenAIProvider:
             api_key="sk-kimi-test",
         )
         result = plugin.provide_llm()
+        assert isinstance(result, OpenAICompatProvider)
         headers = result._client.default_headers
         assert headers.get("User-Agent") == "claude-code/1.0.17"
 
@@ -145,6 +150,7 @@ class TestKimiCodeOpenAIProvider:
             api_key="",
         )
         result = plugin.provide_llm()
+        assert isinstance(result, OpenAICompatProvider)
         assert "sk-kimi-from-env" in str(result._client.api_key)
 
     def test_kimi_code_explicit_key_takes_priority_over_env(self, monkeypatch):
@@ -155,6 +161,7 @@ class TestKimiCodeOpenAIProvider:
             api_key="sk-explicit",
         )
         result = plugin.provide_llm()
+        assert isinstance(result, OpenAICompatProvider)
         assert "sk-explicit" in str(result._client.api_key)
 
 
@@ -176,6 +183,7 @@ class TestKimiCodeAnthropicProvider:
             api_key="sk-kimi-test",
         )
         result = plugin.provide_llm()
+        assert isinstance(result, AnthropicProvider)
         assert "api.kimi.com/coding" in str(result._base_url)
 
     def test_kimi_code_anthropic_api_key_env_fallback(self, monkeypatch):
@@ -186,6 +194,7 @@ class TestKimiCodeAnthropicProvider:
             api_key="",
         )
         result = plugin.provide_llm()
+        assert isinstance(result, AnthropicProvider)
         assert result._api_key == "sk-kimi-from-env"
 
     def test_kimi_code_anthropic_explicit_key_takes_priority_over_env(
@@ -198,6 +207,7 @@ class TestKimiCodeAnthropicProvider:
             api_key="sk-explicit",
         )
         result = plugin.provide_llm()
+        assert isinstance(result, AnthropicProvider)
         assert result._api_key == "sk-explicit"
 
     def test_kimi_code_anthropic_sets_claude_code_user_agent(self):
@@ -207,5 +217,6 @@ class TestKimiCodeAnthropicProvider:
             api_key="sk-kimi-test",
         )
         result = plugin.provide_llm()
+        assert isinstance(result, AnthropicProvider)
         headers = result._client.default_headers
         assert headers.get("User-Agent") == "claude-code/1.0.17"

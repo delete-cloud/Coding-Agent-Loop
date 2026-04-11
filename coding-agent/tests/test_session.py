@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+from pydantic import SecretStr
 
 from coding_agent.core.config import Config
 from coding_agent.core.session import Session, SessionRegistry
@@ -27,7 +28,7 @@ class TestSession:
     @pytest.fixture
     def config(self, temp_dir):
         """Create a test configuration."""
-        return Config(tape_dir=temp_dir, max_tokens=1000, api_key="test-key")
+        return Config(tape_dir=temp_dir, max_steps=1000, api_key=SecretStr("test-key"))
 
     def test_session_create(self, config):
         """Test creating a new session."""
@@ -187,7 +188,7 @@ class TestSessionRegistry:
     @pytest.fixture
     def config(self, temp_dir):
         """Create a test configuration."""
-        return Config(tape_dir=temp_dir, max_tokens=1000, api_key="test-key")
+        return Config(tape_dir=temp_dir, max_steps=1000, api_key=SecretStr("test-key"))
 
     def test_register_session(self, config):
         """Test registering a session."""

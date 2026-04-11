@@ -1,13 +1,14 @@
 from pathlib import Path
 
 import pytest
+from pydantic import SecretStr
 
 from coding_agent.core.config import Config, load_config
 
 
 class TestConfig:
     def test_defaults(self):
-        c = Config(api_key="sk-test")
+        c = Config(api_key=SecretStr("sk-test"))
         assert c.model == "gpt-4o"
         assert c.provider == "openai"
         assert c.max_steps == 30
@@ -20,13 +21,14 @@ class TestConfig:
         assert c.api_key is None
 
     def test_api_key_is_secret(self):
-        c = Config(api_key="sk-secret")
+        c = Config(api_key=SecretStr("sk-secret"))
         assert "sk-secret" not in repr(c)
+        assert c.api_key is not None
         assert c.api_key.get_secret_value() == "sk-secret"
 
     def test_custom_values(self):
         c = Config(
-            api_key="sk-test",
+            api_key=SecretStr("sk-test"),
             model="claude-sonnet-4-20250514",
             provider="anthropic",
             base_url="https://api.example.com/v1",
@@ -54,6 +56,7 @@ class TestLoadConfig:
         monkeypatch.setenv("AGENT_API_KEY", "sk-from-env")
         monkeypatch.setenv("AGENT_MODEL", "gpt-4o-mini")
         c = load_config()
+        assert c.api_key is not None
         assert c.api_key.get_secret_value() == "sk-from-env"
         assert c.model == "gpt-4o-mini"
 
@@ -62,6 +65,7 @@ class TestLoadConfig:
         monkeypatch.setenv("AGENT_MODEL", "gpt-4o-mini")
         c = load_config(cli_args={"model": "gpt-4o", "api_key": "sk-cli"})
         assert c.model == "gpt-4o"
+        assert c.api_key is not None
         assert c.api_key.get_secret_value() == "sk-cli"
 
     def test_missing_api_key_allows_none(self, monkeypatch):
@@ -77,6 +81,7 @@ class TestLoadConfig:
         c = load_config(cli_args={"provider": "copilot"})
 
         assert c.provider == "copilot"
+        assert c.api_key is not None
         assert c.api_key.get_secret_value() == "ghu-test-token"
 
     def test_cli_api_key_overrides_github_token_for_copilot(self, monkeypatch):
@@ -85,6 +90,7 @@ class TestLoadConfig:
         c = load_config(cli_args={"provider": "copilot", "api_key": "sk-cli"})
 
         assert c.provider == "copilot"
+        assert c.api_key is not None
         assert c.api_key.get_secret_value() == "sk-cli"
 
     def test_kimi_uses_moonshot_api_key_when_agent_api_key_missing(self, monkeypatch):
@@ -94,6 +100,7 @@ class TestLoadConfig:
         c = load_config(cli_args={"provider": "kimi"})
 
         assert c.provider == "kimi"
+        assert c.api_key is not None
         assert c.api_key.get_secret_value() == "sk-moonshot-token"
 
     @pytest.mark.parametrize("provider", ["kimi-code", "kimi-code-anthropic"])
@@ -106,4 +113,5 @@ class TestLoadConfig:
         c = load_config(cli_args={"provider": provider})
 
         assert c.provider == provider
+        assert c.api_key is not None
         assert c.api_key.get_secret_value() == "sk-kimi-code-token"

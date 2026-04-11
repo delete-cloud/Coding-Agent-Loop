@@ -23,6 +23,7 @@ class TestFileOps:
     def test_file_read_missing(self, tmp_path):
         configure_workspace(tmp_path)
         result = file_read(path="missing.txt")
+        assert isinstance(result, str)
         assert "error" in result.lower() or "not found" in result.lower()
 
     def test_file_write(self, tmp_path):
@@ -45,6 +46,7 @@ class TestFileOps:
 
         result = file_read(path=str(outside))
 
+        assert isinstance(result, str)
         assert "outside workspace" in result.lower()
 
     def test_glob_files_rejects_escape_directory(self, tmp_path):
@@ -52,4 +54,5 @@ class TestFileOps:
 
         result = glob_files(pattern="*.txt", directory=str(tmp_path.parent))
 
+        assert isinstance(result, str)
         assert "outside workspace" in result.lower()
