@@ -66,9 +66,9 @@ _ENV_MAP: dict[str, str] = {
 }
 
 
-def load_config(cli_args: dict | None = None) -> Config:
+def load_config(cli_args: dict[str, object] | None = None) -> Config:
     """Load config with precedence: CLI flags > env vars > defaults."""
-    values: dict = {}
+    values: dict[str, object] = {}
 
     # Layer 1: env vars
     for env_key, field_name in _ENV_MAP.items():
@@ -100,7 +100,7 @@ def load_config(cli_args: dict | None = None) -> Config:
         if kimi_code_token:
             values["api_key"] = kimi_code_token
 
-    return Config(**values)
+    return Config.model_validate(values)
 
 
 # Default settings instance (can be overridden by load_config)

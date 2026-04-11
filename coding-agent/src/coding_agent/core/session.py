@@ -105,7 +105,7 @@ class Session:
         self.save_metadata()
 
     @classmethod
-    def list_sessions(cls, config: Config) -> list[dict]:
+    def list_sessions(cls, config: Config) -> list[dict[str, object]]:
         """List all sessions in the tape directory."""
         sessions = []
         for meta_file in config.tape_dir.glob("*.json"):
