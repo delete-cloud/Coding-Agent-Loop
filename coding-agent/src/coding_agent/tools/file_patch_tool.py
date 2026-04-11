@@ -85,9 +85,9 @@ def _find_hunk_pos(
 
 def _apply_hunks_to_lines(
     file_lines: list[str], hunks: list[_Hunk]
-) -> tuple[list[str], list[dict]]:
+) -> tuple[list[str], list[dict[str, int | str]]]:
     out = list(file_lines)
-    results: list[dict] = []
+    results: list[dict[str, int | str]] = []
     for idx, hunk in enumerate(hunks):
         pos = _find_hunk_pos(out, hunk)
         if pos is None:
