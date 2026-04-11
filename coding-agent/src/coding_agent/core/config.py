@@ -13,7 +13,14 @@ class Config(BaseModel):
     """Validated agent configuration."""
 
     # Provider
-    provider: Literal["openai", "anthropic"] = "openai"
+    provider: Literal[
+        "openai",
+        "anthropic",
+        "copilot",
+        "kimi",
+        "kimi-code",
+        "kimi-code-anthropic",
+    ] = "openai"
     model: str = "gpt-4o"
     api_key: SecretStr | None = None
     base_url: str | None = None
@@ -26,7 +33,6 @@ class Config(BaseModel):
     # Paths
     repo: Path = Path(".")
     tape_dir: Path = Path.home() / ".coding-agent" / "tapes"
-    skills_dir: Path = Path.home() / ".coding-agent" / "skills"
 
     # Sub-agents
     max_subagent_depth: int = 3
@@ -60,9 +66,9 @@ _ENV_MAP: dict[str, str] = {
 }
 
 
-def load_config(cli_args: dict | None = None) -> Config:
+def load_config(cli_args: dict[str, object] | None = None) -> Config:
     """Load config with precedence: CLI flags > env vars > defaults."""
-    values: dict = {}
+    values: dict[str, object] = {}
 
     # Layer 1: env vars
     for env_key, field_name in _ENV_MAP.items():
@@ -76,7 +82,25 @@ def load_config(cli_args: dict | None = None) -> Config:
             if v is not None:
                 values[k] = v
 
-    return Config(**values)
+    if values.get("provider") == "copilot" and "api_key" not in values:
+        github_token = os.environ.get("GITHUB_TOKEN")
+        if github_token:
+            values["api_key"] = github_token
+
+    if values.get("provider") == "kimi" and "api_key" not in values:
+        moonshot_token = os.environ.get("MOONSHOT_API_KEY")
+        if moonshot_token:
+            values["api_key"] = moonshot_token
+
+    if (
+        values.get("provider") in {"kimi-code", "kimi-code-anthropic"}
+        and "api_key" not in values
+    ):
+        kimi_code_token = os.environ.get("KIMI_CODE_API_KEY")
+        if kimi_code_token:
+            values["api_key"] = kimi_code_token
+
+    return Config.model_validate(values)
 
 
 # Default settings instance (can be overridden by load_config)

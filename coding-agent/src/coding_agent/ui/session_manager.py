@@ -32,7 +32,10 @@ from coding_agent.wire.protocol import (
     TurnEnd,
     WireMessage,
 )
-from coding_agent.ui.session_store import SessionStore, create_session_store
+from coding_agent.ui.session_store import (
+    SessionStore,
+    create_session_store,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +96,7 @@ class Session:
     pending_approval: dict[str, Any] | None = None
     approval_event: asyncio.Event = field(default_factory=asyncio.Event)
     approval_response: dict[str, Any] | None = None
+    event_queues: list[asyncio.Queue[dict[str, Any]]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.wire = LocalWire(self.id)
@@ -162,12 +166,12 @@ class SessionManager:
 
     def __init__(self, store: SessionStore | None = None):
         self._store = store or create_session_store()
-        self._sessions: dict[str, Session] = {}
+        self._session_cache: dict[str, Session] = {}
         self._approval_stores: dict[str, ApprovalStore] = {}
         self._lock = asyncio.Lock()
 
     def _persist_session(self, session: Session) -> None:
-        self._sessions[session.id] = session
+        self._session_cache[session.id] = session
         self._store.save(session.id, cast(dict[str, Any], session.to_store_data()))
 
     def _hydrate_session(self, session: Session) -> Session:
@@ -176,7 +180,7 @@ class SessionManager:
             approval_store = session.approval_store
             self._approval_stores[session.id] = approval_store
         session.approval_store = approval_store
-        self._sessions[session.id] = session
+        self._session_cache[session.id] = session
         return session
 
     async def create_session(
@@ -193,7 +197,7 @@ class SessionManager:
         Args:
             repo_path: Path to the repository root (default: current directory)
             approval_policy: Policy for tool execution approval
-            provider: LLM provider (if None, uses mock/test provider)
+            provider: Explicit LLM provider override for tests or custom sessions
             max_steps: Maximum steps per turn
             enable_parallel: Enable parallel tool execution
             max_parallel: Maximum number of parallel tool executions
@@ -237,7 +241,7 @@ class SessionManager:
         Raises:
             KeyError: If session not found
         """
-        session = self._sessions.get(session_id)
+        session = self._session_cache.get(session_id)
         if session is not None:
             return session
         loaded = self._store.load(session_id)
@@ -256,7 +260,7 @@ class SessionManager:
         Returns:
             True if session exists, False otherwise
         """
-        if session_id in self._sessions:
+        if session_id in self._session_cache:
             return True
         return self._store.load(session_id) is not None
 
@@ -265,17 +269,68 @@ class SessionManager:
         self._persist_session(session)
 
     def remove_session(self, session_id: str) -> None:
-        session = self._sessions.pop(session_id, None)
-        if session is None and self._store.load(session_id) is None:
+        if not self.has_session(session_id):
             raise KeyError(f"Session not found: {session_id}")
+        self._session_cache.pop(session_id, None)
         self._store.delete(session_id)
         self._approval_stores.pop(session_id, None)
 
     def clear_sessions(self) -> None:
         for session_id in list(self._store.list_sessions()):
             self._store.delete(session_id)
-        self._sessions.clear()
+        self._session_cache.clear()
         self._approval_stores.clear()
+
+    def add_event_queue(
+        self,
+        session_id: str,
+        queue: asyncio.Queue[dict[str, Any]],
+    ) -> None:
+        session = self.get_session(session_id)
+        session.event_queues.append(queue)
+        self._persist_session(session)
+
+    def remove_event_queue(
+        self,
+        session_id: str,
+        queue: asyncio.Queue[dict[str, Any]],
+    ) -> None:
+        session = self.get_session(session_id)
+        if queue in session.event_queues:
+            session.event_queues.remove(queue)
+            self._persist_session(session)
+
+    async def broadcast_event(
+        self,
+        session_id: str,
+        event: dict[str, str],
+    ) -> None:
+        session = self.get_session(session_id)
+        before_count = len(session.event_queues)
+        session.event_queues = [
+            queue for queue in session.event_queues if not queue.full()
+        ]
+        pruned_count = before_count - len(session.event_queues)
+        if pruned_count:
+            logger.info(
+                "Pruned %d full event queue(s) for session %s",
+                pruned_count,
+                session_id,
+            )
+        for queue in session.event_queues:
+            try:
+                await queue.put(event)
+            except Exception:
+                logger.debug("Dropping closed event queue", exc_info=True)
+
+    def has_approval_request(self, session_id: str) -> bool:
+        return self.get_session(session_id).pending_approval is not None
+
+    def matches_approval_request(self, session_id: str, request_id: str) -> bool:
+        session = self.get_session(session_id)
+        if session.pending_approval is None:
+            return False
+        return session.pending_approval.get("request_id") == request_id
 
     async def close_session(self, session_id: str) -> None:
         """Close a session and clean up resources.
@@ -309,6 +364,7 @@ class SessionManager:
         session = self.get_session(session_id)
         session.last_activity = datetime.now()
         session.turn_in_progress = True
+        self._persist_session(session)
 
         try:
             approval_mode_map = {
@@ -326,9 +382,12 @@ class SessionManager:
                 session_id_override=session_id,
                 api_key=None,
             )
+            ctx.config["wire_consumer"] = None
+            ctx.config["agent_id"] = ""
 
             llm_plugin = pipeline._registry.get("llm_provider")
-            llm_plugin._instance = session.provider or MockProvider()
+            if session.provider is not None:
+                llm_plugin._instance = session.provider
 
             class _WireConsumer:
                 def __init__(self, wire: LocalWire) -> None:
@@ -347,6 +406,7 @@ class SessionManager:
                     }
                     session.approval_event.clear()
                     session.approval_response = None
+                    outer._persist_session(session)
                     session.approval_store.add_request(req)
                     await self._wire.send(req)
                     try:
@@ -367,12 +427,16 @@ class SessionManager:
                             "feedback": response.feedback,
                         }
                         session.approval_event.set()
+                        outer._persist_session(session)
                         return response
                     finally:
                         session.pending_approval = None
                         session.approval_response = None
+                        outer._persist_session(session)
 
+            outer = self
             consumer = _WireConsumer(session.wire)
+            ctx.config["wire_consumer"] = consumer
             adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
             await adapter.run_turn(prompt)
         except Exception as exc:
@@ -380,18 +444,22 @@ class SessionManager:
             await session.wire.send(
                 StreamDelta(
                     session_id=session_id,
+                    agent_id="",
                     content=f"Error: {exc}",
                 )
             )
             await session.wire.send(
                 TurnEnd(
                     session_id=session_id,
+                    agent_id="",
                     turn_id=uuid.uuid4().hex,
                     completion_status=CompletionStatus.ERROR,
                 )
             )
         finally:
-            session.turn_in_progress = False
+            current_task = asyncio.current_task()
+            if session.task is None or session.task is not current_task:
+                session.turn_in_progress = False
             session.last_activity = datetime.now()
             self._persist_session(session)
 
@@ -445,6 +513,69 @@ class SessionManager:
             )
 
         return success
+
+    async def wait_for_http_approval(
+        self,
+        session_id: str,
+        approval_req: ApprovalRequest,
+        timeout_seconds: float,
+    ) -> ApprovalResponse:
+        if not self.has_session(session_id):
+            return ApprovalResponse(
+                session_id=session_id,
+                request_id=approval_req.request_id,
+                approved=False,
+                feedback="Session not found",
+            )
+
+        session = self.get_session(session_id)
+        if not session.turn_in_progress:
+            return ApprovalResponse(
+                session_id=session_id,
+                request_id=approval_req.request_id,
+                approved=False,
+                feedback="Approval timeout or error",
+            )
+
+        session.pending_approval = {
+            "request_id": approval_req.request_id,
+            "tool_name": approval_req.tool_call.tool_name
+            if approval_req.tool_call
+            else "",
+            "arguments": approval_req.tool_call.arguments
+            if approval_req.tool_call
+            else {},
+        }
+        session.approval_event.clear()
+        session.approval_response = None
+        session.approval_store.add_request(approval_req)
+        self._persist_session(session)
+
+        try:
+            await asyncio.wait_for(
+                session.approval_event.wait(), timeout=timeout_seconds
+            )
+            if session.approval_response is not None:
+                return ApprovalResponse(
+                    session_id=session_id,
+                    request_id=approval_req.request_id,
+                    approved=session.approval_response["decision"] == "approve",
+                    feedback=session.approval_response.get("feedback"),
+                )
+        except asyncio.TimeoutError:
+            logger.warning("Approval timeout for session %s", session_id)
+        finally:
+            session.pending_approval = None
+            session.approval_response = None
+            _ = session.approval_event.set()
+            self._persist_session(session)
+
+        return ApprovalResponse(
+            session_id=session_id,
+            request_id=approval_req.request_id,
+            approved=False,
+            feedback="Approval timeout or error",
+        )
 
     def list_sessions(self) -> list[str]:
         """List all active session IDs.

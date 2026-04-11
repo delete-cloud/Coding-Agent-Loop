@@ -1,0 +1,368 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.14.0, pytest-9.0.2, pluggy-1.6.0 -- /Users/kina/Code/Agent/Coding-Agent-Loop/coding-agent/.venv/bin/python3
+cachedir: .pytest_cache
+rootdir: /Users/kina/Code/Agent/Coding-Agent-Loop/coding-agent
+configfile: pyproject.toml
+plugins: cov-7.1.0, asyncio-1.3.0, anyio-4.13.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 21 items
+
+tests/cli/test_input_handler.py::TestInputHandlerMultiline::test_handler_creation PASSED [  4%]
+tests/cli/test_input_handler.py::TestInputHandlerMultiline::test_handler_uses_separate_histories_for_chat_and_shell PASSED [  9%]
+tests/cli/test_input_handler.py::TestInputHandlerMultiline::test_handler_uses_separate_sessions_for_chat_and_shell PASSED [ 14%]
+tests/cli/test_input_handler.py::TestInputHandlerMultiline::test_handler_has_multiline_bindings PASSED [ 19%]
+tests/cli/test_input_handler.py::TestInputHandlerMultiline::test_slash_command_completer PASSED [ 23%]
+tests/cli/test_input_handler.py::TestInputHandlerMultiline::test_bang_completer PASSED [ 28%]
+tests/cli/test_input_handler.py::TestInputHandlerMultiline::test_shell_prompt_is_visibly_different PASSED [ 33%]
+tests/cli/test_input_handler.py::TestInputHandlerMultiline::test_normal_prompt_keeps_turn_indicator PASSED [ 38%]
+tests/cli/test_input_handler.py::TestKeystrokeBashToggle::test_bang_on_empty_buffer_exits_with_shell_sentinel FAILED [ 42%]
+tests/cli/test_input_handler.py::TestKeystrokeBashToggle::test_bang_on_nonempty_buffer_inserts_bang FAILED [ 47%]
+tests/cli/test_input_handler.py::TestKeystrokeBashToggle::test_bang_in_shell_mode_inserts_bang FAILED [ 52%]
+tests/cli/test_input_handler.py::TestKeystrokeBashToggle::test_escape_in_shell_mode_empty_buffer_exits_with_chat_sentinel FAILED [ 57%]
+tests/cli/test_input_handler.py::TestKeystrokeBashToggle::test_escape_in_shell_mode_nonempty_buffer_no_exit FAILED [ 61%]
+tests/cli/test_input_handler.py::TestKeystrokeBashToggle::test_escape_in_chat_mode_not_active PASSED [ 66%]
+tests/cli/test_input_handler.py::TestKeystrokeBashToggle::test_backspace_in_shell_mode_empty_buffer_exits_to_chat FAILED [ 71%]
+tests/cli/test_input_handler.py::TestKeystrokeBashToggle::test_backspace_in_shell_mode_nonempty_buffer_deletes_char FAILED [ 76%]
+tests/cli/test_input_handler.py::TestGetInputSentinelLoop::test_get_input_switches_to_shell_on_sentinel FAILED [ 80%]
+tests/cli/test_input_handler.py::TestGetInputSentinelLoop::test_get_input_switches_back_to_chat_on_sentinel FAILED [ 85%]
+tests/cli/test_input_handler.py::TestGetInputSentinelLoop::test_get_input_never_returns_sentinels FAILED [ 90%]
+tests/cli/test_input_handler.py::TestGetInputSentinelLoop::test_shell_mode_property_exposed FAILED [ 95%]
+tests/cli/test_input_handler.py::TestGetInputSentinelLoop::test_rapid_toggle_bang_then_escape FAILED [100%]
+
+=================================== FAILURES ===================================
+_ TestKeystrokeBashToggle.test_bang_on_empty_buffer_exits_with_shell_sentinel __
+
+self = <tests.cli.test_input_handler.TestKeystrokeBashToggle object at 0x10781b4d0>
+
+    def test_bang_on_empty_buffer_exits_with_shell_sentinel(self):
+        """! on empty buffer must call app.exit(result=SWITCH_TO_SHELL)."""
+        handler = InputHandler()
+>       binding = _get_key_binding_for_key(handler, "!")
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/cli/test_input_handler.py:141: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+handler = <coding_agent.cli.input_handler.InputHandler object at 0x107de9ae0>
+key_str = '!'
+
+    def _get_key_binding_for_key(handler: InputHandler, key_str: str):
+        """Find first binding whose keys tuple contains the given key string."""
+        matches = [b for b in handler.bindings.bindings if key_str in b.keys]
+        if not matches:
+>           raise KeyError(f"No binding registered for key: {key_str!r}")
+E           KeyError: "No binding registered for key: '!'"
+
+tests/cli/test_input_handler.py:56: KeyError
+______ TestKeystrokeBashToggle.test_bang_on_nonempty_buffer_inserts_bang _______
+
+self = <tests.cli.test_input_handler.TestKeystrokeBashToggle object at 0x10781b250>
+
+    def test_bang_on_nonempty_buffer_inserts_bang(self):
+        """! on non-empty buffer must insert '!' normally (not switch mode)."""
+        handler = InputHandler()
+>       binding = _get_key_binding_for_key(handler, "!")
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/cli/test_input_handler.py:154: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+handler = <coding_agent.cli.input_handler.InputHandler object at 0x107dea030>
+key_str = '!'
+
+    def _get_key_binding_for_key(handler: InputHandler, key_str: str):
+        """Find first binding whose keys tuple contains the given key string."""
+        matches = [b for b in handler.bindings.bindings if key_str in b.keys]
+        if not matches:
+>           raise KeyError(f"No binding registered for key: {key_str!r}")
+E           KeyError: "No binding registered for key: '!'"
+
+tests/cli/test_input_handler.py:56: KeyError
+_________ TestKeystrokeBashToggle.test_bang_in_shell_mode_inserts_bang _________
+
+self = <tests.cli.test_input_handler.TestKeystrokeBashToggle object at 0x1076e1e00>
+
+    def test_bang_in_shell_mode_inserts_bang(self):
+        """! while already in shell mode must NOT switch — just insert '!'."""
+        handler = InputHandler()
+        handler._shell_mode = True
+>       binding = _get_key_binding_for_key(handler, "!")
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/cli/test_input_handler.py:168: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+handler = <coding_agent.cli.input_handler.InputHandler object at 0x107eee050>
+key_str = '!'
+
+    def _get_key_binding_for_key(handler: InputHandler, key_str: str):
+        """Find first binding whose keys tuple contains the given key string."""
+        matches = [b for b in handler.bindings.bindings if key_str in b.keys]
+        if not matches:
+>           raise KeyError(f"No binding registered for key: {key_str!r}")
+E           KeyError: "No binding registered for key: '!'"
+
+tests/cli/test_input_handler.py:56: KeyError
+_ TestKeystrokeBashToggle.test_escape_in_shell_mode_empty_buffer_exits_with_chat_sentinel _
+
+self = <tests.cli.test_input_handler.TestKeystrokeBashToggle object at 0x1076e23f0>
+
+    def test_escape_in_shell_mode_empty_buffer_exits_with_chat_sentinel(self):
+        """Escape in shell mode on empty buffer must call app.exit(result=SWITCH_TO_CHAT)."""
+        handler = InputHandler()
+        handler._shell_mode = True
+>       binding = _get_key_binding_for_key(handler, "escape")
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/cli/test_input_handler.py:182: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+handler = <coding_agent.cli.input_handler.InputHandler object at 0x107eee850>
+key_str = 'escape'
+
+    def _get_key_binding_for_key(handler: InputHandler, key_str: str):
+        """Find first binding whose keys tuple contains the given key string."""
+        matches = [b for b in handler.bindings.bindings if key_str in b.keys]
+        if not matches:
+>           raise KeyError(f"No binding registered for key: {key_str!r}")
+E           KeyError: "No binding registered for key: 'escape'"
+
+tests/cli/test_input_handler.py:56: KeyError
+__ TestKeystrokeBashToggle.test_escape_in_shell_mode_nonempty_buffer_no_exit ___
+
+self = <tests.cli.test_input_handler.TestKeystrokeBashToggle object at 0x107875130>
+
+    def test_escape_in_shell_mode_nonempty_buffer_no_exit(self):
+        """Escape in shell mode with text in buffer must NOT exit (let default handle)."""
+        handler = InputHandler()
+        handler._shell_mode = True
+>       binding = _get_key_binding_for_key(handler, "escape")
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/cli/test_input_handler.py:196: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+handler = <coding_agent.cli.input_handler.InputHandler object at 0x11043b020>
+key_str = 'escape'
+
+    def _get_key_binding_for_key(handler: InputHandler, key_str: str):
+        """Find first binding whose keys tuple contains the given key string."""
+        matches = [b for b in handler.bindings.bindings if key_str in b.keys]
+        if not matches:
+>           raise KeyError(f"No binding registered for key: {key_str!r}")
+E           KeyError: "No binding registered for key: 'escape'"
+
+tests/cli/test_input_handler.py:56: KeyError
+_ TestKeystrokeBashToggle.test_backspace_in_shell_mode_empty_buffer_exits_to_chat _
+
+self = <tests.cli.test_input_handler.TestKeystrokeBashToggle object at 0x10783b020>
+
+    def test_backspace_in_shell_mode_empty_buffer_exits_to_chat(self):
+        """Backspace in shell mode on empty buffer must call app.exit(result=SWITCH_TO_CHAT)."""
+        handler = InputHandler()
+        handler._shell_mode = True
+>       binding = _get_key_binding_for_key(handler, "backspace")
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/cli/test_input_handler.py:220: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+handler = <coding_agent.cli.input_handler.InputHandler object at 0x10712f5b0>
+key_str = 'backspace'
+
+    def _get_key_binding_for_key(handler: InputHandler, key_str: str):
+        """Find first binding whose keys tuple contains the given key string."""
+        matches = [b for b in handler.bindings.bindings if key_str in b.keys]
+        if not matches:
+>           raise KeyError(f"No binding registered for key: {key_str!r}")
+E           KeyError: "No binding registered for key: 'backspace'"
+
+tests/cli/test_input_handler.py:56: KeyError
+_ TestKeystrokeBashToggle.test_backspace_in_shell_mode_nonempty_buffer_deletes_char _
+
+self = <tests.cli.test_input_handler.TestKeystrokeBashToggle object at 0x10786fe50>
+
+    def test_backspace_in_shell_mode_nonempty_buffer_deletes_char(self):
+        """Backspace in shell mode with text must delete one char (normal behavior)."""
+        handler = InputHandler()
+        handler._shell_mode = True
+>       binding = _get_key_binding_for_key(handler, "backspace")
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/cli/test_input_handler.py:234: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+handler = <coding_agent.cli.input_handler.InputHandler object at 0x10712ec10>
+key_str = 'backspace'
+
+    def _get_key_binding_for_key(handler: InputHandler, key_str: str):
+        """Find first binding whose keys tuple contains the given key string."""
+        matches = [b for b in handler.bindings.bindings if key_str in b.keys]
+        if not matches:
+>           raise KeyError(f"No binding registered for key: {key_str!r}")
+E           KeyError: "No binding registered for key: 'backspace'"
+
+tests/cli/test_input_handler.py:56: KeyError
+____ TestGetInputSentinelLoop.test_get_input_switches_to_shell_on_sentinel _____
+
+self = <tests.cli.test_input_handler.TestGetInputSentinelLoop object at 0x10781ae90>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x111c88180>
+
+    @pytest.mark.asyncio
+    async def test_get_input_switches_to_shell_on_sentinel(self, monkeypatch):
+        """chat prompt returns SWITCH_TO_SHELL → loop continues on shell session → returns real input."""
+        handler = InputHandler()
+        chat_calls = iter([SWITCH_TO_SHELL])
+        shell_calls = iter(["ls -la"])
+    
+        async def mock_chat_prompt(*args, **kwargs):
+            return next(chat_calls)
+    
+        async def mock_shell_prompt(*args, **kwargs):
+            return next(shell_calls)
+    
+        monkeypatch.setattr(handler.chat_session, "prompt_async", mock_chat_prompt)
+        monkeypatch.setattr(handler.shell_session, "prompt_async", mock_shell_prompt)
+    
+        result = await handler.get_input()
+    
+>       assert result == "ls -la"
+E       AssertionError: assert '__SWITCH_TO_SHELL__' == 'ls -la'
+E         
+E         - ls -la
+E         + __SWITCH_TO_SHELL__
+
+tests/cli/test_input_handler.py:271: AssertionError
+__ TestGetInputSentinelLoop.test_get_input_switches_back_to_chat_on_sentinel ___
+
+self = <tests.cli.test_input_handler.TestGetInputSentinelLoop object at 0x10781ad50>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x107877650>
+
+    @pytest.mark.asyncio
+    async def test_get_input_switches_back_to_chat_on_sentinel(self, monkeypatch):
+        """chat→SWITCH_TO_SHELL, shell→SWITCH_TO_CHAT, chat→'hello' → returns 'hello'."""
+        handler = InputHandler()
+        chat_calls = iter([SWITCH_TO_SHELL, "hello"])
+        shell_calls = iter([SWITCH_TO_CHAT])
+    
+        async def mock_chat_prompt(*args, **kwargs):
+            return next(chat_calls)
+    
+        async def mock_shell_prompt(*args, **kwargs):
+            return next(shell_calls)
+    
+        monkeypatch.setattr(handler.chat_session, "prompt_async", mock_chat_prompt)
+        monkeypatch.setattr(handler.shell_session, "prompt_async", mock_shell_prompt)
+    
+        result = await handler.get_input()
+    
+>       assert result == "hello"
+E       AssertionError: assert '__SWITCH_TO_SHELL__' == 'hello'
+E         
+E         - hello
+E         + __SWITCH_TO_SHELL__
+
+tests/cli/test_input_handler.py:291: AssertionError
+_______ TestGetInputSentinelLoop.test_get_input_never_returns_sentinels ________
+
+self = <tests.cli.test_input_handler.TestGetInputSentinelLoop object at 0x1076e3a80>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1078f6be0>
+
+    @pytest.mark.asyncio
+    async def test_get_input_never_returns_sentinels(self, monkeypatch):
+        """get_input() must never return a sentinel string as its final value."""
+        handler = InputHandler()
+        chat_calls = iter([SWITCH_TO_SHELL, "real input"])
+        shell_calls = iter([SWITCH_TO_CHAT])
+    
+        async def mock_chat_prompt(*args, **kwargs):
+            return next(chat_calls)
+    
+        async def mock_shell_prompt(*args, **kwargs):
+            return next(shell_calls)
+    
+        monkeypatch.setattr(handler.chat_session, "prompt_async", mock_chat_prompt)
+        monkeypatch.setattr(handler.shell_session, "prompt_async", mock_shell_prompt)
+    
+        result = await handler.get_input()
+    
+>       assert result == "real input"
+E       AssertionError: assert '__SWITCH_TO_SHELL__' == 'real input'
+E         
+E         - real input
+E         + __SWITCH_TO_SHELL__
+
+tests/cli/test_input_handler.py:311: AssertionError
+__________ TestGetInputSentinelLoop.test_shell_mode_property_exposed ___________
+
+self = <tests.cli.test_input_handler.TestGetInputSentinelLoop object at 0x1076e3bb0>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x107c67550>
+
+    @pytest.mark.asyncio
+    async def test_shell_mode_property_exposed(self, monkeypatch):
+        """handler.shell_mode property must be True after switching to shell."""
+        handler = InputHandler()
+        chat_calls = iter([SWITCH_TO_SHELL])
+        shell_calls = iter(["cmd"])
+    
+        async def mock_chat_prompt(*args, **kwargs):
+            return next(chat_calls)
+    
+        async def mock_shell_prompt(*args, **kwargs):
+            return next(shell_calls)
+    
+        monkeypatch.setattr(handler.chat_session, "prompt_async", mock_chat_prompt)
+        monkeypatch.setattr(handler.shell_session, "prompt_async", mock_shell_prompt)
+    
+        await handler.get_input()
+    
+        # After get_input returns while in shell mode, shell_mode property must be True
+>       assert handler.shell_mode is True  # type: ignore[attr-defined]
+               ^^^^^^^^^^^^^^^^^^
+E       AttributeError: 'InputHandler' object has no attribute 'shell_mode'
+
+tests/cli/test_input_handler.py:334: AttributeError
+_________ TestGetInputSentinelLoop.test_rapid_toggle_bang_then_escape __________
+
+self = <tests.cli.test_input_handler.TestGetInputSentinelLoop object at 0x107876210>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x107ed4500>
+
+    @pytest.mark.asyncio
+    async def test_rapid_toggle_bang_then_escape(self, monkeypatch):
+        """Rapid toggle: chat→SWITCH_TO_SHELL, shell→SWITCH_TO_CHAT, chat→'hi' → returns 'hi'."""
+        handler = InputHandler()
+        chat_calls = iter([SWITCH_TO_SHELL, "hi"])
+        shell_calls = iter([SWITCH_TO_CHAT])
+    
+        async def mock_chat_prompt(*args, **kwargs):
+            return next(chat_calls)
+    
+        async def mock_shell_prompt(*args, **kwargs):
+            return next(shell_calls)
+    
+        monkeypatch.setattr(handler.chat_session, "prompt_async", mock_chat_prompt)
+        monkeypatch.setattr(handler.shell_session, "prompt_async", mock_shell_prompt)
+    
+        result = await handler.get_input()
+    
+>       assert result == "hi"
+E       AssertionError: assert '__SWITCH_TO_SHELL__' == 'hi'
+E         
+E         - hi
+E         + __SWITCH_TO_SHELL__
+
+tests/cli/test_input_handler.py:354: AssertionError
+=========================== short test summary info ============================
+FAILED tests/cli/test_input_handler.py::TestKeystrokeBashToggle::test_bang_on_empty_buffer_exits_with_shell_sentinel
+FAILED tests/cli/test_input_handler.py::TestKeystrokeBashToggle::test_bang_on_nonempty_buffer_inserts_bang
+FAILED tests/cli/test_input_handler.py::TestKeystrokeBashToggle::test_bang_in_shell_mode_inserts_bang
+FAILED tests/cli/test_input_handler.py::TestKeystrokeBashToggle::test_escape_in_shell_mode_empty_buffer_exits_with_chat_sentinel
+FAILED tests/cli/test_input_handler.py::TestKeystrokeBashToggle::test_escape_in_shell_mode_nonempty_buffer_no_exit
+FAILED tests/cli/test_input_handler.py::TestKeystrokeBashToggle::test_backspace_in_shell_mode_empty_buffer_exits_to_chat
+FAILED tests/cli/test_input_handler.py::TestKeystrokeBashToggle::test_backspace_in_shell_mode_nonempty_buffer_deletes_char
+FAILED tests/cli/test_input_handler.py::TestGetInputSentinelLoop::test_get_input_switches_to_shell_on_sentinel
+FAILED tests/cli/test_input_handler.py::TestGetInputSentinelLoop::test_get_input_switches_back_to_chat_on_sentinel
+FAILED tests/cli/test_input_handler.py::TestGetInputSentinelLoop::test_get_input_never_returns_sentinels
+FAILED tests/cli/test_input_handler.py::TestGetInputSentinelLoop::test_shell_mode_property_exposed
+FAILED tests/cli/test_input_handler.py::TestGetInputSentinelLoop::test_rapid_toggle_bang_then_escape
+========================= 12 failed, 9 passed in 0.24s =========================

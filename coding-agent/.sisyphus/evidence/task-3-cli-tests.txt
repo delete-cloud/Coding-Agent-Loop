@@ -1,0 +1,91 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.14.0, pytest-9.0.2, pluggy-1.6.0 -- /Users/kina/Code/Agent/Coding-Agent-Loop/coding-agent/.venv/bin/python3
+cachedir: .pytest_cache
+rootdir: /Users/kina/Code/Agent/Coding-Agent-Loop/coding-agent
+configfile: pyproject.toml
+plugins: cov-7.1.0, asyncio-1.3.0, anyio-4.13.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 68 items
+
+tests/cli/test_bash_executor.py::TestBashExecutor::test_execute_simple_command PASSED [  1%]
+tests/cli/test_bash_executor.py::TestBashExecutor::test_execute_failing_command PASSED [  2%]
+tests/cli/test_bash_executor.py::TestBashExecutor::test_execute_shows_exit_code_on_failure PASSED [  4%]
+tests/cli/test_bash_executor.py::TestBashExecutor::test_execute_multiword_command PASSED [  5%]
+tests/cli/test_bash_executor.py::TestBashExecutor::test_execute_empty_command PASSED [  7%]
+tests/cli/test_bash_executor.py::TestBashExecutor::test_execute_whitespace_only PASSED [  8%]
+tests/cli/test_bash_executor.py::TestBashExecutor::test_is_bash_command PASSED [ 10%]
+tests/cli/test_bash_executor.py::TestBashExecutor::test_is_bash_mode_toggle PASSED [ 11%]
+tests/cli/test_bash_executor.py::TestBashExecutor::test_extract_bash_command PASSED [ 13%]
+tests/cli/test_commands.py::TestCommands::test_help_command PASSED       [ 14%]
+tests/cli/test_commands.py::TestCommands::test_help_command_does_not_emit_ansi_sequences PASSED [ 16%]
+tests/cli/test_commands.py::TestCommands::test_exit_command PASSED       [ 17%]
+tests/cli/test_commands.py::TestCommands::test_quit_command PASSED       [ 19%]
+tests/cli/test_commands.py::TestCommands::test_clear_command PASSED      [ 20%]
+tests/cli/test_commands.py::TestCommands::test_model_command_without_args PASSED [ 22%]
+tests/cli/test_commands.py::TestCommands::test_model_command_with_args PASSED [ 23%]
+tests/cli/test_commands.py::TestCommands::test_plan_command_no_planner PASSED [ 25%]
+tests/cli/test_commands.py::TestCommands::test_tools_command_no_registry PASSED [ 26%]
+tests/cli/test_commands.py::TestCommands::test_unknown_command PASSED    [ 27%]
+tests/cli/test_commands.py::TestCommands::test_not_a_command PASSED      [ 29%]
+tests/cli/test_commands.py::TestCommands::test_empty_slash_shows_help PASSED [ 30%]
+tests/cli/test_commands.py::TestCommands::test_command_completions PASSED [ 32%]
+tests/cli/test_commands.py::TestCommands::test_all_commands_have_descriptions PASSED [ 33%]
+tests/cli/test_input_handler.py::TestInputHandlerMultiline::test_handler_creation PASSED [ 35%]
+tests/cli/test_input_handler.py::TestInputHandlerMultiline::test_handler_uses_separate_histories_for_chat_and_shell PASSED [ 36%]
+tests/cli/test_input_handler.py::TestInputHandlerMultiline::test_handler_uses_separate_sessions_for_chat_and_shell PASSED [ 38%]
+tests/cli/test_input_handler.py::TestInputHandlerMultiline::test_handler_has_multiline_bindings PASSED [ 39%]
+tests/cli/test_input_handler.py::TestInputHandlerMultiline::test_slash_command_completer PASSED [ 41%]
+tests/cli/test_input_handler.py::TestInputHandlerMultiline::test_bang_completer PASSED [ 42%]
+tests/cli/test_input_handler.py::TestInputHandlerMultiline::test_shell_prompt_is_visibly_different PASSED [ 44%]
+tests/cli/test_input_handler.py::TestInputHandlerMultiline::test_normal_prompt_keeps_turn_indicator PASSED [ 45%]
+tests/cli/test_input_handler.py::TestKeystrokeBashToggle::test_bang_on_empty_buffer_exits_with_shell_sentinel PASSED [ 47%]
+tests/cli/test_input_handler.py::TestKeystrokeBashToggle::test_bang_on_nonempty_buffer_inserts_bang PASSED [ 48%]
+tests/cli/test_input_handler.py::TestKeystrokeBashToggle::test_bang_in_shell_mode_inserts_bang PASSED [ 50%]
+tests/cli/test_input_handler.py::TestKeystrokeBashToggle::test_escape_in_shell_mode_empty_buffer_exits_with_chat_sentinel PASSED [ 51%]
+tests/cli/test_input_handler.py::TestKeystrokeBashToggle::test_escape_in_shell_mode_nonempty_buffer_no_exit PASSED [ 52%]
+tests/cli/test_input_handler.py::TestKeystrokeBashToggle::test_escape_in_chat_mode_not_active PASSED [ 54%]
+tests/cli/test_input_handler.py::TestKeystrokeBashToggle::test_backspace_in_shell_mode_empty_buffer_exits_to_chat PASSED [ 55%]
+tests/cli/test_input_handler.py::TestKeystrokeBashToggle::test_backspace_in_shell_mode_nonempty_buffer_deletes_char PASSED [ 57%]
+tests/cli/test_input_handler.py::TestGetInputSentinelLoop::test_get_input_switches_to_shell_on_sentinel PASSED [ 58%]
+tests/cli/test_input_handler.py::TestGetInputSentinelLoop::test_get_input_switches_back_to_chat_on_sentinel PASSED [ 60%]
+tests/cli/test_input_handler.py::TestGetInputSentinelLoop::test_get_input_never_returns_sentinels PASSED [ 61%]
+tests/cli/test_input_handler.py::TestGetInputSentinelLoop::test_shell_mode_property_exposed PASSED [ 63%]
+tests/cli/test_input_handler.py::TestGetInputSentinelLoop::test_rapid_toggle_bang_then_escape PASSED [ 64%]
+tests/cli/test_repl.py::TestInputHandler::test_input_handler_creation PASSED [ 66%]
+tests/cli/test_repl.py::TestInputHandler::test_get_input_mock PASSED     [ 67%]
+tests/cli/test_repl.py::TestInputHandler::test_get_input_with_custom_prompt PASSED [ 69%]
+tests/cli/test_repl.py::TestInputHandler::test_get_input_strips_whitespace PASSED [ 70%]
+tests/cli/test_repl.py::TestInputHandler::test_get_input_eof_error PASSED [ 72%]
+tests/cli/test_repl.py::TestInputHandler::test_get_input_keyboard_interrupt PASSED [ 73%]
+tests/cli/test_repl.py::TestInputHandler::test_get_input_none_result_returns_none PASSED [ 75%]
+tests/cli/test_repl.py::TestInputHandler::test_get_input_uses_shell_session_in_shell_mode PASSED [ 76%]
+tests/cli/test_repl.py::TestInputHandler::test_get_input_uses_chat_session_by_default PASSED [ 77%]
+tests/cli/test_repl.py::TestInputHandler::test_key_bindings_exist PASSED [ 79%]
+tests/cli/test_repl.py::TestInputHandler::test_ctrlc_tracking_initialised_at_zero PASSED [ 80%]
+tests/cli/test_repl.py::TestInputHandler::test_ctrlc_timeout_is_two_seconds PASSED [ 82%]
+tests/cli/test_repl.py::TestInputHandler::test_single_ctrlc_records_timestamp PASSED [ 83%]
+tests/cli/test_repl.py::TestInputHandler::test_double_ctrlc_within_timeout_returns_exit_sentinel PASSED [ 85%]
+tests/cli/test_repl.py::TestInputHandler::test_ctrlc_after_timeout_does_not_exit PASSED [ 86%]
+tests/cli/test_repl.py::TestInputHandler::test_first_ctrlc_uses_prompt_toolkit_run_in_terminal PASSED [ 88%]
+tests/cli/test_repl.py::TestREPLImports::test_repl_module_imports PASSED [ 89%]
+tests/cli/test_repl.py::TestREPLImports::test_repl_session_creation_requires_config PASSED [ 91%]
+tests/cli/test_repl.py::TestBashIntegration::test_bang_detected_in_repl PASSED [ 92%]
+tests/cli/test_repl.py::TestBashIntegration::test_bang_extraction PASSED [ 94%]
+tests/cli/test_repl.py::TestBashIntegration::test_bare_bang_enters_shell_mode_until_exit PASSED [ 95%]
+tests/cli/test_repl.py::TestBashIntegration::test_bang_bash_enters_shell_mode_until_exit PASSED [ 97%]
+tests/cli/test_repl.py::TestBashIntegration::test_repl_passes_shell_mode_to_input_handler PASSED [ 98%]
+tests/cli/test_repl.py::TestBashIntegration::test_repl_only_patches_stdout_while_waiting_for_input PASSED [100%]
+
+=============================== warnings summary ===============================
+tests/cli/test_repl.py::TestREPLImports::test_repl_module_imports
+tests/cli/test_repl.py::TestREPLImports::test_repl_module_imports
+tests/cli/test_repl.py::TestREPLImports::test_repl_module_imports
+tests/cli/test_repl.py::TestREPLImports::test_repl_module_imports
+tests/cli/test_repl.py::TestREPLImports::test_repl_module_imports
+tests/cli/test_repl.py::TestREPLImports::test_repl_module_imports
+tests/cli/test_repl.py::TestREPLImports::test_repl_module_imports
+  /Users/kina/Code/Agent/Coding-Agent-Loop/coding-agent/.venv/lib/python3.14/site-packages/slowapi/extension.py:717: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    if asyncio.iscoroutinefunction(func):
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================== 68 passed, 7 warnings in 0.83s ========================

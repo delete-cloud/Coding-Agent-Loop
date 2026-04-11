@@ -9,7 +9,7 @@ import pytest
 
 from coding_agent.providers.anthropic import AnthropicProvider
 from coding_agent.providers.base import ToolCall, ToolSchema
-from agentkit.providers.models import TextEvent, ToolCallEvent, DoneEvent
+from agentkit.providers.models import TextEvent, ToolCallEvent, DoneEvent, UsageEvent
 
 
 class TestAnthropicProviderInit:
@@ -252,3 +252,232 @@ class TestAnthropicStreaming:
         assert tool_events[0].name == "bash"
         assert tool_events[0].arguments == {"command": "ls"}
         assert tool_events[0].tool_call_id == "toolu_1"
+
+
+class TestAnthropicUsageExtraction:
+    def _make_stream(self, mock_events):
+        def mock_aiter(_self):
+            async def _aiter():
+                for e in mock_events:
+                    yield e
+
+            return _aiter()
+
+        mock_stream = MagicMock()
+        mock_stream.__aenter__ = AsyncMock(return_value=mock_stream)
+        mock_stream.__aexit__ = AsyncMock(return_value=False)
+        mock_stream.__aiter__ = mock_aiter
+        return mock_stream
+
+    @pytest.mark.asyncio
+    async def test_message_start_extracts_input_tokens(self):
+        p = AnthropicProvider(model="claude-sonnet-4-20250514", api_key="sk-test")
+
+        message_usage = MagicMock()
+        message_usage.input_tokens = 150
+        message_obj = MagicMock()
+        message_obj.usage = message_usage
+
+        mock_events = [
+            MagicMock(type="message_start", message=message_obj),
+            MagicMock(
+                type="content_block_start",
+                index=0,
+                content_block=MagicMock(type="text", text=""),
+            ),
+            MagicMock(
+                type="content_block_delta",
+                index=0,
+                delta=MagicMock(type="text_delta", text="Hi"),
+            ),
+            MagicMock(type="content_block_stop", index=0),
+            MagicMock(type="message_stop"),
+        ]
+
+        p._client.messages.stream = MagicMock(
+            return_value=self._make_stream(mock_events)
+        )
+
+        events = []
+        async for event in p.stream(messages=[{"role": "user", "content": "hi"}]):
+            events.append(event)
+
+        usage_events = [e for e in events if isinstance(e, UsageEvent)]
+        assert len(usage_events) == 1
+        assert usage_events[0].input_tokens == 150
+
+    @pytest.mark.asyncio
+    async def test_message_delta_extracts_output_tokens(self):
+        p = AnthropicProvider(model="claude-sonnet-4-20250514", api_key="sk-test")
+
+        message_usage = MagicMock()
+        message_usage.input_tokens = 100
+
+        delta_usage = MagicMock()
+        delta_usage.output_tokens = 42
+
+        mock_events = [
+            MagicMock(type="message_start", message=MagicMock(usage=message_usage)),
+            MagicMock(
+                type="content_block_start",
+                index=0,
+                content_block=MagicMock(type="text", text=""),
+            ),
+            MagicMock(
+                type="content_block_delta",
+                index=0,
+                delta=MagicMock(type="text_delta", text="Hello"),
+            ),
+            MagicMock(type="content_block_stop", index=0),
+            MagicMock(type="message_delta", usage=delta_usage),
+            MagicMock(type="message_stop"),
+        ]
+
+        p._client.messages.stream = MagicMock(
+            return_value=self._make_stream(mock_events)
+        )
+
+        events = []
+        async for event in p.stream(messages=[{"role": "user", "content": "hi"}]):
+            events.append(event)
+
+        usage_events = [e for e in events if isinstance(e, UsageEvent)]
+        assert len(usage_events) == 1
+        assert usage_events[0].input_tokens == 100
+        assert usage_events[0].output_tokens == 42
+
+    @pytest.mark.asyncio
+    async def test_usage_event_yielded_before_done(self):
+        p = AnthropicProvider(model="claude-sonnet-4-20250514", api_key="sk-test")
+
+        mock_events = [
+            MagicMock(
+                type="message_start",
+                message=MagicMock(usage=MagicMock(input_tokens=50)),
+            ),
+            MagicMock(
+                type="content_block_start",
+                index=0,
+                content_block=MagicMock(type="text", text=""),
+            ),
+            MagicMock(
+                type="content_block_delta",
+                index=0,
+                delta=MagicMock(type="text_delta", text="ok"),
+            ),
+            MagicMock(type="content_block_stop", index=0),
+            MagicMock(type="message_delta", usage=MagicMock(output_tokens=25)),
+            MagicMock(type="message_stop"),
+        ]
+
+        p._client.messages.stream = MagicMock(
+            return_value=self._make_stream(mock_events)
+        )
+
+        events = []
+        async for event in p.stream(messages=[{"role": "user", "content": "hi"}]):
+            events.append(event)
+
+        assert isinstance(events[-2], UsageEvent)
+        assert isinstance(events[-1], DoneEvent)
+        assert events[-2].input_tokens == 50
+        assert events[-2].output_tokens == 25
+
+    @pytest.mark.asyncio
+    async def test_missing_usage_fields_degrade_to_zeros(self):
+        p = AnthropicProvider(model="claude-sonnet-4-20250514", api_key="sk-test")
+
+        mock_events = [
+            MagicMock(
+                type="content_block_start",
+                index=0,
+                content_block=MagicMock(type="text", text=""),
+            ),
+            MagicMock(
+                type="content_block_delta",
+                index=0,
+                delta=MagicMock(type="text_delta", text="text"),
+            ),
+            MagicMock(type="content_block_stop", index=0),
+            MagicMock(type="message_stop"),
+        ]
+
+        p._client.messages.stream = MagicMock(
+            return_value=self._make_stream(mock_events)
+        )
+
+        events = []
+        async for event in p.stream(messages=[{"role": "user", "content": "hi"}]):
+            events.append(event)
+
+        usage_events = [e for e in events if isinstance(e, UsageEvent)]
+        assert len(usage_events) == 1
+        assert usage_events[0].input_tokens == 0
+        assert usage_events[0].output_tokens == 0
+
+    @pytest.mark.asyncio
+    async def test_multiple_message_delta_uses_last_output_tokens(self):
+        p = AnthropicProvider(model="claude-sonnet-4-20250514", api_key="sk-test")
+
+        mock_events = [
+            MagicMock(
+                type="message_start",
+                message=MagicMock(usage=MagicMock(input_tokens=80)),
+            ),
+            MagicMock(
+                type="content_block_start",
+                index=0,
+                content_block=MagicMock(type="text", text=""),
+            ),
+            MagicMock(
+                type="content_block_delta",
+                index=0,
+                delta=MagicMock(type="text_delta", text="a"),
+            ),
+            MagicMock(type="content_block_stop", index=0),
+            MagicMock(type="message_delta", usage=MagicMock(output_tokens=10)),
+            MagicMock(type="message_delta", usage=MagicMock(output_tokens=30)),
+            MagicMock(type="message_stop"),
+        ]
+
+        p._client.messages.stream = MagicMock(
+            return_value=self._make_stream(mock_events)
+        )
+
+        events = []
+        async for event in p.stream(messages=[{"role": "user", "content": "hi"}]):
+            events.append(event)
+
+        usage_events = [e for e in events if isinstance(e, UsageEvent)]
+        assert len(usage_events) == 1
+        assert usage_events[0].input_tokens == 80
+        assert usage_events[0].output_tokens == 30
+
+    @pytest.mark.asyncio
+    async def test_usage_event_has_provider_name(self):
+        p = AnthropicProvider(model="claude-sonnet-4-20250514", api_key="sk-test")
+
+        mock_events = [
+            MagicMock(
+                type="message_start",
+                message=MagicMock(usage=MagicMock(input_tokens=10)),
+            ),
+            MagicMock(
+                type="content_block_delta",
+                index=0,
+                delta=MagicMock(type="text_delta", text="x"),
+            ),
+            MagicMock(type="message_stop"),
+        ]
+
+        p._client.messages.stream = MagicMock(
+            return_value=self._make_stream(mock_events)
+        )
+
+        events = []
+        async for event in p.stream(messages=[{"role": "user", "content": "hi"}]):
+            events.append(event)
+
+        usage_events = [e for e in events if isinstance(e, UsageEvent)]
+        assert len(usage_events) == 1
+        assert usage_events[0].provider_name == "claude-sonnet-4-20250514"

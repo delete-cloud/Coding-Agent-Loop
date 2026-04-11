@@ -52,6 +52,49 @@ class LLMProviderPlugin:
                 api_key=self._api_key,
                 base_url=self._base_url,
             )
+        elif self._provider_name == "copilot":
+            from coding_agent.providers.copilot import CopilotProvider
+
+            self._instance = CopilotProvider(
+                model=self._model,
+                api_key=self._api_key,
+                base_url=self._base_url,
+            )
+        elif self._provider_name == "kimi":
+            import os
+
+            from coding_agent.providers.openai_compat import OpenAICompatProvider
+
+            api_key = self._api_key or os.environ.get("MOONSHOT_API_KEY", "")
+            self._instance = OpenAICompatProvider(
+                model=self._model,
+                api_key=api_key,
+                base_url="https://api.moonshot.cn/v1",
+            )
+        elif self._provider_name == "kimi-code":
+            import os
+
+            from coding_agent.providers.openai_compat import OpenAICompatProvider
+
+            api_key = self._api_key or os.environ.get("KIMI_CODE_API_KEY", "")
+            self._instance = OpenAICompatProvider(
+                model=self._model,
+                api_key=api_key,
+                base_url="https://api.kimi.com/coding/v1",
+                default_headers={"User-Agent": "claude-code/1.0.17"},
+            )
+        elif self._provider_name == "kimi-code-anthropic":
+            import os
+
+            from coding_agent.providers.anthropic import AnthropicProvider
+
+            api_key = self._api_key or os.environ.get("KIMI_CODE_API_KEY", "")
+            self._instance = AnthropicProvider(
+                model=self._model,
+                api_key=api_key,
+                base_url="https://api.kimi.com/coding/",
+                default_headers={"User-Agent": "claude-code/1.0.17"},
+            )
         else:
             raise ValueError(f"unsupported provider: {self._provider_name}")
 

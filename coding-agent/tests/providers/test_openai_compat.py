@@ -4,10 +4,27 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from coding_agent.providers.openai_compat import OpenAICompatProvider
-from agentkit.providers.models import TextEvent, ToolCallEvent, DoneEvent
+from agentkit.providers.models import (
+    TextEvent,
+    ThinkingEvent,
+    ToolCallEvent,
+    DoneEvent,
+    UsageEvent,
+)
 
 
 class TestOpenAICompatProvider:
+    def test_supports_custom_default_headers(self):
+        provider = OpenAICompatProvider(
+            model="gpt-4o",
+            api_key="sk-test",
+            default_headers={"Accept": "application/vnd.github+json"},
+        )
+
+        assert (
+            provider._client.default_headers["Accept"] == "application/vnd.github+json"
+        )
+
     def test_context_size_known_model(self):
         provider = OpenAICompatProvider(
             model="gpt-4o",
@@ -35,7 +52,9 @@ class TestOpenAICompatProvider:
         mock_chunk.choices = [MagicMock()]
         mock_chunk.choices[0].delta.content = "Hello"
         mock_chunk.choices[0].delta.tool_calls = None
+        mock_chunk.choices[0].delta.reasoning_content = None
         mock_chunk.choices[0].finish_reason = None
+        mock_chunk.usage = None
 
         mock_stream = AsyncMock()
         mock_stream.__aiter__.return_value = [mock_chunk]
@@ -48,10 +67,11 @@ class TestOpenAICompatProvider:
         ):
             events.append(event)
 
-        assert len(events) == 2  # text + done
+        assert len(events) == 3  # text + usage + done
         assert isinstance(events[0], TextEvent)
         assert events[0].text == "Hello"
-        assert isinstance(events[1], DoneEvent)
+        assert isinstance(events[1], UsageEvent)
+        assert isinstance(events[2], DoneEvent)
 
     @pytest.mark.asyncio
     async def test_stream_handles_rate_limit_with_retry(self):
@@ -76,12 +96,14 @@ class TestOpenAICompatProvider:
                     body=None,
                 )
 
-            # Return successful stream
             mock_chunk = MagicMock()
             mock_chunk.choices = [MagicMock()]
             mock_chunk.choices[0].delta.content = "Hello"
             mock_chunk.choices[0].delta.tool_calls = None
+            mock_chunk.choices[0].delta.reasoning_content = None
             mock_chunk.choices[0].finish_reason = None
+            mock_chunk.usage = None
+            mock_chunk.choices[0].usage = None
 
             mock_stream = AsyncMock()
             mock_stream.__aiter__.return_value = [mock_chunk]
@@ -180,7 +202,10 @@ class TestOpenAICompatProvider:
         mock_chunk1 = MagicMock()
         mock_chunk1.choices = [MagicMock()]
         mock_chunk1.choices[0].delta.content = None
+        mock_chunk1.choices[0].delta.reasoning_content = None
         mock_chunk1.choices[0].finish_reason = None
+        mock_chunk1.usage = None
+        mock_chunk1.choices[0].usage = None
 
         # Tool call delta
         mock_tool_call = MagicMock()
@@ -195,7 +220,10 @@ class TestOpenAICompatProvider:
         mock_chunk2.choices = [MagicMock()]
         mock_chunk2.choices[0].delta.content = None
         mock_chunk2.choices[0].delta.tool_calls = None
+        mock_chunk2.choices[0].delta.reasoning_content = None
         mock_chunk2.choices[0].finish_reason = "stop"
+        mock_chunk2.usage = None
+        mock_chunk2.choices[0].usage = None
 
         mock_stream = AsyncMock()
         mock_stream.__aiter__.return_value = [mock_chunk1, mock_chunk2]
@@ -223,11 +251,214 @@ class TestOpenAICompatProvider:
         ):
             events.append(event)
 
-        # Should get tool_call + done
-        assert len(events) == 2, (
-            f"Expected 2 events, got {len(events)}: {[type(e).__name__ for e in events]}"
+        # Should get tool_call + usage + done
+        assert len(events) == 3, (
+            f"Expected 3 events, got {len(events)}: {[type(e).__name__ for e in events]}"
         )
         assert isinstance(events[0], ToolCallEvent)
         assert events[0].name == "bash"
         assert events[0].arguments == {"command": "ls"}
-        assert isinstance(events[1], DoneEvent)
+        assert isinstance(events[1], UsageEvent)
+        assert isinstance(events[2], DoneEvent)
+
+    @pytest.mark.asyncio
+    async def test_stream_captures_reasoning_content(self):
+        provider = OpenAICompatProvider(
+            model="kimi-for-coding",
+            api_key="sk-test",
+        )
+
+        mock_thinking_chunk = MagicMock()
+        mock_thinking_chunk.choices = [MagicMock()]
+        mock_thinking_chunk.choices[0].delta.content = None
+        mock_thinking_chunk.choices[0].delta.reasoning_content = "Let me think..."
+        mock_thinking_chunk.choices[0].delta.tool_calls = None
+        mock_thinking_chunk.choices[0].finish_reason = None
+        mock_thinking_chunk.usage = None
+        mock_thinking_chunk.choices[0].usage = None
+
+        mock_text_chunk = MagicMock()
+        mock_text_chunk.choices = [MagicMock()]
+        mock_text_chunk.choices[0].delta.content = "Here's the answer"
+        mock_text_chunk.choices[0].delta.reasoning_content = None
+        mock_text_chunk.choices[0].delta.tool_calls = None
+        mock_text_chunk.choices[0].finish_reason = None
+        mock_text_chunk.usage = None
+        mock_text_chunk.choices[0].usage = None
+
+        mock_stream = AsyncMock()
+        mock_stream.__aiter__.return_value = [mock_thinking_chunk, mock_text_chunk]
+
+        provider._client.chat.completions.create = AsyncMock(return_value=mock_stream)
+
+        events = []
+        async for event in provider.stream(
+            messages=[{"role": "user", "content": "Hi"}]
+        ):
+            events.append(event)
+
+        assert len(events) == 4  # thinking + text + usage + done
+        assert isinstance(events[0], ThinkingEvent)
+        assert events[0].text == "Let me think..."
+        assert isinstance(events[1], TextEvent)
+        assert events[1].text == "Here's the answer"
+        assert isinstance(events[2], UsageEvent)
+        assert isinstance(events[3], DoneEvent)
+
+
+class TestOpenAIUsageExtraction:
+    @pytest.mark.asyncio
+    async def test_usage_event_yielded_before_done(self):
+        provider = OpenAICompatProvider(model="gpt-4o", api_key="sk-test")
+
+        mock_text_chunk = MagicMock()
+        mock_text_chunk.choices = [MagicMock()]
+        mock_text_chunk.choices[0].delta.content = "Hello"
+        mock_text_chunk.choices[0].delta.tool_calls = None
+        mock_text_chunk.choices[0].delta.reasoning_content = None
+        mock_text_chunk.choices[0].finish_reason = None
+        mock_text_chunk.usage = None
+
+        mock_usage_chunk = MagicMock()
+        mock_usage_chunk.choices = []
+        mock_usage_chunk.usage = MagicMock()
+        mock_usage_chunk.usage.prompt_tokens = 100
+        mock_usage_chunk.usage.completion_tokens = 50
+
+        mock_stream = AsyncMock()
+        mock_stream.__aiter__.return_value = [mock_text_chunk, mock_usage_chunk]
+        provider._client.chat.completions.create = AsyncMock(return_value=mock_stream)
+
+        events = []
+        async for event in provider.stream(
+            messages=[{"role": "user", "content": "Hi"}]
+        ):
+            events.append(event)
+
+        assert len(events) == 3
+        assert isinstance(events[0], TextEvent)
+        assert isinstance(events[1], UsageEvent)
+        assert events[1].input_tokens == 100
+        assert events[1].output_tokens == 50
+        assert isinstance(events[2], DoneEvent)
+
+    @pytest.mark.asyncio
+    async def test_usage_event_with_no_usage_data_yields_zeros(self):
+        provider = OpenAICompatProvider(model="gpt-4o", api_key="sk-test")
+
+        mock_text_chunk = MagicMock()
+        mock_text_chunk.choices = [MagicMock()]
+        mock_text_chunk.choices[0].delta.content = "Hello"
+        mock_text_chunk.choices[0].delta.tool_calls = None
+        mock_text_chunk.choices[0].delta.reasoning_content = None
+        mock_text_chunk.choices[0].finish_reason = None
+        mock_text_chunk.usage = None
+        mock_text_chunk.choices[0].usage = None
+
+        mock_stream = AsyncMock()
+        mock_stream.__aiter__.return_value = [mock_text_chunk]
+        provider._client.chat.completions.create = AsyncMock(return_value=mock_stream)
+
+        events = []
+        async for event in provider.stream(
+            messages=[{"role": "user", "content": "Hi"}]
+        ):
+            events.append(event)
+
+        assert len(events) == 3
+        assert isinstance(events[0], TextEvent)
+        assert isinstance(events[1], UsageEvent)
+        assert events[1].input_tokens == 0
+        assert events[1].output_tokens == 0
+        assert isinstance(events[2], DoneEvent)
+
+    @pytest.mark.asyncio
+    async def test_kimi_non_standard_usage_location(self):
+        provider = OpenAICompatProvider(model="kimi-for-coding", api_key="sk-test")
+
+        mock_text_chunk = MagicMock()
+        mock_text_chunk.choices = [MagicMock()]
+        mock_text_chunk.choices[0].delta.content = "Hello"
+        mock_text_chunk.choices[0].delta.tool_calls = None
+        mock_text_chunk.choices[0].delta.reasoning_content = None
+        mock_text_chunk.choices[0].finish_reason = None
+        mock_text_chunk.usage = None
+        mock_text_chunk.choices[0].usage = None
+
+        mock_usage_chunk = MagicMock()
+        mock_usage_chunk.choices = [MagicMock()]
+        mock_usage_chunk.choices[0].delta.content = None
+        mock_usage_chunk.choices[0].delta.tool_calls = None
+        mock_usage_chunk.choices[0].delta.reasoning_content = None
+        mock_usage_chunk.choices[0].finish_reason = "stop"
+        mock_usage_chunk.usage = None
+        mock_usage_chunk.choices[0].usage = MagicMock()
+        mock_usage_chunk.choices[0].usage.prompt_tokens = 200
+        mock_usage_chunk.choices[0].usage.completion_tokens = 75
+
+        mock_stream = AsyncMock()
+        mock_stream.__aiter__.return_value = [mock_text_chunk, mock_usage_chunk]
+        provider._client.chat.completions.create = AsyncMock(return_value=mock_stream)
+
+        events = []
+        async for event in provider.stream(
+            messages=[{"role": "user", "content": "Hi"}]
+        ):
+            events.append(event)
+
+        usage_events = [e for e in events if isinstance(e, UsageEvent)]
+        assert len(usage_events) == 1
+        assert usage_events[0].input_tokens == 200
+        assert usage_events[0].output_tokens == 75
+
+    @pytest.mark.asyncio
+    async def test_stream_options_include_usage_is_set(self):
+        provider = OpenAICompatProvider(model="gpt-4o", api_key="sk-test")
+
+        mock_chunk = MagicMock()
+        mock_chunk.choices = [MagicMock()]
+        mock_chunk.choices[0].delta.content = "Hi"
+        mock_chunk.choices[0].delta.tool_calls = None
+        mock_chunk.choices[0].delta.reasoning_content = None
+        mock_chunk.choices[0].finish_reason = None
+        mock_chunk.usage = None
+
+        mock_stream = AsyncMock()
+        mock_stream.__aiter__.return_value = [mock_chunk]
+        provider._client.chat.completions.create = AsyncMock(return_value=mock_stream)
+
+        events = []
+        async for event in provider.stream(
+            messages=[{"role": "user", "content": "Hi"}]
+        ):
+            events.append(event)
+
+        create_call = provider._client.chat.completions.create
+        call_kwargs = create_call.call_args[1]
+        assert call_kwargs.get("stream_options") == {"include_usage": True}
+
+    @pytest.mark.asyncio
+    async def test_usage_event_has_provider_name(self):
+        provider = OpenAICompatProvider(model="gpt-4o", api_key="sk-test")
+
+        mock_chunk = MagicMock()
+        mock_chunk.choices = [MagicMock()]
+        mock_chunk.choices[0].delta.content = "Hi"
+        mock_chunk.choices[0].delta.tool_calls = None
+        mock_chunk.choices[0].delta.reasoning_content = None
+        mock_chunk.choices[0].finish_reason = None
+        mock_chunk.usage = None
+
+        mock_stream = AsyncMock()
+        mock_stream.__aiter__.return_value = [mock_chunk]
+        provider._client.chat.completions.create = AsyncMock(return_value=mock_stream)
+
+        events = []
+        async for event in provider.stream(
+            messages=[{"role": "user", "content": "Hi"}]
+        ):
+            events.append(event)
+
+        usage_events = [e for e in events if isinstance(e, UsageEvent)]
+        assert len(usage_events) == 1
+        assert usage_events[0].provider_name == "gpt-4o"

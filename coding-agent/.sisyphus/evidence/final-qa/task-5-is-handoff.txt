@@ -1,0 +1,3 @@
+97:            if anchor_type == "handoff" and "is_handoff" not in entry.meta:
+98:                entry.meta["is_handoff"] = True
+101:            if entry.meta.get("is_handoff"):

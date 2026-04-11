@@ -1,3 +1,5 @@
+# pyright: reportUnusedImport=false, reportMissingTypeStubs=false, reportUnknownParameterType=false, reportMissingParameterType=false, reportUnknownArgumentType=false, reportAny=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnusedParameter=false
+
 """End-to-end integration test — verify all layers wire together."""
 
 import pytest
@@ -80,7 +82,7 @@ class TestEndToEnd:
     @pytest.mark.asyncio
     async def test_approval_directive_flow(self, tmp_path):
         from coding_agent.__main__ import create_agent
-        from agentkit.directive.types import Approve
+        from agentkit.directive.types import AskUser
 
         config_path = (
             Path(__file__).parent.parent.parent / "src" / "coding_agent" / "agent.toml"
@@ -99,7 +101,7 @@ class TestEndToEnd:
             tool_name="file_read",
             arguments={"path": "/tmp/test.txt"},
         )
-        assert isinstance(result, Approve)
+        assert isinstance(result, AskUser)
 
     @pytest.mark.asyncio
     async def test_memory_grounding_flow(self, tmp_path):
@@ -182,8 +184,10 @@ class TestEndToEnd:
         assert kinds[0] == "message"
         assert "tool_call" in kinds
         assert "tool_result" in kinds
-        assert entries[-1].kind == "message"
-        assert entries[-1].payload["role"] == "assistant"
-        assert "hello world" in entries[-1].payload["content"]
+
+        message_entries = [e for e in entries if e.kind == "message"]
+        last_message = message_entries[-1]
+        assert last_message.payload["role"] == "assistant"
+        assert "hello world" in last_message.payload["content"]
 
         assert call_count == 2

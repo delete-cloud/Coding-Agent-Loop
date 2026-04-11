@@ -9,7 +9,9 @@ class InMemoryTapeStore:
         self._tapes = {}
 
     async def save(self, tape_id, entries):
-        self._tapes[tape_id] = entries
+        if tape_id not in self._tapes:
+            self._tapes[tape_id] = []
+        self._tapes[tape_id].extend(entries)
 
     async def load(self, tape_id):
         return self._tapes.get(tape_id, [])
@@ -52,7 +54,7 @@ class TestForkTapeStore:
         forked.append(Entry(kind="tool_call", payload={"name": "bash"}))
         await fork_store.commit(forked)
         loaded = await backing_store.load(forked.tape_id)
-        assert len(loaded) == 2
+        assert len(loaded) == 1  # only delta (new entry) is persisted
 
     @pytest.mark.asyncio
     async def test_rollback_discards(self, fork_store, backing_store):
@@ -70,3 +72,15 @@ class TestForkTapeStore:
         fork_store.rollback(forked)
         with pytest.raises(ValueError, match="already finalized"):
             await fork_store.commit(forked)
+
+    @pytest.mark.asyncio
+    async def test_commit_only_saves_delta(self, fork_store, backing_store):
+        tape = Tape()
+        for i in range(5):
+            tape.append(Entry(kind="message", payload={"content": str(i)}))
+        forked = fork_store.begin(tape)
+        for i in range(5, 8):
+            forked.append(Entry(kind="message", payload={"content": str(i)}))
+        await fork_store.commit(forked)
+        loaded = await backing_store.load(forked.tape_id)
+        assert len(loaded) == 3  # only the 3 new entries, not all 8
