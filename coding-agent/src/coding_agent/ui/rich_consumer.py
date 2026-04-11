@@ -4,7 +4,7 @@ import asyncio
 import json
 import time
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any, Protocol
 
 from coding_agent.ui.collapse import (
     CollapseGroup,
@@ -24,24 +24,51 @@ from coding_agent.wire.protocol import (
     WireMessage,
 )
 
-if TYPE_CHECKING:
-    from coding_agent.ui.stream_renderer import StreamingRenderer
-
 
 class WireConsumer(Protocol):
     async def emit(self, msg: WireMessage) -> None: ...
     async def request_approval(self, req: ApprovalRequest) -> ApprovalResponse: ...
 
 
+class Renderer(Protocol):
+    console: Any
+
+    def thinking_start(self) -> None: ...
+    def thinking_update(self, elapsed_seconds: float = 0.0) -> None: ...
+    def thinking(self, text: str) -> None: ...
+    def thinking_end(self) -> None: ...
+    def stream_start(self) -> None: ...
+    def stream_text(self, text: str) -> None: ...
+    def stream_end(self) -> None: ...
+    def compact_tool_call(
+        self, call_id: str, name: str, args: dict[str, object]
+    ) -> None: ...
+    def tool_call(self, call_id: str, name: str, args: dict[str, object]) -> None: ...
+    def compact_tool_result(
+        self, call_id: str, name: str, result: str, *, is_error: bool = False
+    ) -> None: ...
+    def tool_result(
+        self, call_id: str, name: str, result: str, *, is_error: bool = False
+    ) -> None: ...
+    def collapsed_group(
+        self,
+        summary: str,
+        duration: float,
+        has_error: bool = False,
+        hint: str | None = None,
+    ) -> None: ...
+    def turn_end(self, status: str) -> None: ...
+
+
 class RichConsumer:
     def __init__(
         self,
-        renderer: StreamingRenderer,
+        renderer: Renderer,
         thinking_enabled: Callable[[], bool] | None = None,
         thinking_effort: Callable[[], str] | None = None,
         on_status: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
-        self.renderer: StreamingRenderer = renderer
+        self.renderer: Renderer = renderer
         self._stream_active: bool = False
         self._session_approved_tools: set[str] = set()
         self._collapse_group: CollapseGroup | None = None
