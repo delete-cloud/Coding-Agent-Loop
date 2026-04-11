@@ -22,6 +22,7 @@ from coding_agent.core.config import Config
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.ui.stream_renderer import StreamingRenderer
 from coding_agent.ui.rich_consumer import RichConsumer
+from coding_agent.ui.rich_tui import CodingAgentTUI
 from coding_agent.ui.status_footer import StatusFooter
 
 
