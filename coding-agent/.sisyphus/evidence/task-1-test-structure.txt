@@ -1,4 +1,0 @@
-=== Test structure verification ===
-def test_ count: 21
-assert True count: 0
-SWITCH_TO_SHELL|SWITCH_TO_CHAT occurrences: 21
