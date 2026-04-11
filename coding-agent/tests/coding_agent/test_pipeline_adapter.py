@@ -412,6 +412,33 @@ class TestNoConsumer:
         assert outcome.stop_reason == StopReason.NO_TOOL_CALLS
         assert outcome.steps_taken == 1
 
+    @pytest.mark.asyncio
+    async def test_reasoning_only_second_round_after_tool_call_returns_no_visible_message(
+        self,
+    ):
+        call_count = 0
+
+        async def mock_stream(messages, tools=None, **kw):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                yield ToolCallEvent(
+                    tool_call_id="tc1",
+                    name="skill_invoke",
+                    arguments={"name": "using-superpowers"},
+                )
+                yield DoneEvent()
+            else:
+                yield ThinkingEvent(text="Let me think...")
+                yield DoneEvent()
+
+        pipeline, ctx, _ = _make_pipeline_and_ctx(mock_stream)
+        adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx)
+
+        outcome = await adapter.run_turn("hello")
+
+        assert outcome.final_message is None
+
 
 class TestErrorRecovery:
     """T12: REPL-safe error recovery — PipelineAdapter must never crash the REPL."""

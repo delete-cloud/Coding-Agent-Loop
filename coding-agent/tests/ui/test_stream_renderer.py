@@ -1157,6 +1157,21 @@ class TestThinkingSpinner:
         output = buf.getvalue()
         assert "some thought" in output
 
+    def test_thinking_buffers_chunks_until_end_when_active(self):
+        renderer, _, buf = self._make_renderer(terminal=False)
+        renderer.thinking_start()
+        buf.truncate(0)
+        buf.seek(0)
+
+        renderer.thinking("The")
+        renderer.thinking(" user")
+
+        assert buf.getvalue() == ""
+
+        renderer.thinking_end()
+        output = buf.getvalue()
+        assert "The user" in output
+
     def test_update_status_renders_token_info(self):
         renderer, _, buf = self._make_renderer()
         renderer.update_status(tokens_in=500, tokens_out=200, elapsed_seconds=12.3)

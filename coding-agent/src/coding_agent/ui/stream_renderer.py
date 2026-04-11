@@ -184,6 +184,7 @@ class StreamingRenderer:
         self._stream_started_output: bool = False
         self._spinner_idx: int = 0
         self._thinking_active: bool = False
+        self._thinking_buffer: str = ""
 
     def user_message(self, content: str) -> None:
         clean_content = _sanitize_display_text(content)
@@ -194,6 +195,9 @@ class StreamingRenderer:
             self.console.print(Text(clean_content, style="bold white"))
 
     def thinking(self, text: str) -> None:
+        if self._thinking_active:
+            self._thinking_buffer += text
+            return
         self.console.print(Text(text, style="dim italic"))
 
     def _clear_current_line(self) -> None:
@@ -208,6 +212,7 @@ class StreamingRenderer:
     def thinking_start(self) -> None:
         self._thinking_active = True
         self._spinner_idx = 0
+        self._thinking_buffer = ""
         if self.console.is_terminal:
             char = _SPINNER[self._spinner_idx]
             self.console.print(Text(f"{char} Thinking...", style="dim"), end="")
@@ -229,8 +234,11 @@ class StreamingRenderer:
             return
         if self.console.is_terminal:
             self._clear_current_line()
+        if self._thinking_buffer:
+            self.console.print(Text(self._thinking_buffer, style="dim italic"))
         self._thinking_active = False
         self._spinner_idx = 0
+        self._thinking_buffer = ""
 
     def update_status(
         self,
