@@ -3,24 +3,18 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import lru_cache
+import importlib
 import platform
+import re
 import shlex
 import subprocess
 from pathlib import Path
 from shutil import which
+from types import ModuleType
 from typing import cast
 
 from agentkit.config.loader import load_config
 from agentkit.tools import tool
-
-from .sandbox import (
-    SandboxConfig,
-    SandboxLimits,
-    SandboxMode,
-    SandboxRequest,
-    _validate_cwd,
-    build_sandbox,
-)
 
 _DISALLOWED_TOKENS = {"&&", "||", "|", ";", ">", ">>", "<", "2>", "&"}
 _STRUCTURED_RESULTS: ContextVar[bool] = ContextVar(
@@ -71,6 +65,25 @@ def _normalize_shell_config(raw_shell_config: object) -> dict[str, object]:
     for key, value in typed_shell_config.items():
         normalized[str(key)] = value
     return normalized
+
+
+def _load_sandbox_module() -> ModuleType:
+    try:
+        sandbox_module = importlib.import_module("coding_agent.tools.sandbox")
+    except ImportError as exc:
+        raise ValueError(
+            "Sandbox mode configured but coding_agent.tools.sandbox is unavailable"
+        ) from exc
+    return cast(ModuleType, sandbox_module)
+
+
+def _sandbox_mode(shell_config: dict[str, object]) -> str:
+    mode_value = shell_config.get("sandbox_mode", "none")
+    if not isinstance(mode_value, str):
+        raise ValueError("sandbox_mode must be a string")
+    if mode_value not in ("none", "nsjail", "docker"):
+        raise ValueError(f"Unsupported sandbox mode: {mode_value}")
+    return mode_value
 
 
 def _parse_command(command: str) -> list[str]:
@@ -143,19 +156,15 @@ def _resolve_workspace_root(
     return Path(str(workspace_root)).expanduser().resolve()
 
 
-def _sandbox_config(
-    *, cwd: str | None, __pipeline_ctx__: object | None
-) -> SandboxConfig:
+def _sandbox_config(*, cwd: str | None, __pipeline_ctx__: object | None) -> object:
     shell_config = _pipeline_shell_config(__pipeline_ctx__)
     workspace_root = _resolve_workspace_root(cwd, __pipeline_ctx__, shell_config)
-    mode_value = shell_config.get("sandbox_mode", "none")
-    if mode_value not in ("none", "nsjail", "docker"):
-        raise ValueError(f"Unsupported sandbox mode: {mode_value}")
-    mode: SandboxMode = mode_value
-    return SandboxConfig(
-        mode=mode,
+    mode_value = _sandbox_mode(shell_config)
+    sandbox_module = _load_sandbox_module()
+    return sandbox_module.SandboxConfig(
+        mode=mode_value,
         workspace_root=workspace_root,
-        limits=SandboxLimits(
+        limits=sandbox_module.SandboxLimits(
             cpu_limit_seconds=_optional_int(shell_config.get("cpu_limit_seconds")),
             memory_limit_mb=_optional_int(shell_config.get("memory_limit_mb")),
         ),
@@ -175,13 +184,42 @@ def _optional_int(value: object | None) -> int | None:
 
 def _sandbox_request(
     *, args: list[str], cwd: str | None, env: dict[str, str] | None, timeout: int
-) -> SandboxRequest:
-    return SandboxRequest(
+) -> object:
+    sandbox_module = _load_sandbox_module()
+    return sandbox_module.SandboxRequest(
         args=args,
         cwd=Path(cwd).expanduser().resolve() if cwd else Path.cwd().resolve(),
         env=_build_env(env),
         timeout_seconds=timeout,
     )
+
+
+def _validated_execution_cwd(
+    *, cwd: str | None, __pipeline_ctx__: object | None, shell_config: dict[str, object]
+) -> str | None:
+    if cwd is None:
+        return None
+    workspace_root = _resolve_workspace_root(cwd, __pipeline_ctx__, shell_config)
+    resolved_cwd = Path(cwd).expanduser().resolve()
+    try:
+        resolved_cwd.relative_to(workspace_root)
+    except ValueError as exc:
+        raise ValueError(
+            f"Working directory is outside sandbox workspace: {resolved_cwd}"
+        ) from exc
+    return str(resolved_cwd)
+
+
+def _validate_no_path_escape(args: list[str], workspace_root: Path) -> None:
+    for arg in args[1:]:
+        for match in re.findall(r"/[A-Za-z0-9_./-]+", arg):
+            candidate = Path(match).expanduser().resolve()
+            try:
+                candidate.relative_to(workspace_root)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Path is outside sandbox workspace: {candidate}"
+                ) from exc
 
 
 @tool(description="Run a shell command and return stdout/stderr.")
@@ -193,13 +231,28 @@ def bash_run(
     __pipeline_ctx__: object | None = None,
 ) -> str | dict[str, str | int]:
     try:
+        shell_config = _pipeline_shell_config(__pipeline_ctx__)
+        mode_value = _sandbox_mode(shell_config)
+        execution_cwd = _validated_execution_cwd(
+            cwd=cwd,
+            __pipeline_ctx__=__pipeline_ctx__,
+            shell_config=shell_config,
+        )
         changed_dir = _apply_cd(command, cwd)
         if changed_dir is not None:
-            shell_config = _pipeline_shell_config(__pipeline_ctx__)
             workspace_root = _resolve_workspace_root(
                 cwd, __pipeline_ctx__, shell_config
             )
-            _validate_cwd(Path(changed_dir), workspace_root)
+            if mode_value != "none":
+                sandbox_module = _load_sandbox_module()
+                sandbox_module._validate_cwd(Path(changed_dir), workspace_root)
+            else:
+                try:
+                    Path(changed_dir).relative_to(workspace_root)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Directory is outside sandbox workspace: {changed_dir}"
+                    ) from exc
             return f"Changed directory to {changed_dir}"
 
         exported = _apply_export(command)
@@ -210,12 +263,33 @@ def bash_run(
             return f"Exported {key}={value}"
 
         args = _parse_command(command)
-        sandbox = build_sandbox(
-            _sandbox_config(cwd=cwd, __pipeline_ctx__=__pipeline_ctx__)
-        )
-        result = sandbox.run(
-            _sandbox_request(args=args, cwd=cwd, env=env, timeout=timeout)
-        )
+        if mode_value == "none":
+            workspace_root = _resolve_workspace_root(
+                execution_cwd or cwd, __pipeline_ctx__, shell_config
+            )
+            _validate_no_path_escape(args, workspace_root)
+            result = subprocess.run(
+                args,
+                shell=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=execution_cwd,
+                env=_build_env(env),
+            )
+        else:
+            sandbox_module = _load_sandbox_module()
+            sandbox = sandbox_module.build_sandbox(
+                _sandbox_config(cwd=execution_cwd, __pipeline_ctx__=__pipeline_ctx__)
+            )
+            result = sandbox.run(
+                _sandbox_request(
+                    args=args,
+                    cwd=execution_cwd,
+                    env=env,
+                    timeout=timeout,
+                )
+            )
         if _structured_results_enabled():
             return _structured_shell_result(result)
         output = ""
