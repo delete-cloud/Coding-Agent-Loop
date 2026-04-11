@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 from pathlib import Path
 from typing import Any, Callable
 
@@ -15,8 +14,10 @@ class CoreToolsPlugin:
 
     @staticmethod
     def _default_child_pipeline_builder(**kwargs: Any) -> tuple[Any, PipelineContext]:
-        app_module = importlib.import_module("coding_agent.app")
-        return app_module.create_child_pipeline(**kwargs)
+        import importlib
+
+        main_module = importlib.import_module("coding_agent.__main__")
+        return main_module.create_child_pipeline(**kwargs)
 
     def __init__(
         self,
@@ -68,8 +69,8 @@ class CoreToolsPlugin:
             todo_read,
             file_patch,
             web_search,
+            subagent,
         ]
-        tool_fns.append(subagent)
 
         for fn in tool_fns:
             self._registry.register(fn)

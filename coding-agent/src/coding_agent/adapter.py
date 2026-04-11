@@ -78,7 +78,9 @@ class PipelineAdapter:
     async def initialize(self) -> None:
         if self._mounted:
             return
-        await self._pipeline.mount(self._ctx)
+        mount_result = self._pipeline.mount(self._ctx)
+        if isawaitable(mount_result):
+            await mount_result
         self._mounted = True
 
     async def close(self) -> None:
