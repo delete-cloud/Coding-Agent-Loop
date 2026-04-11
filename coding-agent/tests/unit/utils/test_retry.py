@@ -1,11 +1,29 @@
 """Tests for retry utilities."""
 
 import asyncio
+from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from coding_agent.utils.retry import with_retry, RETRYABLE_STATUS_CODES
+from coding_agent.utils.retry import RETRYABLE_STATUS_CODES, RetryableError, with_retry
+
+
+class StatusError(Exception):
+    def __init__(self, message: str, status: int):
+        super().__init__(message)
+        self.status = status
+
+
+@dataclass
+class ResponseStub:
+    status_code: int
+
+
+class ResponseStatusError(Exception):
+    def __init__(self, message: str, response: ResponseStub):
+        super().__init__(message)
+        self.response = response
 
 
 class TestWithRetry:
@@ -33,7 +51,7 @@ class TestWithRetry:
             side_effect=[
                 self._make_exception(429),
                 self._make_exception(429),
-                "success"
+                "success",
             ]
         )
 
@@ -55,7 +73,7 @@ class TestWithRetry:
         async def test_func():
             return await mock_func()
 
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(RetryableError) as exc_info:
             await test_func()
 
         assert exc_info.value.status_code == 400
@@ -70,7 +88,7 @@ class TestWithRetry:
         async def test_func():
             return await mock_func()
 
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(RetryableError) as exc_info:
             await test_func()
 
         assert exc_info.value.status_code == 500
@@ -83,7 +101,7 @@ class TestWithRetry:
             side_effect=[
                 self._make_exception(503),
                 self._make_exception(503),
-                "success"
+                "success",
             ]
         )
 
@@ -96,7 +114,7 @@ class TestWithRetry:
         async def test_func():
             return await mock_func()
 
-        with patch('asyncio.sleep', mock_sleep):
+        with patch("asyncio.sleep", mock_sleep):
             await test_func()
 
         # Check exponential backoff: ~1s, ~2s (with jitter)
@@ -107,9 +125,7 @@ class TestWithRetry:
     @pytest.mark.asyncio
     async def test_on_retry_callback(self):
         """Test on_retry callback is called."""
-        mock_func = AsyncMock(
-            side_effect=[self._make_exception(429), "success"]
-        )
+        mock_func = AsyncMock(side_effect=[self._make_exception(429), "success"])
         callback_calls = []
 
         def on_retry(attempt, exception, delay):
@@ -127,9 +143,7 @@ class TestWithRetry:
     @pytest.mark.asyncio
     async def test_callback_error_not_breaking(self):
         """Test that callback errors don't break retry logic."""
-        mock_func = AsyncMock(
-            side_effect=[self._make_exception(429), "success"]
-        )
+        mock_func = AsyncMock(side_effect=[self._make_exception(429), "success"])
 
         def failing_callback(attempt, exception, delay):
             raise RuntimeError("Callback failed!")
@@ -146,13 +160,9 @@ class TestWithRetry:
     @pytest.mark.asyncio
     async def test_retry_on_status_attribute(self):
         """Test retry using 'status' attribute (Anthropic SDK style)."""
-        # Create exception with 'status' instead of 'status_code'
-        exc = Exception("Overloaded")
-        exc.status = 529
+        exc = StatusError("Overloaded", status=529)
 
-        mock_func = AsyncMock(
-            side_effect=[exc, "success"]
-        )
+        mock_func = AsyncMock(side_effect=[exc, "success"])
 
         @with_retry(max_retries=3, base_delay=0.01)
         async def test_func():
@@ -165,16 +175,9 @@ class TestWithRetry:
     @pytest.mark.asyncio
     async def test_retry_on_response_status_code(self):
         """Test retry using response.status_code (httpx style)."""
-        # Create exception with response object
-        response_mock = MagicMock()
-        response_mock.status_code = 502
+        exc = ResponseStatusError("Bad Gateway", response=ResponseStub(status_code=502))
 
-        exc = Exception("Bad Gateway")
-        exc.response = response_mock
-
-        mock_func = AsyncMock(
-            side_effect=[exc, "success"]
-        )
+        mock_func = AsyncMock(side_effect=[exc, "success"])
 
         @with_retry(max_retries=3, base_delay=0.01)
         async def test_func():
@@ -192,7 +195,7 @@ class TestWithRetry:
                 self._make_exception(500),
                 self._make_exception(500),
                 self._make_exception(500),
-                "success"
+                "success",
             ]
         )
 
@@ -205,7 +208,7 @@ class TestWithRetry:
         async def test_func():
             return await mock_func()
 
-        with patch('asyncio.sleep', mock_sleep):
+        with patch("asyncio.sleep", mock_sleep):
             await test_func()
 
         # With base_delay=1.0 and max_delay=2.0:
@@ -234,9 +237,7 @@ class TestWithRetry:
 
     def _make_exception(self, status_code: int):
         """Create an exception with status_code attribute."""
-        exc = Exception(f"HTTP {status_code}")
-        exc.status_code = status_code
-        return exc
+        return RetryableError(f"HTTP {status_code}", status_code=status_code)
 
 
 class TestRetryableStatuses:
