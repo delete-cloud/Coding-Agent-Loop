@@ -373,7 +373,7 @@ class SessionManager:
                 ApprovalPolicy.AUTO: "auto",
             }
 
-            create_agent = importlib.import_module("coding_agent.app").create_agent
+            create_agent = importlib.import_module("coding_agent.__main__").create_agent
 
             pipeline, ctx = create_agent(
                 workspace_root=session.repo_path,
@@ -438,10 +438,7 @@ class SessionManager:
             consumer = _WireConsumer(session.wire)
             ctx.config["wire_consumer"] = consumer
             adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
-            try:
-                await adapter.run_turn(prompt)
-            finally:
-                await adapter.close()
+            await adapter.run_turn(prompt)
         except Exception as exc:
             logger.exception("HTTP session turn failed")
             await session.wire.send(
