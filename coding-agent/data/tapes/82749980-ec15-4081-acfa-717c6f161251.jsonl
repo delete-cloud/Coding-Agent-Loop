@@ -1,2 +1,0 @@
-{"id": "18adb50c-bfba-4b20-ae79-1068973c52ab", "kind": "message", "payload": {"role": "assistant", "content": "Hello! How can I help you today?", "reasoning_content": "The user said \"hello\". I should greet them back and ask how I can help them."}, "timestamp": 1775109925.713343}
-{"id": "d82fe123-90b2-4dc8-9e87-9d38546ee77c", "kind": "anchor", "payload": {"content": "hello"}, "timestamp": 1775109925.7134879, "meta": {"topic_id": "topic-b3c2da49", "topic_number": 1, "prefix": "Topic Start"}}

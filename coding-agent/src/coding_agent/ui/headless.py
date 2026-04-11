@@ -31,7 +31,7 @@ class WireConsumer(Protocol):
 
 class HeadlessConsumer:
     """WireConsumer implementation for batch/headless mode.
-
+    
     - Logs all messages to console
     - Auto-approves tool calls (yolo mode)
     - No interactive UI
@@ -57,12 +57,11 @@ class HeadlessConsumer:
 
     async def request_approval(self, req: ApprovalRequest) -> ApprovalResponse:
         """Request approval and wait for response.
-
+        
         In headless mode, this auto-approves based on configuration.
         """
-        tool_name = req.tool_call.tool_name if req.tool_call is not None else "unknown"
         if self.auto_approve:
-            logger.info(f"[Auto-approve] {tool_name}")
+            logger.info(f"[Auto-approve] {req.tool_call.tool_name}")
             return ApprovalResponse(
                 session_id=req.session_id,
                 request_id=req.request_id,
@@ -70,9 +69,7 @@ class HeadlessConsumer:
             )
         else:
             # In non-auto mode, deny by default in headless mode
-            logger.warning(
-                f"[Auto-deny] {tool_name} (headless mode without auto_approve)"
-            )
+            logger.warning(f"[Auto-deny] {req.tool_call.tool_name} (headless mode without auto_approve)")
             return ApprovalResponse(
                 session_id=req.session_id,
                 request_id=req.request_id,

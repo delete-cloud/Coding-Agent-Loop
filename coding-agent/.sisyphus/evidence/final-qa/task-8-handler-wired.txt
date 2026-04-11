@@ -1,2 +1,0 @@
-158:    async def _memory_handler(directive: Any) -> None:
-163:        memory_handler=_memory_handler if memory_plugin is not None else None,

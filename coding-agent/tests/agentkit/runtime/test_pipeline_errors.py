@@ -50,9 +50,7 @@ class ErrorPlugin:
         """Mock tool that raises RuntimeError."""
         if name == "failing_tool":
             raise RuntimeError(f"Tool '{name}' failed: simulated error")
-        if name == "ok_tool":
-            return f"executed:{name}"
-        return None
+        return f"executed:{name}"
 
 
 class TestPipelineToolErrorHandling:
@@ -210,57 +208,3 @@ class TestPipelineToolErrorHandling:
 
         assert tc1_result is not None
         assert "executed:ok_tool" in tc1_result.payload["content"]
-
-    @pytest.mark.asyncio
-    async def test_unknown_tool_is_recorded_as_error(self, setup):
-        pipeline, plugin = setup
-        tape = Tape()
-        tape.append(
-            Entry(
-                kind="message",
-                payload={"role": "user", "content": "run unsupported tool"},
-            )
-        )
-        ctx = PipelineContext(tape=tape, session_id="s1")
-        await pipeline.mount(ctx)
-
-        from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
-
-        call_count = 0
-
-        async def mock_stream(messages, tools=None, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                yield ToolCallEvent(
-                    tool_call_id="tc1", name="missing_tool", arguments={}
-                )
-                yield DoneEvent()
-            else:
-                yield TextEvent(text="I saw the tool error")
-                yield DoneEvent()
-
-        mock_llm = MagicMock()
-        mock_llm.stream = mock_stream
-        plugin._mock_llm = mock_llm
-
-        result = await pipeline.run_turn(ctx)
-        assert result is not None
-
-        tool_result_entries = [e for e in ctx.tape if e.kind == "tool_result"]
-        assert len(tool_result_entries) >= 1
-
-        tc1_result = None
-        for entry in tool_result_entries:
-            if entry.payload.get("tool_call_id") == "tc1":
-                tc1_result = entry
-                break
-
-        assert tc1_result is not None, "Expected tool_result entry for tc1"
-        assert tc1_result.payload["content"] == (
-            "Error executing tool 'missing_tool': tool 'missing_tool' not found"
-        )
-
-        entries = list(ctx.tape)
-        assert entries[-1].payload.get("role") == "assistant"
-        assert entries[-1].payload["content"] == "I saw the tool error"

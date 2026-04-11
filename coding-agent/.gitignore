@@ -9,5 +9,4 @@ uv.lock
 .ruff_cache/
 
 data/
-
 helm/

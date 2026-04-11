@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from contextvars import ContextVar
-from typing import Any
 
 import pytest
 
@@ -70,37 +68,25 @@ class TestDependencyAnalyzer:
 
 class TestParallelExecutorPlugin:
     def test_state_key(self):
-        async def echo(name: str, arguments: dict[str, Any]) -> str:
-            return name
-
-        plugin = ParallelExecutorPlugin(execute_fn=echo)
+        plugin = ParallelExecutorPlugin(execute_fn=lambda n, a: n)
         assert plugin.state_key == "parallel_executor"
 
     def test_hooks_include_execute_tools_batch(self):
-        async def echo(name: str, arguments: dict[str, Any]) -> str:
-            return name
-
-        plugin = ParallelExecutorPlugin(execute_fn=echo)
+        plugin = ParallelExecutorPlugin(execute_fn=lambda n, a: n)
         hooks = plugin.hooks()
         assert "execute_tools_batch" in hooks
 
     def test_max_concurrency_default(self):
-        async def echo(name: str, arguments: dict[str, Any]) -> str:
-            return name
-
-        plugin = ParallelExecutorPlugin(execute_fn=echo)
+        plugin = ParallelExecutorPlugin(execute_fn=lambda n, a: n)
         assert plugin.max_concurrency == 5
 
     def test_max_concurrency_configurable(self):
-        async def echo(name: str, arguments: dict[str, Any]) -> str:
-            return name
-
-        plugin = ParallelExecutorPlugin(execute_fn=echo, max_concurrency=10)
+        plugin = ParallelExecutorPlugin(execute_fn=lambda n, a: n, max_concurrency=10)
         assert plugin.max_concurrency == 10
 
     @pytest.mark.asyncio
     async def test_independent_calls_execute_concurrently(self):
-        async def slow_execute(name: str, arguments: dict[str, Any]) -> str:
+        async def slow_execute(name: str, arguments: dict) -> str:
             await asyncio.sleep(0.1)
             return f"result:{arguments.get('path', '')}"
 
@@ -126,7 +112,7 @@ class TestParallelExecutorPlugin:
     async def test_dependent_calls_execute_sequentially(self):
         execution_order: list[str] = []
 
-        async def tracking_execute(name: str, arguments: dict[str, Any]) -> str:
+        async def tracking_execute(name: str, arguments: dict) -> str:
             path = arguments.get("path", "?")
             execution_order.append(f"{name}:{path}:start")
             await asyncio.sleep(0.05)
@@ -156,7 +142,7 @@ class TestParallelExecutorPlugin:
     async def test_mixed_independent_and_dependent(self):
         timestamps: dict[str, float] = {}
 
-        async def timed_execute(name: str, arguments: dict[str, Any]) -> str:
+        async def timed_execute(name: str, arguments: dict) -> str:
             path = arguments.get("path", "?")
             key = f"{name}:{path}"
             timestamps[f"{key}:start"] = time.monotonic()
@@ -193,7 +179,7 @@ class TestParallelExecutorPlugin:
 
     @pytest.mark.asyncio
     async def test_empty_batch_returns_empty(self):
-        async def noop(name: str, arguments: dict[str, Any]) -> str:
+        async def noop(name: str, arguments: dict) -> str:
             return "noop"
 
         plugin = ParallelExecutorPlugin(execute_fn=noop)
@@ -202,7 +188,7 @@ class TestParallelExecutorPlugin:
 
     @pytest.mark.asyncio
     async def test_none_tool_calls_returns_empty(self):
-        async def noop(name: str, arguments: dict[str, Any]) -> str:
+        async def noop(name: str, arguments: dict) -> str:
             return "noop"
 
         plugin = ParallelExecutorPlugin(execute_fn=noop)
@@ -211,7 +197,7 @@ class TestParallelExecutorPlugin:
 
     @pytest.mark.asyncio
     async def test_single_call(self):
-        async def echo(name: str, arguments: dict[str, Any]) -> str:
+        async def echo(name: str, arguments: dict) -> str:
             return f"echo:{name}"
 
         plugin = ParallelExecutorPlugin(execute_fn=echo)
@@ -222,7 +208,7 @@ class TestParallelExecutorPlugin:
 
     @pytest.mark.asyncio
     async def test_execute_fn_error_returns_error_string(self):
-        async def failing(name: str, arguments: dict[str, Any]) -> str:
+        async def failing(name: str, arguments: dict) -> str:
             raise RuntimeError("boom")
 
         plugin = ParallelExecutorPlugin(execute_fn=failing)
@@ -239,7 +225,7 @@ class TestParallelExecutorPlugin:
         max_concurrent = 0
         lock = asyncio.Lock()
 
-        async def counting_execute(name: str, arguments: dict[str, Any]) -> str:
+        async def counting_execute(name: str, arguments: dict) -> str:
             nonlocal concurrent_count, max_concurrent
             async with lock:
                 concurrent_count += 1
@@ -258,56 +244,3 @@ class TestParallelExecutorPlugin:
 
         await plugin.execute_batch(tool_calls=tool_calls)
         assert max_concurrent <= 2, f"Max concurrent was {max_concurrent}, expected ≤2"
-
-    @pytest.mark.asyncio
-    async def test_execute_batch_preserves_contextvars_for_parallel_tasks(self):
-        structured = ContextVar("structured", default=False)
-
-        async def read_structured(
-            name: str, arguments: dict[str, Any]
-        ) -> dict[str, bool]:
-            await asyncio.sleep(0)
-            return {"structured": structured.get()}
-
-        plugin = ParallelExecutorPlugin(execute_fn=read_structured)
-
-        token = structured.set(True)
-        try:
-            results = await plugin.execute_batch(
-                tool_calls=[
-                    {"name": "file_read", "arguments": {"path": "a.py"}},
-                    {"name": "file_read", "arguments": {"path": "b.py"}},
-                ]
-            )
-        finally:
-            structured.reset(token)
-
-        assert results == [{"structured": True}, {"structured": True}]
-
-    @pytest.mark.asyncio
-    async def test_execute_batch_forwards_ctx_when_execute_fn_supports_it(self):
-        captured_ctxs: list[object | None] = []
-        ctx = object()
-
-        async def execute_with_ctx(
-            name: str,
-            arguments: dict[str, Any],
-            *,
-            ctx: object | None = None,
-        ) -> str:
-            del name, arguments
-            captured_ctxs.append(ctx)
-            return "ok"
-
-        plugin = ParallelExecutorPlugin(execute_fn=execute_with_ctx)
-
-        results = await plugin.execute_batch(
-            tool_calls=[
-                {"name": "file_read", "arguments": {"path": "a.py"}},
-                {"name": "file_read", "arguments": {"path": "b.py"}},
-            ],
-            ctx=ctx,
-        )
-
-        assert results == ["ok", "ok"]
-        assert captured_ctxs == [ctx, ctx]

@@ -19,10 +19,6 @@ class HookError(AgentKitError):
         self.hook_name = hook_name
 
 
-class HookTypeError(HookError):
-    """A hook returned a value that does not match its declared return type."""
-
-
 class PipelineError(AgentKitError):
     """A pipeline stage failed."""
 

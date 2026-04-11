@@ -4,20 +4,11 @@ from __future__ import annotations
 
 import inspect
 from functools import wraps
-from typing import Any, Callable, Protocol, TypeVar, cast, overload
-
-from pydantic import BaseModel
+from typing import Any, Callable, TypeVar, overload
 
 from agentkit.tools.schema import ToolSchema
 
 F = TypeVar("F", bound=Callable[..., Any])
-
-
-class ToolCallable(Protocol):
-    _tool_schema: ToolSchema
-
-    def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
-
 
 _TYPE_MAP: dict[type, str] = {
     str: "string",
@@ -40,8 +31,6 @@ def _extract_parameters(fn: Callable[..., Any]) -> dict[str, Any]:
     for name, param in sig.parameters.items():
         if name in ("self", "cls"):
             continue
-        if name.startswith("__"):
-            continue
 
         prop: dict[str, Any] = {}
         if name in hints:
@@ -59,7 +48,6 @@ def _extract_parameters(fn: Callable[..., Any]) -> dict[str, Any]:
     schema: dict[str, Any] = {
         "type": "object",
         "properties": properties,
-        "additionalProperties": False,
     }
     if required:
         schema["required"] = required
@@ -74,7 +62,6 @@ def tool(
     *,
     name: str | None = None,
     description: str | None = None,
-    output_model: type[BaseModel] | None = None,
 ) -> Callable[[F], F]: ...
 
 
@@ -83,7 +70,6 @@ def tool(
     *,
     name: str | None = None,
     description: str | None = None,
-    output_model: type[BaseModel] | None = None,
 ) -> F | Callable[[F], F]:
     """Decorate a function as an agent tool.
 
@@ -100,7 +86,6 @@ def tool(
             name=tool_name,
             description=tool_desc,
             parameters=params,
-            output_model=output_model,
         )
 
         @wraps(func)
@@ -113,13 +98,11 @@ def tool(
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
                 return await func(*args, **kwargs)
 
-            tool_fn = cast(ToolCallable, cast(object, async_wrapper))
-            tool_fn._tool_schema = schema
-            return cast(F, tool_fn)
+            async_wrapper._tool_schema = schema  # type: ignore[attr-defined]
+            return async_wrapper  # type: ignore[return-value]
 
-        tool_fn = cast(ToolCallable, cast(object, wrapper))
-        tool_fn._tool_schema = schema
-        return cast(F, tool_fn)
+        wrapper._tool_schema = schema  # type: ignore[attr-defined]
+        return wrapper  # type: ignore[return-value]
 
     if fn is not None:
         return decorator(fn)

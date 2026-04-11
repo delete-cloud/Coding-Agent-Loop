@@ -1,3 +1,0 @@
-=== Help text ===
-    print_pt("  ! - Instantly enter bash mode (no Enter needed)", output=output)
-    print_pt("  Escape or Backspace on empty prompt - Return to chat", output=output)

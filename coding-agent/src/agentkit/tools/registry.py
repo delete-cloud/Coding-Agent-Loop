@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Iterable
 from typing import Any, Callable
-
-from pydantic import ValidationError
 
 from agentkit.errors import ToolError
 from agentkit.tools.schema import ToolSchema
@@ -43,50 +40,15 @@ class ToolRegistry:
         """Return schemas for all registered tools."""
         return list(self._schemas.values())
 
-    def retain(self, names: Iterable[str]) -> None:
-        """Keep only the tools whose names are in *names*; remove the rest."""
-        keep = set(names)
-        unknown = keep - set(self._tools)
-        if unknown:
-            raise ToolError(
-                f"cannot retain unknown tools: {', '.join(sorted(unknown))}"
-            )
-        self._tools = {n: self._tools[n] for n in self._tools if n in keep}
-        self._schemas = {n: self._schemas[n] for n in self._schemas if n in keep}
-
-    def _validate_output(self, schema: ToolSchema, result: Any) -> Any:
-        if schema.output_model is None:
-            return result
-        if isinstance(result, schema.output_model):
-            return result
-        try:
-            return schema.output_model.model_validate(result)
-        except ValidationError as exc:
-            raise ToolError(f"output validation failed for tool '{schema.name}': {exc}")
-
-    def _filter_kwargs(
-        self, fn: Callable[..., Any], kwargs: dict[str, Any]
-    ) -> dict[str, Any]:
-        signature = inspect.signature(fn)
-        if any(
-            param.kind == inspect.Parameter.VAR_KEYWORD
-            for param in signature.parameters.values()
-        ):
-            return kwargs
-
-        allowed = set(signature.parameters)
-        return {key: value for key, value in kwargs.items() if key in allowed}
-
     def execute(self, name: str, **kwargs: Any) -> Any:
         """Execute a tool synchronously by name."""
         fn = self.get(name)
-        result = fn(**self._filter_kwargs(fn, kwargs))
-        return self._validate_output(self._schemas[name], result)
+        return fn(**kwargs)
 
     async def execute_async(self, name: str, **kwargs: Any) -> Any:
         """Execute a tool by name, awaiting if async."""
         fn = self.get(name)
-        result = fn(**self._filter_kwargs(fn, kwargs))
+        result = fn(**kwargs)
         if inspect.isawaitable(result):
-            result = await result
-        return self._validate_output(self._schemas[name], result)
+            return await result
+        return result

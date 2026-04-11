@@ -3,8 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from pydantic import BaseModel
-
 
 @dataclass(frozen=True)
 class StreamEvent:
@@ -23,29 +21,6 @@ class ToolCallEvent(StreamEvent):
     name: str = ""
     arguments: dict[str, Any] = field(default_factory=dict)
     kind: str = field(init=False, default="tool_call")
-
-
-@dataclass(frozen=True)
-class ThinkingEvent(StreamEvent):
-    text: str = ""
-    kind: str = field(init=False, default="thinking")
-
-
-@dataclass(frozen=True)
-class ToolResultEvent(StreamEvent):
-    tool_call_id: str = ""
-    name: str = ""
-    result: str | dict[str, Any] | BaseModel = ""
-    is_error: bool = False
-    kind: str = field(init=False, default="tool_result")
-
-
-@dataclass(frozen=True)
-class UsageEvent(StreamEvent):
-    input_tokens: int = 0
-    output_tokens: int = 0
-    provider_name: str = ""
-    kind: str = field(init=False, default="usage")
 
 
 @dataclass(frozen=True)

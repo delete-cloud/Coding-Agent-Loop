@@ -54,9 +54,6 @@ class InMemorySessionStore:
     def load(self, session_id: str) -> SessionPayload | None:
         return self._sessions.get(session_id)
 
-    def get(self, session_id: str) -> SessionPayload | None:
-        return self.load(session_id)
-
     def list_sessions(self) -> list[str]:
         return list(self._sessions.keys())
 

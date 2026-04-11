@@ -36,7 +36,7 @@ class DocumentChunk:
     id: str
     content: str
     source: str
-    metadata: dict[str, Any]
+    metadata: dict
 
 
 @dataclass
@@ -69,17 +69,6 @@ class KB:
         embedding_fn: Callable[[list[str]], list[list[float]]] | None = None,
         text_extensions: set[str] | None = None,
     ):
-        """Initialize the knowledge base.
-
-        Args:
-            db_path: Path to the LanceDB database directory.
-            embedding_model: OpenAI embedding model name.
-            embedding_dim: Dimension of embedding vectors.
-            chunk_size: Number of tokens per chunk.
-            chunk_overlap: Number of tokens to overlap between chunks.
-            embedding_fn: Optional custom embedding function for testing.
-                         If not provided, uses OpenAI API.
-        """
         self.db_path = Path(db_path)
         self.embedding_model = embedding_model
         self.embedding_dim = embedding_dim
@@ -118,6 +107,17 @@ class KB:
         self._db = lancedb.connect(str(self.db_path))
         self._table: lancedb.table.Table | None = None
 
+    def _table_names(self) -> set[str]:
+        listed = self._db.list_tables()
+        if isinstance(listed, list):
+            return {str(name) for name in listed}
+
+        tables = getattr(listed, "tables", None)
+        if isinstance(tables, list):
+            return {str(name) for name in tables}
+
+        raise TypeError(f"unsupported list_tables() result: {type(listed)!r}")
+
     def _get_openai_client(self):
         """Get or create OpenAI client."""
         if self._openai_client is None:
@@ -154,6 +154,7 @@ class KB:
                     "OPENAI_API_KEY environment variable is required "
                     "when not using a custom embedding function"
                 )
+
             self._openai_sync_client = OpenAI(api_key=api_key)
         return self._openai_sync_client
 
@@ -231,7 +232,7 @@ class KB:
 
         table_name = "chunks"
 
-        if table_name in self._db.list_tables().tables:
+        if table_name in self._table_names():
             self._table = self._db.open_table(table_name)
         else:
             # Create table with schema
@@ -249,7 +250,7 @@ class KB:
         return self._table
 
     def has_table(self, table_name: str = "chunks") -> bool:
-        return table_name in self._db.list_tables().tables
+        return table_name in self._table_names()
 
     async def index_file(self, path: Path, content: str) -> None:
         """Index a single file into the knowledge base.
@@ -313,6 +314,7 @@ class KB:
             show_progress: Whether to show progress bar (default: True).
         """
         root = Path(root)
+
         # Collect all files to index
         files = [
             path
@@ -421,7 +423,6 @@ class KB:
             return []
 
         table = self._get_table()
-
         embeddings = self._embed_sync([query])
         query_vector = embeddings[0]
 
@@ -471,7 +472,7 @@ class KB:
         vector_results = table.search(query_vector).limit(k).to_list()
 
         # Full-text search (using LanceDB's full-text search)
-        fts_results: list[dict[str, Any]] = []
+        fts_results: list[dict] = []
         try:
             fts_results = table.search(query, query_type="fts").limit(k).to_list()
         except (RuntimeError, NotImplementedError):
@@ -486,6 +487,7 @@ class KB:
         for r in vector_results:
             if r["id"] not in seen_ids:
                 seen_ids.add(r["id"])
+                raw_distance = float(r["_distance"])
                 merged.append(
                     KBSearchResult(
                         chunk=DocumentChunk(
@@ -494,7 +496,7 @@ class KB:
                             source=r["source"],
                             metadata=json.loads(r["metadata"]),
                         ),
-                        score=r["_distance"] * 0.9,  # Slight boost for vector results
+                        score=raw_distance * 0.9,
                     )
                 )
 
@@ -502,6 +504,7 @@ class KB:
         for r in fts_results:
             if r["id"] not in seen_ids:
                 seen_ids.add(r["id"])
+                raw_score = float(r.get("_score", 0.0))
                 merged.append(
                     KBSearchResult(
                         chunk=DocumentChunk(
@@ -510,13 +513,10 @@ class KB:
                             source=r["source"],
                             metadata=json.loads(r["metadata"]),
                         ),
-                        score=r.get("_score", 1.0),  # FTS uses _score, not _distance
+                        score=-raw_score,
                     )
                 )
 
-        # Sort by score (lower is better for vector distance)
-        # For FTS, higher score is better, so we need to normalize
-        # We'll just use the original scores and sort
         merged.sort(key=lambda x: x.score)
 
         return merged[:k]
