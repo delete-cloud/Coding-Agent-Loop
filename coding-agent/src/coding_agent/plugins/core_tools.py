@@ -65,6 +65,8 @@ class CoreToolsPlugin:
     def execute_tool(
         self, name: str = "", arguments: dict[str, Any] | None = None, **kwargs: Any
     ) -> Any:
+        if name not in self._registry.names():
+            return None
         args = self._prepare_arguments(name, arguments)
         # Remove 'name' from args to avoid conflict with positional arg
         args.pop("name", None)
@@ -75,6 +77,8 @@ class CoreToolsPlugin:
     async def execute_tool_async(
         self, name: str = "", arguments: dict[str, Any] | None = None, **kwargs: Any
     ) -> Any:
+        if name not in self._registry.names():
+            return None
         args = self._prepare_arguments(name, arguments)
         # Remove 'name' from args to avoid conflict with positional arg
         args.pop("name", None)

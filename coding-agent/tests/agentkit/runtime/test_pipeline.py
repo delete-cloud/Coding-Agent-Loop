@@ -6,6 +6,7 @@ from agentkit.plugin.registry import PluginRegistry
 from agentkit.tape.tape import Tape
 from agentkit.tape.models import Entry
 from agentkit.errors import PipelineError
+from agentkit.tools.schema import ToolSchema
 
 
 class MinimalPlugin:
@@ -26,7 +27,6 @@ class MinimalPlugin:
             "get_tools": self.get_tools,
             "build_context": self.build_context,
             "summarize_context": self.summarize_context,
-            "execute_tool": self.execute_tool,
         }
 
     def do_mount(self, **kwargs):
@@ -48,8 +48,51 @@ class MinimalPlugin:
     def summarize_context(self, **kwargs):
         return self._summary_result
 
+
+class GreedyToolPlugin:
+    state_key = "greedy_tool"
+
+    def hooks(self):
+        return {
+            "execute_tool": self.execute_tool,
+        }
+
     def execute_tool(self, name: str = "", **kwargs):
-        return f"executed:{name}"
+        if name != "known_tool":
+            return None
+        return "known-tool-result"
+
+
+class SkillsLikePlugin:
+    state_key = "skills_like"
+
+    def hooks(self):
+        return {
+            "get_tools": self.get_tools,
+            "execute_tool": self.execute_tool,
+        }
+
+    def get_tools(self, **kwargs):
+        return [
+            ToolSchema(
+                name="skill_invoke",
+                description="Activate a skill",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                    },
+                    "required": ["name"],
+                },
+            )
+        ]
+
+    def execute_tool(
+        self, name: str = "", arguments: dict[str, object] | None = None, **kwargs
+    ):
+        if name != "skill_invoke":
+            return None
+        return f"activated:{(arguments or {}).get('name', '')}"
 
 
 class TestPipelineContext:
@@ -172,6 +215,52 @@ class TestPipeline:
         assert any(e.kind == "tool_call" for e in entries)
         assert any(e.kind == "tool_result" for e in entries)
         assert entries[-1].payload["role"] == "assistant"
+
+    @pytest.mark.asyncio
+    async def test_run_turn_allows_later_plugin_to_handle_unknown_tool(self):
+        registry = PluginRegistry()
+        llm_plugin = MinimalPlugin()
+        greedy_tool = GreedyToolPlugin()
+        skills = SkillsLikePlugin()
+        registry.register(llm_plugin)
+        registry.register(greedy_tool)
+        registry.register(skills)
+        runtime = HookRuntime(registry)
+        pipeline = Pipeline(runtime=runtime, registry=registry)
+
+        async def mock_stream(messages, tools=None, **kwargs):
+            from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
+
+            if not any(entry.kind == "tool_result" for entry in ctx.tape):
+                assert tools is not None
+                yield ToolCallEvent(
+                    tool_call_id="tc-skill-1",
+                    name="skill_invoke",
+                    arguments={"name": "using-superpowers"},
+                )
+                yield DoneEvent()
+                return
+
+            yield TextEvent(text="Skill activated")
+            yield DoneEvent()
+
+        mock_llm = MagicMock()
+        mock_llm.stream = mock_stream
+        llm_plugin._mock_llm = mock_llm
+
+        tape = Tape()
+        tape.append(Entry(kind="message", payload={"role": "user", "content": "hello"}))
+        ctx = PipelineContext(tape=tape, session_id="s-skill")
+        await pipeline.mount(ctx)
+
+        result = await pipeline.run_turn(ctx)
+
+        tool_result_entries = [e for e in ctx.tape if e.kind == "tool_result"]
+        assert tool_result_entries
+        assert (
+            tool_result_entries[0].payload["content"] == "activated:using-superpowers"
+        )
+        assert result is not None
 
     @pytest.mark.asyncio
     async def test_run_turn_commits_active_fork_and_updates_context_tape(self, setup):
