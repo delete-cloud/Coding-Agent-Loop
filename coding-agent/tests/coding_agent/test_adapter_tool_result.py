@@ -2,7 +2,7 @@
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock
-from typing import Any
+from typing import Any, cast
 from pydantic import BaseModel
 
 from agentkit.providers.models import ToolResultEvent
@@ -85,3 +85,28 @@ class TestPipelineAdapterToolResultHandling:
         assert isinstance(emitted, ToolResultDelta)
         assert emitted.result == {"value": 7}
         assert emitted.display_result == '{"value": 7}'
+
+    @pytest.mark.asyncio
+    async def test_tool_result_event_with_pydantic_model_instance_serializes_for_wire_consumer(
+        self,
+    ):
+        class OutputModel(BaseModel):
+            value: int
+
+        consumer = AsyncMock()
+        pipeline = MagicMock()
+        ctx = PipelineContext(tape=Tape(), session_id="session-1")
+        adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
+
+        await adapter._handle_event(
+            ToolResultEvent(
+                tool_call_id="call_789",
+                name="structured_tool",
+                result=cast(Any, OutputModel(value=9)),
+            )
+        )
+
+        emitted = consumer.emit.await_args.args[0]
+        assert isinstance(emitted, ToolResultDelta)
+        assert emitted.result == {"value": 9}
+        assert emitted.display_result == '{"value": 9}'

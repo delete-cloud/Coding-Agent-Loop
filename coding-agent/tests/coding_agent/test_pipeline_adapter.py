@@ -454,6 +454,55 @@ class TestStopReasonMapping:
         assert adapter._determine_stop_reason() == StopReason.MAX_STEPS_REACHED
 
     @pytest.mark.asyncio
+    async def test_previous_turn_tool_calls_do_not_mark_current_text_turn_blocked(self):
+        async def mock_stream(messages, tools=None, **kw):
+            yield DoneEvent()
+
+        pipeline, ctx, _ = _make_pipeline_and_ctx(mock_stream)
+        adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx)
+
+        ctx.tape.append(
+            Entry(kind="message", payload={"role": "user", "content": "old turn"})
+        )
+        ctx.tape.append(
+            Entry(
+                kind="tool_call",
+                payload={
+                    "id": "tc-old",
+                    "name": "search",
+                    "arguments": {"q": "x"},
+                    "role": "assistant",
+                },
+            )
+        )
+        ctx.tape.append(
+            Entry(
+                kind="tool_result",
+                payload={"tool_call_id": "tc-old", "content": "done"},
+            )
+        )
+        ctx.tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "assistant", "content": "old assistant"},
+            )
+        )
+        ctx.tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "user", "content": "current turn"},
+            )
+        )
+        ctx.tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "assistant", "content": "current assistant"},
+            )
+        )
+
+        assert adapter._determine_stop_reason() == StopReason.NO_TOOL_CALLS
+
+    @pytest.mark.asyncio
     async def test_hidden_child_entries_do_not_override_parent_final_message(self):
         async def mock_stream(messages, tools=None, **kw):
             yield DoneEvent()
@@ -476,6 +525,51 @@ class TestStopReasonMapping:
         )
 
         assert adapter._extract_final_message() == "parent result"
+
+    @pytest.mark.asyncio
+    async def test_previous_turn_assistant_message_does_not_leak_into_current_turn(
+        self,
+    ):
+        async def mock_stream(messages, tools=None, **kw):
+            yield DoneEvent()
+
+        pipeline, ctx, _ = _make_pipeline_and_ctx(mock_stream)
+        adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx)
+
+        ctx.tape.append(
+            Entry(kind="message", payload={"role": "user", "content": "old turn"})
+        )
+        ctx.tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "assistant", "content": "old assistant"},
+            )
+        )
+        ctx.tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "user", "content": "current turn"},
+            )
+        )
+        ctx.tape.append(
+            Entry(
+                kind="tool_call",
+                payload={
+                    "id": "tc-current",
+                    "name": "search",
+                    "arguments": {"q": "y"},
+                    "role": "assistant",
+                },
+            )
+        )
+        ctx.tape.append(
+            Entry(
+                kind="tool_result",
+                payload={"tool_call_id": "tc-current", "content": "done"},
+            )
+        )
+
+        assert adapter._extract_final_message() is None
 
     @pytest.mark.asyncio
     async def test_error_on_pipeline_exception(self):

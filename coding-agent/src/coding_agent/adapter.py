@@ -98,6 +98,20 @@ class PipelineAdapter:
     def _is_visible_entry(self, entry: Entry) -> bool:
         return not entry.meta.get("skip_context")
 
+    def _current_turn_entries(self) -> list[Entry]:
+        entries = list(self._ctx.tape)
+        turn_start = 0
+        for index in range(len(entries) - 1, -1, -1):
+            entry = entries[index]
+            if (
+                self._is_visible_entry(entry)
+                and entry.kind == "message"
+                and entry.payload.get("role") == "user"
+            ):
+                turn_start = index + 1
+                break
+        return entries[turn_start:]
+
     def _metrics_plugin(self) -> SessionMetricsPlugin | None:
         try:
             plugin = self._pipeline._registry.get("session_metrics")
@@ -241,31 +255,21 @@ class PipelineAdapter:
             )
 
     def _determine_stop_reason(self) -> StopReason:
-        entries = list(self._ctx.tape)
-        turn_start = 0
-        for index in range(len(entries) - 1, -1, -1):
-            entry = entries[index]
-            if (
-                self._is_visible_entry(entry)
-                and entry.kind == "message"
-                and entry.payload.get("role") == "user"
-            ):
-                turn_start = index + 1
-                break
+        entries = self._current_turn_entries()
 
-        if self._has_doom_signal(entries[turn_start:]):
+        if self._has_doom_signal(entries):
             return StopReason.DOOM_LOOP
 
         tool_calls = [
             entry
-            for entry in self._ctx.tape.filter("tool_call")
-            if self._is_visible_entry(entry)
+            for entry in entries
+            if self._is_visible_entry(entry) and entry.kind == "tool_call"
         ]
         if not tool_calls:
             return StopReason.NO_TOOL_CALLS
 
         last_tool_call_index = -1
-        for index in range(len(entries) - 1, turn_start - 1, -1):
+        for index in range(len(entries) - 1, -1, -1):
             if entries[index].kind == "tool_call" and self._is_visible_entry(
                 entries[index]
             ):
@@ -284,7 +288,7 @@ class PipelineAdapter:
         return StopReason.MAX_STEPS_REACHED
 
     def _extract_final_message(self) -> str | None:
-        for entry in reversed(list(self._ctx.tape)):
+        for entry in reversed(self._current_turn_entries()):
             if (
                 self._is_visible_entry(entry)
                 and entry.kind == "message"
