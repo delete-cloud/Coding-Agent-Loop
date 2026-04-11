@@ -15,7 +15,6 @@ from agentkit.providers.models import (
     TextEvent,
     ToolCallEvent,
     DoneEvent,
-    UsageEvent,
 )
 from coding_agent.utils.retry import _extract_status_code, RETRYABLE_STATUS_CODES
 
@@ -36,8 +35,6 @@ class AnthropicProvider:
         self,
         model: str,
         api_key: str,
-        base_url: str | None = None,
-        default_headers: dict[str, str] | None = None,
         max_tokens: int = 8192,
         temperature: float = 0.7,
         timeout: float = 60.0,
@@ -45,13 +42,13 @@ class AnthropicProvider:
         retry_base_delay: float = 1.0,
         retry_max_delay: float = 60.0,
     ):
+        # Handle both plain strings and Pydantic SecretStr
         api_key_str = api_key
         if not isinstance(api_key, str):
+            # Assume it's a SecretStr or similar with get_secret_value
             api_key_str = api_key.get_secret_value()
         self._model = model
         self._api_key = api_key_str
-        self._base_url = base_url
-        self._default_headers = default_headers
         self._max_tokens = max_tokens
         self._temperature = temperature
         self._timeout = timeout
@@ -65,8 +62,6 @@ class AnthropicProvider:
         if self.__client is None:
             self.__client = AsyncAnthropic(
                 api_key=self._api_key,
-                base_url=self._base_url,
-                default_headers=self._default_headers,
                 timeout=self._timeout,
             )
         return self.__client
@@ -209,20 +204,10 @@ class AnthropicProvider:
             try:
                 # Track tool use blocks being accumulated
                 tool_blocks: dict[int, dict[str, Any]] = {}
-                _input_tokens = 0
-                _output_tokens = 0
 
                 async with self._client.messages.stream(**api_kwargs) as stream:
                     async for event in stream:
                         match event.type:
-                            case "message_start":
-                                msg_usage = getattr(
-                                    getattr(event, "message", None), "usage", None
-                                )
-                                if msg_usage:
-                                    _input_tokens = (
-                                        getattr(msg_usage, "input_tokens", 0) or 0
-                                    )
                             case "content_block_start":
                                 block = event.content_block
                                 if block.type == "tool_use":
@@ -258,20 +243,9 @@ class AnthropicProvider:
                                         name=block["name"],
                                         arguments=args,
                                     )
-                            case "message_delta":
-                                delta_usage = getattr(event, "usage", None)
-                                if delta_usage:
-                                    _output_tokens = (
-                                        getattr(delta_usage, "output_tokens", 0) or 0
-                                    )
                             case "message_stop":
                                 pass
 
-                yield UsageEvent(
-                    input_tokens=_input_tokens,
-                    output_tokens=_output_tokens,
-                    provider_name=self._model,
-                )
                 yield DoneEvent()
                 return  # Success, exit the retry loop
 

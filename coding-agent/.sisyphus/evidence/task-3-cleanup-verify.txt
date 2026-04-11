@@ -1,4 +1,0 @@
-_shell_mode in repl.py:
-       1
-is_bash_mode_toggle in repl.py:
-       0

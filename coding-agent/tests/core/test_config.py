@@ -1,6 +1,8 @@
+import os
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from coding_agent.core.config import Config, load_config
 
@@ -40,14 +42,6 @@ class TestConfig:
         assert c.max_steps == 10
         assert c.repo == Path("/tmp/test-repo")
 
-    @pytest.mark.parametrize(
-        "provider",
-        ["kimi", "kimi-code", "kimi-code-anthropic"],
-    )
-    def test_accepts_kimi_family_providers(self, provider):
-        c = Config(provider=provider)
-        assert c.provider == provider
-
 
 class TestLoadConfig:
     def test_env_vars_override_defaults(self, monkeypatch):
@@ -69,41 +63,3 @@ class TestLoadConfig:
         monkeypatch.delenv("AGENT_API_KEY", raising=False)
         c = load_config()
         assert c.api_key is None
-
-    def test_copilot_uses_github_token_when_agent_api_key_missing(self, monkeypatch):
-        monkeypatch.delenv("AGENT_API_KEY", raising=False)
-        monkeypatch.setenv("GITHUB_TOKEN", "ghu-test-token")
-
-        c = load_config(cli_args={"provider": "copilot"})
-
-        assert c.provider == "copilot"
-        assert c.api_key.get_secret_value() == "ghu-test-token"
-
-    def test_cli_api_key_overrides_github_token_for_copilot(self, monkeypatch):
-        monkeypatch.setenv("GITHUB_TOKEN", "ghu-test-token")
-
-        c = load_config(cli_args={"provider": "copilot", "api_key": "sk-cli"})
-
-        assert c.provider == "copilot"
-        assert c.api_key.get_secret_value() == "sk-cli"
-
-    def test_kimi_uses_moonshot_api_key_when_agent_api_key_missing(self, monkeypatch):
-        monkeypatch.delenv("AGENT_API_KEY", raising=False)
-        monkeypatch.setenv("MOONSHOT_API_KEY", "sk-moonshot-token")
-
-        c = load_config(cli_args={"provider": "kimi"})
-
-        assert c.provider == "kimi"
-        assert c.api_key.get_secret_value() == "sk-moonshot-token"
-
-    @pytest.mark.parametrize("provider", ["kimi-code", "kimi-code-anthropic"])
-    def test_kimi_code_uses_kimi_code_api_key_when_agent_api_key_missing(
-        self, monkeypatch, provider
-    ):
-        monkeypatch.delenv("AGENT_API_KEY", raising=False)
-        monkeypatch.setenv("KIMI_CODE_API_KEY", "sk-kimi-code-token")
-
-        c = load_config(cli_args={"provider": provider})
-
-        assert c.provider == provider
-        assert c.api_key.get_secret_value() == "sk-kimi-code-token"

@@ -1,13 +1,3 @@
 __pycache__/
 *.pyc
 uv.lock
-
-.sisyphus/
-.venv/
-.mypy_cache/
-.pytest_cache/
-.ruff_cache/
-
-data/
-
-helm/

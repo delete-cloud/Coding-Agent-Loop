@@ -7,7 +7,6 @@ from typing import Any
 
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
-from agentkit.tape.view import TapeView
 
 
 class ContextBuilder:
@@ -18,49 +17,21 @@ class ContextBuilder:
 
     def build(
         self,
-        tape_or_view: Tape | TapeView,
+        tape: Tape,
         grounding: list[dict[str, Any]] | None = None,
-        entries: list[Entry] | None = None,
     ) -> list[dict[str, Any]]:
-        if isinstance(tape_or_view, TapeView):
-            entries = tape_or_view.entries
-        elif entries is not None:
-            pass  # caller provided explicit entries (legacy)
-        else:
-            entries = list(tape_or_view)
-
-        core_messages = self.build_core_messages(entries)
-        return self.compose_messages(core_messages, grounding=grounding)
-
-    def build_core_messages(self, entries: list[Entry]) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = []
-        self.append_to_core_messages(messages, entries)
-        return messages
 
-    def append_to_core_messages(
-        self,
-        messages: list[dict[str, Any]],
-        entries: list[Entry],
-    ) -> None:
+        entries = list(tape)
         index = 0
         while index < len(entries):
             entry = entries[index]
-            if entry.meta.get("skip_context"):
-                index += 1
-                continue
             if entry.kind == "tool_call":
                 tool_calls: list[dict[str, Any]] = []
                 role = entry.payload.get("role", "assistant")
-                reasoning_content: str | None = None
 
                 while index < len(entries) and entries[index].kind == "tool_call":
                     current = entries[index]
-                    if current.meta.get("skip_context"):
-                        index += 1
-                        continue
-                    rc = current.payload.get("reasoning_content")
-                    if rc and reasoning_content is None:
-                        reasoning_content = rc
                     current_calls = current.payload.get("tool_calls")
                     if isinstance(current_calls, list):
                         tool_calls.extend(current_calls)
@@ -82,8 +53,6 @@ class ContextBuilder:
                         for tool_call in tool_calls
                     ],
                 }
-                if reasoning_content is not None:
-                    tool_call_msg["reasoning_content"] = reasoning_content
 
                 # Merge with preceding assistant text to avoid adjacent
                 # same-role messages (Anthropic API rejects those).
@@ -94,13 +63,6 @@ class ContextBuilder:
                     and "tool_calls" not in messages[-1]
                 ):
                     tool_call_msg["content"] = messages[-1]["content"]
-                    if (
-                        messages[-1].get("reasoning_content")
-                        and reasoning_content is None
-                    ):
-                        tool_call_msg["reasoning_content"] = messages[-1][
-                            "reasoning_content"
-                        ]
                     messages[-1] = tool_call_msg
                 else:
                     messages.append(tool_call_msg)
@@ -111,69 +73,27 @@ class ContextBuilder:
                 messages.append(msg)
             index += 1
 
-    def compose_messages(
-        self,
-        core_messages: list[dict[str, Any]],
-        grounding: list[dict[str, Any]] | None = None,
-    ) -> list[dict[str, Any]]:
-        messages = list(core_messages)
-
         if grounding:
-            insert_at = self.grounding_insert_index(messages)
-            messages[insert_at:insert_at] = grounding
+            last_user_idx = None
+            for i in range(len(messages) - 1, -1, -1):
+                if messages[i].get("role") == "user":
+                    last_user_idx = i
+                    break
+            if last_user_idx is not None:
+                for j, g in enumerate(grounding):
+                    messages.insert(last_user_idx + j, g)
+            else:
+                messages.extend(grounding)
 
         system = {"role": "system", "content": self._system_prompt}
         return [system] + messages
 
-    def grounding_insert_index(self, core_messages: list[dict[str, Any]]) -> int:
-        for i in range(len(core_messages) - 1, -1, -1):
-            if core_messages[i].get("role") == "user":
-                return i
-        return len(core_messages)
-
-    def patch_messages(
-        self,
-        messages: list[dict[str, Any]],
-        core_messages: list[dict[str, Any]],
-        grounding: list[dict[str, Any]] | None = None,
-        *,
-        grounding_start: int,
-        grounding_count: int,
-    ) -> tuple[int, int]:
-        system = {"role": "system", "content": self._system_prompt}
-        if messages:
-            messages[0] = system
-        else:
-            messages.append(system)
-
-        if grounding_count > 0:
-            del messages[grounding_start : grounding_start + grounding_count]
-
-        existing_core_count = len(messages) - 1
-        if existing_core_count < 0:
-            existing_core_count = 0
-        if existing_core_count > len(core_messages):
-            raise ValueError("cannot patch incremental messages after core shrink")
-
-        messages.extend(core_messages[existing_core_count:])
-
-        if not grounding:
-            return len(messages), 0
-
-        insert_at = 1 + self.grounding_insert_index(core_messages)
-        messages[insert_at:insert_at] = grounding
-        return insert_at, len(grounding)
-
     def _entry_to_message(self, entry: Entry) -> dict[str, Any] | None:
         if entry.kind == "message":
-            msg: dict[str, Any] = {
+            return {
                 "role": entry.payload.get("role", "user"),
                 "content": entry.payload.get("content", ""),
             }
-            rc = entry.payload.get("reasoning_content")
-            if rc:
-                msg["reasoning_content"] = rc
-            return msg
         elif entry.kind == "tool_call":
             tool_calls = entry.payload.get("tool_calls")
             if not isinstance(tool_calls, list):
@@ -185,15 +105,11 @@ class ContextBuilder:
                     }
                 ]
 
-            tc_msg: dict[str, Any] = {
+            return {
                 "role": entry.payload.get("role", "assistant"),
                 "content": None,
                 "tool_calls": [self._tool_call_to_message(tc) for tc in tool_calls],
             }
-            rc = entry.payload.get("reasoning_content")
-            if rc:
-                tc_msg["reasoning_content"] = rc
-            return tc_msg
         elif entry.kind == "tool_result":
             return {
                 "role": "tool",
@@ -201,23 +117,10 @@ class ContextBuilder:
                 "content": entry.payload.get("content", ""),
             }
         elif entry.kind == "anchor":
-            from agentkit.tape.anchor import Anchor
-
-            # topic_end anchors use fold_boundary to suppress LLM-visible output.
-            # This is intentional — topic_end is a structural boundary marker, not
-            # user-facing content.  The "skip" meta on plain Entry anchors serves
-            # the same purpose for old-format entries.
-            if isinstance(entry, Anchor) and entry.fold_boundary:
-                return None
-            if entry.meta.get("skip"):
-                return None
-
-            content = entry.payload.get("content", "")
-            prefix = entry.meta.get("prefix")
-            if prefix:
-                content = f"[{prefix}] {content}"
-
-            return {"role": "system", "content": content}
+            return {
+                "role": "system",
+                "content": entry.payload.get("content", ""),
+            }
         elif entry.kind == "event":
             return None
         return None

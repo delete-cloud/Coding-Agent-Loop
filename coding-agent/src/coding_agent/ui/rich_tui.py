@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, Dict
 
 from rich.console import Console, Group
 from rich.layout import Layout
@@ -25,8 +25,8 @@ class ToolExecutionTracker:
     """Track tool execution times."""
 
     def __init__(self):
-        self._start_times: dict[str, float] = {}
-        self._durations: dict[str, float] = {}
+        self._start_times: Dict[str, float] = {}
+        self._durations: Dict[str, float] = {}
 
     def start(self, call_id: str) -> None:
         """Start tracking a tool call."""
@@ -60,63 +60,6 @@ class ToolExecutionTracker:
             return Text(f"({duration:.2f}s) ⚠", style="red bold")
 
 
-class _TuiRendererAdapter:
-    def __init__(self, tui: "CodingAgentTUI") -> None:
-        self._tui = tui
-        self.console = tui.console
-
-    def thinking_start(self) -> None:
-        self._tui.thinking_start()
-
-    def thinking_update(self, elapsed_seconds: float = 0.0) -> None:
-        self._tui.thinking_update(elapsed_seconds=elapsed_seconds)
-
-    def thinking(self, text: str) -> None:
-        self._tui.stream_text(text)
-
-    def thinking_end(self) -> None:
-        self._tui.thinking_end()
-
-    def stream_start(self) -> None:
-        self._tui.stream_start()
-
-    def stream_text(self, text: str) -> None:
-        self._tui.stream_text(text)
-
-    def stream_end(self) -> None:
-        self._tui.stream_end()
-
-    def tool_call(self, call_id: str, name: str, args: dict[str, object]) -> None:
-        self._tui.tool_call(call_id, name, args)
-
-    def compact_tool_call(
-        self, call_id: str, name: str, args: dict[str, object]
-    ) -> None:
-        self._tui.compact_tool_call(call_id, name, args)
-
-    def tool_result(
-        self, call_id: str, name: str, result: str, *, is_error: bool = False
-    ) -> None:
-        self._tui.tool_result(call_id, name, result, is_error=is_error)
-
-    def compact_tool_result(
-        self, call_id: str, name: str, result: str, *, is_error: bool = False
-    ) -> None:
-        self._tui.compact_tool_result(call_id, name, result, is_error=is_error)
-
-    def collapsed_group(
-        self,
-        summary: str,
-        duration: float,
-        has_error: bool = False,
-        hint: str | None = None,
-    ) -> None:
-        self._tui.collapsed_group(summary, duration, has_error=has_error, hint=hint)
-
-    def turn_end(self, status: str) -> None:
-        self._tui.turn_end(status)
-
-
 class CodingAgentTUI:
     """Rich-based Terminal UI for Coding Agent."""
 
@@ -125,40 +68,40 @@ class CodingAgentTUI:
         self.model_name = model_name
         self.max_steps = max_steps
         self.current_step = 0
-
+        
         # Content state
         self.messages: list[dict[str, Any]] = []
         self.current_stream = ""
         self.tools: list[dict[str, Any]] = []
         self.plan_tasks: list[dict[str, Any]] = []
-
+        
         # Layout
         self.layout = self._create_layout()
         self.live: Live | None = None
-
+        
         # Tool execution tracking
         self._tool_tracker = ToolExecutionTracker()
-
+        
         # Create consumer
-        self.consumer = RichConsumer(_TuiRendererAdapter(self))
+        self.consumer = RichConsumer(self)
 
     def _create_layout(self) -> Layout:
         """Create the main layout structure."""
         layout = Layout()
-
+        
         # Split into header, main, and tools
         layout.split_column(
             Layout(name="header", size=theme.Layout.HEADER_HEIGHT),
             Layout(name="main"),
             Layout(name="tools", size=theme.Layout.TOOL_PANEL_HEIGHT),
         )
-
+        
         # Main area: conversation (left) + status (right)
         layout["main"].split_row(
             Layout(name="conversation", ratio=3),
             Layout(name="status", ratio=1),
         )
-
+        
         return layout
 
     def _render_header(self) -> Panel:
@@ -168,22 +111,22 @@ class CodingAgentTUI:
     def _render_conversation(self) -> Panel:
         """Render the conversation panel."""
         panels = []
-
+        
         # Render previous messages
         for msg in self.messages:
-            panels.append(create_message_panel(msg["role"], msg["content"]))
-
+            panels.append(
+                create_message_panel(msg["role"], msg["content"])
+            )
+        
         # Render current streaming message if any
         if self.current_stream:
             panels.append(
-                create_message_panel(
-                    "assistant", self.current_stream, is_streaming=True
-                )
+                create_message_panel("assistant", self.current_stream, is_streaming=True)
             )
-
+        
         if not panels:
             panels = [Text("Waiting for input...", style="dim")]
-
+        
         return Panel(
             Group(*panels),
             title="[bold]Conversation[/]",
@@ -209,7 +152,7 @@ class CodingAgentTUI:
                 title="[bold]Tools[/]",
                 border_style=theme.Colors.TEXT_MUTED,
             )
-
+        
         # Show last 2 tool calls with timing
         panels = []
         for tool in self.tools[-2:]:
@@ -217,7 +160,7 @@ class CodingAgentTUI:
             timing_text = None
             if tool.get("duration") is not None:
                 timing_text = self._tool_tracker.format_duration(tool["duration"])
-
+            
             panels.append(
                 create_tool_panel(
                     tool["name"],
@@ -226,7 +169,7 @@ class CodingAgentTUI:
                     timing_text=timing_text,
                 )
             )
-
+        
         return Panel(
             Group(*panels),
             title=f"[bold]Recent Tools ({len(self.tools)} total)[/]",
@@ -241,77 +184,6 @@ class CodingAgentTUI:
             self.layout["status"].update(self._render_status())
             self.layout["tools"].update(self._render_tools())
 
-    def thinking_start(self) -> None:
-        self.refresh()
-
-    def thinking_update(self, elapsed_seconds: float = 0.0) -> None:
-        del elapsed_seconds
-        self.refresh()
-
-    def thinking_end(self) -> None:
-        self.refresh()
-
-    def stream_start(self) -> None:
-        self.current_stream = ""
-        self.refresh()
-
-    def stream_text(self, text: str) -> None:
-        self.current_stream += text
-        self.refresh()
-
-    def stream_end(self) -> None:
-        self.refresh()
-
-    def tool_call(self, call_id: str, name: str, args: dict[str, object]) -> None:
-        self.show_tool_call(call_id, name, dict(args))
-
-    def compact_tool_call(
-        self, call_id: str, name: str, args: dict[str, object]
-    ) -> None:
-        self.tool_call(call_id, name, args)
-
-    def tool_result(
-        self, call_id: str, name: str, result: str, *, is_error: bool = False
-    ) -> None:
-        del name, is_error
-        self.update_tool_result(call_id, result)
-
-    def compact_tool_result(
-        self, call_id: str, name: str, result: str, *, is_error: bool = False
-    ) -> None:
-        self.tool_result(call_id, name, result, is_error=is_error)
-
-    def collapsed_group(
-        self,
-        summary: str,
-        duration: float,
-        has_error: bool = False,
-        hint: str | None = None,
-    ) -> None:
-        suffix = f" ({duration:.2f}s)" if duration > 0 else ""
-        detail = f" — {hint}" if hint else ""
-        prefix = "⚠ " if has_error else "✓ "
-        self.tools.append(
-            {
-                "call_id": f"collapsed-{len(self.tools)}",
-                "name": f"{prefix}{summary}",
-                "args": {},
-                "result": f"{summary}{detail}{suffix}",
-                "duration": duration if duration > 0 else None,
-            }
-        )
-        if len(self.tools) > 20:
-            self.tools = self.tools[-20:]
-        self.refresh()
-
-    def turn_end(self, status: str) -> None:
-        if status == "error":
-            self.messages.append(
-                {"role": "assistant", "content": "Turn ended with an error"}
-            )
-        self.current_stream = ""
-        self.refresh()
-
     # Event handlers called by RichConsumer
     def start_turn(self) -> None:
         """Called when a new turn begins."""
@@ -321,33 +193,30 @@ class CodingAgentTUI:
     def end_turn(self, reason: str, message: str | None) -> None:
         """Called when a turn ends."""
         if message:
-            self.messages.append(
-                {
-                    "role": "assistant",
-                    "content": message,
-                }
-            )
+            self.messages.append({
+                "role": "assistant",
+                "content": message,
+            })
         self.current_stream = ""
         self.refresh()
 
     def append_stream(self, text: str) -> None:
         """Append streaming text."""
-        self.stream_text(text)
+        self.current_stream += text
+        self.refresh()
 
     def show_tool_call(self, call_id: str, name: str, args: dict[str, Any]) -> None:
         """Show a tool call."""
         # Start tracking this tool call
         self._tool_tracker.start(call_id)
-
-        self.tools.append(
-            {
-                "call_id": call_id,
-                "name": name,
-                "args": args,
-                "result": None,
-                "duration": None,
-            }
-        )
+        
+        self.tools.append({
+            "call_id": call_id,
+            "name": name,
+            "args": args,
+            "result": None,
+            "duration": None,
+        })
         # Prevent unbounded growth - keep last 20 tools
         if len(self.tools) > 20:
             self.tools = self.tools[-20:]
@@ -357,7 +226,7 @@ class CodingAgentTUI:
         """Update the result of a tool call."""
         # End tracking and get duration
         duration = self._tool_tracker.end(call_id)
-
+        
         # Find the tool call by call_id and update it
         for tool in reversed(self.tools):
             if tool.get("call_id") == call_id:
@@ -379,12 +248,10 @@ class CodingAgentTUI:
 
     def add_user_message(self, content: str) -> None:
         """Add a user message."""
-        self.messages.append(
-            {
-                "role": "user",
-                "content": content,
-            }
-        )
+        self.messages.append({
+            "role": "user",
+            "content": content,
+        })
         # Prevent unbounded growth - keep last 50 messages
         if len(self.messages) > 50:
             self.messages = self.messages[-50:]

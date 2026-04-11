@@ -53,8 +53,3 @@ class HealthResponse(BaseModel):
     status: str
     sessions: int
     version: str
-
-
-class ReadinessResponse(BaseModel):
-    status: str
-    checks: dict[str, str]

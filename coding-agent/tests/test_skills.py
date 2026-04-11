@@ -1,460 +1,268 @@
-"""Tests for the skills system — directory-based .agents/skills/<name>/SKILL.md format."""
+"""Tests for the skills system."""
 
-import sys
 import tempfile
 from pathlib import Path
 
 import pytest
 
-from coding_agent.skills import (
-    Skill,
-    SkillLoader,
-    SkillMetadata,
-    _parse_frontmatter,
-    _validate_skill_dir,
-    discover_skills,
-)
+from coding_agent.skills import Skill, SkillLoader
 
 
-def _make_skill_dir(
-    parent: Path,
-    name: str,
-    *,
-    description: str = "A test skill",
-    body: str = "Skill body.",
-    extra_fm: str = "",
-    inputs: str = "",
-) -> Path:
-    d = parent / name
-    d.mkdir(parents=True, exist_ok=True)
-    fm_parts = [f"name: {name}", f"description: {description}"]
-    if inputs:
-        fm_parts.append(inputs)
-    if extra_fm:
-        fm_parts.append(extra_fm)
-    fm_block = "\n".join(fm_parts)
-    (d / "SKILL.md").write_text(f"---\n{fm_block}\n---\n{body}")
-    return d
+class TestFrontmatterParsing:
+    """Test frontmatter parsing functionality."""
 
-
-class TestParseFrontmatter:
     def test_parse_simple_frontmatter(self):
-        content = (
-            "---\nname: test-skill\ndescription: A test skill\n---\nThis is the body."
-        )
-        fm, body = _parse_frontmatter(content)
-        assert fm["name"] == "test-skill"
-        assert fm["description"] == "A test skill"
+        """Test parsing a simple frontmatter block."""
+        loader = SkillLoader("/tmp")
+        content = """---
+name: test-skill
+description: A test skill
+---
+
+This is the body."""
+
+        frontmatter, body = loader._parse_frontmatter(content)
+
+        assert frontmatter["name"] == "test-skill"
+        assert frontmatter["description"] == "A test skill"
         assert body == "This is the body."
 
     def test_parse_frontmatter_with_inputs(self):
-        content = (
-            "---\nname: test-skill\ndescription: A test skill\n"
-            "inputs:\n  - name: input1\n    type: string\n  - name: input2\n    type: int\n"
-            "---\nBody content here."
-        )
-        fm, body = _parse_frontmatter(content)
-        assert fm["name"] == "test-skill"
-        assert len(fm["inputs"]) == 2
-        assert fm["inputs"][0]["name"] == "input1"
-        assert fm["inputs"][1]["type"] == "int"
+        """Test parsing frontmatter with inputs array."""
+        loader = SkillLoader("/tmp")
+        content = """---
+name: test-skill
+description: A test skill
+inputs:
+  - name: input1
+    type: string
+    description: First input
+  - name: input2
+    type: int
+    description: Second input
+---
+
+Body content here."""
+
+        frontmatter, body = loader._parse_frontmatter(content)
+
+        assert frontmatter["name"] == "test-skill"
+        assert len(frontmatter["inputs"]) == 2
+        assert frontmatter["inputs"][0]["name"] == "input1"
+        assert frontmatter["inputs"][1]["type"] == "int"
         assert body == "Body content here."
 
     def test_parse_no_frontmatter(self):
+        """Test parsing content without frontmatter."""
+        loader = SkillLoader("/tmp")
         content = "Just a body without frontmatter."
-        fm, body = _parse_frontmatter(content)
-        assert fm == {}
+
+        frontmatter, body = loader._parse_frontmatter(content)
+
+        assert frontmatter == {}
         assert body == content
 
     def test_parse_empty_frontmatter(self):
-        content = "---\n---\nBody only."
-        fm, body = _parse_frontmatter(content)
-        assert fm == {}
+        """Test parsing content with empty frontmatter."""
+        loader = SkillLoader("/tmp")
+        content = """---
+---
+
+Body only."""
+
+        frontmatter, body = loader._parse_frontmatter(content)
+
+        assert frontmatter == {}
         assert body == "Body only."
 
-    def test_parse_invalid_yaml(self):
-        content = "---\nname: test\ninvalid: [unclosed bracket\n---\nBody."
-        fm, body = _parse_frontmatter(content)
-        assert fm == {}
-        assert body == "Body."
 
-    def test_parse_no_closing_fence(self):
-        content = "---\nname: test\nThis never closes"
-        fm, body = _parse_frontmatter(content)
-        assert fm == {}
-        assert body == content
+class TestLazyLoading:
+    """Test lazy loading behavior."""
 
+    @pytest.fixture
+    def temp_skills_dir(self):
+        """Create a temporary directory with test skill files."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skills_dir = Path(tmpdir)
 
-class TestSkillMetadata:
-    def test_creation_and_field_access(self):
-        skill = SkillMetadata(
-            name="my-skill",
-            description="A skill",
-            location="file:///tmp/my-skill/SKILL.md",
-            source="project",
-            _body_text="Raw body",
-            _skill_dir=Path("/tmp/my-skill"),
-        )
-        assert skill.name == "my-skill"
-        assert skill.description == "A skill"
-        assert skill.location == "file:///tmp/my-skill/SKILL.md"
-        assert skill.source == "project"
+            # Create first skill
+            (skills_dir / "skill1.md").write_text("""---
+name: skill1
+description: First test skill
+inputs:
+  - name: param1
+    type: string
+---
 
-    def test_frozen(self):
-        skill = SkillMetadata(
-            name="frozen",
-            description="Frozen skill",
-            location="file:///tmp/frozen/SKILL.md",
-            source="global",
-            _body_text="body",
-            _skill_dir=Path("/tmp/frozen"),
-        )
-        with pytest.raises(AttributeError):
-            skill.name = "mutated"  # type: ignore[misc]
+Skill 1 body content.
+""")
 
-    def test_body_template_substitution(self):
-        skill_dir = Path("/some/dir/my-skill")
-        skill = SkillMetadata(
-            name="my-skill",
-            description="Template test",
-            location="file:///some/dir/my-skill/SKILL.md",
-            source="project",
-            _body_text="Dir: $SKILL_DIR\nPython: $PYTHON",
-            _skill_dir=skill_dir,
-        )
-        body = skill.body()
-        assert str(skill_dir) in body
-        assert sys.executable in body
-        assert "$SKILL_DIR" not in body
-        assert "$PYTHON" not in body
+            # Create second skill
+            (skills_dir / "skill2.md").write_text("""---
+name: skill2
+description: Second test skill
+---
 
-    def test_body_safe_substitute_unknown_vars(self):
-        skill = SkillMetadata(
-            name="safe",
-            description="Safe sub",
-            location="file:///tmp/safe/SKILL.md",
-            source="extra",
-            _body_text="Keep $UNKNOWN intact",
-            _skill_dir=Path("/tmp/safe"),
-        )
-        assert "$UNKNOWN" in skill.body()
+Skill 2 body content.
+More lines here.
+""")
 
-    def test_default_metadata_and_inputs(self):
-        skill = SkillMetadata(
-            name="defaults",
-            description="Check defaults",
-            location="file:///tmp/defaults/SKILL.md",
-            source="global",
-            _body_text="body",
-            _skill_dir=Path("/tmp/defaults"),
-        )
-        assert skill.metadata == {}
-        assert skill.inputs == []
+            yield skills_dir
 
-    def test_custom_metadata_and_inputs(self):
-        skill = SkillMetadata(
-            name="custom",
-            description="Custom fields",
-            location="file:///tmp/custom/SKILL.md",
-            source="project",
-            _body_text="body",
-            _skill_dir=Path("/tmp/custom"),
-            metadata={"author": "test"},
-            inputs=[{"name": "x", "type": "string"}],
-        )
-        assert skill.metadata == {"author": "test"}
-        assert skill.inputs[0]["name"] == "x"
+    def test_load_all_frontmatters_only_loads_frontmatter(self, temp_skills_dir):
+        """Test that load_all_frontmatters only reads frontmatter, not body."""
+        loader = SkillLoader(temp_skills_dir)
+        frontmatters = loader.load_all_frontmatters()
 
+        assert "skill1" in frontmatters
+        assert "skill2" in frontmatters
+        assert frontmatters["skill1"]["description"] == "First test skill"
+        assert frontmatters["skill2"]["description"] == "Second test skill"
 
-class TestValidateSkillDir:
-    def test_valid_skill_dir(self, tmp_path: Path):
-        _make_skill_dir(tmp_path, "valid-skill")
-        result = _validate_skill_dir(tmp_path / "valid-skill", source="project")
-        assert result is not None
-        assert result.name == "valid-skill"
-        assert result.source == "project"
+        # Cache should be empty since we only loaded frontmatters
+        assert len(loader._cache) == 0
 
-    def test_missing_skill_md(self, tmp_path: Path):
-        d = tmp_path / "no-file"
-        d.mkdir()
-        assert _validate_skill_dir(d) is None
+    def test_get_skill_lazy_loads_body(self, temp_skills_dir):
+        """Test that get_skill lazily loads the full skill body."""
+        loader = SkillLoader(temp_skills_dir)
 
-    def test_name_must_match_dirname(self, tmp_path: Path):
-        d = tmp_path / "dir-name"
-        d.mkdir()
-        (d / "SKILL.md").write_text(
-            "---\nname: different-name\ndescription: Mismatch\n---\nBody"
-        )
-        assert _validate_skill_dir(d) is None
+        # First, load frontmatters
+        loader.load_all_frontmatters()
+        assert len(loader._cache) == 0  # Not cached yet
 
-    def test_name_regex_rejects_uppercase(self, tmp_path: Path):
-        d = tmp_path / "BadName"
-        d.mkdir()
-        (d / "SKILL.md").write_text("---\nname: BadName\ndescription: Bad\n---\nBody")
-        assert _validate_skill_dir(d) is None
+        # Now get a skill
+        skill = loader.get_skill("skill1")
 
-    def test_name_regex_rejects_underscore(self, tmp_path: Path):
-        d = tmp_path / "bad_name"
-        d.mkdir()
-        (d / "SKILL.md").write_text("---\nname: bad_name\ndescription: Bad\n---\nBody")
-        assert _validate_skill_dir(d) is None
+        assert skill is not None
+        assert skill.name == "skill1"
+        assert skill.description == "First test skill"
+        assert skill.body == "Skill 1 body content."
+        assert len(skill.inputs) == 1
 
-    def test_name_regex_rejects_spaces(self, tmp_path: Path):
-        d = tmp_path / "bad name"
-        d.mkdir()
-        (d / "SKILL.md").write_text("---\nname: bad name\ndescription: Bad\n---\nBody")
-        assert _validate_skill_dir(d) is None
+        # Should be cached now
+        assert "skill1" in loader._cache
 
-    def test_name_too_long(self, tmp_path: Path):
-        long_name = "a" * 65
-        d = tmp_path / long_name
-        d.mkdir()
-        (d / "SKILL.md").write_text(
-            f"---\nname: {long_name}\ndescription: Too long\n---\nBody"
-        )
-        assert _validate_skill_dir(d) is None
+    def test_get_skill_returns_cached_instance(self, temp_skills_dir):
+        """Test that get_skill returns the same cached instance."""
+        loader = SkillLoader(temp_skills_dir)
 
-    def test_name_max_length_ok(self, tmp_path: Path):
-        name = "a" * 64
-        d = tmp_path / name
-        d.mkdir()
-        (d / "SKILL.md").write_text(
-            f"---\nname: {name}\ndescription: Max length\n---\nBody"
-        )
-        result = _validate_skill_dir(d)
-        assert result is not None
-        assert result.name == name
+        skill1_first = loader.get_skill("skill1")
+        skill1_second = loader.get_skill("skill1")
 
-    def test_description_too_long(self, tmp_path: Path):
-        d = tmp_path / "long-desc"
-        d.mkdir()
-        long_desc = "x" * 1025
-        (d / "SKILL.md").write_text(
-            f"---\nname: long-desc\ndescription: {long_desc}\n---\nBody"
-        )
-        assert _validate_skill_dir(d) is None
+        assert skill1_first is skill1_second
 
-    def test_description_max_length_ok(self, tmp_path: Path):
-        d = tmp_path / "max-desc"
-        d.mkdir()
-        desc = "x" * 1024
-        (d / "SKILL.md").write_text(
-            f"---\nname: max-desc\ndescription: {desc}\n---\nBody"
-        )
-        result = _validate_skill_dir(d)
-        assert result is not None
+    def test_get_skill_not_found(self, temp_skills_dir):
+        """Test that get_skill returns None for unknown skills."""
+        loader = SkillLoader(temp_skills_dir)
 
-    def test_missing_name_in_frontmatter(self, tmp_path: Path):
-        d = tmp_path / "no-name"
-        d.mkdir()
-        (d / "SKILL.md").write_text("---\ndescription: No name\n---\nBody")
-        assert _validate_skill_dir(d) is None
+        result = loader.get_skill("nonexistent")
 
-    def test_invalid_yaml_skipped(self, tmp_path: Path):
-        d = tmp_path / "bad-yaml"
-        d.mkdir()
-        (d / "SKILL.md").write_text(
-            "---\nname: bad-yaml\ninvalid: [unclosed\n---\nBody"
-        )
-        assert _validate_skill_dir(d) is None
+        assert result is None
 
-    def test_location_is_file_uri(self, tmp_path: Path):
-        _make_skill_dir(tmp_path, "uri-test")
-        result = _validate_skill_dir(tmp_path / "uri-test")
-        assert result is not None
-        assert result.location.startswith("file://")
-        assert "uri-test/SKILL.md" in result.location
+    def test_get_skill_auto_loads_frontmatters(self, temp_skills_dir):
+        """Test that get_skill auto-loads frontmatters if not loaded."""
+        loader = SkillLoader(temp_skills_dir)
 
-    def test_extra_frontmatter_goes_to_metadata(self, tmp_path: Path):
-        d = tmp_path / "meta-test"
-        d.mkdir()
-        (d / "SKILL.md").write_text(
-            "---\nname: meta-test\ndescription: Meta\nauthor: tester\ntags:\n  - a\n  - b\n---\nBody"
-        )
-        result = _validate_skill_dir(d)
-        assert result is not None
-        assert result.metadata["author"] == "tester"
-        assert result.metadata["tags"] == ["a", "b"]
+        # Don't call load_all_frontmatters first
+        skill = loader.get_skill("skill1")
 
-    def test_inputs_field_parsed(self, tmp_path: Path):
-        _make_skill_dir(
-            tmp_path,
-            "with-inputs",
-            inputs="inputs:\n  - name: x\n    type: string\n  - name: y\n    type: int",
-        )
-        result = _validate_skill_dir(tmp_path / "with-inputs")
-        assert result is not None
-        assert len(result.inputs) == 2
-        assert result.inputs[0]["name"] == "x"
-
-    def test_non_list_inputs_coerced_to_empty(self, tmp_path: Path):
-        d = tmp_path / "bad-inputs"
-        d.mkdir()
-        (d / "SKILL.md").write_text(
-            "---\nname: bad-inputs\ndescription: Bad inputs\ninputs: not-a-list\n---\nBody"
-        )
-        result = _validate_skill_dir(d)
-        assert result is not None
-        assert result.inputs == []
+        assert skill is not None
+        assert skill.name == "skill1"
 
 
-class TestDiscoverSkills:
-    def test_single_dir_single_skill(self, tmp_path: Path):
-        _make_skill_dir(tmp_path, "alpha")
-        result = discover_skills([tmp_path])
-        assert len(result) == 1
-        assert result[0].name == "alpha"
+class TestSkillLookup:
+    """Test skill lookup functionality."""
 
-    def test_single_dir_multiple_skills(self, tmp_path: Path):
-        _make_skill_dir(tmp_path, "alpha")
-        _make_skill_dir(tmp_path, "beta")
-        _make_skill_dir(tmp_path, "gamma")
-        result = discover_skills([tmp_path])
-        names = {s.name for s in result}
-        assert names == {"alpha", "beta", "gamma"}
+    @pytest.fixture
+    def temp_skills_dir(self):
+        """Create a temporary directory with test skill files."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skills_dir = Path(tmpdir)
 
-    def test_multiple_dirs(self, tmp_path: Path):
-        dir_a = tmp_path / "dir-a"
-        dir_b = tmp_path / "dir-b"
-        dir_a.mkdir()
-        dir_b.mkdir()
-        _make_skill_dir(dir_a, "skill-a")
-        _make_skill_dir(dir_b, "skill-b")
-        result = discover_skills([dir_a, dir_b])
-        names = {s.name for s in result}
-        assert names == {"skill-a", "skill-b"}
+            (skills_dir / "code-review.md").write_text("""---
+name: code-review
+description: Review code
+---
 
-    def test_sources_labeling(self, tmp_path: Path):
-        dir_p = tmp_path / "project"
-        dir_g = tmp_path / "global"
-        dir_p.mkdir()
-        dir_g.mkdir()
-        _make_skill_dir(dir_p, "proj-skill")
-        _make_skill_dir(dir_g, "glob-skill")
-        result = discover_skills([dir_p, dir_g], sources=["project", "global"])
-        source_map = {s.name: s.source for s in result}
-        assert source_map["proj-skill"] == "project"
-        assert source_map["glob-skill"] == "global"
+Code review body.
+""")
 
-    def test_nonexistent_dir_skipped(self, tmp_path: Path):
-        _make_skill_dir(tmp_path, "real-skill")
-        result = discover_skills([tmp_path / "does-not-exist", tmp_path])
-        assert len(result) == 1
-        assert result[0].name == "real-skill"
+            (skills_dir / "test-writing.md").write_text("""---
+name: test-writing
+description: Write tests
+---
 
-    def test_empty_dir_returns_empty(self, tmp_path: Path):
-        empty = tmp_path / "empty"
-        empty.mkdir()
-        result = discover_skills([empty])
-        assert result == []
+Test writing body.
+""")
 
-    def test_empty_dirs_list(self):
-        result = discover_skills([])
-        assert result == []
+            yield skills_dir
 
-    def test_skips_non_directory_entries(self, tmp_path: Path):
-        _make_skill_dir(tmp_path, "valid-skill")
-        (tmp_path / "not-a-dir.txt").write_text("plain file")
-        result = discover_skills([tmp_path])
-        assert len(result) == 1
-        assert result[0].name == "valid-skill"
+    def test_list_skills(self, temp_skills_dir):
+        """Test listing all available skills."""
+        loader = SkillLoader(temp_skills_dir)
+        skills = loader.list_skills()
 
-    def test_skips_invalid_skills(self, tmp_path: Path):
-        _make_skill_dir(tmp_path, "good-skill")
-        # Invalid: uppercase name
-        bad = tmp_path / "BadSkill"
-        bad.mkdir()
-        (bad / "SKILL.md").write_text(
-            "---\nname: BadSkill\ndescription: Bad\n---\nBody"
-        )
-        result = discover_skills([tmp_path])
-        assert len(result) == 1
-        assert result[0].name == "good-skill"
+        assert len(skills) == 2
+        assert "code-review" in skills
+        assert "test-writing" in skills
 
-    def test_sorted_iteration(self, tmp_path: Path):
-        for name in ["zebra", "alpha", "middle"]:
-            _make_skill_dir(tmp_path, name)
-        result = discover_skills([tmp_path])
-        names = [s.name for s in result]
-        assert names == sorted(names)
+    def test_list_skills_empty_dir(self):
+        """Test listing skills in an empty directory."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            loader = SkillLoader(tmpdir)
+            skills = loader.list_skills()
+
+            assert skills == []
+
+    def test_list_skills_nonexistent_dir(self):
+        """Test listing skills in a non-existent directory."""
+        loader = SkillLoader("/nonexistent/path/that/does/not/exist")
+        skills = loader.list_skills()
+
+        assert skills == []
 
 
-class TestDeduplication:
-    def test_first_dir_wins(self, tmp_path: Path):
-        dir1 = tmp_path / "first"
-        dir2 = tmp_path / "second"
-        dir1.mkdir()
-        dir2.mkdir()
-        _make_skill_dir(dir1, "dupe-skill", body="FIRST")
-        _make_skill_dir(dir2, "dupe-skill", body="SECOND")
-        result = discover_skills([dir1, dir2])
-        assert len(result) == 1
-        assert "FIRST" in result[0].body()
+class TestCaching:
+    """Test caching behavior."""
 
-    def test_dedup_case_insensitive(self, tmp_path: Path):
-        dir1 = tmp_path / "first"
-        dir2 = tmp_path / "second"
-        dir1.mkdir()
-        dir2.mkdir()
-        _make_skill_dir(dir1, "my-skill", body="FIRST")
-        _make_skill_dir(dir2, "my-skill", body="SECOND")
-        result = discover_skills([dir1, dir2])
-        assert len(result) == 1
+    @pytest.fixture
+    def temp_skills_dir(self):
+        """Create a temporary directory with a test skill file."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skills_dir = Path(tmpdir)
+            (skills_dir / "cached-skill.md").write_text("""---
+name: cached-skill
+description: A cached skill
+---
 
-    def test_different_names_not_deduped(self, tmp_path: Path):
-        dir1 = tmp_path / "first"
-        dir2 = tmp_path / "second"
-        dir1.mkdir()
-        dir2.mkdir()
-        _make_skill_dir(dir1, "skill-a")
-        _make_skill_dir(dir2, "skill-b")
-        result = discover_skills([dir1, dir2])
-        assert len(result) == 2
+Original body.
+""")
+            yield skills_dir
 
+    def test_clear_cache(self, temp_skills_dir):
+        """Test clearing the skill cache."""
+        loader = SkillLoader(temp_skills_dir)
 
-class TestEdgeCases:
-    def test_empty_body(self, tmp_path: Path):
-        d = tmp_path / "empty-body"
-        d.mkdir()
-        (d / "SKILL.md").write_text("---\nname: empty-body\ndescription: Empty\n---\n")
-        result = _validate_skill_dir(d)
-        assert result is not None
-        assert result.body() == ""
+        # Load a skill
+        skill = loader.get_skill("cached-skill")
+        assert skill is not None
+        assert "cached-skill" in loader._cache
 
-    def test_skill_md_without_frontmatter(self, tmp_path: Path):
-        d = tmp_path / "no-fm"
-        d.mkdir()
-        (d / "SKILL.md").write_text("Just body content, no frontmatter")
-        assert _validate_skill_dir(d) is None
+        # Clear cache
+        loader.clear_cache()
+        assert len(loader._cache) == 0
 
-    def test_broken_symlink_skipped(self, tmp_path: Path):
-        _make_skill_dir(tmp_path, "good-skill")
-        broken = tmp_path / "broken-link"
-        broken.symlink_to(tmp_path / "nonexistent-target")
-        result = discover_skills([tmp_path])
-        assert len(result) == 1
-        assert result[0].name == "good-skill"
-
-    def test_permission_error_on_dir_skipped(self, tmp_path: Path):
-        _make_skill_dir(tmp_path, "accessible")
-        result = discover_skills([tmp_path, tmp_path / "no-access"])
-        assert len(result) == 1
-
-    def test_body_with_template_vars(self, tmp_path: Path):
-        _make_skill_dir(
-            tmp_path,
-            "tpl-skill",
-            body="Dir: $SKILL_DIR\nPython: $PYTHON\nKeep: $OTHER",
-        )
-        result = discover_skills([tmp_path])
-        body = result[0].body()
-        assert str(tmp_path / "tpl-skill") in body
-        assert sys.executable in body
-        assert "$OTHER" in body
+        # Getting skill again should still work
+        skill2 = loader.get_skill("cached-skill")
+        assert skill2 is not None
+        assert "cached-skill" in loader._cache
 
 
-class TestBackwardCompat:
-    def test_skill_dataclass_creation(self):
+class TestSkillDataclass:
+    """Test Skill dataclass."""
+
+    def test_skill_creation(self):
+        """Test creating a Skill instance."""
         skill = Skill(
             name="test",
             description="Test skill",
@@ -462,59 +270,63 @@ class TestBackwardCompat:
             body="Body content",
             source_path=Path("/tmp/test.md"),
         )
+
         assert skill.name == "test"
         assert skill.description == "Test skill"
         assert len(skill.inputs) == 1
         assert skill.body == "Body content"
+        assert str(skill.source_path) == "/tmp/test.md"
 
-    def test_skill_loader_load_frontmatters(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            d = Path(tmpdir)
-            (d / "skill1.md").write_text(
-                "---\nname: skill1\ndescription: First\n---\nBody1"
-            )
-            (d / "skill2.md").write_text(
-                "---\nname: skill2\ndescription: Second\n---\nBody2"
-            )
-            loader = SkillLoader(d)
-            fm = loader.load_all_frontmatters()
-            assert "skill1" in fm
-            assert "skill2" in fm
-            assert fm["skill1"]["description"] == "First"
 
-    def test_skill_loader_get_skill(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            d = Path(tmpdir)
-            (d / "my-skill.md").write_text(
-                "---\nname: my-skill\ndescription: Test\n---\nSkill body"
-            )
-            loader = SkillLoader(d)
-            skill = loader.get_skill("my-skill")
-            assert skill is not None
-            assert skill.name == "my-skill"
-            assert skill.body == "Skill body"
+class TestEdgeCases:
+    """Test edge cases and error handling."""
 
-    def test_skill_loader_list_skills(self):
+    def test_skill_without_name_uses_filename(self):
+        """Test that skills without name in frontmatter use filename."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            d = Path(tmpdir)
-            (d / "a.md").write_text("---\nname: a\ndescription: A\n---\nBody")
-            (d / "b.md").write_text("---\nname: b\ndescription: B\n---\nBody")
-            loader = SkillLoader(d)
+            skills_dir = Path(tmpdir)
+            (skills_dir / "unnamed-skill.md").write_text("""---
+description: Skill without name
+---
+
+Body content.
+""")
+
+            loader = SkillLoader(skills_dir)
             skills = loader.list_skills()
-            assert "a" in skills
-            assert "b" in skills
 
-    def test_skill_loader_nonexistent_dir(self):
-        loader = SkillLoader("/nonexistent/path")
-        assert loader.list_skills() == []
-        assert loader.get_skill("any") is None
+            assert "unnamed-skill" in skills
 
-    def test_skill_loader_clear_cache(self):
+    def test_invalid_yaml_frontmatter(self):
+        """Test handling of invalid YAML in frontmatter."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            d = Path(tmpdir)
-            (d / "cached.md").write_text("---\nname: cached\ndescription: C\n---\nBody")
-            loader = SkillLoader(d)
-            loader.get_skill("cached")
-            assert "cached" in loader._cache
-            loader.clear_cache()
-            assert len(loader._cache) == 0
+            skills_dir = Path(tmpdir)
+            (skills_dir / "invalid.md").write_text("""---
+name: test
+invalid: [unclosed bracket
+---
+
+Body.
+""")
+
+            loader = SkillLoader(skills_dir)
+            # Should not raise, but treat as empty frontmatter
+            skills = loader.list_skills()
+
+            # The skill should still be listed (by filename)
+            assert "invalid" in skills
+
+    def test_empty_skills_directory(self):
+        """Test handling of empty skills directory."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            loader = SkillLoader(tmpdir)
+            skills = loader.list_skills()
+
+            assert skills == []
+
+    def test_nonexistent_skill_file(self):
+        """Test handling of nonexistent skill file."""
+        loader = SkillLoader("/tmp")
+        result = loader._load_skill_file(Path("/nonexistent/path.md"))
+
+        assert result is None

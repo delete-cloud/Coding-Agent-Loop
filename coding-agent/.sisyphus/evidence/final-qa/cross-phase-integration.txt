@@ -1,3 +1,0 @@
-windowed count: 11
-last entry: kind=anchor, meta={'is_handoff': True, 'prefix': 'Context Summary'}
-CROSS-PHASE INTEGRATION: PASS

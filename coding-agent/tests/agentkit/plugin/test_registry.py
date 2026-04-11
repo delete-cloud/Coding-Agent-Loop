@@ -1,9 +1,7 @@
 import pytest
-import warnings
 from agentkit.plugin.registry import PluginRegistry
 from agentkit.plugin.protocol import Plugin
 from agentkit.errors import PluginError
-from agentkit.runtime.hookspecs import HOOK_SPECS
 
 
 class FakePluginA:
@@ -82,46 +80,3 @@ class TestPluginRegistry:
         reg = PluginRegistry()
         with pytest.raises(PluginError, match="not found"):
             reg.get("nonexistent")
-
-
-class TestRegistryUnknownHookWarning:
-    def test_unknown_hook_emits_warning(self):
-        class UnknownHookPlugin:
-            state_key = "unknown_hooks"
-
-            def hooks(self):
-                return {"totally_made_up_hook": lambda **kw: None}
-
-        registry = PluginRegistry(specs=HOOK_SPECS)
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            registry.register(UnknownHookPlugin())
-        assert len(w) == 1
-        assert "totally_made_up_hook" in str(w[0].message)
-        assert issubclass(w[0].category, UserWarning)
-
-    def test_known_hook_no_warning(self):
-        class KnownHookPlugin:
-            state_key = "known_hooks"
-
-            def hooks(self):
-                return {"on_error": lambda **kw: None}
-
-        registry = PluginRegistry(specs=HOOK_SPECS)
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            registry.register(KnownHookPlugin())
-        assert len(w) == 0
-
-    def test_no_specs_no_warning(self):
-        class UnknownHookPlugin:
-            state_key = "unknown_hooks_no_specs"
-
-            def hooks(self):
-                return {"totally_made_up_hook": lambda **kw: None}
-
-        registry = PluginRegistry()
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            registry.register(UnknownHookPlugin())
-        assert len(w) == 0

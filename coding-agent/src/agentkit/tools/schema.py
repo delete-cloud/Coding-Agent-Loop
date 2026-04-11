@@ -5,8 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic import BaseModel
-
 
 @dataclass(frozen=True)
 class ToolSchema:
@@ -21,7 +19,6 @@ class ToolSchema:
     name: str
     description: str
     parameters: dict[str, Any]
-    output_model: type[BaseModel] | None = None
 
     def to_openai_format(self) -> dict[str, Any]:
         """Convert to OpenAI tool format."""

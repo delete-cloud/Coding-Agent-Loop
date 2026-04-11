@@ -21,27 +21,12 @@ class TestDirectiveExecutor:
 
     @pytest.mark.asyncio
     async def test_ask_user_with_handler(self):
-        async def user_handler(question: str, metadata: dict | None = None) -> bool:
+        async def user_handler(question: str) -> bool:
             return True
 
         executor = DirectiveExecutor(ask_user_handler=user_handler)
         result = await executor.execute(AskUser(question="Allow?"))
         assert result is True
-
-    @pytest.mark.asyncio
-    async def test_ask_user_passes_metadata_to_handler(self):
-        captured: dict = {}
-
-        async def user_handler(question: str, metadata: dict | None = None) -> bool:
-            captured["question"] = question
-            captured["metadata"] = metadata
-            return True
-
-        executor = DirectiveExecutor(ask_user_handler=user_handler)
-        meta = {"tool_name": "web_search", "arguments": {"query": "test"}}
-        result = await executor.execute(AskUser(question="Allow?", metadata=meta))
-        assert result is True
-        assert captured["metadata"] == meta
 
     @pytest.mark.asyncio
     async def test_ask_user_without_handler_defaults_reject(self):

@@ -1,1 +1,0 @@
-PASS: skills in enabled plugins

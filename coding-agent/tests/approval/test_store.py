@@ -167,6 +167,7 @@ class TestApprovalStoreWaitForResponse:
         result = await store.wait_for_response("req-123", timeout=1)
 
         assert result == sample_approval_response
+        assert store.get_request("req-123") is None
 
     @pytest.mark.asyncio
     async def test_wait_returns_none_on_timeout(self, store, sample_approval_request):
@@ -176,6 +177,7 @@ class TestApprovalStoreWaitForResponse:
         result = await store.wait_for_response("req-123", timeout=0.05)
 
         assert result is None
+        assert store.get_request("req-123") is None
 
     @pytest.mark.asyncio
     async def test_wait_not_found_returns_none(self, store):
@@ -195,6 +197,7 @@ class TestApprovalStoreWaitForResponse:
         result = await store.wait_for_response("req-123", timeout=0.1)
 
         assert result == sample_approval_response
+        assert store.get_request("req-123") is None
 
     @pytest.mark.asyncio
     async def test_wait_propagates_cancellation(self, store, sample_approval_request):
@@ -206,6 +209,8 @@ class TestApprovalStoreWaitForResponse:
 
         with pytest.raises(asyncio.CancelledError):
             await task
+
+        assert store.get_request("req-123") is None
 
 
 class TestApprovalStoreConcurrent:

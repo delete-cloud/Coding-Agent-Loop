@@ -21,12 +21,6 @@ class TestDirectiveTypes:
     def test_ask_user_carries_question(self):
         d = AskUser(question="Run rm -rf?")
         assert d.question == "Run rm -rf?"
-        assert d.metadata is None
-
-    def test_ask_user_carries_metadata(self):
-        meta = {"tool_name": "bash_run", "arguments": {"command": "rm -rf /"}}
-        d = AskUser(question="Allow?", metadata=meta)
-        assert d.metadata == meta
 
     def test_checkpoint_carries_data(self):
         d = Checkpoint(plugin_id="memory", state={"key": "value"})

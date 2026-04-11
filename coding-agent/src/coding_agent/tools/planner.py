@@ -8,12 +8,12 @@ from typing import Any, Callable
 from agentkit.tools import tool
 from coding_agent.core.planner import PlanManager
 
-_planner: PlanManager | None = None
+_PLANNER: PlanManager | None = None
 
 
 def configure_planner(planner: PlanManager | None) -> None:
-    global _planner
-    _planner = planner
+    global _PLANNER
+    _PLANNER = planner
 
 
 def register_planner_tools(registry: Any, planner: Any = None) -> None:
@@ -67,9 +67,9 @@ def todo_write(
     tasks: list[dict[str, Any]] | None = None,
     updates: list[dict[str, Any]] | None = None,
 ) -> str:
-    return build_planner_tools(_planner)[0](tasks=tasks, updates=updates)
+    return build_planner_tools(_PLANNER)[0](tasks=tasks, updates=updates)
 
 
 @tool(description="Read the current todo list.")
 def todo_read() -> str:
-    return build_planner_tools(_planner)[1]()
+    return build_planner_tools(_PLANNER)[1]()

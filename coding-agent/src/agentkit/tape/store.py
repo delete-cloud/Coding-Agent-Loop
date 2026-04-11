@@ -21,13 +21,11 @@ class ForkTapeStore:
         self._backing = backing
         self._active: dict[str, Tape] = {}
         self._finalized: set[str] = set()
-        self._base_lengths: dict[str, int] = {}
 
     def begin(self, tape: Tape) -> Tape:
         """Create a transactional fork of the given tape."""
         forked = tape.fork()
         self._active[forked.tape_id] = forked
-        self._base_lengths[forked.tape_id] = len(tape)
         return forked
 
     async def commit(self, fork: Tape) -> None:
@@ -36,8 +34,7 @@ class ForkTapeStore:
             raise ValueError(f"tape '{fork.tape_id}' already finalized")
         self._finalized.add(fork.tape_id)
         self._active.pop(fork.tape_id, None)
-        delta = fork.to_list()[self._base_lengths[fork.tape_id]:]
-        await self._backing.save(fork.tape_id, delta)
+        await self._backing.save(fork.tape_id, fork.to_list())
 
     def rollback(self, fork: Tape) -> None:
         """Discard the fork without persisting."""

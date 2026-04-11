@@ -1,5 +1,4 @@
 import pytest
-from pydantic import BaseModel
 from agentkit.tools.decorator import tool
 
 
@@ -65,27 +64,3 @@ class TestToolDecorator:
 
         assert async_read._tool_schema.name == "async_read"
         assert async_read._tool_schema.description == "Read a file async."
-
-    def test_output_model_attached_to_schema(self):
-        class OutputModel(BaseModel):
-            value: int
-
-        @tool(output_model=OutputModel)
-        def build_value(x: int) -> dict:
-            return {"value": x}
-
-        assert build_value._tool_schema.output_model is OutputModel
-
-    def test_internal_runtime_parameters_are_hidden_from_schema(self):
-        @tool
-        async def runtime_bound_tool(
-            goal: str, __pipeline_ctx__: object | None = None
-        ) -> str:
-            return goal
-
-        params = runtime_bound_tool._tool_schema.parameters
-
-        assert params["type"] == "object"
-        assert params["additionalProperties"] is False
-        assert set(params["properties"]) == {"goal"}
-        assert params["required"] == ["goal"]

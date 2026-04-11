@@ -1,7 +1,5 @@
 import pytest
-from pydantic import BaseModel
 from agentkit.tools.schema import ToolSchema
-from dataclasses import FrozenInstanceError
 
 
 class TestToolSchema:
@@ -32,18 +30,5 @@ class TestToolSchema:
 
     def test_schema_is_frozen(self):
         schema = ToolSchema(name="x", description="x", parameters={})
-        with pytest.raises((AttributeError, FrozenInstanceError)):
-            setattr(schema, "name", "y")
-
-    def test_output_model_is_stored(self):
-        class OutputModel(BaseModel):
-            value: int
-
-        schema = ToolSchema(
-            name="x",
-            description="x",
-            parameters={},
-            output_model=OutputModel,
-        )
-
-        assert schema.output_model is OutputModel
+        with pytest.raises(AttributeError):
+            schema.name = "y"

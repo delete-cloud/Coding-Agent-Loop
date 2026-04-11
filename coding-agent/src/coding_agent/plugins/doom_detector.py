@@ -21,8 +21,6 @@ class DoomDetectorPlugin:
         if ctx is None:
             return
 
-        runtime = kwargs.get("runtime")
-
         tool_calls = self._current_turn_tool_calls(ctx)
         if not tool_calls:
             ctx.plugin_states[self.state_key] = {"doom_detected": False}
@@ -49,17 +47,11 @@ class DoomDetectorPlugin:
                 f"doom_loop: {max_consecutive} consecutive identical "
                 f"'{name}' calls (threshold={self._threshold})"
             )
-            if runtime is not None and hasattr(runtime, "notify"):
-                runtime.notify(
-                    "on_session_event",
-                    event_type="doom_detected",
-                    payload={"reason": state["reason"], "tool_name": name},
-                )
 
         ctx.plugin_states[self.state_key] = state
 
     def _current_turn_tool_calls(self, ctx: Any) -> list[Any]:
-        entries = ctx.tape.snapshot()
+        entries = list(ctx.tape)
         turn_start = 0
         for index in range(len(entries) - 1, -1, -1):
             entry = entries[index]
