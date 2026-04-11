@@ -473,6 +473,12 @@ async def send_prompt(
             await _broadcast_event(session, error_data)
             yield error_data
         finally:
+            if session.task is not None:
+                try:
+                    await session.task
+                except Exception:
+                    pass
+                session.task = None
             session.turn_in_progress = False
             session.last_activity = datetime.now()
 

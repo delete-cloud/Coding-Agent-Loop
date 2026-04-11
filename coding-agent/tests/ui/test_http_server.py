@@ -244,6 +244,20 @@ class TestPromptStreaming:
         create_resp = await client.post("/sessions", json={})
         session_id = create_resp.json()["session_id"]
 
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def fake_run_agent(_session_id: str, _prompt: str) -> None:
+            started.set()
+            await release.wait()
+            await session_manager.get_session(session_id).wire.send(
+                TurnEnd(
+                    session_id=session_id,
+                    completion_status=CompletionStatus.COMPLETED,
+                    turn_id="test-turn",
+                )
+            )
+
         # Start prompt in background
         async def send_prompt():
             async with aconnect_sse(
@@ -257,10 +271,13 @@ class TestPromptStreaming:
                         break
 
         # Check turn_in_progress during execution
-        task = asyncio.create_task(send_prompt())
-        await asyncio.sleep(0.05)  # Let it start
-        assert session_manager.get_session(session_id).turn_in_progress
-        await task
+        with patch.object(session_manager, "run_agent", side_effect=fake_run_agent):
+            task = asyncio.create_task(send_prompt())
+            await asyncio.wait_for(started.wait(), timeout=1)
+            assert session_manager.get_session(session_id).turn_in_progress
+            release.set()
+            await task
+
         assert not session_manager.get_session(session_id).turn_in_progress
 
     async def test_prompt_surfaces_subagent_tool_failure_in_real_http_session(
