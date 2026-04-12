@@ -307,6 +307,6 @@ class TestShellTool:
         )
 
         with pytest.raises(
-            sandbox_module.SandboxError, match="unsafe environment variable name"
+            sandbox_module.SandboxError, match="(?i)unsafe environment variable name"
         ):
             runner.run(request)
