@@ -11,7 +11,7 @@
 - **Wire protocol** — Typed dataclasses (`StreamDelta`, `ToolCallDelta`, `TurnEnd`, etc.) decouple agent logic from presentation
 - **Pluggable providers** — Anthropic, OpenAI-compatible, GitHub Copilot, and Kimi-family backends
 - **Rich TUI** — Scrollback-based streaming renderer using `prompt_toolkit` + `rich`
-- **13 plugins** — All domain behavior injected via agentkit's hook system, including skills and MCP integration
+- **14 plugins** — All domain behavior injected via agentkit's hook system, including skills and MCP integration
 
 ### Relationship to AgentKit
 
@@ -51,7 +51,7 @@ The application follows a strict layered dependency graph. Each layer depends on
 │  wire/protocol.py · wire/local.py               │
 ├─────────────────────────────────────────────────┤
 │             Plugin Layer                         │
-│  13 plugins implementing agentkit hooks          │
+│  14 plugins implementing agentkit hooks          │
 ├─────────────────────────────────────────────────┤
 │            Provider Layer                        │
 │  base.py · anthropic.py · openai_compat.py      │
@@ -105,7 +105,7 @@ src/coding_agent/
 │   ├── session.py           #   Session management
 │   └── tape.py              #   Tape utilities
 │
-├── plugins/                 # AgentKit hook implementations (13 plugins)
+├── plugins/                 # AgentKit hook implementations (14 plugins)
 │   ├── approval.py          #   approve_tool_call → Approve/Reject/AskUser
 │   ├── core_tools.py        #   get_tools + execute_tool → ToolRegistry
 │   ├── doom_detector.py     #   on_checkpoint → doom loop detection
@@ -113,6 +113,7 @@ src/coding_agent/
 │   ├── memory.py            #   build_context + on_turn_end → memory
 │   ├── metrics.py           #   on_checkpoint → performance metrics
 │   ├── mcp.py               #   mount/get_tools/execute_tool → MCP server tools
+│   ├── kb.py                #   build_context → KB chunk injection
 │   ├── parallel_executor.py #   execute_tools_batch → parallel execution
 │   ├── shell_session.py     #   mount + on_checkpoint → shell state
 │   ├── skills.py            #   build_context + execute_tool → skill discovery/activation
@@ -194,7 +195,7 @@ def create_agent(...) -> tuple[Pipeline, PipelineContext]:
     # 2. Create PluginRegistry with agentkit HOOK_SPECS
     registry = PluginRegistry(specs=HOOK_SPECS)
 
-    # 3. Register all 13 plugins via factory lambdas
+    # 3. Register all 14 plugins via factory lambdas
     plugin_factories = {
         "llm_provider": lambda: LLMProviderPlugin(...),
         "storage":      lambda: StoragePlugin(...),
@@ -209,6 +210,7 @@ def create_agent(...) -> tuple[Pipeline, PipelineContext]:
         "session_metrics": lambda: SessionMetricsPlugin(),
         "skills":       lambda: SkillsPlugin(...),
         "mcp":          lambda: MCPPlugin(...),
+        "kb":           lambda: KBPlugin(...),
     }
 
     # 4. Selective plugin loading from config
@@ -352,7 +354,7 @@ The `request_approval` flow:
 
 ### Plugin Registration
 
-All 13 plugins implement the agentkit `Plugin` protocol: a `hooks()` method returning `dict[str, Callable]`, and a `state_key` class attribute.
+All 14 plugins implement the agentkit `Plugin` protocol: a `hooks()` method returning `dict[str, Callable]`, and a `state_key` class attribute.
 
 ```python
 class SomePlugin:
