@@ -147,7 +147,7 @@ class DockerSandboxRunner:
             capture_output=True,
             text=True,
             timeout=request.timeout_seconds,
-            env=os.environ.copy(),
+            env=None,
         )
 
     def _docker_command(self, request: SandboxRequest, cwd: Path) -> list[str]:
@@ -250,6 +250,17 @@ def _validate_none_mode_command_paths(args: list[str], workspace_root: Path) -> 
             raise SandboxError(
                 f"Command path escapes sandbox workspace: {resolved}"
             ) from exc
+
+
+def _validated_env_items(env: dict[str, str] | None) -> list[tuple[str, str]]:
+    if env is None:
+        return []
+    items: list[tuple[str, str]] = []
+    for key, value in env.items():
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            raise SandboxError(f"unsafe environment variable name: {key!r}")
+        items.append((key, value))
+    return items
 
 
 def _absolute_path_candidates(args: list[str]) -> set[str]:

@@ -33,6 +33,7 @@ class KBPlugin:
         chunk_overlap: int = KB.DEFAULT_CHUNK_OVERLAP,
         top_k: int = 5,
         index_extensions: list[str] | None = None,
+        text_extensions: list[str] | set[str] | None = None,
         embedding_fn: Callable[[list[str]], list[list[float]]] | None = None,
     ) -> None:
         self._db_path = db_path
@@ -41,7 +42,11 @@ class KBPlugin:
         self._chunk_size = chunk_size
         self._chunk_overlap = chunk_overlap
         self._top_k = top_k
-        self._index_extensions = index_extensions or [
+        normalized_extensions = index_extensions
+        if normalized_extensions is None and text_extensions is not None:
+            normalized_extensions = list(text_extensions)
+
+        self._index_extensions = normalized_extensions or [
             ".md",
             ".txt",
             ".rst",
