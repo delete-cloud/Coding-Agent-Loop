@@ -189,7 +189,7 @@ def _sandbox_request(
     return sandbox_module.SandboxRequest(
         args=args,
         cwd=Path(cwd).expanduser().resolve() if cwd else Path.cwd().resolve(),
-        env=_build_env(env),
+        env=env,
         timeout_seconds=timeout,
     )
 

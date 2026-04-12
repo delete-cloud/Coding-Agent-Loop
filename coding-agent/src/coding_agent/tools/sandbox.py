@@ -6,10 +6,15 @@ from functools import partial
 from pathlib import Path
 import platform
 import re
-import resource
+from string import ascii_letters, digits
 from shutil import which
 import subprocess
 from typing import Literal, Protocol, cast
+
+try:
+    import resource
+except ImportError:
+    resource = None
 
 SandboxMode = Literal["none", "nsjail", "docker"]
 
@@ -142,7 +147,7 @@ class DockerSandboxRunner:
             capture_output=True,
             text=True,
             timeout=request.timeout_seconds,
-            env=request.env,
+            env=os.environ.copy(),
         )
 
     def _docker_command(self, request: SandboxRequest, cwd: Path) -> list[str]:
@@ -161,7 +166,7 @@ class DockerSandboxRunner:
             command.extend(["--ulimit", f"cpu={self._config.limits.cpu_limit_seconds}"])
         if self._config.limits.memory_limit_mb is not None:
             command.extend(["--memory", f"{self._config.limits.memory_limit_mb}m"])
-        for key, value in (request.env or {}).items():
+        for key, value in _docker_container_env(request.env).items():
             command.extend(["-e", f"{key}={value}"])
         command.append(self._config.docker_image)
         command.extend(request.args)
@@ -183,22 +188,48 @@ def _validate_cwd(cwd: Path, workspace_root: Path) -> Path:
 
 
 def _resource_limit_preexec(limits: SandboxLimits):
-    if os.name != "posix":
+    if os.name != "posix" or resource is None:
         return None
     if limits.cpu_limit_seconds is None and limits.memory_limit_mb is None:
         return None
 
     def apply_limits() -> None:
+        resource_module = resource
+        assert resource_module is not None
         if limits.cpu_limit_seconds is not None:
-            resource.setrlimit(
-                resource.RLIMIT_CPU,
+            resource_module.setrlimit(
+                resource_module.RLIMIT_CPU,
                 (limits.cpu_limit_seconds, limits.cpu_limit_seconds),
             )
         if limits.memory_limit_mb is not None:
             bytes_limit = limits.memory_limit_mb * 1024 * 1024
-            resource.setrlimit(resource.RLIMIT_AS, (bytes_limit, bytes_limit))
+            resource_module.setrlimit(
+                resource_module.RLIMIT_AS, (bytes_limit, bytes_limit)
+            )
 
     return partial(apply_limits)
+
+
+_DOCKER_ENV_KEYS = {"HOME", "LANG", "LC_ALL", "LC_CTYPE", "PATH", "TERM", "TZ"}
+
+
+def _docker_container_env(env: dict[str, str] | None) -> dict[str, str]:
+    if env is None:
+        return {}
+    validated: dict[str, str] = {}
+    for key, value in env.items():
+        _validate_docker_env_name(key)
+        validated[key] = value
+    return validated
+
+
+def _validate_docker_env_name(name: str) -> None:
+    if not name:
+        raise SandboxError("Environment variable name cannot be empty")
+    if name[0] not in ascii_letters + "_":
+        raise SandboxError(f"Unsafe environment variable name: {name}")
+    if any(char not in ascii_letters + digits + "_" for char in name[1:]):
+        raise SandboxError(f"Unsafe environment variable name: {name}")
 
 
 def _validate_none_mode_limits(limits: SandboxLimits) -> None:
