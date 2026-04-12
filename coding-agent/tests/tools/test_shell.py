@@ -1,5 +1,8 @@
 """Tests for shell tool."""
 
+import builtins
+import importlib
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -264,3 +267,174 @@ class TestShellTool:
         result = bash_run(command="export MY_VAR=hello")
 
         assert _as_text(result) == "Exported MY_VAR=hello"
+
+    def test_docker_sandbox_request_env_is_explicit_only(
+        self, monkeypatch, tmp_path: Path
+    ):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        monkeypatch.setenv("HOST_ONLY", "host-secret")
+
+        captured: dict[str, object] = {}
+
+        class FakeSandboxRequest:
+            def __init__(self, *, args, cwd, env, timeout_seconds):
+                captured["request"] = {
+                    "args": args,
+                    "cwd": cwd,
+                    "env": env,
+                    "timeout_seconds": timeout_seconds,
+                }
+
+        class FakeSandbox:
+            def run(self, request):
+                captured["run_request"] = request
+                return SimpleNamespace(stdout="ok", stderr="", returncode=0)
+
+        fake_module = SimpleNamespace(
+            SandboxRequest=FakeSandboxRequest,
+            build_sandbox=lambda config: FakeSandbox(),
+            SandboxLimits=lambda **kwargs: SimpleNamespace(**kwargs),
+            SandboxConfig=lambda **kwargs: SimpleNamespace(**kwargs),
+            _validate_cwd=lambda cwd, workspace_root: None,
+        )
+
+        monkeypatch.setattr(
+            "coding_agent.tools.shell._load_sandbox_module",
+            lambda: fake_module,
+        )
+
+        pipeline_ctx = SimpleNamespace(
+            config={
+                "workspace_root": str(workspace),
+                "shell": {"sandbox_mode": "docker"},
+            }
+        )
+
+        result = bash_run(
+            command="echo ok",
+            cwd=str(workspace),
+            env={"CALLER_ONLY": "explicit"},
+            __pipeline_ctx__=pipeline_ctx,
+        )
+
+        assert _as_text(result) == "ok"
+        request = captured["request"]
+        assert request["env"] == {"CALLER_ONLY": "explicit"}
+        assert "HOST_ONLY" not in request["env"]
+
+    def test_sandbox_module_imports_without_resource_module(self, monkeypatch):
+        sys.modules.pop("coding_agent.tools.sandbox", None)
+
+        real_import = builtins.__import__
+
+        def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "resource":
+                raise ImportError("resource is unavailable")
+            return real_import(name, globals, locals, fromlist, level)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+
+        sandbox = importlib.import_module("coding_agent.tools.sandbox")
+
+        assert sandbox.SandboxLimits().__class__.__name__ == "SandboxLimits"
+
+    def test_docker_sandbox_forwards_valid_env_entries(self, tmp_path: Path):
+        from coding_agent.tools.sandbox import (
+            DockerSandboxRunner,
+            SandboxConfig,
+            SandboxLimits,
+            SandboxRequest,
+        )
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        runner = DockerSandboxRunner(
+            SandboxConfig(
+                mode="docker", workspace_root=workspace, limits=SandboxLimits()
+            )
+        )
+        request = SandboxRequest(
+            args=["python", "-V"],
+            cwd=workspace,
+            env={
+                "LANG": "C.UTF-8",
+                "SAFE_VAR": "top-secret",
+            },
+            timeout_seconds=1,
+        )
+
+        command = runner._docker_command(request, workspace)
+
+        assert "LANG=C.UTF-8" in command
+        assert "SAFE_VAR=top-secret" in command
+
+    def test_docker_sandbox_rejects_unsafe_env_names(self, tmp_path: Path):
+        from coding_agent.tools.sandbox import (
+            DockerSandboxRunner,
+            SandboxConfig,
+            SandboxLimits,
+            SandboxRequest,
+            SandboxError,
+        )
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        runner = DockerSandboxRunner(
+            SandboxConfig(
+                mode="docker", workspace_root=workspace, limits=SandboxLimits()
+            )
+        )
+        request = SandboxRequest(
+            args=["python", "-V"],
+            cwd=workspace,
+            env={"BAD-NAME": "nope"},
+            timeout_seconds=1,
+        )
+
+        try:
+            runner._docker_command(request, workspace)
+        except SandboxError as exc:
+            assert "BAD-NAME" in str(exc)
+        else:
+            raise AssertionError("expected SandboxError for unsafe env name")
+
+    def test_docker_sandbox_uses_explicit_process_env(
+        self, tmp_path: Path, monkeypatch
+    ):
+        from coding_agent.tools import sandbox as sandbox_module
+        from coding_agent.tools.sandbox import (
+            DockerSandboxRunner,
+            SandboxConfig,
+            SandboxLimits,
+            SandboxRequest,
+        )
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        runner = DockerSandboxRunner(
+            SandboxConfig(
+                mode="docker", workspace_root=workspace, limits=SandboxLimits()
+            )
+        )
+        request = SandboxRequest(
+            args=["python", "-V"],
+            cwd=workspace,
+            env={"SAFE_VAR": "ok"},
+            timeout_seconds=1,
+        )
+
+        captured: dict[str, object] = {}
+
+        monkeypatch.setattr(sandbox_module.os, "environ", {"BASE": "1"})
+
+        def fake_run(*args, **kwargs):
+            captured["env"] = kwargs["env"]
+            return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+        monkeypatch.setattr(sandbox_module.subprocess, "run", fake_run)
+        monkeypatch.setattr(sandbox_module, "which", lambda name: "/usr/bin/docker")
+
+        runner.run(request)
+
+        assert captured["env"] == {"BASE": "1"}
