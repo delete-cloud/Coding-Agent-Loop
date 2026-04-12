@@ -66,7 +66,7 @@ class TestEnableDisable:
         footer.disable()
         assert footer.enabled is False
 
-    def test_enable_nontty_is_noop(self) -> None:
+    def test_enable_nontty_sets_persistent_mode(self) -> None:
         footer = _make_footer(is_terminal=False)
         footer.run_spike_check()
         footer.enable()
@@ -75,13 +75,13 @@ class TestEnableDisable:
 
 
 class TestUpdate:
-    def test_update_is_noop(self) -> None:
+    def test_update_keeps_footer_disabled(self) -> None:
         footer = _make_footer(is_terminal=True)
         footer.run_spike_check()
         footer.update(model="gpt-4o", tokens_in=100, tokens_out=50, elapsed=5.0)
         assert footer.enabled is False
 
-    def test_clear_and_redraw_is_noop(self) -> None:
+    def test_clear_and_redraw_keeps_footer_disabled(self) -> None:
         footer = _make_footer(is_terminal=True)
         footer.clear_and_redraw()
         assert footer.enabled is False
