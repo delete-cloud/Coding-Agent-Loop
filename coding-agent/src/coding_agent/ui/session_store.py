@@ -6,6 +6,8 @@ import os
 from collections.abc import Callable
 from typing import Protocol, cast
 
+from ..redaction import redact_sensitive_text, redact_url_credentials
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_REDIS_INDEX_KEY = "coding-agent:sessions:index"
@@ -138,10 +140,11 @@ def create_session_store(
         )
         return RedisSessionStore(client=client, redis_url=resolved_redis_url)
     except Exception as exc:
+        safe_exc = redact_sensitive_text(str(exc))
         logger.warning(
             "Redis session store unavailable at %s; falling back to in-memory store: %s",
-            resolved_redis_url,
-            exc,
+            redact_url_credentials(resolved_redis_url),
+            safe_exc,
         )
         return InMemorySessionStore()
 

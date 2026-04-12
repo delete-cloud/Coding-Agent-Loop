@@ -18,7 +18,7 @@ class WireMessage:
 
     Attributes:
         session_id: Unique identifier for the session
-        agent_id: Originating agent identifier for child/UI scoping
+        agent_id: Identifier for the emitting agent within the session
         timestamp: When the message was created
     """
 
@@ -69,7 +69,7 @@ class ToolResultDelta(WireMessage):
 
     call_id: str
     tool_name: str
-    result: str | dict[str, Any]
+    result: Any
     display_result: str = ""
     is_error: bool = False
 

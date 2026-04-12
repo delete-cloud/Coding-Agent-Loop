@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-import uuid
 import json
+import re
+import uuid
 from inspect import isawaitable
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Protocol
 
 from pydantic import BaseModel
@@ -20,6 +22,7 @@ from agentkit.tape.models import Entry
 
 from coding_agent.adapter_types import StopReason, TurnOutcome
 from coding_agent.plugins.metrics import SessionMetricsPlugin
+from .redaction import redact_sensitive_text
 from coding_agent.wire.protocol import (
     ApprovalRequest,
     ApprovalResponse,
@@ -32,6 +35,22 @@ from coding_agent.wire.protocol import (
     TurnStatusDelta,
     WireMessage,
 )
+
+_SENSITIVE_STRING_PATTERNS = (
+    (r"(?i)(authorization\s*:\s*bearer\s+)(\S+)", r"\1***"),
+    (r"(?i)(password\s*[=:]\s*)(\S+)", r"\1***"),
+    (r"(?i)(secret\s*[=:]\s*)(\S+)", r"\1***"),
+    (r"(?i)(token\s*[=:]\s*)(\S+)", r"\1***"),
+    (r"(?i)(api[_-]?key\s*[=:]\s*)(\S+)", r"\1***"),
+)
+
+
+def _redact_string_display_text(value: str) -> str:
+    redacted = redact_sensitive_text(value)
+    for pattern, replacement in _SENSITIVE_STRING_PATTERNS:
+        redacted = re.sub(pattern, replacement, redacted)
+    return redacted
+
 
 if TYPE_CHECKING:
     from coding_agent.ui.rich_consumer import WireConsumer
@@ -53,6 +72,48 @@ def _make_ask_user_handler(consumer: WireConsumer, session_id: str = "") -> Any:
         return response.approved
 
     return handler
+
+
+def _redact_for_display(value: Any) -> Any:
+    if isinstance(value, BaseModel):
+        return _redact_for_display(value.model_dump())
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            if any(
+                token in key.casefold()
+                for token in (
+                    "password",
+                    "secret",
+                    "token",
+                    "api_key",
+                    "apikey",
+                    "authorization",
+                )
+            ):
+                redacted[key] = "***"
+            else:
+                redacted[key] = _redact_for_display(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_for_display(item) for item in value]
+    if isinstance(value, str):
+        return _redact_string_display_text(value)
+    return value
+
+
+def _normalize_tool_result_for_wire(
+    result: str | dict[str, Any] | BaseModel,
+) -> tuple[str | dict[str, Any], str]:
+    if isinstance(result, BaseModel):
+        payload = result.model_dump()
+        return payload, json.dumps(_redact_for_display(payload))
+    if isinstance(result, str):
+        return result, str(_redact_for_display(result))
+    if isinstance(result, Mapping):
+        payload = dict(result)
+        return payload, json.dumps(_redact_for_display(payload))
+    return result, str(_redact_for_display(result))
 
 
 class PipelineAdapter:
