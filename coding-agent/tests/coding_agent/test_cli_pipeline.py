@@ -385,7 +385,7 @@ class TestCliProviderChoices:
         from coding_agent.__main__ import main
 
         with (
-            patch("coding_agent.core.config.load_config") as mock_load_config,
+            patch("coding_agent.__main__.load_config") as mock_load_config,
             patch("coding_agent.cli.repl.run_repl", AsyncMock()),
             patch("coding_agent.__main__.sys.stdout.isatty", return_value=True),
         ):
@@ -416,43 +416,112 @@ class TestCliProviderChoices:
         assert result.exit_code != 1
         assert "interactive REPL mode requires an interactive terminal" in result.output
 
-    def test_run_accepts_kimi_code_provider(self):
+    def test_run_uses_root_provider_and_model_options(self):
         from coding_agent.__main__ import main
 
         runner = CliRunner()
-        result = runner.invoke(
-            main,
-            [
-                "run",
-                "--goal",
-                "test goal",
-                "--provider",
-                "kimi-code",
-                "--api-key",
-                "sk-test-key",
-            ],
-        )
+        with patch("coding_agent.__main__._run_headless", AsyncMock()) as mock_run:
+            result = runner.invoke(
+                main,
+                [
+                    "--provider",
+                    "kimi-code",
+                    "--model",
+                    "kimi-for-coding",
+                    "--api-key",
+                    "sk-test-key",
+                    "run",
+                    "--goal",
+                    "test goal",
+                ],
+            )
 
-        assert result.exit_code != 2
-        assert "Invalid value for '--provider'" not in result.output
+        assert result.exit_code == 0
+        assert mock_run.await_args is not None
+        config, goal = mock_run.await_args.args
+        assert goal == "test goal"
+        assert config.provider == "kimi-code"
+        assert config.model == "kimi-for-coding"
+        assert config.api_key is not None
+        assert config.api_key.get_secret_value() == "sk-test-key"
 
-    def test_repl_accepts_kimi_code_provider(self):
+    def test_repl_uses_root_provider_and_model_options(self):
         from coding_agent.__main__ import main
 
         runner = CliRunner()
-        result = runner.invoke(
-            main,
-            [
-                "repl",
-                "--provider",
-                "kimi-code",
-                "--api-key",
-                "sk-test-key",
-            ],
-        )
+        with patch("coding_agent.cli.repl.run_repl", AsyncMock()) as mock_run:
+            result = runner.invoke(
+                main,
+                [
+                    "--provider",
+                    "kimi-code",
+                    "--model",
+                    "kimi-for-coding",
+                    "--api-key",
+                    "sk-test-key",
+                    "repl",
+                ],
+            )
 
-        assert result.exit_code != 2
-        assert "Invalid value for '--provider'" not in result.output
+        assert result.exit_code == 0
+        assert mock_run.await_args is not None
+        (config,) = mock_run.await_args.args
+        assert config.provider == "kimi-code"
+        assert config.model == "kimi-for-coding"
+        assert config.api_key is not None
+        assert config.api_key.get_secret_value() == "sk-test-key"
+
+    def test_run_uses_kimi_code_api_key_env_without_cli_api_key(self, monkeypatch):
+        from coding_agent.__main__ import main
+
+        monkeypatch.setenv("KIMI_CODE_API_KEY", "kimi-env-key")
+        runner = CliRunner()
+
+        with patch("coding_agent.__main__._run_headless", AsyncMock()) as mock_run:
+            result = runner.invoke(
+                main,
+                ["--provider", "kimi-code", "run", "--goal", "test goal"],
+            )
+
+        assert result.exit_code == 0
+        assert mock_run.await_args is not None
+        config, goal = mock_run.await_args.args
+        assert goal == "test goal"
+        assert config.provider == "kimi-code"
+        assert config.api_key is not None
+        assert config.api_key.get_secret_value() == "kimi-env-key"
+
+    def test_run_keeps_run_only_options_local_to_subcommand(self):
+        from coding_agent.__main__ import main
+
+        runner = CliRunner()
+
+        with patch("coding_agent.__main__._run_with_tui", AsyncMock()) as mock_run:
+            result = runner.invoke(
+                main,
+                [
+                    "--provider",
+                    "kimi-code",
+                    "--api-key",
+                    "sk-test-key",
+                    "run",
+                    "--goal",
+                    "test goal",
+                    "--max-steps",
+                    "7",
+                    "--approval",
+                    "interactive",
+                    "--tui",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert mock_run.await_args is not None
+        config, goal = mock_run.await_args.args
+        assert goal == "test goal"
+        assert config.provider == "kimi-code"
+        assert config.max_steps == 7
+        assert config.approval_mode == "interactive"
 
 
 class TestReplMultiturnContext:
