@@ -27,8 +27,8 @@ RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin coding-agent \
     && mkdir -p /app /workspace /var/lib/coding-agent/data \
     && chown -R coding-agent:coding-agent /app /workspace /var/lib/coding-agent
 
-COPY --from=builder /app/.venv /app/.venv
-COPY --from=builder /app/src /app/src
+COPY --chown=coding-agent:coding-agent --from=builder /app/.venv /app/.venv
+COPY --chown=coding-agent:coding-agent --from=builder /app/src /app/src
 
 WORKDIR /workspace
 USER coding-agent
