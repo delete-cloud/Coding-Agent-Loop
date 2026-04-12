@@ -5,19 +5,18 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import uuid
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any
+from collections.abc import AsyncIterator
 
-from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi import FastAPI, HTTPException, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 
 from coding_agent.approval import ApprovalPolicy
-from coding_agent.ui.session_manager import SessionManager
+from coding_agent.ui.session_manager import Session, SessionManager
 from coding_agent.ui.schemas import (
     PromptRequest,
     CreateSessionRequest,
@@ -26,6 +25,7 @@ from coding_agent.ui.schemas import (
     ApprovalResponseSchema,
     CloseSessionResponse,
     HealthResponse,
+    ReadinessResponse,
 )
 from coding_agent.ui.auth import verify_api_key
 from coding_agent.ui.rate_limit import limiter, RateLimits
@@ -45,95 +45,66 @@ from coding_agent.wire import (
     WireMessage,
 )
 from coding_agent.wire.protocol import ToolResultDelta
+from coding_agent.wire.protocol import ThinkingDelta, TurnStatusDelta
 
 logger = logging.getLogger(__name__)
 
-# Constants
 APPROVAL_TIMEOUT_SECONDS = 120
 SESSION_IDLE_TIMEOUT_MINUTES = 30
 
 
-@dataclass
-class SessionState:
-    """In-memory session state (for backward compatibility with tests)."""
-
-    id: str
-    created_at: datetime
-    last_activity: datetime
-    turn_in_progress: bool = False
-    pending_approval: dict[str, Any] | None = None
-    approval_event: asyncio.Event = field(default_factory=asyncio.Event)
-    approval_response: dict[str, Any] | None = None
-    event_queues: list[asyncio.Queue[dict[str, Any]]] = field(default_factory=list)
-
-
-# Global session manager
 session_manager = SessionManager()
-
-# In-memory session store (for backward compatibility with existing tests)
-sessions: dict[str, SessionState] = {}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown."""
-    # Startup
     cleanup_task = asyncio.create_task(_cleanup_idle_sessions())
     logger.info("HTTP server starting up")
 
-    yield  # Server runs here
+    yield
 
-    # Shutdown
     cleanup_task.cancel()
     try:
         await cleanup_task
     except asyncio.CancelledError:
         pass
 
-    # Close all sessions
-    for session_id in list(sessions.keys()):
-        await _close_session_state(session_id)
+    for session_id in list(session_manager.list_sessions()):
+        await session_manager.close_session(session_id)
 
     logger.info("HTTP server shut down")
 
 
 app = FastAPI(title="Coding Agent HTTP API", lifespan=lifespan)
 
-# Add rate limiter to app state
 app.state.limiter = limiter
 
-# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-# Add exception handler for rate limit exceeded
 @app.exception_handler(RateLimitExceeded)
 async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
     raise HTTPException(status_code=429, detail=str(exc))
 
 
-def _session_to_dict(session: SessionState) -> dict[str, Any]:
+def _session_to_dict(session: Session) -> dict[str, Any]:
     """Convert session state to dictionary."""
-    return {
-        "id": session.id,
-        "created_at": session.created_at.isoformat(),
-        "last_activity": session.last_activity.isoformat(),
-        "turn_in_progress": session.turn_in_progress,
-        "pending_approval": session.pending_approval is not None,
-    }
+    return session.as_dict()
 
 
 def _http_safe_tool_result_payload(msg: ToolResultDelta) -> dict[str, Any]:
     return {
         "session_id": msg.session_id,
-        "call_id": msg.call_id,
+        "agent_id": msg.agent_id,
         "tool_name": msg.tool_name,
+        "call_id": msg.call_id,
         "result": None,
         "display_result": msg.display_result,
         "is_error": msg.is_error,
@@ -141,16 +112,7 @@ def _http_safe_tool_result_payload(msg: ToolResultDelta) -> dict[str, Any]:
     }
 
 
-def _http_safe_tool_call_end_payload(msg: ToolCallEnd) -> dict[str, Any]:
-    return {
-        "session_id": msg.session_id,
-        "call_id": msg.call_id,
-        "result": None,
-        "timestamp": msg.timestamp.isoformat(),
-    }
-
-
-def _wire_message_to_event(msg: WireMessage) -> dict[str, Any]:
+def _wire_message_to_event(msg: WireMessage) -> dict[str, str]:
     """Convert wire message to SSE event."""
     match msg:
         case TurnEnd():
@@ -159,6 +121,7 @@ def _wire_message_to_event(msg: WireMessage) -> dict[str, Any]:
                 "data": json.dumps(
                     {
                         "session_id": msg.session_id,
+                        "agent_id": msg.agent_id,
                         "turn_id": msg.turn_id,
                         "completion_status": msg.completion_status,
                         "timestamp": msg.timestamp.isoformat(),
@@ -171,6 +134,7 @@ def _wire_message_to_event(msg: WireMessage) -> dict[str, Any]:
                 "data": json.dumps(
                     {
                         "session_id": msg.session_id,
+                        "agent_id": msg.agent_id,
                         "timestamp": msg.timestamp.isoformat(),
                     }
                 ),
@@ -181,8 +145,38 @@ def _wire_message_to_event(msg: WireMessage) -> dict[str, Any]:
                 "data": json.dumps(
                     {
                         "session_id": msg.session_id,
+                        "agent_id": msg.agent_id,
                         "content": msg.content,
                         "role": msg.role,
+                        "timestamp": msg.timestamp.isoformat(),
+                    }
+                ),
+            }
+        case ThinkingDelta():
+            return {
+                "event": "ThinkingDelta",
+                "data": json.dumps(
+                    {
+                        "session_id": msg.session_id,
+                        "agent_id": msg.agent_id,
+                        "text": msg.text,
+                        "timestamp": msg.timestamp.isoformat(),
+                    }
+                ),
+            }
+        case TurnStatusDelta():
+            return {
+                "event": "TurnStatusDelta",
+                "data": json.dumps(
+                    {
+                        "session_id": msg.session_id,
+                        "agent_id": msg.agent_id,
+                        "phase": msg.phase,
+                        "elapsed_seconds": msg.elapsed_seconds,
+                        "tokens_in": msg.tokens_in,
+                        "tokens_out": msg.tokens_out,
+                        "model_name": msg.model_name,
+                        "context_percent": msg.context_percent,
                         "timestamp": msg.timestamp.isoformat(),
                     }
                 ),
@@ -193,6 +187,7 @@ def _wire_message_to_event(msg: WireMessage) -> dict[str, Any]:
                 "data": json.dumps(
                     {
                         "session_id": msg.session_id,
+                        "agent_id": msg.agent_id,
                         "tool_name": msg.tool_name,
                         "arguments": msg.arguments,
                         "call_id": msg.call_id,
@@ -211,6 +206,7 @@ def _wire_message_to_event(msg: WireMessage) -> dict[str, Any]:
                 "data": json.dumps(
                     {
                         "session_id": msg.session_id,
+                        "agent_id": msg.agent_id,
                         "call_id": msg.call_id,
                         "tool": msg.tool,
                         "args": msg.args,
@@ -221,7 +217,15 @@ def _wire_message_to_event(msg: WireMessage) -> dict[str, Any]:
         case ToolCallEnd():
             return {
                 "event": "ToolCallEnd",
-                "data": json.dumps(_http_safe_tool_call_end_payload(msg)),
+                "data": json.dumps(
+                    {
+                        "session_id": msg.session_id,
+                        "agent_id": msg.agent_id,
+                        "call_id": msg.call_id,
+                        "result": msg.result,
+                        "timestamp": msg.timestamp.isoformat(),
+                    }
+                ),
             }
         case ApprovalRequest():
             return {
@@ -229,6 +233,7 @@ def _wire_message_to_event(msg: WireMessage) -> dict[str, Any]:
                 "data": json.dumps(
                     {
                         "session_id": msg.session_id,
+                        "agent_id": msg.agent_id,
                         "request_id": msg.request_id,
                         "tool_call": {
                             "tool_name": msg.tool_call.tool_name
@@ -250,6 +255,7 @@ def _wire_message_to_event(msg: WireMessage) -> dict[str, Any]:
                 "data": json.dumps(
                     {
                         "session_id": msg.session_id,
+                        "agent_id": msg.agent_id,
                         "request_id": msg.request_id,
                         "approved": msg.approved,
                         "feedback": msg.feedback,
@@ -263,6 +269,7 @@ def _wire_message_to_event(msg: WireMessage) -> dict[str, Any]:
                 "data": json.dumps(
                     {
                         "session_id": msg.session_id,
+                        "agent_id": msg.agent_id,
                         "content": msg.content,
                         "timestamp": msg.timestamp.isoformat(),
                     }
@@ -274,6 +281,7 @@ def _wire_message_to_event(msg: WireMessage) -> dict[str, Any]:
                 "data": json.dumps(
                     {
                         "session_id": msg.session_id,
+                        "agent_id": msg.agent_id,
                         "step_number": msg.step_number,
                         "max_steps": msg.max_steps,
                         "timestamp": msg.timestamp.isoformat(),
@@ -287,65 +295,38 @@ def _wire_message_to_event(msg: WireMessage) -> dict[str, Any]:
                     {
                         "type": type(msg).__name__,
                         "session_id": getattr(msg, "session_id", None),
+                        "agent_id": getattr(msg, "agent_id", None),
                     }
                 ),
             }
 
 
-async def _broadcast_event(session: SessionState, event: dict[str, Any]) -> None:
+async def _broadcast_event(session: Session, event: dict[str, str]) -> None:
     """Broadcast event to all connected clients."""
-    surviving_queues: list[asyncio.Queue[dict[str, Any]]] = []
-    for queue in session.event_queues:
-        try:
-            queue.put_nowait(event)
-            surviving_queues.append(queue)
-        except asyncio.QueueFull:
-            surviving_queues.append(queue)
-        except Exception:
-            # Queue might be closed
-            pass
-    session.event_queues = surviving_queues
+    await session_manager.broadcast_event(session.id, event)
 
 
 async def _cleanup_idle_sessions() -> None:
     """Background task to clean up idle sessions."""
     while True:
-        await asyncio.sleep(60)  # Check every minute
+        await asyncio.sleep(60)
         try:
-            # Cleanup in session manager
             await session_manager.cleanup_idle_sessions(SESSION_IDLE_TIMEOUT_MINUTES)
-
-            # Cleanup legacy sessions (for backward compatibility)
-            now = datetime.now()
-            expired = []
-            for session_id, session in sessions.items():
-                idle_time = now - session.last_activity
-                if idle_time > timedelta(minutes=SESSION_IDLE_TIMEOUT_MINUTES):
-                    expired.append(session_id)
-            for session_id in expired:
-                logger.info(f"Cleaning up idle legacy session: {session_id}")
-                del sessions[session_id]
-        except Exception as e:
+        except Exception:
             logger.exception("Error during idle session cleanup")
 
 
-async def stream_wire_messages(wire: LocalWire) -> AsyncIterator[dict[str, Any]]:
-    """Stream wire messages as SSE events.
-
-    Consumes messages from the wire's outgoing queue and yields SSE events.
-    Stops when a TurnEnd message is received.
-    """
+async def stream_wire_messages(wire: LocalWire) -> AsyncIterator[dict[str, str]]:
+    """Stream wire messages as SSE events."""
     while True:
         try:
             msg = await wire.get_next_outgoing()
             event = _wire_message_to_event(msg)
             yield event
 
-            # Stop streaming on TurnEnd
-            if isinstance(msg, TurnEnd):
+            if isinstance(msg, TurnEnd) and not msg.agent_id:
                 break
         except asyncio.CancelledError:
-            # Client disconnected
             raise
         except Exception as e:
             logger.exception("Error streaming wire message")
@@ -356,11 +337,40 @@ async def stream_wire_messages(wire: LocalWire) -> AsyncIterator[dict[str, Any]]
             break
 
 
-@app.get("/health", response_model=HealthResponse)
+@app.get("/healthz", response_model=HealthResponse)
 @limiter.limit(RateLimits.HEALTH)
-async def health_check(request: Request):
-    """Health check endpoint."""
-    return HealthResponse(status="healthy", sessions=len(sessions), version="2.0.0")
+async def liveness_check(request: Request) -> HealthResponse:
+    return HealthResponse(
+        status="healthy", sessions=len(session_manager.list_sessions()), version="2.0.0"
+    )
+
+
+@app.get("/readyz", response_model=ReadinessResponse)
+@limiter.limit(RateLimits.HEALTH)
+async def readiness_check(request: Request, response: Response) -> ReadinessResponse:
+    try:
+        session_store_ok = bool(session_manager._store.check_health())
+    except Exception:
+        logger.exception("Session store readiness check failed")
+        session_store_ok = False
+
+    try:
+        rate_limiter_ok = bool(limiter._storage.check())
+    except Exception:
+        logger.exception("Rate limiter readiness check failed")
+        rate_limiter_ok = False
+
+    checks = {
+        "session_store": "ok" if session_store_ok else "error",
+        "rate_limiter": "ok" if rate_limiter_ok else "error",
+    }
+    ready = session_store_ok and rate_limiter_ok
+    if not ready:
+        response.status_code = 503
+    return ReadinessResponse(
+        status="ready" if ready else "not_ready",
+        checks=checks,
+    )
 
 
 @app.post("/sessions", response_model=SessionResponse)
@@ -371,11 +381,9 @@ async def create_session(
     api_key: str | None = Depends(verify_api_key),
 ) -> SessionResponse:
     """Create new session with AgentLoop integration."""
-    # Use defaults if no body provided
-    repo_path = Path(body.repo_path) if body and body.repo_path is not None else None
+    repo_path = None if body is None or body.repo_path is None else Path(body.repo_path)
     approval_policy_str = body.approval_policy if body else "auto"
 
-    # Map string to ApprovalPolicy enum
     approval_policy_map = {
         "yolo": ApprovalPolicy.YOLO,
         "interactive": ApprovalPolicy.INTERACTIVE,
@@ -383,19 +391,10 @@ async def create_session(
     }
     approval_policy = approval_policy_map.get(approval_policy_str, ApprovalPolicy.AUTO)
 
-    # Create session using SessionManager
     session_id = await session_manager.create_session(
         repo_path=repo_path,
         approval_policy=approval_policy,
-        provider=None,  # Will use mock/test provider
-    )
-
-    # Also create legacy session state for backward compatibility with tests
-    now = datetime.now()
-    sessions[session_id] = SessionState(
-        id=session_id,
-        created_at=now,
-        last_activity=now,
+        provider=None,
     )
 
     logger.info(f"Created session: {session_id}")
@@ -408,73 +407,33 @@ async def send_prompt(
     request: Request,
     session_id: str,
     body: PromptRequest | None = None,
-    prompt: str | None = None,  # Backward compat: query param
+    prompt: str | None = None,
     api_key: str | None = Depends(verify_api_key),
 ) -> EventSourceResponse:
-    """Send message, returns SSE stream.
-
-    Returns 409 if a turn is already in progress.
-    Accepts prompt via JSON body (preferred) or query param (backward compat).
-    """
-    # Get prompt from body or query param (body takes precedence)
+    """Send message, returns SSE stream."""
     prompt_text = body.prompt if body else prompt
     if not prompt_text:
         raise HTTPException(status_code=422, detail="Prompt is required")
 
-    # Check in session manager (primary) or legacy sessions (backward compat)
-    has_session_manager = session_manager.has_session(session_id)
-    has_legacy = session_id in sessions
-
-    if not has_session_manager and not has_legacy:
+    if not session_manager.has_session(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Get session from session_manager if available
-    session = None
-    if has_session_manager:
-        session = session_manager.get_session(session_id)
+    session = session_manager.get_session(session_id)
 
-    # Check if turn is already in progress (check both session_manager and legacy state)
-    if session and session.task and not session.task.done():
+    if session.turn_in_progress or (session.task and not session.task.done()):
         raise HTTPException(status_code=409, detail="Turn already in progress")
 
-    # Also check legacy session state for backward compatibility
-    if session_id in sessions and sessions[session_id].turn_in_progress:
-        raise HTTPException(status_code=409, detail="Turn already in progress")
+    session.turn_in_progress = True
+    session.last_activity = datetime.now()
 
-    # Update legacy session state if exists
-    if session_id in sessions:
-        sessions[session_id].turn_in_progress = True
-        sessions[session_id].last_activity = datetime.now()
-
-    async def event_generator() -> AsyncIterator[dict[str, Any]]:
-        """Generate SSE events for the turn."""
-        # If no session_manager session, just yield TurnEnd for legacy compatibility
-        if not session:
-            # Legacy mode: just yield a simple TurnEnd
-            yield {
-                "event": "TurnEnd",
-                "data": json.dumps(
-                    {
-                        "session_id": session_id,
-                        "turn_id": "legacy-turn",
-                        "completion_status": "completed",
-                        "timestamp": datetime.now().isoformat(),
-                    }
-                ),
-            }
-            return
-
+    async def event_generator() -> AsyncIterator[dict[str, str]]:
         try:
-            # Start agent run in background
             session.task = asyncio.create_task(
                 session_manager.run_agent(session_id, prompt_text)
             )
 
-            # Stream wire messages
             async for event in stream_wire_messages(session.wire):
-                # Also broadcast to legacy event queues
-                if session_id in sessions:
-                    await _broadcast_event(sessions[session_id], event)
+                await _broadcast_event(session, event)
                 yield event
 
         except Exception as e:
@@ -489,8 +448,7 @@ async def send_prompt(
                     }
                 ),
             }
-            if session_id in sessions:
-                await _broadcast_event(sessions[session_id], error_data)
+            await _broadcast_event(session, error_data)
             yield error_data
         finally:
             if session.task is not None:
@@ -502,7 +460,6 @@ async def send_prompt(
             session.turn_in_progress = False
             session.last_activity = datetime.now()
 
-    # Return SSE stream from wire
     return EventSourceResponse(
         event_generator(),
         media_type="text/event-stream",
@@ -515,16 +472,12 @@ async def approve_request(
     request: Request,
     session_id: str,
     body: ApproveRequest | None = None,
-    request_id: str | None = None,  # Backward compat: query param
-    approved: bool | None = None,  # Backward compat: query param
-    feedback: str | None = None,  # Backward compat: query param
+    request_id: str | None = None,
+    approved: bool | None = None,
+    feedback: str | None = None,
     api_key: str | None = Depends(verify_api_key),
 ) -> ApprovalResponseSchema:
-    """Respond to approval request.
-
-    Accepts parameters via JSON body (preferred) or query params (backward compat).
-    """
-    # Get values from body or query params (body takes precedence)
+    """Respond to approval request."""
     req_id = body.request_id if body else request_id
     is_approved = body.approved if body else approved
     fb = body.feedback if body else feedback
@@ -534,42 +487,24 @@ async def approve_request(
     if is_approved is None:
         raise HTTPException(status_code=422, detail="approved is required")
 
-    # Check in session_manager or legacy sessions
-    has_session_manager = session_manager.has_session(session_id)
-    has_legacy = session_id in sessions
-
-    if not has_session_manager and not has_legacy:
+    if not session_manager.has_session(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Check legacy session state for pending approval (for backward compatibility)
-    if has_legacy:
-        session = sessions[session_id]
-        if session.pending_approval is None:
+    session = session_manager.get_session(session_id)
+    if session.approval_store.get_request(req_id) is None:
+        raise HTTPException(status_code=400, detail="No pending approval request")
+
+    try:
+        success = await session_manager.submit_approval(
+            session_id=session_id,
+            request_id=req_id,
+            approved=is_approved,
+            feedback=fb,
+        )
+        if not success:
             raise HTTPException(status_code=400, detail="No pending approval request")
-        if session.pending_approval.get("request_id") != req_id:
-            raise HTTPException(status_code=400, detail="Request ID mismatch")
-
-    # Try to submit approval via session_manager if session exists there
-    if has_session_manager:
-        try:
-            await session_manager.submit_approval(
-                session_id=session_id,
-                request_id=req_id,
-                approved=is_approved,
-                feedback=fb,
-            )
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
-
-    # Update legacy session state if exists
-    if session_id in sessions:
-        sessions[session_id].pending_approval = None
-        sessions[session_id].approval_response = {
-            "decision": "approve" if is_approved else "deny",
-            "feedback": fb,
-        }
-        sessions[session_id].approval_event.set()
-        sessions[session_id].last_activity = datetime.now()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     return ApprovalResponseSchema(
         status="ok",
@@ -586,27 +521,23 @@ async def get_events(
     api_key: str | None = Depends(verify_api_key),
 ) -> EventSourceResponse:
     """Persistent SSE event stream (fan-out supported)."""
-    if session_id not in sessions:
+    if not session_manager.has_session(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
 
-    session = sessions[session_id]
-    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=100)
-    session.event_queues.append(queue)
+    session = session_manager.get_session(session_id)
+    queue: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=100)
+    session_manager.add_event_queue(session_id, queue)
 
-    async def event_generator() -> AsyncIterator[dict[str, Any]]:
-        """Generate events from queue."""
+    async def event_generator() -> AsyncIterator[dict[str, str]]:
         try:
             while True:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=30.0)
                     yield event
                 except asyncio.TimeoutError:
-                    # Send keepalive
                     yield {"event": "ping", "data": ""}
         except asyncio.CancelledError:
-            # Client disconnected
-            if queue in session.event_queues:
-                session.event_queues.remove(queue)
+            session_manager.remove_event_queue(session_id, queue)
             raise
 
     return EventSourceResponse(event_generator())
@@ -620,11 +551,6 @@ async def get_session(
     api_key: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Get session state."""
-    # Check in legacy sessions first (for backward compatibility)
-    if session_id in sessions:
-        return _session_to_dict(sessions[session_id])
-
-    # Check in session manager
     if session_manager.has_session(session_id):
         return session_manager.get_session_info(session_id)
 
@@ -639,34 +565,30 @@ async def close_session(
     api_key: str | None = Depends(verify_api_key),
 ) -> CloseSessionResponse:
     """Close session and release resources."""
-    # Check if session exists in either store
-    if not session_manager.has_session(session_id) and session_id not in sessions:
+    if not session_manager.has_session(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
 
-    await _close_session_state(session_id)
+    session = session_manager.get_session(session_id)
+    await _broadcast_event(
+        session,
+        {"event": "SessionClosed", "data": json.dumps({"session_id": session_id})},
+    )
+
+    try:
+        await session_manager.close_session(session_id)
+    except Exception as e:
+        logger.exception(f"Error closing session in manager: {e}")
 
     logger.info(f"Closed session: {session_id}")
     return CloseSessionResponse(status="closed", session_id=session_id)
 
 
-# Global approval handler for integration with agent loop (legacy)
 async def wait_for_approval(
     session_id: str,
     approval_req: ApprovalRequest,
 ) -> ApprovalResponse:
-    """Wait for approval response from HTTP clients.
-
-    This function is called by the agent loop when it needs approval.
-    It will block until the user responds via the /approve endpoint
-    or the timeout expires.
-    """
-    # Use session manager if available
-    if session_manager.has_session(session_id):
-        # Submit through session manager
-        # This is handled by the client calling /approve
-        pass
-
-    if session_id not in sessions:
+    """Wait for approval response from HTTP clients."""
+    if not session_manager.has_session(session_id):
         return ApprovalResponse(
             session_id=session_id,
             request_id=approval_req.request_id,
@@ -674,71 +596,18 @@ async def wait_for_approval(
             feedback="Session not found",
         )
 
-    session = sessions[session_id]
-
-    if session.turn_in_progress:
-        # Set pending approval and notify clients
-        session.pending_approval = {
-            "request_id": approval_req.request_id,
-            "tool_name": approval_req.tool_call.tool_name
-            if approval_req.tool_call
-            else "",
-            "arguments": approval_req.tool_call.arguments
-            if approval_req.tool_call
-            else {},
-        }
-        session.approval_event.clear()
-        session.approval_response = None
-
-        # Broadcast approval request to all connected clients
-        event = _wire_message_to_event(approval_req)
-        await _broadcast_event(session, event)
-
-        # Wait for response or timeout
-        try:
-            await asyncio.wait_for(
-                session.approval_event.wait(),
-                timeout=APPROVAL_TIMEOUT_SECONDS,
-            )
-
-            if session.approval_response:
-                return ApprovalResponse(
-                    session_id=session_id,
-                    request_id=approval_req.request_id,
-                    approved=session.approval_response["decision"] == "approve",
-                    feedback=session.approval_response.get("feedback"),
-                )
-        except asyncio.TimeoutError:
-            logger.warning(f"Approval timeout for session {session_id}")
-            # Broadcast timeout event
-            timeout_event = {
-                "event": "ApprovalTimeout",
-                "data": json.dumps({"request_id": approval_req.request_id}),
-            }
-            await _broadcast_event(session, timeout_event)
-        finally:
-            session.pending_approval = None
-            session.approval_response = None
-
-    return ApprovalResponse(
+    session = session_manager.get_session(session_id)
+    event = _wire_message_to_event(approval_req)
+    await _broadcast_event(session, event)
+    response = await session_manager.wait_for_http_approval(
         session_id=session_id,
-        request_id=approval_req.request_id,
-        approved=False,
-        feedback="Approval timeout or error",
+        approval_req=approval_req,
+        timeout_seconds=APPROVAL_TIMEOUT_SECONDS,
     )
-
-
-async def _close_session_state(session_id: str) -> None:
-    if session_manager.has_session(session_id):
-        try:
-            await session_manager.close_session(session_id)
-        except Exception as e:
-            logger.exception(f"Error closing session in manager: {e}")
-
-    if session_id in sessions:
-        session = sessions[session_id]
-        await _broadcast_event(
-            session,
-            {"event": "SessionClosed", "data": json.dumps({"session_id": session_id})},
-        )
-        del sessions[session_id]
+    if not response.approved and response.feedback == "Approval timeout or error":
+        timeout_event = {
+            "event": "ApprovalTimeout",
+            "data": json.dumps({"request_id": approval_req.request_id}),
+        }
+        await _broadcast_event(session, timeout_event)
+    return response

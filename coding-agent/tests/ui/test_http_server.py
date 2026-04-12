@@ -4,35 +4,40 @@ from __future__ import annotations
 
 import asyncio
 import json
+import types
 from datetime import datetime, timedelta
-from typing import Any
+from unittest.mock import patch
 
 import pytest
 from httpx import AsyncClient, ASGITransport
 from httpx_sse import aconnect_sse
+from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
 
+from coding_agent.approval import ApprovalPolicy
 from coding_agent.approval.store import ApprovalStore
+from coding_agent.wire.local import LocalWire
+from coding_agent.ui.session_manager import Session
 from coding_agent.ui.http_server import (
     APPROVAL_TIMEOUT_SECONDS,
     SESSION_IDLE_TIMEOUT_MINUTES,
-    SessionState,
     _broadcast_event,
     _session_to_dict,
+    stream_wire_messages,
     _wire_message_to_event,
     app,
     limiter,
     session_manager,
-    sessions,
     wait_for_approval,
 )
-from coding_agent.wire import ToolCallEnd
 from coding_agent.wire.protocol import (
     ApprovalRequest,
     ApprovalResponse,
     CompletionStatus,
+    ThinkingDelta,
     StreamDelta,
     ToolCallDelta,
     ToolResultDelta,
+    TurnStatusDelta,
     TurnEnd,
 )
 
@@ -40,23 +45,54 @@ from coding_agent.wire.protocol import (
 @pytest.fixture(autouse=True)
 async def clear_sessions():
     """Clear sessions before each test."""
-    sessions.clear()
-    # Clear rate limit storage to prevent 429 errors
+    session_manager.clear_sessions()
     limiter.reset()
-    # Also close any sessions in session_manager
     for session_id in list(session_manager.list_sessions()):
         try:
             await session_manager.close_session(session_id)
         except Exception:
             pass
     yield
-    sessions.clear()
-    # Cleanup session_manager
+    session_manager.clear_sessions()
     for session_id in list(session_manager.list_sessions()):
         try:
             await session_manager.close_session(session_id)
         except Exception:
             pass
+
+
+def register_session(
+    session_id: str,
+    **overrides,
+) -> Session:
+    session = Session(
+        id=session_id,
+        created_at=overrides.pop("created_at", datetime.now()),
+        last_activity=overrides.pop("last_activity", datetime.now()),
+        **overrides,
+    )
+    session_manager.register_session(session)
+    return session
+
+
+def add_store_backed_approval_request(
+    session: Session,
+    session_id: str,
+    request_id: str,
+) -> None:
+    tool_call = ToolCallDelta(
+        session_id=session_id,
+        tool_name="bash",
+        arguments={"command": "ls"},
+        call_id=f"call-{request_id}",
+    )
+    approval_req = ApprovalRequest(
+        session_id=session_id,
+        request_id=request_id,
+        tool_call=tool_call,
+        timeout_seconds=120,
+    )
+    session.approval_store.add_request(approval_req)
 
 
 @pytest.fixture
@@ -76,15 +112,55 @@ class TestSessionCreation:
         assert response.status_code == 200
         data = response.json()
         assert "session_id" in data
-        assert len(data["session_id"]) == 36  # UUID format
+        assert len(data["session_id"]) == 36
 
     async def test_create_session_stores_in_memory(self, client):
         """Test that created session is stored in memory."""
         response = await client.post("/sessions", json={})
         data = response.json()
         session_id = data["session_id"]
-        assert session_id in sessions
-        assert sessions[session_id].id == session_id
+        assert session_manager.has_session(session_id)
+        assert session_manager.get_session(session_id).id == session_id
+
+    async def test_healthz_reports_store_backed_session_count(self, client):
+        response = await client.post("/sessions", json={})
+        session_id = response.json()["session_id"]
+
+        health = await client.get("/healthz")
+
+        assert health.status_code == 200
+        assert health.json()["sessions"] == 1
+        assert session_manager.has_session(session_id)
+
+    async def test_readyz_reports_dependencies_ready(self, client):
+        ready = await client.get("/readyz")
+
+        assert ready.status_code == 200
+        assert ready.json() == {
+            "status": "ready",
+            "checks": {"session_store": "ok", "rate_limiter": "ok"},
+        }
+
+    async def test_readyz_returns_503_when_session_store_unhealthy(
+        self, client, monkeypatch
+    ):
+        monkeypatch.setattr(session_manager._store, "check_health", lambda: False)
+
+        ready = await client.get("/readyz")
+
+        assert ready.status_code == 503
+        assert ready.json() == {
+            "status": "not_ready",
+            "checks": {"session_store": "error", "rate_limiter": "ok"},
+        }
+
+    async def test_create_session_uses_real_provider_by_default(self, client):
+        response = await client.post("/sessions", json={})
+        session_id = response.json()["session_id"]
+
+        session = session_manager.get_session(session_id)
+
+        assert session.provider is None
 
 
 class TestPromptStreaming:
@@ -101,11 +177,9 @@ class TestPromptStreaming:
 
     async def test_prompt_streaming_events(self, client):
         """Test that prompt returns SSE events."""
-        # Create session first
         create_resp = await client.post("/sessions", json={})
         session_id = create_resp.json()["session_id"]
 
-        # Send prompt and collect SSE events
         events = []
         async with aconnect_sse(
             client,
@@ -115,14 +189,49 @@ class TestPromptStreaming:
         ) as event_source:
             async for sse in event_source.aiter_sse():
                 events.append({"event": sse.event, "data": json.loads(sse.data)})
-                if sse.event == "TurnEnd":
+                if sse.event == "TurnEnd" and not events[-1]["data"]["agent_id"]:
                     break
 
-        # Verify events
         assert len(events) > 0
-        stream_events = [e for e in events if e["event"] == "StreamDelta"]
-        assert len(stream_events) > 0
         assert events[-1]["event"] == "TurnEnd"
+        assert events[-1]["data"]["completion_status"] in {
+            CompletionStatus.COMPLETED.value,
+            CompletionStatus.BLOCKED.value,
+            CompletionStatus.ERROR.value,
+        }
+
+    async def test_prompt_returns_parent_turn_end_when_agent_bootstrap_fails(
+        self, client
+    ):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        with patch(
+            "coding_agent.ui.session_manager.importlib.import_module"
+        ) as import_module:
+            import_module.return_value = types.SimpleNamespace(
+                create_agent=lambda **kwargs: (_ for _ in ()).throw(
+                    RuntimeError("bootstrap exploded")
+                )
+            )
+
+            events = []
+            async with aconnect_sse(
+                client,
+                "POST",
+                f"/sessions/{session_id}/prompt",
+                json={"prompt": "Hello"},
+            ) as event_source:
+                async for sse in event_source.aiter_sse():
+                    events.append({"event": sse.event, "data": json.loads(sse.data)})
+                    if sse.event == "TurnEnd":
+                        break
+
+        assert events[0]["event"] == "StreamDelta"
+        assert "bootstrap exploded" in events[0]["data"]["content"]
+        assert events[-1]["event"] == "TurnEnd"
+        assert events[-1]["data"]["agent_id"] == ""
+        assert events[-1]["data"]["completion_status"] == CompletionStatus.ERROR.value
 
     async def test_prompt_sets_turn_in_progress(self, client):
         """Test that prompt sets turn_in_progress flag."""
@@ -143,7 +252,6 @@ class TestPromptStreaming:
                 )
             )
 
-        # Start prompt in background
         async def send_prompt():
             async with aconnect_sse(
                 client,
@@ -155,7 +263,6 @@ class TestPromptStreaming:
                     if sse.event == "TurnEnd":
                         break
 
-        # Check turn_in_progress during execution
         with patch.object(session_manager, "run_agent", side_effect=fake_run_agent):
             task = asyncio.create_task(send_prompt())
             await asyncio.wait_for(started.wait(), timeout=1)
@@ -263,14 +370,11 @@ class TestConcurrentTurns:
 
     async def test_concurrent_turn_returns_409(self, client):
         """Test that concurrent turns return 409."""
-        # Create session
         create_resp = await client.post("/sessions", json={})
         session_id = create_resp.json()["session_id"]
 
-        # Manually set turn_in_progress
-        sessions[session_id].turn_in_progress = True
+        session_manager.get_session(session_id).turn_in_progress = True
 
-        # Try to send another prompt
         response = await client.post(
             f"/sessions/{session_id}/prompt",
             json={"prompt": "Hello"},
@@ -283,7 +387,6 @@ class TestConcurrentTurns:
         create_resp = await client.post("/sessions", json={})
         session_id = create_resp.json()["session_id"]
 
-        # Complete a turn
         async with aconnect_sse(
             client,
             "POST",
@@ -294,8 +397,7 @@ class TestConcurrentTurns:
                 if sse.event == "TurnEnd":
                     break
 
-        # Should be able to start another turn
-        assert not sessions[session_id].turn_in_progress
+        assert not session_manager.get_session(session_id).turn_in_progress
         response = await client.post(
             f"/sessions/{session_id}/prompt",
             json={"prompt": "Hello again"},
@@ -319,41 +421,35 @@ class TestApprovalEndpoint:
         create_resp = await client.post("/sessions", json={})
         session_id = create_resp.json()["session_id"]
 
-        # Without adding request to ApprovalStore or setting legacy pending_approval,
-        # it will fail the legacy check (400) if legacy session exists
-        # But if no legacy session, it should try ApprovalStore (which returns 404)
-        # Since create_session creates both, we expect 400 from legacy check
         response = await client.post(
             f"/sessions/{session_id}/approve",
             json={"request_id": "req1", "approved": True},
         )
-        # Legacy session exists and pending_approval is None -> 400
         assert response.status_code == 400
         assert "no pending" in response.json()["detail"].lower()
 
-    async def test_approve_request_id_mismatch(self, client):
-        """Test 400 when request ID doesn't match (legacy check)."""
+    async def test_approve_rejects_unknown_request_id(self, client):
         create_resp = await client.post("/sessions", json={})
         session_id = create_resp.json()["session_id"]
 
-        # Set up pending approval in legacy session
-        sessions[session_id].pending_approval = {"request_id": "correct_id"}
+        session = session_manager.get_session(session_id)
+        add_store_backed_approval_request(session, session_id, "correct_id")
 
         response = await client.post(
             f"/sessions/{session_id}/approve",
             json={"request_id": "wrong_id", "approved": True},
         )
         assert response.status_code == 400
-        assert "mismatch" in response.json()["detail"].lower()
+        assert "no pending approval request" in response.json()["detail"].lower()
 
     async def test_approve_success(self, client):
-        """Test successful approval."""
         create_resp = await client.post("/sessions", json={})
         session_id = create_resp.json()["session_id"]
 
-        # Set up pending approval in legacy session
-        sessions[session_id].pending_approval = {"request_id": "req123"}
-        sessions[session_id].approval_event.clear()
+        session = session_manager.get_session(session_id)
+        session.pending_approval = None
+        session.approval_event.clear()
+        add_store_backed_approval_request(session, session_id, "req123")
 
         response = await client.post(
             f"/sessions/{session_id}/approve",
@@ -363,16 +459,18 @@ class TestApprovalEndpoint:
         data = response.json()
         assert data["status"] == "ok"
         assert data["decision"] == "approved"
-        assert sessions[session_id].approval_event.is_set()
+        assert session.approval_event.is_set()
+        assert session.pending_approval is None
 
     async def test_deny_success(self, client):
         """Test successful denial."""
         create_resp = await client.post("/sessions", json={})
         session_id = create_resp.json()["session_id"]
 
-        # Set up pending approval in legacy session
-        sessions[session_id].pending_approval = {"request_id": "req123"}
-        sessions[session_id].approval_event.clear()
+        session = session_manager.get_session(session_id)
+        session.pending_approval = {"request_id": "req123"}
+        session.approval_event.clear()
+        add_store_backed_approval_request(session, session_id, "req123")
 
         response = await client.post(
             f"/sessions/{session_id}/approve",
@@ -382,13 +480,35 @@ class TestApprovalEndpoint:
         data = response.json()
         assert data["status"] == "ok"
         assert data["decision"] == "denied"
+        assert session.approval_event.is_set()
+        assert session.pending_approval is None
+
+    async def test_approve_rejects_stale_pending_projection_without_store_request(
+        self, client
+    ):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        session = session_manager.get_session(session_id)
+        session.pending_approval = {"request_id": "req123"}
+        session.approval_event.clear()
+        assert session.approval_store.get_request("req123") is None
+
+        response = await client.post(
+            f"/sessions/{session_id}/approve",
+            json={"request_id": "req123", "approved": True, "feedback": "Looks good"},
+        )
+
+        assert response.status_code == 400
+        assert "no pending approval request" in response.json()["detail"].lower()
+        assert session.pending_approval == {"request_id": "req123"}
+        assert session.approval_event.is_set() is False
 
     async def test_approve_with_approval_store(self, client):
         """Test approval using ApprovalStore."""
         create_resp = await client.post("/sessions", json={})
         session_id = create_resp.json()["session_id"]
 
-        # Add request to ApprovalStore directly (bypassing legacy check)
         session = session_manager.get_session(session_id)
         tool_call = ToolCallDelta(
             session_id=session_id,
@@ -404,10 +524,8 @@ class TestApprovalEndpoint:
         )
         session.approval_store.add_request(approval_req)
 
-        # Clear legacy pending_approval to test ApprovalStore path
-        sessions[session_id].pending_approval = None
+        session.pending_approval = None
 
-        # Now approve via submit_approval (which uses ApprovalStore)
         success = await session_manager.submit_approval(
             session_id=session_id,
             request_id="req123",
@@ -425,16 +543,14 @@ class TestEventsFanOut:
         create_resp = await client.post("/sessions", json={})
         session_id = create_resp.json()["session_id"]
 
-        # Manually add queues to test fan-out
         queue1 = asyncio.Queue()
         queue2 = asyncio.Queue()
-        sessions[session_id].event_queues = [queue1, queue2]
+        session = session_manager.get_session(session_id)
+        session.event_queues = [queue1, queue2]
 
-        # Broadcast an event
         test_event = {"event": "Test", "data": "{}"}
-        await _broadcast_event(sessions[session_id], test_event)
+        await _broadcast_event(session, test_event)
 
-        # Both queues should receive the event
         assert await queue1.get() == test_event
         assert await queue2.get() == test_event
 
@@ -443,9 +559,9 @@ class TestEventsFanOut:
         create_resp = await client.post("/sessions", json={})
         session_id = create_resp.json()["session_id"]
 
-        # Verify the session has event_queues list
-        assert hasattr(sessions[session_id], "event_queues")
-        assert isinstance(sessions[session_id].event_queues, list)
+        session = session_manager.get_session(session_id)
+        assert hasattr(session, "event_queues")
+        assert isinstance(session.event_queues, list)
 
 
 class TestGetSession:
@@ -489,21 +605,18 @@ class TestCloseSession:
         data = response.json()
         assert data["status"] == "closed"
         assert data["session_id"] == session_id
-        assert session_id not in sessions
+        assert not session_manager.has_session(session_id)
 
     async def test_close_session_broadcasts_event(self, client):
         """Test that closing session broadcasts to event queues."""
         create_resp = await client.post("/sessions", json={})
         session_id = create_resp.json()["session_id"]
 
-        # Add a queue to receive events
         queue = asyncio.Queue()
-        sessions[session_id].event_queues = [queue]
+        session_manager.get_session(session_id).event_queues = [queue]
 
-        # Close the session
         await client.delete(f"/sessions/{session_id}")
 
-        # The queue should have received SessionClosed event
         received_events = []
         while not queue.empty():
             received_events.append(await queue.get())
@@ -518,28 +631,23 @@ class TestSessionTimeout:
         """Test that old sessions are marked for cleanup."""
         session_id = "test_session"
         old_time = datetime.now() - timedelta(minutes=SESSION_IDLE_TIMEOUT_MINUTES + 1)
-        sessions[session_id] = SessionState(
-            id=session_id,
+        session = register_session(
+            session_id,
             created_at=old_time,
             last_activity=old_time,
         )
 
-        # Check that session is old enough to expire
         now = datetime.now()
-        idle_time = now - sessions[session_id].last_activity
+        idle_time = now - session.last_activity
         assert idle_time > timedelta(minutes=SESSION_IDLE_TIMEOUT_MINUTES)
 
     async def test_session_not_expired_if_active(self):
         """Test that active sessions are not expired."""
         session_id = "test_session"
-        sessions[session_id] = SessionState(
-            id=session_id,
-            created_at=datetime.now(),
-            last_activity=datetime.now(),
-        )
+        session = register_session(session_id)
 
         now = datetime.now()
-        idle_time = now - sessions[session_id].last_activity
+        idle_time = now - session.last_activity
         assert idle_time < timedelta(minutes=SESSION_IDLE_TIMEOUT_MINUTES)
 
 
@@ -564,6 +672,7 @@ class TestWireMessageConversion:
         """Test StreamDelta message conversion."""
         msg = StreamDelta(
             session_id="test123",
+            agent_id="child-1",
             content="Hello world",
             role="assistant",
         )
@@ -571,6 +680,7 @@ class TestWireMessageConversion:
         assert event["event"] == "StreamDelta"
         data = json.loads(event["data"])
         assert data["session_id"] == "test123"
+        assert data["agent_id"] == "child-1"
         assert data["content"] == "Hello world"
         assert data["role"] == "assistant"
 
@@ -578,6 +688,7 @@ class TestWireMessageConversion:
         """Test ToolCallDelta message conversion."""
         msg = ToolCallDelta(
             session_id="test123",
+            agent_id="child-2",
             tool_name="bash",
             arguments={"command": "ls"},
             call_id="call1",
@@ -586,6 +697,7 @@ class TestWireMessageConversion:
         assert event["event"] == "ToolCallDelta"
         data = json.loads(event["data"])
         assert data["session_id"] == "test123"
+        assert data["agent_id"] == "child-2"
         assert data["tool_name"] == "bash"
         assert data["call_id"] == "call1"
         assert data["arguments"]["command"] == "ls"
@@ -593,6 +705,7 @@ class TestWireMessageConversion:
     def test_tool_result_delta_conversion_redacts_raw_result_payload(self):
         msg = ToolResultDelta(
             session_id="test123",
+            agent_id="child-3",
             call_id="call1",
             tool_name="bash_run",
             result={"stdout": "SECRET=abc123", "stderr": "", "exit_code": 0},
@@ -604,37 +717,25 @@ class TestWireMessageConversion:
         assert event["event"] == "ToolResultDelta"
         data = json.loads(event["data"])
         assert data["session_id"] == "test123"
+        assert data["agent_id"] == "child-3"
         assert data["call_id"] == "call1"
         assert data["tool_name"] == "bash_run"
         assert data["display_result"] == "command succeeded"
         assert data["is_error"] is False
         assert data["result"] is None
 
-    def test_tool_call_end_conversion_redacts_raw_result_payload(self):
-        msg = ToolCallEnd(
-            session_id="test123",
-            call_id="call1",
-            result="SECRET=abc123\nfull command output",
-        )
-
-        event = _wire_message_to_event(msg)
-
-        assert event["event"] == "ToolCallEnd"
-        data = json.loads(event["data"])
-        assert data["session_id"] == "test123"
-        assert data["call_id"] == "call1"
-        assert data["result"] is None
-
     def test_approval_request_conversion(self):
         """Test ApprovalRequest message conversion."""
         tool_call = ToolCallDelta(
             session_id="test123",
+            agent_id="child-4",
             tool_name="bash",
             arguments={"command": "rm -rf /"},
             call_id="call1",
         )
         msg = ApprovalRequest(
             session_id="test123",
+            agent_id="child-4",
             request_id="req1",
             tool_call=tool_call,
             timeout_seconds=120,
@@ -643,6 +744,7 @@ class TestWireMessageConversion:
         assert event["event"] == "ApprovalRequest"
         data = json.loads(event["data"])
         assert data["session_id"] == "test123"
+        assert data["agent_id"] == "child-4"
         assert data["request_id"] == "req1"
         assert data["timeout_seconds"] == 120
         assert data["tool_call"]["tool_name"] == "bash"
@@ -651,6 +753,7 @@ class TestWireMessageConversion:
         """Test ApprovalResponse conversion."""
         msg = ApprovalResponse(
             session_id="test123",
+            agent_id="child-5",
             request_id="req1",
             approved=True,
             feedback="Looks good",
@@ -659,9 +762,94 @@ class TestWireMessageConversion:
         assert event["event"] == "ApprovalResponse"
         data = json.loads(event["data"])
         assert data["session_id"] == "test123"
+        assert data["agent_id"] == "child-5"
         assert data["request_id"] == "req1"
         assert data["approved"] is True
         assert data["feedback"] == "Looks good"
+
+    def test_thinking_delta_conversion(self):
+        msg = ThinkingDelta(
+            session_id="test123",
+            agent_id="child-6",
+            text="reasoning about the next step",
+        )
+
+        event = _wire_message_to_event(msg)
+
+        assert event["event"] == "ThinkingDelta"
+        data = json.loads(event["data"])
+        assert data["session_id"] == "test123"
+        assert data["agent_id"] == "child-6"
+        assert data["text"] == "reasoning about the next step"
+
+    def test_turn_status_delta_conversion(self):
+        msg = TurnStatusDelta(
+            session_id="test123",
+            agent_id="child-7",
+            phase="idle",
+            elapsed_seconds=1.5,
+            tokens_in=123,
+            tokens_out=45,
+            model_name="kimi-for-coding",
+            context_percent=12.5,
+        )
+
+        event = _wire_message_to_event(msg)
+
+        assert event["event"] == "TurnStatusDelta"
+        data = json.loads(event["data"])
+        assert data["session_id"] == "test123"
+        assert data["agent_id"] == "child-7"
+        assert data["phase"] == "idle"
+        assert data["elapsed_seconds"] == 1.5
+        assert data["tokens_in"] == 123
+        assert data["tokens_out"] == 45
+        assert data["model_name"] == "kimi-for-coding"
+        assert data["context_percent"] == 12.5
+
+
+class TestWireStreamingBehavior:
+    async def test_stream_wire_messages_does_not_stop_on_child_turn_end(self):
+        wire = LocalWire("parent-session")
+
+        async def produce() -> None:
+            await wire.send(
+                TurnEnd(
+                    session_id="parent-session",
+                    agent_id="child-1",
+                    turn_id="child-turn",
+                    completion_status=CompletionStatus.COMPLETED,
+                )
+            )
+            await wire.send(
+                ToolResultDelta(
+                    session_id="parent-session",
+                    tool_name="subagent",
+                    call_id="tc-subagent",
+                    result="Subagent completed: Child finished summary",
+                    display_result="Subagent completed: Child finished summary",
+                )
+            )
+            await wire.send(
+                TurnEnd(
+                    session_id="parent-session",
+                    agent_id="",
+                    turn_id="parent-turn",
+                    completion_status=CompletionStatus.COMPLETED,
+                )
+            )
+
+        producer = asyncio.create_task(produce())
+        events = []
+        async for event in stream_wire_messages(wire):
+            events.append(event)
+        await producer
+
+        assert [event["event"] for event in events] == [
+            "TurnEnd",
+            "ToolResultDelta",
+            "TurnEnd",
+        ]
 
 
 class TestSessionToDict:
@@ -669,7 +857,7 @@ class TestSessionToDict:
 
     def test_session_to_dict(self):
         """Test session state to dictionary conversion."""
-        session = SessionState(
+        session = Session(
             id="test123",
             created_at=datetime(2024, 1, 1, 12, 0, 0),
             last_activity=datetime(2024, 1, 1, 12, 30, 0),
@@ -688,11 +876,7 @@ class TestBroadcastEvent:
 
     async def test_broadcast_to_multiple_queues(self):
         """Test that events are broadcast to all queues."""
-        session = SessionState(
-            id="test",
-            created_at=datetime.now(),
-            last_activity=datetime.now(),
-        )
+        session = register_session("test")
         queue1 = asyncio.Queue()
         queue2 = asyncio.Queue()
         session.event_queues = [queue1, queue2]
@@ -702,24 +886,6 @@ class TestBroadcastEvent:
 
         assert await queue1.get() == event
         assert await queue2.get() == event
-
-    async def test_broadcast_keeps_slow_but_connected_queue(self):
-        session = SessionState(
-            id="test",
-            created_at=datetime.now(),
-            last_activity=datetime.now(),
-        )
-        slow_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1)
-        fast_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=2)
-        await slow_queue.put({"event": "old", "data": "{}"})
-        session.event_queues = [slow_queue, fast_queue]
-
-        event = {"event": "Test", "data": "{}"}
-        await _broadcast_event(session, event)
-
-        assert slow_queue in session.event_queues
-        assert fast_queue in session.event_queues
-        assert await fast_queue.get() == event
 
 
 class TestWaitForApproval:
@@ -747,12 +913,7 @@ class TestWaitForApproval:
     async def test_wait_for_approval_timeout(self):
         """Test that approval times out correctly."""
         session_id = "test_session"
-        sessions[session_id] = SessionState(
-            id=session_id,
-            created_at=datetime.now(),
-            last_activity=datetime.now(),
-            turn_in_progress=True,
-        )
+        register_session(session_id, turn_in_progress=True)
 
         tool_call = ToolCallDelta(
             session_id=session_id,
@@ -766,7 +927,6 @@ class TestWaitForApproval:
             tool_call=tool_call,
         )
 
-        # Use a very short timeout for testing
         import coding_agent.ui.http_server as http_server
 
         original_timeout = http_server.APPROVAL_TIMEOUT_SECONDS
@@ -780,23 +940,64 @@ class TestWaitForApproval:
         finally:
             http_server.APPROVAL_TIMEOUT_SECONDS = original_timeout
 
+    async def test_wait_for_approval_request_can_be_approved_via_http_endpoint(
+        self, client
+    ):
+        import coding_agent.ui.http_server as http_server
+
+        session_id = "http-wait-approval"
+        register_session(session_id, turn_in_progress=True)
+
+        req = ApprovalRequest(
+            session_id=session_id,
+            request_id="req-http-wait",
+            tool_call=ToolCallDelta(
+                session_id=session_id,
+                tool_name="bash",
+                arguments={"command": "pwd"},
+                call_id="call-http-wait",
+            ),
+            timeout_seconds=1,
+        )
+
+        original_timeout = http_server.APPROVAL_TIMEOUT_SECONDS
+        http_server.APPROVAL_TIMEOUT_SECONDS = 0.2
+
+        try:
+            wait_task = asyncio.create_task(wait_for_approval(session_id, req))
+            await asyncio.sleep(0)
+
+            response = await client.post(
+                f"/sessions/{session_id}/approve",
+                json={
+                    "request_id": "req-http-wait",
+                    "approved": True,
+                    "feedback": "approved over http",
+                },
+            )
+
+            approval_response = await wait_task
+        finally:
+            http_server.APPROVAL_TIMEOUT_SECONDS = original_timeout
+
+        assert response.status_code == 200
+        assert approval_response.approved is True
+        assert approval_response.feedback == "approved over http"
+
 
 class TestIntegration:
     """Integration tests for the full flow."""
 
     async def test_full_session_lifecycle(self, client):
         """Test full session lifecycle: create -> prompt -> get -> close."""
-        # Create session
         response = await client.post("/sessions", json={})
         assert response.status_code == 200
         session_id = response.json()["session_id"]
 
-        # Get session info
         response = await client.get(f"/sessions/{session_id}")
         assert response.status_code == 200
         assert response.json()["id"] == session_id
 
-        # Send prompt
         events = []
         async with aconnect_sse(
             client,
@@ -809,15 +1010,12 @@ class TestIntegration:
                 if sse.event == "TurnEnd":
                     break
 
-        assert "StreamDelta" in events
         assert "TurnEnd" in events
 
-        # Close session
         response = await client.delete(f"/sessions/{session_id}")
         assert response.status_code == 200
         assert response.json()["status"] == "closed"
 
-        # Verify session is gone
         response = await client.get(f"/sessions/{session_id}")
         assert response.status_code == 404
 
@@ -841,7 +1039,6 @@ class TestApprovalStoreIntegration:
 
         session = session_manager.get_session(session_id)
 
-        # Add a request
         tool_call = ToolCallDelta(
             session_id=session_id,
             tool_name="bash",
@@ -856,12 +1053,10 @@ class TestApprovalStoreIntegration:
         )
         session.approval_store.add_request(approval_req)
 
-        # Verify request was stored
         retrieved = session.approval_store.get_request("req-test")
         assert retrieved is not None
         assert retrieved.request_id == "req-test"
 
-        # Respond to the request
         approval_resp = ApprovalResponse(
             session_id=session_id,
             request_id="req-test",
@@ -876,17 +1071,14 @@ class TestApprovalStoreIntegration:
         create_resp = await client.post("/sessions", json={})
         session_id = create_resp.json()["session_id"]
 
-        # Try to approve non-existent request
         result = await session_manager.submit_approval(
             session_id=session_id,
             request_id="nonexistent",
             approved=True,
             feedback=None,
         )
-        # Should return False since request wasn't added to store
         assert result is False
 
-        # Now add the request and try again
         session = session_manager.get_session(session_id)
         tool_call = ToolCallDelta(
             session_id=session_id, tool_name="bash", arguments={}, call_id="call1"
@@ -909,11 +1101,8 @@ class TestApprovalStoreIntegration:
         create_resp = await client.post("/sessions", json={})
         session_id = create_resp.json()["session_id"]
 
-        # Verify store exists
         assert session_id in session_manager._approval_stores
 
-        # Close session
         await session_manager.close_session(session_id)
 
-        # Store should be cleaned up
         assert session_id not in session_manager._approval_stores

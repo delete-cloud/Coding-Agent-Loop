@@ -1,5 +1,3 @@
-"""Shell execution tool."""
-
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -24,8 +22,12 @@ _STRUCTURED_RESULTS: ContextVar[bool] = ContextVar(
 )
 
 
+def register_shell_tools(registry: object, cwd: Path | str = ".") -> None:
+    del registry, cwd
+
+
 @contextmanager
-def shell_structured_results(enabled: bool):
+def structured_results_scope(enabled: bool):
     token = _STRUCTURED_RESULTS.set(enabled)
     try:
         yield
@@ -33,40 +35,39 @@ def shell_structured_results(enabled: bool):
         _STRUCTURED_RESULTS.reset(token)
 
 
+def shell_structured_results(enabled: bool):
+    return structured_results_scope(enabled)
+
+
 def _structured_results_enabled() -> bool:
     return _STRUCTURED_RESULTS.get()
 
 
-def _structured_shell_result(result: object) -> dict[str, str | int]:
-    stdout = getattr(result, "stdout", "")
-    stderr = getattr(result, "stderr", "")
-    returncode = getattr(result, "returncode", 0)
+def _structured_shell_result(
+    result: subprocess.CompletedProcess[str],
+) -> dict[str, str | int]:
     return {
-        "stdout": str(stdout),
-        "stderr": str(stderr),
-        "returncode": int(returncode),
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "exit_code": result.returncode,
     }
 
 
 @lru_cache(maxsize=1)
 def _default_shell_config() -> dict[str, object]:
-    config = load_config()
-    shell_config = config.get("shell", {})
-    if not isinstance(shell_config, dict):
-        raise ValueError("shell config must be a dict")
-    return _normalize_shell_config(shell_config)
+    config_path = Path(__file__).resolve().parent.parent / "agent.toml"
+    extra = load_config(config_path).extra
+    raw_shell_config: object = extra["shell"] if "shell" in extra else {}
+    return _normalize_shell_config(raw_shell_config)
 
 
 def _normalize_shell_config(raw_shell_config: object) -> dict[str, object]:
-    if raw_shell_config is None:
-        return {}
     if not isinstance(raw_shell_config, dict):
         raise ValueError("shell config must be a dict")
+    typed_shell_config = cast(dict[object, object], raw_shell_config)
     normalized: dict[str, object] = {}
-    for key, value in raw_shell_config.items():
-        if not isinstance(key, str):
-            raise ValueError("shell config keys must be strings")
-        normalized[key] = value
+    for key, value in typed_shell_config.items():
+        normalized[str(key)] = value
     return normalized
 
 
@@ -94,7 +95,10 @@ def _parse_command(command: str) -> list[str]:
     if not args:
         raise ValueError("Command cannot be empty")
     if any(token in _DISALLOWED_TOKENS for token in args):
-        raise ValueError("Unsupported shell syntax in command")
+        raise ValueError(
+            "Unsupported shell syntax in command. Run commands separately; "
+            "bash_run does not support &&, ||, |, ;, redirects, or backgrounding."
+        )
     if args[0] == "python" and which("python") is None and which("python3") is not None:
         args[0] = "python3"
     return args
@@ -254,6 +258,8 @@ def bash_run(
         exported = _apply_export(command)
         if exported is not None:
             key, value = exported
+            if env is not None:
+                env[key] = value
             return f"Exported {key}={value}"
 
         args = _parse_command(command)

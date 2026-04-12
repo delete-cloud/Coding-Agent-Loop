@@ -14,13 +14,13 @@ import httpx
 import pytest
 from httpx_sse import aconnect_sse
 
+from coding_agent.ui.session_manager import MockProvider, Session
 from coding_agent.ui.http_server import (
     APPROVAL_TIMEOUT_SECONDS,
-    SessionState,
     _broadcast_event,
     _wire_message_to_event,
     app,
-    sessions,
+    session_manager,
     wait_for_approval,
 )
 from coding_agent.wire.protocol import (
@@ -31,20 +31,36 @@ from coding_agent.wire.protocol import (
     ToolCallDelta,
     TurnEnd,
 )
+from tests.ui.test_http_server import add_store_backed_approval_request
 
 
 @pytest.fixture(autouse=True)
 async def clear_sessions():
     """Clear all sessions before each test."""
-    sessions.clear()
+    session_manager.clear_sessions()
     yield
-    sessions.clear()
+    session_manager.clear_sessions()
+
+
+def register_session(
+    session_id: str,
+    **overrides,
+) -> Session:
+    session = Session(
+        id=session_id,
+        created_at=overrides.pop("created_at", datetime.now()),
+        last_activity=overrides.pop("last_activity", datetime.now()),
+        **overrides,
+    )
+    session_manager.register_session(session)
+    return session
 
 
 @pytest.fixture
 async def client():
     """Create async test client."""
     from httpx import ASGITransport, AsyncClient
+
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
@@ -57,6 +73,7 @@ class TestWireHTTPMessageConversion:
         """Test StreamDelta converts to correct SSE event."""
         delta = StreamDelta(
             session_id="test-session",
+            agent_id="child-1",
             content="Hello world",
             role="assistant",
         )
@@ -65,6 +82,7 @@ class TestWireHTTPMessageConversion:
         assert event["event"] == "StreamDelta"
         data = json.loads(event["data"])
         assert data["session_id"] == "test-session"
+        assert data["agent_id"] == "child-1"
         assert data["content"] == "Hello world"
         assert data["role"] == "assistant"
         assert "timestamp" in data
@@ -73,6 +91,7 @@ class TestWireHTTPMessageConversion:
         """Test ToolCallDelta converts to correct SSE event."""
         tool_call = ToolCallDelta(
             session_id="test-session",
+            agent_id="child-2",
             tool_name="read_file",
             arguments={"path": "/test.txt"},
             call_id="call-123",
@@ -82,6 +101,7 @@ class TestWireHTTPMessageConversion:
         assert event["event"] == "ToolCallDelta"
         data = json.loads(event["data"])
         assert data["session_id"] == "test-session"
+        assert data["agent_id"] == "child-2"
         assert data["tool_name"] == "read_file"
         assert data["arguments"] == {"path": "/test.txt"}
         assert data["call_id"] == "call-123"
@@ -90,6 +110,7 @@ class TestWireHTTPMessageConversion:
         """Test TurnEnd converts to correct SSE event."""
         turn_end = TurnEnd(
             session_id="test-session",
+            agent_id="child-3",
             turn_id="turn-123",
             completion_status=CompletionStatus.COMPLETED,
         )
@@ -98,6 +119,7 @@ class TestWireHTTPMessageConversion:
         assert event["event"] == "TurnEnd"
         data = json.loads(event["data"])
         assert data["session_id"] == "test-session"
+        assert data["agent_id"] == "child-3"
         assert data["turn_id"] == "turn-123"
         assert data["completion_status"] == "completed"
 
@@ -105,12 +127,14 @@ class TestWireHTTPMessageConversion:
         """Test ApprovalRequest converts to correct SSE event."""
         tool_call = ToolCallDelta(
             session_id="test-session",
+            agent_id="child-4",
             tool_name="write_file",
             arguments={"path": "/test.txt", "content": "hello"},
             call_id="call-123",
         )
         approval_req = ApprovalRequest(
             session_id="test-session",
+            agent_id="child-4",
             request_id="req-123",
             tool_call=tool_call,
             timeout_seconds=60,
@@ -120,6 +144,7 @@ class TestWireHTTPMessageConversion:
         assert event["event"] == "ApprovalRequest"
         data = json.loads(event["data"])
         assert data["session_id"] == "test-session"
+        assert data["agent_id"] == "child-4"
         assert data["request_id"] == "req-123"
         assert data["tool_call"]["tool_name"] == "write_file"
         assert data["timeout_seconds"] == 60
@@ -128,6 +153,7 @@ class TestWireHTTPMessageConversion:
         """Test ApprovalResponse converts to correct SSE event."""
         approval_resp = ApprovalResponse(
             session_id="test-session",
+            agent_id="child-5",
             request_id="req-123",
             approved=True,
             feedback="Looks good",
@@ -137,6 +163,7 @@ class TestWireHTTPMessageConversion:
         assert event["event"] == "ApprovalResponse"
         data = json.loads(event["data"])
         assert data["session_id"] == "test-session"
+        assert data["agent_id"] == "child-5"
         assert data["request_id"] == "req-123"
         assert data["approved"] is True
         assert data["feedback"] == "Looks good"
@@ -147,11 +174,7 @@ class TestBroadcastEvent:
 
     async def test_broadcast_to_multiple_queues(self):
         """Test events are broadcast to all connected clients."""
-        session = SessionState(
-            id="test-session",
-            created_at=datetime.now(),
-            last_activity=datetime.now(),
-        )
+        session = register_session("test-session")
 
         # Add multiple event queues
         queue1 = asyncio.Queue()
@@ -167,11 +190,7 @@ class TestBroadcastEvent:
 
     async def test_broadcast_wire_message(self):
         """Test broadcasting wire message events."""
-        session = SessionState(
-            id="test-session",
-            created_at=datetime.now(),
-            last_activity=datetime.now(),
-        )
+        session = register_session("test-session")
 
         queue = asyncio.Queue()
         session.event_queues = [queue]
@@ -196,17 +215,13 @@ class TestSessionCreationAndEvents:
         assert response.status_code == 200
         data = response.json()
         assert "session_id" in data
-        assert data["session_id"] in sessions
+        assert session_manager.has_session(data["session_id"])
 
     async def test_get_session_via_http(self, client):
         """Test getting session info through HTTP API."""
         # Create a session
         session_id = "test-session-123"
-        sessions[session_id] = SessionState(
-            id=session_id,
-            created_at=datetime.now(),
-            last_activity=datetime.now(),
-        )
+        register_session(session_id)
 
         response = await client.get(f"/sessions/{session_id}")
         assert response.status_code == 200
@@ -228,6 +243,7 @@ class TestPromptStreamingFlow:
         # Create a session using the API (for full AgentLoop integration)
         create_resp = await client.post("/sessions", json={})
         session_id = create_resp.json()["session_id"]
+        session_manager.get_session(session_id).provider = MockProvider()
 
         async with aconnect_sse(
             client,
@@ -249,12 +265,7 @@ class TestPromptStreamingFlow:
         """Test that concurrent turns are rejected with 409."""
         # Create a session with turn in progress
         session_id = "test-session-busy"
-        sessions[session_id] = SessionState(
-            id=session_id,
-            created_at=datetime.now(),
-            last_activity=datetime.now(),
-            turn_in_progress=True,
-        )
+        register_session(session_id, turn_in_progress=True)
 
         response = await client.post(
             f"/sessions/{session_id}/prompt",
@@ -270,13 +281,7 @@ class TestApprovalFlowIntegration:
         """Test approval request is broadcast to event stream."""
         # Create session
         session_id = "test-approval-session"
-        session = SessionState(
-            id=session_id,
-            created_at=datetime.now(),
-            last_activity=datetime.now(),
-            turn_in_progress=True,
-        )
-        sessions[session_id] = session
+        session = register_session(session_id, turn_in_progress=True)
 
         # Add event queue
         queue = asyncio.Queue()
@@ -310,18 +315,11 @@ class TestApprovalFlowIntegration:
         """Test approve endpoint properly sets approval response."""
         # Create session with pending approval
         session_id = "test-approve-endpoint"
-        session = SessionState(
-            id=session_id,
-            created_at=datetime.now(),
-            last_activity=datetime.now(),
+        session = register_session(
+            session_id,
             turn_in_progress=True,
-            pending_approval={
-                "request_id": "req-123",
-                "tool_name": "write_file",
-                "arguments": {},
-            },
         )
-        sessions[session_id] = session
+        add_store_backed_approval_request(session, session_id, "req-123")
 
         response = await client.post(
             f"/sessions/{session_id}/approve",
@@ -337,6 +335,7 @@ class TestApprovalFlowIntegration:
         assert data["decision"] == "approved"
 
         # Verify session state
+        assert session.approval_response is not None
         assert session.approval_response["decision"] == "approve"
         assert session.approval_response["feedback"] == "Approved!"
         assert session.approval_event.is_set()
@@ -345,10 +344,8 @@ class TestApprovalFlowIntegration:
         """Test approve endpoint rejects mismatched request ID."""
         # Create session with pending approval
         session_id = "test-approve-mismatch"
-        session = SessionState(
-            id=session_id,
-            created_at=datetime.now(),
-            last_activity=datetime.now(),
+        register_session(
+            session_id,
             turn_in_progress=True,
             pending_approval={
                 "request_id": "req-123",
@@ -356,7 +353,6 @@ class TestApprovalFlowIntegration:
                 "arguments": {},
             },
         )
-        sessions[session_id] = session
 
         response = await client.post(
             f"/sessions/{session_id}/approve",
@@ -395,12 +391,7 @@ class TestWaitForApproval:
     async def test_wait_for_approval_no_turn_in_progress(self):
         """Test wait_for_approval returns denied when no turn in progress."""
         session_id = "test-no-turn"
-        sessions[session_id] = SessionState(
-            id=session_id,
-            created_at=datetime.now(),
-            last_activity=datetime.now(),
-            turn_in_progress=False,  # No turn in progress
-        )
+        register_session(session_id, turn_in_progress=False)
 
         tool_call = ToolCallDelta(
             session_id=session_id,
@@ -464,16 +455,12 @@ class TestFullFlowIntegration:
         """Test multiple clients can connect to events endpoint."""
         # Create session
         session_id = "test-fanout"
-        sessions[session_id] = SessionState(
-            id=session_id,
-            created_at=datetime.now(),
-            last_activity=datetime.now(),
-        )
+        session = register_session(session_id)
 
         # Add multiple event queues to simulate multiple clients
         queue1 = asyncio.Queue()
         queue2 = asyncio.Queue()
-        sessions[session_id].event_queues = [queue1, queue2]
+        session.event_queues = [queue1, queue2]
 
         # Send a prompt to generate events (non-streaming request just to trigger events)
         response = await client.post(
@@ -486,7 +473,7 @@ class TestFullFlowIntegration:
         # Both queues should have received events from the broadcast
         # Note: We test the broadcast mechanism rather than the full SSE fan-out
         # which would require complex async coordination
-        assert len(sessions[session_id].event_queues) >= 2
+        assert len(session.event_queues) >= 2
 
 
 class TestSessionTimeout:
@@ -498,8 +485,8 @@ class TestSessionTimeout:
 
         session_id = "test-timeout"
         old_time = datetime.now() - timedelta(minutes=31)
-        sessions[session_id] = SessionState(
-            id=session_id,
+        session = register_session(
+            session_id,
             created_at=old_time,
             last_activity=old_time,
         )
@@ -507,7 +494,7 @@ class TestSessionTimeout:
         # Manually check if session would be cleaned up
         from coding_agent.ui.http_server import SESSION_IDLE_TIMEOUT_MINUTES
 
-        idle_time = datetime.now() - sessions[session_id].last_activity
+        idle_time = datetime.now() - session.last_activity
         assert idle_time > timedelta(minutes=SESSION_IDLE_TIMEOUT_MINUTES)
 
     async def test_session_not_expired_if_active(self):
@@ -515,13 +502,9 @@ class TestSessionTimeout:
         from datetime import timedelta
 
         session_id = "test-active"
-        sessions[session_id] = SessionState(
-            id=session_id,
-            created_at=datetime.now(),
-            last_activity=datetime.now(),
-        )
+        session = register_session(session_id)
 
         from coding_agent.ui.http_server import SESSION_IDLE_TIMEOUT_MINUTES
 
-        idle_time = datetime.now() - sessions[session_id].last_activity
+        idle_time = datetime.now() - session.last_activity
         assert idle_time < timedelta(minutes=SESSION_IDLE_TIMEOUT_MINUTES)
