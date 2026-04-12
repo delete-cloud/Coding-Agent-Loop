@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -41,16 +42,20 @@ def main(ctx, model, provider_name, base_url, api_key):
         from coding_agent.cli.repl import run_repl
         from coding_agent.core.config import load_config
 
-        cli_args = {
-            key: value
-            for key, value in {
-                "provider": provider_name,
-                "model": model,
-                "base_url": base_url,
-                "api_key": api_key,
-            }.items()
-            if value is not None
-        }
+        if not sys.stdout.isatty():
+            raise click.UsageError(
+                "interactive REPL mode requires an interactive terminal; use 'python -m coding_agent run --goal \"<task>\"' for batch mode"
+            )
+
+        cli_args: dict[str, object] = {}
+        if provider_name is not None:
+            cli_args["provider"] = provider_name
+        if model is not None:
+            cli_args["model"] = model
+        if base_url is not None:
+            cli_args["base_url"] = base_url
+        if api_key is not None:
+            cli_args["api_key"] = api_key
         config = load_config(cli_args=cli_args or None)
         asyncio.run(run_repl(config))
 
