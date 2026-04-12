@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -20,8 +21,17 @@ from coding_agent.app import create_agent, create_child_pipeline  # noqa: F401
 
 
 @click.group(invoke_without_command=True)
+@click.option("--model", default=None, help="Model name")
+@click.option(
+    "--provider",
+    "provider_name",
+    default=None,
+    type=click.Choice(["openai", "anthropic", "kimi-code"]),
+)
+@click.option("--base-url", default=None, help="OpenAI-compatible API base URL")
+@click.option("--api-key", envvar="AGENT_API_KEY", default=None, help="API key")
 @click.pass_context
-def main(ctx):
+def main(ctx, model, provider_name, base_url, api_key):
     """Coding Agent CLI.
 
     Without subcommand: starts interactive REPL mode (default)
@@ -32,7 +42,21 @@ def main(ctx):
         from coding_agent.cli.repl import run_repl
         from coding_agent.core.config import load_config
 
-        config = load_config()
+        if not sys.stdout.isatty():
+            raise click.UsageError(
+                "interactive REPL mode requires an interactive terminal; use 'python -m coding_agent run --goal \"<task>\"' for batch mode"
+            )
+
+        cli_args: dict[str, object] = {}
+        if provider_name is not None:
+            cli_args["provider"] = provider_name
+        if model is not None:
+            cli_args["model"] = model
+        if base_url is not None:
+            cli_args["base_url"] = base_url
+        if api_key is not None:
+            cli_args["api_key"] = api_key
+        config = load_config(cli_args=cli_args or None)
         asyncio.run(run_repl(config))
 
 
@@ -65,7 +89,7 @@ def _load_kb_cli_settings(
     "--provider",
     "provider_name",
     default="openai",
-    type=click.Choice(["openai", "anthropic"]),
+    type=click.Choice(["openai", "anthropic", "kimi-code"]),
 )
 @click.option("--base-url", default=None, help="OpenAI-compatible API base URL")
 @click.option("--api-key", envvar="AGENT_API_KEY", required=True, help="API key")
@@ -126,7 +150,7 @@ def run(
     "--provider",
     "provider_name",
     default="openai",
-    type=click.Choice(["openai", "anthropic"]),
+    type=click.Choice(["openai", "anthropic", "kimi-code"]),
 )
 @click.option("--base-url", default=None, help="OpenAI-compatible API base URL")
 @click.option("--api-key", envvar="AGENT_API_KEY", required=True, help="API key")

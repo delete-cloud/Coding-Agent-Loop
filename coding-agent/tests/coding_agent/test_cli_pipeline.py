@@ -6,6 +6,7 @@ import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import click
 import pytest
 from click.testing import CliRunner
 
@@ -379,6 +380,81 @@ class TestKbCli:
         assert "No index found" in result.output
 
 
+class TestCliProviderChoices:
+    def test_top_level_accepts_kimi_code_provider(self):
+        from coding_agent.__main__ import main
+
+        with (
+            patch("coding_agent.core.config.load_config") as mock_load_config,
+            patch("coding_agent.cli.repl.run_repl", AsyncMock()),
+            patch("coding_agent.__main__.sys.stdout.isatty", return_value=True),
+        ):
+            mock_load_config.return_value = MagicMock()
+            ctx = click.Context(main)
+            with ctx.scope(cleanup=False):
+                wrapped_main = getattr(main.callback, "__wrapped__")
+                wrapped_main(
+                    ctx,
+                    model="kimi-for-coding",
+                    provider_name="kimi-code",
+                    base_url=None,
+                    api_key=None,
+                )
+
+        mock_load_config.assert_called_once_with(
+            cli_args={"provider": "kimi-code", "model": "kimi-for-coding"}
+        )
+
+    def test_top_level_non_tty_shows_friendly_message(self):
+        from coding_agent.__main__ import main
+
+        runner = CliRunner()
+
+        with patch("coding_agent.__main__.sys.stdout.isatty", return_value=False):
+            result = runner.invoke(main, ["--provider", "kimi-code"])
+
+        assert result.exit_code != 1
+        assert "interactive REPL mode requires an interactive terminal" in result.output
+
+    def test_run_accepts_kimi_code_provider(self):
+        from coding_agent.__main__ import main
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "run",
+                "--goal",
+                "test goal",
+                "--provider",
+                "kimi-code",
+                "--api-key",
+                "sk-test-key",
+            ],
+        )
+
+        assert result.exit_code != 2
+        assert "Invalid value for '--provider'" not in result.output
+
+    def test_repl_accepts_kimi_code_provider(self):
+        from coding_agent.__main__ import main
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "repl",
+                "--provider",
+                "kimi-code",
+                "--api-key",
+                "sk-test-key",
+            ],
+        )
+
+        assert result.exit_code != 2
+        assert "Invalid value for '--provider'" not in result.output
+
+
 class TestReplMultiturnContext:
     @pytest.mark.asyncio
     @patch("coding_agent.cli.repl.create_agent")
@@ -466,7 +542,11 @@ class TestReplSlashCommands:
 
         session.input_handler.get_input = mock_get_input
 
-        with patch("coding_agent.cli.repl.console"):
+        with (
+            patch("coding_agent.cli.repl.print_pt"),
+            patch("coding_agent.cli.commands.print_pt"),
+            patch("coding_agent.cli.commands.print_html"),
+        ):
             await session.run()
 
         assert session.context["should_exit"] is True
@@ -498,16 +578,23 @@ class TestReplErrorRecovery:
             turn_results.append(outcome)
             return outcome
 
-        with patch("coding_agent.cli.repl.CodingAgentTUI") as mock_tui_cls:
-            mock_tui = MagicMock()
-            mock_tui.__enter__ = MagicMock(return_value=mock_tui)
-            mock_tui.__exit__ = MagicMock(return_value=False)
-            mock_tui.consumer = MagicMock()
-            mock_tui_cls.return_value = mock_tui
+        with (
+            patch("coding_agent.cli.repl.print_pt"),
+            patch("coding_agent.cli.commands.print_pt"),
+            patch("coding_agent.cli.commands.print_html"),
+        ):
+            with patch("coding_agent.cli.repl.CodingAgentTUI") as mock_tui_cls:
+                mock_tui = MagicMock()
+                mock_tui.__enter__ = MagicMock(return_value=mock_tui)
+                mock_tui.__exit__ = MagicMock(return_value=False)
+                mock_tui.consumer = MagicMock()
+                mock_tui_cls.return_value = mock_tui
 
-            with patch.object(adapter, "run_turn", side_effect=side_effect_run_turn):
-                await session._process_message("bad input")
-                await session._process_message("good input")
+                with patch.object(
+                    adapter, "run_turn", side_effect=side_effect_run_turn
+                ):
+                    await session._process_message("bad input")
+                    await session._process_message("good input")
 
         assert len(turn_results) == 2
         assert turn_results[0].stop_reason == StopReason.ERROR
