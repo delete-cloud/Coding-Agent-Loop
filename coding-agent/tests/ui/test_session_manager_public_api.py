@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from coding_agent.approval.store import ApprovalStore
+from coding_agent.approval import ApprovalPolicy
 from coding_agent.wire.protocol import (
     ApprovalRequest,
     CompletionStatus,
@@ -64,6 +65,48 @@ async def test_create_session_persists_to_store_backing() -> None:
     assert payload is not None
     assert payload["id"] == session_id
     assert store.list_sessions() == [session_id]
+
+
+@pytest.mark.asyncio
+async def test_create_session_persists_explicit_provider_restart_metadata() -> None:
+    store = InMemorySessionStore()
+    manager = SessionManager(store=store)
+    provider = MockProvider()
+
+    session_id = await manager.create_session(
+        provider=provider,
+        provider_name="openai",
+        model_name="gpt-test",
+        base_url="http://localhost:1234/v1",
+    )
+    payload = store.get(session_id)
+
+    assert payload is not None
+    assert payload["provider_name"] == "openai"
+    assert payload["model_name"] == "gpt-test"
+    assert payload["base_url"] == "http://localhost:1234/v1"
+
+
+@pytest.mark.asyncio
+async def test_create_session_persists_configured_restart_metadata_by_default() -> None:
+    store = InMemorySessionStore()
+    manager = SessionManager(store=store)
+
+    with patch("coding_agent.core.config.load_config") as load_config:
+        load_config.return_value = types.SimpleNamespace(
+            provider="anthropic",
+            model="claude-test",
+            base_url="http://llm.default",
+        )
+
+        session_id = await manager.create_session(approval_policy=ApprovalPolicy.AUTO)
+
+    payload = store.get(session_id)
+
+    assert payload is not None
+    assert payload["provider_name"] == "anthropic"
+    assert payload["model_name"] == "claude-test"
+    assert payload["base_url"] == "http://llm.default"
 
 
 def test_create_session_store_warns_and_falls_back_when_redis_unreachable(
@@ -155,6 +198,68 @@ def test_rehydrate_clears_non_restart_safe_runtime_state() -> None:
     assert reloaded.turn_in_progress is False
     assert reloaded.pending_approval is None
     assert reloaded.approval_response is None
+
+
+@pytest.mark.asyncio
+async def test_run_agent_restores_restart_safe_agent_configuration_after_rehydrate() -> (
+    None
+):
+    store = InMemorySessionStore()
+    manager = SessionManager(store=store)
+    session = Session(
+        id="rehydrate-configured-session",
+        created_at=datetime.now(),
+        last_activity=datetime.now(),
+        approval_store=ApprovalStore(),
+        provider=MockProvider(),
+        max_steps=9,
+    )
+    session.provider_name = "anthropic"
+    session.model_name = "claude-test"
+    session.base_url = "http://llm.local"
+    manager.register_session(session)
+
+    rehydrated_manager = SessionManager(store=store)
+    rehydrated_session = rehydrated_manager.get_session("rehydrate-configured-session")
+
+    assert rehydrated_session.provider is None
+
+    llm_plugin = types.SimpleNamespace(_instance=None)
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(get=lambda _: llm_plugin),
+        _directive_executor=None,
+    )
+    fake_ctx = types.SimpleNamespace(config={})
+    captured_kwargs: dict[str, object] = {}
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+            self.ctx = ctx
+
+        async def run_turn(self, prompt: str) -> None:
+            del prompt
+
+    def fake_create_agent(**kwargs):
+        captured_kwargs.update(kwargs)
+        return fake_pipeline, fake_ctx
+
+    with (
+        patch("importlib.import_module") as import_module,
+        patch.dict(
+            SessionManager.run_agent.__globals__, {"PipelineAdapter": FakeAdapter}
+        ),
+    ):
+        import_module.return_value = types.SimpleNamespace(
+            create_agent=fake_create_agent
+        )
+        await rehydrated_manager.run_agent("rehydrate-configured-session", "hello")
+
+    assert captured_kwargs["provider_override"] == "anthropic"
+    assert captured_kwargs["model_override"] == "claude-test"
+    assert captured_kwargs["base_url_override"] == "http://llm.local"
+    assert captured_kwargs["max_steps_override"] == 9
+    assert llm_plugin._instance is None
 
 
 def test_redis_session_store_reports_health_from_ping() -> None:

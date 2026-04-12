@@ -20,6 +20,7 @@ from typing import Any, cast
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.approval.store import ApprovalStore
+from coding_agent.core import config as core_config
 from coding_agent.providers.base import ChatProvider, ToolSchema
 from agentkit.providers.models import DoneEvent, TextEvent
 from coding_agent.wire.local import LocalWire
@@ -90,6 +91,9 @@ class Session:
     repo_path: Path | None = None
     approval_policy: ApprovalPolicy = ApprovalPolicy.AUTO
     provider: Any | None = None
+    provider_name: str | None = None
+    model_name: str | None = None
+    base_url: str | None = None
     max_steps: int = 30
     task: asyncio.Task[Any] | None = None
     turn_in_progress: bool = False
@@ -117,6 +121,9 @@ class Session:
             "last_activity": self.last_activity.isoformat(),
             "repo_path": None if self.repo_path is None else str(self.repo_path),
             "approval_policy": self.approval_policy.value,
+            "provider_name": self.provider_name,
+            "model_name": self.model_name,
+            "base_url": self.base_url,
             "max_steps": self.max_steps,
         }
 
@@ -128,6 +135,15 @@ class Session:
         approval_policy_raw = data.get("approval_policy")
         if not isinstance(approval_policy_raw, str):
             raise TypeError("session metadata is missing approval_policy")
+        provider_name_raw = data.get("provider_name")
+        if provider_name_raw is not None and not isinstance(provider_name_raw, str):
+            raise TypeError("session metadata has invalid provider_name")
+        model_name_raw = data.get("model_name")
+        if model_name_raw is not None and not isinstance(model_name_raw, str):
+            raise TypeError("session metadata has invalid model_name")
+        base_url_raw = data.get("base_url")
+        if base_url_raw is not None and not isinstance(base_url_raw, str):
+            raise TypeError("session metadata has invalid base_url")
         session = cls(
             id=_required_session_str(data, "id"),
             created_at=datetime.fromisoformat(
@@ -139,6 +155,9 @@ class Session:
             approval_store=ApprovalStore(),
             repo_path=None if repo_path_raw is None else Path(repo_path_raw),
             approval_policy=ApprovalPolicy(approval_policy_raw),
+            provider_name=provider_name_raw,
+            model_name=model_name_raw,
+            base_url=base_url_raw,
             max_steps=_required_session_int(data, "max_steps"),
         )
         session.turn_in_progress = False
@@ -188,6 +207,9 @@ class SessionManager:
         repo_path: Path | None = None,
         approval_policy: ApprovalPolicy = ApprovalPolicy.AUTO,
         provider: Any | None = None,
+        provider_name: str | None = None,
+        model_name: str | None = None,
+        base_url: str | None = None,
         max_steps: int = 30,
         enable_parallel: bool = True,
         max_parallel: int = 5,
@@ -198,6 +220,9 @@ class SessionManager:
             repo_path: Path to the repository root (default: current directory)
             approval_policy: Policy for tool execution approval
             provider: Explicit LLM provider override for tests or custom sessions
+            provider_name: Restart-safe provider identifier for later rehydration
+            model_name: Restart-safe model identifier for later rehydration
+            base_url: Restart-safe provider base URL for later rehydration
             max_steps: Maximum steps per turn
             enable_parallel: Enable parallel tool execution
             max_parallel: Maximum number of parallel tool executions
@@ -211,6 +236,15 @@ class SessionManager:
         approval_store = ApprovalStore()
         self._approval_stores[session_id] = approval_store
 
+        if provider is None:
+            cfg = core_config.load_config()
+            if provider_name is None:
+                provider_name = cfg.provider
+            if model_name is None:
+                model_name = cfg.model
+            if base_url is None:
+                base_url = cfg.base_url
+
         session = Session(
             id=session_id,
             approval_store=approval_store,
@@ -219,6 +253,9 @@ class SessionManager:
             repo_path=repo_path,
             approval_policy=approval_policy,
             provider=provider,
+            provider_name=provider_name,
+            model_name=model_name,
+            base_url=base_url,
             max_steps=max_steps,
             task=None,
         )
@@ -377,6 +414,9 @@ class SessionManager:
 
             pipeline, ctx = create_agent(
                 workspace_root=session.repo_path,
+                model_override=session.model_name,
+                provider_override=session.provider_name,
+                base_url_override=session.base_url,
                 max_steps_override=session.max_steps,
                 approval_mode_override=approval_mode_map[session.approval_policy],
                 session_id_override=session_id,
