@@ -206,6 +206,9 @@ class SessionManager:
         repo_path: Path | None = None,
         approval_policy: ApprovalPolicy = ApprovalPolicy.AUTO,
         provider: Any | None = None,
+        provider_name: str | None = None,
+        model_name: str | None = None,
+        base_url: str | None = None,
         max_steps: int = 30,
         enable_parallel: bool = True,
         max_parallel: int = 5,
@@ -216,6 +219,9 @@ class SessionManager:
             repo_path: Path to the repository root (default: current directory)
             approval_policy: Policy for tool execution approval
             provider: Explicit LLM provider override for tests or custom sessions
+            provider_name: Restart-safe provider identifier for later rehydration
+            model_name: Restart-safe model identifier for later rehydration
+            base_url: Restart-safe provider base URL for later rehydration
             max_steps: Maximum steps per turn
             enable_parallel: Enable parallel tool execution
             max_parallel: Maximum number of parallel tool executions
@@ -237,11 +243,9 @@ class SessionManager:
             repo_path=repo_path,
             approval_policy=approval_policy,
             provider=provider,
-            provider_name=None,
-            model_name=getattr(provider, "model_name", None)
-            if provider is not None
-            else None,
-            base_url=None,
+            provider_name=provider_name,
+            model_name=model_name,
+            base_url=base_url,
             max_steps=max_steps,
             task=None,
         )

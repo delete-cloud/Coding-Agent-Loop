@@ -66,6 +66,26 @@ async def test_create_session_persists_to_store_backing() -> None:
     assert store.list_sessions() == [session_id]
 
 
+@pytest.mark.asyncio
+async def test_create_session_persists_explicit_provider_restart_metadata() -> None:
+    store = InMemorySessionStore()
+    manager = SessionManager(store=store)
+    provider = MockProvider()
+
+    session_id = await manager.create_session(
+        provider=provider,
+        provider_name="openai",
+        model_name="gpt-test",
+        base_url="http://localhost:1234/v1",
+    )
+    payload = store.get(session_id)
+
+    assert payload is not None
+    assert payload["provider_name"] == "openai"
+    assert payload["model_name"] == "gpt-test"
+    assert payload["base_url"] == "http://localhost:1234/v1"
+
+
 def test_create_session_store_warns_and_falls_back_when_redis_unreachable(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
