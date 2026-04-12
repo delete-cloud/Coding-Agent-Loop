@@ -1,0 +1,503 @@
+import asyncio
+import json
+from typing import cast
+from unittest.mock import AsyncMock
+
+import pytest
+from _pytest.monkeypatch import MonkeyPatch
+
+from agentkit.storage.protocols import SessionStore, TapeStore
+from agentkit.storage.pg import PGPool, PGSessionLock, PGSessionStore, PGTapeStore
+
+
+class FakePool:
+    def __init__(self) -> None:
+        self.sessions: dict[str, dict[str, object]] = {}
+        self.tapes: dict[str, list[dict[str, int | dict[str, object]]]] = {}
+        self.closed: bool = False
+        self.executed: list[tuple[str, tuple[object, ...]]] = []
+
+    async def execute(self, query: str, *args: object) -> str:
+        self.executed.append((query, args))
+        if "INSERT INTO agent_sessions" in query:
+            session_id, payload = args
+            if not isinstance(session_id, str):
+                raise TypeError("session_id must be a string")
+            if not isinstance(payload, str):
+                raise TypeError("payload must be encoded json")
+            payload_obj = json.loads(payload)
+            if not isinstance(payload_obj, dict):
+                raise TypeError("payload must decode to a dict")
+            self.sessions[session_id] = cast(dict[str, object], payload_obj)
+            return "INSERT 0 1"
+        if "DELETE FROM agent_sessions" in query:
+            (session_id,) = args
+            if not isinstance(session_id, str):
+                raise TypeError("session_id must be a string")
+            _ = self.sessions.pop(session_id, None)
+            return "DELETE 1"
+        if "INSERT INTO agent_tapes" in query:
+            tape_id, second_arg, third_arg = args
+            if not isinstance(tape_id, str):
+                raise TypeError("tape_id must be a string")
+            rows = self.tapes.setdefault(tape_id, [])
+            if isinstance(second_arg, int):
+                seq_values = [second_arg]
+            elif isinstance(second_arg, list) and all(
+                isinstance(item, int) for item in second_arg
+            ):
+                seq_values = second_arg
+            else:
+                raise TypeError("seq must be an int or list[int]")
+
+            if isinstance(third_arg, str):
+                payload_values = [third_arg]
+            elif isinstance(third_arg, list) and all(
+                isinstance(item, str) for item in third_arg
+            ):
+                payload_values = third_arg
+            else:
+                raise TypeError("payload must be encoded json or list[str]")
+
+            if len(seq_values) != len(payload_values):
+                raise TypeError("seq and payload batch lengths must match")
+
+            for seq, payload in zip(seq_values, payload_values, strict=True):
+                payload_obj = json.loads(payload)
+                if not isinstance(payload_obj, dict):
+                    raise TypeError("payload must decode to a dict")
+                rows.append({"seq": seq, "entry": cast(dict[str, object], payload_obj)})
+            rows.sort(
+                key=lambda item: item["seq"] if isinstance(item["seq"], int) else -1
+            )
+            return "INSERT 0 1"
+        if query.strip() == "SELECT 1":
+            return "SELECT 1"
+        if "CREATE TABLE IF NOT EXISTS agent_sessions" in query:
+            return "CREATE TABLE"
+        if "CREATE TABLE IF NOT EXISTS agent_tapes" in query:
+            return "CREATE TABLE"
+        raise AssertionError(f"unexpected execute query: {query}")
+
+    async def fetchrow(self, query: str, *args: object) -> dict[str, object] | None:
+        self.executed.append((query, args))
+        if "SELECT payload FROM agent_sessions" not in query:
+            if "SELECT MAX(seq) AS max_seq FROM agent_tapes" not in query:
+                raise AssertionError(f"unexpected fetchrow query: {query}")
+            (tape_id,) = args
+            if not isinstance(tape_id, str):
+                raise TypeError("tape_id must be a string")
+            rows = self.tapes.get(tape_id, [])
+            if not rows:
+                return {"max_seq": None}
+            return {
+                "max_seq": max(
+                    row["seq"] if isinstance(row["seq"], int) else -1 for row in rows
+                )
+            }
+        (session_id,) = args
+        if not isinstance(session_id, str):
+            raise TypeError("session_id must be a string")
+        payload = self.sessions.get(session_id)
+        if payload is None:
+            return None
+        return {"payload": payload}
+
+    async def fetch(self, query: str, *args: object) -> list[dict[str, object]]:
+        self.executed.append((query, args))
+        if "SELECT session_id FROM agent_sessions" in query:
+            return [
+                {"session_id": session_id}
+                for session_id in sorted(self.sessions.keys())
+            ]
+        if "SELECT entry FROM agent_tapes" in query:
+            (tape_id,) = args
+            if not isinstance(tape_id, str):
+                raise TypeError("tape_id must be a string")
+            rows = self.tapes.get(tape_id, [])
+            return [
+                {"entry": row["entry"]}
+                for row in sorted(
+                    rows,
+                    key=lambda r: r["seq"] if isinstance(r["seq"], int) else -1,
+                )
+            ]
+        if "SELECT DISTINCT tape_id FROM agent_tapes" in query:
+            return [{"tape_id": tape_id} for tape_id in sorted(self.tapes.keys())]
+        raise AssertionError(f"unexpected fetch query: {query}")
+
+    async def close(self) -> None:
+        self.closed = True
+
+    async def acquire(self) -> "FakePool":
+        return self
+
+    async def release(self, connection: object) -> None:
+        if connection is not self:
+            raise AssertionError("unexpected connection released")
+
+
+class TestPGPool:
+    @pytest.mark.asyncio
+    async def test_creates_pool_lazily_and_reuses_instance(self):
+        created: list[FakePool] = []
+
+        async def fake_pool_factory(**kwargs: object) -> FakePool:
+            assert kwargs["dsn"] == "postgresql://example"
+            assert kwargs["min_size"] == 2
+            assert kwargs["max_size"] == 5
+            pool = FakePool()
+            created.append(pool)
+            return pool
+
+        pool = PGPool(
+            dsn="postgresql://example",
+            min_size=2,
+            max_size=5,
+            pool_factory=fake_pool_factory,
+        )
+
+        first = await pool.get_pool()
+        second = await pool.get_pool()
+
+        assert first is second
+        assert len(created) == 1
+
+    @pytest.mark.asyncio
+    async def test_close_closes_underlying_pool(self):
+        fake_pool = FakePool()
+
+        async def fake_pool_factory(**_: object) -> FakePool:
+            return fake_pool
+
+        pool = PGPool(dsn="postgresql://example", pool_factory=fake_pool_factory)
+        await pool.get_pool()
+
+        await pool.close()
+
+        assert fake_pool.closed is True
+
+    @pytest.mark.asyncio
+    async def test_concurrent_get_pool_reuses_single_factory_result(self):
+        created: list[FakePool] = []
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def fake_pool_factory(**_: object) -> FakePool:
+            pool = FakePool()
+            created.append(pool)
+            started.set()
+            await release.wait()
+            return pool
+
+        pool = PGPool(dsn="postgresql://example", pool_factory=fake_pool_factory)
+
+        first_task = asyncio.create_task(pool.get_pool())
+        await started.wait()
+        second_task = asyncio.create_task(pool.get_pool())
+        release.set()
+
+        first, second = await asyncio.gather(first_task, second_task)
+
+        assert first is second
+        assert len(created) == 1
+
+    @pytest.mark.asyncio
+    async def test_missing_asyncpg_raises_clear_error(self, monkeypatch: MonkeyPatch):
+        def fake_import_module(name: str):
+            if name == "asyncpg":
+                raise ModuleNotFoundError(name)
+            return __import__(name)
+
+        monkeypatch.setattr("importlib.import_module", fake_import_module)
+
+        pool = PGPool(dsn="postgresql://example")
+
+        with pytest.raises(ImportError, match="asyncpg is required"):
+            await pool.get_pool()
+
+    @pytest.mark.asyncio
+    async def test_acquire_delegates_to_underlying_pool(self):
+        fake_pool = FakePool()
+
+        async def fake_pool_factory(**_: object) -> FakePool:
+            return fake_pool
+
+        pool = PGPool(dsn="postgresql://example", pool_factory=fake_pool_factory)
+
+        conn = await pool.acquire()
+
+        assert conn is fake_pool
+
+    @pytest.mark.asyncio
+    async def test_release_delegates_to_underlying_pool(self):
+        fake_pool = FakePool()
+
+        async def fake_pool_factory(**_: object) -> FakePool:
+            return fake_pool
+
+        pool = PGPool(dsn="postgresql://example", pool_factory=fake_pool_factory)
+        await pool.get_pool()
+
+        await pool.release(fake_pool)
+
+
+class TestPGSessionStore:
+    @pytest.fixture
+    def fake_pool(self) -> FakePool:
+        return FakePool()
+
+    @pytest.fixture
+    def pool(self, fake_pool: FakePool) -> PGPool:
+        async def fake_pool_factory(**_: object) -> FakePool:
+            return fake_pool
+
+        return PGPool(dsn="postgresql://example", pool_factory=fake_pool_factory)
+
+    @pytest.fixture
+    def store(self, pool: PGPool) -> PGSessionStore:
+        return PGSessionStore(pool=pool)
+
+    def test_satisfies_protocol(self, store: PGSessionStore):
+        assert isinstance(store, SessionStore)
+
+    @pytest.mark.asyncio
+    async def test_save_and_load_session(self, store: PGSessionStore):
+        await store.save_session("ses-1", {"model": "gpt-4.1", "turns": 3})
+
+        data = await store.load_session("ses-1")
+
+        assert data == {"model": "gpt-4.1", "turns": 3}
+
+    @pytest.mark.asyncio
+    async def test_load_missing_returns_none(self, store: PGSessionStore):
+        assert await store.load_session("missing") is None
+
+    @pytest.mark.asyncio
+    async def test_save_overwrites_existing(self, store: PGSessionStore):
+        await store.save_session("ses-1", {"version": 1})
+        await store.save_session("ses-1", {"version": 2})
+
+        data = await store.load_session("ses-1")
+
+        assert data == {"version": 2}
+
+    @pytest.mark.asyncio
+    async def test_list_sessions_returns_sorted_ids(self, store: PGSessionStore):
+        await store.save_session("b", {"x": 2})
+        await store.save_session("a", {"x": 1})
+
+        session_ids = await store.list_sessions()
+
+        assert session_ids == ["a", "b"]
+
+    @pytest.mark.asyncio
+    async def test_delete_session(self, store: PGSessionStore):
+        await store.save_session("ses-1", {"x": 1})
+
+        await store.delete_session("ses-1")
+
+        assert await store.load_session("ses-1") is None
+
+    @pytest.mark.asyncio
+    async def test_schema_created_once(
+        self, store: PGSessionStore, fake_pool: FakePool
+    ):
+        await store.save_session("one", {"x": 1})
+        await store.save_session("two", {"x": 2})
+
+        schema_calls = [
+            query
+            for query, _ in fake_pool.executed
+            if "CREATE TABLE IF NOT EXISTS agent_sessions" in query
+        ]
+        assert len(schema_calls) == 1
+
+
+class TestPGTapeStore:
+    @pytest.fixture
+    def fake_pool(self) -> FakePool:
+        return FakePool()
+
+    @pytest.fixture
+    def pool(self, fake_pool: FakePool) -> PGPool:
+        async def fake_pool_factory(**_: object) -> FakePool:
+            return fake_pool
+
+        return PGPool(dsn="postgresql://example", pool_factory=fake_pool_factory)
+
+    @pytest.fixture
+    def store(self, pool: PGPool) -> PGTapeStore:
+        return PGTapeStore(pool=pool)
+
+    def test_satisfies_protocol(self, store: PGTapeStore):
+        assert isinstance(store, TapeStore)
+
+    @pytest.mark.asyncio
+    async def test_save_computes_seq_from_zero(self, store: PGTapeStore):
+        await store.save(
+            "tape-1",
+            [{"kind": "message", "payload": {"role": "user", "content": "hi"}}],
+        )
+
+        rows = await store.load("tape-1")
+
+        assert len(rows) == 1
+        assert rows[0]["kind"] == "message"
+
+    @pytest.mark.asyncio
+    async def test_save_appends_after_existing(self, store: PGTapeStore):
+        await store.save(
+            "tape-1",
+            [{"kind": "message", "payload": {"role": "user", "content": "a"}}],
+        )
+        await store.save(
+            "tape-1",
+            [{"kind": "message", "payload": {"role": "assistant", "content": "b"}}],
+        )
+
+        rows = await store.load("tape-1")
+
+        assert len(rows) == 2
+        first_payload = rows[0].get("payload")
+        second_payload = rows[1].get("payload")
+        assert isinstance(first_payload, dict)
+        assert isinstance(second_payload, dict)
+        assert first_payload["content"] == "a"
+        assert second_payload["content"] == "b"
+
+    @pytest.mark.asyncio
+    async def test_save_empty_entries_is_noop(self, store: PGTapeStore):
+        await store.save("tape-1", [])
+
+        assert await store.load("tape-1") == []
+
+    @pytest.mark.asyncio
+    async def test_save_batches_insert_round_trip(
+        self, store: PGTapeStore, fake_pool: FakePool
+    ):
+        await store.save(
+            "tape-batch",
+            [
+                {"kind": "message", "payload": {"role": "user", "content": "a"}},
+                {
+                    "kind": "message",
+                    "payload": {"role": "assistant", "content": "b"},
+                },
+                {"kind": "message", "payload": {"role": "user", "content": "c"}},
+            ],
+        )
+
+        insert_calls = [
+            (query, args)
+            for query, args in fake_pool.executed
+            if "INSERT INTO agent_tapes" in query
+        ]
+
+        assert len(insert_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_load_empty_tape(self, store: PGTapeStore):
+        result = await store.load("nonexistent")
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_list_ids(self, store: PGTapeStore):
+        await store.save(
+            "tape-a", [{"kind": "message", "payload": {"role": "user", "content": "a"}}]
+        )
+        await store.save(
+            "tape-b", [{"kind": "message", "payload": {"role": "user", "content": "b"}}]
+        )
+
+        result = await store.list_ids()
+        assert result == ["tape-a", "tape-b"]
+
+
+class MockPoolForLock:
+    def __init__(self) -> None:
+        self._conn = FakePoolConnection()
+        self.release = AsyncMock()
+
+    async def acquire(self) -> FakePoolConnection:
+        return self._conn
+
+
+class FakePoolConnection:
+    def __init__(self) -> None:
+        self.execute = AsyncMock()
+
+
+class TestPGSessionLock:
+    @pytest.fixture
+    def mock_pool(self) -> MockPoolForLock:
+        return MockPoolForLock()
+
+    @pytest.fixture
+    def lock(self, mock_pool: MockPoolForLock) -> PGSessionLock:
+        return PGSessionLock(pool=mock_pool)
+
+    @pytest.mark.asyncio
+    async def test_acquire_calls_advisory_lock(
+        self, lock: PGSessionLock, mock_pool: MockPoolForLock
+    ):
+        await lock.acquire("session-abc")
+
+        calls = mock_pool._conn.execute.call_args_list
+        assert len(calls) == 1
+        sql = calls[0][0][0]
+        assert "pg_advisory_lock" in sql
+        assert "hashtext" in sql
+
+    @pytest.mark.asyncio
+    async def test_release_unlocks_and_returns_connection(
+        self, lock: PGSessionLock, mock_pool: MockPoolForLock
+    ):
+        await lock.acquire("session-abc")
+        mock_pool._conn.execute.reset_mock()
+
+        await lock.release()
+
+        calls = mock_pool._conn.execute.call_args_list
+        assert len(calls) == 1
+        sql = calls[0][0][0]
+        assert "pg_advisory_unlock_all" in sql
+        mock_pool.release.assert_awaited_once_with(mock_pool._conn)
+
+    @pytest.mark.asyncio
+    async def test_release_without_acquire_is_noop(self, lock: PGSessionLock):
+        await lock.release()
+
+    @pytest.mark.asyncio
+    async def test_release_returns_connection_even_on_error(
+        self, lock: PGSessionLock, mock_pool: MockPoolForLock
+    ):
+        await lock.acquire("session-abc")
+        mock_pool._conn.execute = AsyncMock(side_effect=Exception("unlock failed"))
+
+        with pytest.raises(Exception, match="unlock failed"):
+            await lock.release()
+
+        mock_pool.release.assert_awaited_once_with(mock_pool._conn)
+
+    @pytest.mark.asyncio
+    async def test_acquire_raises_when_already_held(
+        self, lock: PGSessionLock, mock_pool: MockPoolForLock
+    ):
+        await lock.acquire("session-abc")
+
+        with pytest.raises(RuntimeError, match="already held"):
+            await lock.acquire("session-def")
+
+        mock_pool.release.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_acquire_releases_connection_when_lock_sql_fails(
+        self, lock: PGSessionLock, mock_pool: MockPoolForLock
+    ):
+        mock_pool._conn.execute = AsyncMock(side_effect=Exception("lock failed"))
+
+        with pytest.raises(Exception, match="lock failed"):
+            await lock.acquire("session-abc")
+
+        mock_pool.release.assert_awaited_once_with(mock_pool._conn)
