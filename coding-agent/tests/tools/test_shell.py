@@ -6,6 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -210,6 +211,7 @@ class TestShellTool:
 
         fake_module = SimpleNamespace(
             SandboxRequest=FakeSandboxRequest,
+<<<<<<< HEAD
             build_sandbox=lambda config: FakeSandbox(),
             SandboxLimits=lambda **kwargs: SimpleNamespace(**kwargs),
             SandboxConfig=lambda **kwargs: SimpleNamespace(**kwargs),
@@ -218,6 +220,16 @@ class TestShellTool:
         monkeypatch.setenv("HOST_ONLY", "host-value")
         monkeypatch.setattr(
             "coding_agent.tools.shell._load_sandbox_module", lambda: fake_module
+=======
+            SandboxConfig=lambda **kwargs: SimpleNamespace(**kwargs),
+            SandboxLimits=lambda **kwargs: SimpleNamespace(**kwargs),
+            build_sandbox=lambda config: FakeSandbox(),
+        )
+        monkeypatch.setenv("HOST_ONLY", "host-value")
+        monkeypatch.setattr(
+            "coding_agent.tools.shell._load_sandbox_module",
+            lambda: fake_module,
+>>>>>>> c330af7 (fix(shell): keep sandbox env restricted to explicit vars)
         )
 
         result = bash_run(
@@ -227,7 +239,64 @@ class TestShellTool:
                 config={"shell": {"sandbox_mode": "docker"}}
             ),
         )
+<<<<<<< HEAD
         assert _as_text(result) == "ok"
+
+    def test_docker_sandbox_request_env_is_explicit_only(
+        self, monkeypatch, tmp_path: Path
+    ):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        monkeypatch.setenv("HOST_ONLY", "host-secret")
+
+        captured: dict[str, object] = {}
+
+        class FakeSandboxRequest:
+            def __init__(self, *, args, cwd, env, timeout_seconds):
+                captured["request"] = {
+                    "args": args,
+                    "cwd": cwd,
+                    "env": env,
+                    "timeout_seconds": timeout_seconds,
+                }
+
+        class FakeSandbox:
+            def run(self, request):
+                captured["run_request"] = request
+                return SimpleNamespace(stdout="ok", stderr="", returncode=0)
+
+        fake_module = SimpleNamespace(
+            SandboxRequest=FakeSandboxRequest,
+            build_sandbox=lambda config: FakeSandbox(),
+            SandboxLimits=lambda **kwargs: SimpleNamespace(**kwargs),
+            SandboxConfig=lambda **kwargs: SimpleNamespace(**kwargs),
+            _validate_cwd=lambda cwd, workspace_root: None,
+        )
+
+        monkeypatch.setattr(
+            "coding_agent.tools.shell._load_sandbox_module",
+            lambda: fake_module,
+        )
+
+        pipeline_ctx = SimpleNamespace(
+            config={
+                "workspace_root": str(workspace),
+                "shell": {"sandbox_mode": "docker"},
+            }
+        )
+
+        result = bash_run(
+            command="echo ok",
+            cwd=str(workspace),
+            env={"CALLER_ONLY": "explicit"},
+            __pipeline_ctx__=pipeline_ctx,
+        )
+
+        assert _as_text(result) == "ok"
+        request = cast(dict[str, object], captured["request"])
+        env = cast(dict[str, str], request["env"])
+        assert env == {"CALLER_ONLY": "explicit"}
+        assert "HOST_ONLY" not in env
 
     def test_sandbox_module_imports_without_resource_module(self, monkeypatch):
         module_name = "coding_agent.tools.sandbox"
