@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import Any, Callable
 
 from agentkit.errors import PluginError
@@ -14,9 +15,10 @@ class PluginRegistry:
     Maintains insertion order. Provides hook lookup by name.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, specs: dict | None = None) -> None:
         self._plugins: dict[str, Plugin] = {}
         self._hook_index: dict[str, list[Callable[..., Any]]] = {}
+        self._specs = specs
 
     def register(self, plugin: Plugin) -> None:
         """Register a plugin. Raises PluginError on protocol violation or duplicate key."""
@@ -34,6 +36,13 @@ class PluginRegistry:
         self._plugins[key] = plugin
         for hook_name, hook_fn in plugin.hooks().items():
             self._hook_index.setdefault(hook_name, []).append(hook_fn)
+            if self._specs is not None and hook_name not in self._specs:
+                warnings.warn(
+                    f"Plugin '{plugin.state_key}' registered unknown hook '{hook_name}' "
+                    f"(not in HookSpec registry)",
+                    UserWarning,
+                    stacklevel=2,
+                )
 
     def plugin_ids(self) -> list[str]:
         """Return all registered plugin IDs in insertion order."""

@@ -23,6 +23,7 @@ class Reject(Directive):
 @dataclass(frozen=True)
 class AskUser(Directive):
     question: str = ""
+    metadata: dict[str, Any] | None = None
     kind: str = field(init=False, default="ask_user")
 
 

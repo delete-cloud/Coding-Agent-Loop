@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+from collections.abc import Iterable
 from typing import Any, Callable
 
 from agentkit.errors import ToolError
@@ -39,6 +40,16 @@ class ToolRegistry:
     def schemas(self) -> list[ToolSchema]:
         """Return schemas for all registered tools."""
         return list(self._schemas.values())
+
+    def retain(self, names: Iterable[str]) -> None:
+        keep = set(names)
+        unknown = keep - set(self._tools)
+        if unknown:
+            raise ToolError(
+                f"cannot retain unknown tools: {', '.join(sorted(unknown))}"
+            )
+        self._tools = {n: self._tools[n] for n in self._tools if n in keep}
+        self._schemas = {n: self._schemas[n] for n in self._schemas if n in keep}
 
     def execute(self, name: str, **kwargs: Any) -> Any:
         """Execute a tool synchronously by name."""

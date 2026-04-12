@@ -42,22 +42,22 @@ from agentkit.providers import (
     LLMProvider,
     StreamEvent,
     TextEvent,
+    ThinkingEvent,
     ToolCallEvent,
+    ToolResultEvent,
 )
-from agentkit.runtime import HookRuntime, Pipeline, PipelineContext
+from agentkit.runtime import HookRuntime, Lifecycle, Pipeline, PipelineContext
 from agentkit.storage import DocIndex, SessionStore, TapeStore
 from agentkit.tape import Entry, ForkTapeStore, Tape
 from agentkit.tools import ToolRegistry, ToolSchema, tool
 
 __all__ = [
-    # Runtime
     "HookRuntime",
+    "Lifecycle",
     "Pipeline",
     "PipelineContext",
-    # Plugins
     "Plugin",
     "PluginRegistry",
-    # Directives
     "Directive",
     "DirectiveExecutor",
     "Approve",
@@ -65,35 +65,28 @@ __all__ = [
     "AskUser",
     "Checkpoint",
     "MemoryRecord",
-    # Tape
     "Entry",
     "Tape",
     "ForkTapeStore",
-    # Storage
     "TapeStore",
     "DocIndex",
     "SessionStore",
-    # Tools
     "ToolSchema",
     "ToolRegistry",
     "tool",
-    # Providers
     "LLMProvider",
     "StreamEvent",
     "TextEvent",
+    "ThinkingEvent",
     "ToolCallEvent",
+    "ToolResultEvent",
     "DoneEvent",
-    # Channel
     "Channel",
     "LocalChannel",
-    # Config
     "AgentConfig",
     "load_config",
-    # Context
     "ContextBuilder",
-    # Instruction
     "normalize_instruction",
-    # Errors
     "AgentKitError",
     "HookError",
     "PipelineError",

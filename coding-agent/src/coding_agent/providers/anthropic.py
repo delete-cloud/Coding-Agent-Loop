@@ -15,6 +15,7 @@ from agentkit.providers.models import (
     TextEvent,
     ToolCallEvent,
     DoneEvent,
+    UsageEvent,
 )
 from coding_agent.utils.retry import _extract_status_code, RETRYABLE_STATUS_CODES
 
@@ -28,13 +29,14 @@ class AnthropicProvider:
     content block API format.
     """
 
-    # All Claude models share 200k context
     DEFAULT_CONTEXT_SIZE = 200000
 
     def __init__(
         self,
         model: str,
         api_key: str,
+        base_url: str | None = None,
+        default_headers: dict[str, str] | None = None,
         max_tokens: int = 8192,
         temperature: float = 0.7,
         timeout: float = 60.0,
@@ -42,13 +44,13 @@ class AnthropicProvider:
         retry_base_delay: float = 1.0,
         retry_max_delay: float = 60.0,
     ):
-        # Handle both plain strings and Pydantic SecretStr
         api_key_str = api_key
         if not isinstance(api_key, str):
-            # Assume it's a SecretStr or similar with get_secret_value
             api_key_str = api_key.get_secret_value()
         self._model = model
         self._api_key = api_key_str
+        self._base_url = base_url
+        self._default_headers = default_headers
         self._max_tokens = max_tokens
         self._temperature = temperature
         self._timeout = timeout
@@ -62,6 +64,8 @@ class AnthropicProvider:
         if self.__client is None:
             self.__client = AsyncAnthropic(
                 api_key=self._api_key,
+                base_url=self._base_url,
+                default_headers=self._default_headers,
                 timeout=self._timeout,
             )
         return self.__client
@@ -81,11 +85,6 @@ class AnthropicProvider:
     def _convert_messages(
         self, messages: list[dict[str, Any]]
     ) -> tuple[str, list[dict[str, Any]]]:
-        """Convert OpenAI-format messages to Anthropic format.
-
-        Returns:
-            (system_prompt, anthropic_messages)
-        """
         system_parts: list[str] = []
         anthropic_msgs: list[dict[str, Any]] = []
 
@@ -94,16 +93,12 @@ class AnthropicProvider:
 
             if role == "system":
                 system_parts.append(msg["content"])
-
             elif role == "user":
                 anthropic_msgs.append({"role": "user", "content": msg["content"]})
-
             elif role == "assistant":
-                # May have tool_calls → convert to content blocks
                 tool_calls = msg.get("tool_calls", [])
                 if tool_calls:
                     content_blocks = []
-                    # Add text if present
                     if msg.get("content"):
                         content_blocks.append({"type": "text", "text": msg["content"]})
                     for tc in tool_calls:
@@ -135,9 +130,7 @@ class AnthropicProvider:
                     anthropic_msgs.append(
                         {"role": "assistant", "content": msg.get("content", "")}
                     )
-
             elif role == "tool":
-                # Tool results → user message with tool_result content block
                 anthropic_msgs.append(
                     {
                         "role": "user",
@@ -156,14 +149,11 @@ class AnthropicProvider:
     def _convert_tools(self, tools: list[Any]) -> list[dict[str, Any]]:
         result = []
         for tool in tools:
-            # agentkit ToolSchema — has to_openai_format()
             if hasattr(tool, "to_openai_format"):
                 func = tool.to_openai_format()["function"]
-            # old base.ToolSchema — has .function dict
             elif hasattr(tool, "function"):
                 func = tool.function
             else:
-                # Handle OpenAI-format dicts: {"type": "function", "function": {...}}
                 if isinstance(tool, dict) and "function" in tool:
                     func = tool["function"]
                 else:
@@ -202,12 +192,21 @@ class AnthropicProvider:
 
         for attempt in range(self._max_retries + 1):
             try:
-                # Track tool use blocks being accumulated
                 tool_blocks: dict[int, dict[str, Any]] = {}
+                _input_tokens = 0
+                _output_tokens = 0
 
                 async with self._client.messages.stream(**api_kwargs) as stream:
                     async for event in stream:
                         match event.type:
+                            case "message_start":
+                                msg_usage = getattr(
+                                    getattr(event, "message", None), "usage", None
+                                )
+                                if msg_usage:
+                                    _input_tokens = (
+                                        getattr(msg_usage, "input_tokens", 0) or 0
+                                    )
                             case "content_block_start":
                                 block = event.content_block
                                 if block.type == "tool_use":
@@ -243,24 +242,32 @@ class AnthropicProvider:
                                         name=block["name"],
                                         arguments=args,
                                     )
+                            case "message_delta":
+                                delta_usage = getattr(event, "usage", None)
+                                if delta_usage:
+                                    _output_tokens = (
+                                        getattr(delta_usage, "output_tokens", 0) or 0
+                                    )
                             case "message_stop":
                                 pass
 
+                yield UsageEvent(
+                    input_tokens=_input_tokens,
+                    output_tokens=_output_tokens,
+                    provider_name=self._model,
+                )
                 yield DoneEvent()
-                return  # Success, exit the retry loop
+                return
 
             except Exception as e:
                 last_exception = e
 
-                # Check if this is the last attempt
                 if attempt >= self._max_retries:
                     logger.debug(f"Max retries ({self._max_retries}) exceeded")
                     break
 
-                # Extract status code from exception
                 status_code = _extract_status_code(e)
 
-                # Only retry if we have a status code and it's in retryable list
                 if status_code is None:
                     logger.debug(
                         f"No status code found in {type(e).__name__}, raising immediately"
@@ -273,11 +280,10 @@ class AnthropicProvider:
                     )
                     break
 
-                # Calculate delay with exponential backoff and jitter
                 delay = min(
                     self._retry_base_delay * (2**attempt), self._retry_max_delay
                 )
-                delay += random.uniform(0, 1)  # Add jitter
+                delay += random.uniform(0, 1)
 
                 logger.warning(
                     f"stream failed (attempt {attempt + 1}/{self._max_retries + 1}): "
@@ -287,7 +293,6 @@ class AnthropicProvider:
 
                 await asyncio.sleep(delay)
 
-        # All retries exhausted or non-retryable error — raise instead of yielding error events
         if last_exception:
             raise last_exception
 

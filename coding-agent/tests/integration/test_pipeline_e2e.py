@@ -24,12 +24,13 @@ def _skip_if_no_config():
         pytest.skip("agent.toml not found")
 
 
-def _setup_agent(tmp_path):
+def _setup_agent(tmp_path, *, approval_mode: str | None = None):
     _skip_if_no_config()
     pipeline, ctx = create_agent(
         config_path=CONFIG_PATH,
         data_dir=tmp_path,
         api_key="sk-test",
+        approval_mode_override=approval_mode,
     )
     return pipeline, ctx
 
@@ -217,7 +218,7 @@ class TestPipelineE2E:
     @pytest.mark.asyncio
     async def test_tool_error_recovery(self, tmp_path):
         """Given a tool that raises RuntimeError, when pipeline executes it, then error is recorded in tape and LLM recovers with text response."""
-        pipeline, ctx = _setup_agent(tmp_path)
+        pipeline, ctx = _setup_agent(tmp_path, approval_mode="yolo")
 
         call_count = 0
 
@@ -266,7 +267,7 @@ class TestPipelineE2E:
     @pytest.mark.asyncio
     async def test_large_tool_result_truncated(self, tmp_path):
         """Given a tool returning 20k chars and max_tool_result_size=10000, when pipeline processes it, then tape entry is truncated with notice."""
-        pipeline, ctx = _setup_agent(tmp_path)
+        pipeline, ctx = _setup_agent(tmp_path, approval_mode="yolo")
 
         ctx.config["max_tool_result_size"] = 10000
         large_result = "X" * 20000
@@ -318,11 +319,11 @@ class TestPipelineE2E:
         """Given ParallelExecutorPlugin + 2 independent tool calls in one round, when pipeline runs, then both execute and results appear in tape."""
         from coding_agent.plugins.parallel_executor import ParallelExecutorPlugin
 
-        pipeline, ctx = _setup_agent(tmp_path)
+        pipeline, ctx = _setup_agent(tmp_path, approval_mode="yolo")
 
         executed_tools: list[str] = []
 
-        async def mock_execute_fn(name: str, arguments: dict) -> str:
+        async def mock_execute_fn(name: str, arguments: dict[str, object]) -> str:
             executed_tools.append(name)
             await asyncio.sleep(0.01)
             return f"result_of_{name}({arguments})"

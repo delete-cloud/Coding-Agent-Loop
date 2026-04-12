@@ -19,6 +19,10 @@ class HookError(AgentKitError):
         self.hook_name = hook_name
 
 
+class HookTypeError(HookError):
+    pass
+
+
 class PipelineError(AgentKitError):
     """A pipeline stage failed."""
 

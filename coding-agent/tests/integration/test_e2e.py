@@ -80,7 +80,7 @@ class TestEndToEnd:
     @pytest.mark.asyncio
     async def test_approval_directive_flow(self, tmp_path):
         from coding_agent.__main__ import create_agent
-        from agentkit.directive.types import Approve
+        from agentkit.directive.types import AskUser
 
         config_path = (
             Path(__file__).parent.parent.parent / "src" / "coding_agent" / "agent.toml"
@@ -99,7 +99,7 @@ class TestEndToEnd:
             tool_name="file_read",
             arguments={"path": "/tmp/test.txt"},
         )
-        assert isinstance(result, Approve)
+        assert isinstance(result, AskUser)
 
     @pytest.mark.asyncio
     async def test_memory_grounding_flow(self, tmp_path):

@@ -69,9 +69,9 @@ class PipelineAdapter:
         self._agent_id = agent_id
         self._mounted = False
         self._closed = False
-        # Wire approval flow: bridge consumer.request_approval to DirectiveExecutor
-        if consumer is not None and pipeline._directive_executor is not None:
-            pipeline._directive_executor._ask_user = _make_ask_user_handler(
+        directive_executor = getattr(pipeline, "_directive_executor", None)
+        if consumer is not None and directive_executor is not None:
+            directive_executor._ask_user = _make_ask_user_handler(
                 consumer, ctx.session_id
             )
 
