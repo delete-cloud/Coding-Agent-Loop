@@ -13,7 +13,7 @@ from coding_agent.tools.registry import ToolRegistry
 
 def register_file_tools(registry: ToolRegistry, repo_root: Path | str = ".") -> None:
     """Register file operation tools.
-    
+
     Args:
         registry: Tool registry to register to
         repo_root: Root directory for file operations
@@ -22,11 +22,11 @@ def register_file_tools(registry: ToolRegistry, repo_root: Path | str = ".") -> 
 
     async def file_read(path: str, limit: int = 1000) -> str:
         """Read file content.
-        
+
         Args:
             path: Relative path to file
             limit: Maximum number of lines to read
-            
+
         Returns:
             File content or error message
         """
@@ -41,100 +41,110 @@ def register_file_tools(registry: ToolRegistry, repo_root: Path | str = ".") -> 
             # by replacing invalid sequences. This preserves behavior for valid UTF-8 files.
             with open(target, "r", encoding="utf-8", errors="replace") as f:
                 lines = f.readlines()
-            
+
             # Limit lines
             if len(lines) > limit:
                 content = "".join(lines[:limit])
                 content += f"\n... ({len(lines) - limit} more lines)"
             else:
                 content = "".join(lines)
-            
-            return json.dumps({
-                "path": path,
-                "content": content,
-                "lines": len(lines),
-            })
+
+            return json.dumps(
+                {
+                    "path": path,
+                    "content": content,
+                    "lines": len(lines),
+                }
+            )
         except Exception as e:
             return json.dumps({"error": str(e)})
 
     async def file_write(path: str, content: str) -> str:
         """Write content to a new file.
-        
+
         Args:
             path: Relative path to file
             content: Content to write
-            
+
         Returns:
             Success message or error
         """
         try:
             target = _resolve_path(root, path)
-            
+
             # Don't overwrite existing files
             if target.exists():
-                return json.dumps({
-                    "error": f"File already exists: {path}. Use file_replace to modify existing files."
-                })
-            
+                return json.dumps(
+                    {
+                        "error": f"File already exists: {path}. Use file_replace to modify existing files."
+                    }
+                )
+
             # Create parent directories if needed
             target.parent.mkdir(parents=True, exist_ok=True)
-            
+
             with open(target, "w", encoding="utf-8") as f:
                 f.write(content)
-            
-            return json.dumps({
-                "success": True,
-                "path": path,
-                "bytes_written": len(content.encode("utf-8")),
-            })
+
+            return json.dumps(
+                {
+                    "success": True,
+                    "path": path,
+                    "bytes_written": len(content.encode("utf-8")),
+                }
+            )
         except Exception as e:
             return json.dumps({"error": str(e)})
 
     async def file_replace(path: str, old_string: str, new_string: str) -> str:
         """Replace text in a file.
-        
+
         Args:
             path: Relative path to file
             old_string: Text to find (must match exactly)
             new_string: Text to replace with
-            
+
         Returns:
             Success message or error
         """
         try:
             target = _resolve_path(root, path)
-            
+
             if not target.exists():
                 return json.dumps({"error": f"File not found: {path}"})
             if not target.is_file():
                 return json.dumps({"error": f"Not a file: {path}"})
-            
+
             # Be tolerant of non-UTF8 bytes in the target file.
             with open(target, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
-            
+
             if old_string not in content:
-                return json.dumps({
-                    "error": f"old_string not found in file: {old_string[:50]}..."
-                })
-            
+                return json.dumps(
+                    {"error": f"old_string not found in file: {old_string[:50]}..."}
+                )
+
             # Count occurrences
             count = content.count(old_string)
             if count > 1:
-                return json.dumps({
-                    "error": f"old_string appears {count} times in file. Must be unique."
-                })
-            
+                return json.dumps(
+                    {
+                        "error": f"old_string appears {count} times in file. Must be unique."
+                    }
+                )
+
             new_content = content.replace(old_string, new_string)
-            
+
             with open(target, "w", encoding="utf-8") as f:
                 f.write(new_content)
-            
-            return json.dumps({
-                "success": True,
-                "path": path,
-                "replacements": 1,
-            })
+
+            return json.dumps(
+                {
+                    "success": True,
+                    "path": path,
+                    "replacements": 1,
+                }
+            )
         except Exception as e:
             return json.dumps({"error": str(e)})
 
@@ -190,7 +200,9 @@ def register_file_tools(registry: ToolRegistry, repo_root: Path | str = ".") -> 
             raise ValueError("No hunks found in patch")
         return hunks
 
-    def _find_hunk_pos(file_lines: List[str], hunk: _Hunk, search_window: int = 50) -> Optional[int]:
+    def _find_hunk_pos(
+        file_lines: List[str], hunk: _Hunk, search_window: int = 50
+    ) -> Optional[int]:
         """Find the best position to apply the hunk.
 
         Prefer the line indicated by hunk.old_start, but allow small drift by searching
@@ -223,21 +235,25 @@ def register_file_tools(registry: ToolRegistry, repo_root: Path | str = ".") -> 
                 return pos
         return None
 
-    def _apply_hunks_to_lines(file_lines: List[str], hunks: List[_Hunk]) -> Tuple[List[str], List[dict]]:
+    def _apply_hunks_to_lines(
+        file_lines: List[str], hunks: List[_Hunk]
+    ) -> Tuple[List[str], List[dict[str, object]]]:
         """Apply hunks to file lines, returning new lines and per-hunk results."""
         out = list(file_lines)
-        results: List[dict] = []
+        results: List[dict[str, object]] = []
         offset = 0
         for idx, hunk in enumerate(hunks):
             # Recompute position on current output for robustness.
             pos = _find_hunk_pos(out, hunk)
             if pos is None:
-                results.append({
-                    "hunk": idx,
-                    "status": "failed",
-                    "error": "Context not found for hunk",
-                    "old_start": hunk.old_start,
-                })
+                results.append(
+                    {
+                        "hunk": idx,
+                        "status": "failed",
+                        "error": "Context not found for hunk",
+                        "old_start": hunk.old_start,
+                    }
+                )
                 raise ValueError("Context not found for hunk")
 
             cursor = pos
@@ -260,13 +276,15 @@ def register_file_tools(registry: ToolRegistry, repo_root: Path | str = ".") -> 
             after = out[cursor:]
             out = before + new_block + after
 
-            results.append({
-                "hunk": idx,
-                "status": "applied",
-                "applied_at": pos + 1,
-                "old_start": hunk.old_start,
-                "new_start": hunk.new_start,
-            })
+            results.append(
+                {
+                    "hunk": idx,
+                    "status": "applied",
+                    "applied_at": pos + 1,
+                    "old_start": hunk.old_start,
+                    "new_start": hunk.new_start,
+                }
+            )
         return out, results
 
     async def file_patch(path: str, patch: str) -> str:
@@ -278,7 +296,9 @@ def register_file_tools(registry: ToolRegistry, repo_root: Path | str = ".") -> 
         try:
             target = _resolve_path(root, path)
             if not target.exists():
-                return json.dumps({"success": False, "error": f"File not found: {path}"})
+                return json.dumps(
+                    {"success": False, "error": f"File not found: {path}"}
+                )
             if not target.is_file():
                 return json.dumps({"success": False, "error": f"Not a file: {path}"})
 
@@ -291,12 +311,14 @@ def register_file_tools(registry: ToolRegistry, repo_root: Path | str = ".") -> 
             new_content = "".join(new_lines)
 
             if new_content == original:
-                return json.dumps({
-                    "success": True,
-                    "path": path,
-                    "changed": False,
-                    "hunks": hunk_results,
-                })
+                return json.dumps(
+                    {
+                        "success": True,
+                        "path": path,
+                        "changed": False,
+                        "hunks": hunk_results,
+                    }
+                )
 
             # Safe write: write to temp then replace
             tmp = target.with_suffix(target.suffix + ".tmp")
@@ -304,13 +326,15 @@ def register_file_tools(registry: ToolRegistry, repo_root: Path | str = ".") -> 
                 f.write(new_content)
             tmp.replace(target)
 
-            return json.dumps({
-                "success": True,
-                "path": path,
-                "changed": True,
-                "bytes_written": len(new_content.encode("utf-8")),
-                "hunks": hunk_results,
-            })
+            return json.dumps(
+                {
+                    "success": True,
+                    "path": path,
+                    "changed": True,
+                    "bytes_written": len(new_content.encode("utf-8")),
+                    "hunks": hunk_results,
+                }
+            )
         except Exception as e:
             return json.dumps({"success": False, "error": str(e), "path": path})
 
