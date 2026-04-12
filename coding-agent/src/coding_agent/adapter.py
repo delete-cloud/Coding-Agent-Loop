@@ -4,6 +4,7 @@ import json
 import re
 import uuid
 from inspect import isawaitable
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Protocol
 
 from pydantic import BaseModel
@@ -109,8 +110,9 @@ def _normalize_tool_result_for_wire(
         return payload, json.dumps(_redact_for_display(payload))
     if isinstance(result, str):
         return result, str(_redact_for_display(result))
-    if isinstance(result, dict):
-        return result, json.dumps(_redact_for_display(result))
+    if isinstance(result, Mapping):
+        payload = dict(result)
+        return payload, json.dumps(_redact_for_display(payload))
     return result, str(_redact_for_display(result))
 
 
