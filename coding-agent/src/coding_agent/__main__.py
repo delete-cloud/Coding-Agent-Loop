@@ -65,7 +65,7 @@ def _load_kb_cli_settings(
     "--provider",
     "provider_name",
     default="openai",
-    type=click.Choice(["openai", "anthropic"]),
+    type=click.Choice(["openai", "anthropic", "kimi-code"]),
 )
 @click.option("--base-url", default=None, help="OpenAI-compatible API base URL")
 @click.option("--api-key", envvar="AGENT_API_KEY", required=True, help="API key")
@@ -126,7 +126,7 @@ def run(
     "--provider",
     "provider_name",
     default="openai",
-    type=click.Choice(["openai", "anthropic"]),
+    type=click.Choice(["openai", "anthropic", "kimi-code"]),
 )
 @click.option("--base-url", default=None, help="OpenAI-compatible API base URL")
 @click.option("--api-key", envvar="AGENT_API_KEY", required=True, help="API key")

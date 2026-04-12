@@ -379,6 +379,46 @@ class TestKbCli:
         assert "No index found" in result.output
 
 
+class TestCliProviderChoices:
+    def test_run_accepts_kimi_code_provider(self):
+        from coding_agent.__main__ import main
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "run",
+                "--goal",
+                "test goal",
+                "--provider",
+                "kimi-code",
+                "--api-key",
+                "sk-test-key",
+            ],
+        )
+
+        assert result.exit_code != 2
+        assert "Invalid value for '--provider'" not in result.output
+
+    def test_repl_accepts_kimi_code_provider(self):
+        from coding_agent.__main__ import main
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "repl",
+                "--provider",
+                "kimi-code",
+                "--api-key",
+                "sk-test-key",
+            ],
+        )
+
+        assert result.exit_code != 2
+        assert "Invalid value for '--provider'" not in result.output
+
+
 class TestReplMultiturnContext:
     @pytest.mark.asyncio
     @patch("coding_agent.cli.repl.create_agent")
