@@ -380,6 +380,32 @@ class TestKbCli:
 
 
 class TestCliProviderChoices:
+    def test_top_level_accepts_kimi_code_provider(self):
+        from coding_agent.__main__ import main
+
+        runner = CliRunner()
+
+        with (
+            patch("coding_agent.core.config.load_config") as mock_load_config,
+            patch("coding_agent.cli.repl.run_repl", AsyncMock()),
+        ):
+            mock_load_config.return_value = MagicMock()
+            result = runner.invoke(
+                main,
+                [
+                    "--provider",
+                    "kimi-code",
+                    "--model",
+                    "kimi-for-coding",
+                ],
+            )
+
+        assert result.exit_code != 2
+        assert "Invalid value for '--provider'" not in result.output
+        mock_load_config.assert_called_once_with(
+            cli_args={"provider": "kimi-code", "model": "kimi-for-coding"}
+        )
+
     def test_run_accepts_kimi_code_provider(self):
         from coding_agent.__main__ import main
 

@@ -20,8 +20,17 @@ from coding_agent.app import create_agent, create_child_pipeline  # noqa: F401
 
 
 @click.group(invoke_without_command=True)
+@click.option("--model", default=None, help="Model name")
+@click.option(
+    "--provider",
+    "provider_name",
+    default=None,
+    type=click.Choice(["openai", "anthropic", "kimi-code"]),
+)
+@click.option("--base-url", default=None, help="OpenAI-compatible API base URL")
+@click.option("--api-key", envvar="AGENT_API_KEY", default=None, help="API key")
 @click.pass_context
-def main(ctx):
+def main(ctx, model, provider_name, base_url, api_key):
     """Coding Agent CLI.
 
     Without subcommand: starts interactive REPL mode (default)
@@ -32,7 +41,17 @@ def main(ctx):
         from coding_agent.cli.repl import run_repl
         from coding_agent.core.config import load_config
 
-        config = load_config()
+        cli_args = {
+            key: value
+            for key, value in {
+                "provider": provider_name,
+                "model": model,
+                "base_url": base_url,
+                "api_key": api_key,
+            }.items()
+            if value is not None
+        }
+        config = load_config(cli_args=cli_args or None)
         asyncio.run(run_repl(config))
 
 
