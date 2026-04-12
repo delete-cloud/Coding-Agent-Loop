@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -7,19 +9,30 @@ from agentkit.tape.tape import Tape
 
 from coding_agent.kb import KB, KBSearchResult
 
+logger = logging.getLogger(__name__)
+
+_CHUNK_TRUNCATE = 500
+
+
+@dataclass
+class _SearchSnapshot:
+    last_user_msg: str
+    grounding_messages: list[dict[str, Any]]
+
 
 class KBPlugin:
     state_key = "kb"
 
     def __init__(
         self,
+        *,
         db_path: Path,
-        embedding_model: str = "text-embedding-3-small",
-        embedding_dim: int = 1536,
-        chunk_size: int = 1200,
-        chunk_overlap: int = 200,
+        embedding_model: str = KB.DEFAULT_EMBEDDING_MODEL,
+        embedding_dim: int = KB.DEFAULT_EMBEDDING_DIM,
+        chunk_size: int = KB.DEFAULT_CHUNK_SIZE,
+        chunk_overlap: int = KB.DEFAULT_CHUNK_OVERLAP,
         top_k: int = 5,
-        text_extensions: set[str] | None = None,
+        index_extensions: list[str] | None = None,
         embedding_fn: Callable[[list[str]], list[list[float]]] | None = None,
     ) -> None:
         self._db_path = db_path
@@ -28,13 +41,18 @@ class KBPlugin:
         self._chunk_size = chunk_size
         self._chunk_overlap = chunk_overlap
         self._top_k = top_k
-        self._text_extensions = text_extensions
+        self._index_extensions = index_extensions or [
+            ".md",
+            ".txt",
+            ".rst",
+            ".yaml",
+            ".yml",
+            ".toml",
+        ]
         self._embedding_fn = embedding_fn
-
         self._kb: KB | None = None
         self._has_table = False
-        self._last_user_message: str | None = None
-        self._last_grounding: list[dict[str, Any]] = []
+        self._snapshot: _SearchSnapshot | None = None
 
     def hooks(self) -> dict[str, Callable[..., Any]]:
         return {
@@ -43,6 +61,7 @@ class KBPlugin:
         }
 
     def do_mount(self, **kwargs: Any) -> dict[str, Any]:
+        del kwargs
         self._kb = KB(
             db_path=self._db_path,
             embedding_model=self._embedding_model,
@@ -50,52 +69,61 @@ class KBPlugin:
             chunk_size=self._chunk_size,
             chunk_overlap=self._chunk_overlap,
             embedding_fn=self._embedding_fn,
-            text_extensions=self._text_extensions,
+            text_extensions=set(self._index_extensions),
         )
         self._has_table = self._kb.has_table()
+        logger.info(
+            "KBPlugin mounted: db_path=%s, has_table=%s",
+            self._db_path,
+            self._has_table,
+        )
         return {"kb": self._kb, "has_table": self._has_table}
 
     def build_context(
         self, tape: Tape | None = None, **kwargs: Any
     ) -> list[dict[str, Any]]:
-        if tape is None or self._kb is None or not self._has_table:
+        del kwargs
+        if tape is None or not self._has_table or self._kb is None:
             return []
 
-        user_message = self._latest_user_message(tape)
-        if not user_message:
+        user_message = _latest_user_message(tape)
+        if user_message is None:
             return []
 
-        if user_message == self._last_user_message:
-            return self._last_grounding
+        if self._snapshot is not None and self._snapshot.last_user_msg == user_message:
+            return self._snapshot.grounding_messages
 
         results = self._kb.search_sync(user_message, k=self._top_k)
-        grounding = self._format_grounding(results)
-        self._last_user_message = user_message
-        self._last_grounding = grounding
+        grounding = _format_grounding_messages(results)
+        self._snapshot = _SearchSnapshot(
+            last_user_msg=user_message,
+            grounding_messages=grounding,
+        )
         return grounding
 
-    def _latest_user_message(self, tape: Tape) -> str | None:
-        for entry in reversed(list(tape)):
-            if entry.kind != "message":
-                continue
-            if entry.payload.get("role") != "user":
-                continue
-            content = entry.payload.get("content")
-            if isinstance(content, str) and content.strip():
-                return content
-        return None
 
-    def _format_grounding(self, results: list[KBSearchResult]) -> list[dict[str, Any]]:
-        if not results:
-            return []
+def _latest_user_message(tape: Tape) -> str | None:
+    entries = (
+        tape.windowed_entries() if hasattr(tape, "windowed_entries") else list(tape)
+    )
+    for entry in reversed(entries):
+        if entry.kind != "message":
+            continue
+        role = entry.payload.get("role")
+        content = entry.payload.get("content")
+        if role == "user" and isinstance(content, str) and content.strip():
+            return content
+    return None
 
-        lines = ["[KB] The following code/documentation snippets may be relevant:", ""]
-        for result in results:
-            content = result.chunk.content
-            if len(content) > 500:
-                content = content[:500] + "..."
-            lines.append(f"--- {result.chunk.source} ---")
-            lines.append(content)
-            lines.append("")
 
-        return [{"role": "system", "content": "\n".join(lines).rstrip()}]
+def _format_grounding_messages(results: list[KBSearchResult]) -> list[dict[str, Any]]:
+    if not results:
+        return []
+
+    lines = ["[KB] Relevant context:"]
+    for result in results:
+        content = result.chunk.content.strip()
+        if len(content) > _CHUNK_TRUNCATE:
+            content = f"{content[:_CHUNK_TRUNCATE]}..."
+        lines.append(f"- {result.chunk.source}: {content}")
+    return [{"role": "system", "content": "\n".join(lines)}]
