@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from coding_agent.approval.store import ApprovalStore
+from coding_agent.approval import ApprovalPolicy
 from coding_agent.wire.protocol import (
     ApprovalRequest,
     CompletionStatus,
@@ -84,6 +85,28 @@ async def test_create_session_persists_explicit_provider_restart_metadata() -> N
     assert payload["provider_name"] == "openai"
     assert payload["model_name"] == "gpt-test"
     assert payload["base_url"] == "http://localhost:1234/v1"
+
+
+@pytest.mark.asyncio
+async def test_create_session_persists_configured_restart_metadata_by_default() -> None:
+    store = InMemorySessionStore()
+    manager = SessionManager(store=store)
+
+    with patch("coding_agent.core.config.load_config") as load_config:
+        load_config.return_value = types.SimpleNamespace(
+            provider="anthropic",
+            model="claude-test",
+            base_url="http://llm.default",
+        )
+
+        session_id = await manager.create_session(approval_policy=ApprovalPolicy.AUTO)
+
+    payload = store.get(session_id)
+
+    assert payload is not None
+    assert payload["provider_name"] == "anthropic"
+    assert payload["model_name"] == "claude-test"
+    assert payload["base_url"] == "http://llm.default"
 
 
 def test_create_session_store_warns_and_falls_back_when_redis_unreachable(

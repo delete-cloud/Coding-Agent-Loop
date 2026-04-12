@@ -20,6 +20,7 @@ from typing import Any, cast
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.approval.store import ApprovalStore
+from coding_agent.core import config as core_config
 from coding_agent.providers.base import ChatProvider, ToolSchema
 from agentkit.providers.models import DoneEvent, TextEvent
 from coding_agent.wire.local import LocalWire
@@ -234,6 +235,15 @@ class SessionManager:
 
         approval_store = ApprovalStore()
         self._approval_stores[session_id] = approval_store
+
+        if provider is None:
+            cfg = core_config.load_config()
+            if provider_name is None:
+                provider_name = cfg.provider
+            if model_name is None:
+                model_name = cfg.model
+            if base_url is None:
+                base_url = cfg.base_url
 
         session = Session(
             id=session_id,
