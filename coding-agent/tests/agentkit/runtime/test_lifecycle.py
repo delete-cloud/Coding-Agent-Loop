@@ -17,7 +17,7 @@ class ConcreteLifecycle:
         _ = timeout
         self.stopped = True
 
-    async def health_check(self) -> dict[str, str]:
+    async def health_check(self) -> dict[str, object]:
         return {"status": "ok"}
 
     async def readiness_check(self) -> bool:
