@@ -157,6 +157,68 @@ def test_rehydrate_clears_non_restart_safe_runtime_state() -> None:
     assert reloaded.approval_response is None
 
 
+@pytest.mark.asyncio
+async def test_run_agent_restores_restart_safe_agent_configuration_after_rehydrate() -> (
+    None
+):
+    store = InMemorySessionStore()
+    manager = SessionManager(store=store)
+    session = Session(
+        id="rehydrate-configured-session",
+        created_at=datetime.now(),
+        last_activity=datetime.now(),
+        approval_store=ApprovalStore(),
+        provider=MockProvider(),
+        max_steps=9,
+    )
+    session.provider_name = "anthropic"
+    session.model_name = "claude-test"
+    session.base_url = "http://llm.local"
+    manager.register_session(session)
+
+    rehydrated_manager = SessionManager(store=store)
+    rehydrated_session = rehydrated_manager.get_session("rehydrate-configured-session")
+
+    assert rehydrated_session.provider is None
+
+    llm_plugin = types.SimpleNamespace(_instance=None)
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(get=lambda _: llm_plugin),
+        _directive_executor=None,
+    )
+    fake_ctx = types.SimpleNamespace(config={})
+    captured_kwargs: dict[str, object] = {}
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+            self.ctx = ctx
+
+        async def run_turn(self, prompt: str) -> None:
+            del prompt
+
+    def fake_create_agent(**kwargs):
+        captured_kwargs.update(kwargs)
+        return fake_pipeline, fake_ctx
+
+    with (
+        patch("importlib.import_module") as import_module,
+        patch.dict(
+            SessionManager.run_agent.__globals__, {"PipelineAdapter": FakeAdapter}
+        ),
+    ):
+        import_module.return_value = types.SimpleNamespace(
+            create_agent=fake_create_agent
+        )
+        await rehydrated_manager.run_agent("rehydrate-configured-session", "hello")
+
+    assert captured_kwargs["provider_override"] == "anthropic"
+    assert captured_kwargs["model_override"] == "claude-test"
+    assert captured_kwargs["base_url_override"] == "http://llm.local"
+    assert captured_kwargs["max_steps_override"] == 9
+    assert llm_plugin._instance is None
+
+
 def test_redis_session_store_reports_health_from_ping() -> None:
     class FakeRedisClient:
         def ping(self) -> bool:
