@@ -211,7 +211,6 @@ class TestShellTool:
 
         fake_module = SimpleNamespace(
             SandboxRequest=FakeSandboxRequest,
-<<<<<<< HEAD
             build_sandbox=lambda config: FakeSandbox(),
             SandboxLimits=lambda **kwargs: SimpleNamespace(**kwargs),
             SandboxConfig=lambda **kwargs: SimpleNamespace(**kwargs),
@@ -220,16 +219,6 @@ class TestShellTool:
         monkeypatch.setenv("HOST_ONLY", "host-value")
         monkeypatch.setattr(
             "coding_agent.tools.shell._load_sandbox_module", lambda: fake_module
-=======
-            SandboxConfig=lambda **kwargs: SimpleNamespace(**kwargs),
-            SandboxLimits=lambda **kwargs: SimpleNamespace(**kwargs),
-            build_sandbox=lambda config: FakeSandbox(),
-        )
-        monkeypatch.setenv("HOST_ONLY", "host-value")
-        monkeypatch.setattr(
-            "coding_agent.tools.shell._load_sandbox_module",
-            lambda: fake_module,
->>>>>>> c330af7 (fix(shell): keep sandbox env restricted to explicit vars)
         )
 
         result = bash_run(
@@ -239,7 +228,6 @@ class TestShellTool:
                 config={"shell": {"sandbox_mode": "docker"}}
             ),
         )
-<<<<<<< HEAD
         assert _as_text(result) == "ok"
 
     def test_docker_sandbox_request_env_is_explicit_only(
