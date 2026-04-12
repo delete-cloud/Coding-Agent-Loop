@@ -37,18 +37,36 @@ class FakePool:
             _ = self.sessions.pop(session_id, None)
             return "DELETE 1"
         if "INSERT INTO agent_tapes" in query:
-            tape_id, seq, payload = args
+            tape_id, second_arg, third_arg = args
             if not isinstance(tape_id, str):
                 raise TypeError("tape_id must be a string")
-            if not isinstance(seq, int):
-                raise TypeError("seq must be an int")
-            if not isinstance(payload, str):
-                raise TypeError("payload must be encoded json")
-            payload_obj = json.loads(payload)
-            if not isinstance(payload_obj, dict):
-                raise TypeError("payload must decode to a dict")
             rows = self.tapes.setdefault(tape_id, [])
-            rows.append({"seq": seq, "entry": cast(dict[str, object], payload_obj)})
+            if isinstance(second_arg, int):
+                seq_values = [second_arg]
+            elif isinstance(second_arg, list) and all(
+                isinstance(item, int) for item in second_arg
+            ):
+                seq_values = second_arg
+            else:
+                raise TypeError("seq must be an int or list[int]")
+
+            if isinstance(third_arg, str):
+                payload_values = [third_arg]
+            elif isinstance(third_arg, list) and all(
+                isinstance(item, str) for item in third_arg
+            ):
+                payload_values = third_arg
+            else:
+                raise TypeError("payload must be encoded json or list[str]")
+
+            if len(seq_values) != len(payload_values):
+                raise TypeError("seq and payload batch lengths must match")
+
+            for seq, payload in zip(seq_values, payload_values, strict=True):
+                payload_obj = json.loads(payload)
+                if not isinstance(payload_obj, dict):
+                    raise TypeError("payload must decode to a dict")
+                rows.append({"seq": seq, "entry": cast(dict[str, object], payload_obj)})
             rows.sort(
                 key=lambda item: item["seq"] if isinstance(item["seq"], int) else -1
             )
@@ -353,6 +371,30 @@ class TestPGTapeStore:
         await store.save("tape-1", [])
 
         assert await store.load("tape-1") == []
+
+    @pytest.mark.asyncio
+    async def test_save_batches_insert_round_trip(
+        self, store: PGTapeStore, fake_pool: FakePool
+    ):
+        await store.save(
+            "tape-batch",
+            [
+                {"kind": "message", "payload": {"role": "user", "content": "a"}},
+                {
+                    "kind": "message",
+                    "payload": {"role": "assistant", "content": "b"},
+                },
+                {"kind": "message", "payload": {"role": "user", "content": "c"}},
+            ],
+        )
+
+        insert_calls = [
+            (query, args)
+            for query, args in fake_pool.executed
+            if "INSERT INTO agent_tapes" in query
+        ]
+
+        assert len(insert_calls) == 1
 
     @pytest.mark.asyncio
     async def test_load_empty_tape(self, store: PGTapeStore):
