@@ -101,6 +101,40 @@ def test_create_session_store_redacts_reformatted_redis_exception_text(
     assert "redis://example:6379/0" in caplog.text
 
 
+def test_create_session_store_redacts_unix_socket_redis_credentials(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def failing_factory(url: str):
+        raise OSError(f"cannot connect to {url}")
+
+    with caplog.at_level("WARNING"):
+        store = create_session_store(
+            redis_url="redis://:supersecret@/tmp/redis.sock",
+            redis_client_factory=failing_factory,
+        )
+
+    assert isinstance(store, InMemorySessionStore)
+    assert "supersecret" not in caplog.text
+    assert "redis:/tmp/redis.sock" in caplog.text
+
+
+def test_create_session_store_redacts_ipv6_redis_credentials(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def failing_factory(url: str):
+        raise OSError(f"cannot connect to {url}")
+
+    with caplog.at_level("WARNING"):
+        store = create_session_store(
+            redis_url="redis://:supersecret@[2001:db8::1]:6379/0",
+            redis_client_factory=failing_factory,
+        )
+
+    assert isinstance(store, InMemorySessionStore)
+    assert "supersecret" not in caplog.text
+    assert "redis://[2001:db8::1]:6379/0" in caplog.text
+
+
 def test_in_memory_session_store_reports_healthy() -> None:
     assert InMemorySessionStore().check_health() is True
 
