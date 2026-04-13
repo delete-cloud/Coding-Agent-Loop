@@ -312,10 +312,11 @@ def create_agent(
     max_steps_override: int | None = None,
     approval_mode_override: str | None = None,
     session_id_override: str | None = None,
+    tape: Tape | None = None,
 ) -> tuple[Any, Any]:
     return create_child_pipeline(
         parent_provider=None,
-        tape_fork=Tape(),
+        tape_fork=tape or Tape(),
         tool_filter=None,
         config_path=config_path,
         data_dir=data_dir,
