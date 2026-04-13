@@ -76,6 +76,24 @@ class JSONLTapeStore:
     async def list_ids(self) -> list[str]:
         return [p.stem for p in self._base_dir.glob("*.jsonl")]
 
+    async def truncate(self, tape_id: str, keep: int) -> None:
+        path = self._path_for(tape_id)
+        if not path.exists():
+            return
+
+        def _truncate() -> None:
+            kept_lines: list[str] = []
+            with open(path, encoding="utf-8") as handle:
+                for index, line in enumerate(handle):
+                    if index >= keep:
+                        break
+                    kept_lines.append(line)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.writelines(kept_lines)
+
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _truncate)
+
     def append_memory_record(self, tape_id: str, record: dict[str, Any]) -> None:
         path = self._path_for(tape_id)
         entry = {

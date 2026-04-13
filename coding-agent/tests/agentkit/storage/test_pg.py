@@ -73,6 +73,17 @@ class FakePool:
             return "INSERT 0 1"
         if query.strip() == "SELECT 1":
             return "SELECT 1"
+        if "DELETE FROM agent_tapes WHERE tape_id = $1 AND seq >= $2" in query:
+            tape_id, keep = args
+            if not isinstance(tape_id, str):
+                raise TypeError("tape_id must be a string")
+            if not isinstance(keep, int):
+                raise TypeError("keep must be an int")
+            rows = self.tapes.get(tape_id, [])
+            self.tapes[tape_id] = [
+                row for row in rows if isinstance(row["seq"], int) and row["seq"] < keep
+            ]
+            return "DELETE 1"
         if "CREATE TABLE IF NOT EXISTS agent_sessions" in query:
             return "CREATE TABLE"
         if "CREATE TABLE IF NOT EXISTS agent_tapes" in query:
@@ -412,6 +423,27 @@ class TestPGTapeStore:
 
         result = await store.list_ids()
         assert result == ["tape-a", "tape-b"]
+
+    @pytest.mark.asyncio
+    async def test_truncate_discards_entries_at_and_after_keep(
+        self, store: PGTapeStore
+    ):
+        await store.save(
+            "tape-truncate",
+            [
+                {"kind": "message", "payload": {"role": "user", "content": "a"}},
+                {"kind": "message", "payload": {"role": "assistant", "content": "b"}},
+                {"kind": "message", "payload": {"role": "user", "content": "c"}},
+            ],
+        )
+
+        await store.truncate("tape-truncate", 2)
+
+        rows = await store.load("tape-truncate")
+        assert [cast(dict[str, str], row["payload"])["content"] for row in rows] == [
+            "a",
+            "b",
+        ]
 
 
 class MockPoolForLock:

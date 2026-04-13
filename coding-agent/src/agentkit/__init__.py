@@ -47,7 +47,14 @@ from agentkit.providers import (
     ToolResultEvent,
 )
 from agentkit.runtime import HookRuntime, Lifecycle, Pipeline, PipelineContext
-from agentkit.storage import DocIndex, SessionStore, TapeStore
+from agentkit.checkpoint import CheckpointMeta, CheckpointService, CheckpointSnapshot
+from agentkit.storage import (
+    CheckpointStore,
+    DocIndex,
+    FSCheckpointStore,
+    SessionStore,
+    TapeStore,
+)
 from agentkit.tape import Entry, ForkTapeStore, Tape
 from agentkit.tools import ToolRegistry, ToolSchema, tool
 
@@ -72,9 +79,14 @@ __all__ = [
     "Entry",
     "Tape",
     "ForkTapeStore",
+    "CheckpointMeta",
+    "CheckpointService",
+    "CheckpointSnapshot",
     # Storage
+    "CheckpointStore",
     "TapeStore",
     "DocIndex",
+    "FSCheckpointStore",
     "SessionStore",
     # Tools
     "ToolSchema",
