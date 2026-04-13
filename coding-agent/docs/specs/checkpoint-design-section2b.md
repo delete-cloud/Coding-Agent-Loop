@@ -48,7 +48,11 @@ class TapeStore(Protocol):
 # coding_agent/plugins/storage.py — JSONLTapeStore
 
 async def truncate(self, tape_id: str, keep: int) -> None:
-    """Keep only the first `keep` entries, discard the rest."""
+    """Keep only the first `keep` entries, discard the rest.
+
+    Uses atomic write (temp file → fsync → os.replace) to prevent
+    partial files on crash or power loss.
+    """
     path = self._path_for(tape_id)
     if not path.exists():
         return
@@ -60,8 +64,13 @@ async def truncate(self, tape_id: str, keep: int) -> None:
                 if i >= keep:
                     break
                 lines.append(line)
-        with open(path, "w") as f:
+        # Atomic write: temp → fsync → replace
+        tmp = path.with_suffix(".tmp")
+        with open(tmp, "w") as f:
             f.writelines(lines)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
 
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, _truncate)
@@ -154,7 +163,23 @@ tape_id is preserved.
 async def _restore_checkpoint(
     self, session: Session, checkpoint_id: str
 ) -> None:
-    """Restore session to a checkpoint. Truncate-rollback semantics."""
+    """Restore session to a checkpoint. Preflight-first, then truncate.
+
+    Order of operations (preflight before truncate):
+      1-2. Load + validate checkpoint
+      3-5. Build NEW pipeline/ctx/adapter from checkpoint entries
+      6.   Inject plugin_states as pre-mount hints
+      7.   Preflight mount via adapter.initialize()
+           (steps 3-7 are preflight — if any fail, nothing is mutated)
+      8.   Truncate persisted tape (point of no return)
+      9.   Tear down OLD runtime
+      10.  Swap session to new runtime + persist
+      11.  Invalidate stale checkpoints
+
+    Why preflight before truncate: if create_agent() or plugin mount
+    fails (misconfigured provider, plugin error, etc.), the old session
+    remains intact — no data loss, no degraded state.
+    """
 
     # 1. Load checkpoint
     snapshot = await self._checkpoint_service.restore(checkpoint_id)
@@ -167,21 +192,15 @@ async def _restore_checkpoint(
             f"not session tape {session.tape_id}"
         )
 
-    # 3. Truncate persisted tape to checkpoint's entry_count
-    await self._tape_store.truncate(session.tape_id, meta.entry_count)
-
-    # 4. Rebuild tape from checkpoint's stored entries
-    tape = Tape(
+    # 3. Preflight: build new tape from checkpoint entries
+    new_tape = Tape(
         entries=[Entry.from_dict(e) for e in snapshot.tape_entries],
         tape_id=session.tape_id,          # preserve stable id
         _window_start=meta.window_start,
     )
 
-    # 5. Tear down current hot session (if any)
-    self._evict_runtime(session)
-
-    # 6. Rebuild pipeline via cold path
-    pipeline, ctx = create_agent(
+    # 4. Preflight: create new pipeline + ctx (may fail — safe here)
+    new_pipeline, new_ctx = create_agent(
         workspace_root=session.repo_path,
         model_override=session.model_name,
         provider_override=session.provider_name,
@@ -189,54 +208,89 @@ async def _restore_checkpoint(
         max_steps_override=session.max_steps,
         approval_mode_override=_approval_mode_str(session.approval_policy),
         session_id_override=session.id,
-        tape=tape,
+        tape=new_tape,
     )
 
-    # 7. Optionally inject checkpoint plugin_states into ctx
-    #    (lightweight hint only — not a general rehydration mechanism)
-    #    setdefault: plugins that set their own state during mount won't be
-    #    overwritten; only plugins that don't touch ctx.plugin_states get
-    #    the checkpoint's version. Most critical runtime state (shell cwd,
-    #    MCP connections, memory working set) lives outside ctx.plugin_states
-    #    and is NOT restored here — this is degraded continuity, same as 2A.
+    # 5. Preflight: wire up consumer + adapter
+    new_consumer = self._make_consumer(session)
+    new_ctx.config["wire_consumer"] = new_consumer
+    new_ctx.config["agent_id"] = ""
+    new_adapter = PipelineAdapter(
+        pipeline=new_pipeline, ctx=new_ctx, consumer=new_consumer
+    )
+
+    # 6. Inject checkpoint plugin_states as pre-mount hints.
+    #    These are best-effort: plugins that write their own state
+    #    during mount() will overwrite these values. This is NOT
+    #    full runtime rehydration — same degraded continuity as 2A.
     for key, value in snapshot.plugin_states.items():
-        ctx.plugin_states.setdefault(key, value)
+        new_ctx.plugin_states.setdefault(key, value)
 
-    # 8. Wire up consumer + adapter
-    consumer = self._make_consumer(session)
-    ctx.config["wire_consumer"] = consumer
-    ctx.config["agent_id"] = ""
-    adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
+    # 7. Preflight mount — validate that plugins can initialize.
+    #    PipelineAdapter.initialize() calls pipeline.mount(ctx),
+    #    which is where real failures surface (bad provider config,
+    #    plugin errors, etc.). If this fails, nothing is mutated.
+    await new_adapter.initialize()
 
-    # 9. Update session
-    session.pipeline = pipeline
-    session.pipeline_ctx = ctx
-    session.consumer = consumer
-    session.adapter = adapter
+    # ── Point of no return ──────────────────────────────────
+
+    # 8. Truncate persisted tape to checkpoint's entry_count
+    await self._tape_store.truncate(session.tape_id, meta.entry_count)
+
+    # 9. Tear down OLD runtime (close adapter to release resources)
+    await self._evict_runtime(session)
+
+    # 10. Swap to new runtime + persist
+    session.pipeline = new_pipeline
+    session.pipeline_ctx = new_ctx
+    session.consumer = new_consumer
+    session.adapter = new_adapter
     # tape_id unchanged — same stable id
     self._persist_session(session)
+
+    # 11. Invalidate checkpoints ahead of restore point
+    all_metas = await self._checkpoint_service.list(session.tape_id)
+    for m in all_metas:
+        if m.entry_count > meta.entry_count:
+            await self._checkpoint_service.delete(m.checkpoint_id)
 ```
 
 ### Key design points
 
-1. **Tape truncation before rebuild** — ensures next turn's
-   `ForkTapeStore.commit()` appends at the correct position
+1. **Preflight before truncate** — new pipeline/ctx/adapter are built
+   **and mounted** (`adapter.initialize()`) before any persisted state
+   is mutated. If `create_agent()` or plugin mount fails, the old
+   session is untouched.
 2. **`tape_id` preserved** — no fork, no new id. Session continues
-   on the same stable tape
-3. **Plugin states are best-effort hint only** — `plugin_states` injection
-   is a lightweight hint channel for plugins that already read from
-   `ctx.plugin_states`. It is not a general plugin rehydration mechanism.
-   Most critical runtime state (shell cwd/env, MCP connection state, memory
-   working set, metrics accumulators) lives outside `ctx.plugin_states` and
-   is not restored here. This is degraded continuity, same as 2A's cold path.
-4. **Hot session is torn down first** — `_evict_runtime()` clears
-   pipeline/ctx/adapter/consumer, then rebuild happens cleanly
+   on the same stable tape.
+3. **Plugin states are pre-mount hints only** — `setdefault()` injection
+   happens before `pipeline.mount()`. Plugins that write their own state
+   during `mount()` will overwrite these values. This is NOT full runtime
+   rehydration — shell cwd/env, MCP connections, memory working set, and
+   metrics accumulators are not restored. Same degraded continuity as 2A.
+4. **Old runtime torn down after preflight succeeds** —
+   `_evict_runtime()` closes the old adapter (releasing MCP/plugin
+   resources) only after the new runtime is ready.
+5. **Checkpoint invalidation after restore succeeds** — stale
+   checkpoints (entry_count > restored point) are deleted only after
+   the full restore completes. If restore fails, no checkpoints are lost.
 
 ### `_evict_runtime` helper
 
 ```python
-def _evict_runtime(self, session: Session) -> None:
-    """Clear runtime objects from session (for eviction or restore)."""
+async def _evict_runtime(self, session: Session) -> None:
+    """Close and clear runtime objects (for eviction or restore).
+
+    Closes the adapter first to release MCP connections, plugin
+    resources, and other runtime state. Then clears references.
+    """
+    if session.adapter is not None:
+        close = getattr(session.adapter, "close", None)
+        if callable(close):
+            try:
+                await close()
+            except Exception:
+                logger.warning("Adapter close failed for session %s", session.id)
     session.pipeline = None
     session.pipeline_ctx = None
     session.adapter = None
@@ -637,19 +691,83 @@ factory is a v2 concern when PG backend is needed.
 ```
 /checkpoint restore #2
   │
+  ├─ acquire per-session lock (reject if turn active)
   ├─ _resolve_checkpoint_ref("#2")   ← list + index lookup
-  ├─ turn_in_progress? → reject
   ├─ _restore_checkpoint(session, checkpoint_id)
   │   ├─ checkpoint_service.restore(id) → snapshot
   │   ├─ validate tape_id matches session
-  │   ├─ tape_store.truncate(tape_id, entry_count)   ← NEW
+  │   │
+  │   │  ── preflight (safe to fail) ──
   │   ├─ Tape(entries=snapshot.tape_entries, tape_id=stable_id)
-  │   ├─ _evict_runtime(session)
-  │   ├─ create_agent(tape=restored_tape, ...)
-  │   ├─ plugin_states best-effort inject
+  │   ├─ create_agent(tape=new_tape, ...)
   │   ├─ wire consumer + adapter
-  │   └─ persist session metadata
+  │   ├─ plugin_states pre-mount hints inject
+  │   ├─ await adapter.initialize()        ← mount validated
+  │   │
+  │   │  ── point of no return ──
+  │   ├─ tape_store.truncate(tape_id, entry_count)
+  │   ├─ _evict_runtime(session)           ← close old adapter
+  │   ├─ swap session to new runtime
+  │   ├─ persist session metadata
+  │   └─ delete-ahead stale checkpoints
   └─ "Restored to checkpoint. Next turn continues from turn 28."
+```
+
+---
+
+## Concurrency: Per-Session Lock Coverage
+
+All session-level mutations must be serialized under the same
+per-session lock established in Section 2A. This prevents the critical
+race where a restore truncates the tape while an in-flight turn commits
+with stale base length, corrupting the timeline.
+
+### Protected operations
+
+| Operation | Lock behavior |
+|-----------|---------------|
+| `run_agent()` (turn) | Acquire per-session lock for full turn duration |
+| `/checkpoint save` | Acquire per-session lock (reject if turn active) |
+| `/checkpoint restore` | Acquire per-session lock (reject if turn active) |
+| LRU eviction | Skip sessions with active lock (do not evict mid-turn) |
+| `close_session()` | Acquire per-session lock |
+
+### Implementation
+
+```python
+async def _handle_checkpoint_save(self, session: Session, ...) -> str:
+    lock = self._get_lock(session.id)
+    if lock.locked():
+        return "Cannot save checkpoint while a turn is in progress."
+    async with lock:
+        # ... capture logic ...
+
+async def _handle_checkpoint_restore(self, session: Session, ...) -> str:
+    lock = self._get_lock(session.id)
+    if lock.locked():
+        return "Cannot restore while a turn is in progress."
+    async with lock:
+        # ... restore logic ...
+```
+
+### Eviction safety
+
+`SessionCache.put()` must not evict a session whose lock is held:
+
+```python
+def put(self, session: Session) -> Session | None:
+    evicted = None
+    if session.id in self._cache:
+        self._cache.move_to_end(session.id)
+    elif len(self._cache) >= self._max:
+        # Find the LRU session that is NOT locked
+        for key in list(self._cache.keys()):
+            if not self._is_locked(key):
+                _, evicted = self._cache.pop(key), ...
+                break
+        # If all sessions are active, temporarily exceed max
+    self._cache[session.id] = session
+    return evicted
 ```
 
 ---
@@ -685,31 +803,14 @@ tape, and subsequent turns build forward from that point. If Section 3
 introduces checkpoint branching or forked timelines, this policy would
 be revisited.
 
-Delete checkpoints whose `entry_count > restored_entry_count`:
-
-```python
-async def _restore_checkpoint(self, session: Session, checkpoint_id: str) -> None:
-    snapshot = await self._checkpoint_service.restore(checkpoint_id)
-    meta = snapshot.meta
-
-    # ... validate tape_id ...
-
-    # Invalidate checkpoints that are "ahead" of the restore point
-    all_metas = await self._checkpoint_service.list(session.tape_id)
-    for m in all_metas:
-        if m.entry_count > meta.entry_count:
-            await self._checkpoint_service.delete(m.checkpoint_id)
-
-    # ... truncate, rebuild, etc. ...
-```
+Delete checkpoints whose `entry_count > restored_entry_count`.
+This is done as **step 10** of `_restore_checkpoint()`, **after** the
+full restore succeeds. If restore fails (e.g., during preflight), no
+checkpoints are deleted — the user's existing checkpoints are preserved.
 
 **Why delete, not mark**: Stale checkpoints are actively dangerous —
 restoring a stale checkpoint would truncate to an entry_count that
 doesn't match the current tape timeline. Deletion is the safest option.
-The full-copy model means no data is truly lost (the snapshot's
-`tape_entries` contained the old timeline), but we don't keep them
-because they'd confuse the user and create restore-to-wrong-timeline
-bugs.
 
 **Checkpoint being restored is preserved** — only checkpoints *after*
 the restore point are deleted.
@@ -718,56 +819,33 @@ the restore point are deleted.
 
 ## Error Recovery
 
-### Truncate succeeds, rebuild fails
+### Rebuild or mount fails (preflight)
 
-This is the critical failure mode. If `tape_store.truncate()` succeeds
-but `create_agent()` or `pipeline.mount()` fails, the tape is truncated
-but no working pipeline exists.
+With the preflight-first restore order, `create_agent()`, adapter
+wiring, **and** `adapter.initialize()` (which runs `pipeline.mount()`)
+all happen **before** `tape_store.truncate()`. If any preflight step
+fails:
 
-**Mitigation**: The checkpoint's `tape_entries` are the source of truth.
-The truncated tape can be reconstructed:
+- No persisted state has been modified
+- The old session runtime is still intact
+- The user's existing checkpoints are preserved
+- The error propagates to the caller
 
-```python
-async def _restore_checkpoint(self, session: Session, checkpoint_id: str) -> None:
-    snapshot = await self._checkpoint_service.restore(checkpoint_id)
-    meta = snapshot.meta
+This eliminates the original "truncate succeeded but rebuild failed"
+failure mode entirely. The only residual risk is truncate itself
+failing (disk error, permissions), which is handled below.
 
-    # ... validate ...
+### Truncate fails (after preflight)
 
-    # Truncate persisted tape
-    await self._tape_store.truncate(session.tape_id, meta.entry_count)
+If `tape_store.truncate()` fails after preflight succeeds:
 
-    try:
-        # Rebuild tape and pipeline
-        tape = Tape(
-            entries=[Entry.from_dict(e) for e in snapshot.tape_entries],
-            tape_id=session.tape_id,
-            _window_start=meta.window_start,
-        )
-        self._evict_runtime(session)
-        pipeline, ctx = create_agent(tape=tape, ...)
-        # ... wire up ...
-    except Exception:
-        # Rebuild failed. Session is in a degraded state: tape truncated,
-        # no live pipeline. But checkpoint snapshot is intact, and session
-        # metadata still has tape_id. Next run_agent() call will trigger
-        # cold restore from TapeStore (which has the truncated-but-consistent
-        # entries). Log and propagate.
-        logger.error(
-            "Pipeline rebuild failed after truncate for session %s, "
-            "checkpoint %s. Session will cold-restore on next turn.",
-            session.id, checkpoint_id,
-        )
-        raise
-```
+- New pipeline/ctx/adapter have been built but are not yet installed
+- Old session runtime is still active
+- No checkpoints have been deleted
 
-**Key insight**: truncate + failed rebuild is NOT data loss. The tape is
-shortened to a consistent state matching the checkpoint. A subsequent
-`run_agent()` call will follow the normal cold-restore path from the
-(now-truncated) tape. However, if the rebuild failure is caused by a
-persistent issue (misconfigured provider, plugin mount error, etc.), the
-next call will also fail. Logging and error propagation to the caller
-is necessary; do not assume a retry will always succeed.
+The new runtime objects are discarded (GC'd). The error propagates to
+the caller. The session continues on the old timeline as if restore
+was never attempted.
 
 ### Checkpoint store unavailable
 
@@ -804,6 +882,11 @@ concept. Framework store methods should not depend on session semantics.
 If multi-tape sessions ever exist (unlikely given 2A's stable-id design),
 the product layer would maintain a `session_id → [tape_id, ...]` index
 and fan out queries. Still no change to the framework store.
+
+> **Scale note**: `CheckpointStore.list_by_tape()` scans all `.meta.json`
+> files and filters by `tape_id`. This is acceptable at dev/small-team
+> scale (dozens to hundreds of checkpoints). At larger volumes, migrate
+> to an indexed backend (PG) or add a per-tape index file.
 
 ---
 

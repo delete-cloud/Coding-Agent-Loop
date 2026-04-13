@@ -142,6 +142,12 @@ volumes.
 - `.entries.jsonl` — line-delimited entries allow streaming reads for large tapes
 - `.state.json` — plugin states and extra in one JSON doc
 
+**Write ordering**: files are written in dependency order —
+`.entries.jsonl` first, then `.state.json`, then `.meta.json` last
+(the commit marker). On delete, `.meta.json` is removed first.
+This ensures `list_by_tape()` never surfaces a checkpoint whose
+payload files are missing or partially written.
+
 ---
 
 ## Serialization Filter
@@ -174,7 +180,7 @@ def extract_serializable_states(
         try:
             # Strict: no default=str, no custom encoder.
             # If it doesn't round-trip cleanly, we don't want it.
-            serialized = json.dumps(value)
+            serialized = json.dumps(value, allow_nan=False)
             result[key] = json.loads(serialized)
         except (TypeError, ValueError, OverflowError):
             continue
@@ -189,12 +195,17 @@ def validate_json_safe(data: dict[str, Any], *, name: str) -> None:
     dropping would mask bugs.
     """
     try:
-        json.dumps(data)
+        json.dumps(data, allow_nan=False)
     except (TypeError, ValueError) as exc:
         raise TypeError(
             f"{name} must be JSON-serializable, got error: {exc}"
         ) from exc
 ```
+
+Both functions use `allow_nan=False` so that `NaN`/`Infinity` values —
+which Python's `json` module accepts by default but are **not valid JSON
+per RFC 8259** — are rejected at serialization time rather than producing
+non-interoperable checkpoint files.
 
 ### Two strategies, two use cases
 
@@ -314,6 +325,7 @@ class CheckpointService:
     async def reconstruct_tape(
         self,
         checkpoint_id: str,
+        tape_id: str | None = None,
     ) -> tuple[Tape, dict[str, Any], dict[str, Any]]:
         """Convenience: snapshot → fresh Tape + plugin_states + extra.
 
@@ -321,14 +333,15 @@ class CheckpointService:
         It builds a brand-new Tape instance from persisted entries,
         suitable for injecting into a new PipelineContext.
 
-        The reconstructed Tape gets a fresh runtime identity by default
-        (i.e. a new tape_id unless the caller explicitly establishes
-        lineage elsewhere). parent_id / branching semantics are left to
-        the product layer.
+        If ``tape_id`` is provided, the reconstructed Tape uses that
+        identity (needed for truncate-rollback restore where the
+        session's stable tape_id must be preserved). Otherwise a fresh
+        UUID is generated.
         """
         snapshot = await self.restore(checkpoint_id)
         tape = Tape(
             entries=[Entry.from_dict(e) for e in snapshot.tape_entries],
+            tape_id=tape_id or snapshot.meta.tape_id,
             _window_start=snapshot.meta.window_start,
         )
         return tape, dict(snapshot.plugin_states), dict(snapshot.extra)

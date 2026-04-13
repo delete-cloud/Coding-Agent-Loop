@@ -66,6 +66,53 @@ class ForkTapeStore:
         await self._backing.save(stable_id, delta)             # CHANGED
 ```
 
+### Post-commit identity rebind
+
+The fix above is necessary but **not sufficient**. After
+`ForkTapeStore.commit()` succeeds, `Pipeline.run_turn()` leaves
+`ctx.tape` pointing to the fork (whose `tape_id` is a transient UUID).
+The next turn's `begin(ctx.tape)` would use that transient id as the
+new base — breaking stable identity again.
+
+**Fix**: `commit()` returns the stable base tape id. `Pipeline.run_turn()`
+rebinds `ctx.tape` identity after successful commit.
+
+```python
+# agentkit/tape/store.py — commit returns stable id
+
+async def commit(self, fork: Tape) -> str:
+    """Persist delta and return the stable base tape_id."""
+    if fork.tape_id in self._finalized:
+        raise ValueError(f"tape '{fork.tape_id}' already finalized")
+    stable_id = self._base_tape_ids[fork.tape_id]
+    delta = fork.to_list()[self._base_lengths[fork.tape_id]:]
+    await self._backing.save(stable_id, delta)
+    # Finalize bookkeeping AFTER successful save (not before)
+    self._finalized.add(fork.tape_id)
+    self._active.pop(fork.tape_id, None)
+    self._base_lengths.pop(fork.tape_id, None)
+    self._base_tape_ids.pop(fork.tape_id, None)
+    return stable_id
+```
+
+```python
+# agentkit/runtime/pipeline.py — rebind after commit
+
+if fork is not None:
+    stable_id = await ctx.storage.commit(fork)
+    ctx.tape._tape_id = stable_id   # rebind to stable identity
+```
+
+**Key changes from original proposal:**
+
+1. `_finalized.add()` moves **after** `backing.save()` — prevents
+   masking save failures as "already finalized" in rollback
+2. Bookkeeping dicts (`_base_lengths`, `_base_tape_ids`) are cleaned
+   up after commit, preventing unbounded growth
+3. `commit()` returns `str` (the stable id) instead of `None`
+4. Pipeline rebinds `ctx.tape` identity so the next turn's
+   `begin()` uses the correct stable id
+
 ### Semantic change
 
 | Before | After |
@@ -73,6 +120,8 @@ class ForkTapeStore:
 | Each fork's delta saved under fork's own UUID | Each fork's delta appended under base tape's stable UUID |
 | No single id contains full history | `tape_store.load(base_tape_id)` returns complete history |
 | Fork id = persistence id | Fork id = transaction-scoped working id only |
+| `ctx.tape.tape_id` drifts each turn | `ctx.tape.tape_id` rebinds to stable id after commit |
+| `_finalized` set before save | `_finalized` set after save succeeds (fail-safe) |
 
 ### Impact
 
@@ -306,17 +355,19 @@ async def _run_cold(self, session: Session, prompt: str) -> None:
     await adapter.run_turn(prompt)
 
 async def _restore_tape(self, tape_id: str | None) -> Tape | None:
-    """Load tape from TapeStore. Returns None if no prior history."""
+    """Load tape from TapeStore. Returns empty Tape with stable id if
+    no entries found (preserves identity for subsequent commits).
+
+    Raises on real I/O / corruption errors — do not silently mask
+    failures as "fresh start", which would discard conversation
+    history without the caller knowing.
+    """
     if tape_id is None or self._tape_store is None:
         return None
-    try:
-        entries = await self._tape_store.load(tape_id)
-        if not entries:
-            return None
-        return Tape.from_list(entries, tape_id=tape_id)
-    except Exception:
-        logger.warning("Failed to load tape %s, starting fresh", tape_id)
-        return None
+    entries = await self._tape_store.load(tape_id)
+    if not entries:
+        return Tape(tape_id=tape_id)   # preserve stable id
+    return Tape.from_list(entries, tape_id=tape_id)
 ```
 
 ### First turn of a new session
