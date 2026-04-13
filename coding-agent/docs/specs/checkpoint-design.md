@@ -1,9 +1,12 @@
 # Checkpoint Design — agentkit Framework Layer
 
-> **Status**: Draft — Section 1 (agentkit primitives)
+> **Status**: Archived — historical design draft
 > **Date**: 2026-04-13
 > **Scope**: `agentkit/checkpoint/`, `agentkit/storage/protocols.py` additions only.
 > Product-layer integration (coding-agent) covered in Section 2 (pending).
+>
+> Decisions extracted to [ADR-0001](../adr/0001-checkpoint-captures-serialized-tape-and-plugin-state.md).
+> Code is the source of truth. This document is retained as historical design context and is no longer maintained.
 
 ---
 

@@ -1,10 +1,13 @@
 # Section 2A — HTTP Session Tape Continuity
 
-> **Status**: Draft
+> **Status**: Archived — historical design draft
 > **Date**: 2026-04-13
 > **Depends on**: Section 1 (agentkit checkpoint primitives)
 > **Scope**: `agentkit/tape/store.py` (ForkTapeStore fix), `coding_agent/app.py`,
 > `coding_agent/ui/session_manager.py`, new `coding_agent/ui/session_lock.py`
+>
+> Decisions extracted to [ADR-0002](../adr/0002-fork-tape-store-commits-to-stable-base-id.md), [ADR-0003](../adr/0003-http-sessions-use-one-stable-tape-timeline.md), and [ADR-0004](../adr/0004-cold-restore-provides-degraded-continuity.md).
+> Code is the source of truth. This document is retained as historical design context and is no longer maintained.
 
 ---
 

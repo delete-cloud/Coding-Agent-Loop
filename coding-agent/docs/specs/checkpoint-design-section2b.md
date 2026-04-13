@@ -1,9 +1,12 @@
 # Section 2B — Checkpoint Integration (Product Layer)
 
-> **Status**: Draft
+> **Status**: Archived — historical design draft
 > **Date**: 2026-04-13
 > **Depends on**: Section 1 (agentkit checkpoint primitives), Section 2A (session tape continuity)
 > **Scope**: `coding_agent/` primarily. One agentkit change: `TapeStore.truncate()` protocol addition.
+>
+> Decisions extracted to [ADR-0004](../adr/0004-cold-restore-provides-degraded-continuity.md), [ADR-0005](../adr/0005-checkpoint-restore-uses-truncate-rollback.md), and [ADR-0006](../adr/0006-checkpoint-plugin-state-restores-as-best-effort-hints.md).
+> Code is the source of truth. This document is retained as historical design context and is no longer maintained.
 
 ---
 
