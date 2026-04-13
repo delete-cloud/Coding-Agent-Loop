@@ -199,7 +199,8 @@ class Pipeline:
                     raise PipelineError(str(exc), stage=stage) from exc
 
             if fork is not None:
-                await ctx.storage.commit(fork)
+                stable_tape_id = await ctx.storage.commit(fork)
+                ctx.tape.tape_id = stable_tape_id
 
             return ctx
         except Exception:

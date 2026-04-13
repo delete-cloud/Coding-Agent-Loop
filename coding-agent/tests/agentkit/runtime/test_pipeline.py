@@ -302,6 +302,7 @@ class TestPipeline:
                 self.begin_calls = []
                 self.commit_calls = []
                 self.rollback_calls = []
+                self.stable_tape_id = "stable-tape-id"
 
             def begin(self, tape):
                 self.begin_calls.append(tape)
@@ -309,6 +310,7 @@ class TestPipeline:
 
             async def commit(self, tape):
                 self.commit_calls.append(tape)
+                return self.stable_tape_id
 
             def rollback(self, tape):
                 self.rollback_calls.append(tape)
@@ -340,6 +342,7 @@ class TestPipeline:
         assert ctx.tape is storage.commit_calls[0]
         assert ctx.tape is not original_tape
         assert ctx.tape.parent_id == original_tape.tape_id
+        assert ctx.tape.tape_id == storage.stable_tape_id
 
     @pytest.mark.asyncio
     async def test_build_context_applies_summary_entries(self, setup):
