@@ -8,6 +8,7 @@ import logging
 import os
 import uuid
 from collections.abc import AsyncIterator
+from collections.abc import Callable
 from inspect import isawaitable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -39,6 +40,7 @@ from coding_agent.ui.session_store import (
     SessionStore,
     create_session_store,
 )
+from agentkit.storage.protocols import CheckpointStore, TapeStore
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +106,9 @@ class Session:
     approval_response: dict[str, Any] | None = None
     event_queues: list[asyncio.Queue[dict[str, Any]]] = field(default_factory=list)
     tape_id: str | None = None
+    runtime_pipeline: Any | None = None
+    runtime_ctx: Any | None = None
+    runtime_adapter: Any | None = None
 
     def __post_init__(self) -> None:
         self.wire = LocalWire(self.id)
@@ -207,17 +212,54 @@ class _WireConsumer:
 class SessionManager:
     """Manages agent sessions with lifecycle and resource management."""
 
-    def __init__(self, store: SessionStore | None = None):
+    def __init__(
+        self,
+        store: SessionStore | None = None,
+        *,
+        tape_store: TapeStore | None = None,
+        checkpoint_store: CheckpointStore | None = None,
+        checkpoint_service: CheckpointService | None = None,
+        create_agent_fn: Callable[..., tuple[Any, Any]] | None = None,
+    ):
         self._store = store or create_session_store()
         self._session_cache: dict[str, Session] = {}
         self._approval_stores: dict[str, ApprovalStore] = {}
         self._lock = asyncio.Lock()
         self._session_turn_locks: dict[str, asyncio.Lock] = {}
         data_dir = Path(os.environ.get("AGENT_DATA_DIR", "./data"))
-        self._tape_store = JSONLTapeStore(data_dir / "tapes")
-        self._checkpoint_service = CheckpointService(
-            FSCheckpointStore(data_dir / "checkpoints")
+        self._tape_store = tape_store or JSONLTapeStore(data_dir / "tapes")
+        resolved_checkpoint_store = checkpoint_store or FSCheckpointStore(
+            data_dir / "checkpoints"
         )
+        self._checkpoint_service = checkpoint_service or CheckpointService(
+            resolved_checkpoint_store
+        )
+        self._create_agent = create_agent_fn
+
+    async def _close_runtime(self, session: Session) -> None:
+        adapter = session.runtime_adapter
+        self._invalidate_runtime(session)
+        if adapter is None:
+            return
+        close = getattr(adapter, "close", None)
+        if callable(close):
+            close_result = close()
+            if isawaitable(close_result):
+                await close_result
+
+    def _close_runtime_sync_safe(self, session: Session) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(self._close_runtime(session))
+            return
+        loop.create_task(self._close_runtime(session))
+
+    def _create_agent_for_session(self, **kwargs: Any) -> tuple[Any, Any]:
+        factory = self._create_agent
+        if factory is None:
+            factory = importlib.import_module("coding_agent.__main__").create_agent
+        return factory(**kwargs)
 
     def _turn_lock_for(self, session_id: str) -> asyncio.Lock:
         lock = self._session_turn_locks.get(session_id)
@@ -293,6 +335,12 @@ class SessionManager:
             raise ValueError(
                 f"Checkpoint {checkpoint_id} belongs to tape {meta.tape_id}, not session tape {session.tape_id}"
             )
+        if meta.entry_count != len(snapshot.tape_entries):
+            raise ValueError(
+                "checkpoint entry_count does not match snapshot tape_entries length"
+            )
+        if meta.window_start > meta.entry_count:
+            raise ValueError("checkpoint window_start must be <= entry_count")
 
         restored_tape = Tape(
             entries=[Entry.from_dict(entry) for entry in snapshot.tape_entries],
@@ -305,8 +353,7 @@ class SessionManager:
             ApprovalPolicy.INTERACTIVE: "interactive",
             ApprovalPolicy.AUTO: "auto",
         }
-        create_agent = importlib.import_module("coding_agent.__main__").create_agent
-        pipeline, ctx = create_agent(
+        pipeline, ctx = self._create_agent_for_session(
             workspace_root=session.repo_path,
             model_override=session.model_name,
             provider_override=session.provider_name,
@@ -335,8 +382,12 @@ class SessionManager:
             if isawaitable(initialize_result):
                 await initialize_result
 
+        await self._close_runtime(session)
         await self._tape_store.truncate(session.tape_id, meta.entry_count)
         session.tape_id = ctx.tape.tape_id
+        session.runtime_pipeline = pipeline
+        session.runtime_ctx = ctx
+        session.runtime_adapter = adapter
         self._persist_session(session)
 
         checkpoints = await self._checkpoint_service.list(ctx.tape.tape_id)
@@ -347,6 +398,11 @@ class SessionManager:
     def _persist_session(self, session: Session) -> None:
         self._session_cache[session.id] = session
         self._store.save(session.id, cast(dict[str, Any], session.to_store_data()))
+
+    def _invalidate_runtime(self, session: Session) -> None:
+        session.runtime_pipeline = None
+        session.runtime_ctx = None
+        session.runtime_adapter = None
 
     def _hydrate_session(self, session: Session) -> Session:
         approval_store = self._approval_stores.get(session.id)
@@ -457,18 +513,23 @@ class SessionManager:
         return self._store.load(session_id) is not None
 
     def register_session(self, session: Session) -> None:
+        self._close_runtime_sync_safe(session)
         self._approval_stores[session.id] = session.approval_store
         self._persist_session(session)
 
     def remove_session(self, session_id: str) -> None:
         if not self.has_session(session_id):
             raise KeyError(f"Session not found: {session_id}")
+        session = self.get_session(session_id)
+        self._close_runtime_sync_safe(session)
         self._session_cache.pop(session_id, None)
         self._store.delete(session_id)
         self._approval_stores.pop(session_id, None)
         self._session_turn_locks.pop(session_id, None)
 
     def clear_sessions(self) -> None:
+        for session in list(self._session_cache.values()):
+            self._close_runtime_sync_safe(session)
         for session_id in list(self._store.list_sessions()):
             self._store.delete(session_id)
         self._session_cache.clear()
@@ -572,37 +633,50 @@ class SessionManager:
                     ApprovalPolicy.AUTO: "auto",
                 }
 
-                create_agent = importlib.import_module(
-                    "coding_agent.__main__"
-                ).create_agent
-
-                pipeline, ctx = create_agent(
-                    workspace_root=session.repo_path,
-                    model_override=session.model_name,
-                    provider_override=session.provider_name,
-                    base_url_override=session.base_url,
-                    max_steps_override=session.max_steps,
-                    approval_mode_override=approval_mode_map[session.approval_policy],
-                    session_id_override=session_id,
-                    api_key=None,
-                    tape=await self._restore_tape(session.tape_id),
-                )
-                session.tape_id = ctx.tape.tape_id
-                self._persist_session(session)
-                ctx.config["wire_consumer"] = None
-                ctx.config["agent_id"] = ""
-
-                llm_plugin = pipeline._registry.get("llm_provider")
-                if session.provider is not None:
-                    llm_plugin._instance = session.provider
-
                 consumer = self._make_session_consumer(session)
+                pipeline = session.runtime_pipeline
+                ctx = session.runtime_ctx
+                adapter = session.runtime_adapter
+
+                if pipeline is None or ctx is None or adapter is None:
+                    pipeline, ctx = self._create_agent_for_session(
+                        workspace_root=session.repo_path,
+                        model_override=session.model_name,
+                        provider_override=session.provider_name,
+                        base_url_override=session.base_url,
+                        max_steps_override=session.max_steps,
+                        approval_mode_override=approval_mode_map[
+                            session.approval_policy
+                        ],
+                        session_id_override=session_id,
+                        api_key=None,
+                        tape=await self._restore_tape(session.tape_id),
+                    )
+                    session.tape_id = ctx.tape.tape_id
+                    self._persist_session(session)
+                    ctx.config["wire_consumer"] = None
+                    ctx.config["agent_id"] = ""
+
+                    llm_plugin = pipeline._registry.get("llm_provider")
+                    if session.provider is not None:
+                        llm_plugin._instance = session.provider
+
+                    adapter = PipelineAdapter(
+                        pipeline=pipeline, ctx=ctx, consumer=consumer
+                    )
+                    session.runtime_pipeline = pipeline
+                    session.runtime_ctx = ctx
+                    session.runtime_adapter = adapter
+
+                set_consumer = getattr(adapter, "set_consumer", None)
+                if callable(set_consumer):
+                    set_consumer(consumer)
                 ctx.config["wire_consumer"] = consumer
-                adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
                 await adapter.run_turn(prompt)
                 session.tape_id = ctx.tape.tape_id
                 self._persist_session(session)
             except Exception as exc:
+                await self._close_runtime(session)
                 logger.exception("HTTP session turn failed")
                 await session.wire.send(
                     StreamDelta(
