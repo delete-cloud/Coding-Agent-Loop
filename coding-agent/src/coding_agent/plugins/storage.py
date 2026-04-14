@@ -8,6 +8,7 @@ import asyncio
 import importlib
 import json
 import os
+import tempfile
 import time
 import uuid
 from inspect import isawaitable
@@ -90,8 +91,25 @@ class JSONLTapeStore:
                     if index >= keep:
                         break
                     kept_lines.append(line)
-            with open(path, "w", encoding="utf-8") as handle:
-                handle.writelines(kept_lines)
+
+            fd, temp_path = tempfile.mkstemp(
+                dir=path.parent,
+                prefix=f"{path.name}.",
+                suffix=".tmp",
+                text=True,
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.writelines(kept_lines)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temp_path, path)
+            except Exception:
+                try:
+                    os.unlink(temp_path)
+                except FileNotFoundError:
+                    pass
+                raise
 
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, _truncate)
