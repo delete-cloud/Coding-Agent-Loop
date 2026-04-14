@@ -143,3 +143,28 @@ class TestJSONLTapeStore:
 
         assert path.read_text(encoding="utf-8") == original
         assert list(tmp_path.glob("test-tape.jsonl.*.tmp")) == []
+
+    @pytest.mark.asyncio
+    async def test_truncate_fsyncs_parent_directory_after_replace(
+        self, tmp_path, monkeypatch
+    ):
+        store = JSONLTapeStore(tmp_path)
+        path = tmp_path / "test-tape.jsonl"
+        path.write_text(
+            '{"kind": "message", "payload": {"x": 1}}\n'
+            '{"kind": "message", "payload": {"x": 2}}\n',
+            encoding="utf-8",
+        )
+
+        fsync_calls: list[int] = []
+        original_fsync = storage_module.os.fsync
+
+        def record_fsync(fd: int) -> None:
+            fsync_calls.append(fd)
+            original_fsync(fd)
+
+        monkeypatch.setattr(storage_module.os, "fsync", record_fsync)
+
+        await store.truncate("test-tape", 1)
+
+        assert len(fsync_calls) >= 2

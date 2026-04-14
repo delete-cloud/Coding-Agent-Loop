@@ -104,6 +104,11 @@ class JSONLTapeStore:
                     handle.flush()
                     os.fsync(handle.fileno())
                 os.replace(temp_path, path)
+                dir_fd = os.open(path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
             except Exception:
                 try:
                     os.unlink(temp_path)
