@@ -225,6 +225,8 @@ class PGTapeStore:
         return tape_ids
 
     async def truncate(self, tape_id: str, keep: int) -> None:
+        if keep < 0:
+            raise ValueError("keep must be >= 0")
         pool = await self._ensure_schema()
         _ = await pool.execute(self._TRUNCATE_SQL, tape_id, keep)
 

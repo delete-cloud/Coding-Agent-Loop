@@ -113,3 +113,10 @@ class TestJSONLTapeStore:
         await store.truncate("missing", 0)
 
         assert not (tmp_path / "missing.jsonl").exists()
+
+    @pytest.mark.asyncio
+    async def test_truncate_rejects_negative_keep(self, tmp_path):
+        store = JSONLTapeStore(tmp_path)
+
+        with pytest.raises(ValueError, match="keep must be >= 0"):
+            await store.truncate("test-tape", -1)

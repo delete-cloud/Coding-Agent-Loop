@@ -445,6 +445,11 @@ class TestPGTapeStore:
             "b",
         ]
 
+    @pytest.mark.asyncio
+    async def test_truncate_rejects_negative_keep(self, store: PGTapeStore):
+        with pytest.raises(ValueError, match="keep must be >= 0"):
+            await store.truncate("tape-truncate", -1)
+
 
 class MockPoolForLock:
     def __init__(self) -> None:

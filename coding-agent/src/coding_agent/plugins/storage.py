@@ -77,6 +77,8 @@ class JSONLTapeStore:
         return [p.stem for p in self._base_dir.glob("*.jsonl")]
 
     async def truncate(self, tape_id: str, keep: int) -> None:
+        if keep < 0:
+            raise ValueError("keep must be >= 0")
         path = self._path_for(tape_id)
         if not path.exists():
             return
