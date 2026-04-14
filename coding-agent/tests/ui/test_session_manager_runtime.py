@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import types
 
 import pytest
@@ -35,7 +36,7 @@ async def test_run_agent_does_not_hardcode_api_key() -> None:
             get=lambda _: types.SimpleNamespace(_instance=None)
         )
     )
-    fake_ctx = types.SimpleNamespace(config={})
+    fake_ctx = types.SimpleNamespace(config={}, tape=Tape())
 
     captured_kwargs: dict[str, object] = {}
 
@@ -121,7 +122,7 @@ async def test_run_agent_clears_pending_approval_after_runtime_timeout() -> None
             get=lambda _: types.SimpleNamespace(_instance=None)
         )
     )
-    fake_ctx = types.SimpleNamespace(config={})
+    fake_ctx = types.SimpleNamespace(config={}, tape=Tape())
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(
@@ -179,6 +180,85 @@ async def test_run_agent_reuses_session_tape_id_across_hot_turns() -> None:
     persisted_payload = store.get(session_id)
     assert persisted_payload is not None
     assert persisted_payload["tape_id"] == "stable-session-tape"
+
+
+@pytest.mark.asyncio
+async def test_run_agent_persists_tape_id_before_turn_completion() -> None:
+    store = InMemorySessionStore()
+    manager = SessionManager(store=store)
+    session_id = await manager.create_session()
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+            self.ctx = ctx
+
+        async def run_turn(self, prompt: str) -> None:
+            del prompt
+            raise RuntimeError("turn exploded after tape allocation")
+
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        )
+    )
+
+    def fake_create_agent(**kwargs):
+        return fake_pipeline, types.SimpleNamespace(
+            config={}, tape=Tape(tape_id="allocated-before-run")
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
+        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        await manager.run_agent(session_id, "hello")
+
+    persisted_payload = store.get(session_id)
+    assert persisted_payload is not None
+    assert persisted_payload["tape_id"] == "allocated-before-run"
+
+
+@pytest.mark.asyncio
+async def test_run_agent_rejects_concurrent_turn_for_same_session() -> None:
+    store = InMemorySessionStore()
+    manager = SessionManager(store=store)
+    session_id = await manager.create_session()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+            self.ctx = ctx
+
+        async def run_turn(self, prompt: str) -> None:
+            del prompt
+            started.set()
+            await release.wait()
+
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        )
+    )
+
+    def fake_create_agent(**kwargs):
+        return fake_pipeline, types.SimpleNamespace(
+            config={}, tape=kwargs.get("tape") or Tape()
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
+        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+
+        first = asyncio.create_task(manager.run_agent(session_id, "first"))
+        await asyncio.wait_for(started.wait(), timeout=1)
+
+        with pytest.raises(RuntimeError, match="turn already in progress"):
+            await manager.run_agent(session_id, "second")
+
+        release.set()
+        await first
 
 
 @pytest.mark.asyncio
@@ -528,3 +608,15 @@ async def test_restore_injects_checkpoint_plugin_states_before_mount() -> None:
         await manager._restore_checkpoint(session, "cp-plugin")
 
     assert observed_before_mount == [{"topic": {"current_topic_id": "topic-1"}}]
+
+
+def test_clear_sessions_clears_session_turn_locks() -> None:
+    manager = SessionManager(store=InMemorySessionStore())
+    _ = manager._turn_lock_for("session-a")
+    _ = manager._turn_lock_for("session-b")
+
+    assert manager._session_turn_locks
+
+    manager.clear_sessions()
+
+    assert manager._session_turn_locks == {}

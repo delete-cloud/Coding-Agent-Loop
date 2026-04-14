@@ -212,11 +212,19 @@ class SessionManager:
         self._session_cache: dict[str, Session] = {}
         self._approval_stores: dict[str, ApprovalStore] = {}
         self._lock = asyncio.Lock()
+        self._session_turn_locks: dict[str, asyncio.Lock] = {}
         data_dir = Path(os.environ.get("AGENT_DATA_DIR", "./data"))
         self._tape_store = JSONLTapeStore(data_dir / "tapes")
         self._checkpoint_service = CheckpointService(
             FSCheckpointStore(data_dir / "checkpoints")
         )
+
+    def _turn_lock_for(self, session_id: str) -> asyncio.Lock:
+        lock = self._session_turn_locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._session_turn_locks[session_id] = lock
+        return lock
 
     async def _restore_tape(self, tape_id: str | None) -> Tape | None:
         if tape_id is None:
@@ -458,12 +466,14 @@ class SessionManager:
         self._session_cache.pop(session_id, None)
         self._store.delete(session_id)
         self._approval_stores.pop(session_id, None)
+        self._session_turn_locks.pop(session_id, None)
 
     def clear_sessions(self) -> None:
         for session_id in list(self._store.list_sessions()):
             self._store.delete(session_id)
         self._session_cache.clear()
         self._approval_stores.clear()
+        self._session_turn_locks.clear()
 
     def add_event_queue(
         self,
@@ -545,67 +555,76 @@ class SessionManager:
         session_id: str,
         prompt: str,
     ) -> None:
-        session = self.get_session(session_id)
-        session.last_activity = datetime.now()
-        session.turn_in_progress = True
-        self._persist_session(session)
+        turn_lock = self._turn_lock_for(session_id)
+        if turn_lock.locked():
+            raise RuntimeError("turn already in progress")
 
-        try:
-            approval_mode_map = {
-                ApprovalPolicy.YOLO: "yolo",
-                ApprovalPolicy.INTERACTIVE: "interactive",
-                ApprovalPolicy.AUTO: "auto",
-            }
-
-            create_agent = importlib.import_module("coding_agent.__main__").create_agent
-
-            pipeline, ctx = create_agent(
-                workspace_root=session.repo_path,
-                model_override=session.model_name,
-                provider_override=session.provider_name,
-                base_url_override=session.base_url,
-                max_steps_override=session.max_steps,
-                approval_mode_override=approval_mode_map[session.approval_policy],
-                session_id_override=session_id,
-                api_key=None,
-                tape=await self._restore_tape(session.tape_id),
-            )
-            ctx.config["wire_consumer"] = None
-            ctx.config["agent_id"] = ""
-
-            llm_plugin = pipeline._registry.get("llm_provider")
-            if session.provider is not None:
-                llm_plugin._instance = session.provider
-
-            consumer = self._make_session_consumer(session)
-            ctx.config["wire_consumer"] = consumer
-            adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
-            await adapter.run_turn(prompt)
-            session.tape_id = ctx.tape.tape_id
-            self._persist_session(session)
-        except Exception as exc:
-            logger.exception("HTTP session turn failed")
-            await session.wire.send(
-                StreamDelta(
-                    session_id=session_id,
-                    agent_id="",
-                    content=f"Error: {exc}",
-                )
-            )
-            await session.wire.send(
-                TurnEnd(
-                    session_id=session_id,
-                    agent_id="",
-                    turn_id=uuid.uuid4().hex,
-                    completion_status=CompletionStatus.ERROR,
-                )
-            )
-        finally:
-            current_task = asyncio.current_task()
-            if session.task is None or session.task is not current_task:
-                session.turn_in_progress = False
+        async with turn_lock:
+            session = self.get_session(session_id)
             session.last_activity = datetime.now()
+            session.turn_in_progress = True
             self._persist_session(session)
+
+            try:
+                approval_mode_map = {
+                    ApprovalPolicy.YOLO: "yolo",
+                    ApprovalPolicy.INTERACTIVE: "interactive",
+                    ApprovalPolicy.AUTO: "auto",
+                }
+
+                create_agent = importlib.import_module(
+                    "coding_agent.__main__"
+                ).create_agent
+
+                pipeline, ctx = create_agent(
+                    workspace_root=session.repo_path,
+                    model_override=session.model_name,
+                    provider_override=session.provider_name,
+                    base_url_override=session.base_url,
+                    max_steps_override=session.max_steps,
+                    approval_mode_override=approval_mode_map[session.approval_policy],
+                    session_id_override=session_id,
+                    api_key=None,
+                    tape=await self._restore_tape(session.tape_id),
+                )
+                session.tape_id = ctx.tape.tape_id
+                self._persist_session(session)
+                ctx.config["wire_consumer"] = None
+                ctx.config["agent_id"] = ""
+
+                llm_plugin = pipeline._registry.get("llm_provider")
+                if session.provider is not None:
+                    llm_plugin._instance = session.provider
+
+                consumer = self._make_session_consumer(session)
+                ctx.config["wire_consumer"] = consumer
+                adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
+                await adapter.run_turn(prompt)
+                session.tape_id = ctx.tape.tape_id
+                self._persist_session(session)
+            except Exception as exc:
+                logger.exception("HTTP session turn failed")
+                await session.wire.send(
+                    StreamDelta(
+                        session_id=session_id,
+                        agent_id="",
+                        content=f"Error: {exc}",
+                    )
+                )
+                await session.wire.send(
+                    TurnEnd(
+                        session_id=session_id,
+                        agent_id="",
+                        turn_id=uuid.uuid4().hex,
+                        completion_status=CompletionStatus.ERROR,
+                    )
+                )
+            finally:
+                current_task = asyncio.current_task()
+                if session.task is None or session.task is not current_task:
+                    session.turn_in_progress = False
+                session.last_activity = datetime.now()
+                self._persist_session(session)
 
     async def submit_approval(
         self,
