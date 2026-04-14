@@ -14,14 +14,33 @@ class FSCheckpointStore:
         self._base_dir = Path(base_dir)
         self._base_dir.mkdir(parents=True, exist_ok=True)
 
+    def _validated_checkpoint_id(self, checkpoint_id: str) -> str:
+        if checkpoint_id == "":
+            raise ValueError("checkpoint_id must not be empty")
+
+        candidate = Path(checkpoint_id)
+        if candidate.is_absolute():
+            raise ValueError("checkpoint_id must be a single relative path component")
+        if len(candidate.parts) != 1:
+            raise ValueError("checkpoint_id must be a single path component")
+        if any(part in {"", ".", ".."} for part in candidate.parts):
+            raise ValueError("checkpoint_id must not contain path traversal components")
+        if "\\" in checkpoint_id:
+            raise ValueError("checkpoint_id must not contain path separators")
+
+        return checkpoint_id
+
     def _meta_path(self, checkpoint_id: str) -> Path:
-        return self._base_dir / f"{checkpoint_id}.meta.json"
+        safe_checkpoint_id = self._validated_checkpoint_id(checkpoint_id)
+        return self._base_dir / f"{safe_checkpoint_id}.meta.json"
 
     def _entries_path(self, checkpoint_id: str) -> Path:
-        return self._base_dir / f"{checkpoint_id}.entries.jsonl"
+        safe_checkpoint_id = self._validated_checkpoint_id(checkpoint_id)
+        return self._base_dir / f"{safe_checkpoint_id}.entries.jsonl"
 
     def _state_path(self, checkpoint_id: str) -> Path:
-        return self._base_dir / f"{checkpoint_id}.state.json"
+        safe_checkpoint_id = self._validated_checkpoint_id(checkpoint_id)
+        return self._base_dir / f"{safe_checkpoint_id}.state.json"
 
     async def save(self, snapshot: CheckpointSnapshot) -> None:
         checkpoint_id = snapshot.meta.checkpoint_id

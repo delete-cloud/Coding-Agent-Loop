@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -186,3 +187,46 @@ async def test_checkpoint_store_round_trips_full_snapshot(tmp_path) -> None:
     loaded = await store.load("cp-roundtrip")
 
     assert loaded == snapshot
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "checkpoint_id",
+    ["", "../evil", "nested/path", "/absolute", r"..\\evil"],
+)
+async def test_checkpoint_store_rejects_unsafe_checkpoint_ids(
+    tmp_path: Path, checkpoint_id: str
+) -> None:
+    from agentkit.storage.checkpoint_fs import FSCheckpointStore
+
+    store = FSCheckpointStore(tmp_path)
+    snapshot = CheckpointSnapshot(
+        meta=CheckpointMeta(
+            checkpoint_id=checkpoint_id,
+            tape_id="tape-roundtrip",
+            session_id="session-roundtrip",
+            entry_count=1,
+            window_start=0,
+            created_at=datetime.now(UTC),
+            label="unsafe",
+        ),
+        tape_entries=(
+            {
+                "id": "e-1",
+                "kind": "message",
+                "payload": {"role": "user", "content": "hello"},
+                "timestamp": 1.0,
+            },
+        ),
+        plugin_states={},
+        extra={},
+    )
+
+    with pytest.raises(ValueError, match="checkpoint_id"):
+        await store.save(snapshot)
+
+    with pytest.raises(ValueError, match="checkpoint_id"):
+        await store.load(checkpoint_id)
+
+    with pytest.raises(ValueError, match="checkpoint_id"):
+        await store.delete(checkpoint_id)
