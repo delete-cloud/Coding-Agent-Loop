@@ -74,6 +74,42 @@ class TestMetricHelpers:
         assert result.tools_called[0].input_parameters == {"goal": "child task"}
         assert result.tools_called[0].output == "Subagent completed: child done"
 
+    def test_make_tool_correctness_metric_uses_kimi_code_judge_when_available(
+        self, monkeypatch
+    ) -> None:
+        class FakeMetric:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        class FakeGPTModel:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        monkeypatch.setenv("KIMI_CODE_API_KEY", "sk-kimi-code")
+        monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
+        monkeypatch.setitem(sys.modules, "deepeval", ModuleType("deepeval"))
+        monkeypatch.setitem(
+            sys.modules,
+            "deepeval.metrics",
+            SimpleNamespace(ToolCorrectnessMetric=FakeMetric),
+        )
+        monkeypatch.setitem(
+            sys.modules,
+            "deepeval.models",
+            SimpleNamespace(GPTModel=FakeGPTModel),
+        )
+
+        from coding_agent.evaluation.metrics import make_tool_correctness_metric
+
+        metric = make_tool_correctness_metric(threshold=0.7)
+
+        assert metric.kwargs["threshold"] == 0.7
+        assert metric.kwargs["model"].kwargs == {
+            "model": "kimi-for-coding",
+            "api_key": "sk-kimi-code",
+            "base_url": "https://api.kimi.com/coding/v1",
+        }
+
     @pytest.mark.asyncio
     async def test_metric_measure_supports_async_metrics(self, monkeypatch) -> None:
         class FakeToolCall:
