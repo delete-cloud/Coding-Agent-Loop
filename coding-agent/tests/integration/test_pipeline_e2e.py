@@ -2,6 +2,7 @@
 
 import json
 import asyncio
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -9,11 +10,15 @@ import pytest
 
 from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
 from agentkit.runtime.hook_runtime import HookRuntime
+from agentkit.tape.extract import Visibility, extract_turns
 from agentkit.tape.models import Entry
+from agentkit.tape.store import ForkTapeStore
 
 from coding_agent.__main__ import create_agent
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.adapter_types import StopReason, TurnOutcome
+from coding_agent.evaluation import build_test_cases, load_tape_entries
+from coding_agent.plugins.storage import JSONLTapeStore
 from coding_agent.wire.protocol import (
     StreamDelta,
     ToolCallDelta,
@@ -23,6 +28,13 @@ from coding_agent.wire.protocol import (
 
 CONFIG_PATH = (
     Path(__file__).parent.parent.parent / "src" / "coding_agent" / "agent.toml"
+)
+GOLDEN_SPEC_PATH = (
+    Path(__file__).parent.parent.parent
+    / "data"
+    / "eval"
+    / "golden"
+    / "parent-child-subagent-001.yaml"
 )
 
 
@@ -48,6 +60,20 @@ def _mock_provider(pipeline, stream_fn):
     llm_plugin = pipeline._registry.get("llm_provider")
     llm_plugin._instance = mock
     return mock
+
+
+def _real_provider_env_name(provider_name: str) -> str:
+    if provider_name == "copilot":
+        return "GITHUB_TOKEN"
+    if provider_name == "kimi":
+        return "MOONSHOT_API_KEY"
+    if provider_name in {"kimi-code", "kimi-code-anthropic"}:
+        return "KIMI_CODE_API_KEY"
+    return "AGENT_API_KEY"
+
+
+def _skip_if_no_deepeval() -> None:
+    pytest.importorskip("deepeval")
 
 
 class TestPipelineE2E:
@@ -106,6 +132,264 @@ class TestPipelineE2E:
             and entry.payload.get("content") == "Child finished summary"
             for entry in hidden_child_entries
         )
+
+    @pytest.mark.asyncio
+    async def test_subagent_turn_persisted_tape_flows_into_eval_adapter(self, tmp_path):
+        pipeline, ctx = _setup_agent(tmp_path, approval_mode="yolo")
+        ctx.config["max_tool_rounds"] = 3
+
+        call_count = 0
+
+        async def mock_stream(messages, tools=None, **kwargs):
+            del messages, tools, kwargs
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                yield ToolCallEvent(
+                    tool_call_id="tc-subagent",
+                    name="subagent",
+                    arguments={"goal": "child task"},
+                )
+                yield DoneEvent()
+            elif call_count == 2:
+                yield TextEvent(text="child done")
+                yield DoneEvent()
+            else:
+                yield TextEvent(text="parent done")
+                yield DoneEvent()
+
+        _mock_provider(pipeline, mock_stream)
+        await pipeline.mount(ctx)
+
+        adapter = PipelineAdapter(pipeline, ctx, consumer=None)
+        outcome = await adapter.run_turn("parent task")
+
+        assert outcome.stop_reason == StopReason.NO_TOOL_CALLS
+        assert outcome.final_message == "parent done"
+
+        tape_path = tmp_path / "generated-parent-child.jsonl"
+        ctx.tape.save_jsonl(tape_path)
+
+        loaded_entries = load_tape_entries(tape_path)
+        visible_turns = extract_turns(loaded_entries, visibility=Visibility.VISIBLE)
+        raw_turns = extract_turns(loaded_entries, visibility=Visibility.RAW)
+        cases = build_test_cases(
+            tape_path=tape_path,
+            spec_path=GOLDEN_SPEC_PATH,
+        )
+
+        assert len(visible_turns) == 1
+        assert visible_turns[0].user_input == "parent task"
+        assert visible_turns[0].final_output == "parent done"
+        assert [tool.name for tool in visible_turns[0].tool_calls] == ["subagent"]
+        assert visible_turns[0].tool_calls[0].arguments == {"goal": "child task"}
+        assert (
+            visible_turns[0].tool_calls[0].result_content
+            == "Subagent completed: child done"
+        )
+
+        assert any(
+            entry.kind == "message"
+            and entry.payload.get("role") == "user"
+            and entry.meta.get("skip_context")
+            and entry.payload.get("content") == "child task"
+            for entry in loaded_entries
+        )
+        assert len(raw_turns) == 2
+        assert [turn.user_input for turn in raw_turns] == ["parent task", "child task"]
+        assert raw_turns[0].final_output is None
+        # RAW mode exposes the hidden child user message as a turn boundary, so the
+        # later visible parent assistant message becomes the second turn's final output.
+        assert raw_turns[1].final_output == "parent done"
+        raw_child_messages = [
+            entry
+            for entry in loaded_entries
+            if entry.kind == "message"
+            and entry.meta.get("skip_context")
+            and entry.payload.get("content") == "child done"
+        ]
+        assert raw_child_messages
+
+        assert len(cases) == 1
+        assert cases[0].input == "parent task"
+        assert cases[0].actual_output == "parent done"
+        assert [tool.name for tool in cases[0].tools_called] == ["subagent"]
+        assert [tool.name for tool in cases[0].expected_tools] == ["subagent"]
+        assert cases[0].expected_tools[0].input_parameters == {"goal": "child task"}
+
+    @pytest.mark.asyncio
+    async def test_storage_backed_persisted_tape_round_trip(self, tmp_path):
+        pipeline, ctx = _setup_agent(tmp_path, approval_mode="yolo")
+        ctx.config["max_tool_rounds"] = 3
+
+        call_count = 0
+
+        async def mock_stream(messages, tools=None, **kwargs):
+            del messages, tools, kwargs
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                yield ToolCallEvent(
+                    tool_call_id="tc-subagent-storage",
+                    name="subagent",
+                    arguments={"goal": "child task"},
+                )
+                yield DoneEvent()
+            elif call_count == 2:
+                yield TextEvent(text="child done")
+                yield DoneEvent()
+            else:
+                yield TextEvent(text="parent done")
+                yield DoneEvent()
+
+        _mock_provider(pipeline, mock_stream)
+        await pipeline.mount(ctx)
+
+        adapter = PipelineAdapter(pipeline, ctx, consumer=None)
+        outcome = await adapter.run_turn("parent task")
+
+        assert outcome.final_message == "parent done"
+
+        storage = pipeline._runtime.call_first("provide_storage")
+        assert isinstance(storage, ForkTapeStore)
+
+        jsonl_store = JSONLTapeStore(tmp_path / "tapes")
+        persisted = await jsonl_store.load(ctx.tape.tape_id)
+
+        assert persisted
+        persisted_entries = tuple(Entry.from_dict(item) for item in persisted)
+        assert persisted_entries[0].kind == "tool_call"
+        assert persisted_entries[0].payload["name"] == "subagent"
+        assert any(
+            entry.kind == "message"
+            and entry.payload.get("role") == "user"
+            and entry.payload.get("content") == "child task"
+            and entry.meta.get("skip_context")
+            for entry in persisted_entries
+        )
+        loaded_entries = (ctx.tape[0], *persisted_entries)
+        visible_turns = extract_turns(loaded_entries, visibility=Visibility.VISIBLE)
+
+        assert len(visible_turns) == 1
+        assert visible_turns[0].user_input == "parent task"
+        assert visible_turns[0].final_output == "parent done"
+        assert [tool.name for tool in visible_turns[0].tool_calls] == ["subagent"]
+
+    @pytest.mark.asyncio
+    async def test_real_provider_e2e_turn_skips_without_credentials(
+        self, tmp_path, monkeypatch
+    ):
+        provider_name = os.environ.get("AGENT_PROVIDER", "openai")
+        env_name = _real_provider_env_name(provider_name)
+        credential = os.environ.get(env_name)
+        if not credential:
+            pytest.skip(f"Real provider test requires {env_name}")
+
+        config_path = CONFIG_PATH
+        pipeline, ctx = create_agent(
+            config_path=config_path,
+            data_dir=tmp_path,
+            api_key=credential,
+            provider_override=provider_name,
+            approval_mode_override="yolo",
+        )
+        monkeypatch.delenv("AGENT_API_KEY", raising=False)
+
+        await pipeline.mount(ctx)
+
+        adapter = PipelineAdapter(pipeline, ctx, consumer=None)
+        outcome = await adapter.run_turn(
+            "Reply with exactly REAL_PROVIDER_OK and do not call any tools."
+        )
+
+        assert outcome.stop_reason == StopReason.NO_TOOL_CALLS
+        assert outcome.final_message is not None
+        assert "REAL_PROVIDER_OK" in outcome.final_message
+
+        tape_path = tmp_path / "real-provider-turn.jsonl"
+        ctx.tape.save_jsonl(tape_path)
+
+        loaded_entries = load_tape_entries(tape_path)
+        visible_turns = extract_turns(loaded_entries, visibility=Visibility.VISIBLE)
+
+        assert len(visible_turns) == 1
+        assert visible_turns[0].user_input == (
+            "Reply with exactly REAL_PROVIDER_OK and do not call any tools."
+        )
+        assert visible_turns[0].final_output is not None
+        assert "REAL_PROVIDER_OK" in visible_turns[0].final_output
+        assert visible_turns[0].tool_calls == ()
+
+        single_turn_spec = tmp_path / "real-provider-turn.yaml"
+        _ = single_turn_spec.write_text(
+            'task: "Reply with exactly REAL_PROVIDER_OK and do not call any tools."\n'
+            "expected_tools: []\n"
+            "threshold: 1.0\n",
+            encoding="utf-8",
+        )
+        cases = build_test_cases(
+            tape_path=tape_path,
+            spec_path=single_turn_spec,
+        )
+
+        assert len(cases) == 1
+        assert cases[0].input == (
+            "Reply with exactly REAL_PROVIDER_OK and do not call any tools."
+        )
+        assert "REAL_PROVIDER_OK" in cases[0].actual_output
+        assert cases[0].tools_called == ()
+        assert cases[0].expected_tools == ()
+
+    @pytest.mark.asyncio
+    async def test_tool_correctness_metric_accepts_built_test_case(self, tmp_path):
+        _skip_if_no_deepeval()
+
+        pipeline, ctx = _setup_agent(tmp_path, approval_mode="yolo")
+        ctx.config["max_tool_rounds"] = 3
+
+        call_count = 0
+
+        async def mock_stream(messages, tools=None, **kwargs):
+            del messages, tools, kwargs
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                yield ToolCallEvent(
+                    tool_call_id="tc-subagent-metric",
+                    name="subagent",
+                    arguments={"goal": "child task"},
+                )
+                yield DoneEvent()
+            elif call_count == 2:
+                yield TextEvent(text="child done")
+                yield DoneEvent()
+            else:
+                yield TextEvent(text="parent done")
+                yield DoneEvent()
+
+        _mock_provider(pipeline, mock_stream)
+        await pipeline.mount(ctx)
+
+        adapter = PipelineAdapter(pipeline, ctx, consumer=None)
+        outcome = await adapter.run_turn("parent task")
+
+        assert outcome.final_message == "parent done"
+
+        tape_path = tmp_path / "metric-e2e-parent-child.jsonl"
+        ctx.tape.save_jsonl(tape_path)
+        cases = build_test_cases(
+            tape_path=tape_path,
+            spec_path=GOLDEN_SPEC_PATH,
+        )
+
+        assert len(cases) == 1
+
+        from coding_agent.evaluation.metrics import make_tool_correctness_metric
+
+        metric = make_tool_correctness_metric()
+        score = await metric_measure(metric, cases[0])
+
+        assert score >= 0.0
 
     @pytest.mark.asyncio
     async def test_run_command_streaming_events(self, tmp_path):
