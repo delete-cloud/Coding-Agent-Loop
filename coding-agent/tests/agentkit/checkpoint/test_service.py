@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+import agentkit.storage.checkpoint_fs as checkpoint_fs_module
 
 from agentkit.checkpoint.models import CheckpointMeta, CheckpointSnapshot
 from agentkit.runtime.pipeline import PipelineContext
@@ -230,3 +231,95 @@ async def test_checkpoint_store_rejects_unsafe_checkpoint_ids(
 
     with pytest.raises(ValueError, match="checkpoint_id"):
         await store.delete(checkpoint_id)
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_store_save_keeps_checkpoint_invisible_when_meta_replace_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentkit.storage.checkpoint_fs import FSCheckpointStore
+
+    store = FSCheckpointStore(tmp_path)
+    snapshot = CheckpointSnapshot(
+        meta=CheckpointMeta(
+            checkpoint_id="cp-atomic",
+            tape_id="tape-atomic",
+            session_id="session-atomic",
+            entry_count=1,
+            window_start=0,
+            created_at=datetime.now(UTC),
+            label="atomic",
+        ),
+        tape_entries=(
+            {
+                "id": "e-1",
+                "kind": "message",
+                "payload": {"role": "user", "content": "hello"},
+                "timestamp": 1.0,
+            },
+        ),
+        plugin_states={"topic": {"current_topic_id": "topic-1"}},
+        extra={"workspace": "/tmp/repo"},
+    )
+
+    original_replace = checkpoint_fs_module.os.replace
+
+    def fail_meta_replace(src: str | Path, dst: str | Path) -> None:
+        if Path(dst).name.endswith(".meta.json"):
+            raise OSError("meta replace failed")
+        original_replace(src, dst)
+
+    monkeypatch.setattr(checkpoint_fs_module.os, "replace", fail_meta_replace)
+
+    with pytest.raises(OSError, match="meta replace failed"):
+        await store.save(snapshot)
+
+    assert await store.load("cp-atomic") is None
+    assert await store.list_by_tape("tape-atomic") == []
+    assert not tmp_path.joinpath("cp-atomic.entries.jsonl").exists()
+    assert not tmp_path.joinpath("cp-atomic.state.json").exists()
+    assert not tmp_path.joinpath("cp-atomic.meta.json").exists()
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_store_save_fsyncs_parent_directory_after_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentkit.storage.checkpoint_fs import FSCheckpointStore
+
+    store = FSCheckpointStore(tmp_path)
+    snapshot = CheckpointSnapshot(
+        meta=CheckpointMeta(
+            checkpoint_id="cp-fsync",
+            tape_id="tape-fsync",
+            session_id="session-fsync",
+            entry_count=1,
+            window_start=0,
+            created_at=datetime.now(UTC),
+            label="fsync",
+        ),
+        tape_entries=(
+            {
+                "id": "e-1",
+                "kind": "message",
+                "payload": {"role": "user", "content": "hello"},
+                "timestamp": 1.0,
+            },
+        ),
+        plugin_states={},
+        extra={},
+    )
+
+    fsync_targets: list[int] = []
+    original_fsync = checkpoint_fs_module.os.fsync
+
+    def record_fsync(fd: int) -> None:
+        fsync_targets.append(fd)
+        original_fsync(fd)
+
+    monkeypatch.setattr(checkpoint_fs_module.os, "fsync", record_fsync)
+
+    await store.save(snapshot)
+
+    assert len(fsync_targets) >= 4
