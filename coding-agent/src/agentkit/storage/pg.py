@@ -162,6 +162,9 @@ class PGTapeStore:
         "SELECT entry FROM agent_tapes WHERE tape_id = $1 ORDER BY seq"
     )
     _LIST_SQL: Final[str] = "SELECT DISTINCT tape_id FROM agent_tapes ORDER BY tape_id"
+    _TRUNCATE_SQL: Final[str] = (
+        "DELETE FROM agent_tapes WHERE tape_id = $1 AND seq >= $2"
+    )
 
     def __init__(self, *, pool: PGPool) -> None:
         self._pool: PGPool = pool
@@ -220,6 +223,12 @@ class PGTapeStore:
                 raise TypeError("postgres tape row must include string tape_id")
             tape_ids.append(tape_id)
         return tape_ids
+
+    async def truncate(self, tape_id: str, keep: int) -> None:
+        if keep < 0:
+            raise ValueError("keep must be >= 0")
+        pool = await self._ensure_schema()
+        _ = await pool.execute(self._TRUNCATE_SQL, tape_id, keep)
 
 
 class PGSessionLock:

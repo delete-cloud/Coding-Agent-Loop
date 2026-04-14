@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
+from agentkit.tape.tape import Tape
 from coding_agent.approval.store import ApprovalStore
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.wire.protocol import (
@@ -36,6 +37,46 @@ def test_register_session_uses_public_api() -> None:
 
     assert manager.has_session("test-session")
     assert manager.get_session("test-session") is session
+
+
+def test_session_manager_accepts_injected_storage_backends() -> None:
+    class FakeTapeStore:
+        async def save(self, tape_id: str, entries: list[dict[str, object]]) -> None:
+            return None
+
+        async def load(self, tape_id: str) -> list[dict[str, object]]:
+            return []
+
+        async def list_ids(self) -> list[str]:
+            return []
+
+        async def truncate(self, tape_id: str, keep: int) -> None:
+            return None
+
+    class FakeCheckpointService:
+        async def capture(self, *args, **kwargs):
+            raise AssertionError("unused")
+
+        async def restore(self, checkpoint_id: str):
+            raise AssertionError("unused")
+
+        async def list(self, tape_id: str):
+            return []
+
+        async def delete(self, checkpoint_id: str) -> None:
+            return None
+
+    tape_store = FakeTapeStore()
+    checkpoint_service = FakeCheckpointService()
+
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        tape_store=tape_store,
+        checkpoint_service=checkpoint_service,
+    )
+
+    assert manager._tape_store is tape_store
+    assert manager._checkpoint_service is checkpoint_service
 
 
 def test_clear_sessions_uses_public_api() -> None:
@@ -282,7 +323,7 @@ async def test_run_agent_restores_restart_safe_agent_configuration_after_rehydra
         _registry=types.SimpleNamespace(get=lambda _: llm_plugin),
         _directive_executor=None,
     )
-    fake_ctx = types.SimpleNamespace(config={})
+    fake_ctx = types.SimpleNamespace(config={}, tape=Tape())
     captured_kwargs: dict[str, object] = {}
 
     class FakeAdapter:
@@ -396,7 +437,7 @@ async def test_run_agent_does_not_hardcode_api_key() -> None:
         ),
         _directive_executor=None,
     )
-    fake_ctx = types.SimpleNamespace(config={})
+    fake_ctx = types.SimpleNamespace(config={}, tape=Tape())
 
     with (
         patch("importlib.import_module") as import_module,
@@ -493,7 +534,7 @@ async def test_run_agent_clears_pending_approval_after_runtime_timeout() -> None
         ),
         _directive_executor=None,
     )
-    fake_ctx = types.SimpleNamespace(config={})
+    fake_ctx = types.SimpleNamespace(config={}, tape=Tape())
 
     with (
         patch("importlib.import_module") as import_module,

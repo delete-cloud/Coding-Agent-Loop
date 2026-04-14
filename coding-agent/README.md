@@ -144,6 +144,22 @@ docs/
 - `PipelineAdapter` bridges runtime events to wire messages for Rich, headless, and HTTP consumers
 - `CoreToolsPlugin` is the main tool surface; `SkillsPlugin` and `MCPPlugin` extend the agent beyond local file/shell tools
 
+## Recommended Workflow Entry
+
+For work in this repository, use the workflow layers like this:
+
+- `AGENTS.md` sets the repository defaults and ADR rules.
+- `.agents/skills/adr-first-workflow/SKILL.md` helps decide whether the task needs an ADR, how to shape scope, and which target tests should gate the work.
+- `.opencode/prompts/README.md` and the local prompt set run the bounded engineer/reviewer/verifier loop once the task is already scoped.
+
+Quick decision rule:
+
+1. If you are not sure whether the task needs an ADR, or you are not yet sure about scope or target tests, start with `adr-first-workflow`.
+2. If the goal, scope, relevant ADRs, and target tests are already known, go straight to the task packet and the `.opencode/prompts` bounded loop.
+3. If the task changes persistence, protocol, data model, or cross-module boundaries, record that decision through the ADR workflow before implementation.
+
+Short version: use the skill for workflow judgment, and use the prompt set for disciplined execution.
+
 For more detail, see:
 
 - [docs/AGENTKIT-ARCHITECTURE.md](docs/AGENTKIT-ARCHITECTURE.md)

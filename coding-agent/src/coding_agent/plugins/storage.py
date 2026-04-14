@@ -8,6 +8,7 @@ import asyncio
 import importlib
 import json
 import os
+import tempfile
 import time
 import uuid
 from inspect import isawaitable
@@ -75,6 +76,48 @@ class JSONLTapeStore:
 
     async def list_ids(self) -> list[str]:
         return [p.stem for p in self._base_dir.glob("*.jsonl")]
+
+    async def truncate(self, tape_id: str, keep: int) -> None:
+        if keep < 0:
+            raise ValueError("keep must be >= 0")
+        path = self._path_for(tape_id)
+        if not path.exists():
+            return
+
+        def _truncate() -> None:
+            kept_lines: list[str] = []
+            with open(path, encoding="utf-8") as handle:
+                for index, line in enumerate(handle):
+                    if index >= keep:
+                        break
+                    kept_lines.append(line)
+
+            fd, temp_path = tempfile.mkstemp(
+                dir=path.parent,
+                prefix=f"{path.name}.",
+                suffix=".tmp",
+                text=True,
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.writelines(kept_lines)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temp_path, path)
+                dir_fd = os.open(path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except Exception:
+                try:
+                    os.unlink(temp_path)
+                except FileNotFoundError:
+                    pass
+                raise
+
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _truncate)
 
     def append_memory_record(self, tape_id: str, record: dict[str, Any]) -> None:
         path = self._path_for(tape_id)

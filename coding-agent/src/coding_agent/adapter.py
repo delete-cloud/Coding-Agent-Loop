@@ -136,6 +136,13 @@ class PipelineAdapter:
                 consumer, ctx.session_id
             )
 
+    def set_consumer(self, consumer: WireConsumer | None) -> None:
+        self._consumer = consumer
+        if consumer is not None and self._pipeline._directive_executor is not None:
+            self._pipeline._directive_executor._ask_user = _make_ask_user_handler(
+                consumer, self._ctx.session_id
+            )
+
     async def initialize(self) -> None:
         if self._mounted:
             return
@@ -223,18 +230,6 @@ class PipelineAdapter:
                 return
         self._ctx.tape.append(user_entry)
 
-    def _normalize_tool_result_for_wire(
-        self, result: str | dict[str, Any] | BaseModel
-    ) -> tuple[str | dict[str, Any], str]:
-        if isinstance(result, BaseModel):
-            payload = result.model_dump()
-            return payload, json.dumps(payload)
-        if isinstance(result, str):
-            return result, result
-        if type(result) is dict:
-            return result, json.dumps(result)
-        return result, str(result)
-
     def _has_doom_signal(self, entries: list[Entry]) -> bool:
         for entry in reversed(entries):
             if entry.kind != "event":
@@ -302,9 +297,7 @@ class PipelineAdapter:
                 )
             )
         elif isinstance(event, ToolResultEvent):
-            wire_result, display_result = self._normalize_tool_result_for_wire(
-                event.result
-            )
+            wire_result, display_result = _normalize_tool_result_for_wire(event.result)
             await self._consumer.emit(
                 ToolResultDelta(
                     call_id=event.tool_call_id,
