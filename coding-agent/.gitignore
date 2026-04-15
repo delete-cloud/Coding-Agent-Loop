@@ -7,9 +7,20 @@ uv.lock
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
+.deepeval/
+.tmp-e2e-check/
+.tmp-storage-check/
 .claude/worktrees/
 
 data/
+!data/
+data/*
+!data/eval/
+data/eval/*
+!data/eval/golden/
+data/eval/golden/*
+!data/eval/golden/*.jsonl
+!data/eval/golden/*.yaml
 
 helm/
 .alma-snapshots
