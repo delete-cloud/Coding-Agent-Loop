@@ -254,6 +254,52 @@ Target tests:
             "uv run pytest tests/coding_agent/test_pipeline_adapter.py -v",
         ]
 
+    def test_load_task_packet_contract_keeps_zero_and_two_space_top_level_bullets(
+        self, tmp_path: Path
+    ) -> None:
+        packet = tmp_path / "task-packet.md"
+        _ = packet.write_text(
+            """
+Goal:
+- Verify a bounded task packet
+
+Target tests:
+- uv run pytest tests/cli/test_commands.py -v
+  - uv run pytest tests/coding_agent/test_pipeline_adapter.py -v
+""",
+            encoding="utf-8",
+        )
+
+        contract = load_task_packet_contract(packet)
+
+        assert [step.command for step in contract.steps] == [
+            "uv run pytest tests/cli/test_commands.py -v",
+            "uv run pytest tests/coding_agent/test_pipeline_adapter.py -v",
+        ]
+
+    def test_load_task_packet_contract_keeps_zero_and_three_space_top_level_bullets(
+        self, tmp_path: Path
+    ) -> None:
+        packet = tmp_path / "task-packet.md"
+        _ = packet.write_text(
+            """
+Goal:
+- Verify a bounded task packet
+
+Target tests:
+- uv run pytest tests/cli/test_commands.py -v
+   - uv run pytest tests/coding_agent/test_pipeline_adapter.py -v
+""",
+            encoding="utf-8",
+        )
+
+        contract = load_task_packet_contract(packet)
+
+        assert [step.command for step in contract.steps] == [
+            "uv run pytest tests/cli/test_commands.py -v",
+            "uv run pytest tests/coding_agent/test_pipeline_adapter.py -v",
+        ]
+
     def test_load_task_packet_contract_requires_target_tests(
         self, tmp_path: Path
     ) -> None:
