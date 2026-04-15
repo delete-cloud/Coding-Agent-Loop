@@ -126,8 +126,7 @@ def _tool_call_records(entry: Entry) -> list[ToolCallRecord]:
                 ),
             )
             records.append(record)
-        if records:
-            return records
+        return records
 
     return [
         ToolCallRecord(

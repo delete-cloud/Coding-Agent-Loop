@@ -281,6 +281,30 @@ class TestBatchToolCalls:
         assert [record.call_id for record in turns[0].tool_calls] == ["", ""]
         assert [record.result_content for record in turns[0].tool_calls] == [None, None]
 
+    def test_empty_batched_tool_call_payload_does_not_create_blank_record(self):
+        entries = [
+            _user("go"),
+            Entry(kind="tool_call", payload={"tool_calls": []}),
+            _assistant("done"),
+        ]
+
+        turns = extract_turns(entries)
+
+        assert len(turns) == 1
+        assert turns[0].tool_calls == ()
+
+    def test_malformed_batched_tool_call_payload_does_not_create_blank_record(self):
+        entries = [
+            _user("go"),
+            Entry(kind="tool_call", payload={"tool_calls": [None, "bad", 3]}),
+            _assistant("done"),
+        ]
+
+        turns = extract_turns(entries)
+
+        assert len(turns) == 1
+        assert turns[0].tool_calls == ()
+
 
 # ---------------------------------------------------------------------------
 # skip_context / subagent handling
