@@ -25,6 +25,13 @@ class ApprovalChoice(str, Enum):
     REJECT_WITH_REASON = "reject_with_reason"
 
 
+def _tool_title(req: ApprovalRequest) -> str:
+    tool = req.tool
+    if not req.agent_id:
+        return tool
+    return f"{tool} — from {req.agent_id}"
+
+
 def format_tool_preview(console: Console, req: ApprovalRequest) -> None:
     """Render a tool-specific preview panel.
 
@@ -35,22 +42,23 @@ def format_tool_preview(console: Console, req: ApprovalRequest) -> None:
     """
     tool = req.tool
     args = req.args
+    title = _tool_title(req)
 
     if tool == "bash" or "bash" in tool.lower():
-        _preview_bash(console, args)
+        _preview_bash(console, args, title)
     elif tool == "file_write" or "write" in tool.lower():
-        _preview_file_write(console, args)
+        _preview_file_write(console, args, title)
     elif tool == "file_edit" or "edit" in tool.lower():
-        _preview_file_edit(console, args)
+        _preview_file_edit(console, args, title)
     else:
-        _preview_generic(console, tool, args)
+        _preview_generic(console, args, title)
 
 
-def _preview_bash(console: Console, args: dict[str, Any]) -> None:
+def _preview_bash(console: Console, args: dict[str, Any], title: str) -> None:
     command = args.get("command", "")
     panel = Panel(
         Syntax(command, "bash", theme="monokai", line_numbers=False),
-        title="\u26a1 [bold yellow]bash[/] \u2014 Command to execute",
+        title=f"\u26a1 [bold yellow]{title}[/] \u2014 Command to execute",
         border_style="yellow",
         padding=(0, 1),
         expand=False,
@@ -58,7 +66,7 @@ def _preview_bash(console: Console, args: dict[str, Any]) -> None:
     console.print(panel)
 
 
-def _preview_file_write(console: Console, args: dict[str, Any]) -> None:
+def _preview_file_write(console: Console, args: dict[str, Any], title: str) -> None:
     path = args.get("path", "unknown")
     content = args.get("content", "")
 
@@ -73,7 +81,7 @@ def _preview_file_write(console: Console, args: dict[str, Any]) -> None:
 
     panel = Panel(
         Syntax(display, lang or "text", theme="monokai", line_numbers=True),
-        title=f"\U0001f4c4 [bold cyan]file_write[/] \u2192 {path}",
+        title=f"\U0001f4c4 [bold cyan]{title}[/] \u2192 {path}",
         border_style="cyan",
         padding=(0, 1),
         expand=False,
@@ -81,7 +89,7 @@ def _preview_file_write(console: Console, args: dict[str, Any]) -> None:
     console.print(panel)
 
 
-def _preview_file_edit(console: Console, args: dict[str, Any]) -> None:
+def _preview_file_edit(console: Console, args: dict[str, Any], title: str) -> None:
     path = args.get("path", "unknown")
     old_text = args.get("old_text", "")
     new_text = args.get("new_text", "")
@@ -95,7 +103,7 @@ def _preview_file_edit(console: Console, args: dict[str, Any]) -> None:
 
     panel = Panel(
         diff_text,
-        title="\U0001f4dd [bold]file_edit[/] \u2014 Changes",
+        title=f"\U0001f4dd [bold]{title}[/] \u2014 Changes",
         border_style="yellow",
         padding=(0, 1),
         expand=False,
@@ -103,7 +111,7 @@ def _preview_file_edit(console: Console, args: dict[str, Any]) -> None:
     console.print(panel)
 
 
-def _preview_generic(console: Console, tool: str, args: dict[str, Any]) -> None:
+def _preview_generic(console: Console, args: dict[str, Any], title: str) -> None:
     args_parts = []
     for key, value in args.items():
         val_str = str(value)
@@ -114,7 +122,7 @@ def _preview_generic(console: Console, tool: str, args: dict[str, Any]) -> None:
 
     panel = Panel(
         args_text,
-        title=f"\U0001f527 [bold]{tool}[/]",
+        title=f"\U0001f527 [bold]{title}[/]",
         border_style="yellow",
         padding=(0, 1),
         expand=False,

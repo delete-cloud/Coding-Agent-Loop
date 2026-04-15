@@ -76,6 +76,21 @@ class TestFormatToolPreview:
         assert "custom_tool" in output
         assert "key" in output
 
+    def test_child_tool_preview_shows_agent_context(self):
+        req = ApprovalRequest(
+            session_id="s1",
+            agent_id="child-1",
+            request_id="r1",
+            tool="bash_run",
+            args={"command": "pwd"},
+        )
+        buf = StringIO()
+        console = Console(file=buf, force_terminal=True, width=80)
+        format_tool_preview(console, req)
+        output = buf.getvalue()
+        assert "child-1" in output
+        assert "bash" in output.lower() or "⚡" in output
+
 
 class TestApprovalChoice:
     def test_enum_values(self):
