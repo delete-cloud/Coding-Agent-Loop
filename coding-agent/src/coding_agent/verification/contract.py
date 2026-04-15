@@ -27,18 +27,6 @@ _BULLET_COMMAND = re.compile(
 )
 
 
-def _is_top_level_indent(indent_width: int, line: str, *, saw_top_level: bool) -> bool:
-    if indent_width == 0:
-        return True
-    if indent_width == 1:
-        return True
-    if indent_width in {2, 3}:
-        if not saw_top_level:
-            return True
-        return line[indent_width:].startswith("- uv run ")
-    return False
-
-
 def load_task_packet_contract(path: Path) -> VerificationContract:
     text = path.read_text(encoding="utf-8")
     lines = text.splitlines()
@@ -68,7 +56,7 @@ def load_task_packet_contract(path: Path) -> VerificationContract:
         break
 
     commands: list[str] = []
-    saw_top_level = False
+    top_level_indent: int | None = None
     for line in section_lines:
         match = _BULLET_COMMAND.match(line)
         if match is None:
@@ -87,11 +75,13 @@ def load_task_packet_contract(path: Path) -> VerificationContract:
         if not stripped_command or stripped_command.startswith("-"):
             continue
 
-        if not _is_top_level_indent(indent_width, line, saw_top_level=saw_top_level):
+        if top_level_indent is None:
+            top_level_indent = indent_width
+
+        if indent_width != top_level_indent:
             continue
 
         commands.append(stripped_command)
-        saw_top_level = True
 
     if not commands:
         raise ValueError("Target tests section must include at least one command")
