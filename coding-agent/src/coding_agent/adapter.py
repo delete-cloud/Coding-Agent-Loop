@@ -56,7 +56,9 @@ if TYPE_CHECKING:
     from coding_agent.ui.rich_consumer import WireConsumer
 
 
-def _make_ask_user_handler(consumer: WireConsumer, session_id: str = "") -> Any:
+def _make_ask_user_handler(
+    consumer: WireConsumer, session_id: str = "", agent_id: str = ""
+) -> Any:
     """Bridge DirectiveExecutor ask_user_handler to WireConsumer.request_approval."""
 
     async def handler(question: str, metadata: dict[str, Any] | None = None) -> bool:
@@ -64,6 +66,7 @@ def _make_ask_user_handler(consumer: WireConsumer, session_id: str = "") -> Any:
         arguments = (metadata or {}).get("arguments", {})
         req = ApprovalRequest(
             session_id=session_id,
+            agent_id=agent_id,
             request_id=uuid.uuid4().hex,
             tool=tool_name or "approval",
             args=arguments if arguments else {"question": question},
@@ -133,14 +136,14 @@ class PipelineAdapter:
         # Wire approval flow: bridge consumer.request_approval to DirectiveExecutor
         if consumer is not None and pipeline._directive_executor is not None:
             pipeline._directive_executor._ask_user = _make_ask_user_handler(
-                consumer, ctx.session_id
+                consumer, ctx.session_id, agent_id
             )
 
     def set_consumer(self, consumer: WireConsumer | None) -> None:
         self._consumer = consumer
         if consumer is not None and self._pipeline._directive_executor is not None:
             self._pipeline._directive_executor._ask_user = _make_ask_user_handler(
-                consumer, self._ctx.session_id
+                consumer, self._ctx.session_id, self._agent_id
             )
 
     async def initialize(self) -> None:

@@ -5,6 +5,7 @@ import pytest
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
+from agentkit.directive.executor import DirectiveExecutor
 from agentkit.errors import PipelineError
 from agentkit.providers.models import (
     DoneEvent,
@@ -107,12 +108,15 @@ def _make_pipeline_and_ctx(
 class _RecordingConsumer:
     def __init__(self) -> None:
         self.messages: list[WireMessage] = []
+        self.approval_requests: list[Any] = []
 
     async def emit(self, msg: WireMessage) -> None:
         self.messages.append(msg)
 
     async def request_approval(self, req):
         from coding_agent.wire.protocol import ApprovalResponse
+
+        self.approval_requests.append(req)
 
         return ApprovalResponse(
             session_id=req.session_id, request_id=req.request_id, approved=True
@@ -644,6 +648,44 @@ class TestEventToWireMessage:
         assert {message.session_id for message in consumer.messages} == {
             "parent-session"
         }
+
+    @pytest.mark.asyncio
+    async def test_child_approval_request_preserves_agent_id(self):
+        from coding_agent.approval import ApprovalPolicy
+        from coding_agent.plugins.approval import ApprovalPlugin
+
+        async def mock_stream(messages, tools=None, **kw):
+            yield ToolCallEvent(
+                tool_call_id="tc-child-approval",
+                name="bash_run",
+                arguments={"command": "pwd"},
+            )
+            yield DoneEvent()
+
+        pipeline, ctx, _ = _make_pipeline_and_ctx(
+            mock_stream,
+            session_id="parent-session",
+            config={"max_tool_rounds": 1},
+        )
+        approval_plugin = ApprovalPlugin(policy=ApprovalPolicy.INTERACTIVE)
+        pipeline._registry.register(approval_plugin)
+        pipeline._runtime = HookRuntime(pipeline._registry)
+        pipeline._directive_executor = DirectiveExecutor()
+        consumer = _RecordingConsumer()
+        adapter = PipelineAdapter(
+            pipeline=pipeline,
+            ctx=ctx,
+            consumer=consumer,
+            agent_id="child-agent-1",
+        )
+
+        await adapter.run_turn("delegate")
+
+        assert len(consumer.approval_requests) == 1
+        approval_request = consumer.approval_requests[0]
+        assert approval_request.agent_id == "child-agent-1"
+        assert approval_request.tool_call is not None
+        assert approval_request.tool_call.agent_id == "child-agent-1"
 
     @pytest.mark.asyncio
     async def test_tool_call_event_emits_tool_call_delta(self):
