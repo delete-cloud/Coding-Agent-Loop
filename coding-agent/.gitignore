@@ -18,6 +18,7 @@ data/*
 !data/eval/
 data/eval/*
 !data/eval/golden/
+data/eval/golden/*
 !data/eval/golden/*.jsonl
 !data/eval/golden/*.yaml
 
