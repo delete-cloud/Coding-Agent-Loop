@@ -7,7 +7,7 @@
 
 The repository already has strong layered coverage for runtime execution, tape extraction, and evaluation adaptation. Integration tests under `tests/integration/` execute real pipeline turns with mocked providers, while evaluation tests consume curated JSONL fixtures.
 
-That leaves two gaps for higher-confidence end-to-end verification. First, integration tests cannot currently exercise a real provider call path without editing the tests, because they always replace the provider with an `AsyncMock`. Second, the new persisted-tape evaluation flow is currently validated with direct `Tape.save_jsonl(...)`, not through the storage plugin's `ForkTapeStore`/`JSONLTapeStore` commit/load path.
+That leaves two gaps for higher-confidence end-to-end verification. First, the repository needs a supported opt-in path for real-provider integration coverage instead of relying only on mock-provider flows. Second, the new persisted-tape evaluation flow is currently validated with direct `Tape.save_jsonl(...)`, not through the storage plugin's `ForkTapeStore`/`JSONLTapeStore` commit/load path.
 
 We want a stronger test path without making the default test suite flaky, slow, or credential-dependent. The framework needs an explicit way to run real-provider E2E checks only when the environment is prepared, while keeping the default suite deterministic.
 
@@ -17,7 +17,7 @@ Add an opt-in E2E test path that can run against a real provider when the requir
 
 Also add a storage-backed E2E test that verifies persisted tape data through `ForkTapeStore` + `JSONLTapeStore`, instead of only through direct `Tape.save_jsonl(...)`.
 
-Metric-level evaluation is a separate opt-in layer on top of this decision. The base E2E boundary for this ADR is runtime execution -> persisted tape -> extraction -> evaluation test-case construction. A metric-level test may be added later, but it must remain optional when the `deepeval` dependency is not installed. If we add a longest-chain test that combines a real provider, subagent/tool execution, persistence, extraction, and metric evaluation, it must also remain opt-in and use assertions that tolerate provider-side variance while still proving the intended chain occurred.
+Metric-level evaluation is included as an additional opt-in layer on top of this decision. The base E2E boundary for this ADR remains runtime execution -> persisted tape -> extraction -> evaluation test-case construction, and the same flow may also be validated through metric-level tests that operate on the built evaluation cases. These metric tests must remain optional when the `deepeval` dependency is not installed, and the current metric test path also requires metric-judge credentials even when the runtime provider itself is mocked. Any real-provider or longest-chain metric test must also skip cleanly when the required credentials are absent. If a longest-chain test combines a real provider, subagent/tool execution, persistence, extraction, and metric evaluation, it must remain opt-in and use assertions that tolerate provider-side variance while still proving the intended chain occurred.
 
 ## Alternatives Rejected
 
