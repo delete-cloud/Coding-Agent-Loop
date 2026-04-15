@@ -35,6 +35,18 @@ from coding_agent.tools.web_search import create_web_search_backend
 ToolFilter = Any
 
 
+def _child_system_prompt_suffix(tool_filter: ToolFilter) -> str:
+    if tool_filter is None:
+        return ""
+    if _should_include_tool(tool_filter, "subagent"):
+        return ""
+    return (
+        "\n\nYou are running as a child agent. "
+        "Nested subagent delegation is unavailable in this child session, "
+        "so do not claim that you can call the subagent tool and do not ask to use it."
+    )
+
+
 @contextmanager
 def structured_tool_result_scope(enabled: bool):
     from coding_agent.tools.file_ops import structured_results_scope as file_ops_scope
@@ -116,6 +128,7 @@ def create_child_pipeline(
         cfg.provider = provider_override
     if max_steps_override is not None:
         cfg.max_turns = max_steps_override
+    cfg.system_prompt += _child_system_prompt_suffix(tool_filter)
 
     resolved_key = api_key or os.environ.get("AGENT_API_KEY")
     if not resolved_key and cfg.provider == "copilot":

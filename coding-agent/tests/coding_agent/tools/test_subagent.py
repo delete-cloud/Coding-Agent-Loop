@@ -90,6 +90,31 @@ async def test_subagent_tool_runs_real_child_pipeline_and_excludes_nested_subage
 
 
 @pytest.mark.asyncio
+async def test_subagent_tool_child_system_prompt_explicitly_disables_nested_subagent():
+    provider = ScriptedProvider()
+    tool_fn = build_subagent_tool(create_child_pipeline)
+    parent_ctx = PipelineContext(
+        tape=Tape(),
+        session_id="parent-session",
+        llm_provider=provider,
+        config={"subagent_timeout": 30.0},
+    )
+
+    result = await tool_fn(
+        goal="Inspect child tool availability",
+        __pipeline_ctx__=parent_ctx,
+    )
+
+    assert result == "Subagent completed: Child finished summary"
+    child_messages = provider.calls[0]["messages"]
+    assert child_messages[0]["role"] == "system"
+    child_system_prompt = child_messages[0]["content"]
+    assert "child agent" in child_system_prompt.lower()
+    assert "subagent" in child_system_prompt
+    assert "unavailable" in child_system_prompt.lower()
+
+
+@pytest.mark.asyncio
 async def test_subagent_tool_forwards_child_agent_id_to_parent_consumer():
     provider = ScriptedProvider()
     consumer = RecordingConsumer()
