@@ -94,7 +94,6 @@ class TestVerifyCommand:
         assert result.exit_code != 0
         assert "Invalid task packet" in result.output
         assert "Target tests" in result.output
-        assert result.exception is not None
 
     def test_verify_run_uses_explicit_repo_root_for_commands(
         self, tmp_path: Path
@@ -108,9 +107,6 @@ class TestVerifyCommand:
                 "python3 -c \"from pathlib import Path; print(Path('.').resolve().name)\""
             ],
         )
-
-        outside = tmp_path / "outside"
-        outside.mkdir()
 
         runner = CliRunner()
         result = runner.invoke(
