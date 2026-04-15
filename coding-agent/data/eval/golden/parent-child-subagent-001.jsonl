@@ -1,0 +1,7 @@
+{"id": "u1", "kind": "message", "payload": {"role": "user", "content": "parent task"}, "timestamp": 1700000101.0}
+{"id": "tc1", "kind": "tool_call", "payload": {"id": "call-sub", "name": "subagent", "arguments": {"goal": "child task"}, "role": "assistant"}, "timestamp": 1700000102.0}
+{"id": "cu1", "kind": "message", "payload": {"role": "user", "content": "child task"}, "timestamp": 1700000103.0, "meta": {"skip_context": true, "subagent_child": true}}
+{"id": "ca1", "kind": "message", "payload": {"role": "assistant", "content": "child done"}, "timestamp": 1700000104.0, "meta": {"skip_context": true, "subagent_child": true}}
+{"id": "an1", "kind": "anchor", "payload": {"content": "child topic"}, "timestamp": 1700000105.0, "meta": {"skip_context": true, "subagent_child": true}, "anchor_type": "topic_start"}
+{"id": "tr1", "kind": "tool_result", "payload": {"tool_call_id": "call-sub", "content": "Subagent completed: child done"}, "timestamp": 1700000106.0}
+{"id": "a1", "kind": "message", "payload": {"role": "assistant", "content": "parent done"}, "timestamp": 1700000107.0}
