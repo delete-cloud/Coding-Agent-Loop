@@ -92,6 +92,52 @@ def _payload_dict(payload: Mapping[str, object], key: str) -> JsonDict:
     return {}
 
 
+def _mapping_str(payload: Mapping[str, object], key: str) -> str:
+    value = payload.get(key)
+    return value if isinstance(value, str) else ""
+
+
+def _tool_call_records(entry: Entry) -> list[ToolCallRecord]:
+    batched = entry.payload.get("tool_calls")
+    if isinstance(batched, list):
+        batched_items = cast(list[object], batched)
+        records: list[ToolCallRecord] = []
+        for item in batched_items:
+            if not isinstance(item, Mapping):
+                continue
+            item_mapping = cast(Mapping[str, object], item)
+            function = item_mapping.get("function")
+            function_mapping: Mapping[str, object] | None
+            if isinstance(function, Mapping):
+                function_mapping = cast(Mapping[str, object], function)
+            else:
+                function_mapping = None
+            record = ToolCallRecord(
+                call_id=_mapping_str(item_mapping, "id"),
+                name=(
+                    _mapping_str(function_mapping, "name")
+                    if function_mapping is not None
+                    else _mapping_str(item_mapping, "name")
+                ),
+                arguments=(
+                    _payload_dict(function_mapping, "arguments")
+                    if function_mapping is not None
+                    else _payload_dict(item_mapping, "arguments")
+                ),
+            )
+            records.append(record)
+        if records:
+            return records
+
+    return [
+        ToolCallRecord(
+            call_id=_payload_str(entry.payload, "id"),
+            name=_payload_str(entry.payload, "name"),
+            arguments=_payload_dict(entry.payload, "arguments"),
+        )
+    ]
+
+
 def extract_turns(
     entries: Sequence[Entry],
     *,
@@ -156,18 +202,14 @@ def extract_turns(
                 continue
 
             if entry.kind == "tool_call":
-                call_id = _payload_str(entry.payload, "id")
-                record = ToolCallRecord(
-                    call_id=call_id,
-                    name=_payload_str(entry.payload, "name"),
-                    arguments=_payload_dict(entry.payload, "arguments"),
-                )
-                call_id_to_index[call_id] = len(records)
-                records.append(record)
+                for record in _tool_call_records(entry):
+                    if record.call_id:
+                        call_id_to_index[record.call_id] = len(records)
+                    records.append(record)
 
             elif entry.kind == "tool_result":
                 tc_id = _payload_str(entry.payload, "tool_call_id")
-                idx = call_id_to_index.get(tc_id)
+                idx = call_id_to_index.get(tc_id) if tc_id else None
                 if idx is not None:
                     old = records[idx]
                     records[idx] = ToolCallRecord(
@@ -181,13 +223,12 @@ def extract_turns(
                 # call outside this turn (or from a child tape).  Drop it
                 # silently — this is expected for subagent traces.
 
-            elif (
-                entry.kind == "message"
-                and entry.payload.get("role") == "assistant"
-                and entry.payload.get("content")
-            ):
+            elif entry.kind == "message" and entry.payload.get("role") == "assistant":
+                content = entry.payload.get("content")
+                if not isinstance(content, str) or content == "":
+                    continue
                 # Track the *last* assistant text message in the turn.
-                final_output = _payload_str(entry.payload, "content")
+                final_output = content
 
         turns.append(
             TurnTrace(

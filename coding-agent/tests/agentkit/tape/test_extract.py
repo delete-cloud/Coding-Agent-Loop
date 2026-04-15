@@ -178,6 +178,109 @@ class TestBatchToolCalls:
         turns = extract_turns(entries)
         assert turns[0].tool_calls[0].result_content is None
 
+    def test_batched_tool_call_payload_is_expanded_into_multiple_records(self):
+        entries = [
+            _user("search two files"),
+            Entry(
+                kind="tool_call",
+                payload={
+                    "tool_calls": [
+                        {
+                            "id": "tc1",
+                            "function": {
+                                "name": "file_read",
+                                "arguments": {"path": "a.py"},
+                            },
+                        },
+                        {
+                            "id": "tc2",
+                            "function": {
+                                "name": "file_read",
+                                "arguments": {"path": "b.py"},
+                            },
+                        },
+                    ]
+                },
+            ),
+            _tool_result("tc1", "aaa"),
+            _tool_result("tc2", "bbb"),
+            _assistant("done"),
+        ]
+
+        turns = extract_turns(entries)
+
+        assert len(turns) == 1
+        assert [record.call_id for record in turns[0].tool_calls] == ["tc1", "tc2"]
+        assert [record.name for record in turns[0].tool_calls] == [
+            "file_read",
+            "file_read",
+        ]
+        assert [record.arguments for record in turns[0].tool_calls] == [
+            {"path": "a.py"},
+            {"path": "b.py"},
+        ]
+        assert [record.result_content for record in turns[0].tool_calls] == [
+            "aaa",
+            "bbb",
+        ]
+
+    def test_flat_batched_tool_call_payload_is_expanded_into_multiple_records(self):
+        entries = [
+            _user("search two files"),
+            Entry(
+                kind="tool_call",
+                payload={
+                    "tool_calls": [
+                        {
+                            "id": "tc1",
+                            "name": "file_read",
+                            "arguments": {"path": "a.py"},
+                        },
+                        {
+                            "id": "tc2",
+                            "name": "file_read",
+                            "arguments": {"path": "b.py"},
+                        },
+                    ]
+                },
+            ),
+            _tool_result("tc1", "aaa"),
+            _tool_result("tc2", "bbb"),
+            _assistant("done"),
+        ]
+
+        turns = extract_turns(entries)
+
+        assert len(turns) == 1
+        assert [record.call_id for record in turns[0].tool_calls] == ["tc1", "tc2"]
+        assert [record.name for record in turns[0].tool_calls] == [
+            "file_read",
+            "file_read",
+        ]
+        assert [record.arguments for record in turns[0].tool_calls] == [
+            {"path": "a.py"},
+            {"path": "b.py"},
+        ]
+        assert [record.result_content for record in turns[0].tool_calls] == [
+            "aaa",
+            "bbb",
+        ]
+
+    def test_empty_tool_call_ids_do_not_pair_results(self):
+        entries = [
+            _user("go"),
+            _tool_call("", "file_read", {"path": "a.py"}),
+            _tool_call("", "file_read", {"path": "b.py"}),
+            _tool_result("", "ambiguous result"),
+            _assistant("done"),
+        ]
+
+        turns = extract_turns(entries)
+
+        assert len(turns) == 1
+        assert [record.call_id for record in turns[0].tool_calls] == ["", ""]
+        assert [record.result_content for record in turns[0].tool_calls] == [None, None]
+
 
 # ---------------------------------------------------------------------------
 # skip_context / subagent handling
@@ -317,6 +420,23 @@ class TestEdgeCases:
     def test_empty_entries(self):
         assert extract_turns([]) == []
         assert extract_turns(()) == []
+
+    def test_non_string_assistant_content_is_not_treated_as_final_output(self):
+        entries = [
+            _user("go"),
+            Entry(
+                kind="message",
+                payload={
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "hi"}],
+                },
+            ),
+        ]
+
+        turns = extract_turns(entries)
+
+        assert len(turns) == 1
+        assert turns[0].final_output is None
 
     def test_assistant_message_with_empty_content_not_treated_as_final(self):
         """Assistant messages with empty/None content are not final output."""
