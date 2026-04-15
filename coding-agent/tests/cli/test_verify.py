@@ -80,3 +80,18 @@ class TestVerifyCommand:
         result = runner.invoke(main, ["verify"])
 
         assert result.exit_code != 0
+
+    def test_verify_reports_invalid_task_packet_cleanly(self, tmp_path: Path) -> None:
+        packet = tmp_path / "task-packet.md"
+        _ = packet.write_text("Goal:\n- Missing target tests\n", encoding="utf-8")
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["verify", "--task-packet", str(packet), "--mode", "run"],
+        )
+
+        assert result.exit_code != 0
+        assert "Invalid task packet" in result.output
+        assert "Target tests" in result.output
+        assert result.exception is not None

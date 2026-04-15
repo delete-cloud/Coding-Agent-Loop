@@ -401,7 +401,10 @@ def serve(port: int, host: str):
 )
 def verify(task_packet: Path, mode: str) -> None:
     """Verify a task packet or print its checklist."""
-    contract = load_task_packet_contract(task_packet)
+    try:
+        contract = load_task_packet_contract(task_packet)
+    except ValueError as exc:
+        raise click.ClickException(f"Invalid task packet: {exc}") from exc
     runner = VerificationRunner()
 
     if mode == "checklist":
