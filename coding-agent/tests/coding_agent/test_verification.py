@@ -12,14 +12,14 @@ from coding_agent.verification import (
 
 
 def _write_task_packet(path: Path, *, commands: list[str]) -> None:
-    path.write_text(
+    _ = path.write_text(
         """
 Goal:
 - Verify a bounded task packet
 
 Target tests:
 """
-        + "\n".join(f"- `{command}`" for command in commands)
+        + "\n".join(f"- {command}" for command in commands)
         + "\n",
         encoding="utf-8",
     )
@@ -48,14 +48,35 @@ class TestTaskPacketVerificationContract:
             "uv run pytest tests/coding_agent/test_pipeline_adapter.py -v",
         ]
 
+    def test_load_task_packet_contract_also_accepts_backticked_bullets(
+        self, tmp_path: Path
+    ) -> None:
+        packet = tmp_path / "task-packet.md"
+        _ = packet.write_text(
+            """
+Goal:
+- Verify a bounded task packet
+
+Target tests:
+- `uv run pytest tests/cli/test_commands.py -v`
+""",
+            encoding="utf-8",
+        )
+
+        contract = load_task_packet_contract(packet)
+
+        assert [step.command for step in contract.steps] == [
+            "uv run pytest tests/cli/test_commands.py -v"
+        ]
+
     def test_load_task_packet_contract_requires_target_tests(
         self, tmp_path: Path
     ) -> None:
         packet = tmp_path / "task-packet.md"
-        packet.write_text("Goal:\n- Missing target tests\n", encoding="utf-8")
+        _ = packet.write_text("Goal:\n- Missing target tests\n", encoding="utf-8")
 
         with pytest.raises(ValueError, match="Target tests"):
-            load_task_packet_contract(packet)
+            _ = load_task_packet_contract(packet)
 
 
 class TestVerificationRunner:

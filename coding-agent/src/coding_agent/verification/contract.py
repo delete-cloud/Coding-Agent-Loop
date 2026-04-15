@@ -22,7 +22,7 @@ class VerificationContract(BaseModel):
 
 
 _TARGET_TESTS_HEADER = re.compile(r"^Target tests:\s*$", re.MULTILINE)
-_BULLET_COMMAND = re.compile(r"^\s*-\s*`(?P<command>.+)`\s*$")
+_BULLET_COMMAND = re.compile(r"^\s*-\s*(?:`(?P<backticked>.+)`|(?P<plain>.+))\s*$")
 
 
 def load_task_packet_contract(path: Path) -> VerificationContract:
@@ -49,7 +49,10 @@ def load_task_packet_contract(path: Path) -> VerificationContract:
         match = _BULLET_COMMAND.match(line)
         if match is None:
             continue
-        commands.append(match.group("command"))
+        command = match.group("backticked") or match.group("plain")
+        if command is None:
+            continue
+        commands.append(command.strip())
 
     if not commands:
         raise ValueError("Target tests section must include at least one command")

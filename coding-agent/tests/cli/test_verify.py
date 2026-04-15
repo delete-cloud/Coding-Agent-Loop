@@ -8,14 +8,14 @@ from coding_agent.__main__ import main
 
 
 def _write_task_packet(path: Path, *, commands: list[str]) -> None:
-    path.write_text(
+    _ = path.write_text(
         """
 Goal:
 - Verify a bounded task packet
 
 Target tests:
 """
-        + "\n".join(f"- `{command}`" for command in commands)
+        + "\n".join(f"- {command}" for command in commands)
         + "\n",
         encoding="utf-8",
     )
