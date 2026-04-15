@@ -1,9 +1,11 @@
 # AGENTS.md
 
 ## Scope
+
 Applies to the whole repository.
 
 ## Project Shape
+
 - Python project (`>=3.12`) using `uv` and `hatchling`
 - `src/agentkit/` - reusable runtime/framework code
 - `src/coding_agent/` - product-specific coding agent app
@@ -11,6 +13,7 @@ Applies to the whole repository.
 Keep the boundary clean: generic runtime behavior belongs in `agentkit`; app behavior belongs in `coding_agent`.
 
 ## Setup & Common Commands
+
 ```bash
 uv sync --all-extras
 
@@ -28,6 +31,7 @@ uv run ruff format src/
 ```
 
 ## Layout
+
 - `src/agentkit/` - framework layer
 - `src/coding_agent/` - application layer
 - `tests/agentkit/`, `tests/coding_agent/`, `tests/cli/` - primary test targets
@@ -35,13 +39,16 @@ uv run ruff format src/
 - `data/` - local runtime data
 
 ## Working Rules
+
 - Prefer minimal, localized changes.
 - Reuse existing abstractions before adding new ones.
 - If you change `agentkit`, run the relevant `tests/agentkit/` plus impacted `tests/coding_agent/`.
 - If you change CLI/entrypoint behavior, run `tests/cli/`.
 - Use `README.md` as the default source of truth for workflows unless a more specific doc under `docs/` overrides it.
+- Do not add thin wrapper functions around existing functions unless the wrapper adds real value beyond renaming.
 
 ## ADR & Workflow Rules
+
 - Use ADRs for persistence, protocol, data-model, or cross-module boundary changes, and for decisions with meaningful trade-offs that future readers will ask "why" about.
 - Do not write ADRs for straightforward bug fixes, local refactors, or obvious implementation details with no real trade-off.
 - Historical spec documents are archived design context only; do not maintain or extend them as living documents.
@@ -53,6 +60,7 @@ uv run ruff format src/
 - See `docs/adr/README.md` for the ADR format and acceptance-criteria conventions.
 
 ## Branch, Base, And Worktree Hygiene
+
 - When a new user request introduces a new feature direction, or clearly diverges from the current branch's purpose, stop and ask whether to continue on the current branch or switch to a new branch/worktree first.
 - Prefer a fresh branch/worktree for new feature work that is not a natural continuation of the current branch.
 - If the task is still in analysis/design/scoping, ask before starting implementation work on the wrong branch.
@@ -65,6 +73,7 @@ uv run ruff format src/
 - If downstream PRs need to shrink automatically after a base branch lands, merge the base PR with a merge commit; do not squash-merge or rebase-merge it.
 
 ## Notes
+
 - This is a Python/`uv` repo, not an npm repo.
 - REPL `!` shell mode uses a real shell; the `bash_run` tool is more restricted. Do not assume shell chaining, pipes, or redirection behave the same way.
 - Useful references: `README.md`, `docs/AGENTKIT-ARCHITECTURE.md`, `docs/CODING-AGENT-ARCHITECTURE.md`.
