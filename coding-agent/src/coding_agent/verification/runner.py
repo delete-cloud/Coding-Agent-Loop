@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+from pathlib import Path
 from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict
@@ -34,16 +35,33 @@ class ChecklistRenderResult(BaseModel):
 
 
 class VerificationRunner:
-    def run(self, contract: VerificationContract) -> VerificationReport:
+    def run(
+        self, contract: VerificationContract, *, repo_root: Path | None = None
+    ) -> VerificationReport:
         results: list[VerificationStepResult] = []
 
         for step in contract.steps:
-            completed = subprocess.run(
-                shlex.split(step.command),
-                check=False,
-                capture_output=True,
-                text=True,
-            )
+            try:
+                completed = subprocess.run(
+                    shlex.split(step.command),
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    cwd=repo_root,
+                )
+            except OSError as exc:
+                results.append(
+                    VerificationStepResult(
+                        name=step.name,
+                        command=step.command,
+                        passed=False,
+                        exit_code=-1,
+                        stdout="",
+                        stderr=f"Failed to execute command: {exc}",
+                    )
+                )
+                continue
+
             results.append(
                 VerificationStepResult(
                     name=step.name,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -317,6 +318,29 @@ class TestVerificationRunner:
         assert len(report.steps) == 1
         assert report.steps[0].passed is False
         assert report.steps[0].exit_code == 3
+
+    def test_verify_run_reports_spawn_errors_without_crashing(
+        self, tmp_path: Path
+    ) -> None:
+        packet = tmp_path / "task-packet.md"
+        _ = _write_task_packet(
+            packet, commands=["uv run pytest tests/cli/test_commands.py -v"]
+        )
+
+        runner = VerificationRunner()
+        with patch(
+            "coding_agent.verification.runner.subprocess.run",
+            side_effect=FileNotFoundError("uv not found"),
+        ):
+            report = runner.run(load_task_packet_contract(packet))
+
+        assert report.verdict == "NOT VERIFIED"
+        assert len(report.steps) == 1
+        assert report.steps[0].passed is False
+        assert report.steps[0].exit_code == -1
+        assert report.steps[0].stdout == ""
+        assert "Failed to execute command" in report.steps[0].stderr
+        assert "uv not found" in report.steps[0].stderr
 
     def test_verify_checklist_renders_target_tests_from_task_packet(
         self, tmp_path: Path
