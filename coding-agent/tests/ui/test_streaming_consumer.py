@@ -167,7 +167,7 @@ class TestStreamingConsumer:
 
         consumer, _, _ = self._make_consumer()
 
-        consumer._session_approved_tools.add("bash")
+        consumer._session_approved_tools.add(("", "bash"))
 
         req = ApprovalRequest(
             session_id="s1", request_id="r1", tool="bash", args={"command": "rm -rf /"}
@@ -274,6 +274,49 @@ class TestStreamingConsumer:
         resp2 = await consumer.request_approval(req2)
         assert resp2.approved is True
         assert call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_session_approve_does_not_cross_child_origin(self, monkeypatch):
+        from coding_agent.wire.protocol import ApprovalRequest
+        from coding_agent.ui import approval_prompt
+
+        consumer, _, _ = self._make_consumer()
+        call_count = 0
+
+        async def mock_prompt(console, req):
+            nonlocal call_count
+            call_count += 1
+            from coding_agent.wire.protocol import ApprovalResponse
+
+            return ApprovalResponse(
+                session_id=req.session_id,
+                request_id=req.request_id,
+                approved=True,
+                scope="session",
+            )
+
+        monkeypatch.setattr(approval_prompt, "prompt_approval", mock_prompt)
+
+        child_req = ApprovalRequest(
+            session_id="s1",
+            agent_id="child-1",
+            request_id="r1",
+            tool="bash",
+            args={"command": "ls"},
+        )
+        child_resp = await consumer.request_approval(child_req)
+        assert child_resp.approved is True
+        assert call_count == 1
+
+        parent_req = ApprovalRequest(
+            session_id="s1",
+            request_id="r2",
+            tool="bash",
+            args={"command": "pwd"},
+        )
+        parent_resp = await consumer.request_approval(parent_req)
+        assert parent_resp.approved is True
+        assert call_count == 2
 
 
 class TestCollapseGrouping:
