@@ -69,6 +69,191 @@ Target tests:
             "uv run pytest tests/cli/test_commands.py -v"
         ]
 
+    def test_load_task_packet_contract_ignores_nested_bullets(
+        self, tmp_path: Path
+    ) -> None:
+        packet = tmp_path / "task-packet.md"
+        _ = packet.write_text(
+            """
+Goal:
+- Verify a bounded task packet
+
+Target tests:
+- uv run pytest tests/cli/test_commands.py -v
+  - requires seeded db
+""",
+            encoding="utf-8",
+        )
+
+        contract = load_task_packet_contract(packet)
+
+        assert [step.command for step in contract.steps] == [
+            "uv run pytest tests/cli/test_commands.py -v"
+        ]
+
+    def test_load_task_packet_contract_keeps_later_top_level_bullets(
+        self, tmp_path: Path
+    ) -> None:
+        packet = tmp_path / "task-packet.md"
+        _ = packet.write_text(
+            """
+Goal:
+- Verify a bounded task packet
+
+Target tests:
+- uv run pytest tests/cli/test_commands.py -v
+  - requires seeded db
+- uv run pytest tests/coding_agent/test_pipeline_adapter.py -v
+""",
+            encoding="utf-8",
+        )
+
+        contract = load_task_packet_contract(packet)
+
+        assert [step.command for step in contract.steps] == [
+            "uv run pytest tests/cli/test_commands.py -v",
+            "uv run pytest tests/coding_agent/test_pipeline_adapter.py -v",
+        ]
+
+    def test_load_task_packet_contract_accepts_indented_top_level_bullets(
+        self, tmp_path: Path
+    ) -> None:
+        packet = tmp_path / "task-packet.md"
+        _ = packet.write_text(
+            """
+Goal:
+- Verify a bounded task packet
+
+Target tests:
+  - uv run pytest tests/cli/test_commands.py -v
+  - uv run pytest tests/coding_agent/test_pipeline_adapter.py -v
+""",
+            encoding="utf-8",
+        )
+
+        contract = load_task_packet_contract(packet)
+
+        assert [step.command for step in contract.steps] == [
+            "uv run pytest tests/cli/test_commands.py -v",
+            "uv run pytest tests/coding_agent/test_pipeline_adapter.py -v",
+        ]
+
+    def test_load_task_packet_contract_ignores_empty_bullets(
+        self, tmp_path: Path
+    ) -> None:
+        packet = tmp_path / "task-packet.md"
+        _ = packet.write_text(
+            """
+Goal:
+- Verify a bounded task packet
+
+Target tests:
+-
+-   
+- `   `
+- uv run pytest tests/cli/test_commands.py -v
+""",
+            encoding="utf-8",
+        )
+
+        contract = load_task_packet_contract(packet)
+
+        assert [step.command for step in contract.steps] == [
+            "uv run pytest tests/cli/test_commands.py -v"
+        ]
+
+    def test_load_task_packet_contract_ignores_nested_bullet_markers(
+        self, tmp_path: Path
+    ) -> None:
+        packet = tmp_path / "task-packet.md"
+        _ = packet.write_text(
+            """
+Goal:
+- Verify a bounded task packet
+
+Target tests:
+- - requires seeded db
+- uv run pytest tests/cli/test_commands.py -v
+""",
+            encoding="utf-8",
+        )
+
+        contract = load_task_packet_contract(packet)
+
+        assert [step.command for step in contract.steps] == [
+            "uv run pytest tests/cli/test_commands.py -v"
+        ]
+
+    def test_load_task_packet_contract_ignores_tab_indented_nested_content(
+        self, tmp_path: Path
+    ) -> None:
+        packet = tmp_path / "task-packet.md"
+        _ = packet.write_text(
+            """
+Goal:
+- Verify a bounded task packet
+
+Target tests:
+- uv run pytest tests/cli/test_commands.py -v
+	- nested note
+- uv run pytest tests/coding_agent/test_pipeline_adapter.py -v
+""",
+            encoding="utf-8",
+        )
+
+        contract = load_task_packet_contract(packet)
+
+        assert [step.command for step in contract.steps] == [
+            "uv run pytest tests/cli/test_commands.py -v",
+            "uv run pytest tests/coding_agent/test_pipeline_adapter.py -v",
+        ]
+
+    def test_load_task_packet_contract_keeps_same_indent_top_level_bullets(
+        self, tmp_path: Path
+    ) -> None:
+        packet = tmp_path / "task-packet.md"
+        _ = packet.write_text(
+            """
+Goal:
+- Verify a bounded task packet
+
+Target tests:
+ - uv run pytest tests/cli/test_commands.py -v
+ - uv run pytest tests/coding_agent/test_pipeline_adapter.py -v
+""",
+            encoding="utf-8",
+        )
+
+        contract = load_task_packet_contract(packet)
+
+        assert [step.command for step in contract.steps] == [
+            "uv run pytest tests/cli/test_commands.py -v",
+            "uv run pytest tests/coding_agent/test_pipeline_adapter.py -v",
+        ]
+
+    def test_load_task_packet_contract_keeps_mixed_indented_top_level_bullets(
+        self, tmp_path: Path
+    ) -> None:
+        packet = tmp_path / "task-packet.md"
+        _ = packet.write_text(
+            """
+Goal:
+- Verify a bounded task packet
+
+Target tests:
+ - uv run pytest tests/cli/test_commands.py -v
+  - uv run pytest tests/coding_agent/test_pipeline_adapter.py -v
+""",
+            encoding="utf-8",
+        )
+
+        contract = load_task_packet_contract(packet)
+
+        assert [step.command for step in contract.steps] == [
+            "uv run pytest tests/cli/test_commands.py -v",
+            "uv run pytest tests/coding_agent/test_pipeline_adapter.py -v",
+        ]
+
     def test_load_task_packet_contract_requires_target_tests(
         self, tmp_path: Path
     ) -> None:
