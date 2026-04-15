@@ -19,7 +19,9 @@ The first implementation slice normalizes the `Target tests:` section from a tas
 
 The runtime implementation lives in `src/coding_agent/verification/` and is exposed through a new CLI entrypoint, `python -m coding_agent verify --task-packet <path> --mode run|checklist`.
 
-In v1, verification steps are limited to single commands. The runner executes them sequentially and reports either:
+In v1, verification steps are limited to single commands. Each verification step is executed as a single process invocation without a shell, so shell syntax and shell-only behaviors are outside the contract unless the task packet explicitly invokes a shell itself. Task-packet authors must not rely on pipes, redirection, `&&`/`||`, shell expansion, or shell builtins such as `cd` inside a verification step.
+
+The runner executes steps sequentially and reports either:
 
 - machine-oriented verification output (`VERIFIED` / `NOT VERIFIED`), or
 - a human-readable checklist derived from the same contract.
@@ -37,6 +39,8 @@ Separate sidecar `.verify/*.yaml` files are explicitly deferred. If richer verif
 - [ ] `test_verify_checklist_renders_target_tests_from_task_packet`
 - [ ] `test_verify_run_executes_target_tests_from_task_packet`
 - [ ] `test_verify_run_reports_not_verified_when_command_fails`
+- [ ] `test_verify_run_reports_spawn_errors_without_crashing`
+- [ ] `test_verify_run_uses_explicit_repo_root_for_commands`
 - [ ] `uv run pytest tests/cli/test_verify.py tests/coding_agent/test_verification.py -v`
 
 ## References

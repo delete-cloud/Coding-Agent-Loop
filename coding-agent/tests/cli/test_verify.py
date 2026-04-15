@@ -95,3 +95,38 @@ class TestVerifyCommand:
         assert "Invalid task packet" in result.output
         assert "Target tests" in result.output
         assert result.exception is not None
+
+    def test_verify_run_uses_explicit_repo_root_for_commands(
+        self, tmp_path: Path
+    ) -> None:
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        packet = repo_root / "task-packet.md"
+        _ = _write_task_packet(
+            packet,
+            commands=[
+                "python3 -c \"from pathlib import Path; print(Path('.').resolve().name)\""
+            ],
+        )
+
+        outside = tmp_path / "outside"
+        outside.mkdir()
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "verify",
+                "--task-packet",
+                str(packet),
+                "--repo",
+                str(repo_root),
+                "--mode",
+                "run",
+            ],
+            catch_exceptions=False,
+        )
+
+        assert result.exit_code == 0
+        assert "VERIFIED" in result.output
+        assert f"stdout: {repo_root.name}" in result.output
