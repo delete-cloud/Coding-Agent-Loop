@@ -291,6 +291,7 @@ class TestPipelineE2E:
     async def test_real_provider_e2e_turn_skips_without_credentials(
         self, tmp_path, monkeypatch
     ):
+        _skip_if_no_config()
         provider_name = os.environ.get("AGENT_PROVIDER", "openai")
         env_name = _real_provider_env_name(provider_name)
         credential = os.environ.get(env_name)
@@ -354,6 +355,7 @@ class TestPipelineE2E:
 
     @pytest.mark.asyncio
     async def test_real_provider_subagent_metric_chain(self, tmp_path, monkeypatch):
+        _skip_if_no_config()
         _skip_if_no_deepeval()
         _skip_if_no_metric_judge_credentials()
 

@@ -30,22 +30,21 @@ def _sample_case() -> EvaluationTestCase:
 
 
 class TestMetricHelpers:
-    def test_make_tool_correctness_metric_raises_when_deepeval_missing(self) -> None:
-        from coding_agent.evaluation.metrics import make_tool_correctness_metric
+    def test_make_tool_correctness_metric_raises_when_deepeval_missing(
+        self, monkeypatch
+    ) -> None:
+        import coding_agent.evaluation.metrics as metrics_module
 
-        original = sys.modules.pop("deepeval", None)
-        original_metrics = sys.modules.pop("deepeval.metrics", None)
-        original_test_case = sys.modules.pop("deepeval.test_case", None)
-        try:
-            with pytest.raises(ModuleNotFoundError):
-                make_tool_correctness_metric()
-        finally:
-            if original is not None:
-                sys.modules["deepeval"] = original
-            if original_metrics is not None:
-                sys.modules["deepeval.metrics"] = original_metrics
-            if original_test_case is not None:
-                sys.modules["deepeval.test_case"] = original_test_case
+        def fake_get_module_attr(module_name: str, attr_name: str) -> object:
+            del attr_name
+            if module_name == "deepeval" or module_name.startswith("deepeval."):
+                raise ModuleNotFoundError(module_name)
+            pytest.fail(f"unexpected module lookup: {module_name}")
+
+        monkeypatch.setattr(metrics_module, "_get_module_attr", fake_get_module_attr)
+
+        with pytest.raises(ModuleNotFoundError):
+            _ = metrics_module.make_tool_correctness_metric()
 
     def test_to_deepeval_test_case_maps_tools_and_metadata(self, monkeypatch) -> None:
         class FakeToolCall:
