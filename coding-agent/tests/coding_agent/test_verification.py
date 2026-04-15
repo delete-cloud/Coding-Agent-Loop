@@ -1,0 +1,368 @@
+from __future__ import annotations
+
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+from coding_agent.verification import (
+    ChecklistRenderResult,
+    VerificationRunner,
+    load_task_packet_contract,
+)
+
+
+def _write_task_packet(path: Path, *, commands: list[str]) -> None:
+    _ = path.write_text(
+        """
+Goal:
+- Verify a bounded task packet
+
+Target tests:
+"""
+        + "\n".join(f"- {command}" for command in commands)
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+class TestTaskPacketVerificationContract:
+    def test_load_task_packet_contract_reads_target_tests(self, tmp_path: Path) -> None:
+        packet = tmp_path / "task-packet.md"
+        _ = _write_task_packet(
+            packet,
+            commands=[
+                "uv run pytest tests/cli/test_commands.py -v",
+                "uv run pytest tests/coding_agent/test_pipeline_adapter.py -v",
+            ],
+        )
+
+        contract = load_task_packet_contract(packet)
+
+        assert contract.source_path == packet
+        assert [step.name for step in contract.steps] == [
+            "Target test 1",
+            "Target test 2",
+        ]
+        assert [step.command for step in contract.steps] == [
+            "uv run pytest tests/cli/test_commands.py -v",
+            "uv run pytest tests/coding_agent/test_pipeline_adapter.py -v",
+        ]
+
+    def test_load_task_packet_contract_also_accepts_backticked_bullets(
+        self, tmp_path: Path
+    ) -> None:
+        packet = tmp_path / "task-packet.md"
+        _ = packet.write_text(
+            """
+Goal:
+- Verify a bounded task packet
+
+Target tests:
+- `uv run pytest tests/cli/test_commands.py -v`
+""",
+            encoding="utf-8",
+        )
+
+        contract = load_task_packet_contract(packet)
+
+        assert [step.command for step in contract.steps] == [
+            "uv run pytest tests/cli/test_commands.py -v"
+        ]
+
+    def test_load_task_packet_contract_ignores_nested_bullets(
+        self, tmp_path: Path
+    ) -> None:
+        packet = tmp_path / "task-packet.md"
+        _ = packet.write_text(
+            """
+Goal:
+- Verify a bounded task packet
+
+Target tests:
+- uv run pytest tests/cli/test_commands.py -v
+  - requires seeded db
+""",
+            encoding="utf-8",
+        )
+
+        contract = load_task_packet_contract(packet)
+
+        assert [step.command for step in contract.steps] == [
+            "uv run pytest tests/cli/test_commands.py -v"
+        ]
+
+    def test_load_task_packet_contract_keeps_later_top_level_bullets(
+        self, tmp_path: Path
+    ) -> None:
+        packet = tmp_path / "task-packet.md"
+        _ = packet.write_text(
+            """
+Goal:
+- Verify a bounded task packet
+
+Target tests:
+- uv run pytest tests/cli/test_commands.py -v
+  - requires seeded db
+- uv run pytest tests/coding_agent/test_pipeline_adapter.py -v
+""",
+            encoding="utf-8",
+        )
+
+        contract = load_task_packet_contract(packet)
+
+        assert [step.command for step in contract.steps] == [
+            "uv run pytest tests/cli/test_commands.py -v",
+            "uv run pytest tests/coding_agent/test_pipeline_adapter.py -v",
+        ]
+
+    def test_load_task_packet_contract_accepts_indented_top_level_bullets(
+        self, tmp_path: Path
+    ) -> None:
+        packet = tmp_path / "task-packet.md"
+        _ = packet.write_text(
+            """
+Goal:
+- Verify a bounded task packet
+
+Target tests:
+  - uv run pytest tests/cli/test_commands.py -v
+  - uv run pytest tests/coding_agent/test_pipeline_adapter.py -v
+""",
+            encoding="utf-8",
+        )
+
+        contract = load_task_packet_contract(packet)
+
+        assert [step.command for step in contract.steps] == [
+            "uv run pytest tests/cli/test_commands.py -v",
+            "uv run pytest tests/coding_agent/test_pipeline_adapter.py -v",
+        ]
+
+    def test_load_task_packet_contract_ignores_empty_bullets(
+        self, tmp_path: Path
+    ) -> None:
+        packet = tmp_path / "task-packet.md"
+        _ = packet.write_text(
+            """
+Goal:
+- Verify a bounded task packet
+
+Target tests:
+-
+-   
+- `   `
+- uv run pytest tests/cli/test_commands.py -v
+""",
+            encoding="utf-8",
+        )
+
+        contract = load_task_packet_contract(packet)
+
+        assert [step.command for step in contract.steps] == [
+            "uv run pytest tests/cli/test_commands.py -v"
+        ]
+
+    def test_load_task_packet_contract_ignores_nested_bullet_markers(
+        self, tmp_path: Path
+    ) -> None:
+        packet = tmp_path / "task-packet.md"
+        _ = packet.write_text(
+            """
+Goal:
+- Verify a bounded task packet
+
+Target tests:
+- - requires seeded db
+- uv run pytest tests/cli/test_commands.py -v
+""",
+            encoding="utf-8",
+        )
+
+        contract = load_task_packet_contract(packet)
+
+        assert [step.command for step in contract.steps] == [
+            "uv run pytest tests/cli/test_commands.py -v"
+        ]
+
+    def test_load_task_packet_contract_ignores_tab_indented_nested_content(
+        self, tmp_path: Path
+    ) -> None:
+        packet = tmp_path / "task-packet.md"
+        _ = packet.write_text(
+            """
+Goal:
+- Verify a bounded task packet
+
+Target tests:
+- uv run pytest tests/cli/test_commands.py -v
+	- nested note
+- uv run pytest tests/coding_agent/test_pipeline_adapter.py -v
+""",
+            encoding="utf-8",
+        )
+
+        contract = load_task_packet_contract(packet)
+
+        assert [step.command for step in contract.steps] == [
+            "uv run pytest tests/cli/test_commands.py -v",
+            "uv run pytest tests/coding_agent/test_pipeline_adapter.py -v",
+        ]
+
+    def test_load_task_packet_contract_keeps_same_indent_top_level_plain_bullets(
+        self, tmp_path: Path
+    ) -> None:
+        packet = tmp_path / "task-packet.md"
+        _ = packet.write_text(
+            """
+Goal:
+- Verify a bounded task packet
+
+Target tests:
+ - uv run pytest tests/cli/test_commands.py -v
+ - uv run pytest tests/coding_agent/test_pipeline_adapter.py -v
+""",
+            encoding="utf-8",
+        )
+
+        contract = load_task_packet_contract(packet)
+
+        assert [step.command for step in contract.steps] == [
+            "uv run pytest tests/cli/test_commands.py -v",
+            "uv run pytest tests/coding_agent/test_pipeline_adapter.py -v",
+        ]
+
+    def test_load_task_packet_contract_keeps_same_indent_top_level_backticked_bullets(
+        self, tmp_path: Path
+    ) -> None:
+        packet = tmp_path / "task-packet.md"
+        _ = packet.write_text(
+            """
+Goal:
+- Verify a bounded task packet
+
+Target tests:
+- `uv run pytest tests/cli/test_commands.py -v`
+- `pytest tests/coding_agent/test_pipeline_adapter.py -v`
+""",
+            encoding="utf-8",
+        )
+
+        contract = load_task_packet_contract(packet)
+
+        assert [step.command for step in contract.steps] == [
+            "uv run pytest tests/cli/test_commands.py -v",
+            "pytest tests/coding_agent/test_pipeline_adapter.py -v",
+        ]
+
+    def test_load_task_packet_contract_ignores_mixed_indented_note_bullets(
+        self, tmp_path: Path
+    ) -> None:
+        packet = tmp_path / "task-packet.md"
+        _ = packet.write_text(
+            """
+Goal:
+- Verify a bounded task packet
+
+Target tests:
+- uv run pytest tests/cli/test_commands.py -v
+   - uv run pytest tests/coding_agent/test_pipeline_adapter.py -v
+""",
+            encoding="utf-8",
+        )
+
+        contract = load_task_packet_contract(packet)
+
+        assert [step.command for step in contract.steps] == [
+            "uv run pytest tests/cli/test_commands.py -v"
+        ]
+
+    def test_load_task_packet_contract_requires_target_tests(
+        self, tmp_path: Path
+    ) -> None:
+        packet = tmp_path / "task-packet.md"
+        _ = packet.write_text("Goal:\n- Missing target tests\n", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="Target tests"):
+            _ = load_task_packet_contract(packet)
+
+
+class TestVerificationRunner:
+    def test_verify_run_executes_target_tests_from_task_packet(
+        self, tmp_path: Path
+    ) -> None:
+        packet = tmp_path / "task-packet.md"
+        _ = _write_task_packet(packet, commands=["python3 -c \"print('ok')\""])
+
+        runner = VerificationRunner()
+        report = runner.run(load_task_packet_contract(packet))
+
+        assert report.verdict == "VERIFIED"
+        assert len(report.steps) == 1
+        assert report.steps[0].passed is True
+        assert report.steps[0].exit_code == 0
+        assert "ok" in report.steps[0].stdout
+
+    def test_verify_run_reports_not_verified_when_command_fails(
+        self, tmp_path: Path
+    ) -> None:
+        packet = tmp_path / "task-packet.md"
+        _ = _write_task_packet(
+            packet, commands=['python3 -c "import sys; sys.exit(3)"']
+        )
+
+        runner = VerificationRunner()
+        report = runner.run(load_task_packet_contract(packet))
+
+        assert report.verdict == "NOT VERIFIED"
+        assert len(report.steps) == 1
+        assert report.steps[0].passed is False
+        assert report.steps[0].exit_code == 3
+
+    def test_verify_run_reports_spawn_errors_without_crashing(
+        self, tmp_path: Path
+    ) -> None:
+        packet = tmp_path / "task-packet.md"
+        _ = _write_task_packet(
+            packet, commands=["uv run pytest tests/cli/test_commands.py -v"]
+        )
+
+        runner = VerificationRunner()
+        with patch(
+            "coding_agent.verification.runner.subprocess.run",
+            side_effect=FileNotFoundError("uv not found"),
+        ):
+            report = runner.run(load_task_packet_contract(packet))
+
+        assert report.verdict == "NOT VERIFIED"
+        assert len(report.steps) == 1
+        assert report.steps[0].passed is False
+        assert report.steps[0].exit_code == -1
+        assert report.steps[0].stdout == ""
+        assert "Failed to execute command" in report.steps[0].stderr
+        assert "uv not found" in report.steps[0].stderr
+
+    def test_verify_checklist_renders_target_tests_from_task_packet(
+        self, tmp_path: Path
+    ) -> None:
+        packet = tmp_path / "task-packet.md"
+        _ = _write_task_packet(
+            packet,
+            commands=[
+                "uv run pytest tests/cli/test_commands.py -v",
+                "uv run pytest tests/coding_agent/test_pipeline_adapter.py -v",
+            ],
+        )
+
+        runner = VerificationRunner()
+        checklist = runner.render_checklist(load_task_packet_contract(packet))
+
+        assert isinstance(checklist, ChecklistRenderResult)
+        assert "Verification Checklist" in checklist.text
+        assert "Target test 1" in checklist.text
+        assert "Target test 2" in checklist.text
+        assert "uv run pytest tests/cli/test_commands.py -v" in checklist.text
+        assert (
+            "uv run pytest tests/coding_agent/test_pipeline_adapter.py -v"
+            in checklist.text
+        )
