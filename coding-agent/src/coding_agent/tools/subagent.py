@@ -164,7 +164,7 @@ def _append_child_trace_to_parent(
 
 
 def _child_trace_recorded(child_tape: Tape, *, base_length: int) -> bool:
-    return len(list(child_tape)[base_length:]) > 0
+    return len(child_tape) > base_length
 
 
 def build_subagent_tool(child_pipeline_builder: ChildPipelineBuilder):
