@@ -7,6 +7,7 @@ import pytest
 
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
+from coding_agent.approval import ApprovalPolicy
 from coding_agent.wire.protocol import (
     ApprovalRequest,
     CompletionStatus,
@@ -782,6 +783,361 @@ async def test_restore_injects_checkpoint_plugin_states_before_mount() -> None:
         await manager._restore_checkpoint(session, "cp-plugin")
 
     assert observed_before_mount == [{"topic": {"current_topic_id": "topic-1"}}]
+
+
+@pytest.mark.asyncio
+async def test_restore_rewinds_restart_safe_agent_configuration_from_checkpoint_extra() -> (
+    None
+):
+    store = InMemorySessionStore()
+    manager = SessionManager(store=store)
+    session_id = await manager.create_session(
+        provider_name="current-provider",
+        model_name="current-model",
+        base_url="http://current.local",
+        max_steps=99,
+        approval_policy=ApprovalPolicy.AUTO,
+    )
+    session = manager.get_session(session_id)
+    session.tape_id = "checkpoint-config-tape"
+    manager.register_session(session)
+
+    snapshot = types.SimpleNamespace(
+        meta=types.SimpleNamespace(
+            checkpoint_id="cp-config",
+            tape_id="checkpoint-config-tape",
+            entry_count=2,
+            window_start=0,
+        ),
+        tape_entries=(
+            {
+                "id": "e1",
+                "kind": "message",
+                "payload": {"role": "user", "content": "before config drift"},
+                "timestamp": 1.0,
+            },
+            {
+                "id": "e2",
+                "kind": "message",
+                "payload": {"role": "assistant", "content": "checkpoint saved"},
+                "timestamp": 2.0,
+            },
+        ),
+        plugin_states={},
+        extra={
+            "session_restart_config": {
+                "provider_name": "checkpoint-provider",
+                "model_name": "checkpoint-model",
+                "base_url": "http://checkpoint.local",
+                "max_steps": 7,
+                "approval_policy": "interactive",
+            }
+        },
+    )
+
+    truncate_calls: list[tuple[str, int]] = []
+    captured_kwargs: dict[str, object] = {}
+
+    class FakeCheckpointService:
+        async def restore(self, checkpoint_id: str):
+            assert checkpoint_id == "cp-config"
+            return snapshot
+
+        async def list(self, tape_id: str):
+            assert tape_id == "checkpoint-config-tape"
+            return [snapshot.meta]
+
+        async def delete(self, checkpoint_id: str) -> None:
+            raise AssertionError("no future checkpoints to delete")
+
+    class FakeTapeStore:
+        async def truncate(self, tape_id: str, keep: int) -> None:
+            truncate_calls.append((tape_id, keep))
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+            self.ctx = ctx
+
+        async def initialize(self) -> None:
+            return None
+
+        async def run_turn(self, prompt: str) -> None:
+            del prompt
+
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        )
+    )
+
+    def fake_create_agent(**kwargs):
+        captured_kwargs.update(kwargs)
+        return fake_pipeline, types.SimpleNamespace(
+            config={},
+            tape=kwargs.get("tape"),
+            plugin_states={},
+        )
+
+    session.provider_name = "mutated-provider"
+    session.model_name = "mutated-model"
+    session.base_url = "http://mutated.local"
+    session.max_steps = 42
+    session.approval_policy = ApprovalPolicy.YOLO
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
+        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr(
+            manager, "_checkpoint_service", FakeCheckpointService(), raising=False
+        )
+        mp.setattr(manager, "_tape_store", FakeTapeStore(), raising=False)
+        await manager._restore_checkpoint(session, "cp-config")
+
+    assert truncate_calls == [("checkpoint-config-tape", 2)]
+    assert captured_kwargs["provider_override"] == "checkpoint-provider"
+    assert captured_kwargs["model_override"] == "checkpoint-model"
+    assert captured_kwargs["base_url_override"] == "http://checkpoint.local"
+    assert captured_kwargs["max_steps_override"] == 7
+    assert captured_kwargs["approval_mode_override"] == "interactive"
+    assert session.provider_name == "checkpoint-provider"
+    assert session.model_name == "checkpoint-model"
+    assert session.base_url == "http://checkpoint.local"
+    assert session.max_steps == 7
+    assert session.approval_policy is ApprovalPolicy.INTERACTIVE
+
+
+@pytest.mark.asyncio
+async def test_restore_legacy_checkpoint_without_session_config_uses_current_session_metadata() -> (
+    None
+):
+    store = InMemorySessionStore()
+    manager = SessionManager(store=store)
+    session_id = await manager.create_session(
+        provider_name="current-provider",
+        model_name="current-model",
+        base_url="http://current.local",
+        max_steps=11,
+        approval_policy=ApprovalPolicy.AUTO,
+    )
+    session = manager.get_session(session_id)
+    session.tape_id = "legacy-checkpoint-tape"
+    manager.register_session(session)
+
+    snapshot = types.SimpleNamespace(
+        meta=types.SimpleNamespace(
+            checkpoint_id="cp-legacy",
+            tape_id="legacy-checkpoint-tape",
+            entry_count=0,
+            window_start=0,
+        ),
+        tape_entries=(),
+        plugin_states={},
+        extra={},
+    )
+
+    captured_kwargs: dict[str, object] = {}
+
+    class FakeCheckpointService:
+        async def restore(self, checkpoint_id: str):
+            assert checkpoint_id == "cp-legacy"
+            return snapshot
+
+        async def list(self, tape_id: str):
+            assert tape_id == "legacy-checkpoint-tape"
+            return [snapshot.meta]
+
+        async def delete(self, checkpoint_id: str) -> None:
+            return None
+
+    class FakeTapeStore:
+        async def truncate(self, tape_id: str, keep: int) -> None:
+            return None
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+            self.ctx = ctx
+
+        async def initialize(self) -> None:
+            return None
+
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        )
+    )
+
+    def fake_create_agent(**kwargs):
+        captured_kwargs.update(kwargs)
+        return fake_pipeline, types.SimpleNamespace(
+            config={}, tape=kwargs.get("tape"), plugin_states={}
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
+        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr(
+            manager, "_checkpoint_service", FakeCheckpointService(), raising=False
+        )
+        mp.setattr(manager, "_tape_store", FakeTapeStore(), raising=False)
+        await manager._restore_checkpoint(session, "cp-legacy")
+
+    assert captured_kwargs["provider_override"] == "current-provider"
+    assert captured_kwargs["model_override"] == "current-model"
+    assert captured_kwargs["base_url_override"] == "http://current.local"
+    assert captured_kwargs["max_steps_override"] == 11
+    assert captured_kwargs["approval_mode_override"] == "auto"
+
+
+@pytest.mark.asyncio
+async def test_restore_rejects_partial_checkpoint_session_config_payload() -> None:
+    store = InMemorySessionStore()
+    manager = SessionManager(store=store)
+    session_id = await manager.create_session(
+        provider_name="current-provider",
+        model_name="current-model",
+        base_url="http://current.local",
+        max_steps=11,
+        approval_policy=ApprovalPolicy.AUTO,
+    )
+    session = manager.get_session(session_id)
+    session.tape_id = "invalid-checkpoint-tape"
+    manager.register_session(session)
+
+    snapshot = types.SimpleNamespace(
+        meta=types.SimpleNamespace(
+            checkpoint_id="cp-invalid",
+            tape_id="invalid-checkpoint-tape",
+            entry_count=0,
+            window_start=0,
+        ),
+        tape_entries=(),
+        plugin_states={},
+        extra={
+            "session_restart_config": {
+                "provider_name": "checkpoint-provider",
+                "approval_policy": "interactive",
+            }
+        },
+    )
+
+    class FakeCheckpointService:
+        async def restore(self, checkpoint_id: str):
+            assert checkpoint_id == "cp-invalid"
+            return snapshot
+
+        async def list(self, tape_id: str):
+            raise AssertionError("invalid checkpoint config should fail early")
+
+        async def delete(self, checkpoint_id: str) -> None:
+            raise AssertionError("invalid checkpoint config should fail early")
+
+    class FakeTapeStore:
+        async def truncate(self, tape_id: str, keep: int) -> None:
+            raise AssertionError("invalid checkpoint config should not truncate")
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            manager, "_checkpoint_service", FakeCheckpointService(), raising=False
+        )
+        mp.setattr(manager, "_tape_store", FakeTapeStore(), raising=False)
+        mp.setattr(
+            "coding_agent.__main__.create_agent",
+            lambda **kwargs: (_ for _ in ()).throw(
+                AssertionError("invalid checkpoint config should not build runtime")
+            ),
+        )
+
+        with pytest.raises(TypeError, match="missing .*model_name"):
+            await manager._restore_checkpoint(session, "cp-invalid")
+
+
+@pytest.mark.asyncio
+async def test_restore_clears_hot_provider_override_when_checkpoint_rewinds_provider_metadata() -> (
+    None
+):
+    store = InMemorySessionStore()
+    manager = SessionManager(store=store)
+    current_provider = MockProvider()
+    session_id = await manager.create_session(
+        provider=current_provider,
+        provider_name="current-provider",
+        model_name="current-model",
+        base_url="http://current.local",
+        max_steps=13,
+        approval_policy=ApprovalPolicy.AUTO,
+    )
+    session = manager.get_session(session_id)
+    session.tape_id = "hot-provider-checkpoint-tape"
+    manager.register_session(session)
+
+    snapshot = types.SimpleNamespace(
+        meta=types.SimpleNamespace(
+            checkpoint_id="cp-hot-provider",
+            tape_id="hot-provider-checkpoint-tape",
+            entry_count=0,
+            window_start=0,
+        ),
+        tape_entries=(),
+        plugin_states={},
+        extra={
+            "session_restart_config": {
+                "provider_name": "checkpoint-provider",
+                "model_name": "checkpoint-model",
+                "base_url": "http://checkpoint.local",
+                "max_steps": 5,
+                "approval_policy": "interactive",
+            }
+        },
+    )
+
+    llm_plugin = types.SimpleNamespace(_instance=None)
+
+    class FakeCheckpointService:
+        async def restore(self, checkpoint_id: str):
+            assert checkpoint_id == "cp-hot-provider"
+            return snapshot
+
+        async def list(self, tape_id: str):
+            assert tape_id == "hot-provider-checkpoint-tape"
+            return [snapshot.meta]
+
+        async def delete(self, checkpoint_id: str) -> None:
+            return None
+
+    class FakeTapeStore:
+        async def truncate(self, tape_id: str, keep: int) -> None:
+            return None
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+            self.ctx = ctx
+
+        async def initialize(self) -> None:
+            return None
+
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(get=lambda _: llm_plugin)
+    )
+
+    def fake_create_agent(**kwargs):
+        return fake_pipeline, types.SimpleNamespace(
+            config={}, tape=kwargs.get("tape"), plugin_states={}
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
+        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr(
+            manager, "_checkpoint_service", FakeCheckpointService(), raising=False
+        )
+        mp.setattr(manager, "_tape_store", FakeTapeStore(), raising=False)
+        await manager._restore_checkpoint(session, "cp-hot-provider")
+
+    assert llm_plugin._instance is None
+    assert session.provider is None
 
 
 @pytest.mark.asyncio

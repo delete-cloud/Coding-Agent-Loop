@@ -5,6 +5,8 @@ from unittest.mock import patch
 
 import pytest
 
+from agentkit.checkpoint import CheckpointService
+from agentkit.checkpoint.models import CheckpointMeta
 from agentkit.tape.tape import Tape
 from coding_agent.approval.store import ApprovalStore
 from coding_agent.approval import ApprovalPolicy
@@ -53,21 +55,21 @@ def test_session_manager_accepts_injected_storage_backends() -> None:
         async def truncate(self, tape_id: str, keep: int) -> None:
             return None
 
-    class FakeCheckpointService:
-        async def capture(self, *args, **kwargs):
+    class FakeCheckpointStore:
+        async def save(self, snapshot) -> None:
             raise AssertionError("unused")
 
-        async def restore(self, checkpoint_id: str):
+        async def load(self, checkpoint_id: str):
             raise AssertionError("unused")
 
-        async def list(self, tape_id: str):
+        async def list_by_tape(self, tape_id: str):
             return []
 
         async def delete(self, checkpoint_id: str) -> None:
             return None
 
     tape_store = FakeTapeStore()
-    checkpoint_service = FakeCheckpointService()
+    checkpoint_service = CheckpointService(FakeCheckpointStore())
 
     manager = SessionManager(
         store=InMemorySessionStore(),
@@ -575,3 +577,206 @@ async def test_submit_approval_rejects_stale_pending_projection_without_store_re
     assert session.pending_approval == {"request_id": "stale-req", "tool_name": "bash"}
     assert session.approval_response is None
     assert session.approval_event.is_set() is False
+
+
+@pytest.mark.asyncio
+async def test_list_checkpoints_returns_metadata_for_session_tape() -> None:
+    manager = SessionManager(store=InMemorySessionStore())
+    session_id = await manager.create_session()
+    session = manager.get_session(session_id)
+    session.tape_id = "stable-tape"
+    manager.register_session(session)
+
+    expected = CheckpointMeta(
+        checkpoint_id="cp-1",
+        tape_id="stable-tape",
+        session_id=session_id,
+        entry_count=3,
+        window_start=1,
+        created_at=datetime.now(),
+        label="before-restore",
+    )
+
+    class FakeCheckpointService:
+        async def list(self, tape_id: str):
+            assert tape_id == "stable-tape"
+            return [expected]
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            manager, "_checkpoint_service", FakeCheckpointService(), raising=False
+        )
+        checkpoints = await manager.list_checkpoints(session_id)
+
+    assert checkpoints == [expected]
+
+
+@pytest.mark.asyncio
+async def test_restore_checkpoint_rejects_active_turn() -> None:
+    manager = SessionManager(store=InMemorySessionStore())
+    session_id = await manager.create_session()
+    session = manager.get_session(session_id)
+    session.tape_id = "stable-tape"
+    session.turn_in_progress = True
+    manager.register_session(session)
+
+    with pytest.raises(RuntimeError, match="turn already in progress"):
+        await manager.restore_checkpoint(session_id, "cp-active")
+
+
+@pytest.mark.asyncio
+async def test_capture_checkpoint_uses_current_runtime_context() -> None:
+    manager = SessionManager(store=InMemorySessionStore())
+    session_id = await manager.create_session()
+    session = manager.get_session(session_id)
+    runtime_ctx = types.SimpleNamespace(tape=Tape(tape_id="stable-tape"))
+    session.runtime_pipeline = object()
+    session.runtime_ctx = runtime_ctx
+    session.runtime_adapter = object()
+
+    expected = CheckpointMeta(
+        checkpoint_id="cp-save",
+        tape_id="stable-tape",
+        session_id=session_id,
+        entry_count=0,
+        window_start=0,
+        created_at=datetime.now(),
+        label="manual save",
+    )
+
+    class FakeCheckpointService:
+        async def capture(self, ctx, label: str | None = None, extra=None):
+            assert ctx is runtime_ctx
+            assert label == "manual save"
+            assert extra == {
+                "session_restart_config": {
+                    "provider_name": session.provider_name,
+                    "model_name": session.model_name,
+                    "base_url": session.base_url,
+                    "max_steps": session.max_steps,
+                    "approval_policy": session.approval_policy.value,
+                }
+            }
+            return expected
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            manager, "_checkpoint_service", FakeCheckpointService(), raising=False
+        )
+        checkpoint = await manager.capture_checkpoint(session_id, label="manual save")
+
+    assert checkpoint == expected
+
+
+@pytest.mark.asyncio
+async def test_capture_checkpoint_stamps_restart_safe_session_config_into_extra() -> (
+    None
+):
+    manager = SessionManager(store=InMemorySessionStore())
+    session_id = await manager.create_session(
+        provider_name="anthropic",
+        model_name="claude-checkpoint",
+        base_url="http://checkpoint.local",
+        max_steps=17,
+        approval_policy=ApprovalPolicy.INTERACTIVE,
+    )
+    session = manager.get_session(session_id)
+    runtime_ctx = types.SimpleNamespace(tape=Tape(tape_id="stable-tape"))
+    session.runtime_pipeline = object()
+    session.runtime_ctx = runtime_ctx
+    session.runtime_adapter = object()
+
+    expected = CheckpointMeta(
+        checkpoint_id="cp-save",
+        tape_id="stable-tape",
+        session_id=session_id,
+        entry_count=0,
+        window_start=0,
+        created_at=datetime.now(),
+        label="manual save",
+    )
+    captured_extra: dict[str, object] | None = None
+
+    class FakeCheckpointService:
+        async def capture(self, ctx, label: str | None = None, extra=None):
+            nonlocal captured_extra
+            assert ctx is runtime_ctx
+            assert label == "manual save"
+            assert extra is not None
+            captured_extra = dict(extra)
+            return expected
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            manager, "_checkpoint_service", FakeCheckpointService(), raising=False
+        )
+        checkpoint = await manager.capture_checkpoint(
+            session_id,
+            label="manual save",
+            extra={"workspace": "/tmp/repo"},
+        )
+
+    assert checkpoint == expected
+    assert captured_extra == {
+        "workspace": "/tmp/repo",
+        "session_restart_config": {
+            "provider_name": "anthropic",
+            "model_name": "claude-checkpoint",
+            "base_url": "http://checkpoint.local",
+            "max_steps": 17,
+            "approval_policy": "interactive",
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_ensure_session_runtime_bootstraps_runtime_and_persists_tape_id() -> None:
+    store = InMemorySessionStore()
+    manager = SessionManager(store=store)
+    session_id = await manager.create_session()
+
+    initialized: list[str] = []
+    fake_ctx = types.SimpleNamespace(
+        config={"tool_registry": object()},
+        tape=Tape(tape_id="bootstrapped-tape"),
+        plugin_states={},
+    )
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        ),
+        _directive_executor=None,
+    )
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+            self.ctx = ctx
+
+        async def initialize(self) -> None:
+            initialized.append("initialized")
+
+    def fake_create_agent(**kwargs):
+        assert kwargs["session_id_override"] == session_id
+        return fake_pipeline, fake_ctx
+
+    with (
+        patch("importlib.import_module") as import_module,
+        patch.dict(
+            SessionManager.ensure_session_runtime.__globals__,
+            {"PipelineAdapter": FakeAdapter},
+        ),
+    ):
+        import_module.return_value = types.SimpleNamespace(
+            create_agent=fake_create_agent
+        )
+        returned_ctx = await manager.ensure_session_runtime(session_id)
+
+    session = manager.get_session(session_id)
+    payload = store.get(session_id)
+
+    assert returned_ctx is fake_ctx
+    assert session.runtime_ctx is fake_ctx
+    assert payload is not None
+    assert payload["tape_id"] == "bootstrapped-tape"
+    assert initialized == ["initialized"]
