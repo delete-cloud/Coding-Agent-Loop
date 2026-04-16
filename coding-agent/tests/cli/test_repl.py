@@ -775,7 +775,8 @@ class TestSessionManagerIntegration:
                     runtime_adapter="adapter-b",
                 )
 
-        session.context["session_manager"] = FakeSessionManager()
+        session._session_manager = FakeSessionManager()
+        session.context["session_manager"] = session._session_manager
         await session._switch_session("session-b")
 
         assert session.context["session_id"] == "session-b"
@@ -839,6 +840,71 @@ class TestSessionManagerIntegration:
 
 class TestReplInitialization:
     @pytest.mark.asyncio
+    async def test_initialize_creates_managed_session_without_asyncio_run(
+        self, monkeypatch
+    ):
+        from coding_agent.cli.repl import InteractiveSession
+
+        created_sessions: list[dict[str, object]] = []
+
+        async def fake_create_session(**kwargs):
+            created_sessions.append(dict(kwargs))
+            return "session-init"
+
+        class FakeSessionManager:
+            async def create_session(self, **kwargs):
+                return await fake_create_session(**kwargs)
+
+            def get_session(self, session_id: str):
+                assert session_id == "session-init"
+                return SimpleNamespace(
+                    runtime_pipeline=None,
+                    runtime_ctx=None,
+                    runtime_adapter=None,
+                    tape_id=None,
+                )
+
+            def _persist_session(self, managed_session):
+                assert managed_session.tape_id == "repl-init-tape"
+
+        fake_pipeline = object()
+        fake_ctx = SimpleNamespace(
+            config={"tool_registry": "registry-a"},
+            tape=SimpleNamespace(tape_id="repl-init-tape"),
+        )
+
+        class FakeAdapter:
+            def __init__(self, pipeline, ctx, consumer) -> None:
+                del consumer
+                assert pipeline is fake_pipeline
+                assert ctx is fake_ctx
+
+            async def initialize(self) -> None:
+                return None
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(
+            "coding_agent.cli.repl.create_agent",
+            lambda *args, **kwargs: (fake_pipeline, fake_ctx),
+        )
+        monkeypatch.setattr("coding_agent.cli.repl.PipelineAdapter", FakeAdapter)
+        session = InteractiveSession(TestFooterIntegration()._make_config())
+
+        session._session_manager = FakeSessionManager()
+        session.context["session_manager"] = session._session_manager
+
+        await session.initialize()
+
+        assert session.context["session_id"] == "session-init"
+        assert (
+            created_sessions
+            and created_sessions[0]["provider_name"] == session.config.provider
+        )
+        assert session._pipeline_ctx is fake_ctx
+
+    @pytest.mark.asyncio
     async def test_initialize_mounts_pipeline_before_first_command(self, monkeypatch):
         from agentkit.runtime.pipeline import PipelineContext
         from agentkit.tape.tape import Tape
@@ -859,6 +925,57 @@ class TestReplInitialization:
         assert "mcp_plugin" in session.context
         await session.initialize()
         mock_pipeline.mount.assert_awaited_once_with(mock_ctx)
+
+    @pytest.mark.asyncio
+    async def test_initialize_does_not_reregister_attached_runtime(self, monkeypatch):
+        from coding_agent.cli.repl import InteractiveSession
+
+        class FakeSessionManager:
+            async def create_session(self, **kwargs):
+                return "session-init"
+
+            def get_session(self, session_id: str):
+                assert session_id == "session-init"
+                return SimpleNamespace(
+                    runtime_pipeline=None,
+                    runtime_ctx=None,
+                    runtime_adapter=None,
+                    tape_id=None,
+                )
+
+            def register_session(self, managed_session):
+                raise AssertionError("initialize should not re-register live runtime")
+
+            def _persist_session(self, managed_session):
+                return None
+
+        fake_pipeline = object()
+        fake_ctx = SimpleNamespace(
+            config={"tool_registry": "registry-a"},
+            tape=SimpleNamespace(tape_id="repl-init-tape"),
+        )
+
+        class FakeAdapter:
+            def __init__(self, pipeline, ctx, consumer) -> None:
+                del pipeline, ctx, consumer
+
+            async def initialize(self) -> None:
+                return None
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(
+            "coding_agent.cli.repl.create_agent",
+            lambda *args, **kwargs: (fake_pipeline, fake_ctx),
+        )
+        monkeypatch.setattr("coding_agent.cli.repl.PipelineAdapter", FakeAdapter)
+        session = InteractiveSession(TestFooterIntegration()._make_config())
+
+        session._session_manager = FakeSessionManager()
+        session.context["session_manager"] = session._session_manager
+
+        await session.initialize()
 
     @pytest.mark.asyncio
     async def test_run_initializes_pipeline_before_prompt_loop(self, monkeypatch):

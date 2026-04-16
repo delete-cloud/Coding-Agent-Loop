@@ -10,6 +10,7 @@ from typing import Any
 from prompt_toolkit.patch_stdout import patch_stdout
 from rich.console import Console
 
+from coding_agent.approval import ApprovalPolicy
 from coding_agent.cli.commands import handle_command
 from coding_agent.cli.input_handler import InputHandler, expand_pasted_refs
 from coding_agent.cli.terminal_output import (
@@ -40,6 +41,9 @@ class InteractiveSession:
     def __init__(self, config: Config):
         self.config = config
         self._session_manager = SessionManager()
+        self._pipeline: Any | None = None
+        self._pipeline_ctx: Any | None = None
+        self._pipeline_adapter: Any | None = None
         self.context: dict[str, Any] = {
             "should_exit": False,
             "model": config.model,
@@ -61,6 +65,7 @@ class InteractiveSession:
             on_status=self._handle_status_update,
         )
         self._footer = StatusFooter(console=console)
+        self._managed_session_initialized = False
 
         self._setup_agent()
 
@@ -111,38 +116,6 @@ class InteractiveSession:
 
     def _setup_agent(self):
         """Setup agent components."""
-        session_id = str(
-            asyncio.run(
-                self._session_manager.create_session(  # type: ignore[misc]
-                    repo_path=self.config.repo,
-                    approval_policy=getattr(
-                        __import__(
-                            "coding_agent.approval", fromlist=["ApprovalPolicy"]
-                        ),
-                        "ApprovalPolicy",
-                    ).YOLO
-                    if self.config.approval_mode == "yolo"
-                    else getattr(
-                        __import__(
-                            "coding_agent.approval", fromlist=["ApprovalPolicy"]
-                        ),
-                        "ApprovalPolicy",
-                    ).INTERACTIVE
-                    if self.config.approval_mode == "interactive"
-                    else getattr(
-                        __import__(
-                            "coding_agent.approval", fromlist=["ApprovalPolicy"]
-                        ),
-                        "ApprovalPolicy",
-                    ).AUTO,
-                    provider_name=self.config.provider,
-                    model_name=self.config.model,
-                    base_url=self.config.base_url,
-                    max_steps=self.config.max_steps,
-                )
-            )
-        )
-        self.context["session_id"] = session_id
         self.context["create_session"] = self._create_managed_session
         self.context["switch_session"] = self._switch_session
         self.context["restore_checkpoint"] = self._restore_checkpoint
@@ -157,23 +130,52 @@ class InteractiveSession:
             max_steps_override=self.config.max_steps,
             approval_mode_override=self.config.approval_mode,
         )
+        self._pipeline = pipeline
         self._pipeline_adapter = PipelineAdapter(
             pipeline=pipeline, ctx=pipeline_ctx, consumer=self._consumer
         )
         pipeline_ctx.config["wire_consumer"] = self._consumer
         pipeline_ctx.config["agent_id"] = ""
         self._pipeline_ctx = pipeline_ctx
-        managed_session = self._session_manager.get_session(session_id)
-        managed_session.runtime_pipeline = pipeline
-        managed_session.runtime_ctx = pipeline_ctx
-        managed_session.runtime_adapter = self._pipeline_adapter
-        managed_session.tape_id = pipeline_ctx.tape.tape_id
-        self._session_manager.register_session(managed_session)
         self._refresh_command_context_from_pipeline_ctx(pipeline_ctx)
+
+    def _approval_policy(self) -> ApprovalPolicy:
+        if self.config.approval_mode == "yolo":
+            return ApprovalPolicy.YOLO
+        if self.config.approval_mode == "interactive":
+            return ApprovalPolicy.INTERACTIVE
+        return ApprovalPolicy.AUTO
+
+    async def _initialize_managed_session(self) -> None:
+        if self._managed_session_initialized:
+            return
+        if (
+            self._pipeline is None
+            or self._pipeline_ctx is None
+            or self._pipeline_adapter is None
+        ):
+            raise RuntimeError("REPL pipeline is not initialized")
+        session_id = await self._session_manager.create_session(
+            repo_path=self.config.repo,
+            approval_policy=self._approval_policy(),
+            provider_name=self.config.provider,
+            model_name=self.config.model,
+            base_url=self.config.base_url,
+            max_steps=self.config.max_steps,
+        )
+        self.context["session_id"] = session_id
+        managed_session = self._session_manager.get_session(session_id)
+        managed_session.runtime_pipeline = self._pipeline
+        managed_session.runtime_ctx = self._pipeline_ctx
+        managed_session.runtime_adapter = self._pipeline_adapter
+        managed_session.tape_id = self._pipeline_ctx.tape.tape_id
+        self._session_manager._persist_session(managed_session)
+        self._managed_session_initialized = True
 
     async def _create_managed_session(self) -> str:
         session_id = await self._session_manager.create_session(
             repo_path=self.config.repo,
+            approval_policy=self._approval_policy(),
             provider_name=self.config.provider,
             model_name=self.config.model,
             base_url=self.config.base_url,
@@ -185,6 +187,7 @@ class InteractiveSession:
         await self._session_manager.ensure_session_runtime(session_id)
         managed_session = self._session_manager.get_session(session_id)
         self.context["session_id"] = managed_session.id
+        self._pipeline = managed_session.runtime_pipeline
         self._pipeline_ctx = managed_session.runtime_ctx
         self._pipeline_adapter = managed_session.runtime_adapter
         self._refresh_command_context_from_pipeline_ctx(managed_session.runtime_ctx)
@@ -206,8 +209,9 @@ class InteractiveSession:
         return await self._consumer.request_approval(req)
 
     async def initialize(self) -> None:
-        if not hasattr(self, "_pipeline_adapter"):
+        if self._pipeline_adapter is None:
             return
+        await self._initialize_managed_session()
         await self._pipeline_adapter.initialize()
 
     async def run(self):
@@ -273,7 +277,7 @@ class InteractiveSession:
                 turn_count += 1
         finally:
             self._footer.disable()
-            if hasattr(self, "_pipeline_adapter"):
+            if self._pipeline_adapter is not None:
                 await self._pipeline_adapter.close()
 
         print_pt("\nSession ended.\n", output=prompt_output)
@@ -289,6 +293,8 @@ class InteractiveSession:
                 phase="streaming",
             )
 
+        if self._pipeline_adapter is None:
+            raise RuntimeError("REPL pipeline adapter is not initialized")
         result = await self._pipeline_adapter.run_turn(full_message)
 
         if self._footer.enabled:
