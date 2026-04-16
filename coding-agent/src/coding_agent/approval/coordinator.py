@@ -70,7 +70,10 @@ class ApprovalCoordinator:
             }
         ):
             self.remember_session_approval(request)
-        return self._store.respond(response)
+        recorded = self._store.respond(response)
+        if recorded:
+            self._drop_request_id(response.request_id)
+        return recorded
 
     def is_session_approved(self, request: ApprovalRequest) -> bool:
         return (request.agent_id, request.tool) in self._session_approved_tools
