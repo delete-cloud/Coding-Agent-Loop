@@ -451,12 +451,11 @@ class SessionManager:
         ctx.config["agent_id"] = ""
 
         provider_model_name = getattr(session.provider, "model_name", None)
-        provider_base_url = getattr(session.provider, "base_url", None)
         can_reuse_provider = (
             session.provider is not None
             and session.provider_name == restored_config.provider_name
             and provider_model_name == restored_config.model_name
-            and provider_base_url == restored_config.base_url
+            and previous_base_url == restored_config.base_url
         )
         if can_reuse_provider:
             llm_plugin = pipeline._registry.get("llm_provider")
@@ -1040,7 +1039,12 @@ class SessionManager:
         return await self._checkpoint_service.list(session.tape_id)
 
     async def restore_checkpoint(self, session_id: str, checkpoint_id: str) -> None:
-        session = self.get_session(session_id)
-        if session.turn_in_progress or (session.task and not session.task.done()):
+        turn_lock = self._turn_lock_for(session_id)
+        if turn_lock.locked():
             raise RuntimeError("turn already in progress")
-        await self._restore_checkpoint(session, checkpoint_id)
+
+        async with turn_lock:
+            session = self.get_session(session_id)
+            if session.turn_in_progress or (session.task and not session.task.done()):
+                raise RuntimeError("turn already in progress")
+            await self._restore_checkpoint(session, checkpoint_id)

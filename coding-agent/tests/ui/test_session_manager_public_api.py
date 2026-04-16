@@ -625,6 +625,25 @@ async def test_restore_checkpoint_rejects_active_turn() -> None:
 
 
 @pytest.mark.asyncio
+async def test_restore_checkpoint_rejects_when_turn_lock_is_held() -> None:
+    manager = SessionManager(store=InMemorySessionStore())
+    session_id = await manager.create_session()
+    session = manager.get_session(session_id)
+    session.tape_id = "stable-tape"
+    manager.register_session(session)
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("restore should not run while turn lock is held")
+
+    turn_lock = manager._turn_lock_for(session_id)
+    async with turn_lock:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(manager, "_restore_checkpoint", fail_if_called, raising=False)
+            with pytest.raises(RuntimeError, match="turn already in progress"):
+                await manager.restore_checkpoint(session_id, "cp-locked")
+
+
+@pytest.mark.asyncio
 async def test_capture_checkpoint_uses_current_runtime_context() -> None:
     manager = SessionManager(store=InMemorySessionStore())
     session_id = await manager.create_session()
