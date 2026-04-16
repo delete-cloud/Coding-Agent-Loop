@@ -428,6 +428,8 @@ class SessionManager:
 
         restored_config = _checkpoint_session_config_from_extra(session, snapshot.extra)
         previous_provider_name = session.provider_name
+        previous_model_name = session.model_name
+        previous_base_url = session.base_url
 
         approval_mode_map = {
             ApprovalPolicy.YOLO: "yolo",
@@ -448,10 +450,15 @@ class SessionManager:
         ctx.config["wire_consumer"] = None
         ctx.config["agent_id"] = ""
 
-        if (
+        provider_model_name = getattr(session.provider, "model_name", None)
+        provider_base_url = getattr(session.provider, "base_url", None)
+        can_reuse_provider = (
             session.provider is not None
             and session.provider_name == restored_config.provider_name
-        ):
+            and provider_model_name == restored_config.model_name
+            and provider_base_url == restored_config.base_url
+        )
+        if can_reuse_provider:
             llm_plugin = pipeline._registry.get("llm_provider")
             llm_plugin._instance = session.provider
 
@@ -474,7 +481,11 @@ class SessionManager:
         session.base_url = restored_config.base_url
         session.max_steps = restored_config.max_steps
         session.approval_policy = restored_config.approval_policy
-        if previous_provider_name != restored_config.provider_name:
+        if (
+            previous_provider_name != restored_config.provider_name
+            or previous_model_name != restored_config.model_name
+            or previous_base_url != restored_config.base_url
+        ):
             session.provider = None
         session.runtime_pipeline = pipeline
         session.runtime_ctx = ctx

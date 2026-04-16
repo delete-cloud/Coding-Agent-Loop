@@ -1141,6 +1141,95 @@ async def test_restore_clears_hot_provider_override_when_checkpoint_rewinds_prov
 
 
 @pytest.mark.asyncio
+async def test_restore_does_not_reuse_hot_provider_when_model_changes_with_same_provider() -> (
+    None
+):
+    store = InMemorySessionStore()
+    manager = SessionManager(store=store)
+    hot_provider = MockProvider()
+    hot_provider._model_name = "current-model"
+
+    session_id = await manager.create_session(
+        provider=hot_provider,
+        provider_name="openai",
+        model_name="current-model",
+        base_url="http://current.local",
+        max_steps=13,
+        approval_policy=ApprovalPolicy.AUTO,
+    )
+    session = manager.get_session(session_id)
+    session.tape_id = "same-provider-different-model-tape"
+    manager.register_session(session)
+
+    snapshot = types.SimpleNamespace(
+        meta=types.SimpleNamespace(
+            checkpoint_id="cp-same-provider-new-model",
+            tape_id="same-provider-different-model-tape",
+            entry_count=0,
+            window_start=0,
+        ),
+        tape_entries=(),
+        plugin_states={},
+        extra={
+            "session_restart_config": {
+                "provider_name": "openai",
+                "model_name": "rewound-model",
+                "base_url": "http://current.local",
+                "max_steps": 5,
+                "approval_policy": "interactive",
+            }
+        },
+    )
+
+    llm_plugin = types.SimpleNamespace(_instance=None)
+
+    class FakeCheckpointService:
+        async def restore(self, checkpoint_id: str):
+            assert checkpoint_id == "cp-same-provider-new-model"
+            return snapshot
+
+        async def list(self, tape_id: str):
+            assert tape_id == "same-provider-different-model-tape"
+            return [snapshot.meta]
+
+        async def delete(self, checkpoint_id: str) -> None:
+            return None
+
+    class FakeTapeStore:
+        async def truncate(self, tape_id: str, keep: int) -> None:
+            return None
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+            self.ctx = ctx
+
+        async def initialize(self) -> None:
+            return None
+
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(get=lambda _: llm_plugin)
+    )
+
+    def fake_create_agent(**kwargs):
+        return fake_pipeline, types.SimpleNamespace(
+            config={}, tape=kwargs.get("tape"), plugin_states={}
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
+        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr(
+            manager, "_checkpoint_service", FakeCheckpointService(), raising=False
+        )
+        mp.setattr(manager, "_tape_store", FakeTapeStore(), raising=False)
+        await manager._restore_checkpoint(session, "cp-same-provider-new-model")
+
+    assert llm_plugin._instance is None
+    assert session.provider is None
+
+
+@pytest.mark.asyncio
 async def test_restore_closes_existing_runtime_before_replacing_it() -> None:
     store = InMemorySessionStore()
     manager = SessionManager(store=store)
