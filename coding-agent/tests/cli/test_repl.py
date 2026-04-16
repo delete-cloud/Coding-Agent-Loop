@@ -733,6 +733,58 @@ class TestFooterIntegration:
 
         assert close_calls == ["close"]
 
+
+class TestSessionManagerIntegration:
+    @pytest.mark.asyncio
+    async def test_switch_active_session_rebinds_runtime_context(self, monkeypatch):
+        from coding_agent.cli.repl import InteractiveSession
+
+        monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
+        config = SimpleNamespace(
+            model="gpt-4o",
+            repo=None,
+            api_key=None,
+            provider="openai",
+            base_url=None,
+            max_steps=None,
+            approval_mode=None,
+        )
+        session = InteractiveSession(config)
+
+        fake_ctx = SimpleNamespace(
+            config={
+                "tool_registry": "registry-b",
+                "skills_plugin": "skills-b",
+                "mcp_plugin": "mcp-b",
+            },
+            tape=SimpleNamespace(tape_id="tape-b"),
+        )
+        fake_pipeline = object()
+
+        class FakeSessionManager:
+            async def ensure_session_runtime(self, session_id: str):
+                assert session_id == "session-b"
+                return fake_ctx
+
+            def get_session(self, session_id: str):
+                assert session_id == "session-b"
+                return SimpleNamespace(
+                    id="session-b",
+                    runtime_pipeline=fake_pipeline,
+                    runtime_ctx=fake_ctx,
+                    runtime_adapter="adapter-b",
+                )
+
+        session.context["session_manager"] = FakeSessionManager()
+        await session._switch_session("session-b")
+
+        assert session.context["session_id"] == "session-b"
+        assert session.context["tool_registry"] == "registry-b"
+        assert session.context["skills_plugin"] == "skills-b"
+        assert session.context["mcp_plugin"] == "mcp-b"
+        assert session._pipeline_ctx is fake_ctx
+        assert session._pipeline_adapter == "adapter-b"
+
     def test_status_update_updates_input_toolbar_text(self, monkeypatch):
         from coding_agent.cli.repl import InteractiveSession
 

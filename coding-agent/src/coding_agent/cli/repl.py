@@ -24,6 +24,7 @@ from coding_agent.ui.stream_renderer import StreamingRenderer
 from coding_agent.ui.rich_consumer import RichConsumer
 from coding_agent.ui.rich_tui import CodingAgentTUI
 from coding_agent.ui.status_footer import StatusFooter
+from coding_agent.ui.session_manager import SessionManager
 
 
 console = Console(force_terminal=True, soft_wrap=False)
@@ -38,11 +39,13 @@ class InteractiveSession:
 
     def __init__(self, config: Config):
         self.config = config
+        self._session_manager = SessionManager()
         self.context: dict[str, Any] = {
             "should_exit": False,
             "model": config.model,
             "thinking_enabled": True,
             "thinking_effort": "medium",
+            "session_manager": self._session_manager,
         }
         self.input_handler = InputHandler()
         self._bash_executor = BashExecutor(
@@ -60,6 +63,18 @@ class InteractiveSession:
         self._footer = StatusFooter(console=console)
 
         self._setup_agent()
+
+    def _refresh_command_context_from_pipeline_ctx(self, pipeline_ctx: Any) -> None:
+        self.context["pipeline_ctx"] = pipeline_ctx
+        self.context["tool_registry"] = pipeline_ctx.config.get("tool_registry")
+        if "skills_plugin" in pipeline_ctx.config:
+            self.context["skills_plugin"] = pipeline_ctx.config["skills_plugin"]
+        else:
+            self.context.pop("skills_plugin", None)
+        if "mcp_plugin" in pipeline_ctx.config:
+            self.context["mcp_plugin"] = pipeline_ctx.config["mcp_plugin"]
+        else:
+            self.context.pop("mcp_plugin", None)
 
     def _format_status_text(self, snapshot: dict[str, Any]) -> str:
         phase_icons = {
@@ -96,6 +111,41 @@ class InteractiveSession:
 
     def _setup_agent(self):
         """Setup agent components."""
+        session_id = str(
+            asyncio.run(
+                self._session_manager.create_session(  # type: ignore[misc]
+                    repo_path=self.config.repo,
+                    approval_policy=getattr(
+                        __import__(
+                            "coding_agent.approval", fromlist=["ApprovalPolicy"]
+                        ),
+                        "ApprovalPolicy",
+                    ).YOLO
+                    if self.config.approval_mode == "yolo"
+                    else getattr(
+                        __import__(
+                            "coding_agent.approval", fromlist=["ApprovalPolicy"]
+                        ),
+                        "ApprovalPolicy",
+                    ).INTERACTIVE
+                    if self.config.approval_mode == "interactive"
+                    else getattr(
+                        __import__(
+                            "coding_agent.approval", fromlist=["ApprovalPolicy"]
+                        ),
+                        "ApprovalPolicy",
+                    ).AUTO,
+                    provider_name=self.config.provider,
+                    model_name=self.config.model,
+                    base_url=self.config.base_url,
+                    max_steps=self.config.max_steps,
+                )
+            )
+        )
+        self.context["session_id"] = session_id
+        self.context["create_session"] = self._create_managed_session
+        self.context["switch_session"] = self._switch_session
+        self.context["restore_checkpoint"] = self._restore_checkpoint
         pipeline, pipeline_ctx = create_agent(
             api_key=str(self.config.api_key.get_secret_value())
             if self.config.api_key
@@ -113,15 +163,38 @@ class InteractiveSession:
         pipeline_ctx.config["wire_consumer"] = self._consumer
         pipeline_ctx.config["agent_id"] = ""
         self._pipeline_ctx = pipeline_ctx
+        managed_session = self._session_manager.get_session(session_id)
+        managed_session.runtime_pipeline = pipeline
+        managed_session.runtime_ctx = pipeline_ctx
+        managed_session.runtime_adapter = self._pipeline_adapter
+        managed_session.tape_id = pipeline_ctx.tape.tape_id
+        self._session_manager.register_session(managed_session)
+        self._refresh_command_context_from_pipeline_ctx(pipeline_ctx)
 
-        # Make plugin references available to CLI commands
-        if "tool_registry" in pipeline_ctx.config:
-            self.context["tool_registry"] = pipeline_ctx.config["tool_registry"]
-        if "skills_plugin" in pipeline_ctx.config:
-            self.context["skills_plugin"] = pipeline_ctx.config["skills_plugin"]
-            self.context["pipeline_ctx"] = pipeline_ctx
-        if "mcp_plugin" in pipeline_ctx.config:
-            self.context["mcp_plugin"] = pipeline_ctx.config["mcp_plugin"]
+    async def _create_managed_session(self) -> str:
+        session_id = await self._session_manager.create_session(
+            repo_path=self.config.repo,
+            provider_name=self.config.provider,
+            model_name=self.config.model,
+            base_url=self.config.base_url,
+            max_steps=self.config.max_steps,
+        )
+        return session_id
+
+    async def _switch_session(self, session_id: str) -> None:
+        await self._session_manager.ensure_session_runtime(session_id)
+        managed_session = self._session_manager.get_session(session_id)
+        self.context["session_id"] = managed_session.id
+        self._pipeline_ctx = managed_session.runtime_ctx
+        self._pipeline_adapter = managed_session.runtime_adapter
+        self._refresh_command_context_from_pipeline_ctx(managed_session.runtime_ctx)
+
+    async def _restore_checkpoint(self, checkpoint_id: str) -> None:
+        session_id = self.context.get("session_id")
+        if not isinstance(session_id, str):
+            raise RuntimeError("no active session")
+        await self._session_manager.restore_checkpoint(session_id, checkpoint_id)
+        await self._switch_session(session_id)
 
     # Proxy methods for WireConsumer protocol (used by subagent tool)
     async def emit(self, msg) -> None:
