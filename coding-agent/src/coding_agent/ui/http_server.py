@@ -8,7 +8,7 @@ import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 from collections.abc import AsyncIterator
 
 from fastapi import FastAPI, HTTPException, Depends, Request, Response
@@ -498,6 +498,7 @@ async def approve_request(
     request_id: str | None = None,  # Backward compat: query param
     approved: bool | None = None,  # Backward compat: query param
     feedback: str | None = None,  # Backward compat: query param
+    scope: str | None = None,  # Backward compat: query param
     api_key: str | None = Depends(verify_api_key),
 ) -> ApprovalResponseSchema:
     """Respond to approval request.
@@ -508,7 +509,13 @@ async def approve_request(
     req_id = body.request_id if body else request_id
     is_approved = body.approved if body else approved
     fb = body.feedback if body else feedback
-    scope = body.scope if body else "once"
+    resolved_scope = cast(
+        Literal["once", "session"],
+        body.scope if body else (scope or "once"),
+    )
+
+    if resolved_scope not in {"once", "session"}:
+        raise HTTPException(status_code=422, detail="scope must be 'once' or 'session'")
 
     if req_id is None:
         raise HTTPException(status_code=422, detail="request_id is required")
@@ -528,7 +535,7 @@ async def approve_request(
             request_id=req_id,
             approved=is_approved,
             feedback=fb,
-            scope=scope,
+            scope=resolved_scope,
         )
         if not success:
             raise HTTPException(status_code=400, detail="No pending approval request")
