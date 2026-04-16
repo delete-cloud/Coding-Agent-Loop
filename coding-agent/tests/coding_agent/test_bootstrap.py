@@ -136,3 +136,28 @@ enabled = ["storage", "core_tools"]
 
         approval_plugin = pipeline._registry.get("approval")
         assert approval_plugin._policy.name == "INTERACTIVE"
+
+    def test_create_agent_reads_subagent_timeout_from_config(self, tmp_path):
+        config_path = tmp_path / "agent.toml"
+        config_path.write_text(
+            """
+[agent]
+name = "test-agent"
+model = "claude-sonnet-4-20250514"
+provider = "anthropic"
+
+[agent.plugins]
+enabled = ["storage", "core_tools"]
+
+[subagent]
+timeout = 7.5
+""".strip()
+        )
+
+        _pipeline, ctx = create_agent(
+            config_path=config_path,
+            data_dir=tmp_path / "data",
+            api_key="sk-test",
+        )
+
+        assert ctx.config["subagent_timeout"] == 7.5

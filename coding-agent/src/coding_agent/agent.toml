@@ -34,6 +34,9 @@ sessions = "./data/sessions"
 policy = "auto"
 blocked_tools = []
 
+[subagent]
+timeout = 30.0
+
 [summarizer]
 max_entries = 100
 keep_recent = 20
