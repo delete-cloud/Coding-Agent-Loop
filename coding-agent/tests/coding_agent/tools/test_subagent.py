@@ -142,7 +142,9 @@ async def test_subagent_tool_forwards_child_agent_id_to_parent_consumer():
 
 
 @pytest.mark.asyncio
-async def test_subagent_tool_returns_timeout_summary(monkeypatch: pytest.MonkeyPatch):
+async def test_subagent_timeout_summary_reports_no_progress_when_no_child_entries_are_recorded(
+    monkeypatch: pytest.MonkeyPatch,
+):
     child_ctx = PipelineContext(tape=Tape(), session_id="parent-session")
 
     def child_pipeline_builder(**_kwargs: Any):
@@ -167,7 +169,92 @@ async def test_subagent_tool_returns_timeout_summary(monkeypatch: pytest.MonkeyP
 
     result = await tool_fn(goal="Take too long", __pipeline_ctx__=parent_ctx)
 
-    assert result == "Subagent timed out after 0.01 seconds"
+    assert result == (
+        "Subagent timed out after 0.01 seconds with no child progress recorded"
+    )
+
+
+@pytest.mark.asyncio
+async def test_subagent_timeout_summary_reports_partial_progress_when_child_entries_are_recorded(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    child_tape: Tape | None = None
+
+    def child_pipeline_builder(**kwargs: Any):
+        nonlocal child_tape
+        child_tape = kwargs["tape_fork"]
+        return cast(Pipeline, object()), PipelineContext(
+            tape=kwargs["tape_fork"],
+            session_id="parent-session",
+        )
+
+    class HangingAdapter:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        async def run_turn(self, _goal: str) -> TurnOutcome:
+            assert child_tape is not None
+            child_tape.append(
+                Entry(
+                    kind="message",
+                    payload={"role": "assistant", "content": "Partial child progress"},
+                )
+            )
+            await asyncio.sleep(1)
+            return TurnOutcome(stop_reason=StopReason.NO_TOOL_CALLS)
+
+    monkeypatch.setattr("coding_agent.tools.subagent.PipelineAdapter", HangingAdapter)
+
+    parent_tape = Tape()
+    tool_fn = build_subagent_tool(child_pipeline_builder)
+    parent_ctx = PipelineContext(
+        tape=parent_tape,
+        session_id="parent-session",
+        config={"subagent_timeout": 0.01},
+    )
+
+    result = await tool_fn(goal="Take too long", __pipeline_ctx__=parent_ctx)
+
+    assert result == (
+        "Subagent timed out after 0.01 seconds after recording partial child progress"
+    )
+    appended_entries = list(parent_tape)
+    assert len(appended_entries) == 1
+    assert appended_entries[0].payload["content"] == "Partial child progress"
+    assert appended_entries[0].meta["subagent_child"] is True
+
+
+@pytest.mark.asyncio
+async def test_subagent_timeout_summary_keeps_completed_path_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    child_ctx = PipelineContext(tape=Tape(), session_id="parent-session")
+
+    def child_pipeline_builder(**_kwargs: Any):
+        return cast(Pipeline, object()), child_ctx
+
+    class ImmediateAdapter:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        async def run_turn(self, _goal: str) -> TurnOutcome:
+            return TurnOutcome(
+                stop_reason=StopReason.NO_TOOL_CALLS,
+                final_message="Child finished summary",
+            )
+
+    monkeypatch.setattr("coding_agent.tools.subagent.PipelineAdapter", ImmediateAdapter)
+
+    tool_fn = build_subagent_tool(child_pipeline_builder)
+    parent_ctx = PipelineContext(
+        tape=Tape(),
+        session_id="parent-session",
+        config={"subagent_timeout": 0.01},
+    )
+
+    result = await tool_fn(goal="Finish normally", __pipeline_ctx__=parent_ctx)
+
+    assert result == "Subagent completed: Child finished summary"
 
 
 def test_create_agent_injects_default_child_worker_coordinator() -> None:
