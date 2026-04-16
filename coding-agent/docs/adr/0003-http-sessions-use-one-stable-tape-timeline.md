@@ -15,6 +15,8 @@ Each HTTP session owns one stable tape timeline keyed by a persistent `tape_id`.
 
 Hot path requests reuse the in-memory pipeline, context, and adapter. Cold path recovery rebuilds a new runtime from persisted tape entries, but it still continues on the same stable `tape_id`.
 
+That stable timeline identity is also the foundation for checkpoint restore in the product layer: restore stays in the same session and on the same stable `tape_id`, rather than creating a new default branch identity.
+
 ## Alternatives Rejected
 
 - Create a fresh tape for each HTTP turn — loses continuity immediately.
