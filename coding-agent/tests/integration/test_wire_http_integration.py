@@ -12,6 +12,7 @@ import os
 import socket
 import sys
 import textwrap
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 
 import httpx
@@ -36,6 +37,91 @@ from coding_agent.wire.protocol import (
     TurnEnd,
 )
 from tests.ui.test_http_server import add_store_backed_approval_request
+
+
+async def _probe_live_server(base_url: str) -> httpx.Response:
+    async with httpx.AsyncClient(base_url=base_url, timeout=2.0) as probe:
+        return await probe.get("/healthz")
+
+
+async def _wait_for_live_server(
+    base_url: str,
+    *,
+    probe: Callable[[], Awaitable[httpx.Response]] | None = None,
+    attempts: int = 8,
+    initial_delay: float = 0.05,
+    max_delay: float = 1.0,
+) -> None:
+    probe_request = probe or (lambda: _probe_live_server(base_url))
+    delay = initial_delay
+    last_response: httpx.Response | None = None
+
+    for _ in range(attempts):
+        try:
+            last_response = await probe_request()
+        except httpx.HTTPError:
+            last_response = None
+        else:
+            if (
+                200 <= last_response.status_code < 300
+                or last_response.status_code == 429
+            ):
+                return
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, max_delay)
+
+    raise AssertionError(
+        "live server failed to start"
+        if last_response is None
+        else f"live server failed to start (last status={last_response.status_code})"
+    )
+
+
+async def _wait_for_live_server_or_raise(base_url: str, server) -> None:
+    try:
+        await _wait_for_live_server(base_url)
+    except AssertionError as exc:
+        stdout, stderr = await server.communicate()
+        raise AssertionError(
+            f"{exc}\nstdout={stdout.decode()}\nstderr={stderr.decode()}"
+        ) from exc
+
+
+class TestLiveServerReadinessProbe:
+    async def test_wait_for_live_server_uses_backoff_between_retries(self, monkeypatch):
+        sleep_delays: list[float] = []
+
+        async def fake_sleep(delay: float) -> None:
+            sleep_delays.append(delay)
+
+        attempts = 0
+
+        async def flaky_probe() -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts < 4:
+                raise httpx.ConnectError("not ready")
+            return httpx.Response(status_code=200)
+
+        monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+        await _wait_for_live_server("http://example.test", probe=flaky_probe)
+
+        assert sleep_delays == [0.05, 0.1, 0.2]
+
+    async def test_wait_for_live_server_treats_rate_limit_as_ready(self):
+        attempts = 0
+
+        async def rate_limited_probe() -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise httpx.ConnectError("not ready")
+            return httpx.Response(status_code=429)
+
+        await _wait_for_live_server("http://example.test", probe=rate_limited_probe)
+
+        assert attempts == 2
 
 
 @pytest.fixture(autouse=True)
@@ -473,19 +559,7 @@ class TestApprovalFlowIntegration:
         listen_sock.close()
 
         base_url = f"http://127.0.0.1:{port}"
-        for _ in range(200):
-            try:
-                async with httpx.AsyncClient(base_url=base_url, timeout=1.0) as probe:
-                    ready = await probe.get("/healthz")
-                if ready.status_code == 200:
-                    break
-            except Exception:
-                await asyncio.sleep(0.05)
-        else:
-            stdout, stderr = await server.communicate()
-            raise AssertionError(
-                f"live server failed to start\nstdout={stdout.decode()}\nstderr={stderr.decode()}"
-            )
+        await _wait_for_live_server_or_raise(base_url, server)
 
         try:
             async with (
