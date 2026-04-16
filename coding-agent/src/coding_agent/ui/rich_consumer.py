@@ -158,8 +158,6 @@ class RichConsumer:
         if self._phase == "thinking":
             self._stop_thinking_heartbeat()
             self.renderer.thinking_end()
-            self._phase = "streaming"
-            self._publish_status()
 
     def _reset_turn_state(self) -> None:
         self._stop_thinking_heartbeat()
@@ -313,6 +311,11 @@ class RichConsumer:
         if self._stream_active:
             self.renderer.stream_end()
             self._stream_active = False
+
+        self._end_thinking()
+        if self._phase != "idle":
+            self._phase = "idle"
+            self._publish_status()
 
         response = await prompt_approval(self.renderer.console, req)
 

@@ -241,6 +241,56 @@ class TestStreamingConsumer:
         assert resp.feedback == "too dangerous"
 
     @pytest.mark.asyncio
+    async def test_approval_after_thinking_ends_thinking_before_prompt(
+        self, monkeypatch
+    ):
+        from coding_agent.wire.protocol import ApprovalRequest, ApprovalResponse
+        from coding_agent.ui import approval_prompt
+
+        buf = StringIO()
+        console = Console(file=buf, force_terminal=True, width=80)
+        renderer = StreamingRenderer(console=console)
+        status_snapshots: list[dict[str, object]] = []
+        consumer = RichConsumer(
+            renderer,
+            on_status=lambda snapshot: status_snapshots.append(snapshot.copy()),
+        )
+
+        await consumer.emit(ThinkingDelta(text="reasoning"))
+
+        observed: dict[str, object] = {}
+
+        async def mock_prompt(console, req):
+            del console, req
+            observed["phase"] = consumer._phase
+            observed["status_phase"] = status_snapshots[-1]["phase"]
+            observed["thinking_active"] = renderer._thinking_active
+            observed["heartbeat_stopped"] = consumer._thinking_heartbeat_task is None
+            return ApprovalResponse(
+                session_id="s1",
+                request_id="r1",
+                approved=False,
+                feedback="Rejected by user",
+            )
+
+        monkeypatch.setattr(approval_prompt, "prompt_approval", mock_prompt)
+
+        req = ApprovalRequest(
+            session_id="s1",
+            request_id="r1",
+            tool="bash",
+            args={"command": "ls"},
+        )
+        await consumer.request_approval(req)
+
+        assert observed == {
+            "phase": "idle",
+            "status_phase": "idle",
+            "thinking_active": False,
+            "heartbeat_stopped": True,
+        }
+
+    @pytest.mark.asyncio
     async def test_collapse_group_attribute_exists(self):
         consumer, _, _ = self._make_consumer()
         assert hasattr(consumer, "_collapse_group")
