@@ -87,7 +87,7 @@ class ApprovalStore:
         return True
 
     async def wait_for_response(
-        self, request_id: str, timeout: int
+        self, request_id: str, timeout: float
     ) -> ApprovalResponse | None:
         """Wait for response with timeout.
 
