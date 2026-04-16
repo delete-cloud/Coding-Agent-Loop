@@ -77,13 +77,34 @@ async def _wait_for_live_server(
     )
 
 
-async def _wait_for_live_server_or_raise(base_url: str, server) -> None:
+async def _wait_for_live_server_or_raise(
+    base_url: str,
+    server,
+    *,
+    wait_for_server: Callable[[str], Awaitable[None]] = _wait_for_live_server,
+) -> None:
     try:
-        await _wait_for_live_server(base_url)
+        await wait_for_server(base_url)
     except AssertionError as exc:
-        stdout, stderr = await server.communicate()
+        stdout = b""
+        stderr = b""
+        if server.returncode is None:
+            try:
+                server.terminate()
+            except ProcessLookupError:
+                pass
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    server.communicate(), timeout=2.0
+                )
+            except asyncio.TimeoutError:
+                if server.returncode is None:
+                    server.kill()
+                stdout, stderr = await server.communicate()
+        else:
+            stdout, stderr = await server.communicate()
         raise AssertionError(
-            f"{exc}\nstdout={stdout.decode()}\nstderr={stderr.decode()}"
+            f"{exc}\nstdout={stdout.decode(errors='replace')}\nstderr={stderr.decode(errors='replace')}"
         ) from exc
 
 
@@ -122,6 +143,42 @@ class TestLiveServerReadinessProbe:
         await _wait_for_live_server("http://example.test", probe=rate_limited_probe)
 
         assert attempts == 2
+
+    async def test_wait_for_live_server_or_raise_terminates_running_server(self):
+        class HangingServer:
+            def __init__(self) -> None:
+                self.returncode = None
+                self.terminated = False
+                self.killed = False
+                self.communicate_calls = 0
+
+            def terminate(self) -> None:
+                self.terminated = True
+
+            def kill(self) -> None:
+                self.killed = True
+                self.returncode = -9
+
+            async def communicate(self) -> tuple[bytes, bytes]:
+                self.communicate_calls += 1
+                if self.returncode is None:
+                    await asyncio.sleep(3600)
+                return (b"stdout", b"stderr")
+
+        async def never_ready(_base_url: str) -> None:
+            raise AssertionError("live server failed to start")
+
+        server = HangingServer()
+
+        with pytest.raises(AssertionError, match="stdout=stdout"):
+            await _wait_for_live_server_or_raise(
+                "http://example.test",
+                server,
+                wait_for_server=never_ready,
+            )
+
+        assert server.terminated is True
+        assert server.communicate_calls >= 1
 
 
 @pytest.fixture(autouse=True)
