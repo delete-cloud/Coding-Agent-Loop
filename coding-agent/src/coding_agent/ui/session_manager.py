@@ -41,8 +41,11 @@ from coding_agent.ui.session_store import (
     create_session_store,
 )
 from agentkit.storage.protocols import CheckpointStore, TapeStore
+from agentkit.checkpoint.models import CheckpointMeta
 
 logger = logging.getLogger(__name__)
+
+_CHECKPOINT_SESSION_CONFIG_KEY = "session_restart_config"
 
 
 class MockProvider:
@@ -181,6 +184,15 @@ class Session:
         return session
 
 
+@dataclass(frozen=True)
+class _CheckpointSessionConfig:
+    provider_name: str | None
+    model_name: str | None
+    base_url: str | None
+    max_steps: int
+    approval_policy: ApprovalPolicy
+
+
 def _required_session_str(data: dict[str, Any], key: str) -> str:
     value = data.get(key)
     if not isinstance(value, str):
@@ -193,6 +205,72 @@ def _required_session_int(data: dict[str, Any], key: str) -> int:
     if not isinstance(value, int):
         raise TypeError(f"session metadata is missing {key}")
     return value
+
+
+def _serialize_checkpoint_session_config(session: Session) -> dict[str, Any]:
+    return {
+        "provider_name": session.provider_name,
+        "model_name": session.model_name,
+        "base_url": session.base_url,
+        "max_steps": session.max_steps,
+        "approval_policy": session.approval_policy.value,
+    }
+
+
+def _checkpoint_session_config_from_extra(
+    session: Session, extra: dict[str, Any]
+) -> _CheckpointSessionConfig:
+    raw = extra.get(_CHECKPOINT_SESSION_CONFIG_KEY)
+    if raw is None:
+        return _CheckpointSessionConfig(
+            provider_name=session.provider_name,
+            model_name=session.model_name,
+            base_url=session.base_url,
+            max_steps=session.max_steps,
+            approval_policy=session.approval_policy,
+        )
+    if not isinstance(raw, dict):
+        raise TypeError("checkpoint session config must be an object")
+
+    required_keys = {
+        "provider_name",
+        "model_name",
+        "base_url",
+        "max_steps",
+        "approval_policy",
+    }
+    missing_keys = sorted(required_keys - raw.keys())
+    if missing_keys:
+        missing = ", ".join(missing_keys)
+        raise TypeError(f"checkpoint session config is missing {missing}")
+
+    provider_name = raw.get("provider_name")
+    if provider_name is not None and not isinstance(provider_name, str):
+        raise TypeError("checkpoint session config has invalid provider_name")
+
+    model_name = raw.get("model_name")
+    if model_name is not None and not isinstance(model_name, str):
+        raise TypeError("checkpoint session config has invalid model_name")
+
+    base_url = raw.get("base_url")
+    if base_url is not None and not isinstance(base_url, str):
+        raise TypeError("checkpoint session config has invalid base_url")
+
+    max_steps = raw.get("max_steps")
+    if not isinstance(max_steps, int):
+        raise TypeError("checkpoint session config has invalid max_steps")
+
+    approval_policy_raw = raw.get("approval_policy")
+    if not isinstance(approval_policy_raw, str):
+        raise TypeError("checkpoint session config has invalid approval_policy")
+
+    return _CheckpointSessionConfig(
+        provider_name=provider_name,
+        model_name=model_name,
+        base_url=base_url,
+        max_steps=max_steps,
+        approval_policy=ApprovalPolicy(approval_policy_raw),
+    )
 
 
 class _WireConsumer:
@@ -354,6 +432,11 @@ class SessionManager:
             _window_start=meta.window_start,
         )
 
+        restored_config = _checkpoint_session_config_from_extra(session, snapshot.extra)
+        previous_provider_name = session.provider_name
+        previous_model_name = session.model_name
+        previous_base_url = session.base_url
+
         approval_mode_map = {
             ApprovalPolicy.YOLO: "yolo",
             ApprovalPolicy.INTERACTIVE: "interactive",
@@ -361,11 +444,11 @@ class SessionManager:
         }
         pipeline, ctx = self._create_agent_for_session(
             workspace_root=session.repo_path,
-            model_override=session.model_name,
-            provider_override=session.provider_name,
-            base_url_override=session.base_url,
-            max_steps_override=session.max_steps,
-            approval_mode_override=approval_mode_map[session.approval_policy],
+            model_override=restored_config.model_name,
+            provider_override=restored_config.provider_name,
+            base_url_override=restored_config.base_url,
+            max_steps_override=restored_config.max_steps,
+            approval_mode_override=approval_mode_map[restored_config.approval_policy],
             session_id_override=session.id,
             api_key=None,
             tape=restored_tape,
@@ -373,7 +456,14 @@ class SessionManager:
         ctx.config["wire_consumer"] = None
         ctx.config["agent_id"] = ""
 
-        if session.provider is not None:
+        provider_model_name = getattr(session.provider, "model_name", None)
+        can_reuse_provider = (
+            session.provider is not None
+            and session.provider_name == restored_config.provider_name
+            and provider_model_name == restored_config.model_name
+            and previous_base_url == restored_config.base_url
+        )
+        if can_reuse_provider:
             llm_plugin = pipeline._registry.get("llm_provider")
             llm_plugin._instance = session.provider
 
@@ -391,6 +481,17 @@ class SessionManager:
         await self._close_runtime(session)
         await self._tape_store.truncate(session.tape_id, meta.entry_count)
         session.tape_id = ctx.tape.tape_id
+        session.provider_name = restored_config.provider_name
+        session.model_name = restored_config.model_name
+        session.base_url = restored_config.base_url
+        session.max_steps = restored_config.max_steps
+        session.approval_policy = restored_config.approval_policy
+        if (
+            previous_provider_name != restored_config.provider_name
+            or previous_model_name != restored_config.model_name
+            or previous_base_url != restored_config.base_url
+        ):
+            session.provider = None
         session.runtime_pipeline = pipeline
         session.runtime_ctx = ctx
         session.runtime_adapter = adapter
@@ -873,3 +974,83 @@ class SessionManager:
             logger.info(f"Cleaned up {len(closed)} idle sessions: {closed}")
 
         return closed
+
+    async def ensure_session_runtime(self, session_id: str) -> Any:
+        session = self.get_session(session_id)
+        if session.runtime_ctx is not None and session.runtime_adapter is not None:
+            return session.runtime_ctx
+
+        approval_mode_map = {
+            ApprovalPolicy.YOLO: "yolo",
+            ApprovalPolicy.INTERACTIVE: "interactive",
+            ApprovalPolicy.AUTO: "auto",
+        }
+        consumer = self._make_session_consumer(session)
+        pipeline, ctx = self._create_agent_for_session(
+            workspace_root=session.repo_path,
+            model_override=session.model_name,
+            provider_override=session.provider_name,
+            base_url_override=session.base_url,
+            max_steps_override=session.max_steps,
+            approval_mode_override=approval_mode_map[session.approval_policy],
+            session_id_override=session.id,
+            api_key=None,
+            tape=await self._restore_tape(session.tape_id),
+        )
+        ctx.config["wire_consumer"] = consumer
+        ctx.config["agent_id"] = ""
+
+        llm_plugin = pipeline._registry.get("llm_provider")
+        if session.provider is not None:
+            llm_plugin._instance = session.provider
+
+        adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
+        await adapter.initialize()
+
+        session.runtime_pipeline = pipeline
+        session.runtime_ctx = ctx
+        session.runtime_adapter = adapter
+        session.tape_id = ctx.tape.tape_id
+        self._persist_session(session)
+        return ctx
+
+    async def capture_checkpoint(
+        self,
+        session_id: str,
+        *,
+        label: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> CheckpointMeta:
+        ctx = await self.ensure_session_runtime(session_id)
+        session = self.get_session(session_id)
+        payload = dict(extra or {})
+        if _CHECKPOINT_SESSION_CONFIG_KEY in payload:
+            raise ValueError(
+                f"'{_CHECKPOINT_SESSION_CONFIG_KEY}' is a reserved checkpoint metadata key and cannot be provided via extra"
+            )
+        payload[_CHECKPOINT_SESSION_CONFIG_KEY] = _serialize_checkpoint_session_config(
+            session
+        )
+        checkpoint = await self._checkpoint_service.capture(
+            ctx, label=label, extra=payload
+        )
+        session.tape_id = ctx.tape.tape_id
+        self._persist_session(session)
+        return checkpoint
+
+    async def list_checkpoints(self, session_id: str) -> list[CheckpointMeta]:
+        session = self.get_session(session_id)
+        if session.tape_id is None:
+            return []
+        return await self._checkpoint_service.list(session.tape_id)
+
+    async def restore_checkpoint(self, session_id: str, checkpoint_id: str) -> None:
+        turn_lock = self._turn_lock_for(session_id)
+        if turn_lock.locked():
+            raise RuntimeError("turn already in progress")
+
+        async with turn_lock:
+            session = self.get_session(session_id)
+            if session.turn_in_progress or (session.task and not session.task.done()):
+                raise RuntimeError("turn already in progress")
+            await self._restore_checkpoint(session, checkpoint_id)

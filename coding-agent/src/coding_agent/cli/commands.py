@@ -303,6 +303,160 @@ async def cmd_mcp(args: list[str], context: dict[str, Any]) -> None:
     )
 
 
+@command(
+    "session",
+    "Manage interactive sessions  (/session list | /session new | /session switch <id>)",
+)
+async def cmd_session(args: list[str], context: dict[str, Any]) -> None:
+    output = _out()
+    if not args:
+        print_html(
+            "Usage: <ansicyan>/session list</ansicyan> | "
+            "<ansicyan>/session new</ansicyan> | "
+            "<ansicyan>/session switch &lt;id&gt;</ansicyan>",
+            output=output,
+        )
+        return
+
+    subcmd = args[0].lower()
+    session_manager = context.get("session_manager")
+
+    if subcmd == "list":
+        if session_manager is None:
+            print_pt("Session manager is not enabled.", output=output)
+            return
+        current_session_id = context.get("session_id")
+        session_ids = session_manager.list_sessions()
+        if not session_ids:
+            print_pt("No sessions available.", output=output)
+            return
+        print_html("<b>Sessions:</b>", output=output)
+        for session_id in session_ids:
+            marker = (
+                " <ansigreen>← active</ansigreen>"
+                if session_id == current_session_id
+                else ""
+            )
+            print_html(
+                f"  <ansicyan>{_h(session_id)}</ansicyan>{marker}", output=output
+            )
+        return
+
+    if subcmd == "new":
+        create_session = context.get("create_session")
+        switch_session = context.get("switch_session")
+        if not callable(create_session) or not callable(switch_session):
+            print_pt("Session creation is not available.", output=output)
+            return
+        session_id = await create_session()
+        await switch_session(session_id)
+        print_html(
+            f"Created and switched to <ansicyan>{_h(session_id)}</ansicyan>.",
+            output=output,
+        )
+        return
+
+    if subcmd == "switch":
+        if len(args) < 2:
+            print_pt("Usage: /session switch <id>", output=output)
+            return
+        if session_manager is None:
+            print_pt("Session manager is not enabled.", output=output)
+            return
+        session_id = args[1]
+        if not session_manager.has_session(session_id):
+            print_html(
+                f"<ansired>Unknown session: {_h(session_id)}</ansired>",
+                output=output,
+            )
+            return
+        switch_session = context.get("switch_session")
+        if not callable(switch_session):
+            print_pt("Session switching is not available.", output=output)
+            return
+        await switch_session(session_id)
+        print_html(
+            f"Switched to <ansicyan>{_h(session_id)}</ansicyan>.",
+            output=output,
+        )
+        return
+
+    print_pt(
+        "Usage: /session list | /session new | /session switch <id>", output=output
+    )
+
+
+@command(
+    "checkpoint",
+    "Manage checkpoints  (/checkpoint save [label] | /checkpoint list | /checkpoint restore <id>)",
+)
+async def cmd_checkpoint(args: list[str], context: dict[str, Any]) -> None:
+    output = _out()
+    if not args:
+        print_pt(
+            "Usage: /checkpoint save [label] | /checkpoint list | /checkpoint restore <id>",
+            output=output,
+        )
+        return
+
+    subcmd = args[0].lower()
+    session_manager = context.get("session_manager")
+    session_id = context.get("session_id")
+    if session_manager is None or not isinstance(session_id, str):
+        print_pt(
+            "Checkpoint commands require an active managed session.", output=output
+        )
+        return
+
+    if subcmd == "save":
+        label = " ".join(args[1:]).strip() or None
+        checkpoint = await session_manager.capture_checkpoint(
+            session_id,
+            label=label,
+            extra=None,
+        )
+        print_html(
+            f"Saved checkpoint <ansicyan>{_h(checkpoint.checkpoint_id)}</ansicyan>.",
+            output=output,
+        )
+        return
+
+    if subcmd == "list":
+        checkpoints = await session_manager.list_checkpoints(session_id)
+        if not checkpoints:
+            print_pt("No checkpoints available.", output=output)
+            return
+        print_html("<b>Checkpoints:</b>", output=output)
+        for checkpoint in checkpoints:
+            label_suffix = f" - {_h(checkpoint.label)}" if checkpoint.label else ""
+            print_html(
+                f"  <ansicyan>{_h(checkpoint.checkpoint_id)}</ansicyan>{label_suffix}",
+                output=output,
+            )
+        return
+
+    if subcmd == "restore":
+        if len(args) < 2:
+            print_pt("Usage: /checkpoint restore <id>", output=output)
+            return
+        restore_checkpoint = context.get("restore_checkpoint")
+        if not callable(restore_checkpoint):
+            print_pt("Checkpoint restore is not available.", output=output)
+            return
+        checkpoint_id = args[1]
+        await restore_checkpoint(checkpoint_id)
+        print_html(
+            f"Restored checkpoint <ansicyan>{_h(checkpoint_id)}</ansicyan>.",
+            output=output,
+        )
+        return
+
+    print_pt(
+        "Usage: /checkpoint save [label] | /checkpoint list | /checkpoint restore <id>",
+        output=output,
+    )
+
+
 async def handle_command(input_text: str, context: dict[str, Any]) -> bool:
     if not input_text.startswith("/"):
         return False

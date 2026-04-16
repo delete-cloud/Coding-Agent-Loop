@@ -9,12 +9,14 @@ AgentKit is the foundational framework that powers the coding agent. It provides
 - **Plugin-based extensibility** — All behavior is injected via plugins implementing hook contracts
 - **Protocol-driven design** — Core abstractions use Python `Protocol` types (structural subtyping, no inheritance required)
 - **Type-safe pipeline** — A 7-stage linear pipeline with typed context threading
-- **Append-only conversation history** — Thread-safe `Tape` with windowing and JSONL persistence
+- **Append-only conversation history during normal forward execution** — Thread-safe `Tape` with windowing and JSONL persistence
 - **Provider abstraction** — LLM providers are pluggable via async streaming protocol
 
 ### Design Philosophy
 
 AgentKit separates **mechanism** from **policy**. The framework provides the execution pipeline, hook dispatch, and conversation management. All domain-specific behavior (which LLM to use, which tools to expose, how to approve tool calls) is delegated to plugins.
+
+That separation also applies to checkpoint restore semantics. AgentKit exposes tape and checkpoint primitives, but product layers decide whether restore means rollback, branching, or another policy on top of those primitives. In `coding_agent`, the accepted current policy is controlled rollback on one active stable timeline per session; the framework-level append-only description applies to normal forward execution, not to every product-layer restore policy.
 
 ```
 ┌─────────────────────────────────────────┐

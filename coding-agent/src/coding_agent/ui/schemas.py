@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -48,6 +49,26 @@ class CloseSessionResponse(BaseModel):
 
     status: str
     session_id: str
+
+
+class CheckpointMetadataResponse(BaseModel):
+    checkpoint_id: str
+    tape_id: str
+    session_id: str | None
+    entry_count: int
+    window_start: int
+    created_at: datetime
+    label: str | None = None
+
+
+class CheckpointListResponse(BaseModel):
+    checkpoints: list[CheckpointMetadataResponse]
+
+
+class CheckpointRestoreResponse(BaseModel):
+    status: str
+    session_id: str
+    checkpoint_id: str
 
 
 class HealthResponse(BaseModel):
