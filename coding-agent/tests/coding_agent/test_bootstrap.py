@@ -161,3 +161,27 @@ timeout = 7.5
         )
 
         assert ctx.config["subagent_timeout"] == 7.5
+
+    def test_create_agent_uses_subagent_timeout_fallback_when_config_missing(
+        self, tmp_path
+    ):
+        config_path = tmp_path / "agent.toml"
+        config_path.write_text(
+            """
+[agent]
+name = "test-agent"
+model = "claude-sonnet-4-20250514"
+provider = "anthropic"
+
+[agent.plugins]
+enabled = ["storage", "core_tools"]
+""".strip()
+        )
+
+        _pipeline, ctx = create_agent(
+            config_path=config_path,
+            data_dir=tmp_path / "data",
+            api_key="sk-test",
+        )
+
+        assert ctx.config["subagent_timeout"] == 30.0
