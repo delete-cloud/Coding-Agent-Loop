@@ -147,6 +147,28 @@ class TestApprovalStoreRespond:
 
         assert success is False
 
+    def test_respond_duplicate_returns_false_and_keeps_first_response(
+        self, store, sample_approval_request
+    ) -> None:
+        store.add_request(sample_approval_request)
+
+        first = ApprovalResponse(
+            session_id="test-session",
+            request_id="req-123",
+            approved=True,
+            feedback="first decision",
+        )
+        second = ApprovalResponse(
+            session_id="test-session",
+            request_id="req-123",
+            approved=False,
+            feedback="second decision",
+        )
+
+        assert store.respond(first) is True
+        assert store.respond(second) is False
+        assert store._pending["req-123"].response == first
+
 
 class TestApprovalStoreWaitForResponse:
     """Tests for ApprovalStore.wait_for_response method."""

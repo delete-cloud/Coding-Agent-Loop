@@ -60,8 +60,10 @@ class ApprovalCoordinator:
 
     def respond(self, response: ApprovalResponse) -> bool:
         request = self.get_request(response.request_id)
+        recorded = self._store.respond(response)
         if (
-            request is not None
+            recorded
+            and request is not None
             and response.approved
             and response.scope
             in {
@@ -70,7 +72,6 @@ class ApprovalCoordinator:
             }
         ):
             self.remember_session_approval(request)
-        recorded = self._store.respond(response)
         if recorded:
             self._drop_request_id(response.request_id)
         return recorded

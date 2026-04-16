@@ -117,3 +117,27 @@ class TestApprovalCoordinator:
 
         assert responded is True
         assert coordinator.is_session_approved(repeated) is True
+
+    @pytest.mark.asyncio
+    async def test_duplicate_responses_are_rejected_and_first_response_wins(self) -> None:
+        coordinator = ApprovalCoordinator()
+        coordinator.add_request(_request("req-1", tool_name="bash"))
+
+        first = ApprovalResponse(
+            session_id="session-1",
+            request_id="req-1",
+            approved=True,
+            feedback="first",
+        )
+        second = ApprovalResponse(
+            session_id="session-1",
+            request_id="req-1",
+            approved=False,
+            feedback="second",
+        )
+
+        assert coordinator.respond(first) is True
+        assert coordinator.respond(second) is False
+
+        response = await coordinator.wait_for_response("req-1", timeout=1)
+        assert response == first

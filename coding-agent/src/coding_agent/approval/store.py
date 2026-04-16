@@ -81,6 +81,12 @@ class ApprovalStore:
             return False
 
         pending = self._pending[response.request_id]
+        if pending.response is not None:
+            logger.warning(
+                f"Duplicate response for request {response.request_id} ignored; first response already recorded"
+            )
+            return False
+
         pending.response = response
         pending.response_event.set()
         logger.debug(f"Recorded response for request {response.request_id}")
