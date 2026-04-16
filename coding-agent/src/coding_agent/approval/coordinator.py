@@ -60,10 +60,12 @@ class ApprovalCoordinator:
 
     def respond(self, response: ApprovalResponse) -> bool:
         request = self.get_request(response.request_id)
+        if request is None:
+            return False
+
         recorded = self._store.respond(response)
         if (
             recorded
-            and request is not None
             and response.approved
             and response.scope
             in {

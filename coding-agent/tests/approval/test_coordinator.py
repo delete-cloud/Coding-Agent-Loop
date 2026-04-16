@@ -25,6 +25,19 @@ def _request(request_id: str, tool_name: str = "bash") -> ApprovalRequest:
 
 
 class TestApprovalCoordinator:
+    def test_respond_returns_false_when_request_missing(self) -> None:
+        coordinator = ApprovalCoordinator()
+
+        responded = coordinator.respond(
+            ApprovalResponse(
+                session_id="session-1",
+                request_id="missing",
+                approved=True,
+            )
+        )
+
+        assert responded is False
+
     @pytest.mark.asyncio
     async def test_pending_projection_advances_to_next_request_after_first_response(
         self,
