@@ -350,6 +350,45 @@ class TestStreamingConsumer:
         assert remembered == [("r1", "session")]
 
     @pytest.mark.asyncio
+    async def test_session_auto_approve_after_thinking_ends_thinking_immediately(self):
+        from coding_agent.wire.protocol import ApprovalRequest
+
+        buf = StringIO()
+        console = Console(file=buf, force_terminal=True, width=80)
+        renderer = StreamingRenderer(console=console)
+        status_snapshots: list[dict[str, object]] = []
+        consumer = RichConsumer(
+            renderer,
+            on_status=lambda snapshot: status_snapshots.append(snapshot.copy()),
+        )
+
+        class StubApprovalMemory:
+            def is_session_approved(self, req):
+                del req
+                return True
+
+            def remember(self, req, response) -> None:
+                del req, response
+
+        consumer._approval_memory = StubApprovalMemory()
+
+        await consumer.emit(ThinkingDelta(text="reasoning"))
+
+        req = ApprovalRequest(
+            session_id="s1",
+            request_id="r1",
+            tool="bash",
+            args={"command": "ls"},
+        )
+        response = await consumer.request_approval(req)
+
+        assert response.approved is True
+        assert consumer._phase == "idle"
+        assert status_snapshots[-1]["phase"] == "idle"
+        assert renderer._thinking_active is False
+        assert consumer._thinking_heartbeat_task is None
+
+    @pytest.mark.asyncio
     async def test_session_approve_legacy_always_skips_future_prompts(
         self, monkeypatch
     ):
