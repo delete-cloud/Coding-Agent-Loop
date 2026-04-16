@@ -30,6 +30,7 @@ from coding_agent.plugins.skills import SkillsPlugin
 from coding_agent.plugins.storage import StoragePlugin
 from coding_agent.plugins.summarizer import SummarizerPlugin
 from coding_agent.plugins.topic import TopicPlugin
+from coding_agent.subagents.coordinator import ChildWorkerCoordinator
 from coding_agent.tools.web_search import create_web_search_backend
 
 ToolFilter = Any
@@ -292,8 +293,10 @@ def create_child_pipeline(
             "system_prompt": cfg.system_prompt,
             "model": cfg.model,
             "provider": cfg.provider,
+            "approval_mode": policy_str,
             "max_tool_rounds": cfg.max_turns,
             "subagent_timeout": float(subagent_cfg.get("timeout", 30.0)),
+            "child_worker_coordinator": ChildWorkerCoordinator(),
             "web_search": web_search_cfg,
             "workspace_root": str(workspace_root),
             "shell": shell_cfg,

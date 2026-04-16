@@ -727,6 +727,11 @@ class TestFooterIntegration:
                 close_calls.append("close")
 
         session._pipeline_adapter = FakeAdapter()
+
+        async def fake_initialize() -> None:
+            return None
+
+        monkeypatch.setattr(session, "initialize", fake_initialize)
         monkeypatch.setattr(session.input_handler, "get_input", fake_get_input)
 
         await session.run()
@@ -858,7 +863,7 @@ class TestSessionManagerIntegration:
         from coding_agent.cli.repl import InteractiveSession
 
         monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
-        session = InteractiveSession(self._make_config())
+        session = InteractiveSession(TestFooterIntegration()._make_config())
 
         session._handle_status_update(
             {
@@ -880,7 +885,7 @@ class TestSessionManagerIntegration:
         from coding_agent.cli.repl import InteractiveSession
 
         monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
-        session = InteractiveSession(self._make_config())
+        session = InteractiveSession(TestFooterIntegration()._make_config())
         session._footer._mode = "persistent"
         session._footer._enabled = True
 

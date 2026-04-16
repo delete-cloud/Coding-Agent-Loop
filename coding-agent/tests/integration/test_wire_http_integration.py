@@ -8,6 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import socket
+import sys
+import textwrap
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 
 import httpx
@@ -32,6 +37,148 @@ from coding_agent.wire.protocol import (
     TurnEnd,
 )
 from tests.ui.test_http_server import add_store_backed_approval_request
+
+
+async def _probe_live_server(base_url: str) -> httpx.Response:
+    async with httpx.AsyncClient(base_url=base_url, timeout=2.0) as probe:
+        return await probe.get("/healthz")
+
+
+async def _wait_for_live_server(
+    base_url: str,
+    *,
+    probe: Callable[[], Awaitable[httpx.Response]] | None = None,
+    attempts: int = 8,
+    initial_delay: float = 0.05,
+    max_delay: float = 1.0,
+) -> None:
+    probe_request = probe or (lambda: _probe_live_server(base_url))
+    delay = initial_delay
+    last_response: httpx.Response | None = None
+
+    for _ in range(attempts):
+        try:
+            last_response = await probe_request()
+        except httpx.HTTPError:
+            last_response = None
+        else:
+            if (
+                200 <= last_response.status_code < 300
+                or last_response.status_code == 429
+            ):
+                return
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, max_delay)
+
+    raise AssertionError(
+        "live server failed to start"
+        if last_response is None
+        else f"live server failed to start (last status={last_response.status_code})"
+    )
+
+
+async def _wait_for_live_server_or_raise(
+    base_url: str,
+    server,
+    *,
+    wait_for_server: Callable[[str], Awaitable[None]] = _wait_for_live_server,
+) -> None:
+    try:
+        await wait_for_server(base_url)
+    except AssertionError as exc:
+        stdout = b""
+        stderr = b""
+        if server.returncode is None:
+            try:
+                server.terminate()
+            except ProcessLookupError:
+                pass
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    server.communicate(), timeout=2.0
+                )
+            except asyncio.TimeoutError:
+                if server.returncode is None:
+                    server.kill()
+                stdout, stderr = await server.communicate()
+        else:
+            stdout, stderr = await server.communicate()
+        raise AssertionError(
+            f"{exc}\nstdout={stdout.decode(errors='replace')}\nstderr={stderr.decode(errors='replace')}"
+        ) from exc
+
+
+class TestLiveServerReadinessProbe:
+    async def test_wait_for_live_server_uses_backoff_between_retries(self, monkeypatch):
+        sleep_delays: list[float] = []
+
+        async def fake_sleep(delay: float) -> None:
+            sleep_delays.append(delay)
+
+        attempts = 0
+
+        async def flaky_probe() -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts < 4:
+                raise httpx.ConnectError("not ready")
+            return httpx.Response(status_code=200)
+
+        monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+        await _wait_for_live_server("http://example.test", probe=flaky_probe)
+
+        assert sleep_delays == [0.05, 0.1, 0.2]
+
+    async def test_wait_for_live_server_treats_rate_limit_as_ready(self):
+        attempts = 0
+
+        async def rate_limited_probe() -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise httpx.ConnectError("not ready")
+            return httpx.Response(status_code=429)
+
+        await _wait_for_live_server("http://example.test", probe=rate_limited_probe)
+
+        assert attempts == 2
+
+    async def test_wait_for_live_server_or_raise_terminates_running_server(self):
+        class HangingServer:
+            def __init__(self) -> None:
+                self.returncode = None
+                self.terminated = False
+                self.killed = False
+                self.communicate_calls = 0
+
+            def terminate(self) -> None:
+                self.terminated = True
+
+            def kill(self) -> None:
+                self.killed = True
+                self.returncode = -9
+
+            async def communicate(self) -> tuple[bytes, bytes]:
+                self.communicate_calls += 1
+                if self.returncode is None:
+                    await asyncio.sleep(3600)
+                return (b"stdout", b"stderr")
+
+        async def never_ready(_base_url: str) -> None:
+            raise AssertionError("live server failed to start")
+
+        server = HangingServer()
+
+        with pytest.raises(AssertionError, match="stdout=stdout"):
+            await _wait_for_live_server_or_raise(
+                "http://example.test",
+                server,
+                wait_for_server=never_ready,
+            )
+
+        assert server.terminated is True
+        assert server.communicate_calls >= 1
 
 
 @pytest.fixture(autouse=True)
@@ -363,6 +510,176 @@ class TestApprovalFlowIntegration:
         )
         # Legacy check returns 400 for request ID mismatch
         assert response.status_code == 400
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="pass_fds + uvicorn fd unsupported on Windows",
+    )
+    async def test_session_scope_approval_skips_second_http_prompt_approval_live_server(
+        self, tmp_path
+    ):
+        """Test session approval reuse through a real localhost HTTP server."""
+
+        listen_sock = socket.socket()
+        listen_sock.bind(("127.0.0.1", 0))
+        listen_sock.listen(5)
+        port = listen_sock.getsockname()[1]
+
+        session_id = "live-http-approval-session"
+        env = os.environ.copy()
+        env.update(
+            {
+                "LIVE_HTTP_TEST_PORT": str(port),
+                "LIVE_HTTP_TEST_FD": str(listen_sock.fileno()),
+                "LIVE_HTTP_TEST_SESSION_ID": session_id,
+                "LIVE_HTTP_TEST_REPO_PATH": str(tmp_path),
+            }
+        )
+
+        server_script = textwrap.dedent(
+            """
+            import os
+            from datetime import datetime
+            from pathlib import Path
+
+            import uvicorn
+            from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
+
+            from coding_agent.approval import ApprovalPolicy
+            from coding_agent.ui.http_server import app, session_manager
+            from coding_agent.ui.session_manager import Session
+
+            class ScriptedApprovalProvider:
+                def __init__(self) -> None:
+                    self.calls = 0
+
+                @property
+                def model_name(self) -> str:
+                    return "scripted-approval"
+
+                @property
+                def max_context_size(self) -> int:
+                    return 128000
+
+                async def stream(self, messages, tools=None, **kwargs):
+                    del messages, tools, kwargs
+                    self.calls += 1
+                    if self.calls == 1:
+                        yield ToolCallEvent(
+                            tool_call_id="tc-write-1",
+                            name="file_write",
+                            arguments={"path": "first.txt", "content": "first"},
+                        )
+                        yield DoneEvent()
+                        return
+
+                    if self.calls == 2:
+                        yield TextEvent(text="first write complete")
+                        yield DoneEvent()
+                        return
+
+                    if self.calls == 3:
+                        yield ToolCallEvent(
+                            tool_call_id="tc-write-2",
+                            name="file_write",
+                            arguments={"path": "second.txt", "content": "second"},
+                        )
+                        yield DoneEvent()
+                        return
+
+                    yield TextEvent(text="second write complete")
+                    yield DoneEvent()
+
+            session = Session(
+                id=os.environ["LIVE_HTTP_TEST_SESSION_ID"],
+                created_at=datetime.now(),
+                last_activity=datetime.now(),
+                repo_path=Path(os.environ["LIVE_HTTP_TEST_REPO_PATH"]),
+                approval_policy=ApprovalPolicy.INTERACTIVE,
+                provider=ScriptedApprovalProvider(),
+            )
+            session_manager.register_session(session)
+            uvicorn.run(
+                app,
+                host="127.0.0.1",
+                fd=int(os.environ["LIVE_HTTP_TEST_FD"]),
+                log_level="error",
+            )
+            """
+        )
+
+        server = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            server_script,
+            env=env,
+            pass_fds=(listen_sock.fileno(),),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        listen_sock.close()
+
+        base_url = f"http://127.0.0.1:{port}"
+        await _wait_for_live_server_or_raise(base_url, server)
+
+        try:
+            async with (
+                httpx.AsyncClient(base_url=base_url, timeout=30.0) as prompt_client,
+                httpx.AsyncClient(base_url=base_url, timeout=30.0) as approval_client,
+            ):
+                first_events: list[dict[str, object]] = []
+                approved_request_id: str | None = None
+                async with aconnect_sse(
+                    prompt_client,
+                    "POST",
+                    f"/sessions/{session_id}/prompt",
+                    json={"prompt": "Write the first file"},
+                ) as event_source:
+                    async for sse in event_source.aiter_sse():
+                        payload = json.loads(sse.data)
+                        first_events.append({"event": sse.event, "data": payload})
+                        if sse.event == "ApprovalRequest":
+                            approved_request_id = payload["request_id"]
+                            approve_resp = await approval_client.post(
+                                f"/sessions/{session_id}/approve",
+                                json={
+                                    "request_id": approved_request_id,
+                                    "approved": True,
+                                    "feedback": "approve for session",
+                                    "scope": "session",
+                                },
+                            )
+                            assert approve_resp.status_code == 200
+                        if sse.event == "TurnEnd" and not payload["agent_id"]:
+                            break
+
+                second_events: list[dict[str, object]] = []
+                async with aconnect_sse(
+                    prompt_client,
+                    "POST",
+                    f"/sessions/{session_id}/prompt",
+                    json={"prompt": "Write the second file"},
+                ) as event_source:
+                    async for sse in event_source.aiter_sse():
+                        payload = json.loads(sse.data)
+                        second_events.append({"event": sse.event, "data": payload})
+                        if sse.event == "TurnEnd" and not payload["agent_id"]:
+                            break
+
+            assert approved_request_id is not None
+            assert any(event["event"] == "ApprovalRequest" for event in first_events)
+            assert not any(
+                event["event"] == "ApprovalRequest" for event in second_events
+            )
+            assert (tmp_path / "first.txt").read_text() == "first"
+            assert (tmp_path / "second.txt").read_text() == "second"
+        finally:
+            server.terminate()
+            try:
+                await asyncio.wait_for(server.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                server.kill()
+                await server.communicate()
 
 
 class TestWaitForApproval:

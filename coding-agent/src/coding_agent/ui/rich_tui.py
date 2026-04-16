@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from coding_agent.approval.coordinator import ApprovalCoordinator
 from rich.console import Console, Group
 from rich.layout import Layout
 from rich.live import Live
@@ -117,6 +118,18 @@ class _TuiRendererAdapter:
         self._tui.turn_end(status)
 
 
+class _TuiApprovalMemory:
+    def __init__(self) -> None:
+        self._coordinator = ApprovalCoordinator()
+
+    def is_session_approved(self, req) -> bool:
+        return self._coordinator.is_session_approved(req)
+
+    def remember(self, req, response) -> None:
+        if response.approved and response.scope in {"session", "always"}:
+            self._coordinator.remember_session_approval(req)
+
+
 class CodingAgentTUI:
     """Rich-based Terminal UI for Coding Agent."""
 
@@ -138,9 +151,12 @@ class CodingAgentTUI:
 
         # Tool execution tracking
         self._tool_tracker = ToolExecutionTracker()
+        self._approval_memory = _TuiApprovalMemory()
 
         # Create consumer
-        self.consumer = RichConsumer(_TuiRendererAdapter(self))
+        self.consumer = RichConsumer(
+            _TuiRendererAdapter(self), approval_memory=self._approval_memory
+        )
 
     def _create_layout(self) -> Layout:
         """Create the main layout structure."""
