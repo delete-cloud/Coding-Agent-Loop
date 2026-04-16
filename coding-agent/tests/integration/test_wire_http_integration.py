@@ -511,6 +511,10 @@ class TestApprovalFlowIntegration:
         # Legacy check returns 400 for request ID mismatch
         assert response.status_code == 400
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="pass_fds + uvicorn fd unsupported on Windows",
+    )
     async def test_session_scope_approval_skips_second_http_prompt_approval_live_server(
         self, tmp_path
     ):

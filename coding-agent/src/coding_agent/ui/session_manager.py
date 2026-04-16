@@ -906,8 +906,6 @@ class SessionManager:
             )
             if response is not None:
                 return response
-        except asyncio.TimeoutError:
-            logger.warning("Approval timeout for session %s", session_id)
         finally:
             session.pending_approval = session.approval_coordinator.projection()
             session.approval_response = None

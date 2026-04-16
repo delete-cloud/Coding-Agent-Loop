@@ -140,3 +140,24 @@ async def test_wait_for_http_approval_reuses_legacy_always_scope_as_session() ->
     assert repeated_response.approved is True
     assert repeated_response.scope == "session"
     assert session.approval_store.get_request("req-2") is None
+
+
+@pytest.mark.asyncio
+async def test_wait_for_http_approval_returns_timeout_response_when_no_reply_arrives() -> (
+    None
+):
+    manager = SessionManager(store=InMemorySessionStore())
+    session_id = await manager.create_session()
+    session = manager.get_session(session_id)
+    session.turn_in_progress = True
+
+    response = await manager.wait_for_http_approval(
+        session_id,
+        _request(session_id, "req-timeout", "bash"),
+        timeout_seconds=0.01,
+    )
+
+    assert response.request_id == "req-timeout"
+    assert response.approved is False
+    assert response.feedback == "Approval timeout or error"
+    assert session.pending_approval is None
