@@ -373,15 +373,17 @@ class TestApprovalFlowIntegration:
     ):
         """Test session approval reuse through a real localhost HTTP server."""
 
-        with socket.socket() as sock:
-            sock.bind(("127.0.0.1", 0))
-            port = sock.getsockname()[1]
+        listen_sock = socket.socket()
+        listen_sock.bind(("127.0.0.1", 0))
+        listen_sock.listen(5)
+        port = listen_sock.getsockname()[1]
 
         session_id = "live-http-approval-session"
         env = os.environ.copy()
         env.update(
             {
                 "LIVE_HTTP_TEST_PORT": str(port),
+                "LIVE_HTTP_TEST_FD": str(listen_sock.fileno()),
                 "LIVE_HTTP_TEST_SESSION_ID": session_id,
                 "LIVE_HTTP_TEST_REPO_PATH": str(tmp_path),
             }
@@ -453,7 +455,7 @@ class TestApprovalFlowIntegration:
             uvicorn.run(
                 app,
                 host="127.0.0.1",
-                port=int(os.environ["LIVE_HTTP_TEST_PORT"]),
+                fd=int(os.environ["LIVE_HTTP_TEST_FD"]),
                 log_level="error",
             )
             """
@@ -464,9 +466,11 @@ class TestApprovalFlowIntegration:
             "-c",
             server_script,
             env=env,
+            pass_fds=(listen_sock.fileno(),),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        listen_sock.close()
 
         base_url = f"http://127.0.0.1:{port}"
         for _ in range(200):
@@ -536,7 +540,11 @@ class TestApprovalFlowIntegration:
             assert (tmp_path / "second.txt").read_text() == "second"
         finally:
             server.terminate()
-            await server.wait()
+            try:
+                await asyncio.wait_for(server.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                server.kill()
+                await server.communicate()
 
 
 class TestWaitForApproval:
