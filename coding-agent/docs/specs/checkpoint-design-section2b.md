@@ -7,6 +7,8 @@
 >
 > Decisions extracted to [ADR-0004](../adr/0004-cold-restore-provides-degraded-continuity.md), [ADR-0005](../adr/0005-checkpoint-restore-uses-truncate-rollback.md), and [ADR-0006](../adr/0006-checkpoint-plugin-state-restores-as-best-effort-hints.md).
 > Code is the source of truth. This document is retained as historical design context and is no longer maintained.
+>
+> Current contract summary: in `coding_agent`, restore stays in the same session and on the same stable `tape_id`, performs controlled rollback on the active timeline, and restores plugin state only as best-effort pre-mount hints. Audit retention and alternate exploration remain future extension paths.
 
 ---
 
@@ -801,10 +803,11 @@ After restore + 5 new turns:
 ### v1 strategy: delete-ahead checkpoints (single-timeline policy)
 
 This is a **v1 policy choice**, not an intrinsic requirement of the
-checkpoint design. It assumes a single timeline: restore rolls back the
-tape, and subsequent turns build forward from that point. If Section 3
-introduces checkpoint branching or forked timelines, this policy would
-be revisited.
+checkpoint design. It assumes a single active timeline: restore performs
+controlled rollback on that timeline, and subsequent turns build forward
+from that point. If future work introduces explicit branching or forked
+timelines, this policy would be revisited as part of that new contract,
+not by broadening the meaning of `restore(...)`.
 
 Delete checkpoints whose `entry_count > restored_entry_count`.
 This is done as **step 10** of `_restore_checkpoint()`, **after** the

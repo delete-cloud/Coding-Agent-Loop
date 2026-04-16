@@ -20,6 +20,8 @@ consumer, not the only one.
 
 ### Design decisions (confirmed during brainstorm)
 
+> Historical design context only: the accepted current `coding_agent` restore contract is defined by ADR-0003, ADR-0005, and ADR-0006. This document explains the framework primitives and option space that led to those decisions.
+
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
 | Checkpoint content | Tape + plugin states | External env snapshots are product-layer concerns |
@@ -436,3 +438,5 @@ These are explicitly deferred to the coding-agent product-layer design:
 6. **External environment snapshots** (git ref, sandbox state) — via `extra` parameter
 7. **Plugin state restore opt-in** — product-layer interface for plugins that need it
 8. **Restore-in-place vs fork policy** — local (restore) vs multi-pod (fork)
+
+For `coding_agent`, that policy has since been narrowed: restore is the same-session, same-stable-timeline controlled rollback path, while alternate exploration belongs on an explicit fork-style extension path rather than on `restore(...)` itself.
