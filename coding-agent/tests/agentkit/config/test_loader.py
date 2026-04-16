@@ -77,3 +77,21 @@ sessions = "./data/sessions"
         toml_file.write_text('[agent]\nname = "test"\n')
         with pytest.raises(ConfigError, match="model"):
             load_config(toml_file)
+
+    def test_load_toml_exposes_subagent_timeout_section(self, tmp_path):
+        toml_file = tmp_path / "agent.toml"
+        toml_file.write_text(
+            """
+[agent]
+name = "test-agent"
+model = "claude-sonnet"
+provider = "anthropic"
+
+[subagent]
+timeout = 7.5
+""".strip()
+        )
+
+        cfg = load_config(toml_file)
+
+        assert cfg.extra["subagent"]["timeout"] == 7.5
