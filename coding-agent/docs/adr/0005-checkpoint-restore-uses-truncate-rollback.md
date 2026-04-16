@@ -11,7 +11,7 @@ Checkpoint restore also has to keep the persisted tape and rebuilt runtime align
 
 ## Decision
 
-Checkpoint restore uses controlled rollback on the existing stable `tape_id`.
+Checkpoint restore uses controlled truncate rollback on the existing stable `tape_id`.
 
 In `coding_agent`, `restore(checkpoint_id)` means: stay in the same session, preserve the same stable `tape_id`, rebuild the runtime from the checkpoint snapshot, and continue future turns on that same active timeline from the restored point.
 

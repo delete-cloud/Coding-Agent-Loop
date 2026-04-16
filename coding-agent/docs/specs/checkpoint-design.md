@@ -20,7 +20,7 @@ consumer, not the only one.
 
 ### Design decisions (confirmed during brainstorm)
 
-> Historical design context only: the accepted current `coding_agent` restore contract is defined by ADR-0003, ADR-0005, and ADR-0006. This document explains the framework primitives and option space that led to those decisions.
+> Historical design context only: the accepted current `coding_agent` restore contract is defined by [ADR-0003](../adr/0003-http-sessions-use-one-stable-tape-timeline.md), [ADR-0005](../adr/0005-checkpoint-restore-uses-truncate-rollback.md), and [ADR-0006](../adr/0006-checkpoint-plugin-state-restores-as-best-effort-hints.md). This document explains the framework primitives and option space that led to those decisions.
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
