@@ -10,7 +10,7 @@ from agentkit.runtime.pipeline import Pipeline, PipelineContext
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
 from coding_agent.adapter_types import StopReason, TurnOutcome
-from coding_agent.__main__ import create_child_pipeline
+from coding_agent.__main__ import create_agent, create_child_pipeline
 from coding_agent.wire.protocol import StreamDelta, TurnEnd, WireMessage
 from coding_agent.tools.subagent import build_subagent_tool
 
@@ -170,10 +170,20 @@ async def test_subagent_tool_returns_timeout_summary(monkeypatch: pytest.MonkeyP
     assert result == "Subagent timed out after 0.01 seconds"
 
 
+def test_create_agent_injects_default_child_worker_coordinator() -> None:
+    _pipeline, ctx = create_agent(session_id_override="test-session")
+
+    coordinator = ctx.config.get("child_worker_coordinator")
+
+    assert coordinator is not None
+    assert callable(getattr(coordinator, "allocate_child_id", None))
+    assert callable(getattr(coordinator, "acquire_write_lease", None))
+
+
 def test_subagent_tool_schema_hides_internal_pipeline_context():
     tool_fn = build_subagent_tool(create_child_pipeline)
 
-    params = tool_fn._tool_schema.parameters
+    params = cast(Any, tool_fn)._tool_schema.parameters
 
     assert params["additionalProperties"] is False
     assert set(params["properties"]) == {"goal"}
@@ -330,3 +340,338 @@ async def test_subagent_tool_appends_hidden_child_trace_to_parent_tape(
         entry.meta.get("child_agent_id") == "child-1" for entry in appended_entries
     )
     assert all(entry.meta.get("source_tape_id") for entry in appended_entries)
+
+
+@pytest.mark.asyncio
+async def test_subagent_tool_acquires_write_lease_for_mutating_child_tool_event(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    events: list[str] = []
+
+    consumer = RecordingConsumer()
+
+    class StubWriteLease:
+        async def __aenter__(self) -> None:
+            events.append("lease-enter")
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            del exc_type, exc, tb
+            events.append("lease-exit")
+
+    class StubCoordinator:
+        def allocate_child_id(self, parent_agent_id: str) -> str:
+            return f"{parent_agent_id}.child-1" if parent_agent_id else "child-1"
+
+        def acquire_write_lease(self) -> StubWriteLease:
+            return StubWriteLease()
+
+    child_ctx = PipelineContext(tape=Tape(), session_id="parent-session")
+
+    def child_pipeline_builder(**_kwargs: Any):
+        return cast(Pipeline, object()), child_ctx
+
+    class MutatingAdapter:
+        def __init__(self, **kwargs: Any) -> None:
+            self._consumer = kwargs["consumer"]
+
+        async def run_turn(self, _goal: str) -> TurnOutcome:
+            child_ctx.tape.append(
+                Entry(
+                    kind="tool_call",
+                    payload={
+                        "id": "child-call-1",
+                        "name": "file_write",
+                        "arguments": {"path": "out.txt", "content": "x"},
+                    },
+                )
+            )
+            await self._consumer.emit(
+                StreamDelta(
+                    session_id="parent-session",
+                    agent_id="parent-agent.child-1",
+                    content="before write",
+                )
+            )
+            from coding_agent.wire.protocol import ToolCallDelta, ToolResultDelta
+
+            await self._consumer.emit(
+                ToolCallDelta(
+                    session_id="parent-session",
+                    agent_id="parent-agent.child-1",
+                    tool_name="file_write",
+                    arguments={"path": "out.txt", "content": "x"},
+                    call_id="child-call-1",
+                )
+            )
+            await self._consumer.emit(
+                ToolResultDelta(
+                    session_id="parent-session",
+                    agent_id="parent-agent.child-1",
+                    call_id="child-call-1",
+                    tool_name="file_write",
+                    result="ok",
+                )
+            )
+            return TurnOutcome(
+                stop_reason=StopReason.NO_TOOL_CALLS,
+                final_message="Child wrote file",
+            )
+
+    monkeypatch.setattr("coding_agent.tools.subagent.PipelineAdapter", MutatingAdapter)
+
+    tool_fn = build_subagent_tool(child_pipeline_builder)
+    parent_ctx = PipelineContext(
+        tape=Tape(),
+        session_id="parent-session",
+        config={
+            "agent_id": "parent-agent",
+            "wire_consumer": consumer,
+            "subagent_timeout": 30.0,
+            "child_worker_coordinator": StubCoordinator(),
+        },
+    )
+
+    result = await tool_fn(goal="Write a file", __pipeline_ctx__=parent_ctx)
+
+    assert result == "Subagent completed: Child wrote file"
+    assert events == ["lease-enter", "lease-exit"]
+
+
+@pytest.mark.asyncio
+async def test_subagent_tool_holds_write_lease_across_multiple_mutating_child_tool_events(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    events: list[str] = []
+
+    consumer = RecordingConsumer()
+
+    class StubWriteLease:
+        async def __aenter__(self) -> None:
+            events.append("lease-enter")
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            del exc_type, exc, tb
+            events.append("lease-exit")
+
+    class StubCoordinator:
+        def allocate_child_id(self, parent_agent_id: str) -> str:
+            return f"{parent_agent_id}.child-1" if parent_agent_id else "child-1"
+
+        def acquire_write_lease(self) -> StubWriteLease:
+            return StubWriteLease()
+
+    child_ctx = PipelineContext(tape=Tape(), session_id="parent-session")
+
+    def child_pipeline_builder(**_kwargs: Any):
+        return cast(Pipeline, object()), child_ctx
+
+    class TwoWriteAdapter:
+        def __init__(self, **kwargs: Any) -> None:
+            self._consumer = kwargs["consumer"]
+
+        async def run_turn(self, _goal: str) -> TurnOutcome:
+            from coding_agent.wire.protocol import ToolCallDelta, ToolResultDelta
+
+            await self._consumer.emit(
+                ToolCallDelta(
+                    session_id="parent-session",
+                    agent_id="parent-agent.child-1",
+                    tool_name="file_write",
+                    arguments={"path": "one.txt", "content": "1"},
+                    call_id="child-call-1",
+                )
+            )
+            await self._consumer.emit(
+                ToolResultDelta(
+                    session_id="parent-session",
+                    agent_id="parent-agent.child-1",
+                    call_id="child-call-1",
+                    tool_name="file_write",
+                    result="ok",
+                )
+            )
+            await self._consumer.emit(
+                ToolCallDelta(
+                    session_id="parent-session",
+                    agent_id="parent-agent.child-1",
+                    tool_name="file_write",
+                    arguments={"path": "two.txt", "content": "2"},
+                    call_id="child-call-2",
+                )
+            )
+            await self._consumer.emit(
+                ToolResultDelta(
+                    session_id="parent-session",
+                    agent_id="parent-agent.child-1",
+                    call_id="child-call-2",
+                    tool_name="file_write",
+                    result="ok",
+                )
+            )
+            return TurnOutcome(
+                stop_reason=StopReason.NO_TOOL_CALLS,
+                final_message="Child wrote two files",
+            )
+
+    monkeypatch.setattr("coding_agent.tools.subagent.PipelineAdapter", TwoWriteAdapter)
+
+    tool_fn = build_subagent_tool(child_pipeline_builder)
+    parent_ctx = PipelineContext(
+        tape=Tape(),
+        session_id="parent-session",
+        config={
+            "agent_id": "parent-agent",
+            "wire_consumer": consumer,
+            "subagent_timeout": 30.0,
+            "child_worker_coordinator": StubCoordinator(),
+        },
+    )
+
+    result = await tool_fn(goal="Write two files", __pipeline_ctx__=parent_ctx)
+
+    assert result == "Subagent completed: Child wrote two files"
+    assert events == ["lease-enter", "lease-exit"]
+
+
+@pytest.mark.asyncio
+async def test_subagent_tool_skips_write_lease_for_read_only_child_turn(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    events: list[str] = []
+
+    class FailingLease:
+        async def __aenter__(self) -> None:
+            raise AssertionError("read-only child turn should not acquire write lease")
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            del exc_type, exc, tb
+
+    class StubCoordinator:
+        def allocate_child_id(self, parent_agent_id: str) -> str:
+            return f"{parent_agent_id}.child-1" if parent_agent_id else "child-1"
+
+        def acquire_write_lease(self) -> FailingLease:
+            return FailingLease()
+
+    child_ctx = PipelineContext(tape=Tape(), session_id="parent-session")
+
+    def child_pipeline_builder(**_kwargs: Any):
+        return cast(Pipeline, object()), child_ctx
+
+    class ReadOnlyAdapter:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        async def run_turn(self, _goal: str) -> TurnOutcome:
+            events.append("run-turn")
+            child_ctx.tape.append(
+                Entry(
+                    kind="tool_call",
+                    payload={
+                        "id": "child-call-1",
+                        "name": "file_read",
+                        "arguments": {"path": "out.txt"},
+                    },
+                )
+            )
+            return TurnOutcome(
+                stop_reason=StopReason.NO_TOOL_CALLS,
+                final_message="Child read file",
+            )
+
+    monkeypatch.setattr("coding_agent.tools.subagent.PipelineAdapter", ReadOnlyAdapter)
+
+    tool_fn = build_subagent_tool(child_pipeline_builder)
+    parent_ctx = PipelineContext(
+        tape=Tape(),
+        session_id="parent-session",
+        config={
+            "agent_id": "parent-agent",
+            "subagent_timeout": 30.0,
+            "child_worker_coordinator": StubCoordinator(),
+        },
+    )
+
+    result = await tool_fn(goal="Read a file", __pipeline_ctx__=parent_ctx)
+
+    assert result == "Subagent completed: Child read file"
+    assert events == ["run-turn"]
+
+
+@pytest.mark.asyncio
+async def test_subagent_tool_releases_write_lease_and_closes_adapter_on_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    events: list[str] = []
+    lease_acquired = asyncio.Event()
+
+    consumer = RecordingConsumer()
+
+    class StubWriteLease:
+        async def __aenter__(self) -> None:
+            events.append("lease-enter")
+            lease_acquired.set()
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            del exc_type, exc, tb
+            events.append("lease-exit")
+
+    class StubCoordinator:
+        def allocate_child_id(self, parent_agent_id: str) -> str:
+            return f"{parent_agent_id}.child-1" if parent_agent_id else "child-1"
+
+        def acquire_write_lease(self) -> StubWriteLease:
+            return StubWriteLease()
+
+    child_ctx = PipelineContext(tape=Tape(), session_id="parent-session")
+
+    def child_pipeline_builder(**_kwargs: Any):
+        return cast(Pipeline, object()), child_ctx
+
+    class BlockingAdapter:
+        def __init__(self, **kwargs: Any) -> None:
+            self._consumer = kwargs["consumer"]
+
+        async def run_turn(self, _goal: str) -> TurnOutcome:
+            from coding_agent.wire.protocol import ToolCallDelta
+
+            await self._consumer.emit(
+                ToolCallDelta(
+                    session_id="parent-session",
+                    agent_id="parent-agent.child-1",
+                    tool_name="file_write",
+                    arguments={"path": "blocked.txt", "content": "x"},
+                    call_id="child-call-1",
+                )
+            )
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable after cancellation")
+
+        async def close(self) -> None:
+            events.append("adapter-close")
+
+    monkeypatch.setattr("coding_agent.tools.subagent.PipelineAdapter", BlockingAdapter)
+
+    tool_fn = build_subagent_tool(child_pipeline_builder)
+    parent_ctx = PipelineContext(
+        tape=Tape(),
+        session_id="parent-session",
+        config={
+            "agent_id": "parent-agent",
+            "wire_consumer": consumer,
+            "subagent_timeout": 30.0,
+            "child_worker_coordinator": StubCoordinator(),
+        },
+    )
+
+    task = asyncio.create_task(
+        tool_fn(goal="Write then block", __pipeline_ctx__=parent_ctx)
+    )
+    await lease_acquired.wait()
+
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert events == ["lease-enter", "lease-exit", "adapter-close"]
