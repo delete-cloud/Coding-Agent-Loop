@@ -67,10 +67,11 @@ class RichConsumer:
         thinking_enabled: Callable[[], bool] | None = None,
         thinking_effort: Callable[[], str] | None = None,
         on_status: Callable[[dict[str, Any]], None] | None = None,
+        approval_memory: Any | None = None,
     ) -> None:
         self.renderer: Renderer = renderer
         self._stream_active: bool = False
-        self._session_approved_tools: set[tuple[str, str]] = set()
+        self._approval_memory = approval_memory
         self._collapse_group: CollapseGroup | None = None
         self._hidden_call_ids: set[str] = set()
         self._turn_start: float | None = None
@@ -93,9 +94,6 @@ class RichConsumer:
         if not agent_id:
             return tool_name
         return f"[{agent_id}] {tool_name}"
-
-    def _approval_cache_key(self, req: ApprovalRequest) -> tuple[str, str]:
-        return (req.agent_id, req.tool)
 
     def _start_turn_timer(self) -> None:
         if self._turn_start is None:
@@ -301,9 +299,10 @@ class RichConsumer:
     async def request_approval(self, req: ApprovalRequest) -> ApprovalResponse:
         from coding_agent.ui.approval_prompt import prompt_approval
 
-        cache_key = self._approval_cache_key(req)
-
-        if cache_key in self._session_approved_tools:
+        if (
+            self._approval_memory is not None
+            and self._approval_memory.is_session_approved(req)
+        ):
             return ApprovalResponse(
                 session_id=req.session_id,
                 request_id=req.request_id,
@@ -317,7 +316,7 @@ class RichConsumer:
 
         response = await prompt_approval(self.renderer.console, req)
 
-        if response.approved and response.scope == "session":
-            self._session_approved_tools.add(cache_key)
+        if self._approval_memory is not None:
+            self._approval_memory.remember(req, response)
 
         return response

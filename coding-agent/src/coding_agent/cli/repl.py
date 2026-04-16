@@ -10,6 +10,7 @@ from typing import Any
 from prompt_toolkit.patch_stdout import patch_stdout
 from rich.console import Console
 
+from coding_agent.approval.coordinator import ApprovalCoordinator
 from coding_agent.cli.commands import handle_command
 from coding_agent.cli.input_handler import InputHandler, expand_pasted_refs
 from coding_agent.cli.terminal_output import (
@@ -27,6 +28,18 @@ from coding_agent.ui.status_footer import StatusFooter
 
 
 console = Console(force_terminal=True, soft_wrap=False)
+
+
+class _InteractiveApprovalMemory:
+    def __init__(self) -> None:
+        self._coordinator = ApprovalCoordinator()
+
+    def is_session_approved(self, req) -> bool:
+        return self._coordinator.is_session_approved(req)
+
+    def remember(self, req, response) -> None:
+        if response.approved and response.scope == "session":
+            self._coordinator.remember_session_approval(req)
 
 
 def create_agent(*args: Any, **kwargs: Any):
@@ -51,11 +64,13 @@ class InteractiveSession:
 
         # Scrollback-based renderer — created once, persists across turns
         self._renderer = StreamingRenderer(console=console, enhanced_boundaries=True)
+        self._approval_memory = _InteractiveApprovalMemory()
         self._consumer = RichConsumer(
             self._renderer,
             thinking_enabled=lambda: bool(self.context.get("thinking_enabled", True)),
             thinking_effort=lambda: str(self.context.get("thinking_effort", "medium")),
             on_status=self._handle_status_update,
+            approval_memory=self._approval_memory,
         )
         self._footer = StatusFooter(console=console)
 

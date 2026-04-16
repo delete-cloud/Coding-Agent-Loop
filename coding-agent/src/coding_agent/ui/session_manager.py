@@ -9,14 +9,14 @@ import os
 import uuid
 from collections.abc import AsyncIterator
 from collections.abc import Callable
-from inspect import isawaitable
 from dataclasses import dataclass, field
 from datetime import datetime
+from inspect import isawaitable
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from coding_agent.adapter import PipelineAdapter
-from coding_agent.approval import ApprovalPolicy
+from coding_agent.approval import ApprovalCoordinator, ApprovalPolicy
 from coding_agent.approval.store import ApprovalStore
 from coding_agent.core import config as core_config
 from coding_agent.plugins.storage import JSONLTapeStore
@@ -109,9 +109,11 @@ class Session:
     runtime_pipeline: Any | None = None
     runtime_ctx: Any | None = None
     runtime_adapter: Any | None = None
+    approval_coordinator: ApprovalCoordinator = field(init=False)
 
     def __post_init__(self) -> None:
         self.wire = LocalWire(self.id)
+        self.approval_coordinator = ApprovalCoordinator(self.approval_store)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -289,20 +291,23 @@ class SessionManager:
 
     def _make_session_consumer(self, session: Session) -> _WireConsumer:
         async def _request_approval(req: ApprovalRequest) -> ApprovalResponse:
-            session.pending_approval = {
-                "request_id": req.request_id,
-                "tool_name": req.tool_call.tool_name if req.tool_call else "",
-                "arguments": req.tool_call.arguments if req.tool_call else {},
-            }
+            if session.approval_coordinator.is_session_approved(req):
+                return ApprovalResponse(
+                    session_id=req.session_id,
+                    request_id=req.request_id,
+                    approved=True,
+                    scope="session",
+                )
+            session.approval_coordinator.add_request(req)
+            session.pending_approval = session.approval_coordinator.projection()
             session.approval_event.clear()
             session.approval_response = None
             self._persist_session(session)
-            session.approval_store.add_request(req)
             await session.wire.send(req)
             try:
-                response = await session.approval_store.wait_for_response(
+                response = await session.approval_coordinator.wait_for_response(
                     req.request_id,
-                    req.timeout_seconds,
+                    float(req.timeout_seconds),
                 )
                 if response is None:
                     return ApprovalResponse(
@@ -317,10 +322,11 @@ class SessionManager:
                     "feedback": response.feedback,
                 }
                 session.approval_event.set()
+                session.pending_approval = session.approval_coordinator.projection()
                 self._persist_session(session)
                 return response
             finally:
-                session.pending_approval = None
+                session.pending_approval = session.approval_coordinator.projection()
                 session.approval_response = None
                 self._persist_session(session)
 
@@ -410,6 +416,7 @@ class SessionManager:
             approval_store = session.approval_store
             self._approval_stores[session.id] = approval_store
         session.approval_store = approval_store
+        session.approval_coordinator = ApprovalCoordinator(approval_store)
         self._session_cache[session.id] = session
         return session
 
@@ -579,13 +586,14 @@ class SessionManager:
                 logger.debug("Dropping closed event queue", exc_info=True)
 
     def has_approval_request(self, session_id: str) -> bool:
-        return self.get_session(session_id).pending_approval is not None
+        return (
+            self.get_session(session_id).approval_coordinator.pending_request
+            is not None
+        )
 
     def matches_approval_request(self, session_id: str, request_id: str) -> bool:
         session = self.get_session(session_id)
-        if session.pending_approval is None:
-            return False
-        return session.pending_approval.get("request_id") == request_id
+        return session.approval_coordinator.get_request(request_id) is not None
 
     async def close_session(self, session_id: str) -> None:
         """Close a session and clean up resources.
@@ -706,6 +714,7 @@ class SessionManager:
         request_id: str,
         approved: bool,
         feedback: str | None = None,
+        scope: Literal["once", "session", "always"] = "once",
     ) -> bool:
         """Submit an approval response for a pending request.
 
@@ -731,12 +740,13 @@ class SessionManager:
             request_id=request_id,
             approved=approved,
             feedback=feedback,
+            scope=scope,
         )
-        success = session.approval_store.respond(response)
+        success = session.approval_coordinator.respond(response)
         session.last_activity = datetime.now()
 
         if success:
-            session.pending_approval = None
+            session.pending_approval = session.approval_coordinator.projection()
             session.approval_response = {
                 "decision": "approve" if approved else "deny",
                 "feedback": feedback,
@@ -774,35 +784,31 @@ class SessionManager:
                 feedback="Approval timeout or error",
             )
 
-        session.pending_approval = {
-            "request_id": approval_req.request_id,
-            "tool_name": approval_req.tool_call.tool_name
-            if approval_req.tool_call
-            else "",
-            "arguments": approval_req.tool_call.arguments
-            if approval_req.tool_call
-            else {},
-        }
+        if session.approval_coordinator.is_session_approved(approval_req):
+            return ApprovalResponse(
+                session_id=session_id,
+                request_id=approval_req.request_id,
+                approved=True,
+                scope="session",
+            )
+
+        session.approval_coordinator.add_request(approval_req)
+        session.pending_approval = session.approval_coordinator.projection()
         session.approval_event.clear()
         session.approval_response = None
-        session.approval_store.add_request(approval_req)
         self._persist_session(session)
 
         try:
-            await asyncio.wait_for(
-                session.approval_event.wait(), timeout=timeout_seconds
+            response = await session.approval_coordinator.wait_for_response(
+                approval_req.request_id,
+                float(timeout_seconds),
             )
-            if session.approval_response is not None:
-                return ApprovalResponse(
-                    session_id=session_id,
-                    request_id=approval_req.request_id,
-                    approved=session.approval_response["decision"] == "approve",
-                    feedback=session.approval_response.get("feedback"),
-                )
+            if response is not None:
+                return response
         except asyncio.TimeoutError:
             logger.warning("Approval timeout for session %s", session_id)
         finally:
-            session.pending_approval = None
+            session.pending_approval = session.approval_coordinator.projection()
             session.approval_response = None
             _ = session.approval_event.set()
             self._persist_session(session)

@@ -508,6 +508,7 @@ async def approve_request(
     req_id = body.request_id if body else request_id
     is_approved = body.approved if body else approved
     fb = body.feedback if body else feedback
+    scope = body.scope if body else "once"
 
     if req_id is None:
         raise HTTPException(status_code=422, detail="request_id is required")
@@ -527,6 +528,7 @@ async def approve_request(
             request_id=req_id,
             approved=is_approved,
             feedback=fb,
+            scope=scope,
         )
         if not success:
             raise HTTPException(status_code=400, detail="No pending approval request")

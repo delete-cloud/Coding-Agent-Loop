@@ -167,7 +167,14 @@ class TestStreamingConsumer:
 
         consumer, _, _ = self._make_consumer()
 
-        consumer._session_approved_tools.add(("", "bash"))
+        class StubApprovalMemory:
+            def is_session_approved(self, req):
+                return req.agent_id == "" and req.tool == "bash"
+
+            def remember(self, req, response) -> None:
+                del req, response
+
+        consumer._approval_memory = StubApprovalMemory()
 
         req = ApprovalRequest(
             session_id="s1", request_id="r1", tool="bash", args={"command": "rm -rf /"}
@@ -247,6 +254,22 @@ class TestStreamingConsumer:
         consumer, _, buf = self._make_consumer()
         call_count = 0
 
+        remembered: list[tuple[str, str]] = []
+
+        class StubApprovalMemory:
+            def __init__(self) -> None:
+                self._approved: set[tuple[str, str]] = set()
+
+            def is_session_approved(self, req):
+                return (req.agent_id, req.tool) in self._approved
+
+            def remember(self, req, response) -> None:
+                remembered.append((req.request_id, response.scope))
+                if response.approved and response.scope == "session":
+                    self._approved.add((req.agent_id, req.tool))
+
+        consumer._approval_memory = StubApprovalMemory()
+
         async def mock_prompt(console, req):
             nonlocal call_count
             call_count += 1
@@ -274,6 +297,7 @@ class TestStreamingConsumer:
         resp2 = await consumer.request_approval(req2)
         assert resp2.approved is True
         assert call_count == 1
+        assert remembered == [("r1", "session")]
 
     @pytest.mark.asyncio
     async def test_session_approve_does_not_cross_child_origin(self, monkeypatch):

@@ -554,6 +554,79 @@ class TestApprovalEndpoint:
         )
         assert success is True
 
+    async def test_approve_endpoint_can_set_session_scope(self, client):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        session = session_manager.get_session(session_id)
+        tool_call = ToolCallDelta(
+            session_id=session_id,
+            tool_name="bash",
+            arguments={"command": "ls"},
+            call_id="call1",
+        )
+        approval_req = ApprovalRequest(
+            session_id=session_id,
+            request_id="req123",
+            tool_call=tool_call,
+            timeout_seconds=120,
+        )
+        session.approval_coordinator.add_request(approval_req)
+
+        response = await client.post(
+            f"/sessions/{session_id}/approve",
+            json={
+                "request_id": "req123",
+                "approved": True,
+                "feedback": "Looks good",
+                "scope": "session",
+            },
+        )
+
+        assert response.status_code == 200
+        assert session.approval_coordinator.is_session_approved(
+            ApprovalRequest(
+                session_id=session_id,
+                request_id="req456",
+                tool_call=ToolCallDelta(
+                    session_id=session_id,
+                    tool_name="bash",
+                    arguments={"command": "pwd"},
+                    call_id="call2",
+                ),
+            )
+        )
+
+    async def test_approve_endpoint_rejects_legacy_always_scope(self, client):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        session = session_manager.get_session(session_id)
+        approval_req = ApprovalRequest(
+            session_id=session_id,
+            request_id="req123",
+            tool_call=ToolCallDelta(
+                session_id=session_id,
+                tool_name="bash",
+                arguments={"command": "ls"},
+                call_id="call1",
+            ),
+            timeout_seconds=120,
+        )
+        session.approval_coordinator.add_request(approval_req)
+
+        response = await client.post(
+            f"/sessions/{session_id}/approve",
+            json={
+                "request_id": "req123",
+                "approved": True,
+                "feedback": "Looks good",
+                "scope": "always",
+            },
+        )
+
+        assert response.status_code == 422
+
 
 class TestEventsFanOut:
     """Tests for SSE fan-out with multiple clients."""

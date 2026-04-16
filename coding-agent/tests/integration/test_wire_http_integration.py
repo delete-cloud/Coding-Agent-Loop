@@ -8,6 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import socket
+import sys
+import textwrap
 from datetime import datetime
 
 import httpx
@@ -363,6 +367,176 @@ class TestApprovalFlowIntegration:
         )
         # Legacy check returns 400 for request ID mismatch
         assert response.status_code == 400
+
+    async def test_session_scope_approval_skips_second_http_prompt_approval_live_server(
+        self, tmp_path
+    ):
+        """Test session approval reuse through a real localhost HTTP server."""
+
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+
+        session_id = "live-http-approval-session"
+        env = os.environ.copy()
+        env.update(
+            {
+                "LIVE_HTTP_TEST_PORT": str(port),
+                "LIVE_HTTP_TEST_SESSION_ID": session_id,
+                "LIVE_HTTP_TEST_REPO_PATH": str(tmp_path),
+            }
+        )
+
+        server_script = textwrap.dedent(
+            """
+            import os
+            from datetime import datetime
+            from pathlib import Path
+
+            import uvicorn
+            from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
+
+            from coding_agent.approval import ApprovalPolicy
+            from coding_agent.ui.http_server import app, session_manager
+            from coding_agent.ui.session_manager import Session
+
+            class ScriptedApprovalProvider:
+                def __init__(self) -> None:
+                    self.calls = 0
+
+                @property
+                def model_name(self) -> str:
+                    return "scripted-approval"
+
+                @property
+                def max_context_size(self) -> int:
+                    return 128000
+
+                async def stream(self, messages, tools=None, **kwargs):
+                    del messages, tools, kwargs
+                    self.calls += 1
+                    if self.calls == 1:
+                        yield ToolCallEvent(
+                            tool_call_id="tc-write-1",
+                            name="file_write",
+                            arguments={"path": "first.txt", "content": "first"},
+                        )
+                        yield DoneEvent()
+                        return
+
+                    if self.calls == 2:
+                        yield TextEvent(text="first write complete")
+                        yield DoneEvent()
+                        return
+
+                    if self.calls == 3:
+                        yield ToolCallEvent(
+                            tool_call_id="tc-write-2",
+                            name="file_write",
+                            arguments={"path": "second.txt", "content": "second"},
+                        )
+                        yield DoneEvent()
+                        return
+
+                    yield TextEvent(text="second write complete")
+                    yield DoneEvent()
+
+            session = Session(
+                id=os.environ["LIVE_HTTP_TEST_SESSION_ID"],
+                created_at=datetime.now(),
+                last_activity=datetime.now(),
+                repo_path=Path(os.environ["LIVE_HTTP_TEST_REPO_PATH"]),
+                approval_policy=ApprovalPolicy.INTERACTIVE,
+                provider=ScriptedApprovalProvider(),
+            )
+            session_manager.register_session(session)
+            uvicorn.run(
+                app,
+                host="127.0.0.1",
+                port=int(os.environ["LIVE_HTTP_TEST_PORT"]),
+                log_level="error",
+            )
+            """
+        )
+
+        server = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            server_script,
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        base_url = f"http://127.0.0.1:{port}"
+        for _ in range(200):
+            try:
+                async with httpx.AsyncClient(base_url=base_url, timeout=1.0) as probe:
+                    ready = await probe.get("/healthz")
+                if ready.status_code == 200:
+                    break
+            except Exception:
+                await asyncio.sleep(0.05)
+        else:
+            stdout, stderr = await server.communicate()
+            raise AssertionError(
+                f"live server failed to start\nstdout={stdout.decode()}\nstderr={stderr.decode()}"
+            )
+
+        try:
+            async with (
+                httpx.AsyncClient(base_url=base_url, timeout=30.0) as prompt_client,
+                httpx.AsyncClient(base_url=base_url, timeout=30.0) as approval_client,
+            ):
+                first_events: list[dict[str, object]] = []
+                approved_request_id: str | None = None
+                async with aconnect_sse(
+                    prompt_client,
+                    "POST",
+                    f"/sessions/{session_id}/prompt",
+                    json={"prompt": "Write the first file"},
+                ) as event_source:
+                    async for sse in event_source.aiter_sse():
+                        payload = json.loads(sse.data)
+                        first_events.append({"event": sse.event, "data": payload})
+                        if sse.event == "ApprovalRequest":
+                            approved_request_id = payload["request_id"]
+                            approve_resp = await approval_client.post(
+                                f"/sessions/{session_id}/approve",
+                                json={
+                                    "request_id": approved_request_id,
+                                    "approved": True,
+                                    "feedback": "approve for session",
+                                    "scope": "session",
+                                },
+                            )
+                            assert approve_resp.status_code == 200
+                        if sse.event == "TurnEnd" and not payload["agent_id"]:
+                            break
+
+                second_events: list[dict[str, object]] = []
+                async with aconnect_sse(
+                    prompt_client,
+                    "POST",
+                    f"/sessions/{session_id}/prompt",
+                    json={"prompt": "Write the second file"},
+                ) as event_source:
+                    async for sse in event_source.aiter_sse():
+                        payload = json.loads(sse.data)
+                        second_events.append({"event": sse.event, "data": payload})
+                        if sse.event == "TurnEnd" and not payload["agent_id"]:
+                            break
+
+            assert approved_request_id is not None
+            assert any(event["event"] == "ApprovalRequest" for event in first_events)
+            assert not any(
+                event["event"] == "ApprovalRequest" for event in second_events
+            )
+            assert (tmp_path / "first.txt").read_text() == "first"
+            assert (tmp_path / "second.txt").read_text() == "second"
+        finally:
+            server.terminate()
+            await server.wait()
 
 
 class TestWaitForApproval:
