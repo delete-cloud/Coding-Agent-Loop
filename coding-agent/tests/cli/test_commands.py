@@ -208,6 +208,174 @@ class TestCommands:
         assert "not enabled" in buf.getvalue()
 
     @pytest.mark.asyncio
+    async def test_session_list_command_uses_session_manager(self, monkeypatch):
+        import coding_agent.cli.terminal_output as terminal_output_module
+
+        class FakeSessionManager:
+            def list_sessions(self):
+                return ["session-a", "session-b"]
+
+        buf = StringIO()
+        monkeypatch.setattr(
+            terminal_output_module, "_prompt_output", create_output(stdout=buf)
+        )
+        context = {
+            "should_exit": False,
+            "session_manager": FakeSessionManager(),
+            "session_id": "session-a",
+        }
+
+        handled = await handle_command("/session list", context)
+
+        assert handled is True
+        output = buf.getvalue()
+        assert "session-a" in output
+        assert "session-b" in output
+
+    @pytest.mark.asyncio
+    async def test_session_switch_updates_active_session(self, monkeypatch):
+        import coding_agent.cli.terminal_output as terminal_output_module
+
+        class FakeSessionManager:
+            def has_session(self, session_id: str) -> bool:
+                return session_id == "session-b"
+
+        switched_to: list[str] = []
+        buf = StringIO()
+        monkeypatch.setattr(
+            terminal_output_module, "_prompt_output", create_output(stdout=buf)
+        )
+
+        async def fake_switch_session(session_id: str) -> None:
+            switched_to.append(session_id)
+
+        context = {
+            "should_exit": False,
+            "session_manager": FakeSessionManager(),
+            "switch_session": fake_switch_session,
+            "session_id": "session-a",
+        }
+
+        handled = await handle_command("/session switch session-b", context)
+
+        assert handled is True
+        assert switched_to == ["session-b"]
+
+    @pytest.mark.asyncio
+    async def test_session_new_creates_and_switches_to_session(self, monkeypatch):
+        import coding_agent.cli.terminal_output as terminal_output_module
+
+        created: list[str] = []
+        switched: list[str] = []
+        buf = StringIO()
+        monkeypatch.setattr(
+            terminal_output_module, "_prompt_output", create_output(stdout=buf)
+        )
+
+        async def fake_create_session() -> str:
+            created.append("created")
+            return "session-new"
+
+        async def fake_switch_session(session_id: str) -> None:
+            switched.append(session_id)
+
+        context = {
+            "should_exit": False,
+            "create_session": fake_create_session,
+            "switch_session": fake_switch_session,
+        }
+
+        handled = await handle_command("/session new", context)
+
+        assert handled is True
+        assert created == ["created"]
+        assert switched == ["session-new"]
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_save_uses_session_manager_capture(self, monkeypatch):
+        import coding_agent.cli.terminal_output as terminal_output_module
+
+        class FakeSessionManager:
+            async def capture_checkpoint(
+                self, session_id: str, *, label=None, extra=None
+            ):
+                assert session_id == "session-a"
+                assert label == "manual-save"
+                assert extra is None
+                return type("Meta", (), {"checkpoint_id": "cp-1", "label": label})()
+
+        buf = StringIO()
+        monkeypatch.setattr(
+            terminal_output_module, "_prompt_output", create_output(stdout=buf)
+        )
+        context = {
+            "should_exit": False,
+            "session_manager": FakeSessionManager(),
+            "session_id": "session-a",
+        }
+
+        handled = await handle_command("/checkpoint save manual-save", context)
+
+        assert handled is True
+        output = buf.getvalue()
+        assert "cp-1" in output
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_list_uses_session_manager_list(self, monkeypatch):
+        import coding_agent.cli.terminal_output as terminal_output_module
+
+        class FakeCheckpoint:
+            checkpoint_id = "cp-1"
+            label = "manual"
+
+        class FakeSessionManager:
+            async def list_checkpoints(self, session_id: str):
+                assert session_id == "session-a"
+                return [FakeCheckpoint()]
+
+        buf = StringIO()
+        monkeypatch.setattr(
+            terminal_output_module, "_prompt_output", create_output(stdout=buf)
+        )
+        context = {
+            "should_exit": False,
+            "session_manager": FakeSessionManager(),
+            "session_id": "session-a",
+        }
+
+        handled = await handle_command("/checkpoint list", context)
+
+        assert handled is True
+        output = buf.getvalue()
+        assert "cp-1" in output
+        assert "manual" in output
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_restore_delegates_to_switchable_session_hook(
+        self, monkeypatch
+    ):
+        import coding_agent.cli.terminal_output as terminal_output_module
+
+        restored: list[str] = []
+        buf = StringIO()
+        monkeypatch.setattr(
+            terminal_output_module, "_prompt_output", create_output(stdout=buf)
+        )
+
+        async def fake_restore_checkpoint(checkpoint_id: str) -> None:
+            restored.append(checkpoint_id)
+
+        context = {
+            "should_exit": False,
+            "restore_checkpoint": fake_restore_checkpoint,
+        }
+
+        handled = await handle_command("/checkpoint restore cp-1", context)
+
+        assert handled is True
+        assert restored == ["cp-1"]
+
+    @pytest.mark.asyncio
     async def test_help_output_has_commands_header(self, monkeypatch):
         import coding_agent.cli.terminal_output as terminal_output_module
 
