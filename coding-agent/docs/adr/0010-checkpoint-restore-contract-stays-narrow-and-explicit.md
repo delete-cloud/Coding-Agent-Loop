@@ -26,13 +26,16 @@ This keeps the public contract narrow while leaving the underlying framework pri
 - Treat fork/audit as implied current behavior — rejected because it conflates future extension work with the accepted restore contract.
 - Move restore semantics into agentkit as a framework rule — rejected because restore policy belongs in `coding_agent`, not in the lower-level mechanism layer.
 
-## Acceptance Criteria
+## Follow-ups
 
 - [ ] `docs/AGENTKIT-ARCHITECTURE.md` scopes append-only to normal forward execution and explains product-layer restore policy.
 - [ ] `docs/adr/0003-http-sessions-use-one-stable-tape-timeline.md` links the stable timeline identity to checkpoint restore semantics.
 - [ ] `docs/adr/0005-checkpoint-restore-uses-truncate-rollback.md` uses `restore(checkpoint_id)` and `tape_id` consistently.
 - [ ] `docs/adr/0006-checkpoint-plugin-state-restores-as-best-effort-hints.md` keeps plugin-state restore narrowed to hints.
 - [ ] `docs/specs/checkpoint-design.md` and `docs/specs/checkpoint-design-section2b.md` frame the accepted contract as historical/current source of truth and leave fork/audit as extension paths.
+
+## Acceptance Criteria
+
 - [ ] `uv run pytest tests/ui/test_session_manager_runtime.py -k "checkpoint_restore or truncate or stable_tape_id or plugin_state" -v`
 
 ## References
