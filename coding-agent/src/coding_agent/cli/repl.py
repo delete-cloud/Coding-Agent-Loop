@@ -190,6 +190,10 @@ class InteractiveSession:
         self._pipeline = managed_session.runtime_pipeline
         self._pipeline_ctx = managed_session.runtime_ctx
         self._pipeline_adapter = managed_session.runtime_adapter
+        if self._pipeline_adapter is not None:
+            self._pipeline_adapter.set_consumer(self._consumer)
+        if self._pipeline_ctx is not None:
+            self._pipeline_ctx.config["wire_consumer"] = self._consumer
         self._refresh_command_context_from_pipeline_ctx(managed_session.runtime_ctx)
 
     async def _restore_checkpoint(self, checkpoint_id: str) -> None:
