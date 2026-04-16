@@ -163,6 +163,10 @@ def _append_child_trace_to_parent(
         )
 
 
+def _child_trace_recorded(child_tape: Tape, *, base_length: int) -> bool:
+    return len(list(child_tape)[base_length:]) > 0
+
+
 def build_subagent_tool(child_pipeline_builder: ChildPipelineBuilder):
     @tool(
         name="subagent",
@@ -211,13 +215,25 @@ def build_subagent_tool(child_pipeline_builder: ChildPipelineBuilder):
             await _close_adapter_if_supported(child_adapter)
 
         if timed_out:
+            recorded_progress = _child_trace_recorded(
+                child_ctx.tape,
+                base_length=child_base_length,
+            )
             _append_child_trace_to_parent(
                 __pipeline_ctx__.tape,
                 child_ctx.tape,
                 base_length=child_base_length,
                 child_agent_id=child_agent_id,
             )
-            return f"Subagent timed out after {timeout_seconds:g} seconds"
+            if recorded_progress:
+                return (
+                    f"Subagent timed out after {timeout_seconds:g} seconds "
+                    "after recording partial child progress"
+                )
+            return (
+                f"Subagent timed out after {timeout_seconds:g} seconds "
+                "with no child progress recorded"
+            )
 
         _append_child_trace_to_parent(
             __pipeline_ctx__.tape,
