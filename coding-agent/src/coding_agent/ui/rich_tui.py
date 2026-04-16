@@ -126,7 +126,7 @@ class _TuiApprovalMemory:
         return self._coordinator.is_session_approved(req)
 
     def remember(self, req, response) -> None:
-        if response.approved and response.scope == "session":
+        if response.approved and response.scope in {"session", "always"}:
             self._coordinator.remember_session_approval(req)
 
 
