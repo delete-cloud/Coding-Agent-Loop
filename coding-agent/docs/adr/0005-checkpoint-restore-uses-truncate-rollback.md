@@ -11,9 +11,11 @@ Checkpoint restore also has to keep the persisted tape and rebuilt runtime align
 
 ## Decision
 
-Checkpoint restore uses truncate rollback on the existing stable tape id.
+Checkpoint restore uses controlled truncate rollback on the existing stable `tape_id`.
 
-Restoring a checkpoint truncates the persisted tape to the checkpoint's `entry_count`, rebuilds the runtime from the checkpoint snapshot, preserves the same stable `tape_id`, and invalidates checkpoints that pointed past the restored point.
+In `coding_agent`, `restore(checkpoint_id)` means: stay in the same session, preserve the same stable `tape_id`, rebuild the runtime from the checkpoint snapshot, and continue future turns on that same active timeline from the restored point.
+
+The current implementation realizes that contract by truncating the persisted tape to the checkpoint's `entry_count` and invalidating checkpoints that pointed past the restored point. Those details explain the current implementation, but the public contract is the same-session, same-stable-timeline controlled rollback semantics.
 
 ## Alternatives Rejected
 

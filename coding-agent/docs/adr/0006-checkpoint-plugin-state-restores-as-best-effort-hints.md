@@ -15,6 +15,8 @@ Checkpoint `plugin_states` restore as best-effort pre-mount hints.
 
 The restore flow injects serialized plugin state into `ctx.plugin_states` before mount, using it as a hint that plugins may keep or overwrite during initialization. This is not a framework-level full runtime rehydration mechanism.
 
+This narrow plugin-state rule is part of the current restore contract in `coding_agent`: it preserves useful continuity when state is cheap and serializable, without promising recovery of live runtime state such as shell processes, MCP connections, or in-memory caches.
+
 ## Alternatives Rejected
 
 - Add a `StatefulPlugin` restore protocol in `agentkit` — too much framework coupling for an optional product concern.
