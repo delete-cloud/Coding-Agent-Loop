@@ -778,6 +778,26 @@ class TestWireMessageConversion:
         assert data["timeout_seconds"] == 120
         assert data["tool_call"]["tool_name"] == "bash"
 
+
+class TestCheckpointRestoreErrors:
+    async def test_restore_checkpoint_returns_unquoted_keyerror_detail(
+        self, client, monkeypatch
+    ):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        async def failing_restore(*args, **kwargs):
+            raise KeyError("Checkpoint cp-missing not found")
+
+        monkeypatch.setattr(session_manager, "restore_checkpoint", failing_restore)
+
+        response = await client.post(
+            f"/sessions/{session_id}/checkpoints/cp-missing/restore"
+        )
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Checkpoint cp-missing not found"
+
     def test_approval_response_conversion(self):
         """Test ApprovalResponse conversion."""
         msg = ApprovalResponse(

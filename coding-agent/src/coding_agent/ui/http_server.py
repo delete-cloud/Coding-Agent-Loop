@@ -61,6 +61,12 @@ SESSION_IDLE_TIMEOUT_MINUTES = 30
 session_manager = SessionManager()
 
 
+def _key_error_detail(exc: KeyError) -> str:
+    if exc.args and isinstance(exc.args[0], str):
+        return exc.args[0]
+    return str(exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown."""
@@ -636,7 +642,7 @@ async def restore_checkpoint(
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
