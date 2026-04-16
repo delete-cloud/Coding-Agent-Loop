@@ -1008,6 +1008,10 @@ class SessionManager:
         ctx = await self.ensure_session_runtime(session_id)
         session = self.get_session(session_id)
         payload = dict(extra or {})
+        if _CHECKPOINT_SESSION_CONFIG_KEY in payload:
+            raise ValueError(
+                f"'{_CHECKPOINT_SESSION_CONFIG_KEY}' is a reserved checkpoint metadata key and cannot be provided via extra"
+            )
         payload[_CHECKPOINT_SESSION_CONFIG_KEY] = _serialize_checkpoint_session_config(
             session
         )

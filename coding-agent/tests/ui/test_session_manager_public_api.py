@@ -730,6 +730,30 @@ async def test_capture_checkpoint_stamps_restart_safe_session_config_into_extra(
 
 
 @pytest.mark.asyncio
+async def test_capture_checkpoint_rejects_reserved_restart_config_key() -> None:
+    manager = SessionManager(store=InMemorySessionStore())
+    session_id = await manager.create_session()
+    session = manager.get_session(session_id)
+    session.runtime_pipeline = object()
+    session.runtime_ctx = types.SimpleNamespace(tape=Tape(tape_id="stable-tape"))
+    session.runtime_adapter = object()
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            manager,
+            "_checkpoint_service",
+            types.SimpleNamespace(capture=lambda *args, **kwargs: None),
+            raising=False,
+        )
+
+        with pytest.raises(ValueError, match="reserved checkpoint metadata key"):
+            await manager.capture_checkpoint(
+                session_id,
+                extra={"session_restart_config": {"provider_name": "oops"}},
+            )
+
+
+@pytest.mark.asyncio
 async def test_ensure_session_runtime_bootstraps_runtime_and_persists_tape_id() -> None:
     store = InMemorySessionStore()
     manager = SessionManager(store=store)

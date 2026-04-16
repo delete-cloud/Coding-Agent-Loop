@@ -798,6 +798,27 @@ class TestCheckpointRestoreErrors:
         assert response.status_code == 404
         assert response.json()["detail"] == "Checkpoint cp-missing not found"
 
+    async def test_restore_checkpoint_maps_typeerror_to_bad_request(
+        self, client, monkeypatch
+    ):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        async def failing_restore(*args, **kwargs):
+            raise TypeError("checkpoint session config is missing model_name")
+
+        monkeypatch.setattr(session_manager, "restore_checkpoint", failing_restore)
+
+        response = await client.post(
+            f"/sessions/{session_id}/checkpoints/cp-invalid/restore"
+        )
+
+        assert response.status_code == 400
+        assert (
+            response.json()["detail"]
+            == "checkpoint session config is missing model_name"
+        )
+
     def test_approval_response_conversion(self):
         """Test ApprovalResponse conversion."""
         msg = ApprovalResponse(
