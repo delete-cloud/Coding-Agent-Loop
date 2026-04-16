@@ -22,6 +22,9 @@ from coding_agent.ui.schemas import (
     CreateSessionRequest,
     ApproveRequest,
     SessionResponse,
+    CheckpointListResponse,
+    CheckpointMetadataResponse,
+    CheckpointRestoreResponse,
     ApprovalResponseSchema,
     CloseSessionResponse,
     HealthResponse,
@@ -585,6 +588,63 @@ async def get_session(
         return session_manager.get_session_info(session_id)
 
     raise HTTPException(status_code=404, detail="Session not found")
+
+
+@app.get("/sessions/{session_id}/checkpoints", response_model=CheckpointListResponse)
+@limiter.limit(RateLimits.LIST_CHECKPOINTS)
+async def list_checkpoints(
+    request: Request,
+    session_id: str,
+    api_key: str | None = Depends(verify_api_key),
+) -> CheckpointListResponse:
+    if not session_manager.has_session(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    checkpoints = await session_manager.list_checkpoints(session_id)
+    return CheckpointListResponse(
+        checkpoints=[
+            CheckpointMetadataResponse(
+                checkpoint_id=checkpoint.checkpoint_id,
+                tape_id=checkpoint.tape_id,
+                session_id=checkpoint.session_id,
+                entry_count=checkpoint.entry_count,
+                window_start=checkpoint.window_start,
+                created_at=checkpoint.created_at,
+                label=checkpoint.label,
+            )
+            for checkpoint in checkpoints
+        ]
+    )
+
+
+@app.post(
+    "/sessions/{session_id}/checkpoints/{checkpoint_id}/restore",
+    response_model=CheckpointRestoreResponse,
+)
+@limiter.limit(RateLimits.RESTORE_CHECKPOINT)
+async def restore_checkpoint(
+    request: Request,
+    session_id: str,
+    checkpoint_id: str,
+    api_key: str | None = Depends(verify_api_key),
+) -> CheckpointRestoreResponse:
+    if not session_manager.has_session(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    try:
+        await session_manager.restore_checkpoint(session_id, checkpoint_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return CheckpointRestoreResponse(
+        status="restored",
+        session_id=session_id,
+        checkpoint_id=checkpoint_id,
+    )
 
 
 @app.delete("/sessions/{session_id}", response_model=CloseSessionResponse)

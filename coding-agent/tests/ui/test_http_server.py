@@ -11,6 +11,7 @@ from unittest.mock import patch
 import pytest
 from httpx import AsyncClient, ASGITransport
 from httpx_sse import aconnect_sse
+from agentkit.checkpoint.models import CheckpointMeta
 from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
 
 from coding_agent.approval import ApprovalPolicy
@@ -1051,6 +1052,102 @@ class TestIntegration:
         # Verify session is gone
         response = await client.get(f"/sessions/{session_id}")
         assert response.status_code == 404
+
+
+class TestCheckpointEndpoints:
+    async def test_list_checkpoints_returns_session_scoped_metadata(self, client):
+        session_id = "checkpoint-http-session"
+        register_session(session_id)
+
+        expected = CheckpointMeta(
+            checkpoint_id="cp-http-1",
+            tape_id="stable-tape",
+            session_id=session_id,
+            entry_count=4,
+            window_start=1,
+            created_at=datetime(2026, 4, 16, 10, 0, 0),
+            label="before-http-restore",
+        )
+
+        async def fake_list_checkpoints(requested_session_id: str):
+            assert requested_session_id == session_id
+            return [expected]
+
+        with patch.object(
+            session_manager,
+            "list_checkpoints",
+            side_effect=fake_list_checkpoints,
+        ):
+            response = await client.get(f"/sessions/{session_id}/checkpoints")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "checkpoints": [
+                {
+                    "checkpoint_id": "cp-http-1",
+                    "tape_id": "stable-tape",
+                    "session_id": session_id,
+                    "entry_count": 4,
+                    "window_start": 1,
+                    "created_at": "2026-04-16T10:00:00",
+                    "label": "before-http-restore",
+                }
+            ]
+        }
+
+    async def test_list_checkpoints_returns_404_for_unknown_session(self, client):
+        response = await client.get("/sessions/missing-session/checkpoints")
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Session not found"
+
+    async def test_restore_checkpoint_returns_ok_payload(self, client):
+        session_id = "restore-http-session"
+        register_session(session_id)
+
+        async def fake_restore_checkpoint(
+            requested_session_id: str, checkpoint_id: str
+        ):
+            assert requested_session_id == session_id
+            assert checkpoint_id == "cp-http-restore"
+
+        with patch.object(
+            session_manager,
+            "restore_checkpoint",
+            side_effect=fake_restore_checkpoint,
+        ):
+            response = await client.post(
+                f"/sessions/{session_id}/checkpoints/cp-http-restore/restore"
+            )
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "status": "restored",
+            "session_id": session_id,
+            "checkpoint_id": "cp-http-restore",
+        }
+
+    async def test_restore_checkpoint_returns_409_for_active_turn(self, client):
+        session_id = "restore-busy-session"
+        register_session(session_id)
+
+        async def fake_restore_checkpoint(
+            requested_session_id: str, checkpoint_id: str
+        ):
+            del requested_session_id, checkpoint_id
+            raise RuntimeError("turn already in progress")
+
+        with patch.object(
+            session_manager,
+            "restore_checkpoint",
+            side_effect=fake_restore_checkpoint,
+        ):
+            response = await client.post(
+                f"/sessions/{session_id}/checkpoints/cp-busy/restore"
+            )
+
+        assert response.status_code == 409
+        assert response.json()["detail"] == "turn already in progress"
 
 
 class TestApprovalStoreIntegration:
