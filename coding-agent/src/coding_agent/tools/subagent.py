@@ -13,7 +13,7 @@ from agentkit.tools import tool
 
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.adapter_types import StopReason, TurnOutcome
-from coding_agent.wire.protocol import ToolCallDelta, ToolResultDelta, WireMessage
+from coding_agent.wire.protocol import ToolCallDelta, WireMessage
 
 
 ChildPipelineBuilder = Callable[..., tuple[Pipeline, PipelineContext]]
