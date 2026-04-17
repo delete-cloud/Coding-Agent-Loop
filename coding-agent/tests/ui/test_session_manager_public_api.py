@@ -1,6 +1,7 @@
 from __future__ import annotations
 import types
 from datetime import datetime
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -158,6 +159,12 @@ def test_session_manager_uses_pg_backends_when_storage_config_requests_pg() -> N
         def __init__(self, *, dsn: str) -> None:
             self.dsn = dsn
 
+        async def get_pool(self) -> FakePGPool:
+            return self
+
+        async def close(self) -> None:
+            return None
+
     class FakePGTapeStore:
         def __init__(self, *, pool: FakePGPool) -> None:
             self.pool = pool
@@ -189,6 +196,94 @@ def test_session_manager_uses_pg_backends_when_storage_config_requests_pg() -> N
     assert isinstance(manager._tape_store, FakePGTapeStore)
     assert isinstance(manager._checkpoint_service._store, FakePGCheckpointStore)
     assert manager._tape_store.pool is manager._checkpoint_service._store.pool
+
+
+def test_session_manager_reuses_shared_pg_pool_for_http_session_store() -> None:
+    class FakePGPool:
+        def __init__(self, *, dsn: str) -> None:
+            self.dsn = dsn
+
+    class FakePGTapeStore:
+        def __init__(self, *, pool: FakePGPool) -> None:
+            self.pool = pool
+
+    class FakePGCheckpointStore:
+        def __init__(self, *, pool: FakePGPool) -> None:
+            self.pool = pool
+
+    with (
+        patch("coding_agent.ui.session_manager.create_session_store") as create_store,
+        patch(
+            "coding_agent.ui.session_manager._load_pg_storage_types",
+            return_value=(FakePGPool, FakePGTapeStore, FakePGCheckpointStore),
+        ),
+    ):
+        create_store.return_value = InMemorySessionStore()
+        _ = SessionManager(
+            storage_config={
+                "tape_backend": "pg",
+                "checkpoint_backend": "pg",
+                "http_session_backend": "pg",
+                "dsn": "postgresql://example",
+            }
+        )
+
+    assert create_store.call_count == 1
+    assert create_store.call_args.kwargs["backend"] == "pg"
+    assert create_store.call_args.kwargs["dsn"] == "postgresql://example"
+    assert isinstance(create_store.call_args.kwargs["pg_pool"], FakePGPool)
+
+
+def test_session_manager_normalizes_tape_backend_for_http_session_pg_default() -> None:
+    manager = SessionManager.__new__(SessionManager)
+    manager._storage_config = {
+        "tape_backend": " PG ",
+        "dsn": "postgresql://example",
+    }
+    manager._pg_pool = None
+
+    class FakePGPool:
+        def __init__(self, *, dsn: str) -> None:
+            self.dsn = dsn
+
+    with (
+        patch("coding_agent.ui.session_manager.create_session_store") as create_store,
+        patch(
+            "coding_agent.ui.session_manager._load_pg_storage_types",
+            return_value=(FakePGPool, object(), object()),
+        ),
+    ):
+        create_store.return_value = InMemorySessionStore()
+
+        _ = SessionManager._create_http_session_store(manager)
+
+    assert create_store.call_args.kwargs["backend"] == "pg"
+
+
+def test_session_manager_normalizes_tape_backend_for_checkpoint_default() -> None:
+    manager = SessionManager.__new__(SessionManager)
+    manager._storage_config = {
+        "tape_backend": " PG ",
+        "dsn": "postgresql://example",
+    }
+
+    class FakePGPool:
+        def __init__(self, *, dsn: str) -> None:
+            self.dsn = dsn
+
+    class FakePGCheckpointStore:
+        def __init__(self, *, pool: FakePGPool) -> None:
+            self.pool = pool
+
+    manager._pg_pool = None
+
+    with patch(
+        "coding_agent.ui.session_manager._load_pg_storage_types",
+        return_value=(FakePGPool, object(), FakePGCheckpointStore),
+    ):
+        store = SessionManager._create_checkpoint_store(manager, Path("/tmp/data"))
+
+    assert isinstance(store, FakePGCheckpointStore)
 
 
 def test_create_session_store_warns_and_falls_back_when_redis_unreachable(

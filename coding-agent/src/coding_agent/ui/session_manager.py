@@ -39,6 +39,7 @@ from coding_agent.wire.protocol import (
     WireMessage,
 )
 from coding_agent.ui.session_store import (
+    AsyncPGSessionPool,
     SessionStore,
     create_session_store,
 )
@@ -334,19 +335,22 @@ class SessionManager:
         )
         self._create_agent = create_agent_fn
 
-    def _get_pg_pool(self) -> object:
+    def _get_pg_pool(self) -> AsyncPGSessionPool:
         PGPool, _, _ = _load_pg_storage_types()
         if self._pg_pool is not None:
-            return self._pg_pool
+            return cast(AsyncPGSessionPool, self._pg_pool)
 
         dsn_obj = self._storage_config.get("dsn")
         if not isinstance(dsn_obj, str) or not dsn_obj.strip():
             raise RuntimeError("PG storage requires storage.dsn")
         self._pg_pool = PGPool(dsn=dsn_obj)
-        return self._pg_pool
+        return cast(AsyncPGSessionPool, self._pg_pool)
 
     def _create_http_session_store(self) -> SessionStore:
         configured_backend = self._storage_config.get("http_session_backend")
+        tape_backend = (
+            str(self._storage_config.get("tape_backend", "jsonl")).strip().lower()
+        )
         if configured_backend is None:
             legacy_backend = self._storage_config.get("session_backend")
             if (
@@ -354,14 +358,20 @@ class SessionManager:
                 and legacy_backend.strip().lower() == "pg"
             ):
                 configured_backend = "pg"
-            elif self._storage_config.get("tape_backend") == "pg":
+            elif tape_backend == "pg":
                 configured_backend = "pg"
 
-        backend = configured_backend if isinstance(configured_backend, str) else None
+        backend = (
+            configured_backend.strip().lower()
+            if isinstance(configured_backend, str)
+            else None
+        )
         dsn = self._storage_config.get("dsn")
+        pg_pool = self._get_pg_pool() if backend == "pg" else None
         return create_session_store(
             backend=backend,
             dsn=dsn if isinstance(dsn, str) else None,
+            pg_pool=pg_pool,
         )
 
     def _create_tape_store(self, data_dir: Path) -> TapeStore:
@@ -372,9 +382,10 @@ class SessionManager:
         return JSONLTapeStore(data_dir / "tapes")
 
     def _create_checkpoint_store(self, data_dir: Path) -> CheckpointStore:
-        default_backend = (
-            "pg" if self._storage_config.get("tape_backend") == "pg" else "fs"
+        tape_backend = (
+            str(self._storage_config.get("tape_backend", "jsonl")).strip().lower()
         )
+        default_backend = "pg" if tape_backend == "pg" else "fs"
         backend = (
             str(self._storage_config.get("checkpoint_backend", default_backend))
             .strip()
