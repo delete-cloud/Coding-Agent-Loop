@@ -131,6 +131,13 @@ def test_redis_session_store_can_rehydrate_session_metadata() -> None:
 
 
 def test_pg_session_metadata_store_round_trips_session_metadata() -> None:
+    class FakeRecord:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self._payload = payload
+
+        def __iter__(self):
+            return iter(self._payload.items())
+
     class FakeAsyncPGPool:
         def __init__(self) -> None:
             self.sessions: dict[str, dict[str, object]] = {}
@@ -154,22 +161,22 @@ def test_pg_session_metadata_store_round_trips_session_metadata() -> None:
                 return "CREATE TABLE"
             raise AssertionError(f"unexpected execute query: {query}")
 
-        async def fetchrow(self, query: str, *args: object) -> dict[str, object] | None:
+        async def fetchrow(self, query: str, *args: object) -> object | None:
             self.executed.append((query, args))
             if "SELECT payload FROM agent_http_sessions" in query:
                 (session_id,) = args
                 assert isinstance(session_id, str)
                 payload = self.sessions.get(session_id)
-                return None if payload is None else {"payload": payload}
+                return None if payload is None else FakeRecord({"payload": payload})
             if query.strip() == "SELECT 1":
-                return {"?column?": 1}
+                return FakeRecord({"?column?": 1})
             raise AssertionError(f"unexpected fetchrow query: {query}")
 
-        async def fetch(self, query: str, *args: object) -> list[dict[str, object]]:
+        async def fetch(self, query: str, *args: object) -> list[object]:
             self.executed.append((query, args))
             if "SELECT session_id FROM agent_http_sessions" in query:
                 return [
-                    {"session_id": session_id}
+                    FakeRecord({"session_id": session_id})
                     for session_id in sorted(self.sessions.keys())
                 ]
             raise AssertionError(f"unexpected fetch query: {query}")
@@ -194,24 +201,25 @@ def test_pg_session_metadata_store_round_trips_session_metadata() -> None:
         async def close(self) -> None:
             await self.pool.close()
 
-    store = PGSessionMetadataStore(
-        pool=FakePGPool(),
-    )
-    session = Session(
-        id="pg-session",
-        created_at=datetime.now(),
-        last_activity=datetime.now(),
-        approval_store=ApprovalStore(),
-    )
+    store = PGSessionMetadataStore(pool=FakePGPool())
+    try:
+        session = Session(
+            id="pg-session",
+            created_at=datetime.now(),
+            last_activity=datetime.now(),
+            approval_store=ApprovalStore(),
+        )
 
-    store.save(session.id, session.to_store_data())
+        store.save(session.id, session.to_store_data())
 
-    payload = store.load("pg-session")
+        payload = store.load("pg-session")
 
-    assert payload is not None
-    assert payload["id"] == "pg-session"
-    assert store.list_sessions() == ["pg-session"]
-    assert store.check_health() is True
+        assert payload is not None
+        assert payload["id"] == "pg-session"
+        assert store.list_sessions() == ["pg-session"]
+        assert store.check_health() is True
+    finally:
+        store.close()
 
 
 def test_pg_session_metadata_store_closes_background_loop_and_pool() -> None:

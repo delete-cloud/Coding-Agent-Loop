@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import threading
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Iterable
 from typing import Protocol, cast
 
 from agentkit.storage.pg import PGPool
@@ -215,9 +215,10 @@ class PGSessionMetadataStore:
             )
             if row_obj is None:
                 return None
-            if not isinstance(row_obj, dict):
-                raise TypeError("postgres session metadata row must decode to a dict")
-            payload = row_obj.get("payload")
+            row_dict = _coerce_row_dict(
+                row=row_obj, context="postgres session metadata row"
+            )
+            payload = row_dict.get("payload")
             if payload is None:
                 return None
             if not isinstance(payload, dict):
@@ -246,9 +247,10 @@ class PGSessionMetadataStore:
                 raise TypeError("postgres session metadata list result must be a list")
             session_ids: list[str] = []
             for row in rows_obj:
-                if not isinstance(row, dict):
-                    raise TypeError("postgres session metadata list rows must be dicts")
-                session_id = row.get("session_id")
+                row_dict = _coerce_row_dict(
+                    row=row, context="postgres session metadata list row"
+                )
+                session_id = row_dict.get("session_id")
                 if not isinstance(session_id, str):
                     raise TypeError(
                         "postgres session metadata row must include string session_id"
@@ -352,6 +354,21 @@ def create_session_store(
             safe_exc,
         )
         return InMemorySessionStore()
+
+
+def _coerce_row_dict(*, row: object, context: str) -> dict[str, object]:
+    if isinstance(row, dict):
+        return row
+    if not isinstance(row, Iterable):
+        raise TypeError(f"{context} must be convertible to a dict")
+    try:
+        row_items = cast(Iterable[tuple[object, object]], row)
+        row_dict_obj = dict(row_items)
+    except Exception as exc:
+        raise TypeError(f"{context} must be convertible to a dict") from exc
+    if not isinstance(row_dict_obj, dict):
+        raise TypeError(f"{context} must decode to a dict")
+    return cast(dict[str, object], row_dict_obj)
 
 
 def _create_redis_client(
