@@ -924,6 +924,22 @@ class TestWireMessageConversion:
 
 
 class TestCheckpointRestoreErrors:
+    async def test_capture_checkpoint_returns_409_for_active_turn(
+        self, client, monkeypatch
+    ):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        async def failing_capture(*args, **kwargs):
+            raise RuntimeError("turn already in progress")
+
+        monkeypatch.setattr(session_manager, "capture_checkpoint", failing_capture)
+
+        response = await client.post(f"/sessions/{session_id}/checkpoints", json={})
+
+        assert response.status_code == 409
+        assert response.json()["detail"] == "turn already in progress"
+
     async def test_restore_checkpoint_returns_unquoted_keyerror_detail(
         self, client, monkeypatch
     ):
@@ -1240,6 +1256,61 @@ class TestIntegration:
 
 
 class TestCheckpointEndpoints:
+    async def test_capture_checkpoint_returns_session_scoped_metadata(self, client):
+        session_id = "capture-http-session"
+        register_session(session_id)
+
+        expected = CheckpointMeta(
+            checkpoint_id="cp-http-capture",
+            tape_id="stable-tape",
+            session_id=session_id,
+            entry_count=4,
+            window_start=1,
+            created_at=datetime(2026, 4, 16, 9, 30, 0),
+            label="before-http-save",
+        )
+
+        async def fake_capture_checkpoint(
+            requested_session_id: str,
+            *,
+            label: str | None = None,
+            extra=None,
+        ):
+            assert requested_session_id == session_id
+            assert label == "before-http-save"
+            assert extra is None
+            return expected
+
+        with patch.object(
+            session_manager,
+            "capture_checkpoint",
+            side_effect=fake_capture_checkpoint,
+        ):
+            response = await client.post(
+                f"/sessions/{session_id}/checkpoints",
+                json={"label": "before-http-save"},
+            )
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "checkpoint_id": "cp-http-capture",
+            "tape_id": "stable-tape",
+            "session_id": session_id,
+            "entry_count": 4,
+            "window_start": 1,
+            "created_at": "2026-04-16T09:30:00",
+            "label": "before-http-save",
+        }
+
+    async def test_capture_checkpoint_returns_404_for_unknown_session(self, client):
+        response = await client.post(
+            "/sessions/missing-session/checkpoints",
+            json={"label": "before-http-save"},
+        )
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Session not found"
+
     async def test_list_checkpoints_returns_session_scoped_metadata(self, client):
         session_id = "checkpoint-http-session"
         register_session(session_id)

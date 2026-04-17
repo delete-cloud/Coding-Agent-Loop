@@ -56,6 +56,7 @@ class RateLimits:
     APPROVE: Final[str] = "30/minute"
     GET_SESSION: Final[str] = "60/minute"
     CLOSE_SESSION: Final[str] = "20/minute"
+    CAPTURE_CHECKPOINT: Final[str] = "20/minute"
     LIST_CHECKPOINTS: Final[str] = "60/minute"
     RESTORE_CHECKPOINT: Final[str] = "20/minute"
 
