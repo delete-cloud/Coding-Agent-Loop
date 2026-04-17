@@ -1029,7 +1029,6 @@ class SessionManager:
                 raise RuntimeError("turn already in progress")
 
             ctx = await self.ensure_session_runtime(session_id)
-            session = self.get_session(session_id)
             payload = dict(extra or {})
             if _CHECKPOINT_SESSION_CONFIG_KEY in payload:
                 raise ValueError(

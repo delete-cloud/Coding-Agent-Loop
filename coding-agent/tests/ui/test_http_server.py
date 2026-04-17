@@ -923,7 +923,7 @@ class TestWireMessageConversion:
         assert data["tool_call"]["tool_name"] == "bash"
 
 
-class TestCheckpointRestoreErrors:
+class TestCheckpointErrorMapping:
     async def test_capture_checkpoint_returns_409_for_active_turn(
         self, client, monkeypatch
     ):
