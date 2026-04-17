@@ -1019,22 +1019,31 @@ class SessionManager:
         label: str | None = None,
         extra: dict[str, Any] | None = None,
     ) -> CheckpointMeta:
-        ctx = await self.ensure_session_runtime(session_id)
-        session = self.get_session(session_id)
-        payload = dict(extra or {})
-        if _CHECKPOINT_SESSION_CONFIG_KEY in payload:
-            raise ValueError(
-                f"'{_CHECKPOINT_SESSION_CONFIG_KEY}' is a reserved checkpoint metadata key and cannot be provided via extra"
+        turn_lock = self._turn_lock_for(session_id)
+        if turn_lock.locked():
+            raise RuntimeError("turn already in progress")
+
+        async with turn_lock:
+            session = self.get_session(session_id)
+            if session.turn_in_progress or (session.task and not session.task.done()):
+                raise RuntimeError("turn already in progress")
+
+            ctx = await self.ensure_session_runtime(session_id)
+            session = self.get_session(session_id)
+            payload = dict(extra or {})
+            if _CHECKPOINT_SESSION_CONFIG_KEY in payload:
+                raise ValueError(
+                    f"'{_CHECKPOINT_SESSION_CONFIG_KEY}' is a reserved checkpoint metadata key and cannot be provided via extra"
+                )
+            payload[_CHECKPOINT_SESSION_CONFIG_KEY] = (
+                _serialize_checkpoint_session_config(session)
             )
-        payload[_CHECKPOINT_SESSION_CONFIG_KEY] = _serialize_checkpoint_session_config(
-            session
-        )
-        checkpoint = await self._checkpoint_service.capture(
-            ctx, label=label, extra=payload
-        )
-        session.tape_id = ctx.tape.tape_id
-        self._persist_session(session)
-        return checkpoint
+            checkpoint = await self._checkpoint_service.capture(
+                ctx, label=label, extra=payload
+            )
+            session.tape_id = ctx.tape.tape_id
+            self._persist_session(session)
+            return checkpoint
 
     async def list_checkpoints(self, session_id: str) -> list[CheckpointMeta]:
         session = self.get_session(session_id)
