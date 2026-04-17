@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 
 import pytest
@@ -8,6 +9,7 @@ from coding_agent.approval.store import ApprovalStore
 from coding_agent.ui.session_manager import Session, SessionManager
 from coding_agent.ui.session_store import (
     InMemorySessionStore,
+    PGSessionMetadataStore,
     RedisSessionStore,
     create_session_store,
 )
@@ -126,6 +128,141 @@ def test_redis_session_store_can_rehydrate_session_metadata() -> None:
     assert payload is not None
     assert payload["id"] == "persisted-session"
     assert "persisted-session" in store.list_sessions()
+
+
+def test_pg_session_metadata_store_round_trips_session_metadata() -> None:
+    class FakeAsyncPGPool:
+        def __init__(self) -> None:
+            self.sessions: dict[str, dict[str, object]] = {}
+            self.executed: list[tuple[str, tuple[object, ...]]] = []
+            self.closed = False
+
+        async def execute(self, query: str, *args: object) -> str:
+            self.executed.append((query, args))
+            if "INSERT INTO agent_http_sessions" in query:
+                session_id, payload = args
+                assert isinstance(session_id, str)
+                assert isinstance(payload, str)
+                self.sessions[session_id] = json.loads(payload)
+                return "INSERT 0 1"
+            if "DELETE FROM agent_http_sessions" in query:
+                (session_id,) = args
+                assert isinstance(session_id, str)
+                self.sessions.pop(session_id, None)
+                return "DELETE 1"
+            if "CREATE TABLE IF NOT EXISTS agent_http_sessions" in query:
+                return "CREATE TABLE"
+            raise AssertionError(f"unexpected execute query: {query}")
+
+        async def fetchrow(self, query: str, *args: object) -> dict[str, object] | None:
+            self.executed.append((query, args))
+            if "SELECT payload FROM agent_http_sessions" in query:
+                (session_id,) = args
+                assert isinstance(session_id, str)
+                payload = self.sessions.get(session_id)
+                return None if payload is None else {"payload": payload}
+            if query.strip() == "SELECT 1":
+                return {"?column?": 1}
+            raise AssertionError(f"unexpected fetchrow query: {query}")
+
+        async def fetch(self, query: str, *args: object) -> list[dict[str, object]]:
+            self.executed.append((query, args))
+            if "SELECT session_id FROM agent_http_sessions" in query:
+                return [
+                    {"session_id": session_id}
+                    for session_id in sorted(self.sessions.keys())
+                ]
+            raise AssertionError(f"unexpected fetch query: {query}")
+
+        async def acquire(self):
+            raise AssertionError("unused")
+
+        async def release(self, connection):
+            _ = connection
+            raise AssertionError("unused")
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class FakePGPool:
+        def __init__(self) -> None:
+            self.pool = FakeAsyncPGPool()
+
+        async def get_pool(self) -> FakeAsyncPGPool:
+            return self.pool
+
+        async def close(self) -> None:
+            await self.pool.close()
+
+    store = PGSessionMetadataStore(
+        pool=FakePGPool(),
+    )
+    session = Session(
+        id="pg-session",
+        created_at=datetime.now(),
+        last_activity=datetime.now(),
+        approval_store=ApprovalStore(),
+    )
+
+    store.save(session.id, session.to_store_data())
+
+    payload = store.load("pg-session")
+
+    assert payload is not None
+    assert payload["id"] == "pg-session"
+    assert store.list_sessions() == ["pg-session"]
+    assert store.check_health() is True
+
+
+def test_pg_session_metadata_store_closes_background_loop_and_pool() -> None:
+    class FakeAsyncPGPool:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def execute(self, query: str, *args: object) -> str:
+            _ = (query, args)
+            raise AssertionError("unused")
+
+        async def fetchrow(self, query: str, *args: object) -> dict[str, object] | None:
+            _ = (query, args)
+            raise AssertionError("unused")
+
+        async def fetch(self, query: str, *args: object) -> list[dict[str, object]]:
+            _ = (query, args)
+            raise AssertionError("unused")
+
+        async def acquire(self):
+            raise AssertionError("unused")
+
+        async def release(self, connection):
+            _ = connection
+            raise AssertionError("unused")
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class FakePGPool:
+        def __init__(self) -> None:
+            self.pool = FakeAsyncPGPool()
+
+        async def get_pool(self) -> FakeAsyncPGPool:
+            return self.pool
+
+        async def close(self) -> None:
+            await self.pool.close()
+
+    pool = FakePGPool()
+    store = PGSessionMetadataStore(pool=pool)
+
+    store.close()
+
+    assert pool.pool.closed is True
+
+
+def test_create_session_store_builds_pg_store_from_explicit_backend() -> None:
+    store = create_session_store(backend="pg", dsn="postgresql://example")
+
+    assert isinstance(store, PGSessionMetadataStore)
 
 
 def test_rehydrate_clears_non_restart_safe_runtime_state() -> None:

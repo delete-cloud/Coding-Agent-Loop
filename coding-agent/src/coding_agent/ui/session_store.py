@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
-from collections.abc import Callable
+import threading
+from collections.abc import Callable, Coroutine
 from typing import Protocol, cast
+
+from agentkit.storage.pg import PGPool
 
 from ..redaction import redact_sensitive_text, redact_url_credentials
 
@@ -44,6 +48,12 @@ class SessionStore(Protocol):
     def delete(self, session_id: str) -> None: ...
 
     def check_health(self) -> bool: ...
+
+
+class AsyncPGSessionPool(Protocol):
+    async def get_pool(self) -> object: ...
+
+    async def close(self) -> None: ...
 
 
 class InMemorySessionStore:
@@ -124,12 +134,207 @@ class RedisSessionStore:
             return False
 
 
+class PGSessionMetadataStore:
+    _CREATE_TABLE_SQL = """
+    CREATE TABLE IF NOT EXISTS agent_http_sessions (
+        session_id TEXT PRIMARY KEY,
+        payload JSONB NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """
+    _UPSERT_SQL = """
+    INSERT INTO agent_http_sessions (session_id, payload)
+    VALUES ($1, $2::jsonb)
+    ON CONFLICT (session_id)
+    DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()
+    """
+    _SELECT_SQL = "SELECT payload FROM agent_http_sessions WHERE session_id = $1"
+    _LIST_SQL = "SELECT session_id FROM agent_http_sessions ORDER BY session_id"
+    _DELETE_SQL = "DELETE FROM agent_http_sessions WHERE session_id = $1"
+
+    def __init__(
+        self,
+        *,
+        pool: AsyncPGSessionPool,
+    ) -> None:
+        self._pool = pool
+        self._schema_ready = False
+        self._loop = asyncio.new_event_loop()
+        self._loop_thread = threading.Thread(
+            target=self._run_loop,
+            name="pg-session-metadata-store",
+            daemon=True,
+        )
+        self._loop_thread.start()
+
+    def _run_loop(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
+
+    def _run_sync(self, operation: Coroutine[object, object, object]) -> object:
+        future = asyncio.run_coroutine_threadsafe(operation, self._loop)
+        return future.result()
+
+    async def _ensure_schema(self) -> object:
+        asyncpg_pool = await self._pool.get_pool()
+        if not self._schema_ready:
+            execute = getattr(asyncpg_pool, "execute", None)
+            if not callable(execute):
+                raise TypeError("postgres session metadata pool must expose execute")
+            _ = await cast(Callable[..., Coroutine[object, object, object]], execute)(
+                self._CREATE_TABLE_SQL
+            )
+            self._schema_ready = True
+        return asyncpg_pool
+
+    def save(self, session_id: str, data: SessionPayload) -> None:
+        async def _save() -> None:
+            pool = await self._ensure_schema()
+            execute = getattr(pool, "execute", None)
+            if not callable(execute):
+                raise TypeError("postgres session metadata pool must expose execute")
+            _ = await cast(Callable[..., Coroutine[object, object, object]], execute)(
+                self._UPSERT_SQL,
+                session_id,
+                json.dumps(data),
+            )
+
+        _ = self._run_sync(_save())
+
+    def load(self, session_id: str) -> SessionPayload | None:
+        async def _load() -> SessionPayload | None:
+            pool = await self._ensure_schema()
+            fetchrow = getattr(pool, "fetchrow", None)
+            if not callable(fetchrow):
+                raise TypeError("postgres session metadata pool must expose fetchrow")
+            row_obj = await cast(
+                Callable[..., Coroutine[object, object, object]], fetchrow
+            )(
+                self._SELECT_SQL,
+                session_id,
+            )
+            if row_obj is None:
+                return None
+            if not isinstance(row_obj, dict):
+                raise TypeError("postgres session metadata row must decode to a dict")
+            payload = row_obj.get("payload")
+            if payload is None:
+                return None
+            if not isinstance(payload, dict):
+                raise TypeError(
+                    "postgres session metadata payload must decode to a dict"
+                )
+            return cast(SessionPayload, payload)
+
+        result = self._run_sync(_load())
+        if result is None:
+            return None
+        if not isinstance(result, dict):
+            raise TypeError("postgres session metadata payload must be a JSON object")
+        return cast(SessionPayload, result)
+
+    def list_sessions(self) -> list[str]:
+        async def _list_sessions() -> list[str]:
+            pool = await self._ensure_schema()
+            fetch = getattr(pool, "fetch", None)
+            if not callable(fetch):
+                raise TypeError("postgres session metadata pool must expose fetch")
+            rows_obj = await cast(
+                Callable[..., Coroutine[object, object, object]], fetch
+            )(self._LIST_SQL)
+            if not isinstance(rows_obj, list):
+                raise TypeError("postgres session metadata list result must be a list")
+            session_ids: list[str] = []
+            for row in rows_obj:
+                if not isinstance(row, dict):
+                    raise TypeError("postgres session metadata list rows must be dicts")
+                session_id = row.get("session_id")
+                if not isinstance(session_id, str):
+                    raise TypeError(
+                        "postgres session metadata row must include string session_id"
+                    )
+                session_ids.append(session_id)
+            return session_ids
+
+        result = self._run_sync(_list_sessions())
+        if not isinstance(result, list):
+            raise TypeError("postgres session metadata list result must be a list")
+        return cast(list[str], result)
+
+    def delete(self, session_id: str) -> None:
+        async def _delete() -> None:
+            pool = await self._ensure_schema()
+            execute = getattr(pool, "execute", None)
+            if not callable(execute):
+                raise TypeError("postgres session metadata pool must expose execute")
+            _ = await cast(Callable[..., Coroutine[object, object, object]], execute)(
+                self._DELETE_SQL,
+                session_id,
+            )
+
+        _ = self._run_sync(_delete())
+
+    def check_health(self) -> bool:
+        try:
+
+            async def _check_health() -> bool:
+                pool = await self._ensure_schema()
+                fetchrow = getattr(pool, "fetchrow", None)
+                if not callable(fetchrow):
+                    raise TypeError(
+                        "postgres session metadata pool must expose fetchrow"
+                    )
+                row_obj = await cast(
+                    Callable[..., Coroutine[object, object, object]], fetchrow
+                )("SELECT 1")
+                return row_obj is not None
+
+            return bool(self._run_sync(_check_health()))
+        except Exception:
+            return False
+
+    def close(self) -> None:
+        async def _close_pool() -> None:
+            await self._pool.close()
+
+        try:
+            _ = self._run_sync(_close_pool())
+        finally:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            self._loop_thread.join(timeout=5)
+            self._loop.close()
+
+
 def create_session_store(
     *,
+    backend: str | None = None,
+    dsn: str | None = None,
     redis_url: str | None = None,
     redis_client_factory: Callable[[str], RedisClient] | None = None,
+    pg_pool: AsyncPGSessionPool | None = None,
 ) -> SessionStore:
+    resolved_backend = (
+        (backend or os.environ.get("AGENT_SESSION_BACKEND") or "").strip().lower()
+    )
+    resolved_dsn = (
+        dsn
+        or os.environ.get("AGENT_SESSION_PG_DSN")
+        or os.environ.get("AGENT_STORAGE_DSN")
+    )
     resolved_redis_url = redis_url or os.environ.get("AGENT_SESSION_REDIS_URL")
+    if resolved_backend == "pg":
+        if not resolved_dsn:
+            raise ValueError("PG session store requires dsn")
+        return PGSessionMetadataStore(
+            pool=pg_pool or PGPool(dsn=resolved_dsn),
+        )
+
+    if resolved_backend == "memory":
+        return InMemorySessionStore()
+
+    if resolved_backend not in {"", "redis"}:
+        raise ValueError(f"unsupported session store backend: {resolved_backend}")
+
     if not resolved_redis_url:
         return InMemorySessionStore()
 
