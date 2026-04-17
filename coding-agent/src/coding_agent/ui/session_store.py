@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import TimeoutError as FutureTimeoutError
 import json
 import logging
 import os
@@ -156,6 +157,7 @@ class PGSessionMetadataStore:
     )
     _DELETE_SQL: Final[str] = "DELETE FROM agent_http_sessions WHERE session_id = $1"
     _LOOP_READY_TIMEOUT_SECONDS: Final[float] = 5.0
+    _SYNC_OPERATION_TIMEOUT_SECONDS: Final[float] = 30.0
 
     def __init__(
         self,
@@ -193,7 +195,14 @@ class PGSessionMetadataStore:
 
     def _run_sync(self, operation: Coroutine[object, object, object]) -> object:
         future = asyncio.run_coroutine_threadsafe(operation, self._loop)
-        return future.result()
+        try:
+            return future.result(timeout=self._SYNC_OPERATION_TIMEOUT_SECONDS)
+        except FutureTimeoutError as exc:
+            future.cancel()
+            raise TimeoutError(
+                "postgres session metadata operation timed out "
+                f"after {self._SYNC_OPERATION_TIMEOUT_SECONDS} seconds"
+            ) from exc
 
     async def _ensure_schema(self) -> object:
         asyncpg_pool = await self._pool.get_pool()

@@ -344,7 +344,7 @@ class SessionManager:
 
         dsn_obj = self._storage_config.get("dsn")
         if not isinstance(dsn_obj, str) or not dsn_obj.strip():
-            raise RuntimeError("PG storage requires storage.dsn")
+            raise RuntimeError("PG storage requires storage_config['dsn']")
         dsn = dsn_obj.strip()
         self._pg_pool = PGPool(dsn=dsn)
         return cast(AsyncPGSessionPool, self._pg_pool)
@@ -488,8 +488,6 @@ class SessionManager:
         return bool(await self._run_store_io(self._store.check_health))
 
     async def remove_session_async(self, session_id: str) -> None:
-        if not await self.has_session_async(session_id):
-            raise KeyError(f"Session not found: {session_id}")
         session = await self.get_session_async(session_id)
         self._close_runtime_sync_safe(session)
         self._session_cache.pop(session_id, None)

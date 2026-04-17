@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 
 from agentkit.config.loader import load_config as load_agent_toml
+from agentkit.errors import ConfigError
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.ui.session_manager import Session, SessionManager
 from coding_agent.ui.schemas import (
@@ -61,7 +62,17 @@ SESSION_IDLE_TIMEOUT_MINUTES = 30
 
 def _load_storage_config() -> dict[str, Any]:
     config_path = Path(__file__).resolve().parent.parent / "agent.toml"
-    return cast(dict[str, Any], load_agent_toml(config_path).extra.get("storage", {}))
+    try:
+        return cast(
+            dict[str, Any], load_agent_toml(config_path).extra.get("storage", {})
+        )
+    except ConfigError:
+        logger.warning(
+            "Unable to load storage config from %s; using defaults",
+            config_path,
+            exc_info=True,
+        )
+        return {}
 
 
 def _build_session_manager() -> SessionManager:
@@ -95,7 +106,7 @@ async def lifespan(app: FastAPI):
         pass
 
     # Close all sessions
-    for session_id in list(session_manager.list_sessions()):
+    for session_id in await session_manager.list_sessions_async():
         await session_manager.close_session(session_id)
     await session_manager.close()
 

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
+import sys
 import types
 from datetime import datetime, timedelta
 from unittest.mock import patch
@@ -11,6 +13,7 @@ from unittest.mock import patch
 import pytest
 from httpx import AsyncClient, ASGITransport
 from httpx_sse import aconnect_sse
+from agentkit.errors import ConfigError
 from agentkit.checkpoint.models import CheckpointMeta
 from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
 
@@ -1213,6 +1216,19 @@ class TestWaitForApproval:
         assert response.status_code == 200
         assert approval_response.approved is True
         assert approval_response.feedback == "approved over http"
+
+
+def test_http_server_import_falls_back_when_agent_toml_is_unreadable(
+    monkeypatch,
+) -> None:
+    monkeypatch.delitem(sys.modules, "coding_agent.ui.http_server", raising=False)
+
+    with patch("agentkit.config.loader.load_config") as load_config:
+        load_config.side_effect = ConfigError("config file not found")
+        http_server = importlib.import_module("coding_agent.ui.http_server")
+
+    assert http_server._load_storage_config() == {}
+    assert http_server.session_manager._storage_config == {}
 
 
 class TestIntegration:

@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
+from agentkit.errors import ConfigError
 from agentkit.checkpoint import CheckpointService
 from agentkit.checkpoint.models import CheckpointMeta
 from agentkit.tape.tape import Tape
@@ -312,6 +313,33 @@ def test_session_manager_strips_dsn_before_creating_pg_pool() -> None:
 
     assert isinstance(pool, FakePGPool)
     assert pool.dsn == "postgresql://example"
+
+
+@pytest.mark.asyncio
+async def test_remove_session_async_loads_store_once_when_not_cached() -> None:
+    class CountingStore(InMemorySessionStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.load_calls = 0
+
+        def load(self, session_id: str):
+            self.load_calls += 1
+            return super().load(session_id)
+
+    store = CountingStore()
+    manager = SessionManager(store=store)
+    session = Session(
+        id="remove-me",
+        created_at=datetime.now(),
+        last_activity=datetime.now(),
+        approval_store=ApprovalStore(),
+    )
+    store.save(session.id, session.to_store_data())
+
+    await manager.remove_session_async("remove-me")
+
+    assert store.load_calls == 1
+    assert store.load("remove-me") is None
 
 
 def test_create_session_store_warns_and_falls_back_when_redis_unreachable(

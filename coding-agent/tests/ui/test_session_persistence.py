@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import cast
+from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
@@ -470,6 +473,35 @@ def test_pg_session_metadata_store_close_test_does_not_start_real_thread() -> No
     assert created_threads[0].join_calls == [0.1]
     assert created_loops[0].stop_calls == 1
     assert created_loops[0].closed is False
+
+
+def test_pg_session_metadata_store_run_sync_times_out_and_cancels_future() -> None:
+    class FakePool:
+        async def get_pool(self) -> object:
+            raise AssertionError("unused")
+
+        async def close(self) -> None:
+            return None
+
+    future = MagicMock()
+    future.result.side_effect = FutureTimeoutError()
+
+    store = PGSessionMetadataStore(pool=FakePool())
+    try:
+        operation = asyncio.sleep(0)
+        with patch(
+            "coding_agent.ui.session_store.asyncio.run_coroutine_threadsafe",
+            return_value=future,
+        ):
+            with pytest.raises(
+                TimeoutError, match="postgres session metadata operation timed out"
+            ):
+                store._run_sync(operation)
+
+        future.cancel.assert_called_once_with()
+        operation.close()
+    finally:
+        store.close()
 
 
 def test_create_session_store_strips_dsn_before_building_pg_pool() -> None:
