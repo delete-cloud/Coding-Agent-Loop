@@ -4,7 +4,10 @@ import asyncio
 import importlib
 import json
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from typing import Final, Protocol, cast
+
+from agentkit.checkpoint.models import CheckpointMeta, CheckpointSnapshot
 
 
 class AsyncPGPool(Protocol):
@@ -29,6 +32,17 @@ class LockPool(Protocol):
     async def acquire(self) -> LockConnection: ...
 
     async def release(self, connection: LockConnection) -> None: ...
+
+
+class CodecConnection(Protocol):
+    async def set_type_codec(
+        self,
+        typename: str,
+        *,
+        encoder: Callable[[object], str],
+        decoder: Callable[[str], object],
+        schema: str,
+    ) -> None: ...
 
 
 PoolFactory = Callable[..., Awaitable[AsyncPGPool]]
@@ -59,6 +73,7 @@ class PGPool:
                         dsn=self._dsn,
                         min_size=self._min_size,
                         max_size=self._max_size,
+                        init=_init_connection_codecs,
                     )
         return self._pool
 
@@ -231,6 +246,88 @@ class PGTapeStore:
         _ = await pool.execute(self._TRUNCATE_SQL, tape_id, keep)
 
 
+class PGCheckpointStore:
+    _CREATE_TABLE_SQL: Final[str] = """
+    CREATE TABLE IF NOT EXISTS agent_checkpoints (
+        checkpoint_id TEXT PRIMARY KEY,
+        tape_id TEXT NOT NULL,
+        meta JSONB NOT NULL,
+        entries JSONB NOT NULL,
+        plugin_states JSONB NOT NULL,
+        extra JSONB NOT NULL
+    )
+    """
+    _INSERT_SQL: Final[str] = """
+    INSERT INTO agent_checkpoints (
+        checkpoint_id,
+        tape_id,
+        meta,
+        entries,
+        plugin_states,
+        extra
+    )
+    VALUES ($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6::jsonb)
+    """
+    _LOAD_SQL: Final[str] = (
+        "SELECT meta, entries, plugin_states, extra FROM agent_checkpoints "
+        "WHERE checkpoint_id = $1"
+    )
+    _LIST_SQL: Final[str] = (
+        "SELECT meta FROM agent_checkpoints WHERE tape_id = $1 "
+        "ORDER BY meta->>'created_at'"
+    )
+    _DELETE_SQL: Final[str] = "DELETE FROM agent_checkpoints WHERE checkpoint_id = $1"
+
+    def __init__(self, *, pool: PGPool) -> None:
+        self._pool: PGPool = pool
+        self._schema_ready: bool = False
+
+    async def _ensure_schema(self) -> AsyncPGPool:
+        pool = await self._pool.get_pool()
+        if not self._schema_ready:
+            _ = await pool.execute(self._CREATE_TABLE_SQL)
+            self._schema_ready = True
+        return pool
+
+    async def save(self, snapshot: CheckpointSnapshot) -> None:
+        pool = await self._ensure_schema()
+        meta = snapshot.meta
+        meta_payload = {
+            "checkpoint_id": meta.checkpoint_id,
+            "tape_id": meta.tape_id,
+            "session_id": meta.session_id,
+            "entry_count": meta.entry_count,
+            "window_start": meta.window_start,
+            "created_at": meta.created_at.isoformat(),
+            "label": meta.label,
+        }
+        _ = await pool.execute(
+            self._INSERT_SQL,
+            meta.checkpoint_id,
+            meta.tape_id,
+            json.dumps(meta_payload),
+            json.dumps(list(snapshot.tape_entries)),
+            json.dumps(snapshot.plugin_states),
+            json.dumps(snapshot.extra),
+        )
+
+    async def load(self, checkpoint_id: str) -> CheckpointSnapshot | None:
+        pool = await self._ensure_schema()
+        row = await pool.fetchrow(self._LOAD_SQL, checkpoint_id)
+        if row is None:
+            return None
+        return _snapshot_from_row(row)
+
+    async def list_by_tape(self, tape_id: str) -> list[CheckpointMeta]:
+        pool = await self._ensure_schema()
+        rows = await pool.fetch(self._LIST_SQL, tape_id)
+        return [_meta_from_raw(_required_dict(row, "meta")) for row in rows]
+
+    async def delete(self, checkpoint_id: str) -> None:
+        pool = await self._ensure_schema()
+        _ = await pool.execute(self._DELETE_SQL, checkpoint_id)
+
+
 class PGSessionLock:
     def __init__(self, *, pool: LockPool) -> None:
         self._pool: LockPool = pool
@@ -270,3 +367,81 @@ def _load_asyncpg_pool_factory() -> PoolFactory:
     if not callable(create_pool):
         raise ImportError("asyncpg does not expose create_pool")
     return cast(PoolFactory, create_pool)
+
+
+async def _init_connection_codecs(connection: CodecConnection) -> None:
+    for typename in ("json", "jsonb"):
+        await connection.set_type_codec(
+            typename,
+            encoder=json.dumps,
+            decoder=json.loads,
+            schema="pg_catalog",
+        )
+
+
+def _required_dict(row: dict[str, object], key: str) -> dict[str, object]:
+    value = row.get(key)
+    if not isinstance(value, dict):
+        raise TypeError(f"postgres checkpoint row must include dict {key}")
+    return cast(dict[str, object], value)
+
+
+def _required_list(row: dict[str, object], key: str) -> list[object]:
+    value = row.get(key)
+    if not isinstance(value, list):
+        raise TypeError(f"postgres checkpoint row must include list {key}")
+    return value
+
+
+def _meta_from_raw(raw: dict[str, object]) -> CheckpointMeta:
+    checkpoint_id = raw.get("checkpoint_id")
+    tape_id = raw.get("tape_id")
+    session_id = raw.get("session_id")
+    entry_count = raw.get("entry_count")
+    window_start = raw.get("window_start")
+    created_at = raw.get("created_at")
+    label = raw.get("label")
+
+    if not isinstance(checkpoint_id, str):
+        raise TypeError("postgres checkpoint meta must include string checkpoint_id")
+    if not isinstance(tape_id, str):
+        raise TypeError("postgres checkpoint meta must include string tape_id")
+    if session_id is not None and not isinstance(session_id, str):
+        raise TypeError(
+            "postgres checkpoint meta must include string session_id or None"
+        )
+    if not isinstance(entry_count, int):
+        raise TypeError("postgres checkpoint meta must include int entry_count")
+    if not isinstance(window_start, int):
+        raise TypeError("postgres checkpoint meta must include int window_start")
+    if not isinstance(created_at, str):
+        raise TypeError("postgres checkpoint meta must include string created_at")
+    if label is not None and not isinstance(label, str):
+        raise TypeError("postgres checkpoint meta must include string label or None")
+
+    return CheckpointMeta(
+        checkpoint_id=checkpoint_id,
+        tape_id=tape_id,
+        session_id=session_id,
+        entry_count=entry_count,
+        window_start=window_start,
+        created_at=datetime.fromisoformat(created_at),
+        label=label,
+    )
+
+
+def _snapshot_from_row(row: dict[str, object]) -> CheckpointSnapshot:
+    entries_raw = _required_list(row, "entries")
+    plugin_states = _required_dict(row, "plugin_states")
+    extra = _required_dict(row, "extra")
+    tape_entries: list[dict[str, object]] = []
+    for entry in entries_raw:
+        if not isinstance(entry, dict):
+            raise TypeError("postgres checkpoint entries must contain dict items")
+        tape_entries.append(cast(dict[str, object], entry))
+    return CheckpointSnapshot(
+        meta=_meta_from_raw(_required_dict(row, "meta")),
+        tape_entries=tuple(tape_entries),
+        plugin_states=plugin_states,
+        extra=extra,
+    )
