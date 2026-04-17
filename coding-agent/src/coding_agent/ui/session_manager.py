@@ -9,11 +9,12 @@ import os
 import uuid
 from collections.abc import AsyncIterator
 from collections.abc import Callable
+from functools import partial
 from dataclasses import dataclass, field
 from datetime import datetime
 from inspect import isawaitable
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, TypeVar, cast
 
 from agentkit.storage.checkpoint_fs import FSCheckpointStore
 from agentkit.checkpoint.models import CheckpointMeta
@@ -47,6 +48,7 @@ from coding_agent.ui.session_store import (
 logger = logging.getLogger(__name__)
 
 _CHECKPOINT_SESSION_CONFIG_KEY = "session_restart_config"
+T = TypeVar("T")
 
 
 class MockProvider:
@@ -428,6 +430,73 @@ class SessionManager:
             self._session_turn_locks[session_id] = lock
         return lock
 
+    async def _run_store_io(self, func: Callable[..., T], /, *args: object) -> T:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, partial(func, *args))
+
+    async def _persist_session_async(self, session: Session) -> None:
+        self._session_cache[session.id] = session
+        await self._run_store_io(
+            self._store.save,
+            session.id,
+            cast(dict[str, Any], session.to_store_data()),
+        )
+
+    async def get_session_async(self, session_id: str) -> Session:
+        session = self._session_cache.get(session_id)
+        if session is not None:
+            return session
+        loaded = await self._run_store_io(self._store.load, session_id)
+        if loaded is None:
+            raise KeyError(f"Session not found: {session_id}")
+        return self._hydrate_session(
+            Session.from_store_data(cast(dict[str, Any], loaded))
+        )
+
+    async def has_session_async(self, session_id: str) -> bool:
+        if session_id in self._session_cache:
+            return True
+        return await self._run_store_io(self._store.load, session_id) is not None
+
+    async def list_sessions_async(self) -> list[str]:
+        return await self._run_store_io(self._store.list_sessions)
+
+    async def get_session_info_async(self, session_id: str) -> dict[str, Any]:
+        session = await self.get_session_async(session_id)
+        return session.as_dict()
+
+    async def add_event_queue_async(
+        self,
+        session_id: str,
+        queue: asyncio.Queue[dict[str, Any]],
+    ) -> None:
+        session = await self.get_session_async(session_id)
+        session.event_queues.append(queue)
+        await self._persist_session_async(session)
+
+    async def remove_event_queue_async(
+        self,
+        session_id: str,
+        queue: asyncio.Queue[dict[str, Any]],
+    ) -> None:
+        session = await self.get_session_async(session_id)
+        if queue in session.event_queues:
+            session.event_queues.remove(queue)
+            await self._persist_session_async(session)
+
+    async def check_health_async(self) -> bool:
+        return bool(await self._run_store_io(self._store.check_health))
+
+    async def remove_session_async(self, session_id: str) -> None:
+        if not await self.has_session_async(session_id):
+            raise KeyError(f"Session not found: {session_id}")
+        session = await self.get_session_async(session_id)
+        self._close_runtime_sync_safe(session)
+        self._session_cache.pop(session_id, None)
+        await self._run_store_io(self._store.delete, session_id)
+        self._approval_stores.pop(session_id, None)
+        self._session_turn_locks.pop(session_id, None)
+
     async def _restore_tape(self, tape_id: str | None) -> Tape | None:
         if tape_id is None:
             return None
@@ -660,7 +729,7 @@ class SessionManager:
         )
 
         async with self._lock:
-            self._persist_session(session)
+            await self._persist_session_async(session)
 
         logger.info(f"Created session: {session_id}")
         return session_id
@@ -786,7 +855,7 @@ class SessionManager:
             KeyError: If session not found
         """
         async with self._lock:
-            session = self.get_session(session_id)
+            session = await self.get_session_async(session_id)
 
             # Cancel any running task
             if session.task and not session.task.done():
@@ -796,7 +865,7 @@ class SessionManager:
                 except (asyncio.CancelledError, asyncio.TimeoutError):
                     pass
 
-            self.remove_session(session_id)
+            await self.remove_session_async(session_id)
 
         logger.info(f"Closed session: {session_id}")
 
@@ -823,10 +892,10 @@ class SessionManager:
             raise RuntimeError("turn already in progress")
 
         async with turn_lock:
-            session = self.get_session(session_id)
+            session = await self.get_session_async(session_id)
             session.last_activity = datetime.now()
             session.turn_in_progress = True
-            self._persist_session(session)
+            await self._persist_session_async(session)
 
             try:
                 approval_mode_map = {
@@ -855,7 +924,7 @@ class SessionManager:
                         tape=await self._restore_tape(session.tape_id),
                     )
                     session.tape_id = ctx.tape.tape_id
-                    self._persist_session(session)
+                    await self._persist_session_async(session)
                     ctx.config["wire_consumer"] = None
                     ctx.config["agent_id"] = ""
 
@@ -876,7 +945,7 @@ class SessionManager:
                 ctx.config["wire_consumer"] = consumer
                 await adapter.run_turn(prompt)
                 session.tape_id = ctx.tape.tape_id
-                self._persist_session(session)
+                await self._persist_session_async(session)
             except Exception as exc:
                 await self._close_runtime(session)
                 logger.exception("HTTP session turn failed")
@@ -900,7 +969,7 @@ class SessionManager:
                 if session.task is None or session.task is not current_task:
                     session.turn_in_progress = False
                 session.last_activity = datetime.now()
-                self._persist_session(session)
+                await self._persist_session_async(session)
 
     async def submit_approval(
         self,
@@ -926,7 +995,7 @@ class SessionManager:
         Raises:
             KeyError: If session not found
         """
-        session = self.get_session(session_id)
+        session = await self.get_session_async(session_id)
 
         # Create approval response and submit to ApprovalStore
         response = ApprovalResponse(
@@ -946,7 +1015,7 @@ class SessionManager:
                 "feedback": feedback,
             }
             session.approval_event.set()
-            self._persist_session(session)
+            await self._persist_session_async(session)
             logger.info(f"Approval submitted for session {session_id}: {approved}")
         else:
             logger.warning(
@@ -961,7 +1030,7 @@ class SessionManager:
         approval_req: ApprovalRequest,
         timeout_seconds: float,
     ) -> ApprovalResponse:
-        if not self.has_session(session_id):
+        if not await self.has_session_async(session_id):
             return ApprovalResponse(
                 session_id=session_id,
                 request_id=approval_req.request_id,
@@ -969,7 +1038,7 @@ class SessionManager:
                 feedback="Session not found",
             )
 
-        session = self.get_session(session_id)
+        session = await self.get_session_async(session_id)
         if not session.turn_in_progress:
             return ApprovalResponse(
                 session_id=session_id,
@@ -990,7 +1059,7 @@ class SessionManager:
         session.pending_approval = session.approval_coordinator.projection()
         session.approval_event.clear()
         session.approval_response = None
-        self._persist_session(session)
+        await self._persist_session_async(session)
 
         try:
             response = await session.approval_coordinator.wait_for_response(
@@ -1003,7 +1072,7 @@ class SessionManager:
             session.pending_approval = session.approval_coordinator.projection()
             session.approval_response = None
             _ = session.approval_event.set()
-            self._persist_session(session)
+            await self._persist_session_async(session)
 
         return ApprovalResponse(
             session_id=session_id,
@@ -1067,7 +1136,7 @@ class SessionManager:
         return closed
 
     async def ensure_session_runtime(self, session_id: str) -> Any:
-        session = self.get_session(session_id)
+        session = await self.get_session_async(session_id)
         if session.runtime_ctx is not None and session.runtime_adapter is not None:
             return session.runtime_ctx
 
@@ -1102,7 +1171,7 @@ class SessionManager:
         session.runtime_ctx = ctx
         session.runtime_adapter = adapter
         session.tape_id = ctx.tape.tape_id
-        self._persist_session(session)
+        await self._persist_session_async(session)
         return ctx
 
     async def capture_checkpoint(
@@ -1117,7 +1186,7 @@ class SessionManager:
             raise RuntimeError("turn already in progress")
 
         async with turn_lock:
-            session = self.get_session(session_id)
+            session = await self.get_session_async(session_id)
             if session.turn_in_progress or (session.task and not session.task.done()):
                 raise RuntimeError("turn already in progress")
 
@@ -1138,7 +1207,7 @@ class SessionManager:
             return checkpoint
 
     async def list_checkpoints(self, session_id: str) -> list[CheckpointMeta]:
-        session = self.get_session(session_id)
+        session = await self.get_session_async(session_id)
         if session.tape_id is None:
             return []
         return await self._checkpoint_service.list(session.tape_id)
@@ -1149,7 +1218,7 @@ class SessionManager:
             raise RuntimeError("turn already in progress")
 
         async with turn_lock:
-            session = self.get_session(session_id)
+            session = await self.get_session_async(session_id)
             if session.turn_in_progress or (session.task and not session.task.done()):
                 raise RuntimeError("turn already in progress")
             await self._restore_checkpoint(session, checkpoint_id)

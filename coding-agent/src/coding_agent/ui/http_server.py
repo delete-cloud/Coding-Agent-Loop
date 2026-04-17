@@ -375,7 +375,9 @@ async def stream_wire_messages(wire: LocalWire) -> AsyncIterator[dict[str, str]]
 @limiter.limit(RateLimits.HEALTH)
 async def liveness_check(request: Request) -> HealthResponse:
     return HealthResponse(
-        status="healthy", sessions=len(session_manager.list_sessions()), version="2.0.0"
+        status="healthy",
+        sessions=len(await session_manager.list_sessions_async()),
+        version="2.0.0",
     )
 
 
@@ -383,7 +385,7 @@ async def liveness_check(request: Request) -> HealthResponse:
 @limiter.limit(RateLimits.HEALTH)
 async def readiness_check(request: Request, response: Response) -> ReadinessResponse:
     try:
-        session_store_ok = bool(session_manager._store.check_health())
+        session_store_ok = bool(await session_manager.check_health_async())
     except Exception:
         logger.exception("Session store readiness check failed")
         session_store_ok = False
@@ -457,10 +459,10 @@ async def send_prompt(
     if not prompt_text:
         raise HTTPException(status_code=422, detail="Prompt is required")
 
-    if not session_manager.has_session(session_id):
+    if not await session_manager.has_session_async(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
 
-    session = session_manager.get_session(session_id)
+    session = await session_manager.get_session_async(session_id)
 
     if session.turn_in_progress or (session.task and not session.task.done()):
         raise HTTPException(status_code=409, detail="Turn already in progress")
@@ -543,10 +545,10 @@ async def approve_request(
     if is_approved is None:
         raise HTTPException(status_code=422, detail="approved is required")
 
-    if not session_manager.has_session(session_id):
+    if not await session_manager.has_session_async(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
 
-    session = session_manager.get_session(session_id)
+    session = await session_manager.get_session_async(session_id)
     if session.approval_store.get_request(req_id) is None:
         raise HTTPException(status_code=400, detail="No pending approval request")
 
@@ -578,12 +580,12 @@ async def get_events(
     api_key: str | None = Depends(verify_api_key),
 ) -> EventSourceResponse:
     """Persistent SSE event stream (fan-out supported)."""
-    if not session_manager.has_session(session_id):
+    if not await session_manager.has_session_async(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
 
-    session = session_manager.get_session(session_id)
+    session = await session_manager.get_session_async(session_id)
     queue: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=100)
-    session_manager.add_event_queue(session_id, queue)
+    await session_manager.add_event_queue_async(session_id, queue)
 
     async def event_generator() -> AsyncIterator[dict[str, str]]:
         """Generate events from queue."""
@@ -597,7 +599,7 @@ async def get_events(
                     yield {"event": "ping", "data": ""}
         except asyncio.CancelledError:
             # Client disconnected
-            session_manager.remove_event_queue(session_id, queue)
+            await session_manager.remove_event_queue_async(session_id, queue)
             raise
 
     return EventSourceResponse(event_generator())
@@ -611,8 +613,8 @@ async def get_session(
     api_key: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Get session state."""
-    if session_manager.has_session(session_id):
-        return session_manager.get_session_info(session_id)
+    if await session_manager.has_session_async(session_id):
+        return await session_manager.get_session_info_async(session_id)
 
     raise HTTPException(status_code=404, detail="Session not found")
 
@@ -628,7 +630,7 @@ async def capture_checkpoint(
     body: CheckpointCaptureRequest | None = None,
     api_key: str | None = Depends(verify_api_key),
 ) -> CheckpointMetadataResponse:
-    if not session_manager.has_session(session_id):
+    if not await session_manager.has_session_async(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
 
     try:
@@ -662,7 +664,7 @@ async def list_checkpoints(
     session_id: str,
     api_key: str | None = Depends(verify_api_key),
 ) -> CheckpointListResponse:
-    if not session_manager.has_session(session_id):
+    if not await session_manager.has_session_async(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
 
     checkpoints = await session_manager.list_checkpoints(session_id)
@@ -693,7 +695,7 @@ async def restore_checkpoint(
     checkpoint_id: str,
     api_key: str | None = Depends(verify_api_key),
 ) -> CheckpointRestoreResponse:
-    if not session_manager.has_session(session_id):
+    if not await session_manager.has_session_async(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
 
     try:
@@ -720,10 +722,10 @@ async def close_session(
     api_key: str | None = Depends(verify_api_key),
 ) -> CloseSessionResponse:
     """Close session and release resources."""
-    if not session_manager.has_session(session_id):
+    if not await session_manager.has_session_async(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
 
-    session = session_manager.get_session(session_id)
+    session = await session_manager.get_session_async(session_id)
     await _broadcast_event(
         session,
         {"event": "SessionClosed", "data": json.dumps({"session_id": session_id})},
@@ -748,7 +750,7 @@ async def wait_for_approval(
     It will block until the user responds via the /approve endpoint
     or the timeout expires.
     """
-    if not session_manager.has_session(session_id):
+    if not await session_manager.has_session_async(session_id):
         return ApprovalResponse(
             session_id=session_id,
             request_id=approval_req.request_id,
@@ -756,7 +758,7 @@ async def wait_for_approval(
             feedback="Session not found",
         )
 
-    session = session_manager.get_session(session_id)
+    session = await session_manager.get_session_async(session_id)
     event = _wire_message_to_event(approval_req)
     await _broadcast_event(session, event)
     response = await session_manager.wait_for_http_approval(
