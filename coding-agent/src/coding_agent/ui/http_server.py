@@ -21,6 +21,7 @@ from coding_agent.ui.schemas import (
     PromptRequest,
     CreateSessionRequest,
     ApproveRequest,
+    CheckpointCaptureRequest,
     SessionResponse,
     CheckpointListResponse,
     CheckpointMetadataResponse,
@@ -603,6 +604,44 @@ async def get_session(
         return session_manager.get_session_info(session_id)
 
     raise HTTPException(status_code=404, detail="Session not found")
+
+
+@app.post(
+    "/sessions/{session_id}/checkpoints",
+    response_model=CheckpointMetadataResponse,
+)
+@limiter.limit(RateLimits.CAPTURE_CHECKPOINT)
+async def capture_checkpoint(
+    request: Request,
+    session_id: str,
+    body: CheckpointCaptureRequest | None = None,
+    api_key: str | None = Depends(verify_api_key),
+) -> CheckpointMetadataResponse:
+    if not session_manager.has_session(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    try:
+        checkpoint = await session_manager.capture_checkpoint(
+            session_id,
+            label=body.label if body else None,
+            extra=None,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return CheckpointMetadataResponse(
+        checkpoint_id=checkpoint.checkpoint_id,
+        tape_id=checkpoint.tape_id,
+        session_id=checkpoint.session_id,
+        entry_count=checkpoint.entry_count,
+        window_start=checkpoint.window_start,
+        created_at=checkpoint.created_at,
+        label=checkpoint.label,
+    )
 
 
 @app.get("/sessions/{session_id}/checkpoints", response_model=CheckpointListResponse)

@@ -681,6 +681,196 @@ class TestApprovalFlowIntegration:
                 server.kill()
                 await server.communicate()
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="pass_fds + uvicorn fd unsupported on Windows",
+    )
+    async def test_multi_session_checkpoint_capture_list_restore_live_server(
+        self, tmp_path, monkeypatch
+    ):
+        credential = os.environ.get("KIMI_CODE_API_KEY")
+        if not credential:
+            pytest.skip("Live provider test requires KIMI_CODE_API_KEY")
+
+        monkeypatch.delenv("AGENT_API_KEY", raising=False)
+        monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
+
+        listen_sock = socket.socket()
+        listen_sock.bind(("127.0.0.1", 0))
+        listen_sock.listen(5)
+        port = listen_sock.getsockname()[1]
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+
+        env = os.environ.copy()
+        env.update(
+            {
+                "LIVE_HTTP_TEST_FD": str(listen_sock.fileno()),
+                "AGENT_PROVIDER": "kimi-code",
+                "AGENT_MODEL": "kimi-for-coding",
+                "KIMI_CODE_API_KEY": credential,
+            }
+        )
+
+        server_script = textwrap.dedent(
+            """
+            import os
+
+            import uvicorn
+
+            from coding_agent.ui.http_server import app
+
+            uvicorn.run(
+                app,
+                host="127.0.0.1",
+                fd=int(os.environ["LIVE_HTTP_TEST_FD"]),
+                log_level="error",
+            )
+            """
+        )
+
+        server = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            server_script,
+            env=env,
+            pass_fds=(listen_sock.fileno(),),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        listen_sock.close()
+
+        base_url = f"http://127.0.0.1:{port}"
+        await _wait_for_live_server_or_raise(base_url, server)
+
+        async def _run_prompt(
+            client: httpx.AsyncClient, session_id: str, prompt: str
+        ) -> tuple[str, str]:
+            chunks: list[str] = []
+            completion_status = ""
+            async with aconnect_sse(
+                client,
+                "POST",
+                f"/sessions/{session_id}/prompt",
+                json={"prompt": prompt},
+            ) as event_source:
+                async for sse in event_source.aiter_sse():
+                    payload = json.loads(sse.data)
+                    if sse.event == "StreamDelta" and payload["agent_id"] == "":
+                        chunks.append(payload["content"])
+                    if sse.event == "TurnEnd" and not payload["agent_id"]:
+                        completion_status = payload["completion_status"]
+                        break
+            return "".join(chunks).strip(), completion_status
+
+        try:
+            async with httpx.AsyncClient(base_url=base_url, timeout=120.0) as client:
+                create_a = await client.post(
+                    "/sessions",
+                    json={
+                        "repo_path": str(workspace),
+                        "approval_policy": "yolo",
+                    },
+                )
+                assert create_a.status_code == 200
+                session_a = create_a.json()["session_id"]
+
+                create_b = await client.post(
+                    "/sessions",
+                    json={
+                        "repo_path": str(workspace),
+                        "approval_policy": "yolo",
+                    },
+                )
+                assert create_b.status_code == 200
+                session_b = create_b.json()["session_id"]
+                assert session_a != session_b
+
+                text_a, status_a = await _run_prompt(
+                    client,
+                    session_a,
+                    "Reply with a short acknowledgement for session A. Do not use tools.",
+                )
+
+                assert status_a == CompletionStatus.COMPLETED.value
+                assert text_a
+
+                capture_a = await client.post(
+                    f"/sessions/{session_a}/checkpoints",
+                    json={"label": "checkpoint-a"},
+                )
+                assert capture_a.status_code == 200
+                checkpoint_a = capture_a.json()
+
+                capture_b = await client.post(
+                    f"/sessions/{session_b}/checkpoints",
+                    json={"label": "checkpoint-b"},
+                )
+                assert capture_b.status_code == 200
+                checkpoint_b = capture_b.json()
+
+                list_a = await client.get(f"/sessions/{session_a}/checkpoints")
+                list_b = await client.get(f"/sessions/{session_b}/checkpoints")
+                assert list_a.status_code == 200
+                assert list_b.status_code == 200
+
+                checkpoints_a = list_a.json()["checkpoints"]
+                checkpoints_b = list_b.json()["checkpoints"]
+                assert [item["checkpoint_id"] for item in checkpoints_a] == [
+                    checkpoint_a["checkpoint_id"]
+                ]
+                assert [item["checkpoint_id"] for item in checkpoints_b] == [
+                    checkpoint_b["checkpoint_id"]
+                ]
+                assert checkpoints_a[0]["session_id"] == session_a
+                assert checkpoints_b[0]["session_id"] == session_b
+                assert checkpoints_a[0]["label"] == "checkpoint-a"
+                assert checkpoints_b[0]["label"] == "checkpoint-b"
+                assert checkpoints_a[0]["tape_id"] != checkpoints_b[0]["tape_id"]
+
+                restore_a = await client.post(
+                    f"/sessions/{session_a}/checkpoints/{checkpoint_a['checkpoint_id']}/restore"
+                )
+                assert restore_a.status_code == 200
+                assert restore_a.json() == {
+                    "status": "restored",
+                    "session_id": session_a,
+                    "checkpoint_id": checkpoint_a["checkpoint_id"],
+                }
+
+                restore_wrong_session = await client.post(
+                    f"/sessions/{session_b}/checkpoints/{checkpoint_a['checkpoint_id']}/restore"
+                )
+                assert restore_wrong_session.status_code == 400
+                assert "belongs to tape" in restore_wrong_session.json()["detail"]
+
+                restored_text, restored_status = await _run_prompt(
+                    client,
+                    session_a,
+                    "Reply with a short acknowledgement after restore. Do not use tools.",
+                )
+                assert restored_status == CompletionStatus.COMPLETED.value
+                assert restored_text
+
+                session_a_info = await client.get(f"/sessions/{session_a}")
+                session_b_info = await client.get(f"/sessions/{session_b}")
+                assert session_a_info.status_code == 200
+                assert session_b_info.status_code == 200
+                assert session_a_info.json()["id"] == session_a
+                assert session_b_info.json()["id"] == session_b
+
+                list_b_again = await client.get(f"/sessions/{session_b}/checkpoints")
+                assert list_b_again.status_code == 200
+                assert list_b_again.json()["checkpoints"] == checkpoints_b
+        finally:
+            server.terminate()
+            try:
+                await asyncio.wait_for(server.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                server.kill()
+                await server.communicate()
+
 
 class TestWaitForApproval:
     """Test the wait_for_approval function."""

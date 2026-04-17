@@ -30,6 +30,12 @@ class ApproveRequest(BaseModel):
     scope: Literal["once", "session"] = "once"
 
 
+class CheckpointCaptureRequest(BaseModel):
+    """Request schema for capturing a checkpoint."""
+
+    label: str | None = Field(None, min_length=1, max_length=200)
+
+
 class SessionResponse(BaseModel):
     """Response schema for session creation."""
 
