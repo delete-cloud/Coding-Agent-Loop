@@ -153,8 +153,9 @@ class TestKBPlugin:
         result = plugin.build_context(tape=tape)
         content = result[0]["content"]
         lines = content.splitlines()
-        chunk_line = lines[3]
+        chunk_line = next(line for line in lines if line.startswith("- docs/auth.md:"))
+        chunk_text = chunk_line.split(": ", 1)[1]
 
-        assert chunk_line.startswith("auth ")
-        assert len(chunk_line) == 503
-        assert chunk_line.endswith("...")
+        assert chunk_text.startswith("auth ")
+        assert len(chunk_text) == 503
+        assert chunk_text.endswith("...")
