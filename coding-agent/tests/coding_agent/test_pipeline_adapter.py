@@ -928,6 +928,22 @@ class TestNoConsumer:
 class TestErrorRecovery:
     """T12: REPL-safe error recovery — PipelineAdapter must never crash the REPL."""
 
+    @pytest.mark.asyncio
+    async def test_constructor_handles_missing_directive_executor(self):
+        async def mock_stream(messages, tools=None, **kw):
+            yield TextEvent(text="hi")
+            yield DoneEvent()
+
+        pipeline, ctx, _ = _make_pipeline_and_ctx(mock_stream)
+        if hasattr(pipeline, "_directive_executor"):
+            delattr(pipeline, "_directive_executor")
+
+        consumer = _RecordingConsumer()
+
+        adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
+
+        assert adapter._consumer is consumer
+
     def _make_adapter_with_mock_pipeline(
         self,
         side_effect,
