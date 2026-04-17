@@ -335,7 +335,7 @@ def test_create_session_store_builds_pg_store_from_explicit_backend() -> None:
 
 
 def test_create_session_store_accepts_injected_pg_pool_without_dsn() -> None:
-    class FakePGPool:
+    class MockPGPool:
         def __init__(self) -> None:
             self.closed = False
 
@@ -345,7 +345,7 @@ def test_create_session_store_accepts_injected_pg_pool_without_dsn() -> None:
         async def close(self) -> None:
             self.closed = True
 
-    pool = FakePGPool()
+    pool = MockPGPool()
     store = create_session_store(backend="pg", pg_pool=pool)
     try:
         assert isinstance(store, PGSessionMetadataStore)
