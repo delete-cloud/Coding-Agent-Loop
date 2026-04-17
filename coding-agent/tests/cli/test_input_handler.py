@@ -297,7 +297,7 @@ class TestTUISeparators:
             and text.startswith("/")
         ]
 
-        assert commands == ["/clear", "/exit", "/help", "/mcp", "/model"]
+        assert commands == ["/checkpoint", "/clear", "/exit", "/help", "/mcp"]
 
     def test_bottom_toolbar_limits_to_5_items(self):
         handler = InputHandler()
@@ -323,7 +323,7 @@ class TestTUISeparators:
             and text.startswith("/")
         ]
 
-        assert commands == ["/clear", "/exit", "/help", "/mcp", "/model"]
+        assert commands == ["/checkpoint", "/clear", "/exit", "/help", "/mcp"]
         assert all(
             style != "class:toolbar.key.bestmatch"
             for style, text, *_ in fragments

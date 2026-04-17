@@ -4,12 +4,13 @@ import os
 from typing import Any
 
 import structlog
+from structlog.typing import EventDict, WrappedLogger
 
 
 _configured = False
 
 
-def _drop_all(logger: Any, method: str, event_dict: dict[str, Any]) -> dict[str, Any]:
+def _drop_all(logger: WrappedLogger, method: str, event_dict: EventDict) -> EventDict:
     raise structlog.DropEvent()
 
 

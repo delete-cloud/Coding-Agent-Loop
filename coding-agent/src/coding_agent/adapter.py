@@ -115,7 +115,10 @@ def _normalize_tool_result_for_wire(
         return result, str(_redact_for_display(result))
     if isinstance(result, Mapping):
         payload = dict(result)
-        return payload, json.dumps(_redact_for_display(payload))
+        display_result = json.dumps(_redact_for_display(payload))
+        if isinstance(result, dict) and type(result).__str__ is not dict.__str__:
+            display_result = str(_redact_for_display(str(result)))
+        return payload, display_result
     return result, str(_redact_for_display(result))
 
 
@@ -134,15 +137,17 @@ class PipelineAdapter:
         self._mounted = False
         self._closed = False
         # Wire approval flow: bridge consumer.request_approval to DirectiveExecutor
-        if consumer is not None and pipeline._directive_executor is not None:
-            pipeline._directive_executor._ask_user = _make_ask_user_handler(
+        directive_executor = getattr(pipeline, "_directive_executor", None)
+        if consumer is not None and directive_executor is not None:
+            directive_executor._ask_user = _make_ask_user_handler(
                 consumer, ctx.session_id, agent_id
             )
 
     def set_consumer(self, consumer: WireConsumer | None) -> None:
         self._consumer = consumer
-        if consumer is not None and self._pipeline._directive_executor is not None:
-            self._pipeline._directive_executor._ask_user = _make_ask_user_handler(
+        directive_executor = getattr(self._pipeline, "_directive_executor", None)
+        if consumer is not None and directive_executor is not None:
+            directive_executor._ask_user = _make_ask_user_handler(
                 consumer, self._ctx.session_id, self._agent_id
             )
 

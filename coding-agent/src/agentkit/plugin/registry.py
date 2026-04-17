@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import warnings
+from collections.abc import Mapping
 from typing import Any, Callable
 
 from agentkit.errors import PluginError
@@ -15,10 +16,10 @@ class PluginRegistry:
     Maintains insertion order. Provides hook lookup by name.
     """
 
-    def __init__(self, specs: dict | None = None) -> None:
+    def __init__(self, specs: Mapping[str, object] | None = None) -> None:
         self._plugins: dict[str, Plugin] = {}
         self._hook_index: dict[str, list[Callable[..., Any]]] = {}
-        self._specs = specs
+        self._specs: Mapping[str, object] | None = specs
 
     def register(self, plugin: Plugin) -> None:
         """Register a plugin. Raises PluginError on protocol violation or duplicate key."""
