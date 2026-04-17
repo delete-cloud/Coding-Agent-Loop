@@ -304,7 +304,12 @@ class PGSessionMetadataStore:
         finally:
             self._loop.call_soon_threadsafe(self._loop.stop)
             self._loop_thread.join(timeout=5)
-            self._loop.close()
+            if self._loop_thread.is_alive():
+                logger.warning(
+                    "Timed out waiting for postgres session metadata loop thread to stop; skipping event loop close"
+                )
+            else:
+                self._loop.close()
 
 
 def create_session_store(

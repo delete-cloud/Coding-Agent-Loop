@@ -156,8 +156,11 @@ async def test_create_session_persists_configured_restart_metadata_by_default() 
 
 def test_session_manager_uses_pg_backends_when_storage_config_requests_pg() -> None:
     class FakePGPool:
+        instances: list[FakePGPool] = []
+
         def __init__(self, *, dsn: str) -> None:
             self.dsn = dsn
+            self.__class__.instances.append(self)
 
         async def get_pool(self) -> FakePGPool:
             return self
@@ -196,12 +199,17 @@ def test_session_manager_uses_pg_backends_when_storage_config_requests_pg() -> N
     assert isinstance(manager._tape_store, FakePGTapeStore)
     assert isinstance(manager._checkpoint_service._store, FakePGCheckpointStore)
     assert manager._tape_store.pool is manager._checkpoint_service._store.pool
+    assert manager._store._pool is not manager._tape_store.pool
+    assert len(FakePGPool.instances) == 2
 
 
-def test_session_manager_reuses_shared_pg_pool_for_http_session_store() -> None:
+def test_session_manager_uses_dedicated_pg_pool_for_http_session_store() -> None:
     class FakePGPool:
+        instances: list[FakePGPool] = []
+
         def __init__(self, *, dsn: str) -> None:
             self.dsn = dsn
+            self.__class__.instances.append(self)
 
     class FakePGTapeStore:
         def __init__(self, *, pool: FakePGPool) -> None:
@@ -231,7 +239,8 @@ def test_session_manager_reuses_shared_pg_pool_for_http_session_store() -> None:
     assert create_store.call_count == 1
     assert create_store.call_args.kwargs["backend"] == "pg"
     assert create_store.call_args.kwargs["dsn"] == "postgresql://example"
-    assert isinstance(create_store.call_args.kwargs["pg_pool"], FakePGPool)
+    assert create_store.call_args.kwargs["pg_pool"] is None
+    assert len(FakePGPool.instances) == 1
 
 
 def test_session_manager_normalizes_tape_backend_for_http_session_pg_default() -> None:

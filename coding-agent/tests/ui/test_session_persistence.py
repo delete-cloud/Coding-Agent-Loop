@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from unittest.mock import patch
 
 import pytest
 
@@ -265,6 +266,64 @@ def test_pg_session_metadata_store_closes_background_loop_and_pool() -> None:
     store.close()
 
     assert pool.pool.closed is True
+
+
+def test_pg_session_metadata_store_skips_loop_close_when_thread_does_not_stop() -> None:
+    class FakePool:
+        async def get_pool(self) -> object:
+            raise AssertionError("unused")
+
+        async def close(self) -> None:
+            return None
+
+    class FakeThread:
+        def __init__(self) -> None:
+            self.join_calls: list[float | None] = []
+
+        def start(self) -> None:
+            return None
+
+        def join(self, timeout: float | None = None) -> None:
+            self.join_calls.append(timeout)
+
+        def is_alive(self) -> bool:
+            return True
+
+    class FakeLoop:
+        def __init__(self) -> None:
+            self.closed = False
+            self.stop_calls = 0
+
+        def run_forever(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            self.stop_calls += 1
+
+        def call_soon_threadsafe(self, callback) -> None:
+            callback()
+
+        def close(self) -> None:
+            self.closed = True
+
+    store = PGSessionMetadataStore(pool=FakePool())
+    fake_thread = FakeThread()
+    fake_loop = FakeLoop()
+
+    def fake_run_sync(operation):
+        operation.close()
+        return None
+
+    with (
+        patch.object(store, "_loop_thread", fake_thread),
+        patch.object(store, "_loop", fake_loop),
+        patch.object(store, "_run_sync", fake_run_sync),
+    ):
+        store.close()
+
+    assert fake_thread.join_calls == [5]
+    assert fake_loop.stop_calls == 1
+    assert fake_loop.closed is False
 
 
 def test_create_session_store_builds_pg_store_from_explicit_backend() -> None:
