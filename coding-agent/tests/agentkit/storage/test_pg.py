@@ -33,9 +33,12 @@ class FakePool:
             session_id, payload = args
             if not isinstance(session_id, str):
                 raise TypeError("session_id must be a string")
-            if not isinstance(payload, str):
-                raise TypeError("payload must be encoded json")
-            payload_obj = json.loads(payload)
+            if isinstance(payload, str):
+                payload_obj = json.loads(payload)
+            elif isinstance(payload, dict):
+                payload_obj = payload
+            else:
+                raise TypeError("payload must be encoded json or dict")
             if not isinstance(payload_obj, dict):
                 raise TypeError("payload must decode to a dict")
             self.sessions[session_id] = cast(dict[str, object], payload_obj)
@@ -60,20 +63,22 @@ class FakePool:
             else:
                 raise TypeError("seq must be an int or list[int]")
 
-            if isinstance(third_arg, str):
+            if isinstance(third_arg, (str, dict)):
                 payload_values = [third_arg]
             elif isinstance(third_arg, list) and all(
-                isinstance(item, str) for item in third_arg
+                isinstance(item, (str, dict)) for item in third_arg
             ):
                 payload_values = third_arg
             else:
-                raise TypeError("payload must be encoded json or list[str]")
+                raise TypeError("payload must be encoded json/dict or list thereof")
 
             if len(seq_values) != len(payload_values):
                 raise TypeError("seq and payload batch lengths must match")
 
             for seq, payload in zip(seq_values, payload_values, strict=True):
-                payload_obj = json.loads(payload)
+                payload_obj = (
+                    json.loads(payload) if isinstance(payload, str) else payload
+                )
                 if not isinstance(payload_obj, dict):
                     raise TypeError("payload must decode to a dict")
                 rows.append({"seq": seq, "entry": cast(dict[str, object], payload_obj)})
@@ -90,17 +95,25 @@ class FakePool:
             if not isinstance(tape_id, str):
                 raise TypeError("tape_id must be a string")
             if not all(
-                isinstance(item, str)
+                isinstance(item, (str, dict, list))
                 for item in (meta_json, entries_json, state_json, extra_json)
             ):
-                raise TypeError("checkpoint payloads must be encoded json")
+                raise TypeError("checkpoint payloads must be json-compatible values")
             self.checkpoints[checkpoint_id] = {
                 "checkpoint_id": checkpoint_id,
                 "tape_id": tape_id,
-                "meta": json.loads(meta_json),
-                "entries": json.loads(entries_json),
-                "plugin_states": json.loads(state_json),
-                "extra": json.loads(extra_json),
+                "meta": json.loads(meta_json)
+                if isinstance(meta_json, str)
+                else meta_json,
+                "entries": json.loads(entries_json)
+                if isinstance(entries_json, str)
+                else entries_json,
+                "plugin_states": json.loads(state_json)
+                if isinstance(state_json, str)
+                else state_json,
+                "extra": json.loads(extra_json)
+                if isinstance(extra_json, str)
+                else extra_json,
             }
             return "INSERT 0 1"
         if query.strip() == "SELECT 1":
@@ -446,6 +459,20 @@ class TestPGSessionStore:
         ]
         assert len(schema_calls) == 1
 
+    @pytest.mark.asyncio
+    async def test_save_session_passes_python_object_to_codec_enabled_pool(
+        self, store: PGSessionStore, fake_pool: FakePool
+    ):
+        await store.save_session("ses-1", {"model": "gpt-4.1"})
+
+        insert_calls = [
+            args
+            for query, args in fake_pool.executed
+            if "INSERT INTO agent_sessions" in query
+        ]
+        assert len(insert_calls) == 1
+        assert isinstance(insert_calls[0][1], dict)
+
 
 class TestPGTapeStore:
     @pytest.fixture
@@ -707,6 +734,29 @@ class TestPGCheckpointStore:
             if "CREATE TABLE IF NOT EXISTS agent_checkpoints" in query
         ]
         assert len(schema_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_pg_checkpoint_store_save_passes_python_objects_to_codec_enabled_pool(
+        self, store: PGCheckpointStore, fake_pool: FakePool
+    ):
+        snapshot = self._snapshot(
+            "checkpoint-codec",
+            "tape-codec",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+
+        await store.save(snapshot)
+
+        insert_calls = [
+            args
+            for query, args in fake_pool.executed
+            if "INSERT INTO agent_checkpoints" in query
+        ]
+        assert len(insert_calls) == 1
+        assert isinstance(insert_calls[0][2], dict)
+        assert isinstance(insert_calls[0][3], list)
+        assert isinstance(insert_calls[0][4], dict)
+        assert isinstance(insert_calls[0][5], dict)
 
 
 class MockPoolForLock:

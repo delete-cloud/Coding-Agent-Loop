@@ -125,7 +125,7 @@ class PGSessionStore:
 
     async def save_session(self, session_id: str, data: dict[str, object]) -> None:
         pool = await self._ensure_schema()
-        _ = await pool.execute(self._UPSERT_SQL, session_id, json.dumps(data))
+        _ = await pool.execute(self._UPSERT_SQL, session_id, data)
 
     async def load_session(self, session_id: str) -> dict[str, object] | None:
         pool = await self._ensure_schema()
@@ -305,10 +305,10 @@ class PGCheckpointStore:
             self._INSERT_SQL,
             meta.checkpoint_id,
             meta.tape_id,
-            json.dumps(meta_payload),
-            json.dumps(list(snapshot.tape_entries)),
-            json.dumps(snapshot.plugin_states),
-            json.dumps(snapshot.extra),
+            meta_payload,
+            list(snapshot.tape_entries),
+            snapshot.plugin_states,
+            snapshot.extra,
         )
 
     async def load(self, checkpoint_id: str) -> CheckpointSnapshot | None:
