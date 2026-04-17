@@ -328,8 +328,32 @@ def test_pg_session_metadata_store_skips_loop_close_when_thread_does_not_stop() 
 
 def test_create_session_store_builds_pg_store_from_explicit_backend() -> None:
     store = create_session_store(backend="pg", dsn="postgresql://example")
+    try:
+        assert isinstance(store, PGSessionMetadataStore)
+    finally:
+        store.close()
 
-    assert isinstance(store, PGSessionMetadataStore)
+
+def test_create_session_store_accepts_injected_pg_pool_without_dsn() -> None:
+    class FakePGPool:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def get_pool(self) -> object:
+            raise AssertionError("unused")
+
+        async def close(self) -> None:
+            self.closed = True
+
+    pool = FakePGPool()
+    store = create_session_store(backend="pg", pg_pool=pool)
+    try:
+        assert isinstance(store, PGSessionMetadataStore)
+        assert store._pool is pool
+    finally:
+        store.close()
+
+    assert pool.closed is True
 
 
 def test_rehydrate_clears_non_restart_safe_runtime_state() -> None:

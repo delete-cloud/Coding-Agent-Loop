@@ -330,8 +330,8 @@ def create_session_store(
     )
     resolved_redis_url = redis_url or os.environ.get("AGENT_SESSION_REDIS_URL")
     if resolved_backend == "pg":
-        if not resolved_dsn:
-            raise ValueError("PG session store requires dsn")
+        if pg_pool is None and not resolved_dsn:
+            raise ValueError("PG session store requires dsn or pg_pool")
         return PGSessionMetadataStore(
             pool=pg_pool or PGPool(dsn=resolved_dsn),
         )
