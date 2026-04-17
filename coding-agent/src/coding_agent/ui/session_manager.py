@@ -15,15 +15,17 @@ from inspect import isawaitable
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from agentkit.storage.checkpoint_fs import FSCheckpointStore
+from agentkit.checkpoint.models import CheckpointMeta
+from agentkit.checkpoint import CheckpointService
+from agentkit.storage.protocols import CheckpointStore, TapeStore
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.approval import ApprovalCoordinator, ApprovalPolicy
 from coding_agent.approval.store import ApprovalStore
 from coding_agent.core import config as core_config
 from coding_agent.plugins.storage import JSONLTapeStore
-from agentkit.checkpoint import CheckpointService
 from coding_agent.providers.base import ChatProvider, ToolSchema
 from agentkit.providers.models import DoneEvent, TextEvent
-from agentkit.storage.checkpoint_fs import FSCheckpointStore
 from agentkit.tape.tape import Tape
 from agentkit.tape.models import Entry
 from coding_agent.wire.local import LocalWire
@@ -40,8 +42,6 @@ from coding_agent.ui.session_store import (
     SessionStore,
     create_session_store,
 )
-from agentkit.storage.protocols import CheckpointStore, TapeStore
-from agentkit.checkpoint.models import CheckpointMeta
 
 logger = logging.getLogger(__name__)
 
@@ -273,6 +273,20 @@ def _checkpoint_session_config_from_extra(
     )
 
 
+def _load_pg_storage_types() -> tuple[Any, Any, Any]:
+    try:
+        pg_module = importlib.import_module("agentkit.storage.pg")
+    except ImportError as exc:
+        raise RuntimeError(
+            "PG backend is not available; add agentkit.storage.pg before using tape_backend='pg'"
+        ) from exc
+    return (
+        getattr(pg_module, "PGPool"),
+        getattr(pg_module, "PGTapeStore"),
+        getattr(pg_module, "PGCheckpointStore"),
+    )
+
+
 class _WireConsumer:
     def __init__(
         self,
@@ -296,25 +310,80 @@ class SessionManager:
         self,
         store: SessionStore | None = None,
         *,
+        storage_config: dict[str, Any] | None = None,
+        pg_pool: object | None = None,
         tape_store: TapeStore | None = None,
         checkpoint_store: CheckpointStore | None = None,
         checkpoint_service: CheckpointService | None = None,
         create_agent_fn: Callable[..., tuple[Any, Any]] | None = None,
     ):
-        self._store = store or create_session_store()
+        self._storage_config = storage_config or {}
+        self._pg_pool = pg_pool
+        self._store = store or self._create_http_session_store()
         self._session_cache: dict[str, Session] = {}
         self._approval_stores: dict[str, ApprovalStore] = {}
         self._lock = asyncio.Lock()
         self._session_turn_locks: dict[str, asyncio.Lock] = {}
         data_dir = Path(os.environ.get("AGENT_DATA_DIR", "./data"))
-        self._tape_store = tape_store or JSONLTapeStore(data_dir / "tapes")
-        resolved_checkpoint_store = checkpoint_store or FSCheckpointStore(
-            data_dir / "checkpoints"
+        self._tape_store = tape_store or self._create_tape_store(data_dir)
+        resolved_checkpoint_store = checkpoint_store or self._create_checkpoint_store(
+            data_dir
         )
         self._checkpoint_service = checkpoint_service or CheckpointService(
             resolved_checkpoint_store
         )
         self._create_agent = create_agent_fn
+
+    def _get_pg_pool(self) -> object:
+        PGPool, _, _ = _load_pg_storage_types()
+        if self._pg_pool is not None:
+            return self._pg_pool
+
+        dsn_obj = self._storage_config.get("dsn")
+        if not isinstance(dsn_obj, str) or not dsn_obj.strip():
+            raise RuntimeError("PG storage requires storage.dsn")
+        self._pg_pool = PGPool(dsn=dsn_obj)
+        return self._pg_pool
+
+    def _create_http_session_store(self) -> SessionStore:
+        configured_backend = self._storage_config.get("http_session_backend")
+        if configured_backend is None:
+            legacy_backend = self._storage_config.get("session_backend")
+            if (
+                isinstance(legacy_backend, str)
+                and legacy_backend.strip().lower() == "pg"
+            ):
+                configured_backend = "pg"
+            elif self._storage_config.get("tape_backend") == "pg":
+                configured_backend = "pg"
+
+        backend = configured_backend if isinstance(configured_backend, str) else None
+        dsn = self._storage_config.get("dsn")
+        return create_session_store(
+            backend=backend,
+            dsn=dsn if isinstance(dsn, str) else None,
+        )
+
+    def _create_tape_store(self, data_dir: Path) -> TapeStore:
+        backend = str(self._storage_config.get("tape_backend", "jsonl")).strip().lower()
+        if backend == "pg":
+            _, PGTapeStore, _ = _load_pg_storage_types()
+            return cast(TapeStore, PGTapeStore(pool=self._get_pg_pool()))
+        return JSONLTapeStore(data_dir / "tapes")
+
+    def _create_checkpoint_store(self, data_dir: Path) -> CheckpointStore:
+        default_backend = (
+            "pg" if self._storage_config.get("tape_backend") == "pg" else "fs"
+        )
+        backend = (
+            str(self._storage_config.get("checkpoint_backend", default_backend))
+            .strip()
+            .lower()
+        )
+        if backend == "pg":
+            _, _, PGCheckpointStore = _load_pg_storage_types()
+            return cast(CheckpointStore, PGCheckpointStore(pool=self._get_pg_pool()))
+        return FSCheckpointStore(data_dir / "checkpoints")
 
     async def _close_runtime(self, session: Session) -> None:
         adapter = session.runtime_adapter
@@ -719,6 +788,19 @@ class SessionManager:
             self.remove_session(session_id)
 
         logger.info(f"Closed session: {session_id}")
+
+    async def close(self) -> None:
+        store_close = getattr(self._store, "close", None)
+        if callable(store_close):
+            store_close_result = store_close()
+            if isawaitable(store_close_result):
+                await store_close_result
+
+        close = getattr(self._pg_pool, "close", None)
+        if callable(close):
+            close_result = close()
+            if isawaitable(close_result):
+                await close_result
 
     async def run_agent(
         self,

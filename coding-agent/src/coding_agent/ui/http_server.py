@@ -15,6 +15,7 @@ from fastapi import FastAPI, HTTPException, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 
+from agentkit.config.loader import load_config as load_agent_toml
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.ui.session_manager import Session, SessionManager
 from coding_agent.ui.schemas import (
@@ -58,8 +59,17 @@ APPROVAL_TIMEOUT_SECONDS = 120
 SESSION_IDLE_TIMEOUT_MINUTES = 30
 
 
+def _load_storage_config() -> dict[str, Any]:
+    config_path = Path(__file__).resolve().parent.parent / "agent.toml"
+    return cast(dict[str, Any], load_agent_toml(config_path).extra.get("storage", {}))
+
+
+def _build_session_manager() -> SessionManager:
+    return SessionManager(storage_config=_load_storage_config())
+
+
 # Global session manager
-session_manager = SessionManager()
+session_manager = _build_session_manager()
 
 
 def _key_error_detail(exc: KeyError) -> str:
@@ -87,6 +97,7 @@ async def lifespan(app: FastAPI):
     # Close all sessions
     for session_id in list(session_manager.list_sessions()):
         await session_manager.close_session(session_id)
+    await session_manager.close()
 
     logger.info("HTTP server shut down")
 

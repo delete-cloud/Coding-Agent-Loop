@@ -20,6 +20,7 @@ from coding_agent.wire.protocol import (
 from coding_agent.ui.session_manager import MockProvider, Session, SessionManager
 from coding_agent.ui.session_store import (
     InMemorySessionStore,
+    PGSessionMetadataStore,
     RedisSessionStore,
     create_session_store,
 )
@@ -150,6 +151,44 @@ async def test_create_session_persists_configured_restart_metadata_by_default() 
     assert payload["provider_name"] == "anthropic"
     assert payload["model_name"] == "claude-test"
     assert payload["base_url"] == "http://llm.default"
+
+
+def test_session_manager_uses_pg_backends_when_storage_config_requests_pg() -> None:
+    class FakePGPool:
+        def __init__(self, *, dsn: str) -> None:
+            self.dsn = dsn
+
+    class FakePGTapeStore:
+        def __init__(self, *, pool: FakePGPool) -> None:
+            self.pool = pool
+
+    class FakePGCheckpointStore:
+        def __init__(self, *, pool: FakePGPool) -> None:
+            self.pool = pool
+
+    with (
+        patch("coding_agent.ui.session_manager.create_session_store") as create_store,
+        patch(
+            "coding_agent.ui.session_manager._load_pg_storage_types",
+            return_value=(FakePGPool, FakePGTapeStore, FakePGCheckpointStore),
+        ),
+    ):
+        create_store.return_value = PGSessionMetadataStore(
+            pool=FakePGPool(dsn="postgresql://example")
+        )
+        manager = SessionManager(
+            storage_config={
+                "tape_backend": "pg",
+                "checkpoint_backend": "pg",
+                "http_session_backend": "pg",
+                "dsn": "postgresql://example",
+            }
+        )
+
+    assert isinstance(manager._store, PGSessionMetadataStore)
+    assert isinstance(manager._tape_store, FakePGTapeStore)
+    assert isinstance(manager._checkpoint_service._store, FakePGCheckpointStore)
+    assert manager._tape_store.pool is manager._checkpoint_service._store.pool
 
 
 def test_create_session_store_warns_and_falls_back_when_redis_unreachable(
