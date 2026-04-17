@@ -6,7 +6,7 @@ import logging
 import os
 import threading
 from collections.abc import Callable, Coroutine, Iterable
-from typing import Protocol, cast
+from typing import Final, Protocol, cast
 
 from agentkit.storage.pg import PGPool
 
@@ -135,40 +135,60 @@ class RedisSessionStore:
 
 
 class PGSessionMetadataStore:
-    _CREATE_TABLE_SQL = """
+    _CREATE_TABLE_SQL: Final[str] = """
     CREATE TABLE IF NOT EXISTS agent_http_sessions (
         session_id TEXT PRIMARY KEY,
         payload JSONB NOT NULL,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
     """
-    _UPSERT_SQL = """
+    _UPSERT_SQL: Final[str] = """
     INSERT INTO agent_http_sessions (session_id, payload)
     VALUES ($1, $2::jsonb)
     ON CONFLICT (session_id)
     DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()
     """
-    _SELECT_SQL = "SELECT payload FROM agent_http_sessions WHERE session_id = $1"
-    _LIST_SQL = "SELECT session_id FROM agent_http_sessions ORDER BY session_id"
-    _DELETE_SQL = "DELETE FROM agent_http_sessions WHERE session_id = $1"
+    _SELECT_SQL: Final[str] = (
+        "SELECT payload FROM agent_http_sessions WHERE session_id = $1"
+    )
+    _LIST_SQL: Final[str] = (
+        "SELECT session_id FROM agent_http_sessions ORDER BY session_id"
+    )
+    _DELETE_SQL: Final[str] = "DELETE FROM agent_http_sessions WHERE session_id = $1"
+    _LOOP_READY_TIMEOUT_SECONDS: Final[float] = 5.0
 
     def __init__(
         self,
         *,
         pool: AsyncPGSessionPool,
     ) -> None:
-        self._pool = pool
-        self._schema_ready = False
-        self._loop = asyncio.new_event_loop()
-        self._loop_thread = threading.Thread(
+        self._pool: AsyncPGSessionPool = pool
+        self._schema_ready: bool = False
+        self._loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
+        self._loop_ready: threading.Event = threading.Event()
+        self._loop_thread: threading.Thread = threading.Thread(
             target=self._run_loop,
             name="pg-session-metadata-store",
             daemon=True,
         )
         self._loop_thread.start()
+        ready = self._loop_ready.wait(self._LOOP_READY_TIMEOUT_SECONDS)
+        if not ready:
+            self._handle_loop_start_failure()
+            raise RuntimeError("postgres session metadata loop thread failed to start")
+
+    def _handle_loop_start_failure(self) -> None:
+        try:
+            _ = self._loop.call_soon_threadsafe(self._loop.stop)
+        except RuntimeError:
+            pass
+        self._loop_thread.join(timeout=0.1)
+        if not self._loop_thread.is_alive():
+            self._loop.close()
 
     def _run_loop(self) -> None:
         asyncio.set_event_loop(self._loop)
+        self._loop_ready.set()
         self._loop.run_forever()
 
     def _run_sync(self, operation: Coroutine[object, object, object]) -> object:
@@ -196,7 +216,7 @@ class PGSessionMetadataStore:
             _ = await cast(Callable[..., Coroutine[object, object, object]], execute)(
                 self._UPSERT_SQL,
                 session_id,
-                json.dumps(data),
+                data,
             )
 
         _ = self._run_sync(_save())
@@ -246,7 +266,7 @@ class PGSessionMetadataStore:
             if not isinstance(rows_obj, list):
                 raise TypeError("postgres session metadata list result must be a list")
             session_ids: list[str] = []
-            for row in rows_obj:
+            for row in cast(list[object], rows_obj):
                 row_dict = _coerce_row_dict(
                     row=row, context="postgres session metadata list row"
                 )
@@ -302,7 +322,7 @@ class PGSessionMetadataStore:
         try:
             _ = self._run_sync(_close_pool())
         finally:
-            self._loop.call_soon_threadsafe(self._loop.stop)
+            _ = self._loop.call_soon_threadsafe(self._loop.stop)
             self._loop_thread.join(timeout=5)
             if self._loop_thread.is_alive():
                 logger.warning(

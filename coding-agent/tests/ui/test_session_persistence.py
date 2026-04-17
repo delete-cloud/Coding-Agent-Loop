@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import json
 from datetime import datetime
+from types import TracebackType
+from typing import cast
 from unittest.mock import patch
 
 import pytest
@@ -150,8 +151,8 @@ def test_pg_session_metadata_store_round_trips_session_metadata() -> None:
             if "INSERT INTO agent_http_sessions" in query:
                 session_id, payload = args
                 assert isinstance(session_id, str)
-                assert isinstance(payload, str)
-                self.sessions[session_id] = json.loads(payload)
+                assert isinstance(payload, dict)
+                self.sessions[session_id] = payload
                 return "INSERT 0 1"
             if "DELETE FROM agent_http_sessions" in query:
                 (session_id,) = args
@@ -202,7 +203,8 @@ def test_pg_session_metadata_store_round_trips_session_metadata() -> None:
         async def close(self) -> None:
             await self.pool.close()
 
-    store = PGSessionMetadataStore(pool=FakePGPool())
+    pg_pool = FakePGPool()
+    store = PGSessionMetadataStore(pool=pg_pool)
     try:
         session = Session(
             id="pg-session",
@@ -219,7 +221,79 @@ def test_pg_session_metadata_store_round_trips_session_metadata() -> None:
         assert payload["id"] == "pg-session"
         assert store.list_sessions() == ["pg-session"]
         assert store.check_health() is True
+        insert_calls = [
+            args
+            for query, args in pg_pool.pool.executed
+            if "INSERT INTO agent_http_sessions" in query
+        ]
+        assert len(insert_calls) == 1
+        assert isinstance(insert_calls[0][1], dict)
     finally:
+        store.close()
+
+
+def test_pg_session_metadata_store_waits_for_loop_start_before_returning() -> None:
+    created_loops: list[FakeLoop] = []
+    created_threads: list[FakeThread] = []
+
+    class FakePool:
+        async def get_pool(self) -> object:
+            raise AssertionError("unused")
+
+        async def close(self) -> None:
+            return None
+
+    class FakeLoop:
+        def __init__(self) -> None:
+            self.closed = False
+            created_loops.append(self)
+
+        def run_forever(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            return None
+
+        def call_soon_threadsafe(self, callback) -> None:
+            callback()
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeThread:
+        def __init__(self, *, target, name: str, daemon: bool) -> None:
+            self.target = target
+            self.name = name
+            self.daemon = daemon
+            self.started = False
+            created_threads.append(self)
+
+        def start(self) -> None:
+            self.started = True
+            self.target()
+
+        def join(self, timeout: float | None = None) -> None:
+            _ = timeout
+
+        def is_alive(self) -> bool:
+            return False
+
+    with (
+        patch(
+            "coding_agent.ui.session_store.asyncio.new_event_loop", side_effect=FakeLoop
+        ),
+        patch("coding_agent.ui.session_store.asyncio.set_event_loop"),
+        patch("coding_agent.ui.session_store.threading.Thread", side_effect=FakeThread),
+    ):
+        store = PGSessionMetadataStore(pool=FakePool())
+
+    try:
+        assert len(created_loops) == 1
+        assert len(created_threads) == 1
+        assert created_threads[0].started is True
+        assert store._loop_ready.is_set() is True
+    finally:
+        store._run_sync = lambda operation: (operation.close(), None)[1]
         store.close()
 
 
@@ -339,7 +413,7 @@ def test_pg_session_metadata_store_close_test_does_not_start_real_thread() -> No
 
     class FakeThread:
         def __init__(self, *, target, name: str, daemon: bool) -> None:
-            self.target = target
+            self.target = cast(object, target)
             self.name = name
             self.daemon = daemon
             self.started = False
@@ -373,8 +447,11 @@ def test_pg_session_metadata_store_close_test_does_not_start_real_thread() -> No
         def close(self) -> None:
             self.closed = True
 
-    def fake_run_sync(operation):
-        operation.close()
+    def fake_run_sync(operation: object) -> None:
+        cast(object, operation)
+        close = getattr(operation, "close")
+        cast(object, close)
+        close()
         return None
 
     with (
@@ -383,14 +460,15 @@ def test_pg_session_metadata_store_close_test_does_not_start_real_thread() -> No
         ),
         patch("coding_agent.ui.session_store.threading.Thread", side_effect=FakeThread),
     ):
-        store = PGSessionMetadataStore(pool=FakePool())
-        with patch.object(store, "_run_sync", fake_run_sync):
-            store.close()
+        with pytest.raises(
+            RuntimeError, match="postgres session metadata loop thread failed to start"
+        ):
+            PGSessionMetadataStore(pool=FakePool())
 
     assert len(created_loops) == 1
     assert len(created_threads) == 1
     assert created_threads[0].started is True
-    assert created_threads[0].join_calls == [5]
+    assert created_threads[0].join_calls == [0.1]
     assert created_loops[0].stop_calls == 1
     assert created_loops[0].closed is False
 
