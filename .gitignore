@@ -18,3 +18,10 @@ agent-coding-loop/.agent-loop-last.patch
 agent-coding-loop/eval/reports/
 agent-coding-loop/eval/**/__pycache__/
 agent-coding-loop/kb/__pycache__/
+
+# local reference files / subprojects (do not commit)
+TodoWrite.md
+bub_build_architecture_analysis.md
+simplebank
+agent-coding-loop/
+bub/

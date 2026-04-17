@@ -1,3 +1,0 @@
-{"query_id":"q1","retrieved_ids":["docs/intro.md:1:4","docs/retry.md:10:14","docs/api.md:7:11"]}
-{"query_id":"q2","retrieved_ids":["docs/lancedb.md:20:24","docs/vector.md:12:16","docs/indexing.md:30:34"]}
-{"query_id":"q3","retrieved_ids":["docs/langgraph.md:3:7","docs/prompting.md:8:12","docs/agentic_rag.md:5:9"]}

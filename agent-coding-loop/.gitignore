@@ -1,6 +1,0 @@
-.env
-.env.*
-.worktrees/
-bin/
-
-eval-results/

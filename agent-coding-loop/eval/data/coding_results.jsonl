@@ -1,3 +1,0 @@
-{"task_id":"task_001","pass":true,"latency_sec":12.6,"cost_usd":0.16}
-{"task_id":"task_002","pass":false,"latency_sec":21.4,"cost_usd":0.24}
-{"task_id":"task_003","pass":true,"latency_sec":17.1,"cost_usd":0.21}
