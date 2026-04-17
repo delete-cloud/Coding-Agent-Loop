@@ -343,7 +343,8 @@ class SessionManager:
         dsn_obj = self._storage_config.get("dsn")
         if not isinstance(dsn_obj, str) or not dsn_obj.strip():
             raise RuntimeError("PG storage requires storage.dsn")
-        self._pg_pool = PGPool(dsn=dsn_obj)
+        dsn = dsn_obj.strip()
+        self._pg_pool = PGPool(dsn=dsn)
         return cast(AsyncPGSessionPool, self._pg_pool)
 
     def _create_http_session_store(self) -> SessionStore:

@@ -295,6 +295,25 @@ def test_session_manager_normalizes_tape_backend_for_checkpoint_default() -> Non
     assert isinstance(store, FakePGCheckpointStore)
 
 
+def test_session_manager_strips_dsn_before_creating_pg_pool() -> None:
+    class FakePGPool:
+        def __init__(self, *, dsn: str) -> None:
+            self.dsn = dsn
+
+    manager = SessionManager.__new__(SessionManager)
+    manager._storage_config = {"dsn": "  postgresql://example  "}
+    manager._pg_pool = None
+
+    with patch(
+        "coding_agent.ui.session_manager._load_pg_storage_types",
+        return_value=(FakePGPool, object(), object()),
+    ):
+        pool = SessionManager._get_pg_pool(manager)
+
+    assert isinstance(pool, FakePGPool)
+    assert pool.dsn == "postgresql://example"
+
+
 def test_create_session_store_warns_and_falls_back_when_redis_unreachable(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

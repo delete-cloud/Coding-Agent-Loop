@@ -326,8 +326,96 @@ def test_pg_session_metadata_store_skips_loop_close_when_thread_does_not_stop() 
     assert fake_loop.closed is False
 
 
+def test_pg_session_metadata_store_close_test_does_not_start_real_thread() -> None:
+    created_loops: list[FakeLoop] = []
+    created_threads: list[FakeThread] = []
+
+    class FakePool:
+        async def get_pool(self) -> object:
+            raise AssertionError("unused")
+
+        async def close(self) -> None:
+            return None
+
+    class FakeThread:
+        def __init__(self, *, target, name: str, daemon: bool) -> None:
+            self.target = target
+            self.name = name
+            self.daemon = daemon
+            self.started = False
+            self.join_calls: list[float | None] = []
+            created_threads.append(self)
+
+        def start(self) -> None:
+            self.started = True
+
+        def join(self, timeout: float | None = None) -> None:
+            self.join_calls.append(timeout)
+
+        def is_alive(self) -> bool:
+            return True
+
+    class FakeLoop:
+        def __init__(self) -> None:
+            self.closed = False
+            self.stop_calls = 0
+            created_loops.append(self)
+
+        def run_forever(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            self.stop_calls += 1
+
+        def call_soon_threadsafe(self, callback) -> None:
+            callback()
+
+        def close(self) -> None:
+            self.closed = True
+
+    def fake_run_sync(operation):
+        operation.close()
+        return None
+
+    with (
+        patch(
+            "coding_agent.ui.session_store.asyncio.new_event_loop", side_effect=FakeLoop
+        ),
+        patch("coding_agent.ui.session_store.threading.Thread", side_effect=FakeThread),
+    ):
+        store = PGSessionMetadataStore(pool=FakePool())
+        with patch.object(store, "_run_sync", fake_run_sync):
+            store.close()
+
+    assert len(created_loops) == 1
+    assert len(created_threads) == 1
+    assert created_threads[0].started is True
+    assert created_threads[0].join_calls == [5]
+    assert created_loops[0].stop_calls == 1
+    assert created_loops[0].closed is False
+
+
+def test_create_session_store_strips_dsn_before_building_pg_pool() -> None:
+    with patch("coding_agent.ui.session_store.PGPool") as pg_pool_cls:
+        store = create_session_store(backend="pg", dsn="  postgresql://example  ")
+    assert isinstance(store, PGSessionMetadataStore)
+    try:
+        assert pg_pool_cls.call_args.kwargs["dsn"] == "postgresql://example"
+    finally:
+        store._loop.call_soon_threadsafe(store._loop.stop)
+        store._loop_thread.join(timeout=5)
+        if not store._loop_thread.is_alive():
+            store._loop.close()
+
+
+def test_create_session_store_rejects_all_whitespace_dsn() -> None:
+    with pytest.raises(ValueError, match="PG session store requires dsn or pg_pool"):
+        create_session_store(backend="pg", dsn="   ")
+
+
 def test_create_session_store_builds_pg_store_from_explicit_backend() -> None:
     store = create_session_store(backend="pg", dsn="postgresql://example")
+    assert isinstance(store, PGSessionMetadataStore)
     try:
         assert isinstance(store, PGSessionMetadataStore)
     finally:
@@ -347,8 +435,8 @@ def test_create_session_store_accepts_injected_pg_pool_without_dsn() -> None:
 
     pool = MockPGPool()
     store = create_session_store(backend="pg", pg_pool=pool)
+    assert isinstance(store, PGSessionMetadataStore)
     try:
-        assert isinstance(store, PGSessionMetadataStore)
         assert store._pool is pool
     finally:
         store.close()

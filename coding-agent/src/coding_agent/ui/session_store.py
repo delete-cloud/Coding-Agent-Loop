@@ -328,12 +328,16 @@ def create_session_store(
         or os.environ.get("AGENT_SESSION_PG_DSN")
         or os.environ.get("AGENT_STORAGE_DSN")
     )
+    normalized_dsn = resolved_dsn.strip() if isinstance(resolved_dsn, str) else None
     resolved_redis_url = redis_url or os.environ.get("AGENT_SESSION_REDIS_URL")
     if resolved_backend == "pg":
-        if pg_pool is None and not resolved_dsn:
+        if pg_pool is None and not normalized_dsn:
             raise ValueError("PG session store requires dsn or pg_pool")
+        if pg_pool is None:
+            assert normalized_dsn is not None
+            pg_pool = PGPool(dsn=normalized_dsn)
         return PGSessionMetadataStore(
-            pool=pg_pool or PGPool(dsn=resolved_dsn),
+            pool=pg_pool,
         )
 
     if resolved_backend == "memory":
