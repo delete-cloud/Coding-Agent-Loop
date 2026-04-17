@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import html as _html
-from typing import Any, Callable, Coroutine
+from typing import Any, Callable, Coroutine, cast
 
 from coding_agent.cli.terminal_output import get_prompt_output, print_html, print_pt
 
@@ -15,6 +15,9 @@ def _h(value: object) -> str:
 
 
 _COMMANDS: dict[str, Callable[..., Coroutine[Any, Any, None]]] = {}
+CreateSessionHook = Callable[[], Coroutine[Any, Any, str]]
+SwitchSessionHook = Callable[[str], Coroutine[Any, Any, None]]
+RestoreCheckpointHook = Callable[[str], Coroutine[Any, Any, None]]
 
 
 def command(name: str, description: str = ""):
@@ -343,8 +346,8 @@ async def cmd_session(args: list[str], context: dict[str, Any]) -> None:
         return
 
     if subcmd == "new":
-        create_session = context.get("create_session")
-        switch_session = context.get("switch_session")
+        create_session = cast(CreateSessionHook | None, context.get("create_session"))
+        switch_session = cast(SwitchSessionHook | None, context.get("switch_session"))
         if not callable(create_session) or not callable(switch_session):
             print_pt("Session creation is not available.", output=output)
             return
@@ -370,7 +373,7 @@ async def cmd_session(args: list[str], context: dict[str, Any]) -> None:
                 output=output,
             )
             return
-        switch_session = context.get("switch_session")
+        switch_session = cast(SwitchSessionHook | None, context.get("switch_session"))
         if not callable(switch_session):
             print_pt("Session switching is not available.", output=output)
             return
@@ -400,15 +403,14 @@ async def cmd_checkpoint(args: list[str], context: dict[str, Any]) -> None:
         return
 
     subcmd = args[0].lower()
-    session_manager = context.get("session_manager")
-    session_id = context.get("session_id")
-    if session_manager is None or not isinstance(session_id, str):
-        print_pt(
-            "Checkpoint commands require an active managed session.", output=output
-        )
-        return
-
     if subcmd == "save":
+        session_manager = context.get("session_manager")
+        session_id = context.get("session_id")
+        if session_manager is None or not isinstance(session_id, str):
+            print_pt(
+                "Checkpoint commands require an active managed session.", output=output
+            )
+            return
         label = " ".join(args[1:]).strip() or None
         checkpoint = await session_manager.capture_checkpoint(
             session_id,
@@ -422,6 +424,13 @@ async def cmd_checkpoint(args: list[str], context: dict[str, Any]) -> None:
         return
 
     if subcmd == "list":
+        session_manager = context.get("session_manager")
+        session_id = context.get("session_id")
+        if session_manager is None or not isinstance(session_id, str):
+            print_pt(
+                "Checkpoint commands require an active managed session.", output=output
+            )
+            return
         checkpoints = await session_manager.list_checkpoints(session_id)
         if not checkpoints:
             print_pt("No checkpoints available.", output=output)
@@ -439,11 +448,13 @@ async def cmd_checkpoint(args: list[str], context: dict[str, Any]) -> None:
         if len(args) < 2:
             print_pt("Usage: /checkpoint restore <id>", output=output)
             return
-        restore_checkpoint = context.get("restore_checkpoint")
+        restore_checkpoint = cast(
+            RestoreCheckpointHook | None, context.get("restore_checkpoint")
+        )
+        checkpoint_id = args[1]
         if not callable(restore_checkpoint):
             print_pt("Checkpoint restore is not available.", output=output)
             return
-        checkpoint_id = args[1]
         await restore_checkpoint(checkpoint_id)
         print_html(
             f"Restored checkpoint <ansicyan>{_h(checkpoint_id)}</ansicyan>.",

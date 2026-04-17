@@ -376,6 +376,35 @@ class TestCommands:
         assert restored == ["cp-1"]
 
     @pytest.mark.asyncio
+    async def test_checkpoint_restore_requires_runtime_restore_hook(self, monkeypatch):
+        import coding_agent.cli.terminal_output as terminal_output_module
+
+        class FakeSessionManager:
+            async def restore_checkpoint(
+                self, session_id: str, checkpoint_id: str
+            ) -> None:
+                raise AssertionError(
+                    "raw session manager restore should not be used without hook"
+                )
+
+        buf = StringIO()
+        monkeypatch.setattr(
+            terminal_output_module, "_prompt_output", create_output(stdout=buf)
+        )
+        context = {
+            "should_exit": False,
+            "session_manager": FakeSessionManager(),
+            "session_id": "session-a",
+        }
+
+        handled = await handle_command("/checkpoint restore cp-1", context)
+
+        assert handled is True
+        output = buf.getvalue()
+        assert "Checkpoint restore is not available." in output
+        assert "Restored checkpoint" not in output
+
+    @pytest.mark.asyncio
     async def test_help_output_has_commands_header(self, monkeypatch):
         import coding_agent.cli.terminal_output as terminal_output_module
 
