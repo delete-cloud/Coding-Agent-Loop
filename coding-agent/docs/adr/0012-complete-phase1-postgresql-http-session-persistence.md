@@ -32,12 +32,11 @@ Specifically:
 
 ## Acceptance Criteria
 
-- [ ] `test_pg_checkpoint_store_round_trip_snapshot`
-- [ ] `test_pg_checkpoint_store_list_by_tape_returns_sorted_meta`
-- [ ] `test_create_persistence_bundle_builds_pg_backends_from_storage_config`
-- [ ] `test_session_manager_defaults_use_configured_pg_persistence_bundle`
-- [ ] `test_http_server_uses_configured_persistence_bundle_for_global_session_manager`
-- [ ] `uv run pytest tests/agentkit/storage/test_pg.py tests/coding_agent/plugins/test_storage_factory.py tests/ui/test_session_persistence.py tests/ui/test_session_manager_public_api.py tests/ui/test_http_server.py -k "pg or checkpoint or persistence_bundle or session_manager_defaults" -v`
+- [ ] PostgreSQL checkpoint persistence is covered by tests in `tests/agentkit/storage/test_pg.py`, including round-trip snapshot persistence and ordered listing by tape.
+- [ ] Config-driven persistence bundle construction from `[storage]` configuration is covered by tests in `tests/coding_agent/plugins/test_storage_factory.py`.
+- [ ] `SessionManager` default persistence wiring is covered by tests in `tests/ui/test_session_manager_public_api.py` and `tests/ui/test_session_persistence.py`.
+- [ ] HTTP server startup uses the configured persistence bundle for the global session manager, covered by tests in `tests/ui/test_http_server.py`.
+- [ ] `uv run pytest tests/agentkit/storage/test_pg.py tests/coding_agent/plugins/test_storage_factory.py tests/ui/test_session_persistence.py tests/ui/test_session_manager_public_api.py tests/ui/test_http_server.py -v`
 
 ## References
 
