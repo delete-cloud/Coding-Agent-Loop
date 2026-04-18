@@ -402,6 +402,9 @@ class SessionManager:
     async def _close_runtime(self, session: Session) -> None:
         adapter = session.runtime_adapter
         self._invalidate_runtime(session)
+        await self._close_runtime_adapter(adapter)
+
+    async def _close_runtime_adapter(self, adapter: object | None) -> None:
         if adapter is None:
             return
         close = getattr(adapter, "close", None)
@@ -411,12 +414,14 @@ class SessionManager:
                 await close_result
 
     def _close_runtime_sync_safe(self, session: Session) -> None:
+        adapter = session.runtime_adapter
+        self._invalidate_runtime(session)
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            asyncio.run(self._close_runtime(session))
+            asyncio.run(self._close_runtime_adapter(adapter))
             return
-        loop.create_task(self._close_runtime(session))
+        _ = loop.create_task(self._close_runtime_adapter(adapter))
 
     def _create_agent_for_session(self, **kwargs: Any) -> tuple[Any, Any]:
         factory = self._create_agent
@@ -500,7 +505,7 @@ class SessionManager:
 
     async def remove_session_async(self, session_id: str) -> None:
         session = await self.get_session_async(session_id)
-        self._close_runtime_sync_safe(session)
+        await self._close_runtime(session)
         self._session_cache.pop(session_id, None)
         await self._run_store_io(self._store.delete, session_id)
         self._approval_stores.pop(session_id, None)
@@ -871,6 +876,10 @@ class SessionManager:
                     await asyncio.wait_for(session.task, timeout=5.0)
                 except (asyncio.CancelledError, asyncio.TimeoutError):
                     pass
+                if not session.task.done():
+                    raise RuntimeError(
+                        f"Session task for {session_id} did not stop after cancellation"
+                    )
 
             await self.remove_session_async(session_id)
 
@@ -887,6 +896,10 @@ class SessionManager:
                     await asyncio.wait_for(session.task, timeout=5.0)
                 except (asyncio.CancelledError, asyncio.TimeoutError):
                     pass
+                if not session.task.done():
+                    raise RuntimeError(
+                        f"Session task for {session_id} did not stop after cancellation"
+                    )
 
             await self._close_runtime(session)
             session.task = None
