@@ -352,9 +352,10 @@ class SessionManager:
         self._create_agent = create_agent_fn
 
     def _get_pg_pool(self) -> AsyncPGSessionPool:
-        PGPool, _, _ = _load_pg_storage_types()
         if self._pg_pool is not None:
             return cast(AsyncPGSessionPool, self._pg_pool)
+
+        PGPool, _, _ = _load_pg_storage_types()
 
         dsn_obj = self._storage_config.get("dsn")
         if not isinstance(dsn_obj, str) or not dsn_obj.strip():
@@ -384,10 +385,11 @@ class SessionManager:
             else None
         )
         dsn = self._storage_config.get("dsn")
+        pg_pool = self._get_pg_pool() if backend == "pg" else None
         return create_session_store(
             backend=backend,
             dsn=dsn if isinstance(dsn, str) else None,
-            pg_pool=None,
+            pg_pool=pg_pool,
         )
 
     def _create_tape_store(self, data_dir: Path) -> TapeStore:

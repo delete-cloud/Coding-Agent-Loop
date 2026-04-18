@@ -278,7 +278,7 @@ def test_session_manager_uses_pg_backends_when_storage_config_requests_pg() -> N
     assert len(FakePGPool.instances) == 2
 
 
-def test_session_manager_uses_dedicated_pg_pool_for_http_session_store() -> None:
+def test_session_manager_reuses_pg_pool_for_http_session_store() -> None:
     class FakePGPool:
         instances: list[FakePGPool] = []
 
@@ -314,7 +314,7 @@ def test_session_manager_uses_dedicated_pg_pool_for_http_session_store() -> None
     assert create_store.call_count == 1
     assert create_store.call_args.kwargs["backend"] == "pg"
     assert create_store.call_args.kwargs["dsn"] == "postgresql://example"
-    assert create_store.call_args.kwargs["pg_pool"] is None
+    assert create_store.call_args.kwargs["pg_pool"] is FakePGPool.instances[0]
     assert len(FakePGPool.instances) == 1
 
 
@@ -387,6 +387,39 @@ def test_session_manager_strips_dsn_before_creating_pg_pool() -> None:
 
     assert isinstance(pool, FakePGPool)
     assert pool.dsn == "postgresql://example"
+
+
+def test_session_manager_reuses_injected_pg_pool_without_importing_pg_types() -> None:
+    injected_pool = object()
+    manager = SessionManager.__new__(SessionManager)
+    manager._storage_config = {}
+    manager._pg_pool = injected_pool
+
+    with patch(
+        "coding_agent.ui.session_manager._load_pg_storage_types",
+        side_effect=AssertionError("should not import pg types when pool injected"),
+    ):
+        pool = SessionManager._get_pg_pool(manager)
+
+    assert pool is injected_pool
+
+
+def test_session_manager_http_session_store_reuses_injected_pg_pool() -> None:
+    injected_pool = object()
+    manager = SessionManager.__new__(SessionManager)
+    manager._storage_config = {
+        "http_session_backend": "pg",
+        "dsn": "postgresql://example",
+    }
+    manager._pg_pool = injected_pool
+
+    with patch("coding_agent.ui.session_manager.create_session_store") as create_store:
+        create_store.return_value = InMemorySessionStore()
+
+        _ = SessionManager._create_http_session_store(manager)
+
+    assert create_store.call_args.kwargs["backend"] == "pg"
+    assert create_store.call_args.kwargs["pg_pool"] is injected_pool
 
 
 @pytest.mark.asyncio
