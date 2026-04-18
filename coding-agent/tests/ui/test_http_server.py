@@ -1173,6 +1173,21 @@ class TestBroadcastEvent:
         assert await queue1.get() == event
         assert await queue2.get() == event
 
+    async def test_broadcast_uses_provided_session_without_manager_lookup(self):
+        session = register_session("broadcast-without-lookup")
+        queue = asyncio.Queue()
+        session.event_queues = [queue]
+        event = {"event": "Test", "data": "{}"}
+
+        with patch.object(
+            session_manager,
+            "broadcast_event",
+            side_effect=AssertionError("manager lookup should be skipped"),
+        ):
+            await _broadcast_event(session, event)
+
+        assert await queue.get() == event
+
 
 class TestWaitForApproval:
     """Tests for the approval wait function."""

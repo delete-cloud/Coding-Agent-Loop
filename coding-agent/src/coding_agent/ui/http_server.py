@@ -343,7 +343,20 @@ def _wire_message_to_event(msg: WireMessage) -> dict[str, str]:
 
 async def _broadcast_event(session: Session, event: dict[str, str]) -> None:
     """Broadcast event to all connected clients."""
-    await session_manager.broadcast_event(session.id, event)
+    before_count = len(session.event_queues)
+    session.event_queues = [queue for queue in session.event_queues if not queue.full()]
+    pruned_count = before_count - len(session.event_queues)
+    if pruned_count:
+        logger.info(
+            "Pruned %d full event queue(s) for session %s",
+            pruned_count,
+            session.id,
+        )
+    for queue in session.event_queues:
+        try:
+            await queue.put(event)
+        except Exception:
+            logger.debug("Dropping closed event queue", exc_info=True)
 
 
 async def _cleanup_event_queue_on_disconnect(
