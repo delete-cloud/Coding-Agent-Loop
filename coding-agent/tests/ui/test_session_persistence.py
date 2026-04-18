@@ -4,7 +4,7 @@ import asyncio
 from datetime import datetime
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import Callable, cast
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 from unittest.mock import patch
 
 import pytest
@@ -811,6 +811,44 @@ def test_pg_session_metadata_store_run_sync_times_out_and_cancels_future() -> No
                 store._run_sync(operation)
 
         future.cancel.assert_called_once_with()
+        operation.close()
+    finally:
+        store.close()
+
+
+def test_pg_session_metadata_store_run_sync_waits_for_cancellation_callback() -> None:
+    class FakePool:
+        async def get_pool(self) -> object:
+            raise AssertionError("unused")
+
+        async def close(self) -> None:
+            return None
+
+    future = MagicMock()
+    future.result.side_effect = [FutureTimeoutError(), FutureTimeoutError()]
+    callbacks: list[Callable[[object], object]] = []
+
+    def add_done_callback(callback):
+        callbacks.append(callback)
+
+    future.add_done_callback.side_effect = add_done_callback
+
+    store = PGSessionMetadataStore(pool=FakePool())
+    try:
+        operation = asyncio.sleep(0)
+        with patch(
+            "coding_agent.ui.session_store.asyncio.run_coroutine_threadsafe",
+            return_value=future,
+        ):
+            with pytest.raises(
+                TimeoutError, match="postgres session metadata operation timed out"
+            ):
+                store._run_sync(operation)
+
+        future.cancel.assert_called_once_with()
+        assert len(callbacks) == 1
+        future.result.assert_has_calls([call(timeout=30.0), call(timeout=0.1)])
+        callbacks[0](future)
         operation.close()
     finally:
         store.close()

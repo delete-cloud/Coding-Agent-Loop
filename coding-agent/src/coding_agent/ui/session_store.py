@@ -220,7 +220,14 @@ class PGSessionMetadataStore:
         try:
             return future.result(timeout=self._SYNC_OPERATION_TIMEOUT_SECONDS)
         except FutureTimeoutError as exc:
+            cancellation_complete = threading.Event()
+            future.add_done_callback(lambda _future: cancellation_complete.set())
             future.cancel()
+            try:
+                _ = future.result(timeout=0.1)
+            except (FutureTimeoutError, asyncio.CancelledError, Exception):
+                pass
+            cancellation_complete.wait(timeout=0.1)
             raise TimeoutError(
                 "postgres session metadata operation timed out "
                 f"after {self._SYNC_OPERATION_TIMEOUT_SECONDS} seconds"
