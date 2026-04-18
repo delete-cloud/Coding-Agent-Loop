@@ -1032,6 +1032,32 @@ class TestCloseSession:
         assert response.status_code == 404
         assert response.json()["detail"] == f"Session not found: {session_id}"
 
+    async def test_close_session_returns_404_when_session_disappears_before_load(
+        self, client, monkeypatch
+    ):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        async def fake_has_session_async(current_session_id: str) -> bool:
+            assert current_session_id == session_id
+            return True
+
+        async def disappearing_get_session_async(current_session_id: str):
+            assert current_session_id == session_id
+            raise KeyError(f"Session not found: {session_id}")
+
+        monkeypatch.setattr(
+            session_manager, "has_session_async", fake_has_session_async
+        )
+        monkeypatch.setattr(
+            session_manager, "get_session_async", disappearing_get_session_async
+        )
+
+        response = await client.delete(f"/sessions/{session_id}")
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == f"Session not found: {session_id}"
+
 
 class TestSessionTimeout:
     """Tests for session idle timeout."""

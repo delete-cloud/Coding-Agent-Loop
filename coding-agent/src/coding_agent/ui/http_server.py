@@ -794,12 +794,8 @@ async def close_session(
     api_key: str | None = Depends(verify_api_key),
 ) -> CloseSessionResponse:
     """Close session and release resources."""
-    if not await session_manager.has_session_async(session_id):
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    session = await session_manager.get_session_async(session_id)
-
     try:
+        session = await session_manager.get_session_async(session_id)
         await session_manager.close_session(session_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
