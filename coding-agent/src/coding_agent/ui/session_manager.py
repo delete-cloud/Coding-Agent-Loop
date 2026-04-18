@@ -893,7 +893,6 @@ class SessionManager:
             await self._close_runtime(session)
             session.task = None
             session.turn_in_progress = False
-            session.last_activity = datetime.now()
             await self._persist_session_async(session)
 
     async def close(self) -> None:

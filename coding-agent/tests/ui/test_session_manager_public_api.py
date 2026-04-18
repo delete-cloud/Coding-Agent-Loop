@@ -372,6 +372,7 @@ async def test_shutdown_session_runtime_preserves_persisted_session_metadata() -
     session.turn_in_progress = True
     session.runtime_pipeline = object()
     session.runtime_ctx = object()
+    previous_last_activity = session.last_activity
 
     class FakeAdapter:
         def __init__(self) -> None:
@@ -390,6 +391,7 @@ async def test_shutdown_session_runtime_preserves_persisted_session_metadata() -
     assert payload["id"] == session_id
     assert adapter.closed is True
     reloaded = manager.get_session(session_id)
+    assert reloaded.last_activity == previous_last_activity
     assert reloaded.turn_in_progress is False
     assert reloaded.runtime_pipeline is None
     assert reloaded.runtime_ctx is None
