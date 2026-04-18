@@ -377,7 +377,16 @@ async def _cleanup_event_queue_on_disconnect(
     session_id: str,
     queue: asyncio.Queue[dict[str, str]],
 ) -> None:
-    await asyncio.shield(session_manager.remove_event_queue_async(session_id, queue))
+    try:
+        await asyncio.shield(
+            session_manager.remove_event_queue_async(session_id, queue)
+        )
+    except KeyError:
+        logger.debug(
+            "Event queue cleanup skipped for already-removed session %s",
+            session_id,
+            exc_info=True,
+        )
 
 
 async def _cleanup_idle_sessions() -> None:
@@ -639,13 +648,24 @@ async def get_events(
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=30.0)
                     yield event
+                    if event.get("event") == "SessionClosed":
+                        break
                 except asyncio.TimeoutError:
+                    if session_id not in session_manager._session_cache:
+                        break
+                    current_session = session_manager._session_cache.get(session_id)
+                    if (
+                        current_session is not None
+                        and queue not in current_session.event_queues
+                    ):
+                        break
                     # Send keepalive
                     yield {"event": "ping", "data": ""}
         except asyncio.CancelledError:
             # Client disconnected
-            await _cleanup_event_queue_on_disconnect(session_id, queue)
             raise
+        finally:
+            await _cleanup_event_queue_on_disconnect(session_id, queue)
 
     return EventSourceResponse(event_generator())
 
@@ -771,15 +791,16 @@ async def close_session(
         raise HTTPException(status_code=404, detail="Session not found")
 
     session = await session_manager.get_session_async(session_id)
+
+    try:
+        await session_manager.close_session(session_id)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
     await _broadcast_event(
         session,
         {"event": "SessionClosed", "data": json.dumps({"session_id": session_id})},
     )
-
-    try:
-        await session_manager.close_session(session_id)
-    except Exception as e:
-        logger.exception(f"Error closing session in manager: {e}")
 
     logger.info(f"Closed session: {session_id}")
     return CloseSessionResponse(status="closed", session_id=session_id)

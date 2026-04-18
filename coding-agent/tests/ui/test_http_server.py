@@ -789,6 +789,21 @@ class TestEventsFanOut:
         assert len(cleaned) == 1
         assert cleaned == [(session_id, queue)]
 
+    async def test_event_queue_cleanup_ignores_missing_session(self, monkeypatch):
+        queue: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=1)
+
+        async def fake_remove_event_queue_async(current_session_id: str, queue) -> None:
+            _ = (current_session_id, queue)
+            raise KeyError("Session not found: removed")
+
+        monkeypatch.setattr(
+            session_manager,
+            "remove_event_queue_async",
+            fake_remove_event_queue_async,
+        )
+
+        await _cleanup_event_queue_on_disconnect("removed", queue)
+
 
 class TestGetSession:
     """Tests for get session endpoint."""
@@ -851,6 +866,23 @@ class TestCloseSession:
             received_events.append(await queue.get())
 
         assert any(e["event"] == "SessionClosed" for e in received_events)
+
+    async def test_close_session_returns_error_when_manager_close_fails(
+        self, client, monkeypatch
+    ):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        async def failing_close_session(current_session_id: str) -> None:
+            assert current_session_id == session_id
+            raise RuntimeError("close exploded")
+
+        monkeypatch.setattr(session_manager, "close_session", failing_close_session)
+
+        response = await client.delete(f"/sessions/{session_id}")
+
+        assert response.status_code == 500
+        assert response.json()["detail"] == "close exploded"
 
 
 class TestSessionTimeout:
