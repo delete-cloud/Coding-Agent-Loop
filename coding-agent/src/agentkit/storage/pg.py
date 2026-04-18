@@ -280,7 +280,7 @@ class PGCheckpointStore:
     )
     _LIST_SQL: Final[str] = (
         "SELECT meta FROM agent_checkpoints WHERE tape_id = $1 "
-        "ORDER BY meta->>'created_at'"
+        "ORDER BY (meta->>'created_at')::timestamptz"
     )
     _DELETE_SQL: Final[str] = "DELETE FROM agent_checkpoints WHERE checkpoint_id = $1"
 

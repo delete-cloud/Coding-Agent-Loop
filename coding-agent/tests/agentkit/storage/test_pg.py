@@ -214,9 +214,18 @@ class FakePool:
                 for payload in self.checkpoints.values()
                 if payload["tape_id"] == tape_id
             ]
-            rows.sort(
-                key=lambda row: str(cast(dict[str, object], row["meta"])["created_at"])
-            )
+            if "::timestamptz" in query:
+                rows.sort(
+                    key=lambda row: datetime.fromisoformat(
+                        str(cast(dict[str, object], row["meta"])["created_at"])
+                    )
+                )
+            else:
+                rows.sort(
+                    key=lambda row: str(
+                        cast(dict[str, object], row["meta"])["created_at"]
+                    )
+                )
             return rows
         raise AssertionError(f"unexpected fetch query: {query}")
 
@@ -382,6 +391,60 @@ class TestPGPool:
         await pool.get_pool()
 
         await pool.release(fake_pool)
+
+
+@pytest.mark.asyncio
+async def test_pg_checkpoint_store_orders_list_by_created_at_timestamp() -> None:
+    async def fake_pool_factory(**_: object) -> FakePool:
+        return fake_pool
+
+    fake_pool = FakePool()
+    store = PGCheckpointStore(
+        pool=PGPool(dsn="postgresql://example", pool_factory=fake_pool_factory)
+    )
+
+    older = CheckpointSnapshot(
+        meta=CheckpointMeta(
+            checkpoint_id="cp-older",
+            tape_id="tape-1",
+            session_id="session-1",
+            entry_count=1,
+            window_start=0,
+            created_at=datetime.fromisoformat("2026-04-18T12:30:00+02:00"),
+            label="older",
+        ),
+        tape_entries=tuple(),
+        plugin_states={},
+        extra={},
+    )
+    newer = CheckpointSnapshot(
+        meta=CheckpointMeta(
+            checkpoint_id="cp-newer",
+            tape_id="tape-1",
+            session_id="session-1",
+            entry_count=2,
+            window_start=0,
+            created_at=datetime.fromisoformat("2026-04-18T11:45:00+00:00"),
+            label="newer",
+        ),
+        tape_entries=tuple(),
+        plugin_states={},
+        extra={},
+    )
+
+    await store.save(newer)
+    await store.save(older)
+
+    metas = await store.list_by_tape("tape-1")
+
+    assert [meta.checkpoint_id for meta in metas] == ["cp-older", "cp-newer"]
+    list_queries = [
+        query
+        for query, _args in fake_pool.executed
+        if "SELECT meta FROM agent_checkpoints" in query
+    ]
+    assert list_queries
+    assert "::timestamptz" in list_queries[-1]
 
 
 class TestPGSessionStore:
