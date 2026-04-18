@@ -1132,14 +1132,12 @@ class SessionManager:
             List of closed session IDs
         """
         now = datetime.now()
-        closed = []
-
-        async with self._lock:
-            session_ids = list(self._store.list_sessions())
+        closed: list[str] = []
+        session_ids = await self.list_sessions_async()
 
         for session_id in session_ids:
             try:
-                session = self.get_session(session_id)
+                session = await self.get_session_async(session_id)
                 idle_time = now - session.last_activity
                 if idle_time.total_seconds() > max_idle_minutes * 60:
                     await self.close_session(session_id)

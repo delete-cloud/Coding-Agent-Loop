@@ -567,6 +567,34 @@ def test_pg_session_metadata_store_run_sync_times_out_and_cancels_future() -> No
         store.close()
 
 
+def test_pg_session_metadata_store_run_sync_raises_clear_error_when_loop_unavailable() -> (
+    None
+):
+    class FakePool:
+        async def get_pool(self) -> object:
+            raise AssertionError("unused")
+
+        async def close(self) -> None:
+            return None
+
+    store = PGSessionMetadataStore(pool=FakePool())
+    try:
+        operation = asyncio.sleep(0)
+        with patch(
+            "coding_agent.ui.session_store.asyncio.run_coroutine_threadsafe",
+            side_effect=RuntimeError("loop closed"),
+        ):
+            with pytest.raises(
+                RuntimeError,
+                match="postgres session metadata loop is not available",
+            ):
+                store._run_sync(operation)
+
+        assert operation.cr_frame is None
+    finally:
+        store.close()
+
+
 def test_create_session_store_strips_dsn_before_building_pg_pool() -> None:
     with patch("coding_agent.ui.session_store.PGPool") as pg_pool_cls:
         store = create_session_store(backend="pg", dsn="  postgresql://example  ")

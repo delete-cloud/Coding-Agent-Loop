@@ -203,7 +203,14 @@ class PGSessionMetadataStore:
         self._loop.run_forever()
 
     def _run_sync(self, operation: Coroutine[object, object, object]) -> object:
-        future = asyncio.run_coroutine_threadsafe(operation, self._loop)
+        try:
+            future = asyncio.run_coroutine_threadsafe(operation, self._loop)
+        except RuntimeError as exc:
+            operation.close()
+            raise RuntimeError(
+                "postgres session metadata loop is not available; "
+                "the store may have been closed or failed to start"
+            ) from exc
         try:
             return future.result(timeout=self._SYNC_OPERATION_TIMEOUT_SECONDS)
         except FutureTimeoutError as exc:

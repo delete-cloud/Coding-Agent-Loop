@@ -443,6 +443,56 @@ async def test_capture_checkpoint_persists_tape_id_via_async_store_path() -> Non
     assert persist_calls == [session_id]
 
 
+@pytest.mark.asyncio
+async def test_cleanup_idle_sessions_uses_async_store_helpers() -> None:
+    store = InMemorySessionStore()
+    manager = SessionManager(store=store)
+    first_id = await manager.create_session()
+    second_id = await manager.create_session()
+
+    first = manager.get_session(first_id)
+    second = manager.get_session(second_id)
+    first.last_activity = datetime.now()
+    second.last_activity = datetime.now()
+
+    sync_calls: list[str] = []
+    async_calls: list[str] = []
+    closed_sessions: list[str] = []
+
+    def fail_sync_list_sessions() -> list[str]:
+        sync_calls.append("list")
+        raise AssertionError("cleanup_idle_sessions should not call sync list_sessions")
+
+    def fail_sync_get_session(_session_id: str) -> Session:
+        sync_calls.append("get")
+        raise AssertionError("cleanup_idle_sessions should not call sync get_session")
+
+    async def fake_list_sessions_async() -> list[str]:
+        async_calls.append("list")
+        return [first_id, second_id]
+
+    async def fake_get_session_async(session_id: str) -> Session:
+        async_calls.append(f"get:{session_id}")
+        return first if session_id == first_id else second
+
+    async def fake_close_session(session_id: str) -> None:
+        closed_sessions.append(session_id)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(manager._store, "list_sessions", fail_sync_list_sessions)
+        mp.setattr(manager, "get_session", fail_sync_get_session)
+        mp.setattr(manager, "list_sessions_async", fake_list_sessions_async)
+        mp.setattr(manager, "get_session_async", fake_get_session_async)
+        mp.setattr(manager, "close_session", fake_close_session)
+
+        closed = await manager.cleanup_idle_sessions(max_idle_minutes=10_000)
+
+    assert closed == []
+    assert closed_sessions == []
+    assert sync_calls == []
+    assert async_calls == ["list", f"get:{first_id}", f"get:{second_id}"]
+
+
 def test_create_session_store_warns_and_falls_back_when_redis_unreachable(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
