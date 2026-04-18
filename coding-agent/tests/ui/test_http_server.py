@@ -999,6 +999,39 @@ class TestCloseSession:
         assert response.status_code == 500
         assert response.json()["detail"] == "close exploded"
 
+    async def test_close_session_returns_404_when_session_disappears_during_close(
+        self, client, monkeypatch
+    ):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        async def fake_has_session_async(current_session_id: str) -> bool:
+            assert current_session_id == session_id
+            return True
+
+        async def fake_get_session_async(current_session_id: str):
+            assert current_session_id == session_id
+            return session_manager.get_session(current_session_id)
+
+        async def disappearing_close_session(current_session_id: str) -> None:
+            assert current_session_id == session_id
+            raise KeyError(f"Session not found: {session_id}")
+
+        monkeypatch.setattr(
+            session_manager, "has_session_async", fake_has_session_async
+        )
+        monkeypatch.setattr(
+            session_manager, "get_session_async", fake_get_session_async
+        )
+        monkeypatch.setattr(
+            session_manager, "close_session", disappearing_close_session
+        )
+
+        response = await client.delete(f"/sessions/{session_id}")
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == f"Session not found: {session_id}"
+
 
 class TestSessionTimeout:
     """Tests for session idle timeout."""
@@ -1469,14 +1502,23 @@ class TestWaitForApproval:
 def test_http_server_import_falls_back_when_agent_toml_is_unreadable(
     monkeypatch,
 ) -> None:
+    original_module = sys.modules.get("coding_agent.ui.http_server")
     monkeypatch.delitem(sys.modules, "coding_agent.ui.http_server", raising=False)
 
-    with patch("agentkit.config.loader.load_config") as load_config:
-        load_config.side_effect = ConfigError("config file not found")
-        http_server = importlib.import_module("coding_agent.ui.http_server")
+    try:
+        with patch("agentkit.config.loader.load_config") as load_config:
+            load_config.side_effect = ConfigError("config file not found")
+            http_server = importlib.import_module("coding_agent.ui.http_server")
 
-    assert http_server._load_storage_config() == {}
-    assert http_server.session_manager._storage_config == {}
+        assert http_server._load_storage_config() == {}
+        assert http_server.session_manager._storage_config == {}
+    finally:
+        if original_module is None:
+            monkeypatch.delitem(
+                sys.modules, "coding_agent.ui.http_server", raising=False
+            )
+        else:
+            sys.modules["coding_agent.ui.http_server"] = original_module
 
 
 class TestIntegration:
