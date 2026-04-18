@@ -66,7 +66,7 @@ def _load_storage_config() -> dict[str, Any]:
         return cast(
             dict[str, Any], load_agent_toml(config_path).extra.get("storage", {})
         )
-    except ConfigError:
+    except (ConfigError, OSError):
         logger.warning(
             "Unable to load storage config from %s; using defaults",
             config_path,
@@ -346,6 +346,13 @@ async def _broadcast_event(session: Session, event: dict[str, str]) -> None:
     await session_manager.broadcast_event(session.id, event)
 
 
+async def _cleanup_event_queue_on_disconnect(
+    session_id: str,
+    queue: asyncio.Queue[dict[str, str]],
+) -> None:
+    await asyncio.shield(session_manager.remove_event_queue_async(session_id, queue))
+
+
 async def _cleanup_idle_sessions() -> None:
     """Background task to clean up idle sessions."""
     while True:
@@ -387,7 +394,7 @@ async def stream_wire_messages(wire: LocalWire) -> AsyncIterator[dict[str, str]]
 async def liveness_check(request: Request) -> HealthResponse:
     return HealthResponse(
         status="healthy",
-        sessions=len(await session_manager.list_sessions_async()),
+        sessions=await session_manager.count_sessions_async(),
         version="2.0.0",
     )
 
@@ -610,7 +617,7 @@ async def get_events(
                     yield {"event": "ping", "data": ""}
         except asyncio.CancelledError:
             # Client disconnected
-            await session_manager.remove_event_queue_async(session_id, queue)
+            await _cleanup_event_queue_on_disconnect(session_id, queue)
             raise
 
     return EventSourceResponse(event_generator())

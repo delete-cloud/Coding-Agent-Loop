@@ -24,6 +24,7 @@ from coding_agent.ui.session_manager import Session
 from coding_agent.ui.http_server import (
     APPROVAL_TIMEOUT_SECONDS,
     SESSION_IDLE_TIMEOUT_MINUTES,
+    _cleanup_event_queue_on_disconnect,
     _broadcast_event,
     _session_to_dict,
     stream_wire_messages,
@@ -138,6 +139,29 @@ class TestSessionCreation:
         assert health.status_code == 200
         assert health.json()["sessions"] == 1
         assert session_manager.has_session(session_id)
+
+    async def test_healthz_uses_count_sessions_async(self, client, monkeypatch):
+        async def fake_count_sessions_async() -> int:
+            return 7
+
+        def fail_list_sessions_async():
+            raise AssertionError("healthz should not call list_sessions_async")
+
+        monkeypatch.setattr(
+            session_manager,
+            "count_sessions_async",
+            fake_count_sessions_async,
+        )
+        monkeypatch.setattr(
+            session_manager,
+            "list_sessions_async",
+            fail_list_sessions_async,
+        )
+
+        health = await client.get("/healthz")
+
+        assert health.status_code == 200
+        assert health.json()["sessions"] == 7
 
     async def test_readyz_reports_dependencies_ready(self, client):
         ready = await client.get("/readyz")
@@ -734,6 +758,35 @@ class TestEventsFanOut:
         session = session_manager.get_session(session_id)
         assert hasattr(session, "event_queues")
         assert isinstance(session.event_queues, list)
+
+    async def test_event_queue_cleanup_is_shielded_on_disconnect(self, monkeypatch):
+        session_id = "disconnect-session"
+        queue: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=1)
+
+        cleanup_started = asyncio.Event()
+        cleanup_released = asyncio.Event()
+        cleaned: list[tuple[str, object]] = []
+
+        async def fake_remove_event_queue_async(current_session_id: str, queue) -> None:
+            cleaned.append((current_session_id, queue))
+            cleanup_started.set()
+            await cleanup_released.wait()
+
+        monkeypatch.setattr(
+            session_manager,
+            "remove_event_queue_async",
+            fake_remove_event_queue_async,
+        )
+
+        task = asyncio.create_task(
+            _cleanup_event_queue_on_disconnect(session_id, queue)
+        )
+        await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+        cleanup_released.set()
+        await task
+
+        assert len(cleaned) == 1
+        assert cleaned == [(session_id, queue)]
 
 
 class TestGetSession:

@@ -461,6 +461,9 @@ class SessionManager:
     async def list_sessions_async(self) -> list[str]:
         return await self._run_store_io(self._store.list_sessions)
 
+    async def count_sessions_async(self) -> int:
+        return await self._run_store_io(self._store.count_sessions)
+
     async def get_session_info_async(self, session_id: str) -> dict[str, Any]:
         session = await self.get_session_async(session_id)
         return session.as_dict()
@@ -486,6 +489,14 @@ class SessionManager:
 
     async def check_health_async(self) -> bool:
         return bool(await self._run_store_io(self._store.check_health))
+
+    async def _close_resource_async(self, resource: object) -> None:
+        close = getattr(resource, "close", None)
+        if not callable(close):
+            return
+        close_result = await self._run_store_io(close)
+        if isawaitable(close_result):
+            await close_result
 
     async def remove_session_async(self, session_id: str) -> None:
         session = await self.get_session_async(session_id)
@@ -527,7 +538,7 @@ class SessionManager:
             session.pending_approval = session.approval_coordinator.projection()
             session.approval_event.clear()
             session.approval_response = None
-            self._persist_session(session)
+            await self._persist_session_async(session)
             await session.wire.send(req)
             try:
                 response = await session.approval_coordinator.wait_for_response(
@@ -548,12 +559,12 @@ class SessionManager:
                 }
                 session.approval_event.set()
                 session.pending_approval = session.approval_coordinator.projection()
-                self._persist_session(session)
+                await self._persist_session_async(session)
                 return response
             finally:
                 session.pending_approval = session.approval_coordinator.projection()
                 session.approval_response = None
-                self._persist_session(session)
+                await self._persist_session_async(session)
 
         return _WireConsumer(session.wire, _request_approval)
 
@@ -642,7 +653,7 @@ class SessionManager:
         session.runtime_pipeline = pipeline
         session.runtime_ctx = ctx
         session.runtime_adapter = adapter
-        self._persist_session(session)
+        await self._persist_session_async(session)
 
         checkpoints = await self._checkpoint_service.list(ctx.tape.tape_id)
         for checkpoint_meta in checkpoints:
@@ -868,17 +879,8 @@ class SessionManager:
         logger.info(f"Closed session: {session_id}")
 
     async def close(self) -> None:
-        store_close = getattr(self._store, "close", None)
-        if callable(store_close):
-            store_close_result = store_close()
-            if isawaitable(store_close_result):
-                await store_close_result
-
-        close = getattr(self._pg_pool, "close", None)
-        if callable(close):
-            close_result = close()
-            if isawaitable(close_result):
-                await close_result
+        await self._close_resource_async(self._store)
+        await self._close_resource_async(self._pg_pool)
 
     async def run_agent(
         self,
@@ -1201,7 +1203,7 @@ class SessionManager:
                 ctx, label=label, extra=payload
             )
             session.tape_id = ctx.tape.tape_id
-            self._persist_session(session)
+            await self._persist_session_async(session)
             return checkpoint
 
     async def list_checkpoints(self, session_id: str) -> list[CheckpointMeta]:

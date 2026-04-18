@@ -1,4 +1,6 @@
 from __future__ import annotations
+import asyncio
+import threading
 import types
 from datetime import datetime
 from pathlib import Path
@@ -340,6 +342,72 @@ async def test_remove_session_async_loads_store_once_when_not_cached() -> None:
 
     assert store.load_calls == 1
     assert store.load("remove-me") is None
+
+
+@pytest.mark.asyncio
+async def test_close_offloads_sync_store_close_to_executor() -> None:
+    close_called = threading.Event()
+    loop_thread_id = threading.get_ident()
+    close_thread_ids: list[int] = []
+
+    class ClosableStore(InMemorySessionStore):
+        def close(self) -> None:
+            close_thread_ids.append(threading.get_ident())
+            close_called.set()
+
+    manager = SessionManager(store=ClosableStore())
+
+    await manager.close()
+
+    assert close_called.is_set() is True
+    assert close_thread_ids == [close_thread_ids[0]]
+    assert close_thread_ids[0] != loop_thread_id
+
+
+@pytest.mark.asyncio
+async def test_capture_checkpoint_persists_tape_id_via_async_store_path() -> None:
+    manager = SessionManager(store=InMemorySessionStore())
+    session_id = await manager.create_session()
+    session = manager.get_session(session_id)
+    runtime_ctx = types.SimpleNamespace(tape=Tape(tape_id="stable-tape"))
+    session.runtime_pipeline = object()
+    session.runtime_ctx = runtime_ctx
+    session.runtime_adapter = object()
+
+    expected = CheckpointMeta(
+        checkpoint_id="cp-save",
+        tape_id="stable-tape",
+        session_id=session_id,
+        entry_count=0,
+        window_start=0,
+        created_at=datetime.now(),
+        label="manual save",
+    )
+    persist_calls: list[str] = []
+
+    class FakeCheckpointService:
+        async def capture(self, ctx, label: str | None = None, extra=None):
+            del label, extra
+            assert ctx is runtime_ctx
+            return expected
+
+    async def fake_persist_session_async(current_session: Session) -> None:
+        persist_calls.append(current_session.id)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            manager, "_checkpoint_service", FakeCheckpointService(), raising=False
+        )
+        mp.setattr(
+            manager,
+            "_persist_session_async",
+            fake_persist_session_async,
+            raising=False,
+        )
+        checkpoint = await manager.capture_checkpoint(session_id, label="manual save")
+
+    assert checkpoint == expected
+    assert persist_calls == [session_id]
 
 
 def test_create_session_store_warns_and_falls_back_when_redis_unreachable(

@@ -44,6 +44,8 @@ class SessionStore(Protocol):
 
     def load(self, session_id: str) -> SessionPayload | None: ...
 
+    def count_sessions(self) -> int: ...
+
     def list_sessions(self) -> list[str]: ...
 
     def delete(self, session_id: str) -> None: ...
@@ -66,6 +68,9 @@ class InMemorySessionStore:
 
     def load(self, session_id: str) -> SessionPayload | None:
         return self._sessions.get(session_id)
+
+    def count_sessions(self) -> int:
+        return len(self._sessions)
 
     def get(self, session_id: str) -> SessionPayload | None:
         return self.load(session_id)
@@ -124,6 +129,9 @@ class RedisSessionStore:
                 session_ids.append(member)
         return sorted(session_ids)
 
+    def count_sessions(self) -> int:
+        return len(cast(set[str | bytes], self._client.smembers(self._index_key)))
+
     def delete(self, session_id: str) -> None:
         _ = self._client.delete(self._key_for(session_id))
         _ = self._client.srem(self._index_key, session_id)
@@ -155,6 +163,7 @@ class PGSessionMetadataStore:
     _LIST_SQL: Final[str] = (
         "SELECT session_id FROM agent_http_sessions ORDER BY session_id"
     )
+    _COUNT_SQL: Final[str] = "SELECT COUNT(*) AS session_count FROM agent_http_sessions"
     _DELETE_SQL: Final[str] = "DELETE FROM agent_http_sessions WHERE session_id = $1"
     _LOOP_READY_TIMEOUT_SECONDS: Final[float] = 5.0
     _SYNC_OPERATION_TIMEOUT_SECONDS: Final[float] = 30.0
@@ -291,6 +300,34 @@ class PGSessionMetadataStore:
         if not isinstance(result, list):
             raise TypeError("postgres session metadata list result must be a list")
         return cast(list[str], result)
+
+    def count_sessions(self) -> int:
+        async def _count_sessions() -> int:
+            pool = await self._ensure_schema()
+            fetchrow = getattr(pool, "fetchrow", None)
+            if not callable(fetchrow):
+                raise TypeError("postgres session metadata pool must expose fetchrow")
+            row_obj = await cast(
+                Callable[..., Coroutine[object, object, object]], fetchrow
+            )(self._COUNT_SQL)
+            if row_obj is None:
+                raise TypeError(
+                    "postgres session metadata count result must not be None"
+                )
+            row_dict = _coerce_row_dict(
+                row=row_obj, context="postgres session metadata count row"
+            )
+            session_count = row_dict.get("session_count")
+            if not isinstance(session_count, int):
+                raise TypeError(
+                    "postgres session metadata count row must include int session_count"
+                )
+            return session_count
+
+        result = self._run_sync(_count_sessions())
+        if not isinstance(result, int):
+            raise TypeError("postgres session metadata count result must be an int")
+        return result
 
     def delete(self, session_id: str) -> None:
         async def _delete() -> None:
