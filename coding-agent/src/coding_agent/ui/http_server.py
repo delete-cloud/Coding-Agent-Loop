@@ -106,9 +106,18 @@ async def lifespan(app: FastAPI):
         pass
 
     # Close all sessions
-    for session_id in await session_manager.list_sessions_async():
-        await session_manager.shutdown_session_runtime(session_id)
-    await session_manager.close()
+    try:
+        for session_id in await session_manager.list_sessions_async():
+            try:
+                await session_manager.shutdown_session_runtime(session_id)
+            except Exception:
+                logger.warning(
+                    "Failed to shut down runtime for session %s during server shutdown",
+                    session_id,
+                    exc_info=True,
+                )
+    finally:
+        await session_manager.close()
 
     logger.info("HTTP server shut down")
 
@@ -651,12 +660,10 @@ async def get_events(
                     if event.get("event") == "SessionClosed":
                         break
                 except asyncio.TimeoutError:
-                    if session_id not in session_manager._session_cache:
+                    if not await session_manager.has_session_async(session_id):
                         break
-                    current_session = session_manager._session_cache.get(session_id)
-                    if (
-                        current_session is not None
-                        and queue not in current_session.event_queues
+                    if not await session_manager.has_event_queue_async(
+                        session_id, queue
                     ):
                         break
                     # Send keepalive

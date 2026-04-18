@@ -14,6 +14,7 @@ from unittest.mock import patch
 import pytest
 from httpx import AsyncClient, ASGITransport
 from httpx_sse import aconnect_sse
+from starlette.requests import Request
 from agentkit.errors import ConfigError
 from agentkit.checkpoint.models import CheckpointMeta
 from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
@@ -27,6 +28,7 @@ from coding_agent.ui.http_server import (
     SESSION_IDLE_TIMEOUT_MINUTES,
     _cleanup_event_queue_on_disconnect,
     _broadcast_event,
+    get_events,
     _session_to_dict,
     stream_wire_messages,
     _wire_message_to_event,
@@ -803,6 +805,119 @@ class TestEventsFanOut:
         )
 
         await _cleanup_event_queue_on_disconnect("removed", queue)
+
+    async def test_event_generator_uses_public_session_apis_for_keepalive_exit(
+        self, client, monkeypatch
+    ):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        has_session_calls: list[str] = []
+        get_session_calls: list[str] = []
+        has_session_results = iter([True, True, False])
+
+        class FakeEventSourceResponse:
+            def __init__(self, body_iterator):
+                self.body_iterator = body_iterator
+
+        async def fake_has_session_async(current_session_id: str) -> bool:
+            has_session_calls.append(current_session_id)
+            return next(has_session_results)
+
+        async def fake_get_session_async(current_session_id: str):
+            get_session_calls.append(current_session_id)
+            return session_manager.get_session(current_session_id)
+
+        monkeypatch.setattr(
+            session_manager, "has_session_async", fake_has_session_async
+        )
+        monkeypatch.setattr(
+            session_manager, "get_session_async", fake_get_session_async
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.EventSourceResponse",
+            FakeEventSourceResponse,
+        )
+
+        real_wait_for = asyncio.wait_for
+
+        async def fake_wait_for(awaitable, timeout):
+            if timeout == 30.0:
+                awaitable.close()
+                raise asyncio.TimeoutError
+            return await real_wait_for(awaitable, timeout)
+
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.asyncio.wait_for", fake_wait_for
+        )
+
+        request = Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": f"/sessions/{session_id}/events",
+                "headers": [],
+            }
+        )
+        response = await get_events(request, session_id, None)
+        event_generator = response.body_iterator
+        event = await anext(event_generator)
+
+        assert event == {"event": "ping", "data": ""}
+
+        with pytest.raises(StopAsyncIteration):
+            await anext(event_generator)
+
+        assert has_session_calls == [session_id, session_id, session_id]
+        assert len(get_session_calls) >= 2
+        assert all(
+            call_session_id == session_id for call_session_id in get_session_calls
+        )
+
+
+class TestLifespanShutdown:
+    async def test_lifespan_shutdown_continues_after_session_failure(self, monkeypatch):
+        observed_shutdowns: list[str] = []
+        close_calls: list[str] = []
+
+        async def fake_cleanup_idle_sessions() -> None:
+            try:
+                while True:
+                    await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                raise
+
+        async def fake_list_sessions_async() -> list[str]:
+            return ["session-a", "session-b"]
+
+        async def fake_shutdown_session_runtime(session_id: str) -> None:
+            observed_shutdowns.append(session_id)
+            if session_id == "session-a":
+                raise RuntimeError("boom")
+
+        async def fake_close() -> None:
+            close_calls.append("closed")
+
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._cleanup_idle_sessions",
+            fake_cleanup_idle_sessions,
+        )
+        monkeypatch.setattr(
+            session_manager, "list_sessions_async", fake_list_sessions_async
+        )
+        monkeypatch.setattr(
+            session_manager,
+            "shutdown_session_runtime",
+            fake_shutdown_session_runtime,
+        )
+        monkeypatch.setattr(session_manager, "close", fake_close)
+
+        cm = app.router.lifespan_context(app)
+        await cm.__aenter__()
+        await cm.__aexit__(None, None, None)
+
+        assert observed_shutdowns == ["session-a", "session-b"]
+        assert close_calls == ["closed"]
 
 
 class TestGetSession:
