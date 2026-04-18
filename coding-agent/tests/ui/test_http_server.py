@@ -8,6 +8,7 @@ import json
 import sys
 import types
 from datetime import datetime, timedelta
+from typing import cast
 from unittest.mock import patch
 
 import pytest
@@ -1187,6 +1188,38 @@ class TestBroadcastEvent:
             await _broadcast_event(session, event)
 
         assert await queue.get() == event
+
+    async def test_broadcast_prunes_full_queue_without_blocking(self):
+        session = register_session("broadcast-full-queue")
+        full_queue: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=1)
+        await full_queue.put({"event": "Old", "data": "{}"})
+        healthy_queue: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=1)
+        session.event_queues = [full_queue, healthy_queue]
+        event = {"event": "Test", "data": "{}"}
+
+        await _broadcast_event(session, event)
+
+        assert session.event_queues == [healthy_queue]
+        assert full_queue.qsize() == 1
+        assert await healthy_queue.get() == event
+
+    async def test_broadcast_prunes_failed_queue(self):
+        session = register_session("broadcast-failed-queue")
+
+        class BrokenQueue:
+            def put_nowait(self, item: object) -> None:
+                _ = item
+                raise RuntimeError("queue closed")
+
+        healthy_queue: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=1)
+        broken_queue = cast(asyncio.Queue[dict[str, str]], BrokenQueue())
+        session.event_queues = [broken_queue, healthy_queue]
+        event = {"event": "Test", "data": "{}"}
+
+        await _broadcast_event(session, event)
+
+        assert session.event_queues == [healthy_queue]
+        assert await healthy_queue.get() == event
 
 
 class TestWaitForApproval:

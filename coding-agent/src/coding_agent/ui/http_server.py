@@ -343,20 +343,34 @@ def _wire_message_to_event(msg: WireMessage) -> dict[str, str]:
 
 async def _broadcast_event(session: Session, event: dict[str, str]) -> None:
     """Broadcast event to all connected clients."""
-    before_count = len(session.event_queues)
-    session.event_queues = [queue for queue in session.event_queues if not queue.full()]
-    pruned_count = before_count - len(session.event_queues)
-    if pruned_count:
-        logger.info(
-            "Pruned %d full event queue(s) for session %s",
-            pruned_count,
-            session.id,
-        )
+    active_queues: list[asyncio.Queue[dict[str, str]]] = []
+    full_pruned_count = 0
+    failed_pruned_count = 0
+
     for queue in session.event_queues:
         try:
-            await queue.put(event)
+            queue.put_nowait(event)
+            active_queues.append(queue)
+        except asyncio.QueueFull:
+            full_pruned_count += 1
         except Exception:
+            failed_pruned_count += 1
             logger.debug("Dropping closed event queue", exc_info=True)
+
+    session.event_queues = active_queues
+
+    if full_pruned_count:
+        logger.info(
+            "Pruned %d full event queue(s) for session %s",
+            full_pruned_count,
+            session.id,
+        )
+    if failed_pruned_count:
+        logger.info(
+            "Pruned %d failed event queue(s) for session %s",
+            failed_pruned_count,
+            session.id,
+        )
 
 
 async def _cleanup_event_queue_on_disconnect(
