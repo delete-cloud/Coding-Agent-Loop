@@ -223,6 +223,45 @@ def test_redis_session_store_count_falls_back_to_smembers_without_scard() -> Non
     assert client.smembers_calls == 1
 
 
+def test_redis_session_store_accepts_client_without_scard_method() -> None:
+    class FakeRedisClient:
+        def __init__(self) -> None:
+            self._data: dict[str, str] = {}
+            self._index: set[str] = set()
+
+        def ping(self) -> bool:
+            return True
+
+        def set(self, key: str, value: str) -> None:
+            self._data[key] = value
+
+        def get(self, key: str) -> str | None:
+            return self._data.get(key)
+
+        def delete(self, key: str) -> None:
+            self._data.pop(key, None)
+
+        def sadd(self, key: str, value: str) -> None:
+            assert key == "coding-agent:sessions:index"
+            self._index.add(value)
+
+        def srem(self, key: str, value: str) -> None:
+            assert key == "coding-agent:sessions:index"
+            self._index.discard(value)
+
+        def smembers(self, key: str) -> set[str]:
+            assert key == "coding-agent:sessions:index"
+            return set(self._index)
+
+    client = FakeRedisClient()
+    store = RedisSessionStore(client=cast(object, client), redis_url="redis://test")
+
+    store.save("session-a", {"id": "session-a"})
+    store.save("session-b", {"id": "session-b"})
+
+    assert store.count_sessions() == 2
+
+
 def test_pg_session_metadata_store_round_trips_session_metadata() -> None:
     class FakeRecord:
         def __init__(self, payload: dict[str, object]) -> None:
