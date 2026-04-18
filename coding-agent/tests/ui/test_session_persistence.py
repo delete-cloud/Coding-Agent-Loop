@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 from concurrent.futures import TimeoutError as FutureTimeoutError
-from typing import cast
+from typing import Callable, cast
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
@@ -311,9 +311,15 @@ def test_pg_session_metadata_store_waits_for_loop_start_before_returning() -> No
     class FakeLoop:
         def __init__(self) -> None:
             self.closed = False
+            self.scheduled_callbacks: list[Callable[[], object]] = []
             created_loops.append(self)
 
+        def call_soon(self, callback) -> None:
+            self.scheduled_callbacks.append(callback)
+
         def run_forever(self) -> None:
+            for callback in list(self.scheduled_callbacks):
+                callback()
             return None
 
         def stop(self) -> None:
@@ -357,6 +363,7 @@ def test_pg_session_metadata_store_waits_for_loop_start_before_returning() -> No
         assert len(created_threads) == 1
         assert created_threads[0].started is True
         assert store._loop_ready.is_set() is True
+        assert len(created_loops[0].scheduled_callbacks) == 1
     finally:
         store._run_sync = lambda operation: (operation.close(), None)[1]
         store.close()
@@ -463,6 +470,63 @@ def test_pg_session_metadata_store_skips_loop_close_when_thread_does_not_stop() 
     assert fake_thread.join_calls == [5]
     assert fake_loop.stop_calls == 1
     assert fake_loop.closed is False
+
+
+def test_pg_session_metadata_store_close_handles_already_closed_loop() -> None:
+    class FakePool:
+        async def get_pool(self) -> object:
+            raise AssertionError("unused")
+
+        async def close(self) -> None:
+            return None
+
+    class FakeThread:
+        def __init__(self) -> None:
+            self.join_calls: list[float | None] = []
+
+        def start(self) -> None:
+            return None
+
+        def join(self, timeout: float | None = None) -> None:
+            self.join_calls.append(timeout)
+
+        def is_alive(self) -> bool:
+            return False
+
+    class FakeLoop:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def stop(self) -> None:
+            return None
+
+        def call_soon_threadsafe(self, callback) -> None:
+            _ = callback
+            raise RuntimeError("loop already closed")
+
+        def close(self) -> None:
+            self.close_calls += 1
+            raise RuntimeError("loop already closed")
+
+    store = PGSessionMetadataStore(pool=FakePool())
+    fake_thread = FakeThread()
+    fake_loop = FakeLoop()
+
+    def fake_run_sync(operation):
+        operation.close()
+        return None
+
+    with (
+        patch.object(store, "_loop_thread", fake_thread),
+        patch.object(store, "_loop", fake_loop),
+        patch.object(store, "_run_sync", fake_run_sync),
+        patch("coding_agent.ui.session_store.logger.warning") as warning,
+    ):
+        store.close()
+
+    assert fake_thread.join_calls == [5]
+    assert fake_loop.close_calls == 1
+    assert warning.call_count == 2
 
 
 def test_pg_session_metadata_store_close_test_does_not_start_real_thread() -> None:

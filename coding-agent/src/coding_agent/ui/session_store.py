@@ -199,7 +199,7 @@ class PGSessionMetadataStore:
 
     def _run_loop(self) -> None:
         asyncio.set_event_loop(self._loop)
-        self._loop_ready.set()
+        self._loop.call_soon(self._loop_ready.set)
         self._loop.run_forever()
 
     def _run_sync(self, operation: Coroutine[object, object, object]) -> object:
@@ -375,14 +375,25 @@ class PGSessionMetadataStore:
         try:
             _ = self._run_sync(_close_pool())
         finally:
-            _ = self._loop.call_soon_threadsafe(self._loop.stop)
+            try:
+                _ = self._loop.call_soon_threadsafe(self._loop.stop)
+            except RuntimeError:
+                logger.warning(
+                    "Postgres session metadata loop was already closed while "
+                    "scheduling stop during shutdown"
+                )
             self._loop_thread.join(timeout=5)
             if self._loop_thread.is_alive():
                 logger.warning(
                     "Timed out waiting for postgres session metadata loop thread to stop; skipping event loop close"
                 )
             else:
-                self._loop.close()
+                try:
+                    self._loop.close()
+                except RuntimeError:
+                    logger.warning(
+                        "Postgres session metadata loop was already closed during shutdown"
+                    )
 
 
 def create_session_store(
