@@ -17,7 +17,11 @@ from coding_agent.wire.protocol import (
     ToolCallDelta,
     TurnEnd,
 )
-from coding_agent.ui.session_manager import MockProvider, SessionManager
+from coding_agent.ui.session_manager import (
+    MockProvider,
+    SessionManager,
+    _load_pg_storage_types,
+)
 from coding_agent.ui.session_store import InMemorySessionStore
 
 
@@ -57,6 +61,31 @@ async def test_run_agent_does_not_hardcode_api_key() -> None:
 
     assert captured_kwargs["session_id_override"] == session_id
     assert captured_kwargs["api_key"] is None
+
+
+def test_load_pg_storage_types_reports_missing_optional_dependencies() -> None:
+    with pytest.MonkeyPatch.context() as mp:
+        fake_import_error = ModuleNotFoundError("No module named 'asyncpg'")
+        mp.setattr(
+            "coding_agent.ui.session_manager.importlib.import_module",
+            lambda name: (_ for _ in ()).throw(fake_import_error),
+        )
+
+        with pytest.raises(RuntimeError, match="optional dependencies"):
+            _load_pg_storage_types()
+
+
+def test_load_pg_storage_types_reports_missing_exports() -> None:
+    fake_module = types.SimpleNamespace(PGPool=object(), PGTapeStore=object())
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "coding_agent.ui.session_manager.importlib.import_module",
+            lambda name: fake_module,
+        )
+
+        with pytest.raises(RuntimeError, match="PGCheckpointStore"):
+            _load_pg_storage_types()
 
 
 @pytest.mark.asyncio

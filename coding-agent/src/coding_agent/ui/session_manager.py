@@ -281,8 +281,21 @@ def _load_pg_storage_types() -> tuple[Any, Any, Any]:
         pg_module = importlib.import_module("agentkit.storage.pg")
     except ImportError as exc:
         raise RuntimeError(
-            "PG backend is not available; add agentkit.storage.pg before using tape_backend='pg'"
+            "PG backend is not available; ensure agentkit.storage.pg and its PostgreSQL "
+            "optional dependencies are installed before using tape_backend='pg' "
+            "(for example, install/include the PG extra or `asyncpg`)."
         ) from exc
+    required_symbols = ("PGPool", "PGTapeStore", "PGCheckpointStore")
+    missing_symbols = [
+        symbol for symbol in required_symbols if not hasattr(pg_module, symbol)
+    ]
+    if missing_symbols:
+        raise RuntimeError(
+            "PG backend is missing required exports from agentkit.storage.pg: "
+            f"{', '.join(missing_symbols)}. Ensure the installed PG backend package "
+            "version includes the PostgreSQL storage implementation and its optional "
+            "dependencies."
+        )
     return (
         getattr(pg_module, "PGPool"),
         getattr(pg_module, "PGTapeStore"),
@@ -464,6 +477,14 @@ class SessionManager:
         if session_id in self._session_cache:
             return True
         return await self._run_store_io(self._store.load, session_id) is not None
+
+    async def has_event_queue_async(
+        self,
+        session_id: str,
+        queue: asyncio.Queue[dict[str, Any]],
+    ) -> bool:
+        session = await self.get_session_async(session_id)
+        return queue in session.event_queues
 
     async def list_sessions_async(self) -> list[str]:
         return await self._run_store_io(self._store.list_sessions)
