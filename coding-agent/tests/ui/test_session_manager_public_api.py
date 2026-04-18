@@ -193,6 +193,42 @@ async def test_event_queue_mutations_do_not_persist_async_runtime_only_state() -
     assert session.event_queues == []
 
 
+@pytest.mark.asyncio
+async def test_run_store_io_serializes_executor_calls() -> None:
+    manager = SessionManager(store=InMemorySessionStore())
+    gate = threading.Event()
+    order: list[str] = []
+    concurrent_runs = 0
+    max_concurrent_runs = 0
+
+    def blocking_store_call(name: str) -> str:
+        nonlocal concurrent_runs, max_concurrent_runs
+        concurrent_runs += 1
+        max_concurrent_runs = max(max_concurrent_runs, concurrent_runs)
+        order.append(f"start:{name}")
+        try:
+            gate.wait()
+        finally:
+            order.append(f"end:{name}")
+            concurrent_runs -= 1
+        return name
+
+    async def call_store(name: str) -> str:
+        return await manager._run_store_io(blocking_store_call, name)
+
+    first = asyncio.create_task(call_store("first"))
+    await asyncio.sleep(0)
+    second = asyncio.create_task(call_store("second"))
+    await asyncio.sleep(0.05)
+
+    gate.set()
+    results = await asyncio.gather(first, second)
+
+    assert results == ["first", "second"]
+    assert max_concurrent_runs == 1
+    assert order == ["start:first", "end:first", "start:second", "end:second"]
+
+
 def test_session_manager_uses_pg_backends_when_storage_config_requests_pg() -> None:
     class FakePGPool:
         instances: list[FakePGPool] = []

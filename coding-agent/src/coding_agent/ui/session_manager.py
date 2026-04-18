@@ -326,6 +326,7 @@ class SessionManager:
         self._session_cache: dict[str, Session] = {}
         self._approval_stores: dict[str, ApprovalStore] = {}
         self._lock = asyncio.Lock()
+        self._store_io_guard = asyncio.Lock()
         self._session_turn_locks: dict[str, asyncio.Lock] = {}
         data_dir = Path(os.environ.get("AGENT_DATA_DIR", "./data"))
         self._tape_store = tape_store or self._create_tape_store(data_dir)
@@ -431,8 +432,9 @@ class SessionManager:
         return lock
 
     async def _run_store_io(self, func: Callable[..., T], /, *args: object) -> T:
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, partial(func, *args))
+        async with self._store_io_guard:
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, partial(func, *args))
 
     async def _persist_session_async(self, session: Session) -> None:
         self._session_cache[session.id] = session
