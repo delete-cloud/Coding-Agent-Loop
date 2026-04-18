@@ -529,6 +529,63 @@ def test_pg_session_metadata_store_close_handles_already_closed_loop() -> None:
     assert warning.call_count == 2
 
 
+def test_pg_session_metadata_store_close_swallows_pool_close_errors() -> None:
+    class FakePool:
+        async def get_pool(self) -> object:
+            raise AssertionError("unused")
+
+        async def close(self) -> None:
+            return None
+
+    class FakeThread:
+        def __init__(self) -> None:
+            self.join_calls: list[float | None] = []
+
+        def start(self) -> None:
+            return None
+
+        def join(self, timeout: float | None = None) -> None:
+            self.join_calls.append(timeout)
+
+        def is_alive(self) -> bool:
+            return False
+
+    class FakeLoop:
+        def __init__(self) -> None:
+            self.stop_calls = 0
+            self.close_calls = 0
+
+        def stop(self) -> None:
+            self.stop_calls += 1
+
+        def call_soon_threadsafe(self, callback) -> None:
+            callback()
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    store = PGSessionMetadataStore(pool=FakePool())
+    fake_thread = FakeThread()
+    fake_loop = FakeLoop()
+
+    def fake_run_sync(operation):
+        operation.close()
+        raise OSError("pool close failed")
+
+    with (
+        patch.object(store, "_loop_thread", fake_thread),
+        patch.object(store, "_loop", fake_loop),
+        patch.object(store, "_run_sync", fake_run_sync),
+        patch("coding_agent.ui.session_store.logger.warning") as warning,
+    ):
+        store.close()
+
+    assert fake_thread.join_calls == [5]
+    assert fake_loop.stop_calls == 1
+    assert fake_loop.close_calls == 1
+    warning.assert_called_once()
+
+
 def test_pg_session_metadata_store_close_test_does_not_start_real_thread() -> None:
     created_loops: list[FakeLoop] = []
     created_threads: list[FakeThread] = []

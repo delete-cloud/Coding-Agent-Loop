@@ -373,7 +373,13 @@ class PGSessionMetadataStore:
             await self._pool.close()
 
         try:
-            _ = self._run_sync(_close_pool())
+            try:
+                _ = self._run_sync(_close_pool())
+            except Exception:
+                logger.warning(
+                    "Failed to close postgres session metadata pool during shutdown",
+                    exc_info=True,
+                )
         finally:
             try:
                 _ = self._loop.call_soon_threadsafe(self._loop.stop)
