@@ -32,16 +32,6 @@ coding-agent/src/
 
 See [`coding-agent/README.md`](./coding-agent/README.md) for full usage, development, and architecture details.
 
-## Local Reference Directories
-
-The following directories are tracked in `.gitignore` and kept locally for reference or development convenience. They are **not** part of the committed monorepo:
-
-- `agent-coding-loop/` — earlier iteration of the loop evaluation harness
-- `bub/` — build-system experiments
-- `eino-examples/`, `eino-skills/` — eino framework reference
-- `opencode/` — opencode agent reference
-- `simplebank/` — Go backend reference project (symlink)
-
 ## Quick Start
 
 ```bash
