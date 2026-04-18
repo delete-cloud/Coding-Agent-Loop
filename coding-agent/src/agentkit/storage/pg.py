@@ -267,6 +267,12 @@ class PGCheckpointStore:
         extra
     )
     VALUES ($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6::jsonb)
+    ON CONFLICT (checkpoint_id) DO UPDATE SET
+        tape_id = EXCLUDED.tape_id,
+        meta = EXCLUDED.meta,
+        entries = EXCLUDED.entries,
+        plugin_states = EXCLUDED.plugin_states,
+        extra = EXCLUDED.extra
     """
     _LOAD_SQL: Final[str] = (
         "SELECT meta, entries, plugin_states, extra FROM agent_checkpoints "
@@ -351,7 +357,10 @@ class PGSessionLock:
         try:
             _ = await self._conn.execute("SELECT pg_advisory_unlock_all()")
         finally:
-            await self._pool.release(self._conn)
+            pool_release: Awaitable[None] = cast(
+                Awaitable[None], self._pool.release(self._conn)
+            )
+            await pool_release
             self._conn = None
 
 

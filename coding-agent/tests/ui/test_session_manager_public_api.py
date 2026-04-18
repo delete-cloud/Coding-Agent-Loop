@@ -8,7 +8,6 @@ from unittest.mock import patch
 
 import pytest
 
-from agentkit.errors import ConfigError
 from agentkit.checkpoint import CheckpointService
 from agentkit.checkpoint.models import CheckpointMeta
 from agentkit.tape.tape import Tape

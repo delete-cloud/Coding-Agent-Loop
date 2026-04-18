@@ -215,11 +215,7 @@ class FakePool:
                 if payload["tape_id"] == tape_id
             ]
             rows.sort(
-                key=lambda row: (
-                    cast(dict[str, object], row["meta"])["created_at"]
-                    if isinstance(row["meta"], dict)
-                    else ""
-                )
+                key=lambda row: str(cast(dict[str, object], row["meta"])["created_at"])
             )
             return rows
         raise AssertionError(f"unexpected fetch query: {query}")
@@ -665,6 +661,49 @@ class TestPGCheckpointStore:
         loaded = await store.load("cp-roundtrip")
 
         assert loaded == snapshot
+
+    @pytest.mark.asyncio
+    async def test_pg_checkpoint_store_overwrites_existing_checkpoint_id(
+        self, store: PGCheckpointStore
+    ):
+        first_snapshot = self._snapshot(
+            "cp-retry",
+            "tape-first",
+            created_at=datetime(2026, 4, 17, tzinfo=UTC),
+        )
+        second_snapshot = self._snapshot(
+            "cp-retry",
+            "tape-second",
+            created_at=datetime(2026, 4, 17, 1, tzinfo=UTC),
+        )
+        second_snapshot = CheckpointSnapshot(
+            meta=CheckpointMeta(
+                checkpoint_id=second_snapshot.meta.checkpoint_id,
+                tape_id=second_snapshot.meta.tape_id,
+                session_id="session-2",
+                entry_count=4,
+                window_start=2,
+                created_at=second_snapshot.meta.created_at,
+                label="retry-save",
+            ),
+            tape_entries=(
+                {
+                    "id": "e-3",
+                    "kind": "message",
+                    "payload": {"content": "retry"},
+                    "timestamp": 3.0,
+                },
+            ),
+            plugin_states={"topic": {"current": "retry"}},
+            extra={"source": "retry"},
+        )
+
+        await store.save(first_snapshot)
+        await store.save(second_snapshot)
+
+        loaded = await store.load("cp-retry")
+
+        assert loaded == second_snapshot
 
     @pytest.mark.asyncio
     async def test_pg_checkpoint_store_list_by_tape_returns_sorted_meta(
