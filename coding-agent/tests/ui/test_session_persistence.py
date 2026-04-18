@@ -89,6 +89,7 @@ def test_redis_session_store_can_rehydrate_session_metadata() -> None:
         def __init__(self) -> None:
             self._data: dict[str, str] = {}
             self._index: set[str] = set()
+            self.smembers_calls = 0
 
         def ping(self) -> bool:
             return True
@@ -112,6 +113,7 @@ def test_redis_session_store_can_rehydrate_session_metadata() -> None:
 
         def smembers(self, key: str) -> set[str]:
             assert key == "coding-agent:sessions:index"
+            self.smembers_calls += 1
             return set(self._index)
 
     client = FakeRedisClient()
@@ -132,6 +134,93 @@ def test_redis_session_store_can_rehydrate_session_metadata() -> None:
     assert payload is not None
     assert payload["id"] == "persisted-session"
     assert "persisted-session" in store.list_sessions()
+
+
+def test_redis_session_store_count_uses_scard_when_available() -> None:
+    class FakeRedisClient:
+        def __init__(self) -> None:
+            self.smembers_calls = 0
+            self.scard_calls = 0
+
+        def ping(self) -> bool:
+            return True
+
+        def set(self, key: str, value: str) -> None:
+            _ = (key, value)
+            raise AssertionError("unused")
+
+        def get(self, key: str) -> str | None:
+            _ = key
+            raise AssertionError("unused")
+
+        def delete(self, key: str) -> None:
+            _ = key
+            raise AssertionError("unused")
+
+        def sadd(self, key: str, value: str) -> None:
+            _ = (key, value)
+            raise AssertionError("unused")
+
+        def srem(self, key: str, value: str) -> None:
+            _ = (key, value)
+            raise AssertionError("unused")
+
+        def smembers(self, key: str) -> set[str]:
+            _ = key
+            self.smembers_calls += 1
+            return {"unexpected"}
+
+        def scard(self, key: str) -> int:
+            assert key == "coding-agent:sessions:index"
+            self.scard_calls += 1
+            return 7
+
+    client = FakeRedisClient()
+    store = RedisSessionStore(client=client, redis_url="redis://test")
+
+    assert store.count_sessions() == 7
+    assert client.scard_calls == 1
+    assert client.smembers_calls == 0
+
+
+def test_redis_session_store_count_falls_back_to_smembers_without_scard() -> None:
+    class FakeRedisClient:
+        def __init__(self) -> None:
+            self.smembers_calls = 0
+
+        def ping(self) -> bool:
+            return True
+
+        def set(self, key: str, value: str) -> None:
+            _ = (key, value)
+            raise AssertionError("unused")
+
+        def get(self, key: str) -> str | None:
+            _ = key
+            raise AssertionError("unused")
+
+        def delete(self, key: str) -> None:
+            _ = key
+            raise AssertionError("unused")
+
+        def sadd(self, key: str, value: str) -> None:
+            _ = (key, value)
+            raise AssertionError("unused")
+
+        def srem(self, key: str, value: str) -> None:
+            _ = (key, value)
+            raise AssertionError("unused")
+
+        def smembers(self, key: str) -> set[str]:
+            assert key == "coding-agent:sessions:index"
+            self.smembers_calls += 1
+            return {"one", "two", "three"}
+
+    client = FakeRedisClient()
+    store = RedisSessionStore(client=client, redis_url="redis://test")
+
+    assert store.count_sessions() == 3
+    assert client.smembers_calls == 1
 
 
 def test_pg_session_metadata_store_round_trips_session_metadata() -> None:

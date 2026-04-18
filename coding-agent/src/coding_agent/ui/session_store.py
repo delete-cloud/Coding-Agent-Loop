@@ -38,6 +38,8 @@ class RedisClient(Protocol):
 
     def smembers(self, key: str) -> set[str] | set[bytes]: ...
 
+    def scard(self, key: str) -> int: ...
+
 
 class SessionStore(Protocol):
     def save(self, session_id: str, data: SessionPayload) -> None: ...
@@ -130,6 +132,12 @@ class RedisSessionStore:
         return sorted(session_ids)
 
     def count_sessions(self) -> int:
+        scard = getattr(self._client, "scard", None)
+        if callable(scard):
+            count = scard(self._index_key)
+            if not isinstance(count, int):
+                raise TypeError("redis scard must return an int")
+            return count
         return len(cast(set[str | bytes], self._client.smembers(self._index_key)))
 
     def delete(self, session_id: str) -> None:
