@@ -475,7 +475,6 @@ class SessionManager:
     ) -> None:
         session = await self.get_session_async(session_id)
         session.event_queues.append(queue)
-        await self._persist_session_async(session)
 
     async def remove_event_queue_async(
         self,
@@ -485,7 +484,6 @@ class SessionManager:
         session = await self.get_session_async(session_id)
         if queue in session.event_queues:
             session.event_queues.remove(queue)
-            await self._persist_session_async(session)
 
     async def check_health_async(self) -> bool:
         return bool(await self._run_store_io(self._store.check_health))
@@ -809,7 +807,6 @@ class SessionManager:
     ) -> None:
         session = self.get_session(session_id)
         session.event_queues.append(queue)
-        self._persist_session(session)
 
     def remove_event_queue(
         self,
@@ -819,7 +816,6 @@ class SessionManager:
         session = self.get_session(session_id)
         if queue in session.event_queues:
             session.event_queues.remove(queue)
-            self._persist_session(session)
 
     async def broadcast_event(
         self,

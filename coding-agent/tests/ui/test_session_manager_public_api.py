@@ -156,6 +156,43 @@ async def test_create_session_persists_configured_restart_metadata_by_default() 
     assert payload["base_url"] == "http://llm.default"
 
 
+def test_event_queue_mutations_do_not_persist_sync_runtime_only_state() -> None:
+    manager = SessionManager(store=InMemorySessionStore())
+    session = Session(
+        id="runtime-only-sync-queues",
+        created_at=datetime.now(),
+        last_activity=datetime.now(),
+        approval_store=ApprovalStore(),
+    )
+    manager.register_session(session)
+    queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+
+    with patch.object(manager, "_persist_session", side_effect=AssertionError):
+        manager.add_event_queue(session.id, queue)
+        manager.remove_event_queue(session.id, queue)
+
+    assert session.event_queues == []
+
+
+@pytest.mark.asyncio
+async def test_event_queue_mutations_do_not_persist_async_runtime_only_state() -> None:
+    manager = SessionManager(store=InMemorySessionStore())
+    session = Session(
+        id="runtime-only-async-queues",
+        created_at=datetime.now(),
+        last_activity=datetime.now(),
+        approval_store=ApprovalStore(),
+    )
+    manager.register_session(session)
+    queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+
+    with patch.object(manager, "_persist_session_async", side_effect=AssertionError):
+        await manager.add_event_queue_async(session.id, queue)
+        await manager.remove_event_queue_async(session.id, queue)
+
+    assert session.event_queues == []
+
+
 def test_session_manager_uses_pg_backends_when_storage_config_requests_pg() -> None:
     class FakePGPool:
         instances: list[FakePGPool] = []
