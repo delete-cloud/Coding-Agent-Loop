@@ -234,6 +234,69 @@ def test_pg_session_metadata_store_round_trips_session_metadata() -> None:
         store.close()
 
 
+def test_pg_session_metadata_store_count_sessions_uses_count_query() -> None:
+    class FakeRecord:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self._payload = payload
+
+        def __iter__(self):
+            return iter(self._payload.items())
+
+    class FakeAsyncPGPool:
+        def __init__(self) -> None:
+            self.executed: list[tuple[str, tuple[object, ...]]] = []
+            self.closed = False
+
+        async def execute(self, query: str, *args: object) -> str:
+            self.executed.append((query, args))
+            if "CREATE TABLE IF NOT EXISTS agent_http_sessions" in query:
+                return "CREATE TABLE"
+            raise AssertionError(f"unexpected execute query: {query}")
+
+        async def fetchrow(self, query: str, *args: object) -> object | None:
+            self.executed.append((query, args))
+            if "SELECT COUNT(*) AS session_count FROM agent_http_sessions" in query:
+                return FakeRecord({"session_count": 3})
+            raise AssertionError(f"unexpected fetchrow query: {query}")
+
+        async def fetch(self, query: str, *args: object) -> list[object]:
+            self.executed.append((query, args))
+            raise AssertionError(f"unexpected fetch query: {query}")
+
+        async def acquire(self):
+            raise AssertionError("unused")
+
+        async def release(self, connection):
+            _ = connection
+            raise AssertionError("unused")
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class FakePGPool:
+        def __init__(self) -> None:
+            self.pool = FakeAsyncPGPool()
+
+        async def get_pool(self) -> FakeAsyncPGPool:
+            return self.pool
+
+        async def close(self) -> None:
+            await self.pool.close()
+
+    pg_pool = FakePGPool()
+    store = PGSessionMetadataStore(pool=pg_pool)
+    try:
+        assert store.count_sessions() == 3
+        count_calls = [
+            args
+            for query, args in pg_pool.pool.executed
+            if "SELECT COUNT(*) AS session_count FROM agent_http_sessions" in query
+        ]
+        assert count_calls == [()]
+    finally:
+        store.close()
+
+
 def test_pg_session_metadata_store_waits_for_loop_start_before_returning() -> None:
     created_loops: list[FakeLoop] = []
     created_threads: list[FakeThread] = []

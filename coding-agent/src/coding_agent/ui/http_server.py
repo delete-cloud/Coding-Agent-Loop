@@ -107,7 +107,7 @@ async def lifespan(app: FastAPI):
 
     # Close all sessions
     for session_id in await session_manager.list_sessions_async():
-        await session_manager.close_session(session_id)
+        await session_manager.shutdown_session_runtime(session_id)
     await session_manager.close()
 
     logger.info("HTTP server shut down")

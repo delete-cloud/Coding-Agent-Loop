@@ -365,6 +365,39 @@ async def test_close_offloads_sync_store_close_to_executor() -> None:
 
 
 @pytest.mark.asyncio
+async def test_shutdown_session_runtime_preserves_persisted_session_metadata() -> None:
+    store = InMemorySessionStore()
+    manager = SessionManager(store=store)
+    session_id = await manager.create_session()
+    session = manager.get_session(session_id)
+    session.turn_in_progress = True
+    session.runtime_pipeline = object()
+    session.runtime_ctx = object()
+
+    class FakeAdapter:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    adapter = FakeAdapter()
+    session.runtime_adapter = adapter
+
+    await manager.shutdown_session_runtime(session_id)
+
+    payload = store.get(session_id)
+    assert payload is not None
+    assert payload["id"] == session_id
+    assert adapter.closed is True
+    reloaded = manager.get_session(session_id)
+    assert reloaded.turn_in_progress is False
+    assert reloaded.runtime_pipeline is None
+    assert reloaded.runtime_ctx is None
+    assert reloaded.runtime_adapter is None
+
+
+@pytest.mark.asyncio
 async def test_capture_checkpoint_persists_tape_id_via_async_store_path() -> None:
     manager = SessionManager(store=InMemorySessionStore())
     session_id = await manager.create_session()

@@ -878,6 +878,24 @@ class SessionManager:
 
         logger.info(f"Closed session: {session_id}")
 
+    async def shutdown_session_runtime(self, session_id: str) -> None:
+        """Release runtime resources without deleting persisted session metadata."""
+        async with self._lock:
+            session = await self.get_session_async(session_id)
+
+            if session.task and not session.task.done():
+                session.task.cancel()
+                try:
+                    await asyncio.wait_for(session.task, timeout=5.0)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    pass
+
+            await self._close_runtime(session)
+            session.task = None
+            session.turn_in_progress = False
+            session.last_activity = datetime.now()
+            await self._persist_session_async(session)
+
     async def close(self) -> None:
         await self._close_resource_async(self._store)
         await self._close_resource_async(self._pg_pool)
