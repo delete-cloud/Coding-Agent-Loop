@@ -61,3 +61,38 @@ def test_cloud_resolver_raises_not_implemented() -> None:
 
     with pytest.raises(NotImplementedError, match="cloud workspace"):
         resolver.resolve_workspace_root(binding)
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (
+            {"kind": "cloud", "workspace_url": 123, "workspace_id": "ws-123"},
+            "string workspace_url and workspace_id",
+        ),
+        (
+            {
+                "kind": "cloud",
+                "workspace_url": "https://workspace.example.com",
+                "workspace_id": 123,
+            },
+            "string workspace_url and workspace_id",
+        ),
+    ],
+)
+def test_cloud_binding_rejects_invalid_field_types(
+    payload: dict[str, object], message: str
+) -> None:
+    with pytest.raises(TypeError, match=message):
+        CloudWorkspaceBinding.from_dict(payload)
+
+
+def test_cloud_resolver_tool_config_raises_not_implemented() -> None:
+    binding = CloudWorkspaceBinding(
+        workspace_url="https://workspace.example.com",
+        workspace_id="ws-123",
+    )
+    resolver = DefaultBindingResolver()
+
+    with pytest.raises(NotImplementedError, match="cloud workspace"):
+        resolver.resolve_tool_config(binding)
