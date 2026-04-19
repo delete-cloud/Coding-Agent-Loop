@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from shutil import which
 from typing import TypedDict
 
 import yaml
@@ -16,6 +17,7 @@ _FIX_SUBJECT_RE = re.compile(
     re.IGNORECASE,
 )
 _NON_WORD_RE = re.compile(r"[^a-z0-9]+")
+_GIT_EXECUTABLE = which("git")
 
 
 @dataclass(frozen=True)
@@ -103,8 +105,9 @@ class PatternRecord(TypedDict):
 def collect_fix_commits(repo_root: Path) -> list[FixCommit]:
     git_root = _git_toplevel(repo_root)
     repo_prefix = _repo_prefix(repo_root=repo_root, git_root=git_root)
+    git_executable = _git_executable()
     command = [
-        "git",
+        git_executable,
         "log",
         "--reverse",
         "--name-only",
@@ -272,14 +275,21 @@ def _slugify(value: str) -> str:
 
 
 def _git_toplevel(repo_root: Path) -> Path:
+    git_executable = _git_executable()
     completed = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"],
+        [git_executable, "rev-parse", "--show-toplevel"],
         check=True,
         capture_output=True,
         text=True,
         cwd=repo_root,
     )
     return Path(completed.stdout.strip())
+
+
+def _git_executable() -> str:
+    if _GIT_EXECUTABLE is None:
+        raise RuntimeError("git executable not found on PATH")
+    return _GIT_EXECUTABLE
 
 
 def _repo_prefix(repo_root: Path, git_root: Path) -> str | None:

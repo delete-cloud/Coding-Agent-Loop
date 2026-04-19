@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import shutil
+import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 from coding_agent.postmortem_phase1 import (
@@ -10,26 +13,32 @@ from coding_agent.postmortem_phase1 import (
 )
 
 
+def _git_executable() -> str:
+    git_executable = shutil.which("git")
+    if git_executable is None:
+        pytest.skip("git executable not available in PATH")
+    return git_executable
+
+
 def test_collect_fix_commits_parses_subjects_and_files_from_git_history(
     tmp_path: Path,
 ) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
+    git_executable = _git_executable()
 
-    import subprocess
-
-    subprocess.run(
-        ["git", "init"], cwd=repo, check=True, capture_output=True, text=True
+    _ = subprocess.run(
+        [git_executable, "init"], cwd=repo, check=True, capture_output=True, text=True
     )
-    subprocess.run(
-        ["git", "config", "user.name", "Test User"],
+    _ = subprocess.run(
+        [git_executable, "config", "user.name", "Test User"],
         cwd=repo,
         check=True,
         capture_output=True,
         text=True,
     )
-    subprocess.run(
-        ["git", "config", "user.email", "test@example.com"],
+    _ = subprocess.run(
+        [git_executable, "config", "user.email", "test@example.com"],
         cwd=repo,
         check=True,
         capture_output=True,
@@ -40,11 +49,15 @@ def test_collect_fix_commits_parses_subjects_and_files_from_git_history(
     target.mkdir()
     file_path = target / "module.py"
     file_path.write_text("print('v1')\n", encoding="utf-8")
-    subprocess.run(
-        ["git", "add", "."], cwd=repo, check=True, capture_output=True, text=True
+    _ = subprocess.run(
+        [git_executable, "add", "."],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
     )
-    subprocess.run(
-        ["git", "commit", "-m", "feat(ui): seed module"],
+    _ = subprocess.run(
+        [git_executable, "commit", "-m", "feat(ui): seed module"],
         cwd=repo,
         check=True,
         capture_output=True,
@@ -52,11 +65,15 @@ def test_collect_fix_commits_parses_subjects_and_files_from_git_history(
     )
 
     file_path.write_text("print('v2')\n", encoding="utf-8")
-    subprocess.run(
-        ["git", "add", "."], cwd=repo, check=True, capture_output=True, text=True
+    _ = subprocess.run(
+        [git_executable, "add", "."],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
     )
-    subprocess.run(
-        ["git", "commit", "-m", "fix(ui): repair session lifecycle race"],
+    _ = subprocess.run(
+        [git_executable, "commit", "-m", "fix(ui): repair session lifecycle race"],
         cwd=repo,
         check=True,
         capture_output=True,
@@ -75,21 +92,20 @@ def test_collect_fix_commits_parses_subjects_and_files_from_git_history(
 def test_build_phase1_artifacts_writes_expected_outputs(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
+    git_executable = _git_executable()
 
-    import subprocess
-
-    subprocess.run(
-        ["git", "init"], cwd=repo, check=True, capture_output=True, text=True
+    _ = subprocess.run(
+        [git_executable, "init"], cwd=repo, check=True, capture_output=True, text=True
     )
-    subprocess.run(
-        ["git", "config", "user.name", "Test User"],
+    _ = subprocess.run(
+        [git_executable, "config", "user.name", "Test User"],
         cwd=repo,
         check=True,
         capture_output=True,
         text=True,
     )
-    subprocess.run(
-        ["git", "config", "user.email", "test@example.com"],
+    _ = subprocess.run(
+        [git_executable, "config", "user.email", "test@example.com"],
         cwd=repo,
         check=True,
         capture_output=True,
@@ -100,11 +116,15 @@ def test_build_phase1_artifacts_writes_expected_outputs(tmp_path: Path) -> None:
     session_dir.mkdir(parents=True)
     session_file = session_dir / "session_manager.py"
     session_file.write_text("STATE = 'initial'\n", encoding="utf-8")
-    subprocess.run(
-        ["git", "add", "."], cwd=repo, check=True, capture_output=True, text=True
+    _ = subprocess.run(
+        [git_executable, "add", "."],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
     )
-    subprocess.run(
-        ["git", "commit", "-m", "feat(ui): add session manager"],
+    _ = subprocess.run(
+        [git_executable, "commit", "-m", "feat(ui): add session manager"],
         cwd=repo,
         check=True,
         capture_output=True,
@@ -112,11 +132,20 @@ def test_build_phase1_artifacts_writes_expected_outputs(tmp_path: Path) -> None:
     )
 
     session_file.write_text("STATE = 'stable'\n", encoding="utf-8")
-    subprocess.run(
-        ["git", "add", "."], cwd=repo, check=True, capture_output=True, text=True
+    _ = subprocess.run(
+        [git_executable, "add", "."],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
     )
-    subprocess.run(
-        ["git", "commit", "-m", "fix(ui): stabilize session lifecycle transitions"],
+    _ = subprocess.run(
+        [
+            git_executable,
+            "commit",
+            "-m",
+            "fix(ui): stabilize session lifecycle transitions",
+        ],
         cwd=repo,
         check=True,
         capture_output=True,
@@ -127,11 +156,20 @@ def test_build_phase1_artifacts_writes_expected_outputs(tmp_path: Path) -> None:
     storage_dir.mkdir(parents=True)
     storage_file = storage_dir / "pg.py"
     storage_file.write_text("POOL = None\n", encoding="utf-8")
-    subprocess.run(
-        ["git", "add", "."], cwd=repo, check=True, capture_output=True, text=True
+    _ = subprocess.run(
+        [git_executable, "add", "."],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
     )
-    subprocess.run(
-        ["git", "commit", "-m", "fix(storage): validate pg config before startup"],
+    _ = subprocess.run(
+        [
+            git_executable,
+            "commit",
+            "-m",
+            "fix(storage): validate pg config before startup",
+        ],
         cwd=repo,
         check=True,
         capture_output=True,
