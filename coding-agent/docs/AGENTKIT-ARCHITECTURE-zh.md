@@ -48,6 +48,11 @@ src/agentkit/
 │   ├── protocol.py          #   Channel 协议
 │   └── local.py             #   内存 LocalChannel
 │
+├── checkpoint/              # 检查点/恢复原语
+│   ├── models.py            #   Checkpoint 数据类
+│   ├── serialize.py         #   序列化辅助
+│   └── service.py           #   CheckpointService
+│
 ├── config/                  # 配置
 │   └── loader.py            #   TOML 加载，AgentConfig 数据类
 │
@@ -70,13 +75,15 @@ src/agentkit/
 │   └── models.py            #   StreamEvent 类型
 │
 ├── runtime/                 # 执行引擎
-│   ├── hookspecs.py         #   14 个钩子规格
+│   ├── hookspecs.py         #   15 个钩子规格
 │   ├── hook_runtime.py      #   HookRuntime 分发器
 │   └── pipeline.py          #   7 阶段 Pipeline
 │
 ├── storage/                 # 持久化协议
 │   ├── protocols.py         #   TapeStore、DocIndex、SessionStore
-│   └── session.py           #   SessionStore 实现
+│   ├── session.py           #   SessionStore 实现
+│   ├── checkpoint_fs.py     #   文件系统检查点存储
+│   └── pg.py                #   PostgreSQL 检查点存储
 │
 ├── tape/                    # 对话历史
 │   ├── models.py            #   Entry 数据类
@@ -209,7 +216,7 @@ class ToolRegistry:
 
 ### 4.1 钩子规格
 
-AgentKit 在 `HOOK_SPECS` 注册表中定义了 **14 个钩子**。每个 `HookSpec` 声明：
+AgentKit 在 `HOOK_SPECS` 注册表中定义了 **15 个钩子**。每个 `HookSpec` 声明：
 
 | 字段 | 用途 |
 |---|---|
@@ -219,7 +226,7 @@ AgentKit 在 `HOOK_SPECS` 注册表中定义了 **14 个钩子**。每个 `HookS
 | `returns_directive` | 返回值为 Directive |
 | `return_type` | 用于验证的预期返回类型 |
 
-### 4.2 14 个钩子
+### 4.2 15 个钩子
 
 | # | 钩子 | 模式 | 阶段 | 用途 |
 |---|---|---|---|---|
@@ -231,12 +238,13 @@ AgentKit 在 `HOOK_SPECS` 注册表中定义了 **14 个钩子**。每个 `HookS
 | 6 | `resolve_context_window` | first_result | build_context | 返回 (window_start, summary_anchor) |
 | 7 | `on_error` | observer | any | 流水线错误时通知 |
 | 8 | `mount` | collect_all | init | 插件初始化，返回状态 |
-| 9 | `on_checkpoint` | observer | save_state | 在轮次边界持久化状态 |
-| 10 | `build_context` | collect_all | build_context | 注入 grounding 上下文（记忆、知识库） |
-| 11 | `on_turn_end` | collect_all | render | 产生 MemoryRecord 指令 |
-| 12 | `execute_tool` | first_result | run_model | 执行单个工具调用 |
-| 13 | `on_session_event` | observer | any | 会话级事件（topic、handoff） |
-| 14 | `execute_tools_batch` | first_result | run_model | 并行批量执行工具 |
+| 9 | `on_shutdown` | observer | any | 流水线关闭时通知 |
+| 10 | `on_checkpoint` | observer | save_state | 在轮次边界持久化状态 |
+| 11 | `build_context` | collect_all | build_context | 注入 grounding 上下文（记忆、知识库） |
+| 12 | `on_turn_end` | collect_all | render | 产生 MemoryRecord 指令 |
+| 13 | `execute_tool` | first_result | run_model | 执行单个工具调用 |
+| 14 | `on_session_event` | observer | any | 会话级事件（topic、handoff） |
+| 15 | `execute_tools_batch` | first_result | run_model | 并行批量执行工具 |
 
 ### 4.3 钩子分发模式
 
@@ -543,7 +551,16 @@ class DirectiveExecutor:
     │  providers  │              │   storage     │
     │  protocol   │              │  protocols    │
     │  models     │              │  session      │
-    └─────────────┘              └───────────────┘
+    └─────────────┘              │ checkpoint_fs │
+                                 │     pg        │
+                                 └───────┬───────┘
+                                         │
+                                    ┌────▼─────┐
+                                    │checkpoint│
+                                    │ models   │
+                                    │serialize │
+                                    │ service  │
+                                    └──────────┘
          │
     ┌────▼────┐    ┌───────────┐    ┌───────────┐
     │ context │    │ directive │    │   tools   │
@@ -564,10 +581,11 @@ class DirectiveExecutor:
 
 ### 关键依赖规则
 
-- `runtime/pipeline.py` 依赖：`plugin.registry`、`providers.models`、`tape`、`directive.types`、`context.builder`
+- `runtime/pipeline.py` 依赖：`plugin.registry`、`providers.models`、`tape`、`directive.types`、`context.builder`（也可能依赖 `checkpoint` 进行 checkpoint/restore）
 - `plugin/` **不**依赖 `runtime/`（清晰分离）
 - `tape/` 仅依赖 `_types`（完全自包含）
 - `providers/` 仅依赖自身的 `models.py`（协议是结构化的）
+- `checkpoint/` 依赖 `tape/models` 和 `storage/protocols`
 - `errors.py` 和 `_types.py` 是叶子依赖（被所有地方使用，自身不依赖任何模块）
 
 ---

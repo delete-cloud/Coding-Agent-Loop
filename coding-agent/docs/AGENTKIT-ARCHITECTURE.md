@@ -50,6 +50,11 @@ src/agentkit/
 │   ├── protocol.py          #   Channel protocol
 │   └── local.py             #   In-memory LocalChannel
 │
+├── checkpoint/              # Checkpoint/restore primitives
+│   ├── models.py            #   Checkpoint dataclasses
+│   ├── serialize.py         #   Serialization helpers
+│   └── service.py           #   CheckpointService
+│
 ├── config/                  # Configuration
 │   └── loader.py            #   TOML loading, AgentConfig dataclass
 │
@@ -72,13 +77,15 @@ src/agentkit/
 │   └── models.py            #   StreamEvent types
 │
 ├── runtime/                 # Execution engine
-│   ├── hookspecs.py         #   14 hook specifications
+│   ├── hookspecs.py         #   15 hook specifications
 │   ├── hook_runtime.py      #   HookRuntime dispatcher
 │   └── pipeline.py          #   7-stage Pipeline
 │
 ├── storage/                 # Persistence protocols
 │   ├── protocols.py         #   TapeStore, DocIndex, SessionStore
-│   └── session.py           #   SessionStore implementation
+│   ├── session.py           #   SessionStore implementation
+│   ├── checkpoint_fs.py     #   Filesystem checkpoint store
+│   └── pg.py                #   PostgreSQL checkpoint store
 │
 ├── tape/                    # Conversation history
 │   ├── models.py            #   Entry dataclass
@@ -211,7 +218,7 @@ The `@tool` decorator generates `ToolSchema` from function signatures and docstr
 
 ### 4.1 Hook Specifications
 
-AgentKit defines **14 hooks** in the `HOOK_SPECS` registry. Each `HookSpec` declares:
+AgentKit defines **15 hooks** in the `HOOK_SPECS` registry. Each `HookSpec` declares:
 
 | Field | Purpose |
 |---|---|
@@ -221,7 +228,7 @@ AgentKit defines **14 hooks** in the `HOOK_SPECS` registry. Each `HookSpec` decl
 | `returns_directive` | Return value is a Directive |
 | `return_type` | Expected return type for validation |
 
-### 4.2 The 14 Hooks
+### 4.2 The 15 Hooks
 
 | # | Hook | Mode | Stage | Purpose |
 |---|---|---|---|---|
@@ -233,12 +240,13 @@ AgentKit defines **14 hooks** in the `HOOK_SPECS` registry. Each `HookSpec` decl
 | 6 | `resolve_context_window` | first_result | build_context | Return (window_start, summary_anchor) |
 | 7 | `on_error` | observer | any | Notified on pipeline errors |
 | 8 | `mount` | collect_all | init | Plugin initialization, return state |
-| 9 | `on_checkpoint` | observer | save_state | Persist state at turn boundaries |
-| 10 | `build_context` | collect_all | build_context | Inject grounding context (memories, KB) |
-| 11 | `on_turn_end` | collect_all | render | Produce MemoryRecord directives |
-| 12 | `execute_tool` | first_result | run_model | Execute single tool call |
-| 13 | `on_session_event` | observer | any | Session-level events (topic, handoff) |
-| 14 | `execute_tools_batch` | first_result | run_model | Execute tool batch in parallel |
+| 9 | `on_shutdown` | observer | any | Notified when pipeline is shutting down |
+| 10 | `on_checkpoint` | observer | save_state | Persist state at turn boundaries |
+| 11 | `build_context` | collect_all | build_context | Inject grounding context (memories, KB) |
+| 12 | `on_turn_end` | collect_all | render | Produce MemoryRecord directives |
+| 13 | `execute_tool` | first_result | run_model | Execute single tool call |
+| 14 | `on_session_event` | observer | any | Session-level events (topic, handoff) |
+| 15 | `execute_tools_batch` | first_result | run_model | Execute tool batch in parallel |
 
 ### 4.3 Hook Dispatch Modes
 
@@ -545,7 +553,16 @@ class DirectiveExecutor:
     │  providers  │              │   storage     │
     │  protocol   │              │  protocols    │
     │  models     │              │  session      │
-    └─────────────┘              └───────────────┘
+    └─────────────┘              │ checkpoint_fs │
+                                 │     pg        │
+                                 └───────┬───────┘
+                                         │
+                                    ┌────▼─────┐
+                                    │checkpoint│
+                                    │ models   │
+                                    │serialize │
+                                    │ service  │
+                                    └──────────┘
          │
     ┌────▼────┐    ┌───────────┐    ┌───────────┐
     │ context │    │ directive │    │   tools   │
@@ -566,10 +583,11 @@ class DirectiveExecutor:
 
 ### Key Dependency Rules
 
-- `runtime/pipeline.py` depends on: `plugin.registry`, `providers.models`, `tape`, `directive.types`, `context.builder`
+- `runtime/pipeline.py` depends on: `plugin.registry`, `providers.models`, `tape`, `directive.types`, `context.builder` (may also depend on `checkpoint` for checkpoint/restore)
 - `plugin/` has **no** dependencies on `runtime/` (clean separation)
 - `tape/` depends only on `_types` (fully self-contained)
 - `providers/` depends only on its own `models.py` (protocol is structural)
+- `checkpoint/` depends on `tape/models` and `storage/protocols`
 - `errors.py` and `_types.py` are leaf dependencies (used everywhere, depend on nothing)
 
 ---
