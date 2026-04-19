@@ -178,8 +178,10 @@ class PGSessionMetadataStore:
         self,
         *,
         pool: AsyncPGSessionPool,
+        owns_pool: bool = False,
     ) -> None:
         self._pool: AsyncPGSessionPool = pool
+        self._owns_pool = owns_pool
         self._schema_ready: bool = False
         self._loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
         self._loop_ready: threading.Event = threading.Event()
@@ -383,7 +385,8 @@ class PGSessionMetadataStore:
 
     def close(self) -> None:
         async def _close_pool() -> None:
-            await self._pool.close()
+            if self._owns_pool:
+                await self._pool.close()
 
         try:
             try:
@@ -434,14 +437,14 @@ def create_session_store(
     normalized_dsn = resolved_dsn.strip() if isinstance(resolved_dsn, str) else None
     resolved_redis_url = redis_url or os.environ.get("AGENT_SESSION_REDIS_URL")
     if resolved_backend == "pg":
+        owns_pool = False
         if pg_pool is None and not normalized_dsn:
             raise ValueError("PG session store requires dsn or pg_pool")
         if pg_pool is None:
             assert normalized_dsn is not None
-            pg_pool = PGPool(dsn=normalized_dsn)
-        return PGSessionMetadataStore(
-            pool=pg_pool,
-        )
+            pg_pool = cast(AsyncPGSessionPool, PGPool(dsn=normalized_dsn))
+            owns_pool = True
+        return PGSessionMetadataStore(pool=pg_pool, owns_pool=owns_pool)
 
     if resolved_backend == "memory":
         return InMemorySessionStore()

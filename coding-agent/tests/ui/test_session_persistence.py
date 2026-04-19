@@ -535,11 +535,55 @@ def test_pg_session_metadata_store_closes_background_loop_and_pool() -> None:
             await self.pool.close()
 
     pool = FakePGPool()
-    store = PGSessionMetadataStore(pool=pool)
+    store = PGSessionMetadataStore(pool=pool, owns_pool=True)
 
     store.close()
 
     assert pool.pool.closed is True
+
+
+def test_pg_session_metadata_store_leaves_injected_pool_open() -> None:
+    class FakeAsyncPGPool:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def execute(self, query: str, *args: object) -> str:
+            _ = (query, args)
+            raise AssertionError("unused")
+
+        async def fetchrow(self, query: str, *args: object) -> dict[str, object] | None:
+            _ = (query, args)
+            raise AssertionError("unused")
+
+        async def fetch(self, query: str, *args: object) -> list[dict[str, object]]:
+            _ = (query, args)
+            raise AssertionError("unused")
+
+        async def acquire(self):
+            raise AssertionError("unused")
+
+        async def release(self, connection):
+            _ = connection
+            raise AssertionError("unused")
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class FakePGPool:
+        def __init__(self) -> None:
+            self.pool = FakeAsyncPGPool()
+
+        async def get_pool(self) -> FakeAsyncPGPool:
+            return self.pool
+
+        async def close(self) -> None:
+            await self.pool.close()
+
+    pool = FakePGPool()
+    store = PGSessionMetadataStore(pool=pool)
+
+    assert store.close() is None
+    assert pool.pool.closed is False
 
 
 def test_pg_session_metadata_store_skips_loop_close_when_thread_does_not_stop() -> None:
@@ -928,7 +972,7 @@ def test_create_session_store_accepts_injected_pg_pool_without_dsn() -> None:
     finally:
         store.close()
 
-    assert pool.closed is True
+    assert pool.closed is False
 
 
 def test_rehydrate_clears_non_restart_safe_runtime_state() -> None:
