@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import types
+from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
@@ -10,6 +11,7 @@ import pytest
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
 from coding_agent.approval import ApprovalPolicy
+from coding_agent.ui.execution_binding import LocalExecutionBinding
 from coding_agent.wire.protocol import (
     ApprovalRequest,
     CompletionStatus,
@@ -347,8 +349,8 @@ async def test_close_session_raises_if_task_survives_cancellation() -> None:
         def cancel(self) -> None:
             self.cancel_calls += 1
 
-    task = cast(asyncio.Task[None], FakeTask())
-    session.task = task
+    fake_task = FakeTask()
+    session.task = cast(asyncio.Task[None], cast(object, fake_task))
 
     with patch(
         "coding_agent.ui.session_manager.asyncio.wait_for",
@@ -358,7 +360,7 @@ async def test_close_session_raises_if_task_survives_cancellation() -> None:
             await manager.close_session(session_id)
 
     assert manager.has_session(session_id) is True
-    assert cast(FakeTask, task).cancel_calls == 1
+    assert fake_task.cancel_calls == 1
 
 
 @pytest.mark.asyncio
@@ -377,8 +379,8 @@ async def test_shutdown_session_runtime_raises_if_task_survives_cancellation() -
         def cancel(self) -> None:
             self.cancel_calls += 1
 
-    task = cast(asyncio.Task[None], FakeTask())
-    session.task = task
+    fake_task = FakeTask()
+    session.task = cast(asyncio.Task[None], cast(object, fake_task))
 
     with patch(
         "coding_agent.ui.session_manager.asyncio.wait_for",
@@ -388,7 +390,7 @@ async def test_shutdown_session_runtime_raises_if_task_survives_cancellation() -
             await manager.shutdown_session_runtime(session_id)
 
     assert manager.has_session(session_id) is True
-    assert cast(FakeTask, task).cancel_calls == 1
+    assert fake_task.cancel_calls == 1
 
 
 @pytest.mark.asyncio
@@ -1025,6 +1027,120 @@ async def test_restore_rewinds_restart_safe_agent_configuration_from_checkpoint_
     assert session.base_url == "http://checkpoint.local"
     assert session.max_steps == 7
     assert session.approval_policy is ApprovalPolicy.INTERACTIVE
+
+
+@pytest.mark.asyncio
+async def test_run_agent_uses_resolved_workspace_root_from_binding() -> None:
+    manager = SessionManager(store=InMemorySessionStore())
+    session_id = await manager.create_session()
+    session = manager.get_session(session_id)
+    session.repo_path = Path("/tmp/not-used-directly")
+    session.execution_binding = LocalExecutionBinding(
+        workspace_root="/tmp/bound-workspace"
+    )
+    manager.register_session(session)
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+            self.ctx = ctx
+
+        async def run_turn(self, prompt: str) -> None:
+            del prompt
+
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        )
+    )
+    fake_ctx = types.SimpleNamespace(config={}, tape=Tape())
+    captured_kwargs: dict[str, object] = {}
+
+    def fake_create_agent(**kwargs):
+        captured_kwargs.update(kwargs)
+        return fake_pipeline, fake_ctx
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
+        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        await manager.run_agent(session_id, "hello")
+
+    assert captured_kwargs["workspace_root"] == Path("/tmp/bound-workspace").resolve()
+
+
+@pytest.mark.asyncio
+async def test_restore_checkpoint_preserves_execution_binding() -> None:
+    store = InMemorySessionStore()
+    manager = SessionManager(store=store)
+    session_id = await manager.create_session()
+    session = manager.get_session(session_id)
+    session.tape_id = "binding-restore-tape"
+    session.execution_binding = LocalExecutionBinding(
+        workspace_root="/tmp/restore-bound"
+    )
+    manager.register_session(session)
+
+    snapshot = types.SimpleNamespace(
+        meta=types.SimpleNamespace(
+            checkpoint_id="cp-binding",
+            tape_id="binding-restore-tape",
+            entry_count=0,
+            window_start=0,
+        ),
+        tape_entries=(),
+        plugin_states={},
+        extra={},
+    )
+    captured_kwargs: dict[str, object] = {}
+
+    class FakeCheckpointService:
+        async def restore(self, checkpoint_id: str):
+            assert checkpoint_id == "cp-binding"
+            return snapshot
+
+        async def list(self, tape_id: str):
+            assert tape_id == "binding-restore-tape"
+            return [snapshot.meta]
+
+        async def delete(self, checkpoint_id: str) -> None:
+            return None
+
+    class FakeTapeStore:
+        async def truncate(self, tape_id: str, keep: int) -> None:
+            return None
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+            self.ctx = ctx
+
+        async def initialize(self) -> None:
+            return None
+
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        )
+    )
+
+    def fake_create_agent(**kwargs):
+        captured_kwargs.update(kwargs)
+        return fake_pipeline, types.SimpleNamespace(
+            config={}, tape=kwargs.get("tape"), plugin_states={}
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
+        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr(
+            manager, "_checkpoint_service", FakeCheckpointService(), raising=False
+        )
+        mp.setattr(manager, "_tape_store", FakeTapeStore(), raising=False)
+        await manager._restore_checkpoint(session, "cp-binding")
+
+    assert captured_kwargs["workspace_root"] == Path("/tmp/restore-bound").resolve()
+    assert isinstance(session.execution_binding, LocalExecutionBinding)
+    assert session.execution_binding.workspace_root == "/tmp/restore-bound"
 
 
 @pytest.mark.asyncio
