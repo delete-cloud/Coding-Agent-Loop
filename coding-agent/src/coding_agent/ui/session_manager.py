@@ -335,6 +335,7 @@ class SessionManager:
     ):
         self._storage_config = storage_config or {}
         self._pg_pool = pg_pool
+        self._owns_pg_pool = False
         self._store = store or self._create_http_session_store()
         self._session_cache: dict[str, Session] = {}
         self._approval_stores: dict[str, ApprovalStore] = {}
@@ -362,6 +363,7 @@ class SessionManager:
             raise RuntimeError("PG storage requires storage_config['dsn']")
         dsn = dsn_obj.strip()
         self._pg_pool = PGPool(dsn=dsn)
+        self._owns_pg_pool = True
         return cast(AsyncPGSessionPool, self._pg_pool)
 
     def _create_http_session_store(self) -> SessionStore:
@@ -930,7 +932,8 @@ class SessionManager:
 
     async def close(self) -> None:
         await self._close_resource_async(self._store)
-        await self._close_resource_async(self._pg_pool)
+        if self._owns_pg_pool:
+            await self._close_resource_async(self._pg_pool)
 
     async def run_agent(
         self,

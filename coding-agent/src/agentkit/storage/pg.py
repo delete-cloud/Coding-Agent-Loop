@@ -165,13 +165,21 @@ class PGTapeStore:
         PRIMARY KEY (tape_id, seq)
     )
     """
-    _MAX_SEQ_SQL: Final[str] = (
-        "SELECT MAX(seq) AS max_seq FROM agent_tapes WHERE tape_id = $1"
-    )
     _INSERT_SQL: Final[str] = """
+    WITH advisory_lock AS (
+        SELECT pg_advisory_xact_lock(hashtext($1))
+    ),
+    max_seq AS (
+        SELECT COALESCE(MAX(seq), -1) AS value
+        FROM agent_tapes
+        WHERE tape_id = $1
+    )
     INSERT INTO agent_tapes (tape_id, seq, entry)
-    SELECT $1, seq, entry::jsonb
-    FROM unnest($2::int[], $3::text[]) AS batch(seq, entry)
+    SELECT
+        $1,
+        (SELECT value FROM max_seq) + batch.ordinality,
+        batch.entry::jsonb
+    FROM advisory_lock, unnest($2::text[]) WITH ORDINALITY AS batch(entry, ordinality)
     """
     _LOAD_SQL: Final[str] = (
         "SELECT entry FROM agent_tapes WHERE tape_id = $1 ORDER BY seq"
@@ -197,25 +205,8 @@ class PGTapeStore:
             return
 
         pool = await self._ensure_schema()
-        row = await pool.fetchrow(self._MAX_SEQ_SQL, tape_id)
-        max_seq = -1
-        if row is not None:
-            raw_max_seq = row.get("max_seq")
-            if raw_max_seq is None:
-                max_seq = -1
-            elif isinstance(raw_max_seq, int):
-                max_seq = raw_max_seq
-            else:
-                raise TypeError("postgres tape row must include int max_seq or None")
-
-        seq_values = [max_seq + offset for offset, _ in enumerate(entries, start=1)]
         payload_values = [json.dumps(entry) for entry in entries]
-        _ = await pool.execute(
-            self._INSERT_SQL,
-            tape_id,
-            seq_values,
-            payload_values,
-        )
+        _ = await pool.execute(self._INSERT_SQL, tape_id, payload_values)
 
     async def load(self, tape_id: str) -> list[dict[str, object]]:
         pool = await self._ensure_schema()

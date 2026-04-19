@@ -66,7 +66,11 @@ def _load_storage_config() -> dict[str, Any]:
         return cast(
             dict[str, Any], load_agent_toml(config_path).extra.get("storage", {})
         )
-    except (ConfigError, OSError):
+    except (ConfigError, OSError) as exc:
+        if isinstance(exc, ConfigError):
+            detail = exc.args[0] if exc.args and isinstance(exc.args[0], str) else ""
+            if not detail.startswith("config file not found:"):
+                raise
         logger.warning(
             "Unable to load storage config from %s; using defaults",
             config_path,

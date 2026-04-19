@@ -50,32 +50,20 @@ class FakePool:
             _ = self.sessions.pop(session_id, None)
             return "DELETE 1"
         if "INSERT INTO agent_tapes" in query:
-            tape_id, second_arg, third_arg = args
+            tape_id, payload_values = args
             if not isinstance(tape_id, str):
                 raise TypeError("tape_id must be a string")
             rows = self.tapes.setdefault(tape_id, [])
-            if isinstance(second_arg, int):
-                seq_values = [second_arg]
-            elif isinstance(second_arg, list) and all(
-                isinstance(item, int) for item in second_arg
+            if not (
+                isinstance(payload_values, list)
+                and all(isinstance(item, (str, dict)) for item in payload_values)
             ):
-                seq_values = second_arg
-            else:
-                raise TypeError("seq must be an int or list[int]")
-
-            if isinstance(third_arg, (str, dict)):
-                payload_values = [third_arg]
-            elif isinstance(third_arg, list) and all(
-                isinstance(item, (str, dict)) for item in third_arg
-            ):
-                payload_values = third_arg
-            else:
                 raise TypeError("payload must be encoded json/dict or list thereof")
-
-            if len(seq_values) != len(payload_values):
-                raise TypeError("seq and payload batch lengths must match")
-
-            for seq, payload in zip(seq_values, payload_values, strict=True):
+            max_seq = max(
+                (row["seq"] for row in rows if isinstance(row["seq"], int)), default=-1
+            )
+            for offset, payload in enumerate(payload_values, start=1):
+                seq = max_seq + offset
                 payload_obj = (
                     json.loads(payload) if isinstance(payload, str) else payload
                 )
@@ -146,19 +134,6 @@ class FakePool:
     async def fetchrow(self, query: str, *args: object) -> dict[str, object] | None:
         self.executed.append((query, args))
         if "SELECT payload FROM agent_sessions" not in query:
-            if "SELECT MAX(seq) AS max_seq FROM agent_tapes" in query:
-                (tape_id,) = args
-                if not isinstance(tape_id, str):
-                    raise TypeError("tape_id must be a string")
-                rows = self.tapes.get(tape_id, [])
-                if not rows:
-                    return {"max_seq": None}
-                return {
-                    "max_seq": max(
-                        row["seq"] if isinstance(row["seq"], int) else -1
-                        for row in rows
-                    )
-                }
             if (
                 "SELECT meta, entries, plugin_states, extra FROM agent_checkpoints"
                 in query
@@ -614,6 +589,22 @@ class TestPGTapeStore:
         ]
 
         assert len(insert_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_save_uses_single_atomic_append_statement(
+        self, store: PGTapeStore, fake_pool: FakePool
+    ):
+        await store.save(
+            "tape-atomic",
+            [{"kind": "message", "payload": {"role": "user", "content": "x"}}],
+        )
+
+        tape_queries = [
+            query for query, _args in fake_pool.executed if "agent_tapes" in query
+        ]
+
+        assert any("pg_advisory_xact_lock" in query for query in tape_queries)
+        assert all("SELECT MAX(seq) AS max_seq" not in query for query in tape_queries)
 
     @pytest.mark.asyncio
     async def test_load_empty_tape(self, store: PGTapeStore):

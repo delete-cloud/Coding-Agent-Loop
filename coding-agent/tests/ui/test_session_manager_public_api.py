@@ -471,6 +471,23 @@ async def test_close_offloads_sync_store_close_to_executor() -> None:
 
 
 @pytest.mark.asyncio
+async def test_close_does_not_close_injected_pg_pool() -> None:
+    class FakePool:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    pool = FakePool()
+    manager = SessionManager(store=InMemorySessionStore(), pg_pool=pool)
+
+    await manager.close()
+
+    assert pool.closed is False
+
+
+@pytest.mark.asyncio
 async def test_shutdown_session_runtime_preserves_persisted_session_metadata() -> None:
     store = InMemorySessionStore()
     manager = SessionManager(store=store)

@@ -1612,11 +1612,31 @@ def test_http_server_import_falls_back_when_agent_toml_is_unreadable(
 
     try:
         with patch("agentkit.config.loader.load_config") as load_config:
-            load_config.side_effect = ConfigError("config file not found")
+            load_config.side_effect = ConfigError(
+                "config file not found: /tmp/missing-agent.toml"
+            )
             http_server = importlib.import_module("coding_agent.ui.http_server")
 
         assert http_server._load_storage_config() == {}
         assert http_server.session_manager._storage_config == {}
+    finally:
+        if original_module is None:
+            monkeypatch.delitem(
+                sys.modules, "coding_agent.ui.http_server", raising=False
+            )
+        else:
+            sys.modules["coding_agent.ui.http_server"] = original_module
+
+
+def test_http_server_import_raises_on_invalid_agent_toml(monkeypatch) -> None:
+    original_module = sys.modules.get("coding_agent.ui.http_server")
+    monkeypatch.delitem(sys.modules, "coding_agent.ui.http_server", raising=False)
+
+    try:
+        with patch("agentkit.config.loader.load_config") as load_config:
+            load_config.side_effect = ConfigError("missing [agent] section")
+            with pytest.raises(ConfigError, match=r"missing \[agent\] section"):
+                importlib.import_module("coding_agent.ui.http_server")
     finally:
         if original_module is None:
             monkeypatch.delitem(
