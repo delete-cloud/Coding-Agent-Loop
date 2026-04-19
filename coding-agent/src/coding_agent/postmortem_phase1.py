@@ -60,6 +60,7 @@ TAXONOMY = {
         "bootstrap",
         "checkpoint",
         "cli",
+        "coding_agent",
         "config",
         "http",
         "kb",
@@ -68,6 +69,7 @@ TAXONOMY = {
         "session_manager",
         "shell",
         "storage_pg",
+        "store",
         "tape",
         "tools",
         "tracing",
@@ -162,11 +164,7 @@ def build_phase1_artifacts(
     _write_yaml(output_dir / "taxonomy.yaml", _build_taxonomy())
     _write_yaml(
         output_dir / "index.yaml",
-        {
-            "patterns": [
-                _index_entry(pattern, output_dir=output_dir) for pattern in patterns
-            ]
-        },
+        {"patterns": [_index_entry(pattern) for pattern in patterns]},
     )
     _write_text(
         output_dir / "onboarding" / "commit-classification-report.md",
@@ -304,42 +302,56 @@ def _normalize_files(files: list[str], *, repo_prefix: str | None) -> list[str]:
 
 def _infer_subsystem(files: list[str]) -> str:
     for path in files:
-        lowered = path.lower()
-        if "ui" in lowered:
+        if _path_has_component(path, "ui"):
             return "ui"
-        if "http" in lowered:
+        if _path_has_component(path, "http"):
             return "http"
-        if "storage" in lowered or "pg" in lowered:
+        if _path_has_component(path, "storage") or _path_has_component(path, "pg"):
             return "storage_pg"
-        if "cli" in lowered:
+        if _path_has_component(path, "cli"):
             return "cli"
-        if "adapter" in lowered:
+        if _path_has_component(path, "adapter"):
             return "adapter"
-        if "approval" in lowered:
+        if _path_has_component(path, "approval"):
             return "approval"
-        if "checkpoint" in lowered:
+        if _path_has_component(path, "checkpoint"):
             return "checkpoint"
-        if "trace" in lowered:
+        if _path_has_component(path, "trace"):
             return "tracing"
-        if "tape" in lowered:
+        if _path_has_component(path, "tape"):
             return "tape"
-        if "tool" in lowered:
+        if _path_has_component(path, "tool"):
             return "tools"
-        if "shell" in lowered:
+        if _path_has_component(path, "shell"):
             return "shell"
-        if "plugin" in lowered:
+        if _path_has_component(path, "plugin"):
             return "plugins"
-        if "config" in lowered:
+        if _path_has_component(path, "config"):
             return "config"
-        if "kb" in lowered:
+        if _path_has_component(path, "kb"):
             return "kb"
-        if "session_manager" in lowered or "session" in lowered:
+        if _path_has_component(path, "session_manager") or _path_has_component(
+            path, "session"
+        ):
             return "session_manager"
-        if "verify" in lowered:
+        if _path_has_component(path, "verify"):
             return "verification"
-        if "agentkit" in lowered:
+        if _path_has_component(path, "agentkit"):
             return "agentkit"
     return "runtime"
+
+
+def _path_has_component(path: str, component: str) -> bool:
+    path_obj = Path(path)
+    normalized_component = component.lower()
+    parts = {part.lower() for part in path_obj.parts}
+    stem = path_obj.stem.lower()
+    return (
+        normalized_component in parts
+        or stem == normalized_component
+        or stem.startswith(f"{normalized_component}_")
+        or stem.endswith(f"_{normalized_component}")
+    )
 
 
 def _normalize_subsystem(subsystem: str) -> str:
@@ -350,6 +362,7 @@ def _normalize_subsystem(subsystem: str) -> str:
         "bootstrap": "bootstrap",
         "checkpoint": "checkpoint",
         "cli": "cli",
+        "coding_agent": "coding_agent",
         "coding-agent": "runtime",
         "config": "config",
         "core": "runtime",
@@ -367,6 +380,7 @@ def _normalize_subsystem(subsystem: str) -> str:
         "shell": "shell",
         "skills": "plugins",
         "storage": "storage_pg",
+        "store": "storage_pg",
         "tape": "tape",
         "test": "verification",
         "tools": "tools",
@@ -391,8 +405,7 @@ def _canonicalize_group_title(title: str) -> str:
     return title
 
 
-def _index_entry(pattern: PatternRecord, *, output_dir: Path) -> dict[str, object]:
-    _ = output_dir
+def _index_entry(pattern: PatternRecord) -> dict[str, object]:
     return {
         "id": pattern["id"],
         "title": pattern["title"],
@@ -463,12 +476,12 @@ def _build_historical_fix_clusters(patterns: list[PatternRecord]) -> str:
 def _build_ingestion_log(
     repo_root: Path, output_dir: Path, commits: list[FixCommit]
 ) -> str:
-    _ = repo_root
+    repo_display = repo_root.name or "repo"
     return "\n".join(
         [
             "# Ingestion Log",
             "",
-            "Repository: `.`",
+            f"Repository: `{repo_display}`",
             f"Output directory: `{output_dir.name}`",
             f"Collected fix commits: {len(commits)}",
             "",

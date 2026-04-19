@@ -176,7 +176,7 @@ def test_build_phase1_artifacts_writes_expected_outputs(tmp_path: Path) -> None:
     ingestion_log = (output_dir / "onboarding" / "ingestion-log.md").read_text(
         encoding="utf-8"
     )
-    assert "Repository: `.`" in ingestion_log
+    assert f"Repository: `{repo.name}`" in ingestion_log
     assert "Output directory: `postmortem`" in ingestion_log
     assert str(repo) not in ingestion_log
 

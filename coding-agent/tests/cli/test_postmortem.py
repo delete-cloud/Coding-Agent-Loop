@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import shutil
+import subprocess
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from coding_agent.__main__ import main
@@ -13,20 +16,22 @@ def test_postmortem_phase1_command_generates_postmortem_directory(
     repo = tmp_path / "repo"
     repo.mkdir()
 
-    import subprocess
+    git_bin = shutil.which("git")
+    if git_bin is None:
+        pytest.skip("git executable not available in PATH")
 
     subprocess.run(
-        ["git", "init"], cwd=repo, check=True, capture_output=True, text=True
+        [git_bin, "init"], cwd=repo, check=True, capture_output=True, text=True
     )
     subprocess.run(
-        ["git", "config", "user.name", "Test User"],
+        [git_bin, "config", "user.name", "Test User"],
         cwd=repo,
         check=True,
         capture_output=True,
         text=True,
     )
     subprocess.run(
-        ["git", "config", "user.email", "test@example.com"],
+        [git_bin, "config", "user.email", "test@example.com"],
         cwd=repo,
         check=True,
         capture_output=True,
@@ -38,10 +43,10 @@ def test_postmortem_phase1_command_generates_postmortem_directory(
     session_file = session_dir / "http_server.py"
     session_file.write_text("STATE = 'draft'\n", encoding="utf-8")
     subprocess.run(
-        ["git", "add", "."], cwd=repo, check=True, capture_output=True, text=True
+        [git_bin, "add", "."], cwd=repo, check=True, capture_output=True, text=True
     )
     subprocess.run(
-        ["git", "commit", "-m", "feat(ui): add http server"],
+        [git_bin, "commit", "-m", "feat(ui): add http server"],
         cwd=repo,
         check=True,
         capture_output=True,
@@ -50,10 +55,10 @@ def test_postmortem_phase1_command_generates_postmortem_directory(
 
     session_file.write_text("STATE = 'stable'\n", encoding="utf-8")
     subprocess.run(
-        ["git", "add", "."], cwd=repo, check=True, capture_output=True, text=True
+        [git_bin, "add", "."], cwd=repo, check=True, capture_output=True, text=True
     )
     subprocess.run(
-        ["git", "commit", "-m", "fix(ui): harden http session transitions"],
+        [git_bin, "commit", "-m", "fix(ui): harden http session transitions"],
         cwd=repo,
         check=True,
         capture_output=True,

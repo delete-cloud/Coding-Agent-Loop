@@ -1,6 +1,6 @@
 # ADR-0013: Adopt Phase 1 postmortem onboarding
 
-**Status**: Proposed
+**Status**: Accepted
 **Date**: 2026-04-19
 
 ## Context
