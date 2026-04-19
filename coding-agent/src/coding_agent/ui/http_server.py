@@ -18,6 +18,7 @@ from sse_starlette.sse import EventSourceResponse
 from agentkit.config.loader import load_config as load_agent_toml
 from agentkit.errors import ConfigError
 from coding_agent.approval import ApprovalPolicy
+from coding_agent.ui.execution_binding import LocalExecutionBinding
 from coding_agent.ui.session_manager import Session, SessionManager
 from coding_agent.ui.schemas import (
     PromptRequest,
@@ -502,6 +503,19 @@ async def create_session(
         approval_policy=approval_policy,
         provider=None,  # Will use mock/test provider
     )
+
+    session = await session_manager.get_session_async(session_id)
+    expected_workspace_root = (
+        str(repo_path.resolve()) if repo_path is not None else str(Path.cwd().resolve())
+    )
+    if (
+        not isinstance(session.execution_binding, LocalExecutionBinding)
+        or session.execution_binding.workspace_root != expected_workspace_root
+    ):
+        session.execution_binding = LocalExecutionBinding(
+            workspace_root=expected_workspace_root
+        )
+        session_manager.register_session(session)
 
     logger.info(f"Created session: {session_id}")
     return SessionResponse(session_id=session_id)
