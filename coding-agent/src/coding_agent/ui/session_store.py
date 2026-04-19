@@ -458,7 +458,7 @@ def create_session_store(
             redis_client_factory=redis_client_factory,
         )
         return RedisSessionStore(client=client, redis_url=resolved_redis_url)
-    except Exception as exc:
+    except OSError as exc:
         safe_exc = redact_sensitive_text(str(exc))
         logger.warning(
             "Redis session store unavailable at %s; falling back to in-memory store: %s",

@@ -13,6 +13,7 @@ from agentkit.checkpoint.models import CheckpointMeta
 from agentkit.tape.tape import Tape
 from coding_agent.approval.store import ApprovalStore
 from coding_agent.approval import ApprovalPolicy
+from agentkit.config.loader import ConfigError
 from coding_agent.wire.protocol import (
     ApprovalRequest,
     CompletionStatus,
@@ -616,6 +617,24 @@ def test_create_session_store_warns_and_falls_back_when_redis_unreachable(
     assert "falling back to in-memory" in caplog.text
     assert "supersecret" not in caplog.text
     assert "redis://example:6379/0" in caplog.text
+
+
+def test_create_session_store_raises_config_error_when_redis_factory_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def failing_factory(url: str):
+        raise ConfigError("invalid redis config")
+
+    with (
+        caplog.at_level("WARNING"),
+        pytest.raises(ConfigError, match="invalid redis config"),
+    ):
+        _ = create_session_store(
+            redis_url="redis://example:6379/0",
+            redis_client_factory=failing_factory,
+        )
+
+    assert "falling back to in-memory" not in caplog.text
 
 
 def test_create_session_store_redacts_reformatted_redis_exception_text(
