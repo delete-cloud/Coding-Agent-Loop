@@ -385,11 +385,10 @@ class SessionManager:
             else None
         )
         dsn = self._storage_config.get("dsn")
-        pg_pool = self._get_pg_pool() if backend == "pg" else None
         return create_session_store(
             backend=backend,
             dsn=dsn if isinstance(dsn, str) else None,
-            pg_pool=pg_pool,
+            pg_pool=None,
         )
 
     def _create_tape_store(self, data_dir: Path) -> TapeStore:

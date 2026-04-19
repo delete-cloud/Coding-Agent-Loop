@@ -662,9 +662,12 @@ async def get_events(
                 except asyncio.TimeoutError:
                     if not await session_manager.has_session_async(session_id):
                         break
-                    if not await session_manager.has_event_queue_async(
-                        session_id, queue
-                    ):
+                    try:
+                        if not await session_manager.has_event_queue_async(
+                            session_id, queue
+                        ):
+                            break
+                    except KeyError:
                         break
                     # Send keepalive
                     yield {"event": "ping", "data": ""}

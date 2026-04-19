@@ -9,6 +9,7 @@ import threading
 from collections.abc import Callable, Coroutine, Iterable
 from typing import Final, Protocol, cast
 
+from agentkit.config.loader import ConfigError
 from agentkit.storage.pg import PGPool
 
 from ..redaction import redact_sensitive_text, redact_url_credentials
@@ -461,7 +462,9 @@ def create_session_store(
             redis_client_factory=redis_client_factory,
         )
         return RedisSessionStore(client=client, redis_url=resolved_redis_url)
-    except OSError as exc:
+    except Exception as exc:
+        if isinstance(exc, ConfigError):
+            raise
         safe_exc = redact_sensitive_text(str(exc))
         logger.warning(
             "Redis session store unavailable at %s; falling back to in-memory store: %s",

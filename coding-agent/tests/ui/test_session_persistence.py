@@ -80,6 +80,25 @@ def test_create_session_store_warns_and_falls_back_when_redis_unreachable(
     assert "falling back to in-memory" in caplog.text
 
 
+def test_create_session_store_falls_back_when_redis_factory_raises_connection_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class FakeRedisConnectionError(Exception):
+        pass
+
+    def failing_factory(url: str):
+        raise FakeRedisConnectionError(f"cannot connect to {url}")
+
+    with caplog.at_level("WARNING"):
+        store = create_session_store(
+            redis_url="redis://example:6379/0",
+            redis_client_factory=failing_factory,
+        )
+
+    assert isinstance(store, InMemorySessionStore)
+    assert "falling back to in-memory" in caplog.text
+
+
 def test_in_memory_session_store_reports_healthy() -> None:
     assert InMemorySessionStore().check_health() is True
 

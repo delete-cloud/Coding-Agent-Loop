@@ -7,6 +7,7 @@ import importlib
 import json
 import sys
 import types
+from collections.abc import AsyncIterator
 from datetime import datetime, timedelta
 from typing import cast
 from unittest.mock import patch
@@ -860,7 +861,7 @@ class TestEventsFanOut:
             }
         )
         response = await get_events(request, session_id, None)
-        event_generator = response.body_iterator
+        event_generator = cast(AsyncIterator[dict[str, str]], response.body_iterator)
         event = await anext(event_generator)
 
         assert event == {"event": "ping", "data": ""}
@@ -873,6 +874,64 @@ class TestEventsFanOut:
         assert all(
             call_session_id == session_id for call_session_id in get_session_calls
         )
+
+    async def test_event_generator_exits_cleanly_when_session_disappears_during_keepalive(
+        self, client, monkeypatch
+    ):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        has_session_results = iter([True, True])
+
+        class FakeEventSourceResponse:
+            def __init__(self, body_iterator):
+                self.body_iterator = body_iterator
+
+        async def fake_has_session_async(current_session_id: str) -> bool:
+            assert current_session_id == session_id
+            return next(has_session_results)
+
+        async def fake_has_event_queue_async(current_session_id: str, queue) -> bool:
+            _ = queue
+            assert current_session_id == session_id
+            raise KeyError(f"Session not found: {session_id}")
+
+        monkeypatch.setattr(
+            session_manager, "has_session_async", fake_has_session_async
+        )
+        monkeypatch.setattr(
+            session_manager, "has_event_queue_async", fake_has_event_queue_async
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.EventSourceResponse",
+            FakeEventSourceResponse,
+        )
+
+        real_wait_for = asyncio.wait_for
+
+        async def fake_wait_for(awaitable, timeout):
+            if timeout == 30.0:
+                awaitable.close()
+                raise asyncio.TimeoutError
+            return await real_wait_for(awaitable, timeout)
+
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.asyncio.wait_for", fake_wait_for
+        )
+
+        request = Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": f"/sessions/{session_id}/events",
+                "headers": [],
+            }
+        )
+        response = await get_events(request, session_id, None)
+        event_generator = cast(AsyncIterator[dict[str, str]], response.body_iterator)
+
+        with pytest.raises(StopAsyncIteration):
+            await anext(event_generator)
 
 
 class TestLifespanShutdown:
