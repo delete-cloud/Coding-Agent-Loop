@@ -9,21 +9,24 @@ import os
 import uuid
 from collections.abc import AsyncIterator
 from collections.abc import Callable
+from functools import partial
 from dataclasses import dataclass, field
 from datetime import datetime
 from inspect import isawaitable
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, TypeVar, cast
 
+from agentkit.storage.checkpoint_fs import FSCheckpointStore
+from agentkit.checkpoint.models import CheckpointMeta
+from agentkit.checkpoint import CheckpointService
+from agentkit.storage.protocols import CheckpointStore, TapeStore
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.approval import ApprovalCoordinator, ApprovalPolicy
 from coding_agent.approval.store import ApprovalStore
 from coding_agent.core import config as core_config
 from coding_agent.plugins.storage import JSONLTapeStore
-from agentkit.checkpoint import CheckpointService
 from coding_agent.providers.base import ChatProvider, ToolSchema
 from agentkit.providers.models import DoneEvent, TextEvent
-from agentkit.storage.checkpoint_fs import FSCheckpointStore
 from agentkit.tape.tape import Tape
 from agentkit.tape.models import Entry
 from coding_agent.wire.local import LocalWire
@@ -37,15 +40,15 @@ from coding_agent.wire.protocol import (
     WireMessage,
 )
 from coding_agent.ui.session_store import (
+    AsyncPGSessionPool,
     SessionStore,
     create_session_store,
 )
-from agentkit.storage.protocols import CheckpointStore, TapeStore
-from agentkit.checkpoint.models import CheckpointMeta
 
 logger = logging.getLogger(__name__)
 
 _CHECKPOINT_SESSION_CONFIG_KEY = "session_restart_config"
+T = TypeVar("T")
 
 
 class MockProvider:
@@ -273,6 +276,33 @@ def _checkpoint_session_config_from_extra(
     )
 
 
+def _load_pg_storage_types() -> tuple[Any, Any, Any]:
+    try:
+        pg_module = importlib.import_module("agentkit.storage.pg")
+    except ImportError as exc:
+        raise RuntimeError(
+            "PG backend is not available; ensure agentkit.storage.pg and its PostgreSQL "
+            "optional dependencies are installed before using tape_backend='pg' "
+            "(for example, install/include the PG extra or `asyncpg`)."
+        ) from exc
+    required_symbols = ("PGPool", "PGTapeStore", "PGCheckpointStore")
+    missing_symbols = [
+        symbol for symbol in required_symbols if not hasattr(pg_module, symbol)
+    ]
+    if missing_symbols:
+        raise RuntimeError(
+            "PG backend is missing required exports from agentkit.storage.pg: "
+            f"{', '.join(missing_symbols)}. Ensure the installed PG backend package "
+            "version includes the PostgreSQL storage implementation and its optional "
+            "dependencies."
+        )
+    return (
+        getattr(pg_module, "PGPool"),
+        getattr(pg_module, "PGTapeStore"),
+        getattr(pg_module, "PGCheckpointStore"),
+    )
+
+
 class _WireConsumer:
     def __init__(
         self,
@@ -296,29 +326,101 @@ class SessionManager:
         self,
         store: SessionStore | None = None,
         *,
+        storage_config: dict[str, Any] | None = None,
+        pg_pool: object | None = None,
         tape_store: TapeStore | None = None,
         checkpoint_store: CheckpointStore | None = None,
         checkpoint_service: CheckpointService | None = None,
         create_agent_fn: Callable[..., tuple[Any, Any]] | None = None,
     ):
-        self._store = store or create_session_store()
+        self._storage_config = storage_config or {}
+        self._pg_pool = pg_pool
+        self._owns_pg_pool = False
+        self._store = store or self._create_http_session_store()
         self._session_cache: dict[str, Session] = {}
         self._approval_stores: dict[str, ApprovalStore] = {}
         self._lock = asyncio.Lock()
+        self._store_io_guard = asyncio.Lock()
         self._session_turn_locks: dict[str, asyncio.Lock] = {}
         data_dir = Path(os.environ.get("AGENT_DATA_DIR", "./data"))
-        self._tape_store = tape_store or JSONLTapeStore(data_dir / "tapes")
-        resolved_checkpoint_store = checkpoint_store or FSCheckpointStore(
-            data_dir / "checkpoints"
+        self._tape_store = tape_store or self._create_tape_store(data_dir)
+        resolved_checkpoint_store = checkpoint_store or self._create_checkpoint_store(
+            data_dir
         )
         self._checkpoint_service = checkpoint_service or CheckpointService(
             resolved_checkpoint_store
         )
         self._create_agent = create_agent_fn
 
+    def _get_pg_pool(self) -> AsyncPGSessionPool:
+        if self._pg_pool is not None:
+            return cast(AsyncPGSessionPool, self._pg_pool)
+
+        PGPool, _, _ = _load_pg_storage_types()
+
+        dsn_obj = self._storage_config.get("dsn")
+        if not isinstance(dsn_obj, str) or not dsn_obj.strip():
+            raise RuntimeError("PG storage requires storage_config['dsn']")
+        dsn = dsn_obj.strip()
+        self._pg_pool = PGPool(dsn=dsn)
+        self._owns_pg_pool = True
+        return cast(AsyncPGSessionPool, self._pg_pool)
+
+    def _create_http_session_store(self) -> SessionStore:
+        configured_backend = self._storage_config.get("http_session_backend")
+        tape_backend = (
+            str(self._storage_config.get("tape_backend", "jsonl")).strip().lower()
+        )
+        if configured_backend is None:
+            legacy_backend = self._storage_config.get("session_backend")
+            if (
+                isinstance(legacy_backend, str)
+                and legacy_backend.strip().lower() == "pg"
+            ):
+                configured_backend = "pg"
+            elif tape_backend == "pg":
+                configured_backend = "pg"
+
+        backend = (
+            configured_backend.strip().lower()
+            if isinstance(configured_backend, str)
+            else None
+        )
+        dsn = self._storage_config.get("dsn")
+        return create_session_store(
+            backend=backend,
+            dsn=dsn if isinstance(dsn, str) else None,
+            pg_pool=None,
+        )
+
+    def _create_tape_store(self, data_dir: Path) -> TapeStore:
+        backend = str(self._storage_config.get("tape_backend", "jsonl")).strip().lower()
+        if backend == "pg":
+            _, PGTapeStore, _ = _load_pg_storage_types()
+            return cast(TapeStore, PGTapeStore(pool=self._get_pg_pool()))
+        return JSONLTapeStore(data_dir / "tapes")
+
+    def _create_checkpoint_store(self, data_dir: Path) -> CheckpointStore:
+        tape_backend = (
+            str(self._storage_config.get("tape_backend", "jsonl")).strip().lower()
+        )
+        default_backend = "pg" if tape_backend == "pg" else "fs"
+        backend = (
+            str(self._storage_config.get("checkpoint_backend", default_backend))
+            .strip()
+            .lower()
+        )
+        if backend == "pg":
+            _, _, PGCheckpointStore = _load_pg_storage_types()
+            return cast(CheckpointStore, PGCheckpointStore(pool=self._get_pg_pool()))
+        return FSCheckpointStore(data_dir / "checkpoints")
+
     async def _close_runtime(self, session: Session) -> None:
         adapter = session.runtime_adapter
         self._invalidate_runtime(session)
+        await self._close_runtime_adapter(adapter)
+
+    async def _close_runtime_adapter(self, adapter: object | None) -> None:
         if adapter is None:
             return
         close = getattr(adapter, "close", None)
@@ -328,12 +430,14 @@ class SessionManager:
                 await close_result
 
     def _close_runtime_sync_safe(self, session: Session) -> None:
+        adapter = session.runtime_adapter
+        self._invalidate_runtime(session)
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            asyncio.run(self._close_runtime(session))
+            asyncio.run(self._close_runtime_adapter(adapter))
             return
-        loop.create_task(self._close_runtime(session))
+        _ = loop.create_task(self._close_runtime_adapter(adapter))
 
     def _create_agent_for_session(self, **kwargs: Any) -> tuple[Any, Any]:
         factory = self._create_agent
@@ -347,6 +451,89 @@ class SessionManager:
             lock = asyncio.Lock()
             self._session_turn_locks[session_id] = lock
         return lock
+
+    async def _run_store_io(self, func: Callable[..., T], /, *args: object) -> T:
+        async with self._store_io_guard:
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, partial(func, *args))
+
+    async def _persist_session_async(self, session: Session) -> None:
+        self._session_cache[session.id] = session
+        await self._run_store_io(
+            self._store.save,
+            session.id,
+            cast(dict[str, Any], session.to_store_data()),
+        )
+
+    async def get_session_async(self, session_id: str) -> Session:
+        session = self._session_cache.get(session_id)
+        if session is not None:
+            return session
+        loaded = await self._run_store_io(self._store.load, session_id)
+        if loaded is None:
+            raise KeyError(f"Session not found: {session_id}")
+        return self._hydrate_session(
+            Session.from_store_data(cast(dict[str, Any], loaded))
+        )
+
+    async def has_session_async(self, session_id: str) -> bool:
+        if session_id in self._session_cache:
+            return True
+        return await self._run_store_io(self._store.load, session_id) is not None
+
+    async def has_event_queue_async(
+        self,
+        session_id: str,
+        queue: asyncio.Queue[dict[str, Any]],
+    ) -> bool:
+        session = await self.get_session_async(session_id)
+        return queue in session.event_queues
+
+    async def list_sessions_async(self) -> list[str]:
+        return await self._run_store_io(self._store.list_sessions)
+
+    async def count_sessions_async(self) -> int:
+        return await self._run_store_io(self._store.count_sessions)
+
+    async def get_session_info_async(self, session_id: str) -> dict[str, Any]:
+        session = await self.get_session_async(session_id)
+        return session.as_dict()
+
+    async def add_event_queue_async(
+        self,
+        session_id: str,
+        queue: asyncio.Queue[dict[str, Any]],
+    ) -> None:
+        session = await self.get_session_async(session_id)
+        session.event_queues.append(queue)
+
+    async def remove_event_queue_async(
+        self,
+        session_id: str,
+        queue: asyncio.Queue[dict[str, Any]],
+    ) -> None:
+        session = await self.get_session_async(session_id)
+        if queue in session.event_queues:
+            session.event_queues.remove(queue)
+
+    async def check_health_async(self) -> bool:
+        return bool(await self._run_store_io(self._store.check_health))
+
+    async def _close_resource_async(self, resource: object) -> None:
+        close = getattr(resource, "close", None)
+        if not callable(close):
+            return
+        close_result = await self._run_store_io(close)
+        if isawaitable(close_result):
+            await close_result
+
+    async def remove_session_async(self, session_id: str) -> None:
+        session = await self.get_session_async(session_id)
+        await self._close_runtime(session)
+        self._session_cache.pop(session_id, None)
+        await self._run_store_io(self._store.delete, session_id)
+        self._approval_stores.pop(session_id, None)
+        self._session_turn_locks.pop(session_id, None)
 
     async def _restore_tape(self, tape_id: str | None) -> Tape | None:
         if tape_id is None:
@@ -380,7 +567,7 @@ class SessionManager:
             session.pending_approval = session.approval_coordinator.projection()
             session.approval_event.clear()
             session.approval_response = None
-            self._persist_session(session)
+            await self._persist_session_async(session)
             await session.wire.send(req)
             try:
                 response = await session.approval_coordinator.wait_for_response(
@@ -401,12 +588,12 @@ class SessionManager:
                 }
                 session.approval_event.set()
                 session.pending_approval = session.approval_coordinator.projection()
-                self._persist_session(session)
+                await self._persist_session_async(session)
                 return response
             finally:
                 session.pending_approval = session.approval_coordinator.projection()
                 session.approval_response = None
-                self._persist_session(session)
+                await self._persist_session_async(session)
 
         return _WireConsumer(session.wire, _request_approval)
 
@@ -495,7 +682,7 @@ class SessionManager:
         session.runtime_pipeline = pipeline
         session.runtime_ctx = ctx
         session.runtime_adapter = adapter
-        self._persist_session(session)
+        await self._persist_session_async(session)
 
         checkpoints = await self._checkpoint_service.list(ctx.tape.tape_id)
         for checkpoint_meta in checkpoints:
@@ -580,7 +767,7 @@ class SessionManager:
         )
 
         async with self._lock:
-            self._persist_session(session)
+            await self._persist_session_async(session)
 
         logger.info(f"Created session: {session_id}")
         return session_id
@@ -651,7 +838,6 @@ class SessionManager:
     ) -> None:
         session = self.get_session(session_id)
         session.event_queues.append(queue)
-        self._persist_session(session)
 
     def remove_event_queue(
         self,
@@ -661,7 +847,6 @@ class SessionManager:
         session = self.get_session(session_id)
         if queue in session.event_queues:
             session.event_queues.remove(queue)
-            self._persist_session(session)
 
     async def broadcast_event(
         self,
@@ -706,7 +891,7 @@ class SessionManager:
             KeyError: If session not found
         """
         async with self._lock:
-            session = self.get_session(session_id)
+            session = await self.get_session_async(session_id)
 
             # Cancel any running task
             if session.task and not session.task.done():
@@ -715,10 +900,40 @@ class SessionManager:
                     await asyncio.wait_for(session.task, timeout=5.0)
                 except (asyncio.CancelledError, asyncio.TimeoutError):
                     pass
+                if not session.task.done():
+                    raise RuntimeError(
+                        f"Session task for {session_id} did not stop after cancellation"
+                    )
 
-            self.remove_session(session_id)
+            await self.remove_session_async(session_id)
 
         logger.info(f"Closed session: {session_id}")
+
+    async def shutdown_session_runtime(self, session_id: str) -> None:
+        """Release runtime resources without deleting persisted session metadata."""
+        async with self._lock:
+            session = await self.get_session_async(session_id)
+
+            if session.task and not session.task.done():
+                session.task.cancel()
+                try:
+                    await asyncio.wait_for(session.task, timeout=5.0)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    pass
+                if not session.task.done():
+                    raise RuntimeError(
+                        f"Session task for {session_id} did not stop after cancellation"
+                    )
+
+            await self._close_runtime(session)
+            session.task = None
+            session.turn_in_progress = False
+            await self._persist_session_async(session)
+
+    async def close(self) -> None:
+        await self._close_resource_async(self._store)
+        if self._owns_pg_pool:
+            await self._close_resource_async(self._pg_pool)
 
     async def run_agent(
         self,
@@ -730,10 +945,10 @@ class SessionManager:
             raise RuntimeError("turn already in progress")
 
         async with turn_lock:
-            session = self.get_session(session_id)
+            session = await self.get_session_async(session_id)
             session.last_activity = datetime.now()
             session.turn_in_progress = True
-            self._persist_session(session)
+            await self._persist_session_async(session)
 
             try:
                 approval_mode_map = {
@@ -762,7 +977,7 @@ class SessionManager:
                         tape=await self._restore_tape(session.tape_id),
                     )
                     session.tape_id = ctx.tape.tape_id
-                    self._persist_session(session)
+                    await self._persist_session_async(session)
                     ctx.config["wire_consumer"] = None
                     ctx.config["agent_id"] = ""
 
@@ -783,7 +998,7 @@ class SessionManager:
                 ctx.config["wire_consumer"] = consumer
                 await adapter.run_turn(prompt)
                 session.tape_id = ctx.tape.tape_id
-                self._persist_session(session)
+                await self._persist_session_async(session)
             except Exception as exc:
                 await self._close_runtime(session)
                 logger.exception("HTTP session turn failed")
@@ -807,7 +1022,7 @@ class SessionManager:
                 if session.task is None or session.task is not current_task:
                     session.turn_in_progress = False
                 session.last_activity = datetime.now()
-                self._persist_session(session)
+                await self._persist_session_async(session)
 
     async def submit_approval(
         self,
@@ -833,7 +1048,7 @@ class SessionManager:
         Raises:
             KeyError: If session not found
         """
-        session = self.get_session(session_id)
+        session = await self.get_session_async(session_id)
 
         # Create approval response and submit to ApprovalStore
         response = ApprovalResponse(
@@ -853,7 +1068,7 @@ class SessionManager:
                 "feedback": feedback,
             }
             session.approval_event.set()
-            self._persist_session(session)
+            await self._persist_session_async(session)
             logger.info(f"Approval submitted for session {session_id}: {approved}")
         else:
             logger.warning(
@@ -868,7 +1083,7 @@ class SessionManager:
         approval_req: ApprovalRequest,
         timeout_seconds: float,
     ) -> ApprovalResponse:
-        if not self.has_session(session_id):
+        if not await self.has_session_async(session_id):
             return ApprovalResponse(
                 session_id=session_id,
                 request_id=approval_req.request_id,
@@ -876,7 +1091,7 @@ class SessionManager:
                 feedback="Session not found",
             )
 
-        session = self.get_session(session_id)
+        session = await self.get_session_async(session_id)
         if not session.turn_in_progress:
             return ApprovalResponse(
                 session_id=session_id,
@@ -897,7 +1112,7 @@ class SessionManager:
         session.pending_approval = session.approval_coordinator.projection()
         session.approval_event.clear()
         session.approval_response = None
-        self._persist_session(session)
+        await self._persist_session_async(session)
 
         try:
             response = await session.approval_coordinator.wait_for_response(
@@ -910,7 +1125,7 @@ class SessionManager:
             session.pending_approval = session.approval_coordinator.projection()
             session.approval_response = None
             _ = session.approval_event.set()
-            self._persist_session(session)
+            await self._persist_session_async(session)
 
         return ApprovalResponse(
             session_id=session_id,
@@ -952,14 +1167,12 @@ class SessionManager:
             List of closed session IDs
         """
         now = datetime.now()
-        closed = []
-
-        async with self._lock:
-            session_ids = list(self._store.list_sessions())
+        closed: list[str] = []
+        session_ids = await self.list_sessions_async()
 
         for session_id in session_ids:
             try:
-                session = self.get_session(session_id)
+                session = await self.get_session_async(session_id)
                 idle_time = now - session.last_activity
                 if idle_time.total_seconds() > max_idle_minutes * 60:
                     await self.close_session(session_id)
@@ -974,7 +1187,7 @@ class SessionManager:
         return closed
 
     async def ensure_session_runtime(self, session_id: str) -> Any:
-        session = self.get_session(session_id)
+        session = await self.get_session_async(session_id)
         if session.runtime_ctx is not None and session.runtime_adapter is not None:
             return session.runtime_ctx
 
@@ -1009,7 +1222,7 @@ class SessionManager:
         session.runtime_ctx = ctx
         session.runtime_adapter = adapter
         session.tape_id = ctx.tape.tape_id
-        self._persist_session(session)
+        await self._persist_session_async(session)
         return ctx
 
     async def capture_checkpoint(
@@ -1024,7 +1237,7 @@ class SessionManager:
             raise RuntimeError("turn already in progress")
 
         async with turn_lock:
-            session = self.get_session(session_id)
+            session = await self.get_session_async(session_id)
             if session.turn_in_progress or (session.task and not session.task.done()):
                 raise RuntimeError("turn already in progress")
 
@@ -1041,11 +1254,11 @@ class SessionManager:
                 ctx, label=label, extra=payload
             )
             session.tape_id = ctx.tape.tape_id
-            self._persist_session(session)
+            await self._persist_session_async(session)
             return checkpoint
 
     async def list_checkpoints(self, session_id: str) -> list[CheckpointMeta]:
-        session = self.get_session(session_id)
+        session = await self.get_session_async(session_id)
         if session.tape_id is None:
             return []
         return await self._checkpoint_service.list(session.tape_id)
@@ -1056,7 +1269,7 @@ class SessionManager:
             raise RuntimeError("turn already in progress")
 
         async with turn_lock:
-            session = self.get_session(session_id)
+            session = await self.get_session_async(session_id)
             if session.turn_in_progress or (session.task and not session.task.done()):
                 raise RuntimeError("turn already in progress")
             await self._restore_checkpoint(session, checkpoint_id)

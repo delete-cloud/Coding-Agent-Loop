@@ -15,6 +15,8 @@ from fastapi import FastAPI, HTTPException, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 
+from agentkit.config.loader import load_config as load_agent_toml
+from agentkit.errors import ConfigError
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.ui.session_manager import Session, SessionManager
 from coding_agent.ui.schemas import (
@@ -58,8 +60,31 @@ APPROVAL_TIMEOUT_SECONDS = 120
 SESSION_IDLE_TIMEOUT_MINUTES = 30
 
 
+def _load_storage_config() -> dict[str, Any]:
+    config_path = Path(__file__).resolve().parent.parent / "agent.toml"
+    try:
+        return cast(
+            dict[str, Any], load_agent_toml(config_path).extra.get("storage", {})
+        )
+    except (ConfigError, OSError) as exc:
+        if isinstance(exc, ConfigError):
+            detail = exc.args[0] if exc.args and isinstance(exc.args[0], str) else ""
+            if not detail.startswith("config file not found:"):
+                raise
+        logger.warning(
+            "Unable to load storage config from %s; using defaults",
+            config_path,
+            exc_info=True,
+        )
+        return {}
+
+
+def _build_session_manager() -> SessionManager:
+    return SessionManager(storage_config=_load_storage_config())
+
+
 # Global session manager
-session_manager = SessionManager()
+session_manager = _build_session_manager()
 
 
 def _key_error_detail(exc: KeyError) -> str:
@@ -85,8 +110,18 @@ async def lifespan(app: FastAPI):
         pass
 
     # Close all sessions
-    for session_id in list(session_manager.list_sessions()):
-        await session_manager.close_session(session_id)
+    try:
+        for session_id in await session_manager.list_sessions_async():
+            try:
+                await session_manager.shutdown_session_runtime(session_id)
+            except Exception:
+                logger.warning(
+                    "Failed to shut down runtime for session %s during server shutdown",
+                    session_id,
+                    exc_info=True,
+                )
+    finally:
+        await session_manager.close()
 
     logger.info("HTTP server shut down")
 
@@ -321,7 +356,50 @@ def _wire_message_to_event(msg: WireMessage) -> dict[str, str]:
 
 async def _broadcast_event(session: Session, event: dict[str, str]) -> None:
     """Broadcast event to all connected clients."""
-    await session_manager.broadcast_event(session.id, event)
+    active_queues: list[asyncio.Queue[dict[str, str]]] = []
+    full_pruned_count = 0
+    failed_pruned_count = 0
+
+    for queue in session.event_queues:
+        try:
+            queue.put_nowait(event)
+            active_queues.append(queue)
+        except asyncio.QueueFull:
+            full_pruned_count += 1
+        except Exception:
+            failed_pruned_count += 1
+            logger.debug("Dropping closed event queue", exc_info=True)
+
+    session.event_queues = active_queues
+
+    if full_pruned_count:
+        logger.info(
+            "Pruned %d full event queue(s) for session %s",
+            full_pruned_count,
+            session.id,
+        )
+    if failed_pruned_count:
+        logger.info(
+            "Pruned %d failed event queue(s) for session %s",
+            failed_pruned_count,
+            session.id,
+        )
+
+
+async def _cleanup_event_queue_on_disconnect(
+    session_id: str,
+    queue: asyncio.Queue[dict[str, str]],
+) -> None:
+    try:
+        await asyncio.shield(
+            session_manager.remove_event_queue_async(session_id, queue)
+        )
+    except KeyError:
+        logger.debug(
+            "Event queue cleanup skipped for already-removed session %s",
+            session_id,
+            exc_info=True,
+        )
 
 
 async def _cleanup_idle_sessions() -> None:
@@ -364,7 +442,9 @@ async def stream_wire_messages(wire: LocalWire) -> AsyncIterator[dict[str, str]]
 @limiter.limit(RateLimits.HEALTH)
 async def liveness_check(request: Request) -> HealthResponse:
     return HealthResponse(
-        status="healthy", sessions=len(session_manager.list_sessions()), version="2.0.0"
+        status="healthy",
+        sessions=await session_manager.count_sessions_async(),
+        version="2.0.0",
     )
 
 
@@ -372,7 +452,7 @@ async def liveness_check(request: Request) -> HealthResponse:
 @limiter.limit(RateLimits.HEALTH)
 async def readiness_check(request: Request, response: Response) -> ReadinessResponse:
     try:
-        session_store_ok = bool(session_manager._store.check_health())
+        session_store_ok = bool(await session_manager.check_health_async())
     except Exception:
         logger.exception("Session store readiness check failed")
         session_store_ok = False
@@ -446,10 +526,10 @@ async def send_prompt(
     if not prompt_text:
         raise HTTPException(status_code=422, detail="Prompt is required")
 
-    if not session_manager.has_session(session_id):
+    if not await session_manager.has_session_async(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
 
-    session = session_manager.get_session(session_id)
+    session = await session_manager.get_session_async(session_id)
 
     if session.turn_in_progress or (session.task and not session.task.done()):
         raise HTTPException(status_code=409, detail="Turn already in progress")
@@ -532,10 +612,10 @@ async def approve_request(
     if is_approved is None:
         raise HTTPException(status_code=422, detail="approved is required")
 
-    if not session_manager.has_session(session_id):
+    if not await session_manager.has_session_async(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
 
-    session = session_manager.get_session(session_id)
+    session = await session_manager.get_session_async(session_id)
     if session.approval_store.get_request(req_id) is None:
         raise HTTPException(status_code=400, detail="No pending approval request")
 
@@ -567,12 +647,12 @@ async def get_events(
     api_key: str | None = Depends(verify_api_key),
 ) -> EventSourceResponse:
     """Persistent SSE event stream (fan-out supported)."""
-    if not session_manager.has_session(session_id):
+    if not await session_manager.has_session_async(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
 
-    session = session_manager.get_session(session_id)
+    session = await session_manager.get_session_async(session_id)
     queue: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=100)
-    session_manager.add_event_queue(session_id, queue)
+    await session_manager.add_event_queue_async(session_id, queue)
 
     async def event_generator() -> AsyncIterator[dict[str, str]]:
         """Generate events from queue."""
@@ -581,13 +661,25 @@ async def get_events(
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=30.0)
                     yield event
+                    if event.get("event") == "SessionClosed":
+                        break
                 except asyncio.TimeoutError:
+                    if not await session_manager.has_session_async(session_id):
+                        break
+                    try:
+                        if not await session_manager.has_event_queue_async(
+                            session_id, queue
+                        ):
+                            break
+                    except KeyError:
+                        break
                     # Send keepalive
                     yield {"event": "ping", "data": ""}
         except asyncio.CancelledError:
             # Client disconnected
-            session_manager.remove_event_queue(session_id, queue)
             raise
+        finally:
+            await _cleanup_event_queue_on_disconnect(session_id, queue)
 
     return EventSourceResponse(event_generator())
 
@@ -600,8 +692,8 @@ async def get_session(
     api_key: str | None = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Get session state."""
-    if session_manager.has_session(session_id):
-        return session_manager.get_session_info(session_id)
+    if await session_manager.has_session_async(session_id):
+        return await session_manager.get_session_info_async(session_id)
 
     raise HTTPException(status_code=404, detail="Session not found")
 
@@ -617,7 +709,7 @@ async def capture_checkpoint(
     body: CheckpointCaptureRequest | None = None,
     api_key: str | None = Depends(verify_api_key),
 ) -> CheckpointMetadataResponse:
-    if not session_manager.has_session(session_id):
+    if not await session_manager.has_session_async(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
 
     try:
@@ -651,7 +743,7 @@ async def list_checkpoints(
     session_id: str,
     api_key: str | None = Depends(verify_api_key),
 ) -> CheckpointListResponse:
-    if not session_manager.has_session(session_id):
+    if not await session_manager.has_session_async(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
 
     checkpoints = await session_manager.list_checkpoints(session_id)
@@ -682,7 +774,7 @@ async def restore_checkpoint(
     checkpoint_id: str,
     api_key: str | None = Depends(verify_api_key),
 ) -> CheckpointRestoreResponse:
-    if not session_manager.has_session(session_id):
+    if not await session_manager.has_session_async(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
 
     try:
@@ -709,19 +801,19 @@ async def close_session(
     api_key: str | None = Depends(verify_api_key),
 ) -> CloseSessionResponse:
     """Close session and release resources."""
-    if not session_manager.has_session(session_id):
-        raise HTTPException(status_code=404, detail="Session not found")
+    try:
+        session = await session_manager.get_session_async(session_id)
+        await session_manager.close_session(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
+    except Exception as exc:
+        logger.exception("Unexpected error while closing session %s", session_id)
+        raise HTTPException(status_code=500, detail="Internal server error") from exc
 
-    session = session_manager.get_session(session_id)
     await _broadcast_event(
         session,
         {"event": "SessionClosed", "data": json.dumps({"session_id": session_id})},
     )
-
-    try:
-        await session_manager.close_session(session_id)
-    except Exception as e:
-        logger.exception(f"Error closing session in manager: {e}")
 
     logger.info(f"Closed session: {session_id}")
     return CloseSessionResponse(status="closed", session_id=session_id)
@@ -737,7 +829,7 @@ async def wait_for_approval(
     It will block until the user responds via the /approve endpoint
     or the timeout expires.
     """
-    if not session_manager.has_session(session_id):
+    if not await session_manager.has_session_async(session_id):
         return ApprovalResponse(
             session_id=session_id,
             request_id=approval_req.request_id,
@@ -745,7 +837,7 @@ async def wait_for_approval(
             feedback="Session not found",
         )
 
-    session = session_manager.get_session(session_id)
+    session = await session_manager.get_session_async(session_id)
     event = _wire_message_to_event(approval_req)
     await _broadcast_event(session, event)
     response = await session_manager.wait_for_http_approval(

@@ -6,14 +6,24 @@ from unittest.mock import AsyncMock
 import pytest
 from _pytest.monkeypatch import MonkeyPatch
 
-from agentkit.storage.protocols import SessionStore, TapeStore
-from agentkit.storage.pg import PGPool, PGSessionLock, PGSessionStore, PGTapeStore
+from datetime import UTC, datetime
+
+from agentkit.checkpoint.models import CheckpointMeta, CheckpointSnapshot
+from agentkit.storage.protocols import CheckpointStore, SessionStore, TapeStore
+from agentkit.storage.pg import (
+    PGCheckpointStore,
+    PGPool,
+    PGSessionLock,
+    PGSessionStore,
+    PGTapeStore,
+)
 
 
 class FakePool:
     def __init__(self) -> None:
         self.sessions: dict[str, dict[str, object]] = {}
         self.tapes: dict[str, list[dict[str, int | dict[str, object]]]] = {}
+        self.checkpoints: dict[str, dict[str, object]] = {}
         self.closed: bool = False
         self.executed: list[tuple[str, tuple[object, ...]]] = []
 
@@ -23,9 +33,12 @@ class FakePool:
             session_id, payload = args
             if not isinstance(session_id, str):
                 raise TypeError("session_id must be a string")
-            if not isinstance(payload, str):
-                raise TypeError("payload must be encoded json")
-            payload_obj = json.loads(payload)
+            if isinstance(payload, str):
+                payload_obj = json.loads(payload)
+            elif isinstance(payload, dict):
+                payload_obj = payload
+            else:
+                raise TypeError("payload must be encoded json or dict")
             if not isinstance(payload_obj, dict):
                 raise TypeError("payload must decode to a dict")
             self.sessions[session_id] = cast(dict[str, object], payload_obj)
@@ -37,39 +50,59 @@ class FakePool:
             _ = self.sessions.pop(session_id, None)
             return "DELETE 1"
         if "INSERT INTO agent_tapes" in query:
-            tape_id, second_arg, third_arg = args
+            tape_id, payload_values = args
             if not isinstance(tape_id, str):
                 raise TypeError("tape_id must be a string")
             rows = self.tapes.setdefault(tape_id, [])
-            if isinstance(second_arg, int):
-                seq_values = [second_arg]
-            elif isinstance(second_arg, list) and all(
-                isinstance(item, int) for item in second_arg
+            if not (
+                isinstance(payload_values, list)
+                and all(isinstance(item, (str, dict)) for item in payload_values)
             ):
-                seq_values = second_arg
-            else:
-                raise TypeError("seq must be an int or list[int]")
-
-            if isinstance(third_arg, str):
-                payload_values = [third_arg]
-            elif isinstance(third_arg, list) and all(
-                isinstance(item, str) for item in third_arg
-            ):
-                payload_values = third_arg
-            else:
-                raise TypeError("payload must be encoded json or list[str]")
-
-            if len(seq_values) != len(payload_values):
-                raise TypeError("seq and payload batch lengths must match")
-
-            for seq, payload in zip(seq_values, payload_values, strict=True):
-                payload_obj = json.loads(payload)
+                raise TypeError("payload must be encoded json/dict or list thereof")
+            max_seq = max(
+                (row["seq"] for row in rows if isinstance(row["seq"], int)), default=-1
+            )
+            for offset, payload in enumerate(payload_values, start=1):
+                seq = max_seq + offset
+                payload_obj = (
+                    json.loads(payload) if isinstance(payload, str) else payload
+                )
                 if not isinstance(payload_obj, dict):
                     raise TypeError("payload must decode to a dict")
                 rows.append({"seq": seq, "entry": cast(dict[str, object], payload_obj)})
             rows.sort(
                 key=lambda item: item["seq"] if isinstance(item["seq"], int) else -1
             )
+            return "INSERT 0 1"
+        if "INSERT INTO agent_checkpoints" in query:
+            checkpoint_id, tape_id, meta_json, entries_json, state_json, extra_json = (
+                args
+            )
+            if not isinstance(checkpoint_id, str):
+                raise TypeError("checkpoint_id must be a string")
+            if not isinstance(tape_id, str):
+                raise TypeError("tape_id must be a string")
+            if not all(
+                isinstance(item, (str, dict, list))
+                for item in (meta_json, entries_json, state_json, extra_json)
+            ):
+                raise TypeError("checkpoint payloads must be json-compatible values")
+            self.checkpoints[checkpoint_id] = {
+                "checkpoint_id": checkpoint_id,
+                "tape_id": tape_id,
+                "meta": json.loads(meta_json)
+                if isinstance(meta_json, str)
+                else meta_json,
+                "entries": json.loads(entries_json)
+                if isinstance(entries_json, str)
+                else entries_json,
+                "plugin_states": json.loads(state_json)
+                if isinstance(state_json, str)
+                else state_json,
+                "extra": json.loads(extra_json)
+                if isinstance(extra_json, str)
+                else extra_json,
+            }
             return "INSERT 0 1"
         if query.strip() == "SELECT 1":
             return "SELECT 1"
@@ -88,24 +121,36 @@ class FakePool:
             return "CREATE TABLE"
         if "CREATE TABLE IF NOT EXISTS agent_tapes" in query:
             return "CREATE TABLE"
+        if "CREATE TABLE IF NOT EXISTS agent_checkpoints" in query:
+            return "CREATE TABLE"
+        if "DELETE FROM agent_checkpoints" in query:
+            (checkpoint_id,) = args
+            if not isinstance(checkpoint_id, str):
+                raise TypeError("checkpoint_id must be a string")
+            _ = self.checkpoints.pop(checkpoint_id, None)
+            return "DELETE 1"
         raise AssertionError(f"unexpected execute query: {query}")
 
     async def fetchrow(self, query: str, *args: object) -> dict[str, object] | None:
         self.executed.append((query, args))
         if "SELECT payload FROM agent_sessions" not in query:
-            if "SELECT MAX(seq) AS max_seq FROM agent_tapes" not in query:
-                raise AssertionError(f"unexpected fetchrow query: {query}")
-            (tape_id,) = args
-            if not isinstance(tape_id, str):
-                raise TypeError("tape_id must be a string")
-            rows = self.tapes.get(tape_id, [])
-            if not rows:
-                return {"max_seq": None}
-            return {
-                "max_seq": max(
-                    row["seq"] if isinstance(row["seq"], int) else -1 for row in rows
-                )
-            }
+            if (
+                "SELECT meta, entries, plugin_states, extra FROM agent_checkpoints"
+                in query
+            ):
+                (checkpoint_id,) = args
+                if not isinstance(checkpoint_id, str):
+                    raise TypeError("checkpoint_id must be a string")
+                payload = self.checkpoints.get(checkpoint_id)
+                if payload is None:
+                    return None
+                return {
+                    "meta": payload["meta"],
+                    "entries": payload["entries"],
+                    "plugin_states": payload["plugin_states"],
+                    "extra": payload["extra"],
+                }
+            raise AssertionError(f"unexpected fetchrow query: {query}")
         (session_id,) = args
         if not isinstance(session_id, str):
             raise TypeError("session_id must be a string")
@@ -135,6 +180,28 @@ class FakePool:
             ]
         if "SELECT DISTINCT tape_id FROM agent_tapes" in query:
             return [{"tape_id": tape_id} for tape_id in sorted(self.tapes.keys())]
+        if "SELECT meta FROM agent_checkpoints" in query:
+            (tape_id,) = args
+            if not isinstance(tape_id, str):
+                raise TypeError("tape_id must be a string")
+            rows = [
+                {"meta": payload["meta"]}
+                for payload in self.checkpoints.values()
+                if payload["tape_id"] == tape_id
+            ]
+            if "::timestamptz" in query:
+                rows.sort(
+                    key=lambda row: datetime.fromisoformat(
+                        str(cast(dict[str, object], row["meta"])["created_at"])
+                    )
+                )
+            else:
+                rows.sort(
+                    key=lambda row: str(
+                        cast(dict[str, object], row["meta"])["created_at"]
+                    )
+                )
+            return rows
         raise AssertionError(f"unexpected fetch query: {query}")
 
     async def close(self) -> None:
@@ -146,6 +213,28 @@ class FakePool:
     async def release(self, connection: object) -> None:
         if connection is not self:
             raise AssertionError("unexpected connection released")
+
+
+class FakeInitConnection:
+    def __init__(self) -> None:
+        self.codec_calls: list[dict[str, object]] = []
+
+    async def set_type_codec(
+        self,
+        typename: str,
+        *,
+        encoder: object,
+        decoder: object,
+        schema: str,
+    ) -> None:
+        self.codec_calls.append(
+            {
+                "typename": typename,
+                "encoder": encoder,
+                "decoder": decoder,
+                "schema": schema,
+            }
+        )
 
 
 class TestPGPool:
@@ -228,6 +317,32 @@ class TestPGPool:
             await pool.get_pool()
 
     @pytest.mark.asyncio
+    async def test_registers_json_and_jsonb_codecs_on_pool_connections(self):
+        seen_connections: list[FakeInitConnection] = []
+
+        async def fake_pool_factory(**kwargs: object) -> FakePool:
+            init = kwargs.get("init")
+            if not callable(init):
+                raise AssertionError("expected asyncpg init callback")
+            conn = FakeInitConnection()
+            seen_connections.append(conn)
+            await init(conn)
+            return FakePool()
+
+        pool = PGPool(dsn="postgresql://example", pool_factory=fake_pool_factory)
+
+        _ = await pool.get_pool()
+
+        assert len(seen_connections) == 1
+        codec_names = [
+            cast(str, call["typename"]) for call in seen_connections[0].codec_calls
+        ]
+        assert codec_names == ["json", "jsonb"]
+        assert all(
+            call["schema"] == "pg_catalog" for call in seen_connections[0].codec_calls
+        )
+
+    @pytest.mark.asyncio
     async def test_acquire_delegates_to_underlying_pool(self):
         fake_pool = FakePool()
 
@@ -251,6 +366,60 @@ class TestPGPool:
         await pool.get_pool()
 
         await pool.release(fake_pool)
+
+
+@pytest.mark.asyncio
+async def test_pg_checkpoint_store_orders_list_by_created_at_timestamp() -> None:
+    async def fake_pool_factory(**_: object) -> FakePool:
+        return fake_pool
+
+    fake_pool = FakePool()
+    store = PGCheckpointStore(
+        pool=PGPool(dsn="postgresql://example", pool_factory=fake_pool_factory)
+    )
+
+    older = CheckpointSnapshot(
+        meta=CheckpointMeta(
+            checkpoint_id="cp-older",
+            tape_id="tape-1",
+            session_id="session-1",
+            entry_count=1,
+            window_start=0,
+            created_at=datetime.fromisoformat("2026-04-18T12:30:00+02:00"),
+            label="older",
+        ),
+        tape_entries=tuple(),
+        plugin_states={},
+        extra={},
+    )
+    newer = CheckpointSnapshot(
+        meta=CheckpointMeta(
+            checkpoint_id="cp-newer",
+            tape_id="tape-1",
+            session_id="session-1",
+            entry_count=2,
+            window_start=0,
+            created_at=datetime.fromisoformat("2026-04-18T11:45:00+00:00"),
+            label="newer",
+        ),
+        tape_entries=tuple(),
+        plugin_states={},
+        extra={},
+    )
+
+    await store.save(newer)
+    await store.save(older)
+
+    metas = await store.list_by_tape("tape-1")
+
+    assert [meta.checkpoint_id for meta in metas] == ["cp-older", "cp-newer"]
+    list_queries = [
+        query
+        for query, _args in fake_pool.executed
+        if "SELECT meta FROM agent_checkpoints" in query
+    ]
+    assert list_queries
+    assert "::timestamptz" in list_queries[-1]
 
 
 class TestPGSessionStore:
@@ -323,6 +492,20 @@ class TestPGSessionStore:
             if "CREATE TABLE IF NOT EXISTS agent_sessions" in query
         ]
         assert len(schema_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_save_session_passes_python_object_to_codec_enabled_pool(
+        self, store: PGSessionStore, fake_pool: FakePool
+    ):
+        await store.save_session("ses-1", {"model": "gpt-4.1"})
+
+        insert_calls = [
+            args
+            for query, args in fake_pool.executed
+            if "INSERT INTO agent_sessions" in query
+        ]
+        assert len(insert_calls) == 1
+        assert isinstance(insert_calls[0][1], dict)
 
 
 class TestPGTapeStore:
@@ -408,6 +591,22 @@ class TestPGTapeStore:
         assert len(insert_calls) == 1
 
     @pytest.mark.asyncio
+    async def test_save_uses_single_atomic_append_statement(
+        self, store: PGTapeStore, fake_pool: FakePool
+    ):
+        await store.save(
+            "tape-atomic",
+            [{"kind": "message", "payload": {"role": "user", "content": "x"}}],
+        )
+
+        tape_queries = [
+            query for query, _args in fake_pool.executed if "agent_tapes" in query
+        ]
+
+        assert any("pg_advisory_xact_lock" in query for query in tape_queries)
+        assert all("SELECT MAX(seq) AS max_seq" not in query for query in tape_queries)
+
+    @pytest.mark.asyncio
     async def test_load_empty_tape(self, store: PGTapeStore):
         result = await store.load("nonexistent")
         assert result == []
@@ -449,6 +648,208 @@ class TestPGTapeStore:
     async def test_truncate_rejects_negative_keep(self, store: PGTapeStore):
         with pytest.raises(ValueError, match="keep must be >= 0"):
             await store.truncate("tape-truncate", -1)
+
+
+class TestPGCheckpointStore:
+    @pytest.fixture
+    def fake_pool(self) -> FakePool:
+        return FakePool()
+
+    @pytest.fixture
+    def pool(self, fake_pool: FakePool) -> PGPool:
+        async def fake_pool_factory(**_: object) -> FakePool:
+            return fake_pool
+
+        return PGPool(dsn="postgresql://example", pool_factory=fake_pool_factory)
+
+    @pytest.fixture
+    def store(self, pool: PGPool) -> PGCheckpointStore:
+        return PGCheckpointStore(pool=pool)
+
+    def _snapshot(
+        self, checkpoint_id: str, tape_id: str, *, created_at: datetime
+    ) -> CheckpointSnapshot:
+        return CheckpointSnapshot(
+            meta=CheckpointMeta(
+                checkpoint_id=checkpoint_id,
+                tape_id=tape_id,
+                session_id="session-1",
+                entry_count=2,
+                window_start=1,
+                created_at=created_at,
+                label=checkpoint_id,
+            ),
+            tape_entries=(
+                {
+                    "id": "e-1",
+                    "kind": "message",
+                    "payload": {"content": "a"},
+                    "timestamp": 1.0,
+                },
+                {
+                    "id": "e-2",
+                    "kind": "message",
+                    "payload": {"content": "b"},
+                    "timestamp": 2.0,
+                },
+            ),
+            plugin_states={"topic": {"current": checkpoint_id}},
+            extra={"source": checkpoint_id},
+        )
+
+    def test_satisfies_protocol(self, store: PGCheckpointStore):
+        assert isinstance(store, CheckpointStore)
+
+    @pytest.mark.asyncio
+    async def test_pg_checkpoint_store_round_trip_snapshot(
+        self, store: PGCheckpointStore
+    ):
+        snapshot = self._snapshot(
+            "cp-roundtrip",
+            "tape-roundtrip",
+            created_at=datetime(2026, 4, 17, tzinfo=UTC),
+        )
+
+        await store.save(snapshot)
+
+        loaded = await store.load("cp-roundtrip")
+
+        assert loaded == snapshot
+
+    @pytest.mark.asyncio
+    async def test_pg_checkpoint_store_overwrites_existing_checkpoint_id(
+        self, store: PGCheckpointStore
+    ):
+        first_snapshot = self._snapshot(
+            "cp-retry",
+            "tape-first",
+            created_at=datetime(2026, 4, 17, tzinfo=UTC),
+        )
+        second_snapshot = self._snapshot(
+            "cp-retry",
+            "tape-second",
+            created_at=datetime(2026, 4, 17, 1, tzinfo=UTC),
+        )
+        second_snapshot = CheckpointSnapshot(
+            meta=CheckpointMeta(
+                checkpoint_id=second_snapshot.meta.checkpoint_id,
+                tape_id=second_snapshot.meta.tape_id,
+                session_id="session-2",
+                entry_count=4,
+                window_start=2,
+                created_at=second_snapshot.meta.created_at,
+                label="retry-save",
+            ),
+            tape_entries=(
+                {
+                    "id": "e-3",
+                    "kind": "message",
+                    "payload": {"content": "retry"},
+                    "timestamp": 3.0,
+                },
+            ),
+            plugin_states={"topic": {"current": "retry"}},
+            extra={"source": "retry"},
+        )
+
+        await store.save(first_snapshot)
+        await store.save(second_snapshot)
+
+        loaded = await store.load("cp-retry")
+
+        assert loaded == second_snapshot
+
+    @pytest.mark.asyncio
+    async def test_pg_checkpoint_store_list_by_tape_returns_sorted_meta(
+        self, store: PGCheckpointStore
+    ):
+        later = self._snapshot(
+            "cp-later",
+            "tape-a",
+            created_at=datetime(2026, 4, 17, 1, tzinfo=UTC),
+        )
+        earlier = self._snapshot(
+            "cp-earlier",
+            "tape-a",
+            created_at=datetime(2026, 4, 17, 0, tzinfo=UTC),
+        )
+        other = self._snapshot(
+            "cp-other",
+            "tape-b",
+            created_at=datetime(2026, 4, 17, 2, tzinfo=UTC),
+        )
+
+        await store.save(later)
+        await store.save(earlier)
+        await store.save(other)
+
+        listed = await store.list_by_tape("tape-a")
+
+        assert listed == [earlier.meta, later.meta]
+
+    @pytest.mark.asyncio
+    async def test_pg_checkpoint_store_delete_removes_snapshot(
+        self, store: PGCheckpointStore
+    ):
+        snapshot = self._snapshot(
+            "cp-delete",
+            "tape-delete",
+            created_at=datetime(2026, 4, 17, tzinfo=UTC),
+        )
+
+        await store.save(snapshot)
+        await store.delete("cp-delete")
+
+        assert await store.load("cp-delete") is None
+
+    @pytest.mark.asyncio
+    async def test_pg_checkpoint_store_schema_created_once(
+        self, store: PGCheckpointStore, fake_pool: FakePool
+    ):
+        await store.save(
+            self._snapshot(
+                "cp-one",
+                "tape-one",
+                created_at=datetime(2026, 4, 17, tzinfo=UTC),
+            )
+        )
+        await store.save(
+            self._snapshot(
+                "cp-two",
+                "tape-two",
+                created_at=datetime(2026, 4, 17, 1, tzinfo=UTC),
+            )
+        )
+
+        schema_calls = [
+            query
+            for query, _ in fake_pool.executed
+            if "CREATE TABLE IF NOT EXISTS agent_checkpoints" in query
+        ]
+        assert len(schema_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_pg_checkpoint_store_save_passes_python_objects_to_codec_enabled_pool(
+        self, store: PGCheckpointStore, fake_pool: FakePool
+    ):
+        snapshot = self._snapshot(
+            "checkpoint-codec",
+            "tape-codec",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+
+        await store.save(snapshot)
+
+        insert_calls = [
+            args
+            for query, args in fake_pool.executed
+            if "INSERT INTO agent_checkpoints" in query
+        ]
+        assert len(insert_calls) == 1
+        assert isinstance(insert_calls[0][2], dict)
+        assert isinstance(insert_calls[0][3], list)
+        assert isinstance(insert_calls[0][4], dict)
+        assert isinstance(insert_calls[0][5], dict)
 
 
 class MockPoolForLock:

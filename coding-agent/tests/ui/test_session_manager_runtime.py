@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import types
+from typing import cast
+from unittest.mock import patch
 
 import pytest
 
@@ -15,7 +17,11 @@ from coding_agent.wire.protocol import (
     ToolCallDelta,
     TurnEnd,
 )
-from coding_agent.ui.session_manager import MockProvider, SessionManager
+from coding_agent.ui.session_manager import (
+    MockProvider,
+    SessionManager,
+    _load_pg_storage_types,
+)
 from coding_agent.ui.session_store import InMemorySessionStore
 
 
@@ -55,6 +61,31 @@ async def test_run_agent_does_not_hardcode_api_key() -> None:
 
     assert captured_kwargs["session_id_override"] == session_id
     assert captured_kwargs["api_key"] is None
+
+
+def test_load_pg_storage_types_reports_missing_optional_dependencies() -> None:
+    with pytest.MonkeyPatch.context() as mp:
+        fake_import_error = ModuleNotFoundError("No module named 'asyncpg'")
+        mp.setattr(
+            "coding_agent.ui.session_manager.importlib.import_module",
+            lambda name: (_ for _ in ()).throw(fake_import_error),
+        )
+
+        with pytest.raises(RuntimeError, match="optional dependencies"):
+            _load_pg_storage_types()
+
+
+def test_load_pg_storage_types_reports_missing_exports() -> None:
+    fake_module = types.SimpleNamespace(PGPool=object(), PGTapeStore=object())
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "coding_agent.ui.session_manager.importlib.import_module",
+            lambda name: fake_module,
+        )
+
+        with pytest.raises(RuntimeError, match="PGCheckpointStore"):
+            _load_pg_storage_types()
 
 
 @pytest.mark.asyncio
@@ -269,6 +300,95 @@ async def test_run_agent_closes_cached_runtime_after_turn_failure() -> None:
     assert session.runtime_pipeline is None
     assert session.runtime_ctx is None
     assert session.runtime_adapter is None
+
+
+@pytest.mark.asyncio
+async def test_remove_session_async_awaits_runtime_close() -> None:
+    manager = SessionManager(store=InMemorySessionStore())
+    session_id = await manager.create_session()
+    session = manager.get_session(session_id)
+    close_started = asyncio.Event()
+    close_released = asyncio.Event()
+
+    class FakeAdapter:
+        async def close(self) -> None:
+            close_started.set()
+            await close_released.wait()
+
+    session.runtime_pipeline = object()
+    session.runtime_ctx = object()
+    session.runtime_adapter = FakeAdapter()
+
+    task = asyncio.create_task(manager.remove_session_async(session_id))
+    await asyncio.wait_for(close_started.wait(), timeout=1)
+
+    assert task.done() is False
+    assert manager.has_session(session_id) is True
+
+    close_released.set()
+    await task
+
+    assert manager.has_session(session_id) is False
+
+
+@pytest.mark.asyncio
+async def test_close_session_raises_if_task_survives_cancellation() -> None:
+    manager = SessionManager(store=InMemorySessionStore())
+    session_id = await manager.create_session()
+    session = manager.get_session(session_id)
+
+    class FakeTask:
+        def __init__(self) -> None:
+            self.cancel_calls = 0
+
+        def done(self) -> bool:
+            return False
+
+        def cancel(self) -> None:
+            self.cancel_calls += 1
+
+    task = cast(asyncio.Task[None], FakeTask())
+    session.task = task
+
+    with patch(
+        "coding_agent.ui.session_manager.asyncio.wait_for",
+        side_effect=asyncio.TimeoutError,
+    ):
+        with pytest.raises(RuntimeError, match="did not stop after cancellation"):
+            await manager.close_session(session_id)
+
+    assert manager.has_session(session_id) is True
+    assert cast(FakeTask, task).cancel_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_shutdown_session_runtime_raises_if_task_survives_cancellation() -> None:
+    manager = SessionManager(store=InMemorySessionStore())
+    session_id = await manager.create_session()
+    session = manager.get_session(session_id)
+
+    class FakeTask:
+        def __init__(self) -> None:
+            self.cancel_calls = 0
+
+        def done(self) -> bool:
+            return False
+
+        def cancel(self) -> None:
+            self.cancel_calls += 1
+
+    task = cast(asyncio.Task[None], FakeTask())
+    session.task = task
+
+    with patch(
+        "coding_agent.ui.session_manager.asyncio.wait_for",
+        side_effect=asyncio.TimeoutError,
+    ):
+        with pytest.raises(RuntimeError, match="did not stop after cancellation"):
+            await manager.shutdown_session_runtime(session_id)
+
+    assert manager.has_session(session_id) is True
+    assert cast(FakeTask, task).cancel_calls == 1
 
 
 @pytest.mark.asyncio

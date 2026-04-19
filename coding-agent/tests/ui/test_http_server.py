@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
+import sys
 import types
+from collections.abc import AsyncIterator
 from datetime import datetime, timedelta
+from typing import cast
 from unittest.mock import patch
 
 import pytest
 from httpx import AsyncClient, ASGITransport
 from httpx_sse import aconnect_sse
+from starlette.requests import Request
+from agentkit.errors import ConfigError
 from agentkit.checkpoint.models import CheckpointMeta
 from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
 
@@ -21,7 +27,9 @@ from coding_agent.ui.session_manager import Session
 from coding_agent.ui.http_server import (
     APPROVAL_TIMEOUT_SECONDS,
     SESSION_IDLE_TIMEOUT_MINUTES,
+    _cleanup_event_queue_on_disconnect,
     _broadcast_event,
+    get_events,
     _session_to_dict,
     stream_wire_messages,
     _wire_message_to_event,
@@ -135,6 +143,29 @@ class TestSessionCreation:
         assert health.status_code == 200
         assert health.json()["sessions"] == 1
         assert session_manager.has_session(session_id)
+
+    async def test_healthz_uses_count_sessions_async(self, client, monkeypatch):
+        async def fake_count_sessions_async() -> int:
+            return 7
+
+        def fail_list_sessions_async():
+            raise AssertionError("healthz should not call list_sessions_async")
+
+        monkeypatch.setattr(
+            session_manager,
+            "count_sessions_async",
+            fake_count_sessions_async,
+        )
+        monkeypatch.setattr(
+            session_manager,
+            "list_sessions_async",
+            fail_list_sessions_async,
+        )
+
+        health = await client.get("/healthz")
+
+        assert health.status_code == 200
+        assert health.json()["sessions"] == 7
 
     async def test_readyz_reports_dependencies_ready(self, client):
         ready = await client.get("/readyz")
@@ -732,6 +763,221 @@ class TestEventsFanOut:
         assert hasattr(session, "event_queues")
         assert isinstance(session.event_queues, list)
 
+    async def test_event_queue_cleanup_is_shielded_on_disconnect(self, monkeypatch):
+        session_id = "disconnect-session"
+        queue: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=1)
+
+        cleanup_started = asyncio.Event()
+        cleanup_released = asyncio.Event()
+        cleaned: list[tuple[str, object]] = []
+
+        async def fake_remove_event_queue_async(current_session_id: str, queue) -> None:
+            cleaned.append((current_session_id, queue))
+            cleanup_started.set()
+            await cleanup_released.wait()
+
+        monkeypatch.setattr(
+            session_manager,
+            "remove_event_queue_async",
+            fake_remove_event_queue_async,
+        )
+
+        task = asyncio.create_task(
+            _cleanup_event_queue_on_disconnect(session_id, queue)
+        )
+        await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+        cleanup_released.set()
+        await task
+
+        assert len(cleaned) == 1
+        assert cleaned == [(session_id, queue)]
+
+    async def test_event_queue_cleanup_ignores_missing_session(self, monkeypatch):
+        queue: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=1)
+
+        async def fake_remove_event_queue_async(current_session_id: str, queue) -> None:
+            _ = (current_session_id, queue)
+            raise KeyError("Session not found: removed")
+
+        monkeypatch.setattr(
+            session_manager,
+            "remove_event_queue_async",
+            fake_remove_event_queue_async,
+        )
+
+        await _cleanup_event_queue_on_disconnect("removed", queue)
+
+    async def test_event_generator_uses_public_session_apis_for_keepalive_exit(
+        self, client, monkeypatch
+    ):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        has_session_calls: list[str] = []
+        get_session_calls: list[str] = []
+        has_session_results = iter([True, True, False])
+
+        class FakeEventSourceResponse:
+            def __init__(self, body_iterator):
+                self.body_iterator = body_iterator
+
+        async def fake_has_session_async(current_session_id: str) -> bool:
+            has_session_calls.append(current_session_id)
+            return next(has_session_results)
+
+        async def fake_get_session_async(current_session_id: str):
+            get_session_calls.append(current_session_id)
+            return session_manager.get_session(current_session_id)
+
+        monkeypatch.setattr(
+            session_manager, "has_session_async", fake_has_session_async
+        )
+        monkeypatch.setattr(
+            session_manager, "get_session_async", fake_get_session_async
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.EventSourceResponse",
+            FakeEventSourceResponse,
+        )
+
+        real_wait_for = asyncio.wait_for
+
+        async def fake_wait_for(awaitable, timeout):
+            if timeout == 30.0:
+                awaitable.close()
+                raise asyncio.TimeoutError
+            return await real_wait_for(awaitable, timeout)
+
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.asyncio.wait_for", fake_wait_for
+        )
+
+        request = Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": f"/sessions/{session_id}/events",
+                "headers": [],
+            }
+        )
+        response = await get_events(request, session_id, None)
+        event_generator = cast(AsyncIterator[dict[str, str]], response.body_iterator)
+        event = await anext(event_generator)
+
+        assert event == {"event": "ping", "data": ""}
+
+        with pytest.raises(StopAsyncIteration):
+            await anext(event_generator)
+
+        assert has_session_calls == [session_id, session_id, session_id]
+        assert len(get_session_calls) >= 2
+        assert all(
+            call_session_id == session_id for call_session_id in get_session_calls
+        )
+
+    async def test_event_generator_exits_cleanly_when_session_disappears_during_keepalive(
+        self, client, monkeypatch
+    ):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        has_session_results = iter([True, True])
+
+        class FakeEventSourceResponse:
+            def __init__(self, body_iterator):
+                self.body_iterator = body_iterator
+
+        async def fake_has_session_async(current_session_id: str) -> bool:
+            assert current_session_id == session_id
+            return next(has_session_results)
+
+        async def fake_has_event_queue_async(current_session_id: str, queue) -> bool:
+            _ = queue
+            assert current_session_id == session_id
+            raise KeyError(f"Session not found: {session_id}")
+
+        monkeypatch.setattr(
+            session_manager, "has_session_async", fake_has_session_async
+        )
+        monkeypatch.setattr(
+            session_manager, "has_event_queue_async", fake_has_event_queue_async
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.EventSourceResponse",
+            FakeEventSourceResponse,
+        )
+
+        real_wait_for = asyncio.wait_for
+
+        async def fake_wait_for(awaitable, timeout):
+            if timeout == 30.0:
+                awaitable.close()
+                raise asyncio.TimeoutError
+            return await real_wait_for(awaitable, timeout)
+
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.asyncio.wait_for", fake_wait_for
+        )
+
+        request = Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": f"/sessions/{session_id}/events",
+                "headers": [],
+            }
+        )
+        response = await get_events(request, session_id, None)
+        event_generator = cast(AsyncIterator[dict[str, str]], response.body_iterator)
+
+        with pytest.raises(StopAsyncIteration):
+            await anext(event_generator)
+
+
+class TestLifespanShutdown:
+    async def test_lifespan_shutdown_continues_after_session_failure(self, monkeypatch):
+        observed_shutdowns: list[str] = []
+        close_calls: list[str] = []
+
+        async def fake_cleanup_idle_sessions() -> None:
+            try:
+                while True:
+                    await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                raise
+
+        async def fake_list_sessions_async() -> list[str]:
+            return ["session-a", "session-b"]
+
+        async def fake_shutdown_session_runtime(session_id: str) -> None:
+            observed_shutdowns.append(session_id)
+            if session_id == "session-a":
+                raise RuntimeError("boom")
+
+        async def fake_close() -> None:
+            close_calls.append("closed")
+
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._cleanup_idle_sessions",
+            fake_cleanup_idle_sessions,
+        )
+        monkeypatch.setattr(
+            session_manager, "list_sessions_async", fake_list_sessions_async
+        )
+        monkeypatch.setattr(
+            session_manager,
+            "shutdown_session_runtime",
+            fake_shutdown_session_runtime,
+        )
+        monkeypatch.setattr(session_manager, "close", fake_close)
+
+        cm = app.router.lifespan_context(app)
+        await cm.__aenter__()
+        await cm.__aexit__(None, None, None)
+
+        assert observed_shutdowns == ["session-a", "session-b"]
+        assert close_calls == ["closed"]
+
 
 class TestGetSession:
     """Tests for get session endpoint."""
@@ -794,6 +1040,102 @@ class TestCloseSession:
             received_events.append(await queue.get())
 
         assert any(e["event"] == "SessionClosed" for e in received_events)
+
+    async def test_close_session_returns_error_when_manager_close_fails(
+        self, client, monkeypatch
+    ):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        async def failing_close_session(current_session_id: str) -> None:
+            assert current_session_id == session_id
+            raise RuntimeError("close exploded")
+
+        monkeypatch.setattr(session_manager, "close_session", failing_close_session)
+
+        response = await client.delete(f"/sessions/{session_id}")
+
+        assert response.status_code == 500
+        assert response.json()["detail"] == "Internal server error"
+
+    async def test_close_session_returns_404_when_session_disappears_during_close(
+        self, client, monkeypatch
+    ):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        async def fake_has_session_async(current_session_id: str) -> bool:
+            assert current_session_id == session_id
+            return True
+
+        async def fake_get_session_async(current_session_id: str):
+            assert current_session_id == session_id
+            return session_manager.get_session(current_session_id)
+
+        async def disappearing_close_session(current_session_id: str) -> None:
+            assert current_session_id == session_id
+            raise KeyError(f"Session not found: {session_id}")
+
+        monkeypatch.setattr(
+            session_manager, "has_session_async", fake_has_session_async
+        )
+        monkeypatch.setattr(
+            session_manager, "get_session_async", fake_get_session_async
+        )
+        monkeypatch.setattr(
+            session_manager, "close_session", disappearing_close_session
+        )
+
+        response = await client.delete(f"/sessions/{session_id}")
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == f"Session not found: {session_id}"
+
+    async def test_close_session_returns_404_when_session_disappears_before_load(
+        self, client, monkeypatch
+    ):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        async def fake_has_session_async(current_session_id: str) -> bool:
+            assert current_session_id == session_id
+            return True
+
+        async def disappearing_get_session_async(current_session_id: str):
+            assert current_session_id == session_id
+            raise KeyError(f"Session not found: {session_id}")
+
+        monkeypatch.setattr(
+            session_manager, "has_session_async", fake_has_session_async
+        )
+        monkeypatch.setattr(
+            session_manager, "get_session_async", disappearing_get_session_async
+        )
+
+        response = await client.delete(f"/sessions/{session_id}")
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == f"Session not found: {session_id}"
+
+    async def test_close_session_hides_unexpected_internal_error_detail(
+        self, client, monkeypatch, caplog
+    ):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        async def failing_close_session(current_session_id: str) -> None:
+            assert current_session_id == session_id
+            raise RuntimeError("dsn=postgresql://user:secret@example/db")
+
+        monkeypatch.setattr(session_manager, "close_session", failing_close_session)
+
+        with caplog.at_level("ERROR"):
+            response = await client.delete(f"/sessions/{session_id}")
+
+        assert response.status_code == 500
+        assert response.json()["detail"] == "Internal server error"
+        assert "dsn=postgresql://user:secret@example/db" not in response.text
+        assert "Unexpected error while closing session" in caplog.text
 
 
 class TestSessionTimeout:
@@ -1117,6 +1459,53 @@ class TestBroadcastEvent:
         assert await queue1.get() == event
         assert await queue2.get() == event
 
+    async def test_broadcast_uses_provided_session_without_manager_lookup(self):
+        session = register_session("broadcast-without-lookup")
+        queue = asyncio.Queue()
+        session.event_queues = [queue]
+        event = {"event": "Test", "data": "{}"}
+
+        with patch.object(
+            session_manager,
+            "broadcast_event",
+            side_effect=AssertionError("manager lookup should be skipped"),
+        ):
+            await _broadcast_event(session, event)
+
+        assert await queue.get() == event
+
+    async def test_broadcast_prunes_full_queue_without_blocking(self):
+        session = register_session("broadcast-full-queue")
+        full_queue: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=1)
+        await full_queue.put({"event": "Old", "data": "{}"})
+        healthy_queue: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=1)
+        session.event_queues = [full_queue, healthy_queue]
+        event = {"event": "Test", "data": "{}"}
+
+        await _broadcast_event(session, event)
+
+        assert session.event_queues == [healthy_queue]
+        assert full_queue.qsize() == 1
+        assert await healthy_queue.get() == event
+
+    async def test_broadcast_prunes_failed_queue(self):
+        session = register_session("broadcast-failed-queue")
+
+        class BrokenQueue:
+            def put_nowait(self, item: object) -> None:
+                _ = item
+                raise RuntimeError("queue closed")
+
+        healthy_queue: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=1)
+        broken_queue = cast(asyncio.Queue[dict[str, str]], BrokenQueue())
+        session.event_queues = [broken_queue, healthy_queue]
+        event = {"event": "Test", "data": "{}"}
+
+        await _broadcast_event(session, event)
+
+        assert session.event_queues == [healthy_queue]
+        assert await healthy_queue.get() == event
+
 
 class TestWaitForApproval:
     """Tests for the approval wait function."""
@@ -1213,6 +1602,48 @@ class TestWaitForApproval:
         assert response.status_code == 200
         assert approval_response.approved is True
         assert approval_response.feedback == "approved over http"
+
+
+def test_http_server_import_falls_back_when_agent_toml_is_unreadable(
+    monkeypatch,
+) -> None:
+    original_module = sys.modules.get("coding_agent.ui.http_server")
+    monkeypatch.delitem(sys.modules, "coding_agent.ui.http_server", raising=False)
+
+    try:
+        with patch("agentkit.config.loader.load_config") as load_config:
+            load_config.side_effect = ConfigError(
+                "config file not found: /tmp/missing-agent.toml"
+            )
+            http_server = importlib.import_module("coding_agent.ui.http_server")
+
+        assert http_server._load_storage_config() == {}
+        assert http_server.session_manager._storage_config == {}
+    finally:
+        if original_module is None:
+            monkeypatch.delitem(
+                sys.modules, "coding_agent.ui.http_server", raising=False
+            )
+        else:
+            sys.modules["coding_agent.ui.http_server"] = original_module
+
+
+def test_http_server_import_raises_on_invalid_agent_toml(monkeypatch) -> None:
+    original_module = sys.modules.get("coding_agent.ui.http_server")
+    monkeypatch.delitem(sys.modules, "coding_agent.ui.http_server", raising=False)
+
+    try:
+        with patch("agentkit.config.loader.load_config") as load_config:
+            load_config.side_effect = ConfigError("missing [agent] section")
+            with pytest.raises(ConfigError, match=r"missing \[agent\] section"):
+                importlib.import_module("coding_agent.ui.http_server")
+    finally:
+        if original_module is None:
+            monkeypatch.delitem(
+                sys.modules, "coding_agent.ui.http_server", raising=False
+            )
+        else:
+            sys.modules["coding_agent.ui.http_server"] = original_module
 
 
 class TestIntegration:
