@@ -36,11 +36,13 @@ AgentKit 提供**机制**（流水线执行、钩子分发、对话 Tape）。Co
 ```
 ┌─────────────────────────────────────────────────┐
 │                CLI 层                            │
-│  __main__.py · repl.py · input_handler.py       │
-│  commands.py · bash_executor.py                 │
+│  __main__.py · app.py · repl.py                 │
+│  input_handler.py · commands.py                 │
+│  bash_executor.py                               │
 ├─────────────────────────────────────────────────┤
 │                UI 层                             │
 │  stream_renderer.py · rich_consumer.py          │
+│  rich_tui.py · collapse.py · status_footer.py   │
 │  approval_prompt.py · headless.py               │
 │  http_server.py · components.py · theme.py      │
 ├─────────────────────────────────────────────────┤
@@ -51,19 +53,22 @@ AgentKit 提供**机制**（流水线执行、钩子分发、对话 Tape）。Co
 │  wire/protocol.py · wire/local.py               │
 ├─────────────────────────────────────────────────┤
 │             插件层                               │
-│  实现 agentkit 钩子的 13 个插件                  │
+│  实现 agentkit 钩子的 14 个插件                  │
 ├─────────────────────────────────────────────────┤
 │            Provider 层                           │
 │  base.py · anthropic.py · openai_compat.py      │
 │  copilot.py                                     │
 ├─────────────────────────────────────────────────┤
 │              Core 层                             │
-│  config.py · context.py · session.py · tape.py  │
-│  loop.py · doom.py · parallel.py · planner.py   │
+│  config.py · session.py · planner.py            │
+│  agents/ · skills/ · subagents/                 │
+│  evaluation/ · verification/                    │
+│  kb.py · metrics.py · tokens.py · redaction.py  │
 ├─────────────────────────────────────────────────┤
 │             Tools 层                             │
 │  file_ops.py · shell.py · planner.py            │
 │  file_patch_tool.py · web_search.py · subagent.py │
+│  subagent_stub.py                               │
 ├─────────────────────────────────────────────────┤
 │              agentkit（框架）                    │
 │  Pipeline · HookRuntime · Tape · ToolRegistry   │
@@ -80,8 +85,13 @@ src/coding_agent/
 ├── adapter.py               # PipelineAdapter：agentkit 事件 → Wire 协议
 ├── adapter_types.py         # StopReason、TurnOutcome 数据类
 ├── agent.toml               # 默认 Agent 配置
+├── app.py                   # Application factory with create_agent()
+│
+├── agents/                  # Agent 定义
+│   └── __init__.py
 │
 ├── approval/                # 审批策略框架
+│   ├── coordinator.py       #   审批协调逻辑
 │   ├── policy.py            #   ApprovalPolicy 枚举，PolicyEngine
 │   └── store.py             #   审批状态持久化
 │
@@ -97,15 +107,19 @@ src/coding_agent/
 │
 ├── core/                    # 核心领域逻辑
 │   ├── config.py            #   Pydantic Config 模型，分层加载
-│   ├── context.py           #   对话上下文管理
-│   ├── doom.py              #   Doom 循环检测逻辑
-│   ├── loop.py              #   遗留 Agent 循环（流水线之前）
-│   ├── parallel.py          #   并行执行工具
 │   ├── planner.py           #   任务规划器（todo_write/todo_read）
-│   ├── session.py           #   会话管理
-│   └── tape.py              #   Tape 工具函数
+│   └── session.py           #   会话管理
 │
-├── plugins/                 # AgentKit 钩子实现（13 个插件）
+├── evaluation/              # 评估框架
+│   ├── __init__.py
+│   ├── adapter.py
+│   └── metrics.py
+│
+├── kb.py                    # 知识库片段注入
+│
+├── metrics.py               # 应用指标
+│
+├── plugins/                 # AgentKit 钩子实现（14 个插件）
 │   ├── approval.py          #   approve_tool_call → Approve/Reject/AskUser
 │   ├── core_tools.py        #   get_tools + execute_tool → ToolRegistry
 │   ├── doom_detector.py     #   on_checkpoint → Doom 循环检测
@@ -126,10 +140,21 @@ src/coding_agent/
 │   ├── openai_compat.py     #   OpenAI 兼容 Chat Completions
 │   └── copilot.py           #   GitHub Copilot（继承 OpenAI-compat）
 │
+├── redaction.py             # 输出脱敏
+│
+├── skills/                  # 技能定义
+│   └── __init__.py
+│
+├── subagents/               # 子 Agent 协调
+│   ├── __init__.py
+│   └── coordinator.py
+│
 ├── summarizer/              # 上下文摘要策略
 │   ├── base.py              #   Summarizer 协议
 │   ├── llm_summarizer.py    #   基于 LLM 的摘要（未来）
 │   └── rule_summarizer.py   #   基于规则的截断
+│
+├── tokens.py                # Token 工具函数
 │
 ├── tools/                   # 工具实现
 │   ├── file_ops.py          #   file_read, file_write, file_replace, glob, grep
@@ -139,18 +164,22 @@ src/coding_agent/
 │   ├── planner.py           #   todo_write, todo_read
 │   ├── web_search.py        #   web_search 工具及后端封装
 │   ├── subagent.py          #   子 Agent 委托工具
+│   ├── subagent_stub.py     #   子 Agent stub 工具
 │   └── sandbox.py           #   sandbox 辅助函数
 │
 ├── ui/                      # 展示层
 │   ├── stream_renderer.py   #   StreamingRenderer：原始文本 → Rich 面板
 │   ├── rich_consumer.py     #   RichConsumer：WireMessage → 渲染器调用
+│   ├── rich_tui.py          #   Rich TUI 组件
 │   ├── approval_prompt.py   #   带预览的交互式审批 UI
 │   ├── headless.py          #   HeadlessConsumer：基于日志的输出
 │   ├── http_server.py       #   FastAPI HTTP Server 模式
 │   ├── components.py        #   共享 Rich 组件
+│   ├── collapse.py          #   可折叠输出区域
 │   ├── theme.py             #   颜色/样式定义
 │   ├── schemas.py           #   HTTP API 模式
 │   ├── session_manager.py   #   HTTP 会话管理
+│   ├── status_footer.py     #   状态栏组件
 │   ├── auth.py              #   HTTP API 认证
 │   └── rate_limit.py        #   HTTP 限流
 │
@@ -182,9 +211,9 @@ python -m coding_agent
        └── serve ─→ uvicorn.run(http_server.app)
 ```
 
-### Agent 构建：`create_agent()`
+### Agent 构建：`app.py` → `create_agent()`
 
-`create_agent()` 工厂函数是连线中心，构建完整的 agentkit 流水线：
+`app.py` 中的 `create_agent()` 工厂函数是连线中心，构建完整的 agentkit 流水线：
 
 ```python
 def create_agent(...) -> tuple[Pipeline, PipelineContext]:
@@ -352,7 +381,7 @@ class LocalWire:
 
 ### 插件注册
 
-所有 13 个插件均实现 agentkit 的 `Plugin` 协议：一个返回 `dict[str, Callable]` 的 `hooks()` 方法，以及一个 `state_key` 类属性。
+所有 14 个插件均实现 agentkit 的 `Plugin` 协议：一个返回 `dict[str, Callable]` 的 `hooks()` 方法，以及一个 `state_key` 类属性。
 
 ```python
 class SomePlugin:
@@ -381,6 +410,7 @@ class SomePlugin:
 | **TopicPlugin** | `topic` | `on_checkpoint`、`on_session_event`、`mount` | 基于文件重叠的主题边界检测 |
 | **SessionMetricsPlugin** | `session_metrics` | `on_checkpoint`、`on_session_event` | 按轮次和主题统计性能指标 |
 | **ShellSessionPlugin** | `shell_session` | `mount`、`on_checkpoint` | 跨工具调用的持久化 CWD + 环境变量追踪 |
+| **KBPlugin** | `kb` | `build_context` | KB 片段注入 |
 
 ### 插件交互图
 
@@ -904,6 +934,9 @@ elif provider in ("kimi-code", "kimi-code-anthropic") and no api_key:
 
 ```
 __main__.py
+├── app.py
+│   └── create_agent() → core/config.py + plugins/
+│
 ├── adapter.py
 │   ├── agentkit（Pipeline, PipelineContext, Entry）
 │   ├── agentkit（TextEvent, ToolCallEvent, ToolResultEvent, DoneEvent）
@@ -932,6 +965,17 @@ __main__.py
 │   ├── topic.py → agentkit（Tape, Entry）
 │   ├── metrics.py →（仅标准库）
 │   └── shell_session.py →（仅标准库）
+│
+├── subagents/
+│   └── coordinator.py
+│
+├── evaluation/
+│   ├── adapter.py
+│   └── metrics.py
+│
+├── verification/
+│   ├── contract.py
+│   └── runner.py
 │
 └── ui/
     ├── rich_consumer.py → wire/protocol.py

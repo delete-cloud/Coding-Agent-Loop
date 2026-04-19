@@ -36,11 +36,13 @@ The application follows a strict layered dependency graph. Each layer depends on
 ```
 ┌─────────────────────────────────────────────────┐
 │                CLI Layer                         │
-│  __main__.py · repl.py · input_handler.py       │
-│  commands.py · bash_executor.py                 │
+│  __main__.py · app.py · repl.py                 │
+│  input_handler.py · commands.py                 │
+│  bash_executor.py                               │
 ├─────────────────────────────────────────────────┤
 │                UI Layer                          │
 │  stream_renderer.py · rich_consumer.py          │
+│  rich_tui.py · collapse.py · status_footer.py   │
 │  approval_prompt.py · headless.py               │
 │  http_server.py · components.py · theme.py      │
 ├─────────────────────────────────────────────────┤
@@ -58,12 +60,15 @@ The application follows a strict layered dependency graph. Each layer depends on
 │  copilot.py                                     │
 ├─────────────────────────────────────────────────┤
 │              Core Layer                          │
-│  config.py · context.py · session.py · tape.py  │
-│  loop.py · doom.py · parallel.py · planner.py   │
+│  config.py · session.py · planner.py            │
+│  agents/ · skills/ · subagents/                 │
+│  evaluation/ · verification/                    │
+│  kb.py · metrics.py · tokens.py · redaction.py  │
 ├─────────────────────────────────────────────────┤
 │             Tools Layer                          │
 │  file_ops.py · shell.py · planner.py            │
 │  file_patch_tool.py · web_search.py · subagent.py │
+│  subagent_stub.py                               │
 ├─────────────────────────────────────────────────┤
 │              agentkit (framework)                │
 │  Pipeline · HookRuntime · Tape · ToolRegistry   │
@@ -80,8 +85,13 @@ src/coding_agent/
 ├── adapter.py               # PipelineAdapter: agentkit events → wire protocol
 ├── adapter_types.py         # StopReason, TurnOutcome dataclasses
 ├── agent.toml               # Default agent configuration
+├── app.py                   # Application factory with create_agent()
+│
+├── agents/                  # Agent definitions
+│   └── __init__.py
 │
 ├── approval/                # Approval policy framework
+│   ├── coordinator.py       #   Approval coordination logic
 │   ├── policy.py            #   ApprovalPolicy enum, PolicyEngine
 │   └── store.py             #   Approval state persistence
 │
@@ -97,13 +107,17 @@ src/coding_agent/
 │
 ├── core/                    # Core domain logic
 │   ├── config.py            #   Pydantic Config model, layered loading
-│   ├── context.py           #   Conversation context management
-│   ├── doom.py              #   Doom loop detection logic
-│   ├── loop.py              #   Legacy agent loop (pre-pipeline)
-│   ├── parallel.py          #   Parallel execution utilities
 │   ├── planner.py           #   Task planner (todo_write/todo_read)
-│   ├── session.py           #   Session management
-│   └── tape.py              #   Tape utilities
+│   └── session.py           #   Session management
+│
+├── evaluation/              # Evaluation framework
+│   ├── __init__.py
+│   ├── adapter.py
+│   └── metrics.py
+│
+├── kb.py                    # Knowledge base chunk injection
+│
+├── metrics.py               # Application metrics
 │
 ├── plugins/                 # AgentKit hook implementations (14 plugins)
 │   ├── approval.py          #   approve_tool_call → Approve/Reject/AskUser
@@ -127,10 +141,21 @@ src/coding_agent/
 │   ├── openai_compat.py     #   OpenAI-compatible Chat Completions
 │   └── copilot.py           #   GitHub Copilot (extends OpenAI-compat)
 │
+├── redaction.py             # Output redaction
+│
+├── skills/                  # Skill definitions
+│   └── __init__.py
+│
+├── subagents/               # Sub-agent coordination
+│   ├── __init__.py
+│   └── coordinator.py
+│
 ├── summarizer/              # Context summarization strategies
 │   ├── base.py              #   Summarizer protocol
 │   ├── llm_summarizer.py    #   LLM-based summarization (future)
 │   └── rule_summarizer.py   #   Rule-based truncation
+│
+├── tokens.py                # Token utilities
 │
 ├── tools/                   # Tool implementations
 │   ├── file_ops.py          #   file_read, file_write, file_replace, glob, grep
@@ -140,18 +165,22 @@ src/coding_agent/
 │   ├── planner.py           #   todo_write, todo_read
 │   ├── web_search.py        #   web_search tool and backend plumbing
 │   ├── subagent.py          #   Sub-agent delegation tool
+│   ├── subagent_stub.py     #   Sub-agent stub tool
 │   └── sandbox.py           #   sandbox helpers
 │
 ├── ui/                      # Presentation layer
 │   ├── stream_renderer.py   #   StreamingRenderer: raw text → Rich panels
 │   ├── rich_consumer.py     #   RichConsumer: WireMessage → Renderer calls
+│   ├── rich_tui.py          #   Rich TUI components
 │   ├── approval_prompt.py   #   Interactive approval UI with previews
 │   ├── headless.py          #   HeadlessConsumer: logging-based output
 │   ├── http_server.py       #   FastAPI HTTP server mode
 │   ├── components.py        #   Shared Rich components
+│   ├── collapse.py          #   Collapsible output regions
 │   ├── theme.py             #   Color/style definitions
 │   ├── schemas.py           #   HTTP API schemas
 │   ├── session_manager.py   #   HTTP session management
+│   ├── status_footer.py     #   Status footer widget
 │   ├── auth.py              #   HTTP API authentication
 │   └── rate_limit.py        #   HTTP rate limiting
 │
@@ -183,9 +212,9 @@ python -m coding_agent
        └── serve ─→ uvicorn.run(http_server.app)
 ```
 
-### Agent Construction: `create_agent()`
+### Agent Construction: `app.py` → `create_agent()`
 
-The `create_agent()` factory is the wiring center. It constructs the full agentkit pipeline:
+The `create_agent()` factory in `app.py` is the wiring center. It constructs the full agentkit pipeline:
 
 ```python
 def create_agent(...) -> tuple[Pipeline, PipelineContext]:
@@ -383,6 +412,7 @@ Plugins are registered in `create_agent()` via factory lambdas, supporting defer
 | **TopicPlugin** | `topic` | `on_checkpoint`, `on_session_event`, `mount` | File-overlap-based topic boundary detection |
 | **SessionMetricsPlugin** | `session_metrics` | `on_checkpoint`, `on_session_event` | Per-turn and per-topic performance metrics |
 | **ShellSessionPlugin** | `shell_session` | `mount`, `on_checkpoint` | Persistent CWD + env tracking across tool calls |
+| **KBPlugin** | `kb` | `build_context` | KB chunk injection |
 
 ### Plugin Interaction Diagram
 
@@ -907,6 +937,9 @@ Fallback when no topic boundaries exist. Keeps the last `keep_recent` entries ve
 
 ```
 __main__.py
+├── app.py
+│   └── create_agent() → core/config.py + plugins/
+│
 ├── adapter.py
 │   ├── agentkit (Pipeline, PipelineContext, Entry)
 │   ├── agentkit (TextEvent, ToolCallEvent, ToolResultEvent, DoneEvent)
@@ -935,6 +968,17 @@ __main__.py
 │   ├── topic.py → agentkit (Tape, Entry)
 │   ├── metrics.py → (stdlib only)
 │   └── shell_session.py → (stdlib only)
+│
+├── subagents/
+│   └── coordinator.py
+│
+├── evaluation/
+│   ├── adapter.py
+│   └── metrics.py
+│
+├── verification/
+│   ├── contract.py
+│   └── runner.py
 │
 └── ui/
     ├── rich_consumer.py → wire/protocol.py
