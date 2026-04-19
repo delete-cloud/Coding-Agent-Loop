@@ -1121,6 +1121,7 @@ class SessionManager:
         Raises:
             KeyError: If session not found
         """
+        await self._assert_owner(session_id)
         session = await self.get_session_async(session_id)
 
         # Create approval response and submit to ApprovalStore
