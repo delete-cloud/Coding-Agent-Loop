@@ -643,8 +643,10 @@ async def approve_request(
         )
         if not success:
             raise HTTPException(status_code=400, detail="No pending approval request")
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     return ApprovalResponseSchema(
         status="ok",
@@ -820,6 +822,8 @@ async def close_session(
         await session_manager.close_session(session_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Unexpected error while closing session %s", session_id)
         raise HTTPException(status_code=500, detail="Internal server error") from exc
