@@ -803,7 +803,8 @@ async def close_session(
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        logger.exception("Unexpected error while closing session %s", session_id)
+        raise HTTPException(status_code=500, detail="Internal server error") from exc
 
     await _broadcast_event(
         session,

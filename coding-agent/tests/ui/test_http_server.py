@@ -1056,7 +1056,7 @@ class TestCloseSession:
         response = await client.delete(f"/sessions/{session_id}")
 
         assert response.status_code == 500
-        assert response.json()["detail"] == "close exploded"
+        assert response.json()["detail"] == "Internal server error"
 
     async def test_close_session_returns_404_when_session_disappears_during_close(
         self, client, monkeypatch
@@ -1116,6 +1116,26 @@ class TestCloseSession:
 
         assert response.status_code == 404
         assert response.json()["detail"] == f"Session not found: {session_id}"
+
+    async def test_close_session_hides_unexpected_internal_error_detail(
+        self, client, monkeypatch, caplog
+    ):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        async def failing_close_session(current_session_id: str) -> None:
+            assert current_session_id == session_id
+            raise RuntimeError("dsn=postgresql://user:secret@example/db")
+
+        monkeypatch.setattr(session_manager, "close_session", failing_close_session)
+
+        with caplog.at_level("ERROR"):
+            response = await client.delete(f"/sessions/{session_id}")
+
+        assert response.status_code == 500
+        assert response.json()["detail"] == "Internal server error"
+        assert "dsn=postgresql://user:secret@example/db" not in response.text
+        assert "Unexpected error while closing session" in caplog.text
 
 
 class TestSessionTimeout:
