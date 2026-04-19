@@ -44,6 +44,7 @@ from coding_agent.ui.session_store import (
     SessionStore,
     create_session_store,
 )
+from coding_agent.ui.session_owner_store import SessionOwnerStoreProtocol
 from coding_agent.ui.binding_resolver import BindingResolver, DefaultBindingResolver
 from coding_agent.ui.execution_binding import ExecutionBinding, LocalExecutionBinding
 
@@ -358,6 +359,9 @@ class SessionManager:
         checkpoint_service: CheckpointService | None = None,
         create_agent_fn: Callable[..., tuple[Any, Any]] | None = None,
         binding_resolver: BindingResolver | None = None,
+        owner_store: SessionOwnerStoreProtocol | None = None,
+        owner_id: str | None = None,
+        fencing_token: int | None = None,
     ):
         self._storage_config = storage_config or {}
         self._pg_pool = pg_pool
@@ -378,6 +382,9 @@ class SessionManager:
         )
         self._create_agent = create_agent_fn
         self._binding_resolver = binding_resolver or DefaultBindingResolver()
+        self._owner_store = owner_store
+        self._owner_id = owner_id
+        self._fencing_token = fencing_token
 
     def _get_pg_pool(self) -> AsyncPGSessionPool:
         if self._pg_pool is not None:
@@ -478,6 +485,29 @@ class SessionManager:
             lock = asyncio.Lock()
             self._session_turn_locks[session_id] = lock
         return lock
+
+    async def _assert_owner(self, session_id: str) -> None:
+        if self._owner_store is None:
+            return
+        if self._owner_id is None or self._fencing_token is None:
+            raise RuntimeError("stale owner or fencing token rejected")
+
+        owner = await self._owner_store.get_owner(session_id)
+        if owner is None:
+            raise RuntimeError("session has no owner")
+
+        if isinstance(owner, dict):
+            current_owner_id = owner.get("owner_id")
+            current_fencing_token = owner.get("fencing_token")
+        else:
+            current_owner_id = owner.owner_id
+            current_fencing_token = owner.fencing_token
+
+        if (
+            current_owner_id != self._owner_id
+            or current_fencing_token != self._fencing_token
+        ):
+            raise RuntimeError("stale owner or fencing token rejected")
 
     async def _run_store_io(self, func: Callable[..., T], /, *args: object) -> T:
         async with self._store_io_guard:
@@ -625,6 +655,7 @@ class SessionManager:
         return _WireConsumer(session.wire, _request_approval)
 
     async def _restore_checkpoint(self, session: Session, checkpoint_id: str) -> None:
+        await self._assert_owner(session.id)
         snapshot = await self._checkpoint_service.restore(checkpoint_id)
         meta = snapshot.meta
         if session.tape_id is None:
@@ -930,6 +961,7 @@ class SessionManager:
         Raises:
             KeyError: If session not found
         """
+        await self._assert_owner(session_id)
         async with self._lock:
             session = await self.get_session_async(session_id)
 
@@ -980,6 +1012,7 @@ class SessionManager:
         session_id: str,
         prompt: str,
     ) -> None:
+        await self._assert_owner(session_id)
         turn_lock = self._turn_lock_for(session_id)
         if turn_lock.locked():
             raise RuntimeError("turn already in progress")
