@@ -1,5 +1,6 @@
 import asyncio
 import json
+from collections.abc import Awaitable, Callable
 from typing import cast
 from unittest.mock import AsyncMock
 
@@ -14,6 +15,7 @@ from agentkit.storage.pg import (
     PGCheckpointStore,
     PGPool,
     PGSessionLock,
+    PGSessionOwnerStore,
     PGSessionStore,
     PGTapeStore,
 )
@@ -22,6 +24,7 @@ from agentkit.storage.pg import (
 class FakePool:
     def __init__(self) -> None:
         self.sessions: dict[str, dict[str, object]] = {}
+        self.session_owners: dict[str, dict[str, object]] = {}
         self.tapes: dict[str, list[dict[str, int | dict[str, object]]]] = {}
         self.checkpoints: dict[str, dict[str, object]] = {}
         self.closed: bool = False
@@ -104,6 +107,49 @@ class FakePool:
                 else extra_json,
             }
             return "INSERT 0 1"
+        if "INSERT INTO session_owners" in query:
+            session_id, owner_id, lease_expires_at, fencing_token = args
+            if not isinstance(session_id, str):
+                raise TypeError("session_id must be a string")
+            owner = self.session_owners.get(session_id)
+            if owner is not None and owner["lease_expires_at"] != "expired":
+                return "INSERT 0 0"
+            self.session_owners[session_id] = {
+                "owner_id": owner_id,
+                "lease_expires_at": lease_expires_at,
+                "fencing_token": fencing_token,
+            }
+            return "INSERT 0 1"
+        if "UPDATE session_owners" in query:
+            (
+                lease_expires_at,
+                new_fencing_token,
+                session_id,
+                owner_id,
+                current_fencing_token,
+            ) = args
+            owner = self.session_owners.get(cast(str, session_id))
+            if owner is None:
+                return "UPDATE 0"
+            if owner["lease_expires_at"] == "expired":
+                return "UPDATE 0"
+            if (
+                owner["owner_id"] != owner_id
+                or owner["fencing_token"] != current_fencing_token
+            ):
+                return "UPDATE 0"
+            owner["lease_expires_at"] = lease_expires_at
+            owner["fencing_token"] = new_fencing_token
+            return "UPDATE 1"
+        if "DELETE FROM session_owners" in query:
+            session_id, owner_id, fencing_token = args
+            owner = self.session_owners.get(cast(str, session_id))
+            if owner is None:
+                return "DELETE 0"
+            if owner["owner_id"] != owner_id or owner["fencing_token"] != fencing_token:
+                return "DELETE 0"
+            del self.session_owners[cast(str, session_id)]
+            return "DELETE 1"
         if query.strip() == "SELECT 1":
             return "SELECT 1"
         if "DELETE FROM agent_tapes WHERE tape_id = $1 AND seq >= $2" in query:
@@ -123,6 +169,8 @@ class FakePool:
             return "CREATE TABLE"
         if "CREATE TABLE IF NOT EXISTS agent_checkpoints" in query:
             return "CREATE TABLE"
+        if "CREATE TABLE IF NOT EXISTS session_owners" in query:
+            return "CREATE TABLE"
         if "DELETE FROM agent_checkpoints" in query:
             (checkpoint_id,) = args
             if not isinstance(checkpoint_id, str):
@@ -134,6 +182,17 @@ class FakePool:
     async def fetchrow(self, query: str, *args: object) -> dict[str, object] | None:
         self.executed.append((query, args))
         if "SELECT payload FROM agent_sessions" not in query:
+            if (
+                "SELECT owner_id, lease_expires_at, fencing_token FROM session_owners"
+                in query
+            ):
+                (session_id,) = args
+                if not isinstance(session_id, str):
+                    raise TypeError("session_id must be a string")
+                owner = self.session_owners.get(session_id)
+                if owner is None:
+                    return None
+                return owner
             if (
                 "SELECT meta, entries, plugin_states, extra FROM agent_checkpoints"
                 in query
@@ -326,7 +385,7 @@ class TestPGPool:
                 raise AssertionError("expected asyncpg init callback")
             conn = FakeInitConnection()
             seen_connections.append(conn)
-            await init(conn)
+            await cast(Callable[[FakeInitConnection], Awaitable[object]], init)(conn)
             return FakePool()
 
         pool = PGPool(dsn="postgresql://example", pool_factory=fake_pool_factory)
@@ -506,6 +565,65 @@ class TestPGSessionStore:
         ]
         assert len(insert_calls) == 1
         assert isinstance(insert_calls[0][1], dict)
+
+
+class TestPGSessionOwnerStore:
+    @pytest.fixture
+    def fake_pool(self) -> FakePool:
+        return FakePool()
+
+    @pytest.fixture
+    def pool(self, fake_pool: FakePool) -> PGPool:
+        async def fake_pool_factory(**_: object) -> FakePool:
+            return fake_pool
+
+        return PGPool(dsn="postgresql://example", pool_factory=fake_pool_factory)
+
+    @pytest.fixture
+    def store(self, pool: PGPool) -> PGSessionOwnerStore:
+        return PGSessionOwnerStore(pool=pool)
+
+    @pytest.mark.asyncio
+    async def test_acquire_returns_true_on_new_session(
+        self, store: PGSessionOwnerStore
+    ) -> None:
+        assert await store.acquire("s1", "owner-a", 30.0, 1) is True
+
+    @pytest.mark.asyncio
+    async def test_acquire_returns_false_on_existing_live_lease(
+        self, store: PGSessionOwnerStore
+    ) -> None:
+        await store.acquire("s1", "owner-a", 30.0, 1)
+
+        assert await store.acquire("s1", "owner-b", 30.0, 2) is False
+
+    @pytest.mark.asyncio
+    async def test_renew_updates_fencing_token(
+        self, store: PGSessionOwnerStore
+    ) -> None:
+        await store.acquire("s1", "owner-a", 30.0, 1)
+
+        renewed = await store.renew("s1", "owner-a", 30.0, 2, 1)
+        owner = await store.get_owner("s1")
+
+        assert renewed is True
+        assert owner is not None
+        assert owner["fencing_token"] == 2
+
+    @pytest.mark.asyncio
+    async def test_renew_rejects_stale_fencing_token(
+        self, store: PGSessionOwnerStore
+    ) -> None:
+        await store.acquire("s1", "owner-a", 30.0, 1)
+
+        assert await store.renew("s1", "owner-a", 30.0, 2, 99) is False
+
+    @pytest.mark.asyncio
+    async def test_release_removes_owner(self, store: PGSessionOwnerStore) -> None:
+        await store.acquire("s1", "owner-a", 30.0, 1)
+
+        assert await store.release("s1", "owner-a", 1) is True
+        assert await store.get_owner("s1") is None
 
 
 class TestPGTapeStore:
