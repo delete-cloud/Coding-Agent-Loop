@@ -5,12 +5,14 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import Any, get_args
+from collections.abc import Mapping
+from typing import Any, cast, get_args
 
 import click
 
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.core.config import Config, load_config
+from coding_agent.postmortem_phase1 import build_phase1_artifacts
 from coding_agent.ui.headless import HeadlessConsumer
 from coding_agent.ui.rich_tui import CodingAgentTUI
 from coding_agent.verification import VerificationRunner, load_task_packet_contract
@@ -198,6 +200,35 @@ def kb():
     pass
 
 
+@main.group()
+def postmortem():
+    """Postmortem knowledge-base tooling."""
+
+
+@postmortem.command("phase1")
+@click.option(
+    "--repo",
+    default=Path("."),
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Repository root used for git-history collection.",
+)
+@click.option(
+    "--output-dir",
+    default="postmortem",
+    help="Output directory relative to --repo unless absolute.",
+)
+def postmortem_phase1(repo: Path, output_dir: str) -> None:
+    """Generate the Phase 1 postmortem onboarding artifacts."""
+    target_output = Path(output_dir)
+    if not target_output.is_absolute():
+        target_output = repo / target_output
+    result = build_phase1_artifacts(repo, output_dir=target_output)
+    click.echo(
+        "Generated Phase 1 postmortem onboarding artifacts "
+        f"at {result.output_dir} ({result.pattern_count} patterns from {result.commit_count} fix commits)."
+    )
+
+
 @kb.command("index")
 @click.argument("path", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option(
@@ -361,11 +392,12 @@ def stats(session: str | None):
         return
 
     data = metrics.to_dict()
+    tool_calls = cast(Mapping[str, int], data["tool_calls"])
 
     click.echo(f"Session: {data['session_id']}")
     click.echo(f"Duration: {data['duration']}")
     click.echo(f"\nTools: {data['tools_total']} calls")
-    for tool, count in data["tool_calls"].items():
+    for tool, count in tool_calls.items():
         click.echo(f"  • {tool}: {count}")
     click.echo(
         f"\nAPI: {data['api_calls']} calls, avg latency {data['avg_api_latency']}"

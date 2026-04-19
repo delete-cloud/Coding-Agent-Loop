@@ -1,0 +1,40 @@
+root_cause_class:
+- state_desync
+- race_condition
+- missing_validation
+- invalid_configuration
+- persistence_boundary_mismatch
+- interface_contract_drift
+- error_handling_gap
+- missing_regression_coverage
+failure_mode:
+- stale_session_state
+- lost_update
+- startup_failure
+- wrong_http_response
+- partial_persistence
+subsystem:
+- agentkit
+- adapter
+- approval
+- bootstrap
+- checkpoint
+- cli
+- config
+- http
+- kb
+- plugins
+- runtime
+- session_manager
+- shell
+- storage_pg
+- tape
+- tools
+- tracing
+- ui
+- verification
+prevention_type:
+- regression_test
+- invariant_check
+- fail_fast_validation
+- interface_boundary_rule

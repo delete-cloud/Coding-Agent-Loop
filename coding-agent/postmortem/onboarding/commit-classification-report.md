@@ -1,0 +1,149 @@
+# Commit Classification Report
+
+Total fix commits classified: 143
+
+## Commits
+
+- `6e096b8` `p0` — fix(p0): align tape factory methods with context expectations, add TODO for max_tokens
+- `d64108a` `p0` — fix(p0): security and robustness improvements
+- `a4f47e1` `p0` — fix(p0): handle SecretStr in OpenAI provider
+- `c0440ec` `p1` — fix(p1): address code review P0/P1 issues
+- `2aceff4` `p1` — fix(p1): address code review P2/P3 issues
+- `b04f0d1` `tools` — fix: handle non-UTF8 files gracefully in file_read and file_replace
+- `d3356a9` `tui` — fix(tui): address code review issues
+- `1a347b0` `cli` — fix(cli): address code review issues for interactive mode
+- `9297e22` `ui` — fix: address PR review comments
+- `be7283a` `tape` — fix(tape): handoff() accepts window_start to preserve recent entries
+- `1a5c4dd` `tracing` — fix(tracing): replace open(devnull) with DropEvent processor to avoid unclosed file handle
+- `7f66b31` `skills` — fix(skills): address code review findings — public API for CLI, XML escaping, clean mount state
+- `317ae31` `review` — fix(review): address P2 review findings — HTML escaping, paste folding, collapse flush
+- `d5e6a50` `cli` — fix(cli): rewrite paste folding with sequential IDs and add TUI input separators
+- `b4d5e80` `plugins` — fix(plugins): prevent 'name' kwarg collision in tool execution
+- `83db155` `agentkit` — fix(agentkit): add usage event fields and fix tool name kwarg in pipeline
+- `d7266c8` `kb` — fix(kb): normalize hybrid search result ranking
+- `957db61` `config` — fix(config): require explicit enablement for KB plugin
+- `2cde0b4` `approval` — fix(approval): clean up pending requests after waits
+- `2d59b7a` `ui` — fix(ui): redact tool result payloads in SSE events
+- `0fa8747` `ui` — fix(ui): remove type suppression and align session store APIs
+- `683a0ba` `ui` — fix(ui): keep slow SSE clients registered under backpressure
+- `de91c5f` `approval` — fix(approval): require store-backed requests across HTTP approval flow
+- `2ff2d24` `agentkit` — fix(agentkit): move Anchor into tape models to remove import cycle
+- `b3bdec7` `agentkit` — fix(agentkit): route incremental context append through TapeView
+- `9ecd643` `ui` — fix(ui): restore missing session store module
+- `cdc78c2` `ui` — fix(ui): align wire payloads for restored session flows
+- `1fbd475` `ui` — fix(ui): restore missing REPL status footer
+- `4e0ea06` `plugins` — fix(plugins): allow skills tools after core tool miss
+- `91a7330` `ui` — fix(ui): keep thinking status out of main output
+- `b110208` `ui` — fix(ui): buffer thinking chunks before rendering
+- `b32ce83` `runtime` — fix(runtime): surface missing tools as execution errors
+- `f755dba` `agentkit` — fix(agentkit): preserve neutral bare anchor semantics
+- `21636c6` `agentkit` — fix(agentkit): move handoff summaries ahead of recent context
+- `f0bb165` `runtime` — fix(runtime): tighten windowing and batch tool contracts
+- `316a6cf` `coding-agent` — fix(coding-agent): scope turn outcomes to the active turn
+- `a4804d3` `storage` — fix(storage): restore optional PG imports
+- `d0edef3` `shell` — fix(shell): restore workspace enforcement without sandbox dependency
+- `7daa94a` `http` — fix(http): stabilize session turn tracking and approval flow
+- `eac8ba3` `bootstrap` — fix(bootstrap): restore child pipeline bootstrap wiring
+- `49b0664` `cli` — fix(cli): align REPL pipeline wiring
+- `8043ca0` `core` — fix(core): satisfy Task 0 static verification gate
+- `299d76d` `config` — fix(config): restore tested agent defaults
+- `f5e83b7` `tracing` — fix: land hardening fixes from wip/hardening-mixed
+- `7c9c258` `gitignore` — fix(gitignore): restore coding-agent artifact guards
+- `0d38f7c` `tools` — fix(tools): harden sandbox environment handling
+- `05be82b` `docker` — fix(docker): preserve app file ownership
+- `79065db` `storage` — fix(storage): batch postgres tape inserts
+- `85f7af0` `bootstrap` — fix(bootstrap): restore child pipeline composition root
+- `e88cbd1` `bootstrap` — fix(bootstrap): preserve shared bootstrap contracts
+- `959e1a8` `bootstrap` — fix(bootstrap): align sandbox env error assertion
+- `3d82c6c` `shell` — fix(shell): keep sandbox env restricted to explicit vars
+- `188779a` `ui` — fix(ui): persist restart-safe session provider settings
+- `4cbc656` `ui` — fix(ui): persist explicit session restart metadata
+- `cd4087b` `ui` — fix(ui): persist default session restart metadata
+- `9b6393c` `http` — fix(http): align session restore wire behavior
+- `98389b9` `ui` — fix(ui): redact redis session store errors
+- `00d1bb6` `adapter` — fix(adapter): redact user-facing tool result displays
+- `16c6109` `ui` — fix(ui): redact redis credential edge cases
+- `d6e2dfb` `adapter` — fix(adapter): handle mapping tool results safely
+- `da14f75` `test` — fix(test): remove stray rebase markers from shell tests
+- `c9daa9b` `cli` — fix(cli): accept kimi-code provider
+- `f232078` `cli` — fix(cli): support kimi-code at the top level
+- `215754b` `cli` — fix(cli): stabilize top-level kimi-code REPL tests
+- `ec9feff` `cli` — fix(cli): unify shared root options
+- `c8555e0` `tape` — fix(tape): commit forks to stable base ids
+- `681f33d` `runtime` — fix(runtime): rebind context tape ids after commit
+- `b1f5290` `storage` — fix(storage): reject invalid truncate counts
+- `f41fc72` `session` — fix(session): preserve turn state across failures
+- `04252bf` `checkpoint` — fix(checkpoint): validate checkpoint ids in fs store
+- `938c358` `storage` — fix(storage): make jsonl truncate atomic
+- `f162e71` `checkpoint` — fix(checkpoint): harden fs checkpoint publishing
+- `8fe77aa` `ui` — fix(ui): reuse session runtimes safely
+- `7e4fb57` `storage` — fix(storage): make jsonl truncate durable
+- `05e9c18` `storage` — fix(storage): keep tape store protocol test compatible
+- `0a149d0` `verification` — fix(verification): accept plain task packet commands
+- `c064997` `verification` — fix(verification): harden target test packet parsing
+- `9640ed3` `tape` — fix(tape): extract batched tool calls for evaluation
+- `9342afd` `coding_agent` — fix(coding_agent): preserve child approval context
+- `64f6f7f` `ui` — fix(ui): show child origin in approval preview
+- `7fa8327` `coding_agent` — fix(coding_agent): ground child subagent prompts
+- `4dfda3d` `ui` — fix(ui): isolate session approvals by origin
+- `5d22c2e` `tape` — fix(tape): drop blank batched tool call records
+- `28c006e` `verification` — fix(verification): accept mixed target test indentation
+- `82ab5d8` `verification` — fix(verification): simplify target test indentation rules
+- `49ec943` `verification` — fix(verification): report verification spawn failures
+- `eb4887a` `ui` — fix: normalize checkpoint restore errors
+- `082193a` `cli` — fix: align repl session initialization
+- `07d3b92` `approval` — fix(approval): centralize session approval coordination
+- `d91c8d9` `coding_agent` — fix(coding_agent): serialize child write turns
+- `444f804` `ui` — fix(ui): align approval flow with HTTP
+- `e383c09` `coding_agent` — fix(coding_agent): inject child worker coordinator
+- `e13e9e1` `ui` — fix: harden checkpoint metadata validation
+- `e676ea8` `cli` — fix: rebind repl session consumer on switch
+- `b160f26` `ui` — fix(ui): accept session scope via query params
+- `4f7e462` `ui` — fix(ui): reuse legacy always approvals
+- `fd62d8f` `ui` — fix: guard checkpoint provider reuse
+- `103239d` `ui` — fix: synchronize checkpoint restore with active turns
+- `feddcec` `approval` — fix(approval): clear answered request projections
+- `3b7aae2` `ui` — fix(ui): tighten approval timeout contract
+- `f2406cf` `approval` — fix(approval): make approval responses single-shot
+- `18cd535` `ui` — fix(ui): report idle state during approval prompts
+- `7ad9179` `ui` — fix(ui): clean up auto-approved thinking state
+- `4fba08d` `ui` — fix(ui): serialize checkpoint capture with active turns
+- `9e51646` `plugins` — fix: tighten agentkit typing
+- `c606f66` `adapter` — fix: guard missing directive executors
+- `6f01ff5` `cli` — fix: require the checkpoint restore hook
+- `039aff5` `ui` — fix(ui): handle asyncpg record session rows
+- `d7ff944` `ui` — fix(ui): reuse pg pool for session defaults
+- `492caa9` `ui` — fix(ui): isolate pg pools across event loops
+- `c109c4a` `ui` — fix(ui): allow injected pg session pools without dsn
+- `e0ae8e5` `ui` — fix(ui): normalize pg session dsns
+- `2142e91` `storage` — fix(storage): pass python objects to pg codecs
+- `4452045` `ui` — fix(ui): fail fast on pg session startup
+- `2c36291` `ui` — fix(ui): offload pg session store access
+- `167f4d5` `ui` — fix(ui): harden session store review fixes
+- `1c58e90` `ui` — fix(ui): finish async session cleanup
+- `b112863` `ui` — fix(ui): preserve sessions on shutdown
+- `6b9ee98` `ui` — fix(ui): harden async session store access
+- `581903d` `ui` — fix(ui): harden pg session loop lifecycle
+- `6819b0d` `storage` — fix(storage): make pg checkpoints retry-safe
+- `8fc6d23` `ui` — fix(ui): preserve idle semantics on shutdown
+- `627ac94` `ui` — fix(ui): stop persisting event queues
+- `f33080f` `storage` — fix(storage): ignore pg close errors
+- `97bbf42` `ui` — fix(ui): broadcast from loaded session
+- `ec9846b` `ui` — fix(ui): serialize async store io
+- `4156432` `store` — fix(store): use scard for redis counts
+- `20262b2` `storage` — fix(storage): sort pg checkpoints by timestamp
+- `6225db9` `ui` — fix(ui): prune blocked event queues
+- `ef19d73` `store` — fix(store): relax optional redis scard typing
+- `deb44f7` `ui` — fix(ui): harden session shutdown teardown
+- `855b080` `ui` — fix(ui): make event cleanup best effort
+- `d95224d` `store` — fix(store): wait for timed-out cancels
+- `9431277` `ui` — fix(ui): harden shutdown and SSE checks
+- `9038e93` `ui` — fix(ui): clarify pg backend dependency errors
+- `d995dd3` `ui` — fix(ui): return 404 when sessions disappear during close
+- `ef6bf9a` `ui` — fix(ui): reuse shared pg pool for session storage
+- `6b32664` `ui` — fix(ui): close session without stale existence check
+- `54e4ee6` `ui` — fix(ui): fail fast on invalid redis config
+- `26ab735` `ui` — fix(ui): preserve ownership of shared pg pools
+- `d03eedd` `ui` — fix(ui): harden event and storage backends
+- `3455afc` `ui` — fix(ui): hide close-session internals
+- `0a49231` `storage` — fix(storage): harden pg review fixes
