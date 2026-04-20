@@ -18,6 +18,7 @@ from sse_starlette.sse import EventSourceResponse
 from agentkit.config.loader import load_config as load_agent_toml
 from agentkit.errors import ConfigError
 from coding_agent.approval import ApprovalPolicy
+from coding_agent.ui.execution_binding import LocalExecutionBinding
 from coding_agent.ui.session_manager import Session, SessionManager
 from coding_agent.ui.schemas import (
     PromptRequest,
