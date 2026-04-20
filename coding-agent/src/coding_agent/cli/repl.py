@@ -248,8 +248,8 @@ class InteractiveSession:
     async def _switch_session(self, session_id: str) -> None:
         await self._session_manager.ensure_session_runtime(session_id)
         managed_session = self._session_manager.get_session(session_id)
-        self.context["session_id"] = managed_session.id
         self._sync_config_from_managed_session(managed_session)
+        self.context["session_id"] = managed_session.id
         self.context["model"] = self.config.model
         self._pipeline = managed_session.runtime_pipeline
         self._pipeline_ctx = managed_session.runtime_ctx

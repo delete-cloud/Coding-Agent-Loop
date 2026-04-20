@@ -937,6 +937,7 @@ class TestSessionManagerIntegration:
             approval_mode="auto",
         )
         session = InteractiveSession(config)
+        session.context["session_id"] = "session-a"
         session.context["model"] = "current-model"
 
         fake_ctx = SimpleNamespace(
@@ -969,6 +970,7 @@ class TestSessionManagerIntegration:
         with pytest.raises(RuntimeError, match="invalid max_steps"):
             await session._switch_session("session-b")
 
+        assert session.context["session_id"] == "session-a"
         assert session.context["model"] == "current-model"
         assert session.config.provider == "openai"
         assert session.config.model == "current-model"
@@ -994,6 +996,7 @@ class TestSessionManagerIntegration:
             approval_mode="auto",
         )
         session = InteractiveSession(config)
+        session.context["session_id"] = "session-a"
         session.context["model"] = "current-model"
 
         fake_ctx = SimpleNamespace(
@@ -1025,9 +1028,13 @@ class TestSessionManagerIntegration:
         with pytest.raises(RuntimeError, match="invalid provider_name"):
             await session._switch_session("session-b")
 
+        assert session.context["session_id"] == "session-a"
         assert session.context["model"] == "current-model"
         assert session.config.provider == "openai"
         assert session.config.model == "current-model"
+        assert session.config.base_url == "http://current.local"
+        assert session.config.max_steps == 30
+        assert session.config.approval_mode == "auto"
 
     def test_status_update_updates_input_toolbar_text(self, monkeypatch):
         from coding_agent.cli.repl import InteractiveSession
