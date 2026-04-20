@@ -444,6 +444,83 @@ class TestTape:
         windowed = tape.windowed_entries()
         assert len(windowed) == 2
 
+    def test_from_list_restores_window_start_from_handoff_anchor(self):
+        from agentkit.tape.anchor import Anchor as _Anchor
+
+        entries_data = [
+            {
+                "id": "m1",
+                "kind": "message",
+                "payload": {"content": "old"},
+                "timestamp": 0,
+                "meta": {},
+            },
+            {
+                "id": "a1",
+                "kind": "anchor",
+                "payload": {"content": "summary"},
+                "timestamp": 0,
+                "anchor_type": "handoff",
+            },
+            {
+                "id": "m2",
+                "kind": "message",
+                "payload": {"content": "new"},
+                "timestamp": 0,
+                "meta": {},
+            },
+        ]
+        tape = Tape.from_list(entries_data)
+        assert tape.window_start == 1
+        assert len(tape.windowed_entries()) == 2
+
+    def test_from_list_respects_explicit_window_start_kwarg(self):
+        entries_data = [
+            {
+                "id": "m1",
+                "kind": "message",
+                "payload": {"content": "old"},
+                "timestamp": 0,
+                "meta": {},
+            },
+            {
+                "id": "a1",
+                "kind": "anchor",
+                "payload": {"content": "summary"},
+                "timestamp": 0,
+                "anchor_type": "handoff",
+            },
+            {
+                "id": "m2",
+                "kind": "message",
+                "payload": {"content": "new"},
+                "timestamp": 0,
+                "meta": {},
+            },
+        ]
+        tape = Tape.from_list(entries_data, _window_start=0)
+        assert tape.window_start == 0
+
+    def test_from_list_without_anchors_keeps_window_start_zero(self):
+        entries_data = [
+            {
+                "id": "m1",
+                "kind": "message",
+                "payload": {"content": "a"},
+                "timestamp": 0,
+                "meta": {},
+            },
+            {
+                "id": "m2",
+                "kind": "message",
+                "payload": {"content": "b"},
+                "timestamp": 0,
+                "meta": {},
+            },
+        ]
+        tape = Tape.from_list(entries_data)
+        assert tape.window_start == 0
+
     def test_jsonl_roundtrip_uses_latest_handoff_anchor_for_window_start(
         self, tmp_path
     ):
