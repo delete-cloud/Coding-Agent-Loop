@@ -31,7 +31,7 @@
 ## Scope Exclusions
 
 - **In-flight turn resume is out of scope.** After owner loss, a new owner rebuilds cold state from persisted data but does not resume partially executed runtime state. This matches ADR-0013's at-most-once contract.
-- **Brokered event routing is out of scope for the first slice.** Sticky routing is acceptable; cross-instance event forwarding comes later.
+- **Cross-instance event forwarding is out of scope for the first slice.** This plan still includes local HTTP binding integration plus stale-owner/failover boundary checks, but not brokered routing between instances.
 - **Cloud workspace tool implementations are out of scope.** We define `CloudWorkspaceBinding` but do not implement cloud file/shell tools.
 
 ---
@@ -61,13 +61,12 @@ The binding abstraction fixes risk 4. The owner/lease/fencing layer fixes risks 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 
 @dataclass(frozen=True)
 class ExecutionBinding:
-    kind: Literal["local", "cloud"]
+    kind: ClassVar[Literal["local", "cloud"]]
 
     def to_dict(self) -> dict[str, Any]:
         raise NotImplementedError
