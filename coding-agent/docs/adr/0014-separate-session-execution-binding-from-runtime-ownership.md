@@ -24,7 +24,7 @@ Introduce a first-class **execution binding** abstraction that sits beside the o
 Specifically:
 
 - Add an `ExecutionBinding` dataclass/protocol in `coding_agent.ui.execution_binding` with at least two concrete variants:
-  - `LocalExecutionBinding(workspace_root: Path)` for local filesystem mode.
+  - `LocalExecutionBinding(workspace_root: str)` for local filesystem mode.
   - `CloudWorkspaceBinding(workspace_url: str, workspace_id: str)` for remote workspace mode.
 - Store the serialized binding on the session metadata table as `execution_binding`, separate from `repo_path`. Migrate the current `repo_path` field to mean "local workspace root" only.
 - Add a `BindingResolver` interface that turns an `ExecutionBinding` into the `workspace_root` and tool configuration that `create_agent_for_session` expects. The resolver lives in `coding_agent.ui.binding_resolver`.

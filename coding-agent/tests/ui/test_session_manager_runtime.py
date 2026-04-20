@@ -350,7 +350,7 @@ async def test_close_session_raises_if_task_survives_cancellation() -> None:
             self.cancel_calls += 1
 
     fake_task = FakeTask()
-    session.task = cast(asyncio.Task[None], cast(object, fake_task))
+    session.task = cast(asyncio.Task[None], fake_task)
 
     with patch(
         "coding_agent.ui.session_manager.asyncio.wait_for",
@@ -380,7 +380,7 @@ async def test_shutdown_session_runtime_raises_if_task_survives_cancellation() -
             self.cancel_calls += 1
 
     fake_task = FakeTask()
-    session.task = cast(asyncio.Task[None], cast(object, fake_task))
+    session.task = cast(asyncio.Task[None], fake_task)
 
     with patch(
         "coding_agent.ui.session_manager.asyncio.wait_for",
@@ -1030,13 +1030,16 @@ async def test_restore_rewinds_restart_safe_agent_configuration_from_checkpoint_
 
 
 @pytest.mark.asyncio
-async def test_run_agent_uses_resolved_workspace_root_from_binding() -> None:
+async def test_run_agent_uses_resolved_workspace_root_from_binding(
+    tmp_path: Path,
+) -> None:
     manager = SessionManager(store=InMemorySessionStore())
     session_id = await manager.create_session()
     session = manager.get_session(session_id)
-    session.repo_path = Path("/tmp/not-used-directly")
+    session.repo_path = tmp_path / "not-used-directly"
+    bound_workspace = tmp_path / "bound-workspace"
     session.execution_binding = LocalExecutionBinding(
-        workspace_root="/tmp/bound-workspace"
+        workspace_root=str(bound_workspace)
     )
     manager.register_session(session)
 
@@ -1065,19 +1068,18 @@ async def test_run_agent_uses_resolved_workspace_root_from_binding() -> None:
         mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
         await manager.run_agent(session_id, "hello")
 
-    assert captured_kwargs["workspace_root"] == Path("/tmp/bound-workspace").resolve()
+    assert captured_kwargs["workspace_root"] == bound_workspace.resolve()
 
 
 @pytest.mark.asyncio
-async def test_restore_checkpoint_preserves_execution_binding() -> None:
+async def test_restore_checkpoint_preserves_execution_binding(tmp_path: Path) -> None:
     store = InMemorySessionStore()
     manager = SessionManager(store=store)
     session_id = await manager.create_session()
     session = manager.get_session(session_id)
     session.tape_id = "binding-restore-tape"
-    session.execution_binding = LocalExecutionBinding(
-        workspace_root="/tmp/restore-bound"
-    )
+    restore_bound = tmp_path / "restore-bound"
+    session.execution_binding = LocalExecutionBinding(workspace_root=str(restore_bound))
     manager.register_session(session)
 
     snapshot = types.SimpleNamespace(
@@ -1138,9 +1140,9 @@ async def test_restore_checkpoint_preserves_execution_binding() -> None:
         mp.setattr(manager, "_tape_store", FakeTapeStore(), raising=False)
         await manager._restore_checkpoint(session, "cp-binding")
 
-    assert captured_kwargs["workspace_root"] == Path("/tmp/restore-bound").resolve()
+    assert captured_kwargs["workspace_root"] == restore_bound.resolve()
     assert isinstance(session.execution_binding, LocalExecutionBinding)
-    assert session.execution_binding.workspace_root == "/tmp/restore-bound"
+    assert session.execution_binding.workspace_root == str(restore_bound)
 
 
 @pytest.mark.asyncio

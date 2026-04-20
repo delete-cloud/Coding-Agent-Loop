@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from coding_agent.ui.binding_resolver import DefaultBindingResolver
@@ -10,13 +12,14 @@ from coding_agent.ui.execution_binding import (
 )
 
 
-def test_local_binding_round_trip() -> None:
-    binding = LocalExecutionBinding(workspace_root="/tmp/repo")
+def test_local_binding_round_trip(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    binding = LocalExecutionBinding(workspace_root=str(workspace))
 
     restored = ExecutionBinding.from_dict(binding.to_dict())
 
     assert isinstance(restored, LocalExecutionBinding)
-    assert restored.workspace_root == "/tmp/repo"
+    assert restored.workspace_root == str(workspace)
 
 
 def test_cloud_binding_round_trip() -> None:
@@ -42,14 +45,14 @@ def test_local_binding_requires_string_workspace_root() -> None:
         LocalExecutionBinding.from_dict({"kind": "local", "workspace_root": 123})
 
 
-def test_local_resolver_returns_absolute_path() -> None:
-    binding = LocalExecutionBinding(workspace_root="/tmp/repo")
+def test_local_resolver_returns_absolute_path(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    binding = LocalExecutionBinding(workspace_root=str(workspace))
     resolver = DefaultBindingResolver()
 
-    assert str(resolver.resolve_workspace_root(binding)).endswith("/tmp/repo")
-    assert resolver.resolve_tool_config(binding) == {
-        "workspace_root": str(resolver.resolve_workspace_root(binding))
-    }
+    resolved = resolver.resolve_workspace_root(binding)
+    assert resolved == workspace.resolve()
+    assert resolver.resolve_tool_config(binding) == {"workspace_root": str(resolved)}
 
 
 def test_cloud_resolver_raises_not_implemented() -> None:
