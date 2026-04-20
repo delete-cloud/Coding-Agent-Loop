@@ -76,6 +76,8 @@ Minimum rule:
 - if this instance is not the active owner for the session, do not execute runtime-sensitive work
 - return a conflict/error that callers can treat as a retry or routing problem
 
+Ownership checks answer whether this instance may perform the action at all. They do not decide which workspace/tools configuration the session should use. Workspace resolution remains an execution-binding step that happens after ownership is validated, so the order is always ownership first, execution binding second.
+
 ## 4. Fencing points
 
 Fencing is only useful if stale owners are rejected at side-effect boundaries.
@@ -145,6 +147,8 @@ Define these invariants:
 - `run_agent`, `restore_checkpoint`, and `close_session` are mutually exclusive owner-sensitive operations
 - non-owner instances cannot execute them locally
 - stale owners must fail before mutating shared state
+
+For `run_agent`, `restore_checkpoint`, and `close_session`, the intended order is: validate ownership first, then resolve execution binding, then perform the operation. This checklist follows the same boundary as ADR-0013: ownership chooses the actor, execution binding chooses the workspace/tools context.
 
 ## 9. Suggested implementation order
 

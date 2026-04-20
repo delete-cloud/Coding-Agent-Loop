@@ -11,6 +11,8 @@ That Phase 1 boundary is acceptable for restart-safe storage, but it is not suff
 
 Phase 2 is the ownership and coordination layer that sits on top of Phase 1 persistence. It does not primarily add “more PostgreSQL persistence”; it defines how multiple instances safely share a PostgreSQL-backed session/tape/checkpoint substrate without split-brain behavior.
 
+Phase 2 ownership decides **which instance may act** on a session. It does not decide **where tools execute** for that session. Execution/workspace placement remains a separate execution-binding concern: validate ownership first, then the active owner resolves the session's execution binding before running tools, restore, or other runtime-sensitive work.
+
 ## Decision
 
 Define Phase 2 as a multi-instance coordination layer for HTTP sessions with four core properties:
@@ -26,7 +28,7 @@ Specifically, Phase 2 will include:
 - App-layer primitives to `acquire`, `renew`, and `release` session ownership atomically.
 - Owner checks in `run_agent`, checkpoint restore, and close/shutdown flows before they perform runtime-sensitive work.
 - Fencing-token validation so a stale owner cannot continue mutating session-associated state after ownership changes.
-- An explicit routing rule for approval responses and SSE/event delivery so only the active owner drives runtime-visible side effects.
+- An explicit routing rule for approval responses and SSE/event delivery so only the active owner drives runtime-visible side effects; execution binding is consulted only after ownership is confirmed.
 - A first failover contract of **at-most-once** execution for in-flight turns: after owner loss, a new owner may rebuild cold state from persisted data, but it does not resume partially executed runtime state.
 
 Phase 2 should initially prefer a minimal operational model:
@@ -62,3 +64,5 @@ Phase 2 should initially prefer a minimal operational model:
 - `src/coding_agent/ui/session_store.py`
 - `src/agentkit/storage/pg.py`
 - Historical design context: `docs/specs/checkpoint-design-section2a.md`
+
+This ADR is intentionally orthogonal to execution binding. A session may fail over to a new owner while keeping the same execution binding, and a session may change execution binding without changing the ownership model itself. Ownership answers "who may act"; execution binding answers "where that owner's tools and workspace live."
