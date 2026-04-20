@@ -919,6 +919,116 @@ class TestSessionManagerIntegration:
         assert session.config.max_steps == 7
         assert session.config.approval_mode == "interactive"
 
+    @pytest.mark.asyncio
+    async def test_switch_session_rejects_invalid_restored_max_steps_without_mutating_state(
+        self, monkeypatch
+    ):
+        from coding_agent.cli.repl import InteractiveSession
+        from coding_agent.approval import ApprovalPolicy
+
+        monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
+        config = SimpleNamespace(
+            model="current-model",
+            repo=None,
+            api_key=None,
+            provider="openai",
+            base_url="http://current.local",
+            max_steps=30,
+            approval_mode="auto",
+        )
+        session = InteractiveSession(config)
+        session.context["model"] = "current-model"
+
+        fake_ctx = SimpleNamespace(
+            config={"tool_registry": "registry-b"},
+            tape=SimpleNamespace(tape_id="tape-b"),
+        )
+
+        class FakeSessionManager:
+            async def ensure_session_runtime(self, session_id: str):
+                assert session_id == "session-b"
+                return fake_ctx
+
+            def get_session(self, session_id: str):
+                assert session_id == "session-b"
+                return SimpleNamespace(
+                    id="session-b",
+                    provider_name="anthropic",
+                    model_name="checkpoint-model",
+                    base_url="http://checkpoint.local",
+                    max_steps="seven",
+                    approval_policy=ApprovalPolicy.INTERACTIVE,
+                    runtime_pipeline=object(),
+                    runtime_ctx=fake_ctx,
+                    runtime_adapter=None,
+                )
+
+        session._session_manager = FakeSessionManager()
+        session.context["session_manager"] = session._session_manager
+
+        with pytest.raises(RuntimeError, match="invalid max_steps"):
+            await session._switch_session("session-b")
+
+        assert session.context["model"] == "current-model"
+        assert session.config.provider == "openai"
+        assert session.config.model == "current-model"
+        assert session.config.base_url == "http://current.local"
+        assert session.config.max_steps == 30
+        assert session.config.approval_mode == "auto"
+
+    @pytest.mark.asyncio
+    async def test_switch_session_rejects_missing_restored_provider_without_mutating_state(
+        self, monkeypatch
+    ):
+        from coding_agent.cli.repl import InteractiveSession
+        from coding_agent.approval import ApprovalPolicy
+
+        monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
+        config = SimpleNamespace(
+            model="current-model",
+            repo=None,
+            api_key=None,
+            provider="openai",
+            base_url="http://current.local",
+            max_steps=30,
+            approval_mode="auto",
+        )
+        session = InteractiveSession(config)
+        session.context["model"] = "current-model"
+
+        fake_ctx = SimpleNamespace(
+            config={"tool_registry": "registry-b"},
+            tape=SimpleNamespace(tape_id="tape-b"),
+        )
+
+        class FakeSessionManager:
+            async def ensure_session_runtime(self, session_id: str):
+                assert session_id == "session-b"
+                return fake_ctx
+
+            def get_session(self, session_id: str):
+                assert session_id == "session-b"
+                return SimpleNamespace(
+                    id="session-b",
+                    model_name="checkpoint-model",
+                    base_url="http://checkpoint.local",
+                    max_steps=7,
+                    approval_policy=ApprovalPolicy.INTERACTIVE,
+                    runtime_pipeline=object(),
+                    runtime_ctx=fake_ctx,
+                    runtime_adapter=None,
+                )
+
+        session._session_manager = FakeSessionManager()
+        session.context["session_manager"] = session._session_manager
+
+        with pytest.raises(RuntimeError, match="invalid provider_name"):
+            await session._switch_session("session-b")
+
+        assert session.context["model"] == "current-model"
+        assert session.config.provider == "openai"
+        assert session.config.model == "current-model"
+
     def test_status_update_updates_input_toolbar_text(self, monkeypatch):
         from coding_agent.cli.repl import InteractiveSession
 
