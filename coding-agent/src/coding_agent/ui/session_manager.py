@@ -44,6 +44,8 @@ from coding_agent.ui.session_store import (
     SessionStore,
     create_session_store,
 )
+from coding_agent.ui.binding_resolver import BindingResolver, DefaultBindingResolver
+from coding_agent.ui.execution_binding import ExecutionBinding, LocalExecutionBinding
 
 logger = logging.getLogger(__name__)
 
@@ -91,14 +93,23 @@ class MockProvider:
 
 @dataclass
 class Session:
-    """A managed agent session."""
+    """A managed agent session.
+
+    Note: ``repo_path`` is legacy/backward-compat metadata only;
+    ``execution_binding`` is the authoritative workspace contract.
+    """
 
     id: str
     created_at: datetime
     last_activity: datetime
     wire: LocalWire = field(init=False)
     approval_store: ApprovalStore = field(default_factory=ApprovalStore)
-    repo_path: Path | None = None
+    repo_path: Path | None = None  # legacy/backward-compat metadata only
+    execution_binding: ExecutionBinding = field(
+        default_factory=lambda: LocalExecutionBinding(
+            workspace_root=str(Path.cwd().resolve())
+        )
+    )
     approval_policy: ApprovalPolicy = ApprovalPolicy.AUTO
     provider: Any | None = None
     provider_name: str | None = None
@@ -135,7 +146,10 @@ class Session:
             "id": self.id,
             "created_at": self.created_at.isoformat(),
             "last_activity": self.last_activity.isoformat(),
+            # repo_path is legacy/backward-compat metadata; execution_binding is
+            # the authoritative workspace contract.
             "repo_path": None if self.repo_path is None else str(self.repo_path),
+            "execution_binding": self.execution_binding.to_dict(),
             "approval_policy": self.approval_policy.value,
             "provider_name": self.provider_name,
             "model_name": self.model_name,
@@ -164,6 +178,16 @@ class Session:
         tape_id_raw = data.get("tape_id")
         if tape_id_raw is not None and not isinstance(tape_id_raw, str):
             raise TypeError("session metadata has invalid tape_id")
+        binding_raw = data.get("execution_binding")
+        if binding_raw is not None:
+            if not isinstance(binding_raw, dict):
+                raise TypeError("session metadata has invalid execution_binding")
+            execution_binding = ExecutionBinding.from_dict(binding_raw)
+        else:
+            workspace_root = (
+                repo_path_raw if repo_path_raw is not None else str(Path.cwd())
+            )
+            execution_binding = LocalExecutionBinding(workspace_root=workspace_root)
         session = cls(
             id=_required_session_str(data, "id"),
             created_at=datetime.fromisoformat(
@@ -174,6 +198,7 @@ class Session:
             ),
             approval_store=ApprovalStore(),
             repo_path=None if repo_path_raw is None else Path(repo_path_raw),
+            execution_binding=execution_binding,
             approval_policy=ApprovalPolicy(approval_policy_raw),
             provider_name=provider_name_raw,
             model_name=model_name_raw,
@@ -332,6 +357,7 @@ class SessionManager:
         checkpoint_store: CheckpointStore | None = None,
         checkpoint_service: CheckpointService | None = None,
         create_agent_fn: Callable[..., tuple[Any, Any]] | None = None,
+        binding_resolver: BindingResolver | None = None,
     ):
         self._storage_config = storage_config or {}
         self._pg_pool = pg_pool
@@ -351,6 +377,7 @@ class SessionManager:
             resolved_checkpoint_store
         )
         self._create_agent = create_agent_fn
+        self._binding_resolver = binding_resolver or DefaultBindingResolver()
 
     def _get_pg_pool(self) -> AsyncPGSessionPool:
         if self._pg_pool is not None:
@@ -630,7 +657,7 @@ class SessionManager:
             ApprovalPolicy.AUTO: "auto",
         }
         pipeline, ctx = self._create_agent_for_session(
-            workspace_root=session.repo_path,
+            workspace_root=self._resolve_workspace_root(session),
             model_override=restored_config.model_name,
             provider_override=restored_config.provider_name,
             base_url_override=restored_config.base_url,
@@ -693,6 +720,9 @@ class SessionManager:
         self._session_cache[session.id] = session
         self._store.save(session.id, cast(dict[str, Any], session.to_store_data()))
 
+    def _resolve_workspace_root(self, session: Session) -> Path:
+        return self._binding_resolver.resolve_workspace_root(session.execution_binding)
+
     def _invalidate_runtime(self, session: Session) -> None:
         session.runtime_pipeline = None
         session.runtime_ctx = None
@@ -751,12 +781,22 @@ class SessionManager:
             if base_url is None:
                 base_url = cfg.base_url
 
+        resolved_repo_path = repo_path.resolve() if repo_path is not None else None
+        binding = LocalExecutionBinding(
+            workspace_root=(
+                str(resolved_repo_path)
+                if resolved_repo_path is not None
+                else str(Path.cwd().resolve())
+            )
+        )
+
         session = Session(
             id=session_id,
             approval_store=approval_store,
             created_at=now,
             last_activity=now,
-            repo_path=repo_path,
+            repo_path=resolved_repo_path,
+            execution_binding=binding,
             approval_policy=approval_policy,
             provider=provider,
             provider_name=provider_name,
@@ -964,7 +1004,7 @@ class SessionManager:
 
                 if pipeline is None or ctx is None or adapter is None:
                     pipeline, ctx = self._create_agent_for_session(
-                        workspace_root=session.repo_path,
+                        workspace_root=self._resolve_workspace_root(session),
                         model_override=session.model_name,
                         provider_override=session.provider_name,
                         base_url_override=session.base_url,
@@ -1198,7 +1238,7 @@ class SessionManager:
         }
         consumer = self._make_session_consumer(session)
         pipeline, ctx = self._create_agent_for_session(
-            workspace_root=session.repo_path,
+            workspace_root=self._resolve_workspace_root(session),
             model_override=session.model_name,
             provider_override=session.provider_name,
             base_url_override=session.base_url,

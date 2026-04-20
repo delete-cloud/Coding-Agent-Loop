@@ -14,6 +14,7 @@ from agentkit.tape.tape import Tape
 from coding_agent.approval.store import ApprovalStore
 from coding_agent.approval import ApprovalPolicy
 from agentkit.config.loader import ConfigError
+from coding_agent.ui.execution_binding import LocalExecutionBinding
 from coding_agent.wire.protocol import (
     ApprovalRequest,
     CompletionStatus,
@@ -155,6 +156,55 @@ async def test_create_session_persists_configured_restart_metadata_by_default() 
     assert payload["provider_name"] == "anthropic"
     assert payload["model_name"] == "claude-test"
     assert payload["base_url"] == "http://llm.default"
+
+
+def test_session_metadata_round_trips_local_execution_binding(tmp_path: Path) -> None:
+    store = InMemorySessionStore()
+    manager = SessionManager(store=store)
+    bound_repo = tmp_path / "bound-repo"
+    session = Session(
+        id="binding-session",
+        created_at=datetime.now(),
+        last_activity=datetime.now(),
+        approval_store=ApprovalStore(),
+        execution_binding=LocalExecutionBinding(workspace_root=str(bound_repo)),
+    )
+
+    manager.register_session(session)
+
+    reloaded = SessionManager(store=store).get_session("binding-session")
+
+    assert isinstance(reloaded.execution_binding, LocalExecutionBinding)
+    assert reloaded.execution_binding.workspace_root == str(bound_repo)
+
+
+def test_session_metadata_defaults_missing_binding_to_local_from_repo_path(
+    tmp_path: Path,
+) -> None:
+    store = InMemorySessionStore()
+    created_at = datetime.now()
+    last_activity = datetime.now()
+    legacy_repo = tmp_path / "legacy-repo"
+    store.save(
+        "legacy-session",
+        {
+            "id": "legacy-session",
+            "created_at": created_at.isoformat(),
+            "last_activity": last_activity.isoformat(),
+            "repo_path": str(legacy_repo),
+            "approval_policy": "auto",
+            "provider_name": None,
+            "model_name": None,
+            "base_url": None,
+            "max_steps": 30,
+            "tape_id": None,
+        },
+    )
+
+    reloaded = SessionManager(store=store).get_session("legacy-session")
+
+    assert isinstance(reloaded.execution_binding, LocalExecutionBinding)
+    assert reloaded.execution_binding.workspace_root == str(legacy_repo)
 
 
 def test_event_queue_mutations_do_not_persist_sync_runtime_only_state() -> None:
