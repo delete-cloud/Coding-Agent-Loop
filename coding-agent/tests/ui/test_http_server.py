@@ -220,6 +220,23 @@ class TestSessionCreation:
         assert isinstance(session.execution_binding, LocalExecutionBinding)
         assert session.execution_binding.workspace_root == str(tmp_path.resolve())
 
+    async def test_create_session_does_not_fetch_session_for_binding_repair(
+        self, client, monkeypatch
+    ):
+        async def fail_get_session_async(session_id: str):
+            raise AssertionError(f"unexpected post-create session fetch: {session_id}")
+
+        monkeypatch.setattr(
+            session_manager, "get_session_async", fail_get_session_async
+        )
+
+        response = await client.post("/sessions", json={})
+
+        assert response.status_code == 200
+        session = session_manager.get_session(response.json()["session_id"])
+        assert isinstance(session.execution_binding, LocalExecutionBinding)
+        assert session.execution_binding.workspace_root == str(Path.cwd().resolve())
+
 
 class TestPromptStreaming:
     """Tests for prompt streaming endpoint."""

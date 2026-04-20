@@ -504,19 +504,6 @@ async def create_session(
         provider=None,  # Will use mock/test provider
     )
 
-    session = await session_manager.get_session_async(session_id)
-    expected_workspace_root = (
-        str(repo_path.resolve()) if repo_path is not None else str(Path.cwd().resolve())
-    )
-    if (
-        not isinstance(session.execution_binding, LocalExecutionBinding)
-        or session.execution_binding.workspace_root != expected_workspace_root
-    ):
-        session.execution_binding = LocalExecutionBinding(
-            workspace_root=expected_workspace_root
-        )
-        session_manager.register_session(session)
-
     logger.info(f"Created session: {session_id}")
     return SessionResponse(session_id=session_id)
 
