@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pytest
-from typing import cast
 
 from agentkit.checkpoint import CheckpointService
 from coding_agent.ui.session_manager import SessionManager
@@ -9,7 +8,6 @@ from datetime import UTC, datetime
 
 from coding_agent.ui.session_owner_store import (
     SessionOwnerRecord,
-    SessionOwnerStoreProtocol,
 )
 from coding_agent.ui.session_store import InMemorySessionStore
 
@@ -22,8 +20,8 @@ class FakeOwnerStore:
         self,
         session_id: str,
         owner_id: str,
-        lease_seconds: float,
-        fencing_token: int,
+        lease_seconds: float = 30.0,
+        fencing_token: int = 1,
     ) -> bool:
         del lease_seconds
         if session_id in self._owners:
@@ -81,6 +79,17 @@ class FakeCheckpointStore:
         del checkpoint_id
 
 
+def test_session_manager_rejects_owner_store_without_owner_metadata() -> None:
+    with pytest.raises(
+        ValueError,
+        match="owner_id and fencing_token must be provided when owner_store is set",
+    ):
+        SessionManager(
+            store=InMemorySessionStore(),
+            owner_store=FakeOwnerStore(),
+        )
+
+
 @pytest.mark.asyncio
 async def test_run_agent_rejects_non_owner_instance() -> None:
     owner_store = FakeOwnerStore()
@@ -95,7 +104,7 @@ async def test_run_agent_rejects_non_owner_instance() -> None:
         store=InMemorySessionStore(),
         checkpoint_service=CheckpointService(FakeCheckpointStore()),
         create_agent_fn=fail_create_agent,
-        owner_store=cast(SessionOwnerStoreProtocol, cast(object, owner_store)),
+        owner_store=owner_store,
         owner_id="owner-b",
         fencing_token=2,
     )
@@ -123,7 +132,7 @@ async def test_restore_checkpoint_rejects_stale_owner() -> None:
     manager = SessionManager(
         store=InMemorySessionStore(),
         checkpoint_service=FailCheckpointService(FakeCheckpointStore()),
-        owner_store=cast(SessionOwnerStoreProtocol, cast(object, owner_store)),
+        owner_store=owner_store,
         owner_id="owner-b",
         fencing_token=2,
     )
@@ -142,7 +151,7 @@ async def test_close_session_rejects_stale_owner() -> None:
     manager = SessionManager(
         store=InMemorySessionStore(),
         checkpoint_service=CheckpointService(FakeCheckpointStore()),
-        owner_store=cast(SessionOwnerStoreProtocol, cast(object, owner_store)),
+        owner_store=owner_store,
         owner_id="owner-b",
         fencing_token=2,
     )

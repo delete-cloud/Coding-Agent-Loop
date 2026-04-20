@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import cast
-
 import pytest
 
 from coding_agent.ui.session_owner_store import (
-    SessionOwnerBackend,
     SessionOwnerRecord,
     SessionOwnerStore,
 )
@@ -66,9 +63,7 @@ class FakePGOwnerStore:
 
 @pytest.fixture
 def owner_store() -> SessionOwnerStore:
-    store = SessionOwnerStore.__new__(SessionOwnerStore)
-    store._pg = cast(SessionOwnerBackend, FakePGOwnerStore())
-    return store
+    return SessionOwnerStore(pg_store=FakePGOwnerStore())
 
 
 @pytest.mark.asyncio
