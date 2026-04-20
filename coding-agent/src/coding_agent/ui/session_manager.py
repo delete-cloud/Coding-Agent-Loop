@@ -345,6 +345,10 @@ class _WireConsumer:
         return await self._approval_handler(req)
 
 
+class SessionOwnershipConflictError(RuntimeError):
+    """Raised when the current process is no longer the authoritative owner."""
+
+
 class SessionManager:
     """Manages agent sessions with lifecycle and resource management."""
 
@@ -490,24 +494,20 @@ class SessionManager:
         if self._owner_store is None:
             return
         if self._owner_id is None or self._fencing_token is None:
-            raise RuntimeError("stale owner or fencing token rejected")
+            raise SessionOwnershipConflictError("stale owner or fencing token rejected")
 
         owner = await self._owner_store.get_owner(session_id)
         if owner is None:
-            raise RuntimeError("session has no owner")
+            raise SessionOwnershipConflictError("session has no owner")
 
-        if isinstance(owner, dict):
-            current_owner_id = owner.get("owner_id")
-            current_fencing_token = owner.get("fencing_token")
-        else:
-            current_owner_id = owner.owner_id
-            current_fencing_token = owner.fencing_token
+        current_owner_id = owner.owner_id
+        current_fencing_token = owner.fencing_token
 
         if (
             current_owner_id != self._owner_id
             or current_fencing_token != self._fencing_token
         ):
-            raise RuntimeError("stale owner or fencing token rejected")
+            raise SessionOwnershipConflictError("stale owner or fencing token rejected")
 
     async def _run_store_io(self, func: Callable[..., T], /, *args: object) -> T:
         async with self._store_io_guard:
@@ -1120,7 +1120,9 @@ class SessionManager:
 
         Raises:
             KeyError: If session not found
+            SessionOwnershipConflictError: If this instance is not the active owner
         """
+        await self._assert_owner(session_id)
         session = await self.get_session_async(session_id)
 
         # Create approval response and submit to ApprovalStore

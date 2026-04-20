@@ -12,6 +12,7 @@ from coding_agent.ui.session_owner_store import (
     SessionOwnerStoreProtocol,
 )
 from coding_agent.ui.session_store import InMemorySessionStore
+from coding_agent.wire.protocol import ApprovalRequest, ToolCallDelta
 
 
 class FakeOwnerStore:
@@ -153,3 +154,34 @@ async def test_close_session_rejects_stale_owner() -> None:
         await manager.close_session(session_id)
 
     assert manager.has_session(session_id) is True
+
+
+@pytest.mark.asyncio
+async def test_submit_approval_rejects_stale_owner() -> None:
+    owner_store = FakeOwnerStore()
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=cast(SessionOwnerStoreProtocol, cast(object, owner_store)),
+        owner_id="owner-b",
+        fencing_token=2,
+    )
+    session_id = await manager.create_session()
+    session = manager.get_session(session_id)
+    session.approval_store.add_request(
+        ApprovalRequest(
+            session_id=session_id,
+            request_id="req-1",
+            tool_call=ToolCallDelta(
+                session_id=session_id,
+                tool_name="bash",
+                arguments={"command": "pwd"},
+                call_id="call-req-1",
+            ),
+            timeout_seconds=30,
+        )
+    )
+    await owner_store.acquire(session_id, "owner-a", 30.0, 1)
+
+    with pytest.raises(RuntimeError, match="stale owner or fencing token rejected"):
+        await manager.submit_approval(session_id, "req-1", approved=True)

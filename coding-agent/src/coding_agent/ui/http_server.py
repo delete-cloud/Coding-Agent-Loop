@@ -19,7 +19,11 @@ from agentkit.config.loader import load_config as load_agent_toml
 from agentkit.errors import ConfigError
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.ui.execution_binding import LocalExecutionBinding
-from coding_agent.ui.session_manager import Session, SessionManager
+from coding_agent.ui.session_manager import (
+    Session,
+    SessionManager,
+    SessionOwnershipConflictError,
+)
 from coding_agent.ui.schemas import (
     PromptRequest,
     CreateSessionRequest,
@@ -630,8 +634,10 @@ async def approve_request(
         )
         if not success:
             raise HTTPException(status_code=400, detail="No pending approval request")
+    except SessionOwnershipConflictError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     return ApprovalResponseSchema(
         status="ok",
@@ -719,7 +725,7 @@ async def capture_checkpoint(
             label=body.label if body else None,
             extra=None,
         )
-    except RuntimeError as exc:
+    except SessionOwnershipConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
@@ -780,7 +786,7 @@ async def restore_checkpoint(
 
     try:
         await session_manager.restore_checkpoint(session_id, checkpoint_id)
-    except RuntimeError as exc:
+    except SessionOwnershipConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
@@ -807,6 +813,8 @@ async def close_session(
         await session_manager.close_session(session_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
+    except SessionOwnershipConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Unexpected error while closing session %s", session_id)
         raise HTTPException(status_code=500, detail="Internal server error") from exc
