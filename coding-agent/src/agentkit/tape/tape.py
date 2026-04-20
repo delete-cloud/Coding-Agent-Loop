@@ -10,6 +10,21 @@ from agentkit._types import EntryKind
 from agentkit.tape.models import Entry
 
 
+def _scan_window_start(entries: list[Entry]) -> int:
+    """Scan entries for the last handoff anchor and return its index as window_start."""
+    from agentkit.tape.anchor import Anchor
+
+    window_start = 0
+    for i, entry in enumerate(entries):
+        if isinstance(entry, Anchor):
+            if entry.is_handoff:
+                window_start = i
+        elif entry.kind == "anchor":
+            if entry.meta.get("is_handoff"):
+                window_start = i
+    return window_start
+
+
 class Tape:
     def __init__(
         self,
@@ -70,6 +85,8 @@ class Tape:
     @classmethod
     def from_list(cls, data: list[dict[str, Any]], **kwargs: Any) -> Tape:
         entries = [Entry.from_dict(d) for d in data]
+        if "_window_start" not in kwargs:
+            kwargs["_window_start"] = _scan_window_start(entries)
         return cls(entries=entries, **kwargs)
 
     def save_jsonl(self, path: Path) -> None:
@@ -89,25 +106,13 @@ class Tape:
 
     @classmethod
     def load_jsonl(cls, path: Path, **kwargs: Any) -> Tape:
-        from agentkit.tape.anchor import Anchor
-
         entries: list[Entry] = []
         with open(path) as f:
             for line in f:
                 line = line.strip()
                 if line:
                     entries.append(Entry.from_dict(json.loads(line)))
-        window_start = 0
-        for i, entry in enumerate(entries):
-            if isinstance(entry, Anchor):
-                if entry.is_handoff:
-                    window_start = i
-            elif entry.kind == "anchor":
-                # Entry.from_dict() handles all anchor_type promotion (including legacy
-                # topic_initial/topic_finalized). This branch only catches bare old-format
-                # entries with meta.is_handoff=True and no anchor_type field.
-                if entry.meta.get("is_handoff"):
-                    window_start = i
+        window_start = _scan_window_start(entries)
         return cls(
             entries=entries,
             _window_start=window_start,
