@@ -382,6 +382,10 @@ class SessionManager:
         )
         self._create_agent = create_agent_fn
         self._binding_resolver = binding_resolver or DefaultBindingResolver()
+        if owner_store is not None and (owner_id is None or fencing_token is None):
+            raise ValueError(
+                "owner_id and fencing_token must be provided when owner_store is set"
+            )
         self._owner_store = owner_store
         self._owner_id = owner_id
         self._fencing_token = fencing_token
@@ -496,12 +500,8 @@ class SessionManager:
         if owner is None:
             raise RuntimeError("session has no owner")
 
-        if isinstance(owner, dict):
-            current_owner_id = owner.get("owner_id")
-            current_fencing_token = owner.get("fencing_token")
-        else:
-            current_owner_id = owner.owner_id
-            current_fencing_token = owner.fencing_token
+        current_owner_id = owner.owner_id
+        current_fencing_token = owner.fencing_token
 
         if (
             current_owner_id != self._owner_id
