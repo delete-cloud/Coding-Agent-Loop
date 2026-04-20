@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import sys
-from typing import Any
+from typing import Any, Literal
 
 from prompt_toolkit.patch_stdout import patch_stdout
 from rich.console import Console
@@ -198,10 +198,52 @@ class InteractiveSession:
         )
         return session_id
 
+    def _sync_config_from_managed_session(self, managed_session: Any) -> None:
+        provider_name = managed_session.provider_name
+        allowed_providers = {
+            "openai",
+            "anthropic",
+            "copilot",
+            "kimi",
+            "kimi-code",
+            "kimi-code-anthropic",
+        }
+        if provider_name not in allowed_providers:
+            raise RuntimeError(
+                f"restored session {managed_session.id} has invalid provider_name"
+            )
+
+        model_name = managed_session.model_name
+        if not isinstance(model_name, str) or not model_name:
+            raise RuntimeError(
+                f"restored session {managed_session.id} is missing model_name"
+            )
+
+        approval_mode: Literal["yolo", "interactive", "auto"]
+        match managed_session.approval_policy:
+            case ApprovalPolicy.YOLO:
+                approval_mode = "yolo"
+            case ApprovalPolicy.INTERACTIVE:
+                approval_mode = "interactive"
+            case ApprovalPolicy.AUTO:
+                approval_mode = "auto"
+            case _:
+                raise RuntimeError(
+                    f"restored session {managed_session.id} has invalid approval_policy"
+                )
+
+        self.config.provider = provider_name
+        self.config.model = model_name
+        self.config.base_url = managed_session.base_url
+        self.config.max_steps = managed_session.max_steps
+        self.config.approval_mode = approval_mode
+
     async def _switch_session(self, session_id: str) -> None:
         await self._session_manager.ensure_session_runtime(session_id)
         managed_session = self._session_manager.get_session(session_id)
         self.context["session_id"] = managed_session.id
+        self.context["model"] = managed_session.model_name
+        self._sync_config_from_managed_session(managed_session)
         self._pipeline = managed_session.runtime_pipeline
         self._pipeline_ctx = managed_session.runtime_ctx
         self._pipeline_adapter = managed_session.runtime_adapter

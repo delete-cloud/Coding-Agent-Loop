@@ -784,6 +784,7 @@ class TestSessionManagerIntegration:
                 assert session_id == "session-b"
                 return SimpleNamespace(
                     id="session-b",
+                    model_name="gpt-4o-mini",
                     runtime_pipeline=fake_pipeline,
                     runtime_ctx=fake_ctx,
                     runtime_adapter=fake_adapter,
@@ -845,6 +846,7 @@ class TestSessionManagerIntegration:
                 assert session_id == "session-b"
                 return SimpleNamespace(
                     id="session-b",
+                    model_name="gpt-4o-mini",
                     runtime_pipeline=object(),
                     runtime_ctx=fake_ctx,
                     runtime_adapter=adapter,
@@ -858,6 +860,64 @@ class TestSessionManagerIntegration:
         assert session._pipeline_adapter is adapter
         assert adapter.consumer is session._consumer
         assert session._pipeline_ctx.config["wire_consumer"] is session._consumer
+
+    @pytest.mark.asyncio
+    async def test_switch_active_session_syncs_restored_model_into_repl_context(
+        self, monkeypatch
+    ):
+        from coding_agent.cli.repl import InteractiveSession
+        from coding_agent.approval import ApprovalPolicy
+
+        monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
+        config = SimpleNamespace(
+            model="current-model",
+            repo=None,
+            api_key=None,
+            provider="openai",
+            base_url="http://current.local",
+            max_steps=30,
+            approval_mode="auto",
+        )
+        session = InteractiveSession(config)
+        session.context["model"] = "stale-model"
+
+        fake_ctx = SimpleNamespace(
+            config={
+                "tool_registry": "registry-b",
+            },
+            tape=SimpleNamespace(tape_id="tape-b"),
+        )
+
+        class FakeSessionManager:
+            async def ensure_session_runtime(self, session_id: str):
+                assert session_id == "session-b"
+                return fake_ctx
+
+            def get_session(self, session_id: str):
+                assert session_id == "session-b"
+                return SimpleNamespace(
+                    id="session-b",
+                    provider_name="anthropic",
+                    model_name="checkpoint-model",
+                    base_url="http://checkpoint.local",
+                    max_steps=7,
+                    approval_policy=ApprovalPolicy.INTERACTIVE,
+                    runtime_pipeline=object(),
+                    runtime_ctx=fake_ctx,
+                    runtime_adapter=None,
+                )
+
+        session._session_manager = FakeSessionManager()
+        session.context["session_manager"] = session._session_manager
+
+        await session._switch_session("session-b")
+
+        assert session.context["model"] == "checkpoint-model"
+        assert session.config.provider == "anthropic"
+        assert session.config.model == "checkpoint-model"
+        assert session.config.base_url == "http://checkpoint.local"
+        assert session.config.max_steps == 7
+        assert session.config.approval_mode == "interactive"
 
     def test_status_update_updates_input_toolbar_text(self, monkeypatch):
         from coding_agent.cli.repl import InteractiveSession
