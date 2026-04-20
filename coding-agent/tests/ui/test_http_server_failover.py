@@ -167,6 +167,40 @@ async def test_close_endpoint_rejects_stale_owner_after_owner_change(
 
 
 @pytest.mark.asyncio
+async def test_close_endpoint_returns_500_for_non_owner_runtime_failure(
+    client, monkeypatch
+) -> None:
+    manager = SessionManager(store=InMemorySessionStore())
+    monkeypatch.setattr(http_server, "session_manager", manager)
+
+    session_id = await manager.create_session()
+    session = manager.get_session(session_id)
+
+    class FakeTask:
+        def done(self) -> bool:
+            return False
+
+        def cancel(self) -> None:
+            return None
+
+    session.task = FakeTask()
+
+    async def timeout_wait_for(awaitable, timeout):
+        del awaitable, timeout
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(
+        "coding_agent.ui.session_manager.asyncio.wait_for",
+        timeout_wait_for,
+    )
+
+    response = await client.delete(f"/sessions/{session_id}")
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Internal server error"
+
+
+@pytest.mark.asyncio
 async def test_failover_rebuilds_from_persisted_state_without_resuming_local_runtime(
     monkeypatch,
 ) -> None:
@@ -221,33 +255,39 @@ async def test_failover_rebuilds_from_persisted_state_without_resuming_local_run
     original_session = first_manager.get_session(session_id)
     original_session.turn_in_progress = True
     original_session.task = asyncio.create_task(asyncio.sleep(60))
-    original_session.event_queues.append(asyncio.Queue())
-    original_session.approval_store.add_request(
-        _approval_request(session_id, "req-local")
-    )
-    original_session.pending_approval = {"request_id": "req-local", "tool_name": "bash"}
-    await first_manager._persist_session_async(original_session)
+    try:
+        original_session.event_queues.append(asyncio.Queue())
+        original_session.approval_store.add_request(
+            _approval_request(session_id, "req-local")
+        )
+        original_session.pending_approval = {
+            "request_id": "req-local",
+            "tool_name": "bash",
+        }
+        await first_manager._persist_session_async(original_session)
 
-    second_manager = SessionManager(store=store, create_agent_fn=create_failover_agent)
-    reloaded_session = second_manager.get_session(session_id)
+        second_manager = SessionManager(
+            store=store, create_agent_fn=create_failover_agent
+        )
+        reloaded_session = second_manager.get_session(session_id)
 
-    assert reloaded_session.runtime_pipeline is None
-    assert reloaded_session.runtime_ctx is None
-    assert reloaded_session.runtime_adapter is None
-    assert reloaded_session.task is None
-    assert reloaded_session.turn_in_progress is False
-    assert reloaded_session.event_queues == []
-    assert reloaded_session.pending_approval is None
-    assert reloaded_session.approval_store.get_request("req-local") is None
+        assert reloaded_session.runtime_pipeline is None
+        assert reloaded_session.runtime_ctx is None
+        assert reloaded_session.runtime_adapter is None
+        assert reloaded_session.task is None
+        assert reloaded_session.turn_in_progress is False
+        assert reloaded_session.event_queues == []
+        assert reloaded_session.pending_approval is None
+        assert reloaded_session.approval_store.get_request("req-local") is None
 
-    returned_ctx = await second_manager.ensure_session_runtime(session_id)
+        returned_ctx = await second_manager.ensure_session_runtime(session_id)
 
-    assert returned_ctx is rebuilt_ctx
-    assert create_calls == [
-        (session_id, None),
-        (session_id, "persisted-tape"),
-    ]
-
-    original_session.task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await original_session.task
+        assert returned_ctx is rebuilt_ctx
+        assert create_calls == [
+            (session_id, None),
+            (session_id, "persisted-tape"),
+        ]
+    finally:
+        original_session.task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await original_session.task
