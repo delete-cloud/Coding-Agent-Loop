@@ -516,6 +516,12 @@ class SessionManager:
         ):
             raise SessionOwnershipConflictError("stale owner or fencing token rejected")
 
+    async def authorize_event_stream(self, session_id: str) -> None:
+        await self._assert_owner(session_id)
+
+    async def verify_event_stream_ownership(self, session_id: str) -> None:
+        await self._assert_owner(session_id)
+
     async def _run_store_io(self, func: Callable[..., T], /, *args: object) -> T:
         async with self._store_io_guard:
             loop = asyncio.get_running_loop()

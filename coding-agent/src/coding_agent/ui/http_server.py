@@ -655,6 +655,11 @@ async def get_events(
     if not await session_manager.has_session_async(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
 
+    try:
+        await session_manager.authorize_event_stream(session_id)
+    except SessionOwnershipConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     session = await session_manager.get_session_async(session_id)
     queue: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=100)
     await session_manager.add_event_queue_async(session_id, queue)
@@ -670,6 +675,10 @@ async def get_events(
                         break
                 except asyncio.TimeoutError:
                     if not await session_manager.has_session_async(session_id):
+                        break
+                    try:
+                        await session_manager.verify_event_stream_ownership(session_id)
+                    except SessionOwnershipConflictError:
                         break
                     try:
                         if not await session_manager.has_event_queue_async(
