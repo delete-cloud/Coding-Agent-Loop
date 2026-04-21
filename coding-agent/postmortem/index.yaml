@@ -514,3 +514,79 @@ patterns:
   - in
   - fs
   - store
+- id: PM-0021
+  title: Guard event stream registration against disappearing sessions
+  path: patterns/PM-0021-guard-event-stream-registration-against-disappearing-sessions.md
+  severity: medium
+  confidence: medium
+  subsystems:
+  - http
+  - session_manager
+  related_files:
+  - src/coding_agent/ui/http_server.py
+  - src/coding_agent/ui/session_manager.py
+  - tests/ui/test_http_server.py
+  - tests/ui/test_http_server_failover.py
+  - tests/ui/test_session_manager_public_api.py
+  related_commits:
+  - 18ab2e9f9af9f557073804808728c5cdd5e0c86d
+  - 975149b5e08865afa78df3e2ee3c3f0da4bc6f23
+  keywords:
+  - guard
+  - event
+  - stream
+  - registration
+  - against
+  - disappearing
+  - sessions
+- id: PM-0022
+  title: Revalidate event stream ownership after queue attach
+  path: patterns/PM-0022-revalidate-event-stream-ownership-after-queue-attach.md
+  severity: medium
+  confidence: medium
+  subsystems:
+  - http
+  - session_manager
+  related_files:
+  - src/coding_agent/ui/http_server.py
+  - src/coding_agent/ui/session_manager.py
+  - tests/ui/test_http_server.py
+  - tests/ui/test_http_server_failover.py
+  - tests/ui/test_session_manager_runtime.py
+  related_commits:
+  - 975149b5e08865afa78df3e2ee3c3f0da4bc6f23
+  - 18ab2e9f9af9f557073804808728c5cdd5e0c86d
+  keywords:
+  - revalidate
+  - event
+  - stream
+  - ownership
+  - after
+  - queue
+  - attach
+- id: PM-0023
+  title: Make event stream cleanup and teardown idempotent
+  path: patterns/PM-0023-make-event-stream-cleanup-and-teardown-idempotent.md
+  severity: medium
+  confidence: medium
+  subsystems:
+  - http
+  - session_manager
+  related_files:
+  - src/coding_agent/ui/http_server.py
+  - src/coding_agent/ui/session_manager.py
+  - tests/ui/test_http_server.py
+  - tests/ui/test_http_server_failover.py
+  - tests/ui/test_session_manager_public_api.py
+  - tests/ui/test_session_manager_runtime.py
+  related_commits:
+  - 3aec2520b75b4c1581f734d0b954db1e7c24b548
+  - 7489e9b3116726e395fa9f5cd8fedaff8875f738
+  keywords:
+  - make
+  - event
+  - stream
+  - cleanup
+  - and
+  - teardown
+  - idempotent
