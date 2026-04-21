@@ -11,7 +11,13 @@ from httpx import ASGITransport, AsyncClient
 from fastapi import HTTPException
 from starlette.requests import Request
 
-from coding_agent.ui.http_server import app, get_events, limiter, session_manager
+from coding_agent.ui.http_server import (
+    _broadcast_event,
+    app,
+    get_events,
+    limiter,
+    session_manager,
+)
 from coding_agent.ui.session_owner_store import SessionOwnerRecord
 from coding_agent.ui.session_store import InMemorySessionStore
 
@@ -285,6 +291,96 @@ async def test_get_events_returns_404_when_session_disappears_during_queue_regis
 
 
 @pytest.mark.asyncio
+async def test_get_events_rejects_owner_change_after_queue_registration(
+    client: AsyncClient,
+    owner_store: FakeOwnerStore,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    create_resp = await client.post("/sessions", json={})
+    session_id = create_resp.json()["session_id"]
+    owner_store._owners[session_id] = SessionOwnerRecord(
+        owner_id="owner-a",
+        lease_expires_at=datetime.now(UTC) + timedelta(seconds=30),
+        fencing_token=1,
+    )
+
+    original_assert_owner = session_manager._assert_owner
+    assert_owner_calls = 0
+
+    async def fake_assert_owner(current_session_id: str) -> None:
+        nonlocal assert_owner_calls
+        assert current_session_id == session_id
+        assert_owner_calls += 1
+        if assert_owner_calls == 3:
+            owner_store._owners[session_id] = SessionOwnerRecord(
+                owner_id="owner-b",
+                lease_expires_at=datetime.now(UTC) + timedelta(seconds=30),
+                fencing_token=2,
+            )
+        await original_assert_owner(current_session_id)
+
+    monkeypatch.setattr(
+        session_manager,
+        "_assert_owner",
+        fake_assert_owner,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await get_events(_events_request(session_id), session_id, None)
+
+    response = exc_info.value
+    assert response.status_code == 409
+    assert response.detail == "stale owner or fencing token rejected"
+    assert session_manager.get_session(session_id).event_queues == []
+
+
+@pytest.mark.asyncio
+async def test_get_events_rejects_broadcast_during_append_to_recheck_window(
+    client: AsyncClient,
+    owner_store: FakeOwnerStore,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    create_resp = await client.post("/sessions", json={})
+    session_id = create_resp.json()["session_id"]
+    owner_store._owners[session_id] = SessionOwnerRecord(
+        owner_id="owner-a",
+        lease_expires_at=datetime.now(UTC) + timedelta(seconds=30),
+        fencing_token=1,
+    )
+
+    original_assert_owner = session_manager._assert_owner
+    assert_owner_calls = 0
+
+    async def fake_assert_owner(current_session_id: str) -> None:
+        nonlocal assert_owner_calls
+        assert current_session_id == session_id
+        assert_owner_calls += 1
+        if assert_owner_calls == 3:
+            session = session_manager.get_session(session_id)
+            await _broadcast_event(session, {"event": "message", "data": "stale"})
+            owner_store._owners[session_id] = SessionOwnerRecord(
+                owner_id="owner-b",
+                lease_expires_at=datetime.now(UTC) + timedelta(seconds=30),
+                fencing_token=2,
+            )
+        await original_assert_owner(current_session_id)
+
+    monkeypatch.setattr(
+        session_manager,
+        "_assert_owner",
+        fake_assert_owner,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await get_events(_events_request(session_id), session_id, None)
+
+    response = exc_info.value
+    assert response.status_code == 409
+    assert response.detail == "stale owner or fencing token rejected"
+    assert session_manager.get_session(session_id).event_queues == []
+
+
+@pytest.mark.asyncio
 async def test_get_events_keeps_stream_alive_for_current_owner(
     client: AsyncClient,
     owner_store: FakeOwnerStore,
@@ -312,7 +408,12 @@ async def test_get_events_keeps_stream_alive_for_current_owner(
             timeout_count += 1
             if timeout_count == 1:
                 raise asyncio.TimeoutError
-            raise StopAsyncIteration
+            owner_store._owners[session_id] = SessionOwnerRecord(
+                owner_id="owner-b",
+                lease_expires_at=datetime.now(UTC) + timedelta(seconds=30),
+                fencing_token=2,
+            )
+            raise asyncio.TimeoutError
         return await real_wait_for(awaitable, timeout)
 
     monkeypatch.setattr("coding_agent.ui.http_server.asyncio.wait_for", fake_wait_for)
@@ -322,3 +423,6 @@ async def test_get_events_keeps_stream_alive_for_current_owner(
 
     event = await anext(event_generator)
     assert event == {"event": "ping", "data": ""}
+
+    with pytest.raises(StopAsyncIteration):
+        await anext(event_generator)

@@ -664,9 +664,11 @@ async def get_events(
 
     queue: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=100)
     try:
-        await session_manager.add_event_queue_async(session_id, queue)
+        await session_manager.register_owned_event_queue_async(session_id, queue)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
+    except SessionOwnershipConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     async def event_generator() -> AsyncIterator[dict[str, str]]:
         """Generate events from queue."""

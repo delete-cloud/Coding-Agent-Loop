@@ -577,6 +577,21 @@ class SessionManager:
         session = await self.get_session_async(session_id)
         session.event_queues.append(queue)
 
+    async def register_owned_event_queue_async(
+        self,
+        session_id: str,
+        queue: asyncio.Queue[dict[str, Any]],
+    ) -> None:
+        await self._assert_owner(session_id)
+        session = await self.get_session_async(session_id)
+        session.event_queues.append(queue)
+        try:
+            await self._assert_owner(session_id)
+        except SessionOwnershipConflictError:
+            if queue in session.event_queues:
+                session.event_queues.remove(queue)
+            raise
+
     async def remove_event_queue_async(
         self,
         session_id: str,
