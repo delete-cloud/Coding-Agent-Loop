@@ -661,7 +661,6 @@ class SessionManager:
         return _WireConsumer(session.wire, _request_approval)
 
     async def _restore_checkpoint(self, session: Session, checkpoint_id: str) -> None:
-        await self._assert_owner(session.id)
         snapshot = await self._checkpoint_service.restore(checkpoint_id)
         meta = snapshot.meta
         if session.tape_id is None:
@@ -990,6 +989,7 @@ class SessionManager:
     async def shutdown_session_runtime(self, session_id: str) -> None:
         """Release runtime resources without deleting persisted session metadata."""
         async with self._lock:
+            await self._assert_owner(session_id)
             session = await self.get_session_async(session_id)
 
             if session.task and not session.task.done():
@@ -1127,6 +1127,7 @@ class SessionManager:
         Raises:
             KeyError: If session not found
         """
+        await self._assert_owner(session_id)
         session = await self.get_session_async(session_id)
 
         # Create approval response and submit to ApprovalStore
@@ -1162,6 +1163,7 @@ class SessionManager:
         approval_req: ApprovalRequest,
         timeout_seconds: float,
     ) -> ApprovalResponse:
+        await self._assert_owner(session_id)
         if not await self.has_session_async(session_id):
             return ApprovalResponse(
                 session_id=session_id,
@@ -1266,6 +1268,7 @@ class SessionManager:
         return closed
 
     async def ensure_session_runtime(self, session_id: str) -> Any:
+        await self._assert_owner(session_id)
         session = await self.get_session_async(session_id)
         if session.runtime_ctx is not None and session.runtime_adapter is not None:
             return session.runtime_ctx

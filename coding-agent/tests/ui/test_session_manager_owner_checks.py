@@ -7,11 +7,14 @@ import pytest
 from agentkit.checkpoint import CheckpointService
 from coding_agent.ui.session_manager import SessionManager
 from datetime import UTC, datetime
+import types
+from unittest.mock import patch
 
 from coding_agent.ui.session_owner_store import (
     SessionOwnerRecord,
 )
 from coding_agent.ui.session_store import InMemorySessionStore
+from agentkit.tape.tape import Tape
 
 
 class FakeOwnerStore:
@@ -254,3 +257,68 @@ async def test_close_session_revalidates_owner_after_waiting_for_lock() -> None:
         await close_task
 
     assert manager.has_session(session_id) is True
+
+
+@pytest.mark.asyncio
+async def test_ensure_session_runtime_rejects_stale_owner() -> None:
+    owner_store = FakeOwnerStore()
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=owner_store,
+        owner_id="owner-b",
+        fencing_token=2,
+    )
+    session_id = await manager.create_session()
+    await owner_store.acquire(session_id, "owner-a", 30.0, 1)
+
+    fake_ctx = types.SimpleNamespace(
+        config={"tool_registry": object()},
+        tape=Tape(tape_id="bootstrapped-tape"),
+        plugin_states={},
+    )
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        ),
+        _directive_executor=None,
+    )
+
+    class FailAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, ctx, consumer
+            raise AssertionError("should not initialize runtime for stale owner")
+
+    with (
+        patch("importlib.import_module") as import_module,
+        patch.dict(
+            SessionManager.ensure_session_runtime.__globals__,
+            {"PipelineAdapter": FailAdapter},
+        ),
+    ):
+        import_module.return_value = types.SimpleNamespace(
+            create_agent=lambda **kwargs: (fake_pipeline, fake_ctx)
+        )
+        with pytest.raises(RuntimeError, match="stale owner or fencing token rejected"):
+            await manager.ensure_session_runtime(session_id)
+
+
+@pytest.mark.asyncio
+async def test_submit_approval_rejects_stale_owner() -> None:
+    owner_store = FakeOwnerStore()
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=owner_store,
+        owner_id="owner-b",
+        fencing_token=2,
+    )
+    session_id = await manager.create_session()
+    await owner_store.acquire(session_id, "owner-a", 30.0, 1)
+
+    with pytest.raises(RuntimeError, match="stale owner or fencing token rejected"):
+        await manager.submit_approval(
+            session_id=session_id,
+            request_id="req-1",
+            approved=True,
+        )
