@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncGenerator
 from collections.abc import AsyncIterator
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from typing import Callable
+from typing import Any
 from typing import cast
 
 import pytest
@@ -84,6 +87,7 @@ async def clear_sessions():
     limiter.reset()
     yield
     session_manager.clear_sessions()
+    limiter.reset()
 
 
 @pytest.fixture
@@ -127,6 +131,41 @@ def _events_request(session_id: str) -> Request:
 class FakeEventSourceResponse:
     def __init__(self, body_iterator: AsyncIterator[dict[str, str]]):
         self.body_iterator = body_iterator
+
+
+@pytest.mark.asyncio
+async def test_clear_sessions_fixture_resets_limiter_in_teardown(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    session_clear_calls = 0
+    limiter_reset_calls = 0
+
+    def fake_clear_sessions() -> None:
+        nonlocal session_clear_calls
+        session_clear_calls += 1
+
+    def fake_limiter_reset() -> None:
+        nonlocal limiter_reset_calls
+        limiter_reset_calls += 1
+
+    monkeypatch.setattr(session_manager, "clear_sessions", fake_clear_sessions)
+    monkeypatch.setattr(limiter, "reset", fake_limiter_reset)
+
+    fixture_factory = cast(
+        "Callable[[], AsyncGenerator[None, None]]",
+        getattr(clear_sessions, "__wrapped__"),
+    )
+    fixture_gen = fixture_factory()
+    await anext(fixture_gen)
+
+    assert session_clear_calls == 1
+    assert limiter_reset_calls == 1
+
+    with pytest.raises(StopAsyncIteration):
+        await anext(fixture_gen)
+
+    assert session_clear_calls == 2
+    assert limiter_reset_calls == 2
 
 
 @pytest.mark.asyncio
@@ -288,6 +327,44 @@ async def test_get_events_returns_404_when_session_disappears_during_queue_regis
     response = exc_info.value
     assert response.status_code == 404
     assert response.detail == f"Session not found: {session_id}"
+
+
+@pytest.mark.asyncio
+async def test_register_owned_event_queue_cleans_up_queue_on_unexpected_error(
+    client: AsyncClient,
+    owner_store: FakeOwnerStore,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    create_resp = await client.post("/sessions", json={})
+    session_id = create_resp.json()["session_id"]
+    owner_store._owners[session_id] = SessionOwnerRecord(
+        owner_id="owner-a",
+        lease_expires_at=datetime.now(UTC) + timedelta(seconds=30),
+        fencing_token=1,
+    )
+
+    original_assert_owner = session_manager._assert_owner
+    assert_owner_calls = 0
+    queue: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=100)
+
+    async def fake_assert_owner(current_session_id: str) -> None:
+        nonlocal assert_owner_calls
+        assert current_session_id == session_id
+        assert_owner_calls += 1
+        if assert_owner_calls == 2:
+            raise RuntimeError("owner store decode failed")
+        await original_assert_owner(current_session_id)
+
+    monkeypatch.setattr(
+        session_manager,
+        "_assert_owner",
+        fake_assert_owner,
+    )
+
+    with pytest.raises(RuntimeError, match="owner store decode failed"):
+        await session_manager.register_owned_event_queue_async(session_id, queue)
+
+    assert queue not in session_manager.get_session(session_id).event_queues
 
 
 @pytest.mark.asyncio
