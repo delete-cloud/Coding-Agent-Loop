@@ -381,6 +381,53 @@ async def test_get_events_rejects_broadcast_during_append_to_recheck_window(
 
 
 @pytest.mark.asyncio
+async def test_get_events_rejects_close_during_append_to_recheck_window(
+    client: AsyncClient,
+    owner_store: FakeOwnerStore,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    create_resp = await client.post("/sessions", json={})
+    session_id = create_resp.json()["session_id"]
+    owner_store._owners[session_id] = SessionOwnerRecord(
+        owner_id="owner-a",
+        lease_expires_at=datetime.now(UTC) + timedelta(seconds=30),
+        fencing_token=1,
+    )
+
+    original_close_runtime = session_manager._close_runtime
+    close_started = asyncio.Event()
+    allow_close_to_finish = asyncio.Event()
+
+    async def fake_close_runtime(session) -> None:
+        close_started.set()
+        await allow_close_to_finish.wait()
+        await original_close_runtime(session)
+
+    monkeypatch.setattr(
+        session_manager,
+        "_close_runtime",
+        fake_close_runtime,
+    )
+
+    remove_task = asyncio.create_task(session_manager.remove_session_async(session_id))
+    await close_started.wait()
+
+    get_events_task = asyncio.create_task(
+        get_events(_events_request(session_id), session_id, None)
+    )
+
+    allow_close_to_finish.set()
+    await remove_task
+
+    with pytest.raises(HTTPException) as exc_info:
+        await get_events_task
+
+    response = exc_info.value
+    assert response.status_code == 404
+    assert response.detail == f"Session not found: {session_id}"
+
+
+@pytest.mark.asyncio
 async def test_get_events_keeps_stream_alive_for_current_owner(
     client: AsyncClient,
     owner_store: FakeOwnerStore,

@@ -582,15 +582,16 @@ class SessionManager:
         session_id: str,
         queue: asyncio.Queue[dict[str, Any]],
     ) -> None:
-        await self._assert_owner(session_id)
-        session = await self.get_session_async(session_id)
-        session.event_queues.append(queue)
-        try:
+        async with self._lock:
             await self._assert_owner(session_id)
-        except SessionOwnershipConflictError:
-            if queue in session.event_queues:
-                session.event_queues.remove(queue)
-            raise
+            session = await self.get_session_async(session_id)
+            session.event_queues.append(queue)
+            try:
+                await self._assert_owner(session_id)
+            except SessionOwnershipConflictError:
+                if queue in session.event_queues:
+                    session.event_queues.remove(queue)
+                raise
 
     async def remove_event_queue_async(
         self,
@@ -612,13 +613,17 @@ class SessionManager:
         if isawaitable(close_result):
             await close_result
 
-    async def remove_session_async(self, session_id: str) -> None:
+    async def _remove_session_async_no_lock(self, session_id: str) -> None:
         session = await self.get_session_async(session_id)
         await self._close_runtime(session)
         self._session_cache.pop(session_id, None)
         await self._run_store_io(self._store.delete, session_id)
         self._approval_stores.pop(session_id, None)
         self._session_turn_locks.pop(session_id, None)
+
+    async def remove_session_async(self, session_id: str) -> None:
+        async with self._lock:
+            await self._remove_session_async_no_lock(session_id)
 
     async def _restore_tape(self, tape_id: str | None) -> Tape | None:
         if tape_id is None:
@@ -1004,7 +1009,7 @@ class SessionManager:
                         f"Session task for {session_id} did not stop after cancellation"
                     )
 
-            await self.remove_session_async(session_id)
+            await self._remove_session_async_no_lock(session_id)
 
         logger.info(f"Closed session: {session_id}")
 
