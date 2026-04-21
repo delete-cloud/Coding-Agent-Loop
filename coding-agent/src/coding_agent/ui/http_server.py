@@ -670,6 +670,10 @@ async def get_events(
             while True:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                    try:
+                        await session_manager.verify_event_stream_ownership(session_id)
+                    except SessionOwnershipConflictError:
+                        break
                     yield event
                     if event.get("event") == "SessionClosed":
                         break

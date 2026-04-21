@@ -12,10 +12,7 @@ from fastapi import HTTPException
 from starlette.requests import Request
 
 from coding_agent.ui.http_server import app, get_events, limiter, session_manager
-from coding_agent.ui.session_owner_store import (
-    SessionOwnerRecord,
-    SessionOwnershipConflictError,
-)
+from coding_agent.ui.session_owner_store import SessionOwnerRecord
 from coding_agent.ui.session_store import InMemorySessionStore
 
 
@@ -79,18 +76,8 @@ class FakeOwnerStore:
 async def clear_sessions():
     session_manager.clear_sessions()
     limiter.reset()
-    for session_id in list(session_manager.list_sessions()):
-        try:
-            await session_manager.close_session(session_id)
-        except Exception:
-            pass
     yield
     session_manager.clear_sessions()
-    for session_id in list(session_manager.list_sessions()):
-        try:
-            await session_manager.close_session(session_id)
-        except Exception:
-            pass
 
 
 @pytest.fixture
@@ -209,6 +196,54 @@ async def test_get_events_stops_stream_after_owner_change(
 
     response = await get_events(_events_request(session_id), session_id, None)
     event_generator = cast(AsyncIterator[dict[str, str]], response.body_iterator)
+
+    with pytest.raises(StopAsyncIteration):
+        await anext(event_generator)
+
+
+@pytest.mark.asyncio
+async def test_get_events_drops_queued_event_after_owner_change(
+    client: AsyncClient,
+    owner_store: FakeOwnerStore,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    create_resp = await client.post("/sessions", json={})
+    session_id = create_resp.json()["session_id"]
+    owner_store._owners[session_id] = SessionOwnerRecord(
+        owner_id="owner-a",
+        lease_expires_at=datetime.now(UTC) + timedelta(seconds=30),
+        fencing_token=1,
+    )
+
+    monkeypatch.setattr(
+        "coding_agent.ui.http_server.EventSourceResponse", FakeEventSourceResponse
+    )
+
+    original_verify = session_manager.verify_event_stream_ownership
+    verify_calls = 0
+
+    async def fake_verify_event_stream_ownership(current_session_id: str) -> None:
+        nonlocal verify_calls
+        assert current_session_id == session_id
+        verify_calls += 1
+        if verify_calls == 1:
+            owner_store._owners[session_id] = SessionOwnerRecord(
+                owner_id="owner-b",
+                lease_expires_at=datetime.now(UTC) + timedelta(seconds=30),
+                fencing_token=2,
+            )
+        await original_verify(current_session_id)
+
+    monkeypatch.setattr(
+        session_manager,
+        "verify_event_stream_ownership",
+        fake_verify_event_stream_ownership,
+    )
+
+    response = await get_events(_events_request(session_id), session_id, None)
+    event_generator = cast(AsyncIterator[dict[str, str]], response.body_iterator)
+    session = session_manager.get_session(session_id)
+    await session.event_queues[0].put({"event": "message", "data": "stale"})
 
     with pytest.raises(StopAsyncIteration):
         await anext(event_generator)
