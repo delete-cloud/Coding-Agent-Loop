@@ -11,7 +11,7 @@ from collections.abc import AsyncIterator
 from collections.abc import Callable
 from functools import partial
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from inspect import isawaitable
 from pathlib import Path
 from typing import Any, Literal, TypeVar, cast
@@ -44,6 +44,8 @@ from coding_agent.ui.session_store import (
     SessionStore,
     create_session_store,
 )
+from coding_agent.ui.session_owner_store import SessionOwnerStoreProtocol
+from coding_agent.ui.session_owner_store import SessionOwnershipConflictError
 from coding_agent.ui.binding_resolver import BindingResolver, DefaultBindingResolver
 from coding_agent.ui.execution_binding import ExecutionBinding, LocalExecutionBinding
 
@@ -358,6 +360,9 @@ class SessionManager:
         checkpoint_service: CheckpointService | None = None,
         create_agent_fn: Callable[..., tuple[Any, Any]] | None = None,
         binding_resolver: BindingResolver | None = None,
+        owner_store: SessionOwnerStoreProtocol | None = None,
+        owner_id: str | None = None,
+        fencing_token: int | None = None,
     ):
         self._storage_config = storage_config or {}
         self._pg_pool = pg_pool
@@ -378,6 +383,17 @@ class SessionManager:
         )
         self._create_agent = create_agent_fn
         self._binding_resolver = binding_resolver or DefaultBindingResolver()
+        if owner_store is None and (owner_id is not None or fencing_token is not None):
+            raise ValueError(
+                "owner_store must be provided when owner_id or fencing_token is set"
+            )
+        if owner_store is not None and (owner_id is None or fencing_token is None):
+            raise ValueError(
+                "owner_id and fencing_token must be provided when owner_store is set"
+            )
+        self._owner_store = owner_store
+        self._owner_id = owner_id
+        self._fencing_token = fencing_token
 
     def _get_pg_pool(self) -> AsyncPGSessionPool:
         if self._pg_pool is not None:
@@ -478,6 +494,27 @@ class SessionManager:
             lock = asyncio.Lock()
             self._session_turn_locks[session_id] = lock
         return lock
+
+    async def _assert_owner(self, session_id: str) -> None:
+        if self._owner_store is None:
+            return
+        if self._owner_id is None or self._fencing_token is None:
+            raise SessionOwnershipConflictError("stale owner or fencing token rejected")
+
+        owner = await self._owner_store.get_owner(session_id)
+        if owner is None:
+            raise SessionOwnershipConflictError("session has no owner")
+        if owner.lease_expires_at <= datetime.now(UTC):
+            raise SessionOwnershipConflictError("session owner lease expired")
+
+        current_owner_id = owner.owner_id
+        current_fencing_token = owner.fencing_token
+
+        if (
+            current_owner_id != self._owner_id
+            or current_fencing_token != self._fencing_token
+        ):
+            raise SessionOwnershipConflictError("stale owner or fencing token rejected")
 
     async def _run_store_io(self, func: Callable[..., T], /, *args: object) -> T:
         async with self._store_io_guard:
@@ -931,6 +968,7 @@ class SessionManager:
             KeyError: If session not found
         """
         async with self._lock:
+            await self._assert_owner(session_id)
             session = await self.get_session_async(session_id)
 
             # Cancel any running task
@@ -952,6 +990,7 @@ class SessionManager:
     async def shutdown_session_runtime(self, session_id: str) -> None:
         """Release runtime resources without deleting persisted session metadata."""
         async with self._lock:
+            await self._assert_owner(session_id)
             session = await self.get_session_async(session_id)
 
             if session.task and not session.task.done():
@@ -985,6 +1024,7 @@ class SessionManager:
             raise RuntimeError("turn already in progress")
 
         async with turn_lock:
+            await self._assert_owner(session_id)
             session = await self.get_session_async(session_id)
             session.last_activity = datetime.now()
             session.turn_in_progress = True
@@ -1088,6 +1128,7 @@ class SessionManager:
         Raises:
             KeyError: If session not found
         """
+        await self._assert_owner(session_id)
         session = await self.get_session_async(session_id)
 
         # Create approval response and submit to ApprovalStore
@@ -1123,6 +1164,7 @@ class SessionManager:
         approval_req: ApprovalRequest,
         timeout_seconds: float,
     ) -> ApprovalResponse:
+        await self._assert_owner(session_id)
         if not await self.has_session_async(session_id):
             return ApprovalResponse(
                 session_id=session_id,
@@ -1227,6 +1269,7 @@ class SessionManager:
         return closed
 
     async def ensure_session_runtime(self, session_id: str) -> Any:
+        await self._assert_owner(session_id)
         session = await self.get_session_async(session_id)
         if session.runtime_ctx is not None and session.runtime_adapter is not None:
             return session.runtime_ctx
@@ -1277,6 +1320,7 @@ class SessionManager:
             raise RuntimeError("turn already in progress")
 
         async with turn_lock:
+            await self._assert_owner(session_id)
             session = await self.get_session_async(session_id)
             if session.turn_in_progress or (session.task and not session.task.done()):
                 raise RuntimeError("turn already in progress")
@@ -1309,6 +1353,7 @@ class SessionManager:
             raise RuntimeError("turn already in progress")
 
         async with turn_lock:
+            await self._assert_owner(session_id)
             session = await self.get_session_async(session_id)
             if session.turn_in_progress or (session.task and not session.task.done()):
                 raise RuntimeError("turn already in progress")

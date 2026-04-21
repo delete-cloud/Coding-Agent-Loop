@@ -325,6 +325,122 @@ class PGCheckpointStore:
         _ = await pool.execute(self._DELETE_SQL, checkpoint_id)
 
 
+class PGSessionOwnerStore:
+    _CREATE_TABLE_SQL: Final[str] = """
+    CREATE TABLE IF NOT EXISTS session_owners (
+        session_id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        lease_expires_at TIMESTAMPTZ NOT NULL,
+        fencing_token BIGINT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """
+    _ACQUIRE_SQL: Final[str] = """
+    INSERT INTO session_owners (session_id, owner_id, lease_expires_at, fencing_token)
+    VALUES ($1, $2, NOW() + make_interval(secs => $3), $4)
+    ON CONFLICT (session_id) DO UPDATE
+    SET owner_id = EXCLUDED.owner_id,
+        lease_expires_at = EXCLUDED.lease_expires_at,
+        fencing_token = EXCLUDED.fencing_token,
+        updated_at = NOW()
+    WHERE session_owners.lease_expires_at <= NOW()
+    """
+    _RENEW_SQL: Final[str] = """
+    UPDATE session_owners
+    SET lease_expires_at = NOW() + make_interval(secs => $1),
+        fencing_token = $2,
+        updated_at = NOW()
+    WHERE session_id = $3
+      AND owner_id = $4
+      AND lease_expires_at > NOW()
+      AND fencing_token = $5
+    """
+    _RELEASE_SQL: Final[str] = """
+    DELETE FROM session_owners
+    WHERE session_id = $1
+      AND owner_id = $2
+      AND fencing_token = $3
+    """
+    _GET_SQL: Final[str] = (
+        "SELECT owner_id, lease_expires_at, fencing_token FROM session_owners "
+        "WHERE session_id = $1 AND lease_expires_at > NOW()"
+    )
+
+    def __init__(self, *, pool: PGPool) -> None:
+        self._pool: PGPool = pool
+        self._schema_ready: bool = False
+
+    async def _ensure_schema(self) -> AsyncPGPool:
+        pool = await self._pool.get_pool()
+        if not self._schema_ready:
+            _ = await pool.execute(self._CREATE_TABLE_SQL)
+            self._schema_ready = True
+        return pool
+
+    async def acquire(
+        self,
+        session_id: str,
+        owner_id: str,
+        lease_seconds: float,
+        fencing_token: int,
+    ) -> bool:
+        pool = await self._ensure_schema()
+        result = await pool.execute(
+            self._ACQUIRE_SQL,
+            session_id,
+            owner_id,
+            lease_seconds,
+            fencing_token,
+        )
+        return result == "INSERT 0 1"
+
+    async def renew(
+        self,
+        session_id: str,
+        owner_id: str,
+        lease_seconds: float,
+        new_fencing_token: int,
+        current_fencing_token: int,
+    ) -> bool:
+        pool = await self._ensure_schema()
+        result = await pool.execute(
+            self._RENEW_SQL,
+            lease_seconds,
+            new_fencing_token,
+            session_id,
+            owner_id,
+            current_fencing_token,
+        )
+        return result == "UPDATE 1"
+
+    async def release(
+        self,
+        session_id: str,
+        owner_id: str,
+        fencing_token: int,
+    ) -> bool:
+        pool = await self._ensure_schema()
+        result = await pool.execute(
+            self._RELEASE_SQL,
+            session_id,
+            owner_id,
+            fencing_token,
+        )
+        return result == "DELETE 1"
+
+    async def get_owner(self, session_id: str) -> dict[str, object] | None:
+        pool = await self._ensure_schema()
+        row = await pool.fetchrow(self._GET_SQL, session_id)
+        if row is None:
+            return None
+        return {
+            "owner_id": row["owner_id"],
+            "lease_expires_at": row["lease_expires_at"],
+            "fencing_token": row["fencing_token"],
+        }
+
+
 class PGSessionLock:
     def __init__(self, *, pool: LockPool) -> None:
         self._pool: LockPool = pool
