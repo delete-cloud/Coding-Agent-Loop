@@ -630,8 +630,12 @@ async def approve_request(
         )
         if not success:
             raise HTTPException(status_code=400, detail="No pending approval request")
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except SessionOwnershipConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return ApprovalResponseSchema(
         status="ok",
@@ -720,6 +724,8 @@ async def capture_checkpoint(
             extra=None,
         )
     except SessionOwnershipConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc

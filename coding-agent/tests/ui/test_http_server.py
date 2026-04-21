@@ -493,6 +493,32 @@ class TestApprovalEndpoint:
         assert response.status_code == 400
         assert "no pending approval request" in response.json()["detail"].lower()
 
+    async def test_approve_returns_409_for_stale_owner_conflict(
+        self, client, monkeypatch
+    ):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        session = session_manager.get_session(session_id)
+        add_store_backed_approval_request(session, session_id, "req123")
+
+        async def conflicting_submit_approval(**kwargs) -> bool:
+            assert kwargs["session_id"] == session_id
+            assert kwargs["request_id"] == "req123"
+            raise SessionOwnershipConflictError("stale owner or fencing token rejected")
+
+        monkeypatch.setattr(
+            session_manager, "submit_approval", conflicting_submit_approval
+        )
+
+        response = await client.post(
+            f"/sessions/{session_id}/approve",
+            json={"request_id": "req123", "approved": True},
+        )
+
+        assert response.status_code == 409
+        assert response.json()["detail"] == "stale owner or fencing token rejected"
+
     async def test_approve_success(self, client):
         create_resp = await client.post("/sessions", json={})
         session_id = create_resp.json()["session_id"]
