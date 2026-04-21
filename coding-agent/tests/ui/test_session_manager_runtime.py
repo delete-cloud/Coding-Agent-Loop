@@ -350,7 +350,7 @@ async def test_close_session_raises_if_task_survives_cancellation() -> None:
             self.cancel_calls += 1
 
     fake_task = FakeTask()
-    session.task = cast(asyncio.Task[None], fake_task)
+    session.task = cast(asyncio.Task[None], cast(object, fake_task))
 
     with patch(
         "coding_agent.ui.session_manager.asyncio.wait_for",
@@ -380,7 +380,7 @@ async def test_shutdown_session_runtime_raises_if_task_survives_cancellation() -
             self.cancel_calls += 1
 
     fake_task = FakeTask()
-    session.task = cast(asyncio.Task[None], fake_task)
+    session.task = cast(asyncio.Task[None], cast(object, fake_task))
 
     with patch(
         "coding_agent.ui.session_manager.asyncio.wait_for",
@@ -548,6 +548,116 @@ async def test_rehydrated_session_rebuilds_runtime_from_persisted_tape() -> None
         await rehydrated.run_agent(session_id, "resume")
 
     assert created_tapes == [persisted_tape]
+
+
+@pytest.mark.asyncio
+async def test_failover_rebuilds_from_persisted_state_without_resuming_local_runtime() -> (
+    None
+):
+    store = InMemorySessionStore()
+    initial_ctx = types.SimpleNamespace(
+        config={"tool_registry": object()},
+        tape=Tape(tape_id="persisted-tape"),
+        plugin_states={},
+    )
+    rebuilt_ctx = types.SimpleNamespace(
+        config={"tool_registry": object()},
+        tape=Tape(tape_id="persisted-tape"),
+        plugin_states={},
+    )
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        ),
+        _directive_executor=None,
+    )
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+            self.ctx = ctx
+
+        async def initialize(self) -> None:
+            return None
+
+    create_calls: list[tuple[str | None, str | None]] = []
+
+    def create_initial_agent(**kwargs):
+        tape = kwargs.get("tape")
+        create_calls.append(
+            (kwargs.get("session_id_override"), None if tape is None else tape.tape_id)
+        )
+        return fake_pipeline, initial_ctx
+
+    def create_failover_agent(**kwargs):
+        tape = kwargs.get("tape")
+        create_calls.append(
+            (kwargs.get("session_id_override"), None if tape is None else tape.tape_id)
+        )
+        return fake_pipeline, rebuilt_ctx
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+    original_task: asyncio.Task[object] | None = None
+
+    try:
+        first_manager = SessionManager(
+            store=store, create_agent_fn=create_initial_agent
+        )
+        session_id = await first_manager.create_session()
+        await first_manager.ensure_session_runtime(session_id)
+
+        original_session = first_manager.get_session(session_id)
+        original_session.turn_in_progress = True
+        original_task = asyncio.create_task(asyncio.sleep(60))
+        original_session.task = original_task
+        original_session.event_queues.append(asyncio.Queue())
+        original_session.approval_store.add_request(
+            ApprovalRequest(
+                session_id=session_id,
+                request_id="req-local",
+                tool_call=ToolCallDelta(
+                    session_id=session_id,
+                    tool_name="bash",
+                    arguments={"command": "pwd"},
+                    call_id="call-req-local",
+                ),
+                timeout_seconds=30,
+            )
+        )
+        original_session.pending_approval = {
+            "request_id": "req-local",
+            "tool_name": "bash",
+        }
+        await first_manager._persist_session_async(original_session)
+
+        second_manager = SessionManager(
+            store=store, create_agent_fn=create_failover_agent
+        )
+        reloaded_session = second_manager.get_session(session_id)
+
+        assert reloaded_session.runtime_pipeline is None
+        assert reloaded_session.runtime_ctx is None
+        assert reloaded_session.runtime_adapter is None
+        assert reloaded_session.task is None
+        assert reloaded_session.turn_in_progress is False
+        assert reloaded_session.event_queues == []
+        assert reloaded_session.pending_approval is None
+        assert reloaded_session.approval_store.get_request("req-local") is None
+
+        returned_ctx = await second_manager.ensure_session_runtime(session_id)
+
+        assert returned_ctx is rebuilt_ctx
+        assert create_calls == [
+            (session_id, None),
+            (session_id, "persisted-tape"),
+        ]
+    finally:
+        monkeypatch.undo()
+        if original_task is not None:
+            original_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await original_task
 
 
 @pytest.mark.asyncio
