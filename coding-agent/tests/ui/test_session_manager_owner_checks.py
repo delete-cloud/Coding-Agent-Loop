@@ -100,6 +100,18 @@ def test_session_manager_rejects_owner_store_without_owner_metadata() -> None:
         )
 
 
+def test_session_manager_rejects_owner_metadata_without_owner_store() -> None:
+    with pytest.raises(
+        ValueError,
+        match="owner_store must be provided when owner_id or fencing_token is set",
+    ):
+        SessionManager(
+            store=InMemorySessionStore(),
+            owner_id="owner-a",
+            fencing_token=1,
+        )
+
+
 @pytest.mark.asyncio
 async def test_run_agent_rejects_non_owner_instance() -> None:
     owner_store = FakeOwnerStore()

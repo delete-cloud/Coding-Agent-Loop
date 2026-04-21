@@ -382,6 +382,10 @@ class SessionManager:
         )
         self._create_agent = create_agent_fn
         self._binding_resolver = binding_resolver or DefaultBindingResolver()
+        if owner_store is None and (owner_id is not None or fencing_token is not None):
+            raise ValueError(
+                "owner_store must be provided when owner_id or fencing_token is set"
+            )
         if owner_store is not None and (owner_id is None or fencing_token is None):
             raise ValueError(
                 "owner_id and fencing_token must be provided when owner_store is set"
