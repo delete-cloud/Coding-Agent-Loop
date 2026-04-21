@@ -7,6 +7,10 @@ from typing import Protocol
 from agentkit.storage.pg import PGPool, PGSessionOwnerStore
 
 
+class SessionOwnershipConflictError(RuntimeError):
+    """Raised when the current instance is not authorized to mutate a session."""
+
+
 @dataclass(frozen=True)
 class SessionOwnerRecord:
     owner_id: str

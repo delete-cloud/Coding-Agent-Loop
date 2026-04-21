@@ -24,6 +24,7 @@ from coding_agent.approval import ApprovalPolicy
 from coding_agent.approval.store import ApprovalStore
 from coding_agent.wire.local import LocalWire
 from coding_agent.ui.session_manager import Session
+from coding_agent.ui.session_owner_store import SessionOwnershipConflictError
 from coding_agent.ui.http_server import (
     APPROVAL_TIMEOUT_SECONDS,
     SESSION_IDLE_TIMEOUT_MINUTES,
@@ -1090,6 +1091,23 @@ class TestCloseSession:
 
         assert response.status_code == 404
         assert response.json()["detail"] == f"Session not found: {session_id}"
+
+    async def test_close_session_returns_409_for_stale_owner_conflict(
+        self, client, monkeypatch
+    ):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        async def conflicting_close_session(current_session_id: str) -> None:
+            assert current_session_id == session_id
+            raise SessionOwnershipConflictError("stale owner or fencing token rejected")
+
+        monkeypatch.setattr(session_manager, "close_session", conflicting_close_session)
+
+        response = await client.delete(f"/sessions/{session_id}")
+
+        assert response.status_code == 409
+        assert response.json()["detail"] == "stale owner or fencing token rejected"
 
     async def test_close_session_returns_404_when_session_disappears_before_load(
         self, client, monkeypatch

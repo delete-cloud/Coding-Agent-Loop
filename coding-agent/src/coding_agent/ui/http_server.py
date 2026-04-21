@@ -19,6 +19,7 @@ from agentkit.config.loader import load_config as load_agent_toml
 from agentkit.errors import ConfigError
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.ui.session_manager import Session, SessionManager
+from coding_agent.ui.session_owner_store import SessionOwnershipConflictError
 from coding_agent.ui.schemas import (
     PromptRequest,
     CreateSessionRequest,
@@ -718,7 +719,7 @@ async def capture_checkpoint(
             label=body.label if body else None,
             extra=None,
         )
-    except RuntimeError as exc:
+    except SessionOwnershipConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
@@ -804,6 +805,8 @@ async def close_session(
     try:
         session = await session_manager.get_session_async(session_id)
         await session_manager.close_session(session_id)
+    except SessionOwnershipConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
     except Exception as exc:

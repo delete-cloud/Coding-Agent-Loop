@@ -45,6 +45,7 @@ from coding_agent.ui.session_store import (
     create_session_store,
 )
 from coding_agent.ui.session_owner_store import SessionOwnerStoreProtocol
+from coding_agent.ui.session_owner_store import SessionOwnershipConflictError
 from coding_agent.ui.binding_resolver import BindingResolver, DefaultBindingResolver
 from coding_agent.ui.execution_binding import ExecutionBinding, LocalExecutionBinding
 
@@ -498,13 +499,13 @@ class SessionManager:
         if self._owner_store is None:
             return
         if self._owner_id is None or self._fencing_token is None:
-            raise RuntimeError("stale owner or fencing token rejected")
+            raise SessionOwnershipConflictError("stale owner or fencing token rejected")
 
         owner = await self._owner_store.get_owner(session_id)
         if owner is None:
-            raise RuntimeError("session has no owner")
+            raise SessionOwnershipConflictError("session has no owner")
         if owner.lease_expires_at <= datetime.now(UTC):
-            raise RuntimeError("session owner lease expired")
+            raise SessionOwnershipConflictError("session owner lease expired")
 
         current_owner_id = owner.owner_id
         current_fencing_token = owner.fencing_token
@@ -513,7 +514,7 @@ class SessionManager:
             current_owner_id != self._owner_id
             or current_fencing_token != self._fencing_token
         ):
-            raise RuntimeError("stale owner or fencing token rejected")
+            raise SessionOwnershipConflictError("stale owner or fencing token rejected")
 
     async def _run_store_io(self, func: Callable[..., T], /, *args: object) -> T:
         async with self._store_io_guard:

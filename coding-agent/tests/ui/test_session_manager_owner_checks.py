@@ -6,9 +6,10 @@ import pytest
 
 from agentkit.checkpoint import CheckpointService
 from coding_agent.ui.session_manager import SessionManager
-from datetime import UTC, datetime
 import types
 from unittest.mock import patch
+from datetime import UTC, datetime
+from coding_agent.ui.session_owner_store import SessionOwnershipConflictError
 
 from coding_agent.ui.session_owner_store import (
     SessionOwnerRecord,
@@ -136,7 +137,10 @@ async def test_run_agent_rejects_non_owner_instance() -> None:
     session_id = await manager.create_session()
     await owner_store.acquire(session_id, "owner-a", 30.0, 1)
 
-    with pytest.raises(RuntimeError, match="stale owner or fencing token rejected"):
+    with pytest.raises(
+        SessionOwnershipConflictError,
+        match="stale owner or fencing token rejected",
+    ):
         await manager.run_agent(session_id, "hello")
 
     assert create_agent_calls == 0
@@ -164,7 +168,10 @@ async def test_restore_checkpoint_rejects_stale_owner() -> None:
     session_id = await manager.create_session()
     await owner_store.acquire(session_id, "owner-a", 30.0, 1)
 
-    with pytest.raises(RuntimeError, match="stale owner or fencing token rejected"):
+    with pytest.raises(
+        SessionOwnershipConflictError,
+        match="stale owner or fencing token rejected",
+    ):
         await manager.restore_checkpoint(session_id, "cp-1")
 
     assert restore_calls == 0
@@ -183,7 +190,10 @@ async def test_close_session_rejects_stale_owner() -> None:
     session_id = await manager.create_session()
     await owner_store.acquire(session_id, "owner-a", 30.0, 1)
 
-    with pytest.raises(RuntimeError, match="stale owner or fencing token rejected"):
+    with pytest.raises(
+        SessionOwnershipConflictError,
+        match="stale owner or fencing token rejected",
+    ):
         await manager.close_session(session_id)
 
     assert manager.has_session(session_id) is True
@@ -214,7 +224,10 @@ async def test_run_agent_rejects_expired_owner_lease() -> None:
         fencing_token=1,
     )
 
-    with pytest.raises(RuntimeError, match="session owner lease expired"):
+    with pytest.raises(
+        SessionOwnershipConflictError,
+        match="session owner lease expired",
+    ):
         await manager.run_agent(session_id, "hello")
 
     assert create_agent_calls == 0
@@ -253,7 +266,10 @@ async def test_close_session_revalidates_owner_after_waiting_for_lock() -> None:
     )
     lock.release()
 
-    with pytest.raises(RuntimeError, match="stale owner or fencing token rejected"):
+    with pytest.raises(
+        SessionOwnershipConflictError,
+        match="stale owner or fencing token rejected",
+    ):
         await close_task
 
     assert manager.has_session(session_id) is True
@@ -299,7 +315,10 @@ async def test_ensure_session_runtime_rejects_stale_owner() -> None:
         import_module.return_value = types.SimpleNamespace(
             create_agent=lambda **kwargs: (fake_pipeline, fake_ctx)
         )
-        with pytest.raises(RuntimeError, match="stale owner or fencing token rejected"):
+        with pytest.raises(
+            SessionOwnershipConflictError,
+            match="stale owner or fencing token rejected",
+        ):
             await manager.ensure_session_runtime(session_id)
 
 
@@ -316,7 +335,10 @@ async def test_submit_approval_rejects_stale_owner() -> None:
     session_id = await manager.create_session()
     await owner_store.acquire(session_id, "owner-a", 30.0, 1)
 
-    with pytest.raises(RuntimeError, match="stale owner or fencing token rejected"):
+    with pytest.raises(
+        SessionOwnershipConflictError,
+        match="stale owner or fencing token rejected",
+    ):
         await manager.submit_approval(
             session_id=session_id,
             request_id="req-1",
