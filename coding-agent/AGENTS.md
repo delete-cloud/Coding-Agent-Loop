@@ -47,6 +47,16 @@ uv run ruff format src/
 - Use `README.md` as the default source of truth for workflows unless a more specific doc under `docs/` overrides it.
 - Do not add thin wrapper functions around existing functions unless the wrapper adds real value beyond renaming.
 
+## Postmortem Usage Rules
+
+- `postmortem/` stores recurring failure patterns. Start with `postmortem/README.md` for the directory layout and `postmortem/index.yaml` for machine-readable pattern scope.
+- When touching files that match a postmortem entry's `related_files`, consult the matched pattern entries before implementation or review.
+- Until dedicated lookup/report commands exist, use `postmortem/index.yaml` plus the referenced markdown pattern files manually.
+- If a matched pattern defines `release_checks`, include those checks in verification evidence for the change.
+- If a matched pattern's body names focused regression tests, run them before claiming completion, even when the broader test suite also passes.
+- For routing, concurrency, persistence, approval flow, and lifecycle teardown changes, prefer postmortem-guided verification over diff-only verification.
+- When a change fixes a recurring failure mode or introduces a reusable regression guard, update an existing postmortem pattern or add a new one rather than leaving the lesson only in PR discussion.
+
 ## ADR & Workflow Rules
 
 - Use ADRs for persistence, protocol, data-model, or cross-module boundary changes, and for decisions with meaningful trade-offs that future readers will ask "why" about.
