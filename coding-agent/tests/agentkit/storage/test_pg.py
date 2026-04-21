@@ -1,6 +1,7 @@
 import asyncio
 import json
 from collections.abc import Awaitable, Callable
+from datetime import timedelta
 from typing import cast
 from unittest.mock import AsyncMock
 
@@ -112,11 +113,18 @@ class FakePool:
             if not isinstance(session_id, str):
                 raise TypeError("session_id must be a string")
             owner = self.session_owners.get(session_id)
-            if owner is not None and owner["lease_expires_at"] != "expired":
+            now = datetime.now(UTC)
+            if (
+                owner is not None
+                and isinstance(owner.get("lease_expires_at"), datetime)
+                and cast(datetime, owner["lease_expires_at"]) > now
+            ):
                 return "INSERT 0 0"
+            if not isinstance(lease_expires_at, (int, float)):
+                raise TypeError("lease_expires_at must be numeric lease seconds")
             self.session_owners[session_id] = {
                 "owner_id": owner_id,
-                "lease_expires_at": lease_expires_at,
+                "lease_expires_at": now + timedelta(seconds=float(lease_expires_at)),
                 "fencing_token": fencing_token,
             }
             return "INSERT 0 1"
@@ -131,14 +139,19 @@ class FakePool:
             owner = self.session_owners.get(cast(str, session_id))
             if owner is None:
                 return "UPDATE 0"
-            if owner["lease_expires_at"] == "expired":
+            now = datetime.now(UTC)
+            if not isinstance(owner.get("lease_expires_at"), datetime):
+                raise TypeError("lease_expires_at must be a datetime")
+            if cast(datetime, owner["lease_expires_at"]) <= now:
                 return "UPDATE 0"
             if (
                 owner["owner_id"] != owner_id
                 or owner["fencing_token"] != current_fencing_token
             ):
                 return "UPDATE 0"
-            owner["lease_expires_at"] = lease_expires_at
+            if not isinstance(lease_expires_at, (int, float)):
+                raise TypeError("lease_expires_at must be numeric lease seconds")
+            owner["lease_expires_at"] = now + timedelta(seconds=float(lease_expires_at))
             owner["fencing_token"] = new_fencing_token
             return "UPDATE 1"
         if "DELETE FROM session_owners" in query:
@@ -191,6 +204,11 @@ class FakePool:
                     raise TypeError("session_id must be a string")
                 owner = self.session_owners.get(session_id)
                 if owner is None:
+                    return None
+                lease_expires_at = owner.get("lease_expires_at")
+                if not isinstance(lease_expires_at, datetime):
+                    raise TypeError("lease_expires_at must be a datetime")
+                if lease_expires_at <= datetime.now(UTC):
                     return None
                 return owner
             if (
@@ -623,6 +641,18 @@ class TestPGSessionOwnerStore:
         await store.acquire("s1", "owner-a", 30.0, 1)
 
         assert await store.release("s1", "owner-a", 1) is True
+        assert await store.get_owner("s1") is None
+
+    @pytest.mark.asyncio
+    async def test_get_owner_filters_expired_leases(
+        self, store: PGSessionOwnerStore, fake_pool: FakePool
+    ) -> None:
+        fake_pool.session_owners["s1"] = {
+            "owner_id": "owner-a",
+            "lease_expires_at": datetime.now(UTC) - timedelta(seconds=1),
+            "fencing_token": 1,
+        }
+
         assert await store.get_owner("s1") is None
 
 

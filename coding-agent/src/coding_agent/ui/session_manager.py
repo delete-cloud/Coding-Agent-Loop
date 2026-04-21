@@ -11,7 +11,7 @@ from collections.abc import AsyncIterator
 from collections.abc import Callable
 from functools import partial
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from inspect import isawaitable
 from pathlib import Path
 from typing import Any, Literal, TypeVar, cast
@@ -499,6 +499,8 @@ class SessionManager:
         owner = await self._owner_store.get_owner(session_id)
         if owner is None:
             raise RuntimeError("session has no owner")
+        if owner.lease_expires_at <= datetime.now(UTC):
+            raise RuntimeError("session owner lease expired")
 
         current_owner_id = owner.owner_id
         current_fencing_token = owner.fencing_token
@@ -961,8 +963,8 @@ class SessionManager:
         Raises:
             KeyError: If session not found
         """
-        await self._assert_owner(session_id)
         async with self._lock:
+            await self._assert_owner(session_id)
             session = await self.get_session_async(session_id)
 
             # Cancel any running task
@@ -1012,12 +1014,12 @@ class SessionManager:
         session_id: str,
         prompt: str,
     ) -> None:
-        await self._assert_owner(session_id)
         turn_lock = self._turn_lock_for(session_id)
         if turn_lock.locked():
             raise RuntimeError("turn already in progress")
 
         async with turn_lock:
+            await self._assert_owner(session_id)
             session = await self.get_session_async(session_id)
             session.last_activity = datetime.now()
             session.turn_in_progress = True
@@ -1310,6 +1312,7 @@ class SessionManager:
             raise RuntimeError("turn already in progress")
 
         async with turn_lock:
+            await self._assert_owner(session_id)
             session = await self.get_session_async(session_id)
             if session.turn_in_progress or (session.task and not session.task.done()):
                 raise RuntimeError("turn already in progress")
@@ -1342,6 +1345,7 @@ class SessionManager:
             raise RuntimeError("turn already in progress")
 
         async with turn_lock:
+            await self._assert_owner(session_id)
             session = await self.get_session_async(session_id)
             if session.turn_in_progress or (session.task and not session.task.done()):
                 raise RuntimeError("turn already in progress")

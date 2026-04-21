@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from datetime import timedelta
 import pytest
 
 from agentkit.checkpoint import CheckpointService
@@ -23,12 +25,11 @@ class FakeOwnerStore:
         lease_seconds: float = 30.0,
         fencing_token: int = 1,
     ) -> bool:
-        del lease_seconds
         if session_id in self._owners:
             return False
         self._owners[session_id] = SessionOwnerRecord(
             owner_id=owner_id,
-            lease_expires_at=datetime.now(UTC),
+            lease_expires_at=datetime.now(UTC) + timedelta(seconds=lease_seconds),
             fencing_token=fencing_token,
         )
         return True
@@ -44,8 +45,17 @@ class FakeOwnerStore:
         new_fencing_token: int = 2,
         current_fencing_token: int = 1,
     ) -> bool:
-        del lease_seconds, new_fencing_token, current_fencing_token, owner_id
-        return session_id in self._owners
+        owner = self._owners.get(session_id)
+        if owner is None:
+            return False
+        if owner.owner_id != owner_id or owner.fencing_token != current_fencing_token:
+            return False
+        self._owners[session_id] = SessionOwnerRecord(
+            owner_id=owner_id,
+            lease_expires_at=datetime.now(UTC) + timedelta(seconds=lease_seconds),
+            fencing_token=new_fencing_token,
+        )
+        return True
 
     async def release(
         self,
@@ -160,5 +170,75 @@ async def test_close_session_rejects_stale_owner() -> None:
 
     with pytest.raises(RuntimeError, match="stale owner or fencing token rejected"):
         await manager.close_session(session_id)
+
+    assert manager.has_session(session_id) is True
+
+
+@pytest.mark.asyncio
+async def test_run_agent_rejects_expired_owner_lease() -> None:
+    owner_store = FakeOwnerStore()
+    create_agent_calls = 0
+
+    def fail_create_agent(**kwargs):
+        nonlocal create_agent_calls
+        create_agent_calls += 1
+        raise AssertionError(f"should not create agent: {kwargs}")
+
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        create_agent_fn=fail_create_agent,
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=1,
+    )
+    session_id = await manager.create_session()
+    owner_store._owners[session_id] = SessionOwnerRecord(
+        owner_id="owner-a",
+        lease_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+        fencing_token=1,
+    )
+
+    with pytest.raises(RuntimeError, match="session owner lease expired"):
+        await manager.run_agent(session_id, "hello")
+
+    assert create_agent_calls == 0
+    assert manager.get_session(session_id).turn_in_progress is False
+
+
+@pytest.mark.asyncio
+async def test_close_session_revalidates_owner_after_waiting_for_lock() -> None:
+    owner_store = FakeOwnerStore()
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=1,
+    )
+    session_id = await manager.create_session()
+    owner_store._owners[session_id] = SessionOwnerRecord(
+        owner_id="owner-a",
+        lease_expires_at=datetime.now(UTC) + timedelta(seconds=30),
+        fencing_token=1,
+    )
+
+    lock = manager._lock
+    await lock.acquire()
+
+    async def close_with_wait() -> None:
+        await manager.close_session(session_id)
+
+    close_task = asyncio.create_task(close_with_wait())
+    await asyncio.sleep(0)
+    owner_store._owners[session_id] = SessionOwnerRecord(
+        owner_id="owner-b",
+        lease_expires_at=datetime.now(UTC) + timedelta(seconds=30),
+        fencing_token=2,
+    )
+    lock.release()
+
+    with pytest.raises(RuntimeError, match="stale owner or fencing token rejected"):
+        await close_task
 
     assert manager.has_session(session_id) is True
