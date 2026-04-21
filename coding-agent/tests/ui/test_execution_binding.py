@@ -4,7 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from coding_agent.ui.binding_resolver import DefaultBindingResolver
+from coding_agent.ui.binding_resolver import (
+    CloudBindingNotImplementedError,
+    DefaultBindingResolver,
+)
 from coding_agent.ui.execution_binding import (
     CloudWorkspaceBinding,
     ExecutionBinding,
@@ -55,14 +58,14 @@ def test_local_resolver_returns_absolute_path(tmp_path: Path) -> None:
     assert resolver.resolve_tool_config(binding) == {"workspace_root": str(resolved)}
 
 
-def test_cloud_resolver_raises_not_implemented() -> None:
+def test_cloud_resolver_raises_typed_not_implemented() -> None:
     binding = CloudWorkspaceBinding(
         workspace_url="https://workspace.example.com",
         workspace_id="ws-123",
     )
     resolver = DefaultBindingResolver()
 
-    with pytest.raises(NotImplementedError, match="cloud workspace"):
+    with pytest.raises(CloudBindingNotImplementedError, match="cloud workspace"):
         resolver.resolve_workspace_root(binding)
 
 
@@ -90,12 +93,12 @@ def test_cloud_binding_rejects_invalid_field_types(
         CloudWorkspaceBinding.from_dict(payload)
 
 
-def test_cloud_resolver_tool_config_raises_not_implemented() -> None:
+def test_cloud_resolver_tool_config_raises_typed_not_implemented() -> None:
     binding = CloudWorkspaceBinding(
         workspace_url="https://workspace.example.com",
         workspace_id="ws-123",
     )
     resolver = DefaultBindingResolver()
 
-    with pytest.raises(NotImplementedError, match="cloud workspace"):
+    with pytest.raises(CloudBindingNotImplementedError, match="cloud workspace"):
         resolver.resolve_tool_config(binding)

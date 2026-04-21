@@ -9,6 +9,7 @@ import sys
 import types
 from collections.abc import AsyncIterator
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
@@ -22,6 +23,7 @@ from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
 
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.approval.store import ApprovalStore
+from coding_agent.ui.execution_binding import LocalExecutionBinding
 from coding_agent.wire.local import LocalWire
 from coding_agent.ui.session_manager import Session
 from coding_agent.ui.session_owner_store import SessionOwnershipConflictError
@@ -197,6 +199,28 @@ class TestSessionCreation:
         session = session_manager.get_session(session_id)
 
         assert session.provider is None
+
+    async def test_create_session_stores_local_binding_by_default(self, client):
+        response = await client.post("/sessions", json={})
+
+        session = session_manager.get_session(response.json()["session_id"])
+
+        assert isinstance(session.execution_binding, LocalExecutionBinding)
+        assert session.execution_binding.workspace_root == str(Path.cwd().resolve())
+
+    async def test_create_session_stores_local_binding_with_repo_path(
+        self, client, tmp_path
+    ):
+        response = await client.post(
+            "/sessions",
+            json={"repo_path": str(tmp_path)},
+        )
+
+        session = session_manager.get_session(response.json()["session_id"])
+
+        assert isinstance(session.execution_binding, LocalExecutionBinding)
+        assert session.execution_binding.workspace_root == str(tmp_path.resolve())
+        assert session.repo_path == tmp_path.resolve()
 
 
 class TestPromptStreaming:
@@ -1541,7 +1565,7 @@ class TestBroadcastEvent:
                 raise RuntimeError("queue closed")
 
         healthy_queue: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=1)
-        broken_queue = cast(asyncio.Queue[dict[str, str]], BrokenQueue())
+        broken_queue = cast(asyncio.Queue[dict[str, str]], cast(object, BrokenQueue()))
         session.event_queues = [broken_queue, healthy_queue]
         event = {"event": "Test", "data": "{}"}
 
