@@ -133,7 +133,7 @@ async def test_get_events_returns_404_before_owner_check_for_missing_session(
 
     response = exc_info.value
     assert getattr(response, "status_code", None) == 404
-    assert getattr(response, "detail", None) == "Session not found"
+    assert getattr(response, "detail", None) == "Session not found: missing-session"
 
 
 @pytest.mark.asyncio
@@ -247,6 +247,41 @@ async def test_get_events_drops_queued_event_after_owner_change(
 
     with pytest.raises(StopAsyncIteration):
         await anext(event_generator)
+
+
+@pytest.mark.asyncio
+async def test_get_events_returns_404_when_session_disappears_during_queue_registration(
+    client: AsyncClient,
+    owner_store: FakeOwnerStore,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    create_resp = await client.post("/sessions", json={})
+    session_id = create_resp.json()["session_id"]
+    owner_store._owners[session_id] = SessionOwnerRecord(
+        owner_id="owner-a",
+        lease_expires_at=datetime.now(UTC) + timedelta(seconds=30),
+        fencing_token=1,
+    )
+
+    original_authorize = session_manager.authorize_event_stream
+
+    async def fake_authorize_event_stream(current_session_id: str) -> None:
+        assert current_session_id == session_id
+        await original_authorize(current_session_id)
+        session_manager.clear_sessions()
+
+    monkeypatch.setattr(
+        session_manager,
+        "authorize_event_stream",
+        fake_authorize_event_stream,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await get_events(_events_request(session_id), session_id, None)
+
+    response = exc_info.value
+    assert response.status_code == 404
+    assert response.detail == f"Session not found: {session_id}"
 
 
 @pytest.mark.asyncio
