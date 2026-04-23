@@ -196,7 +196,9 @@ class Session:
             execution_binding = ExecutionBinding.from_dict(binding_raw)
         else:
             workspace_root = (
-                repo_path_raw if repo_path_raw is not None else str(Path.cwd())
+                str(Path(repo_path_raw).resolve())
+                if repo_path_raw is not None
+                else str(Path.cwd().resolve())
             )
             execution_binding = LocalExecutionBinding(workspace_root=workspace_root)
         session = cls(
