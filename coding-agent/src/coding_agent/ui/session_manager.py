@@ -52,6 +52,7 @@ from coding_agent.ui.execution_binding import ExecutionBinding, LocalExecutionBi
 logger = logging.getLogger(__name__)
 
 _CHECKPOINT_SESSION_CONFIG_KEY = "session_restart_config"
+_DEFAULT_EXECUTION_BINDING = object()
 T = TypeVar("T")
 
 
@@ -97,8 +98,9 @@ class MockProvider:
 class Session:
     """A managed agent session.
 
-    Note: ``repo_path`` is legacy/backward-compat metadata only;
-    ``execution_binding`` is the authoritative workspace contract.
+    Note: ``execution_binding`` is the authoritative workspace contract.
+    ``repo_path`` remains backward-compatible metadata and supplies the
+    default local workspace root when no explicit execution binding is provided.
     """
 
     id: str
@@ -106,8 +108,10 @@ class Session:
     last_activity: datetime
     wire: LocalWire = field(init=False)
     approval_store: ApprovalStore = field(default_factory=ApprovalStore)
-    repo_path: Path | None = None  # legacy/backward-compat metadata only
-    execution_binding: ExecutionBinding | None = None
+    repo_path: Path | None = None  # legacy metadata; seeds default local binding
+    execution_binding: ExecutionBinding = field(  # type: ignore[assignment]
+        default=cast(ExecutionBinding, _DEFAULT_EXECUTION_BINDING),
+    )
     approval_policy: ApprovalPolicy = ApprovalPolicy.AUTO
     provider: Any | None = None
     provider_name: str | None = None
@@ -127,7 +131,7 @@ class Session:
     approval_coordinator: ApprovalCoordinator = field(init=False)
 
     def __post_init__(self) -> None:
-        if self.execution_binding is None:
+        if self.execution_binding is cast(ExecutionBinding, _DEFAULT_EXECUTION_BINDING):
             workspace_root = (
                 str(self.repo_path.resolve())
                 if self.repo_path is not None
@@ -149,14 +153,12 @@ class Session:
         }
 
     def to_store_data(self) -> dict[str, Any]:
-        if self.execution_binding is None:
-            raise RuntimeError("session execution_binding was not initialized")
         return {
             "id": self.id,
             "created_at": self.created_at.isoformat(),
             "last_activity": self.last_activity.isoformat(),
-            # repo_path is legacy/backward-compat metadata; execution_binding is
-            # the authoritative workspace contract.
+            # repo_path remains backward-compatible metadata and seeds the
+            # default local binding when execution_binding is omitted.
             "repo_path": None if self.repo_path is None else str(self.repo_path),
             "execution_binding": self.execution_binding.to_dict(),
             "approval_policy": self.approval_policy.value,
@@ -765,10 +767,6 @@ class SessionManager:
         self._store.save(session.id, cast(dict[str, Any], session.to_store_data()))
 
     def _resolve_workspace_root(self, session: Session) -> Path:
-        if session.execution_binding is None:
-            raise RuntimeError(
-                f"session {session.id} execution_binding was not initialized"
-            )
         return self._binding_resolver.resolve_workspace_root(session.execution_binding)
 
     def _invalidate_runtime(self, session: Session) -> None:
