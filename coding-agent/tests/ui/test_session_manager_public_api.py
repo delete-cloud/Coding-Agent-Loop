@@ -178,6 +178,40 @@ def test_session_metadata_round_trips_local_execution_binding(tmp_path: Path) ->
     assert reloaded.execution_binding.workspace_root == str(bound_repo)
 
 
+def test_session_defaults_local_execution_binding_from_repo_path(
+    tmp_path: Path,
+) -> None:
+    bound_repo = tmp_path / "bound-repo"
+    session = Session(
+        id="binding-from-repo-path",
+        created_at=datetime.now(),
+        last_activity=datetime.now(),
+        approval_store=ApprovalStore(),
+        repo_path=bound_repo,
+    )
+
+    assert isinstance(session.execution_binding, LocalExecutionBinding)
+    assert session.execution_binding.workspace_root == str(bound_repo.resolve())
+
+
+def test_session_preserves_explicit_execution_binding_with_repo_path(
+    tmp_path: Path,
+) -> None:
+    bound_repo = tmp_path / "bound-repo"
+    explicit_root = tmp_path / "explicit-root"
+    session = Session(
+        id="explicit-binding-wins",
+        created_at=datetime.now(),
+        last_activity=datetime.now(),
+        approval_store=ApprovalStore(),
+        repo_path=bound_repo,
+        execution_binding=LocalExecutionBinding(workspace_root=str(explicit_root)),
+    )
+
+    assert isinstance(session.execution_binding, LocalExecutionBinding)
+    assert session.execution_binding.workspace_root == str(explicit_root)
+
+
 def test_session_metadata_defaults_missing_binding_to_local_from_repo_path(
     tmp_path: Path,
 ) -> None:

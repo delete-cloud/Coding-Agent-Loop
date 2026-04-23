@@ -107,11 +107,7 @@ class Session:
     wire: LocalWire = field(init=False)
     approval_store: ApprovalStore = field(default_factory=ApprovalStore)
     repo_path: Path | None = None  # legacy/backward-compat metadata only
-    execution_binding: ExecutionBinding = field(
-        default_factory=lambda: LocalExecutionBinding(
-            workspace_root=str(Path.cwd().resolve())
-        )
-    )
+    execution_binding: ExecutionBinding | None = None
     approval_policy: ApprovalPolicy = ApprovalPolicy.AUTO
     provider: Any | None = None
     provider_name: str | None = None
@@ -131,6 +127,15 @@ class Session:
     approval_coordinator: ApprovalCoordinator = field(init=False)
 
     def __post_init__(self) -> None:
+        if self.execution_binding is None:
+            workspace_root = (
+                str(self.repo_path.resolve())
+                if self.repo_path is not None
+                else str(Path.cwd().resolve())
+            )
+            self.execution_binding = LocalExecutionBinding(
+                workspace_root=workspace_root
+            )
         self.wire = LocalWire(self.id)
         self.approval_coordinator = ApprovalCoordinator(self.approval_store)
 
@@ -144,6 +149,8 @@ class Session:
         }
 
     def to_store_data(self) -> dict[str, Any]:
+        if self.execution_binding is None:
+            raise RuntimeError("session execution_binding was not initialized")
         return {
             "id": self.id,
             "created_at": self.created_at.isoformat(),
@@ -758,6 +765,10 @@ class SessionManager:
         self._store.save(session.id, cast(dict[str, Any], session.to_store_data()))
 
     def _resolve_workspace_root(self, session: Session) -> Path:
+        if session.execution_binding is None:
+            raise RuntimeError(
+                f"session {session.id} execution_binding was not initialized"
+            )
         return self._binding_resolver.resolve_workspace_root(session.execution_binding)
 
     def _invalidate_runtime(self, session: Session) -> None:
