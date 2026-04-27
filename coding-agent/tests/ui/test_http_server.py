@@ -26,10 +26,13 @@ from coding_agent.approval.store import ApprovalStore
 from coding_agent.ui.execution_binding import LocalExecutionBinding
 from coding_agent.wire.local import LocalWire
 from coding_agent.ui.session_manager import Session
+from coding_agent.ui.session_owner_store import SessionOwnerRecord
 from coding_agent.ui.session_owner_store import SessionOwnershipConflictError
 from coding_agent.ui.http_server import (
     APPROVAL_TIMEOUT_SECONDS,
     SESSION_IDLE_TIMEOUT_MINUTES,
+    _build_session_manager,
+    _renew_owner_leases,
     _cleanup_event_queue_on_disconnect,
     _broadcast_event,
     get_events,
@@ -57,6 +60,11 @@ from coding_agent.wire.protocol import (
 @pytest.fixture(autouse=True)
 async def clear_sessions():
     """Clear sessions before each test."""
+    session_manager.configure_owner_leases(
+        owner_store=None,
+        owner_id=None,
+        fencing_token=None,
+    )
     session_manager.clear_sessions()
     # Clear rate limit storage to prevent 429 errors
     limiter.reset()
@@ -67,6 +75,11 @@ async def clear_sessions():
         except Exception:
             pass
     yield
+    session_manager.configure_owner_leases(
+        owner_store=None,
+        owner_id=None,
+        fencing_token=None,
+    )
     session_manager.clear_sessions()
     # Cleanup session_manager
     for session_id in list(session_manager.list_sessions()):
@@ -221,6 +234,117 @@ class TestSessionCreation:
         assert isinstance(session.execution_binding, LocalExecutionBinding)
         assert session.execution_binding.workspace_root == str(tmp_path.resolve())
         assert session.repo_path == tmp_path.resolve()
+
+    def test_build_session_manager_enables_owner_store_for_pg_http_sessions(
+        self, monkeypatch
+    ):
+        class FakeOwnerStore:
+            def __init__(self, *, pg_pool) -> None:
+                self.pg_pool = pg_pool
+
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_storage_config",
+            lambda: {
+                "http_session_backend": "pg",
+                "tape_backend": "pg",
+                "checkpoint_backend": "pg",
+                "dsn": "postgresql://example",
+                "owner_id": "pod-a",
+                "fencing_token": 9,
+                "owner_lease_seconds": 40.0,
+            },
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.SessionOwnerStore",
+            FakeOwnerStore,
+        )
+
+        manager = _build_session_manager()
+
+        assert isinstance(manager._owner_store, FakeOwnerStore)
+        assert manager._owner_store.pg_pool is manager._pg_pool
+        assert manager._owner_id == "pod-a"
+        assert manager._fencing_token == 9
+        assert manager.owner_lease_seconds == 40.0
+
+    async def test_renew_owner_leases_renews_current_sessions(self, monkeypatch):
+        renew_calls: list[tuple[str, str, float, int, int]] = []
+
+        class FakeOwnerStore:
+            async def acquire(
+                self,
+                session_id: str,
+                owner_id: str,
+                lease_seconds: float = 30.0,
+                fencing_token: int = 1,
+            ) -> bool:
+                del session_id, owner_id, lease_seconds, fencing_token
+                return True
+
+            async def renew(
+                self,
+                session_id: str,
+                owner_id: str,
+                lease_seconds: float = 30.0,
+                new_fencing_token: int = 2,
+                current_fencing_token: int = 1,
+            ) -> bool:
+                renew_calls.append(
+                    (
+                        session_id,
+                        owner_id,
+                        lease_seconds,
+                        new_fencing_token,
+                        current_fencing_token,
+                    )
+                )
+                return True
+
+            async def release(
+                self,
+                session_id: str,
+                owner_id: str,
+                fencing_token: int,
+            ) -> bool:
+                del session_id, owner_id, fencing_token
+                return True
+
+            async def get_owner(self, session_id: str) -> SessionOwnerRecord | None:
+                del session_id
+                return None
+
+        sleep_calls = 0
+
+        async def fake_sleep(delay: float) -> None:
+            nonlocal sleep_calls
+            assert delay == 20.0
+            sleep_calls += 1
+            if sleep_calls == 2:
+                raise asyncio.CancelledError
+
+        async def fake_list_sessions_async() -> list[str]:
+            return ["session-a", "session-b"]
+
+        session_manager.configure_owner_leases(
+            owner_store=FakeOwnerStore(),
+            owner_id="pod-a",
+            fencing_token=9,
+            owner_lease_seconds=40.0,
+        )
+        monkeypatch.setattr(
+            session_manager,
+            "list_sessions_async",
+            fake_list_sessions_async,
+        )
+        monkeypatch.setattr("coding_agent.ui.http_server.asyncio.sleep", fake_sleep)
+
+        with pytest.raises(asyncio.CancelledError):
+            await _renew_owner_leases()
+
+        assert renew_calls == [
+            ("session-a", "pod-a", 40.0, 9, 9),
+            ("session-b", "pod-a", 40.0, 9, 9),
+        ]
 
 
 class TestPromptStreaming:

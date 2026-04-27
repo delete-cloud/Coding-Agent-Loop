@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import socket
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -19,7 +21,10 @@ from agentkit.config.loader import load_config as load_agent_toml
 from agentkit.errors import ConfigError
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.ui.session_manager import Session, SessionManager
-from coding_agent.ui.session_owner_store import SessionOwnershipConflictError
+from coding_agent.ui.session_owner_store import (
+    SessionOwnerStore,
+    SessionOwnershipConflictError,
+)
 from coding_agent.ui.schemas import (
     PromptRequest,
     CreateSessionRequest,
@@ -80,8 +85,58 @@ def _load_storage_config() -> dict[str, Any]:
         return {}
 
 
+def _storage_uses_pg_http_sessions(storage_config: dict[str, Any]) -> bool:
+    http_backend = storage_config.get("http_session_backend")
+    session_backend = storage_config.get("session_backend")
+    tape_backend = storage_config.get("tape_backend")
+    configured_backend = http_backend if http_backend is not None else session_backend
+    if isinstance(configured_backend, str) and configured_backend.strip().lower() == "pg":
+        return True
+    return isinstance(tape_backend, str) and tape_backend.strip().lower() == "pg"
+
+
+def _configured_owner_id(storage_config: dict[str, Any]) -> str:
+    owner_id = storage_config.get("owner_id")
+    if isinstance(owner_id, str) and owner_id.strip():
+        return owner_id.strip()
+    return f"{socket.gethostname()}:{uuid.uuid4().hex}"
+
+
+def _configured_fencing_token(storage_config: dict[str, Any]) -> int:
+    token = storage_config.get("fencing_token")
+    if isinstance(token, int) and token > 0:
+        return token
+    return 1
+
+
+def _configured_owner_lease_seconds(storage_config: dict[str, Any]) -> float:
+    lease_seconds = storage_config.get("owner_lease_seconds", 30.0)
+    if not isinstance(lease_seconds, (int, float)):
+        raise ValueError("storage.owner_lease_seconds must be numeric")
+    if lease_seconds <= 0:
+        raise ValueError("storage.owner_lease_seconds must be positive")
+    return float(lease_seconds)
+
+
 def _build_session_manager() -> SessionManager:
-    return SessionManager(storage_config=_load_storage_config())
+    storage_config = _load_storage_config()
+    manager = SessionManager(storage_config=storage_config)
+    if not _storage_uses_pg_http_sessions(storage_config):
+        return manager
+    owner_store = SessionOwnerStore(pg_pool=manager.pg_pool)
+    manager.configure_owner_leases(
+        owner_store=owner_store,
+        owner_id=_configured_owner_id(storage_config),
+        fencing_token=_configured_fencing_token(storage_config),
+        owner_lease_seconds=_configured_owner_lease_seconds(storage_config),
+    )
+    return manager
+
+
+async def _renew_owner_leases() -> None:
+    while True:
+        await asyncio.sleep(max(session_manager.owner_lease_seconds / 2.0, 1.0))
+        await session_manager.renew_owner_leases()
 
 
 # Global session manager
@@ -99,9 +154,17 @@ async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown."""
     # Startup
     cleanup_task = asyncio.create_task(_cleanup_idle_sessions())
+    owner_renew_task = asyncio.create_task(_renew_owner_leases())
     logger.info("HTTP server starting up")
 
-    yield  # Server runs here
+    try:
+        yield  # Server runs here
+    finally:
+        owner_renew_task.cancel()
+        try:
+            await owner_renew_task
+        except asyncio.CancelledError:
+            pass
 
     # Shutdown
     cleanup_task.cancel()
@@ -122,7 +185,10 @@ async def lifespan(app: FastAPI):
                     exc_info=True,
                 )
     finally:
-        await session_manager.close()
+        try:
+            await session_manager.release_owned_sessions()
+        finally:
+            await session_manager.close()
 
     logger.info("HTTP server shut down")
 
