@@ -687,3 +687,21 @@ async def test_renew_owner_leases_logs_and_continues_after_renew_exception(caplo
     assert "Failed to renew owner lease" in caplog.text
     assert first_session_id in caplog.text
     assert second_session_id not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_close_session_releases_owner_lease_before_deleting_metadata() -> None:
+    owner_store = FakeOwnerStore()
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=7,
+    )
+    session_id = await manager.create_session()
+
+    await manager.close_session(session_id)
+
+    assert manager.list_sessions() == []
+    assert await owner_store.get_owner(session_id) is None

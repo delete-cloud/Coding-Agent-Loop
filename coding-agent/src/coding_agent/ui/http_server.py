@@ -731,6 +731,11 @@ async def get_events(
     try:
         await session_manager.authorize_event_stream(session_id)
     except SessionOwnershipConflictError as exc:
+        if str(exc) == "session has no owner":
+            raise HTTPException(
+                status_code=404,
+                detail=f"Session not found: {session_id}",
+            ) from exc
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     queue: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=100)
@@ -739,6 +744,11 @@ async def get_events(
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
     except SessionOwnershipConflictError as exc:
+        if str(exc) == "session has no owner":
+            raise HTTPException(
+                status_code=404,
+                detail=f"Session not found: {session_id}",
+            ) from exc
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     async def event_generator() -> AsyncIterator[dict[str, str]]:
