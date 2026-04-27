@@ -346,6 +346,40 @@ class TestSessionCreation:
             ("session-b", "pod-a", 40.0, 9, 9),
         ]
 
+    async def test_renew_owner_leases_logs_and_continues_after_failure(
+        self, monkeypatch, caplog
+    ):
+        renew_calls = 0
+
+        async def fake_renew_owner_leases() -> None:
+            nonlocal renew_calls
+            renew_calls += 1
+            if renew_calls == 1:
+                raise RuntimeError("database temporarily unavailable")
+
+        sleep_calls = 0
+
+        async def fake_sleep(delay: float) -> None:
+            nonlocal sleep_calls
+            assert delay == 15.0
+            sleep_calls += 1
+            if sleep_calls == 3:
+                raise asyncio.CancelledError
+
+        monkeypatch.setattr(session_manager, "_owner_lease_seconds", 30.0)
+        monkeypatch.setattr(
+            session_manager,
+            "renew_owner_leases",
+            fake_renew_owner_leases,
+        )
+        monkeypatch.setattr("coding_agent.ui.http_server.asyncio.sleep", fake_sleep)
+
+        with pytest.raises(asyncio.CancelledError):
+            await _renew_owner_leases()
+
+        assert renew_calls == 2
+        assert "Error renewing owner leases" in caplog.text
+
 
 class TestPromptStreaming:
     """Tests for prompt streaming endpoint."""
