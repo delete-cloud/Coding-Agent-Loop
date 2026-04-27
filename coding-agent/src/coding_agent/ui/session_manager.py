@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Literal, TypeVar, cast
 
 from agentkit.storage.checkpoint_fs import FSCheckpointStore
+from agentkit.storage.pg import PGPool
 from agentkit.checkpoint.models import CheckpointMeta
 from agentkit.checkpoint import CheckpointService
 from agentkit.storage.protocols import CheckpointStore, TapeStore
@@ -374,6 +375,7 @@ class SessionManager:
         owner_store: SessionOwnerStoreProtocol | None = None,
         owner_id: str | None = None,
         fencing_token: int | None = None,
+        owner_lease_seconds: float = 30.0,
     ):
         self._storage_config = storage_config or {}
         self._pg_pool = pg_pool
@@ -394,6 +396,29 @@ class SessionManager:
         )
         self._create_agent = create_agent_fn
         self._binding_resolver = binding_resolver or DefaultBindingResolver()
+        self.configure_owner_leases(
+            owner_store=owner_store,
+            owner_id=owner_id,
+            fencing_token=fencing_token,
+            owner_lease_seconds=owner_lease_seconds,
+        )
+
+    @property
+    def owner_lease_seconds(self) -> float:
+        return self._owner_lease_seconds
+
+    @property
+    def pg_pool(self) -> PGPool:
+        return self._get_pg_pool()
+
+    def configure_owner_leases(
+        self,
+        *,
+        owner_store: SessionOwnerStoreProtocol | None,
+        owner_id: str | None,
+        fencing_token: int | None,
+        owner_lease_seconds: float = 30.0,
+    ) -> None:
         if owner_store is None and (owner_id is not None or fencing_token is not None):
             raise ValueError(
                 "owner_store must be provided when owner_id or fencing_token is set"
@@ -402,23 +427,26 @@ class SessionManager:
             raise ValueError(
                 "owner_id and fencing_token must be provided when owner_store is set"
             )
+        if owner_lease_seconds <= 0:
+            raise ValueError("owner_lease_seconds must be positive")
         self._owner_store = owner_store
         self._owner_id = owner_id
         self._fencing_token = fencing_token
+        self._owner_lease_seconds = owner_lease_seconds
 
-    def _get_pg_pool(self) -> AsyncPGSessionPool:
+    def _get_pg_pool(self) -> PGPool:
         if self._pg_pool is not None:
-            return cast(AsyncPGSessionPool, self._pg_pool)
+            return cast(PGPool, self._pg_pool)
 
-        PGPool, _, _ = _load_pg_storage_types()
+        pg_pool_type, _, _ = _load_pg_storage_types()
 
         dsn_obj = self._storage_config.get("dsn")
         if not isinstance(dsn_obj, str) or not dsn_obj.strip():
             raise RuntimeError("PG storage requires storage_config['dsn']")
         dsn = dsn_obj.strip()
-        self._pg_pool = PGPool(dsn=dsn)
+        self._pg_pool = pg_pool_type(dsn=dsn)
         self._owns_pg_pool = True
-        return cast(AsyncPGSessionPool, self._pg_pool)
+        return cast(PGPool, self._pg_pool)
 
     def _create_http_session_store(self) -> SessionStore:
         configured_backend = self._storage_config.get("http_session_backend")
@@ -545,6 +573,48 @@ class SessionManager:
             session.id,
             cast(dict[str, Any], session.to_store_data()),
         )
+
+    async def _acquire_owner_for_session(self, session_id: str) -> None:
+        if self._owner_store is None:
+            return
+        if self._owner_id is None or self._fencing_token is None:
+            raise SessionOwnershipConflictError("stale owner or fencing token rejected")
+        acquired = await self._owner_store.acquire(
+            session_id,
+            self._owner_id,
+            lease_seconds=self._owner_lease_seconds,
+            fencing_token=self._fencing_token,
+        )
+        if not acquired:
+            raise SessionOwnershipConflictError("stale owner or fencing token rejected")
+
+    async def release_owned_sessions(self) -> None:
+        if self._owner_store is None:
+            return
+        if self._owner_id is None or self._fencing_token is None:
+            raise SessionOwnershipConflictError("stale owner or fencing token rejected")
+        for session_id in await self.list_sessions_async():
+            await self._owner_store.release(
+                session_id,
+                self._owner_id,
+                self._fencing_token,
+            )
+
+    async def renew_owner_leases(self) -> None:
+        if self._owner_store is None:
+            return
+        if self._owner_id is None or self._fencing_token is None:
+            raise SessionOwnershipConflictError("stale owner or fencing token rejected")
+        for session_id in await self.list_sessions_async():
+            renewed = await self._owner_store.renew(
+                session_id,
+                self._owner_id,
+                lease_seconds=self._owner_lease_seconds,
+                new_fencing_token=self._fencing_token,
+                current_fencing_token=self._fencing_token,
+            )
+            if not renewed:
+                logger.warning("Failed to renew owner lease for session %s", session_id)
 
     async def get_session_async(self, session_id: str) -> Session:
         session = self._session_cache.get(session_id)
@@ -881,7 +951,14 @@ class SessionManager:
         )
 
         async with self._lock:
-            await self._persist_session_async(session)
+            try:
+                await self._persist_session_async(session)
+                await self._acquire_owner_for_session(session_id)
+            except BaseException:
+                self._session_cache.pop(session_id, None)
+                await self._run_store_io(self._store.delete, session_id)
+                self._approval_stores.pop(session_id, None)
+                raise
 
         logger.info(f"Created session: {session_id}")
         return session_id
