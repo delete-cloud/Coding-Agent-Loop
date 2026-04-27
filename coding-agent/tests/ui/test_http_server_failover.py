@@ -368,6 +368,44 @@ async def test_register_owned_event_queue_cleans_up_queue_on_unexpected_error(
 
 
 @pytest.mark.asyncio
+async def test_register_owned_event_queue_cleans_up_queue_on_cancellation(
+    client: AsyncClient,
+    owner_store: FakeOwnerStore,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    create_resp = await client.post("/sessions", json={})
+    session_id = create_resp.json()["session_id"]
+    owner_store._owners[session_id] = SessionOwnerRecord(
+        owner_id="owner-a",
+        lease_expires_at=datetime.now(UTC) + timedelta(seconds=30),
+        fencing_token=1,
+    )
+
+    original_assert_owner = session_manager._assert_owner
+    assert_owner_calls = 0
+    queue: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=100)
+
+    async def fake_assert_owner(current_session_id: str) -> None:
+        nonlocal assert_owner_calls
+        assert current_session_id == session_id
+        assert_owner_calls += 1
+        if assert_owner_calls == 2:
+            raise asyncio.CancelledError
+        await original_assert_owner(current_session_id)
+
+    monkeypatch.setattr(
+        session_manager,
+        "_assert_owner",
+        fake_assert_owner,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await session_manager.register_owned_event_queue_async(session_id, queue)
+
+    assert queue not in session_manager.get_session(session_id).event_queues
+
+
+@pytest.mark.asyncio
 async def test_get_events_rejects_owner_change_after_queue_registration(
     client: AsyncClient,
     owner_store: FakeOwnerStore,

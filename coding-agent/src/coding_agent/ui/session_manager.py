@@ -588,7 +588,7 @@ class SessionManager:
             session.event_queues.append(queue)
             try:
                 await self._assert_owner(session_id)
-            except Exception:
+            except (Exception, asyncio.CancelledError):
                 if queue in session.event_queues:
                     session.event_queues.remove(queue)
                 raise
