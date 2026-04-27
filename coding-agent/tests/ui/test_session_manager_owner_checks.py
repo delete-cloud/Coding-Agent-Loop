@@ -690,7 +690,7 @@ async def test_renew_owner_leases_logs_and_continues_after_renew_exception(caplo
 
 
 @pytest.mark.asyncio
-async def test_close_session_releases_owner_lease_before_deleting_metadata() -> None:
+async def test_close_session_releases_owner_lease_after_deleting_metadata() -> None:
     owner_store = FakeOwnerStore()
     manager = SessionManager(
         store=InMemorySessionStore(),
@@ -705,3 +705,27 @@ async def test_close_session_releases_owner_lease_before_deleting_metadata() -> 
 
     assert manager.list_sessions() == []
     assert await owner_store.get_owner(session_id) is None
+
+
+@pytest.mark.asyncio
+async def test_close_session_keeps_owner_lease_when_metadata_delete_fails() -> None:
+    owner_store = FakeOwnerStore()
+    manager = SessionManager(
+        store=DeleteFailingSessionStore(),
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=7,
+    )
+    session_id = await manager.create_session()
+
+    with pytest.raises(RuntimeError, match="session store delete failed"):
+        await manager.close_session(session_id)
+
+    owner = await owner_store.get_owner(session_id)
+    assert owner is not None
+    assert owner == SessionOwnerRecord(
+        owner_id="owner-a",
+        lease_expires_at=owner.lease_expires_at,
+        fencing_token=7,
+    )

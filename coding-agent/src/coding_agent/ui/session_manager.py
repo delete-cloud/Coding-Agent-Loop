@@ -753,9 +753,9 @@ class SessionManager:
     async def _remove_session_async_no_lock(self, session_id: str) -> None:
         session = await self.get_session_async(session_id)
         await self._close_runtime(session)
-        await self._release_owner_lease_for_session(session_id)
         self._session_cache.pop(session_id, None)
         await self._run_store_io(self._store.delete, session_id)
+        await self._release_owner_lease_for_session(session_id)
         self._approval_stores.pop(session_id, None)
         self._session_turn_locks.pop(session_id, None)
 
