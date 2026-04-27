@@ -271,6 +271,20 @@ class TestSessionCreation:
         renew_calls: list[tuple[str, str, float, int, int]] = []
 
         class FakeOwnerStore:
+            def __init__(self) -> None:
+                self._owners = {
+                    "session-a": SessionOwnerRecord(
+                        owner_id="pod-a",
+                        lease_expires_at=datetime.now() + timedelta(seconds=40),
+                        fencing_token=9,
+                    ),
+                    "session-b": SessionOwnerRecord(
+                        owner_id="pod-a",
+                        lease_expires_at=datetime.now() + timedelta(seconds=40),
+                        fencing_token=9,
+                    ),
+                }
+
             async def acquire(
                 self,
                 session_id: str,
@@ -310,8 +324,7 @@ class TestSessionCreation:
                 return True
 
             async def get_owner(self, session_id: str) -> SessionOwnerRecord | None:
-                del session_id
-                return None
+                return self._owners.get(session_id)
 
         sleep_calls = 0
 
