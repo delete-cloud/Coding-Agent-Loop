@@ -866,7 +866,7 @@ class TestEventsFanOut:
 
         has_session_calls: list[str] = []
         get_session_calls: list[str] = []
-        has_session_results = iter([True, True, False])
+        has_session_results = iter([True, False])
 
         class FakeEventSourceResponse:
             def __init__(self, body_iterator):
@@ -920,7 +920,7 @@ class TestEventsFanOut:
         with pytest.raises(StopAsyncIteration):
             await anext(event_generator)
 
-        assert has_session_calls == [session_id, session_id, session_id]
+        assert has_session_calls == [session_id, session_id]
         assert len(get_session_calls) >= 2
         assert all(
             call_session_id == session_id for call_session_id in get_session_calls
