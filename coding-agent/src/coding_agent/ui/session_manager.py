@@ -956,7 +956,13 @@ class SessionManager:
                 await self._acquire_owner_for_session(session_id)
             except BaseException:
                 self._session_cache.pop(session_id, None)
-                await self._run_store_io(self._store.delete, session_id)
+                try:
+                    await self._run_store_io(self._store.delete, session_id)
+                except BaseException:
+                    logger.exception(
+                        "Failed to delete partially created session during rollback: %s",
+                        session_id,
+                    )
                 self._approval_stores.pop(session_id, None)
                 raise
 

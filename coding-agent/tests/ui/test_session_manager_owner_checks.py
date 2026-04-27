@@ -18,6 +18,12 @@ from coding_agent.ui.session_store import InMemorySessionStore
 from agentkit.tape.tape import Tape
 
 
+class DeleteFailingSessionStore(InMemorySessionStore):
+    def delete(self, session_id: str) -> None:
+        del session_id
+        raise RuntimeError("session store delete failed")
+
+
 class FakeOwnerStore:
     def __init__(self) -> None:
         self._owners: dict[str, SessionOwnerRecord] = {}
@@ -420,6 +426,40 @@ async def test_create_session_rolls_back_persisted_session_when_owner_acquire_fa
 
     assert store.list_sessions() == []
     assert manager.list_sessions() == []
+
+
+@pytest.mark.asyncio
+async def test_create_session_preserves_owner_error_when_rollback_delete_fails(
+    caplog,
+) -> None:
+    owner_store = FakeOwnerStore()
+    manager = SessionManager(
+        store=DeleteFailingSessionStore(),
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=7,
+    )
+
+    async def reject_acquire(
+        session_id: str,
+        owner_id: str,
+        lease_seconds: float = 30.0,
+        fencing_token: int = 1,
+    ) -> bool:
+        del session_id, owner_id, lease_seconds, fencing_token
+        return False
+
+    owner_store.acquire = reject_acquire
+
+    with pytest.raises(
+        SessionOwnershipConflictError,
+        match="stale owner or fencing token rejected",
+    ):
+        await manager.create_session()
+
+    assert manager._session_cache == {}
+    assert "Failed to delete partially created session during rollback" in caplog.text
 
 
 @pytest.mark.asyncio
