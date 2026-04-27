@@ -588,22 +588,48 @@ class SessionManager:
         if not acquired:
             raise SessionOwnershipConflictError("stale owner or fencing token rejected")
 
+    async def _holds_owner_lease(self, session_id: str) -> bool:
+        if self._owner_store is None:
+            return False
+        if self._owner_id is None or self._fencing_token is None:
+            raise SessionOwnershipConflictError("stale owner or fencing token rejected")
+        owner = await self._owner_store.get_owner(session_id)
+        if owner is None:
+            return False
+        return (
+            owner.owner_id == self._owner_id
+            and owner.fencing_token == self._fencing_token
+        )
+
     async def release_owned_sessions(self) -> None:
         if self._owner_store is None:
             return
         if self._owner_id is None or self._fencing_token is None:
             raise SessionOwnershipConflictError("stale owner or fencing token rejected")
         for session_id in await self.list_sessions_async():
-            released = await self._owner_store.release(
-                session_id,
-                self._owner_id,
-                self._fencing_token,
-            )
-            if not released:
-                logger.warning(
-                    "Failed to release owner lease for session %s owned by %s",
+            if not await self._holds_owner_lease(session_id):
+                continue
+            try:
+                released = await self._owner_store.release(
                     session_id,
                     self._owner_id,
+                    self._fencing_token,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to release owner lease for session %s owned by %s with fencing token %s",
+                    session_id,
+                    self._owner_id,
+                    self._fencing_token,
+                    exc_info=True,
+                )
+                continue
+            if not released:
+                logger.warning(
+                    "Failed to release owner lease for session %s owned by %s with fencing token %s",
+                    session_id,
+                    self._owner_id,
+                    self._fencing_token,
                 )
 
     async def renew_owner_leases(self) -> None:
@@ -612,15 +638,32 @@ class SessionManager:
         if self._owner_id is None or self._fencing_token is None:
             raise SessionOwnershipConflictError("stale owner or fencing token rejected")
         for session_id in await self.list_sessions_async():
-            renewed = await self._owner_store.renew(
-                session_id,
-                self._owner_id,
-                lease_seconds=self._owner_lease_seconds,
-                new_fencing_token=self._fencing_token,
-                current_fencing_token=self._fencing_token,
-            )
+            if not await self._holds_owner_lease(session_id):
+                continue
+            try:
+                renewed = await self._owner_store.renew(
+                    session_id,
+                    self._owner_id,
+                    lease_seconds=self._owner_lease_seconds,
+                    new_fencing_token=self._fencing_token,
+                    current_fencing_token=self._fencing_token,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to renew owner lease for session %s owned by %s with fencing token %s",
+                    session_id,
+                    self._owner_id,
+                    self._fencing_token,
+                    exc_info=True,
+                )
+                continue
             if not renewed:
-                logger.warning("Failed to renew owner lease for session %s", session_id)
+                logger.warning(
+                    "Failed to renew owner lease for session %s owned by %s with fencing token %s",
+                    session_id,
+                    self._owner_id,
+                    self._fencing_token,
+                )
 
     async def get_session_async(self, session_id: str) -> Session:
         session = self._session_cache.get(session_id)
