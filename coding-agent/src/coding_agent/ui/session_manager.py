@@ -52,6 +52,7 @@ from coding_agent.ui.execution_binding import ExecutionBinding, LocalExecutionBi
 logger = logging.getLogger(__name__)
 
 _CHECKPOINT_SESSION_CONFIG_KEY = "session_restart_config"
+_DEFAULT_EXECUTION_BINDING = object()
 T = TypeVar("T")
 
 
@@ -97,8 +98,9 @@ class MockProvider:
 class Session:
     """A managed agent session.
 
-    Note: ``repo_path`` is legacy/backward-compat metadata only;
-    ``execution_binding`` is the authoritative workspace contract.
+    Note: ``execution_binding`` is the authoritative workspace contract.
+    ``repo_path`` remains backward-compatible metadata and supplies the
+    default local workspace root when no explicit execution binding is provided.
     """
 
     id: str
@@ -106,11 +108,9 @@ class Session:
     last_activity: datetime
     wire: LocalWire = field(init=False)
     approval_store: ApprovalStore = field(default_factory=ApprovalStore)
-    repo_path: Path | None = None  # legacy/backward-compat metadata only
-    execution_binding: ExecutionBinding = field(
-        default_factory=lambda: LocalExecutionBinding(
-            workspace_root=str(Path.cwd().resolve())
-        )
+    repo_path: Path | None = None  # legacy metadata; seeds default local binding
+    execution_binding: ExecutionBinding = field(  # type: ignore[assignment]
+        default=cast(ExecutionBinding, _DEFAULT_EXECUTION_BINDING),
     )
     approval_policy: ApprovalPolicy = ApprovalPolicy.AUTO
     provider: Any | None = None
@@ -131,6 +131,15 @@ class Session:
     approval_coordinator: ApprovalCoordinator = field(init=False)
 
     def __post_init__(self) -> None:
+        if self.execution_binding is cast(ExecutionBinding, _DEFAULT_EXECUTION_BINDING):
+            workspace_root = (
+                str(self.repo_path.resolve())
+                if self.repo_path is not None
+                else str(Path.cwd().resolve())
+            )
+            self.execution_binding = LocalExecutionBinding(
+                workspace_root=workspace_root
+            )
         self.wire = LocalWire(self.id)
         self.approval_coordinator = ApprovalCoordinator(self.approval_store)
 
@@ -148,8 +157,8 @@ class Session:
             "id": self.id,
             "created_at": self.created_at.isoformat(),
             "last_activity": self.last_activity.isoformat(),
-            # repo_path is legacy/backward-compat metadata; execution_binding is
-            # the authoritative workspace contract.
+            # repo_path remains backward-compatible metadata and seeds the
+            # default local binding when execution_binding is omitted.
             "repo_path": None if self.repo_path is None else str(self.repo_path),
             "execution_binding": self.execution_binding.to_dict(),
             "approval_policy": self.approval_policy.value,
@@ -187,7 +196,9 @@ class Session:
             execution_binding = ExecutionBinding.from_dict(binding_raw)
         else:
             workspace_root = (
-                repo_path_raw if repo_path_raw is not None else str(Path.cwd())
+                str(Path(repo_path_raw).resolve())
+                if repo_path_raw is not None
+                else str(Path.cwd().resolve())
             )
             execution_binding = LocalExecutionBinding(workspace_root=workspace_root)
         session = cls(
