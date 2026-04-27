@@ -594,11 +594,17 @@ class SessionManager:
         if self._owner_id is None or self._fencing_token is None:
             raise SessionOwnershipConflictError("stale owner or fencing token rejected")
         for session_id in await self.list_sessions_async():
-            await self._owner_store.release(
+            released = await self._owner_store.release(
                 session_id,
                 self._owner_id,
                 self._fencing_token,
             )
+            if not released:
+                logger.warning(
+                    "Failed to release owner lease for session %s owned by %s",
+                    session_id,
+                    self._owner_id,
+                )
 
     async def renew_owner_leases(self) -> None:
         if self._owner_store is None:

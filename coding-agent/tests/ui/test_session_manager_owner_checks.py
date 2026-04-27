@@ -375,24 +375,25 @@ async def test_submit_approval_rejects_stale_owner() -> None:
 @pytest.mark.asyncio
 async def test_create_session_acquires_owner_when_owner_store_is_configured() -> None:
     owner_store = FakeOwnerStore()
+    owner_lease_seconds = 45.0
     manager = SessionManager(
         store=InMemorySessionStore(),
         checkpoint_service=CheckpointService(FakeCheckpointStore()),
         owner_store=owner_store,
         owner_id="owner-a",
         fencing_token=7,
-        owner_lease_seconds=45.0,
+        owner_lease_seconds=owner_lease_seconds,
     )
 
+    now = datetime.now(UTC)
     session_id = await manager.create_session()
 
     owner = await owner_store.get_owner(session_id)
     assert owner is not None
-    assert owner == SessionOwnerRecord(
-        owner_id="owner-a",
-        lease_expires_at=owner.lease_expires_at,
-        fencing_token=7,
-    )
+    assert owner.owner_id == "owner-a"
+    assert owner.fencing_token == 7
+    expected_expiry = now + timedelta(seconds=owner_lease_seconds)
+    assert abs((owner.lease_expires_at - expected_expiry).total_seconds()) < 2.0
 
 
 @pytest.mark.asyncio
@@ -489,3 +490,35 @@ async def test_release_owned_sessions_releases_current_owner_only() -> None:
         lease_expires_at=other_owner.lease_expires_at,
         fencing_token=8,
     )
+
+
+@pytest.mark.asyncio
+async def test_release_owned_sessions_logs_failed_owner_release(caplog) -> None:
+    owner_store = FakeOwnerStore()
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=7,
+    )
+    session_id = await manager.create_session()
+
+    async def reject_release(
+        session_id: str,
+        owner_id: str,
+        fencing_token: int,
+    ) -> bool:
+        assert session_id == expected_session_id
+        assert owner_id == "owner-a"
+        assert fencing_token == 7
+        return False
+
+    expected_session_id = session_id
+    owner_store.release = reject_release
+
+    await manager.release_owned_sessions()
+
+    assert "Failed to release owner lease" in caplog.text
+    assert session_id in caplog.text
+    assert "owner-a" in caplog.text
