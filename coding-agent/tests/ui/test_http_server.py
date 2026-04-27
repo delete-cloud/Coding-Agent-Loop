@@ -319,7 +319,7 @@ class TestSessionCreation:
             nonlocal sleep_calls
             assert delay == 20.0
             sleep_calls += 1
-            if sleep_calls == 2:
+            if sleep_calls == 1:
                 raise asyncio.CancelledError
 
         async def fake_list_sessions_async() -> list[str]:
@@ -363,7 +363,7 @@ class TestSessionCreation:
             nonlocal sleep_calls
             assert delay == 15.0
             sleep_calls += 1
-            if sleep_calls == 3:
+            if sleep_calls == 2:
                 raise asyncio.CancelledError
 
         monkeypatch.setattr(session_manager, "_owner_lease_seconds", 30.0)
@@ -379,6 +379,30 @@ class TestSessionCreation:
 
         assert renew_calls == 2
         assert "Error renewing owner leases" in caplog.text
+
+    async def test_renew_owner_leases_renews_before_first_sleep(self, monkeypatch):
+        events: list[str] = []
+
+        async def fake_renew_owner_leases() -> None:
+            events.append("renew")
+
+        async def fake_sleep(delay: float) -> None:
+            assert delay == 15.0
+            events.append("sleep")
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(session_manager, "_owner_lease_seconds", 30.0)
+        monkeypatch.setattr(
+            session_manager,
+            "renew_owner_leases",
+            fake_renew_owner_leases,
+        )
+        monkeypatch.setattr("coding_agent.ui.http_server.asyncio.sleep", fake_sleep)
+
+        with pytest.raises(asyncio.CancelledError):
+            await _renew_owner_leases()
+
+        assert events == ["renew", "sleep"]
 
 
 class TestPromptStreaming:
@@ -1186,6 +1210,48 @@ class TestLifespanShutdown:
 
         assert observed_shutdowns == ["session-a", "session-b"]
         assert close_calls == ["closed"]
+
+    async def test_lifespan_shutdown_logs_failed_owner_renew_task(
+        self, monkeypatch, caplog
+    ):
+        close_calls: list[str] = []
+
+        async def fake_cleanup_idle_sessions() -> None:
+            try:
+                while True:
+                    await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                raise
+
+        async def fake_renew_owner_leases() -> None:
+            raise RuntimeError("renew task failed before shutdown")
+
+        async def fake_list_sessions_async() -> list[str]:
+            return []
+
+        async def fake_close() -> None:
+            close_calls.append("closed")
+
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._cleanup_idle_sessions",
+            fake_cleanup_idle_sessions,
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._renew_owner_leases",
+            fake_renew_owner_leases,
+        )
+        monkeypatch.setattr(
+            session_manager, "list_sessions_async", fake_list_sessions_async
+        )
+        monkeypatch.setattr(session_manager, "close", fake_close)
+
+        cm = app.router.lifespan_context(app)
+        await cm.__aenter__()
+        await asyncio.sleep(0)
+        await cm.__aexit__(None, None, None)
+
+        assert close_calls == ["closed"]
+        assert "Owner lease renewal task failed during shutdown" in caplog.text
 
 
 class TestGetSession:

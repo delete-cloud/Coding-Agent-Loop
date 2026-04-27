@@ -135,11 +135,11 @@ def _build_session_manager() -> SessionManager:
 
 async def _renew_owner_leases() -> None:
     while True:
-        await asyncio.sleep(max(session_manager.owner_lease_seconds / 2.0, 1.0))
         try:
             await session_manager.renew_owner_leases()
         except Exception:
             logger.exception("Error renewing owner leases")
+        await asyncio.sleep(max(session_manager.owner_lease_seconds / 2.0, 1.0))
 
 
 # Global session manager
@@ -168,6 +168,8 @@ async def lifespan(app: FastAPI):
             await owner_renew_task
         except asyncio.CancelledError:
             pass
+        except Exception:
+            logger.exception("Owner lease renewal task failed during shutdown")
 
     # Shutdown
     cleanup_task.cancel()
