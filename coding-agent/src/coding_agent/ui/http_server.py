@@ -88,12 +88,18 @@ def _load_storage_config() -> dict[str, Any]:
 
 def _storage_uses_pg_http_sessions(storage_config: dict[str, Any]) -> bool:
     http_backend = storage_config.get("http_session_backend")
+    if http_backend is not None:
+        return isinstance(http_backend, str) and http_backend.strip().lower() == "pg"
+
     session_backend = storage_config.get("session_backend")
-    tape_backend = storage_config.get("tape_backend")
-    configured_backend = http_backend if http_backend is not None else session_backend
-    if isinstance(configured_backend, str) and configured_backend.strip().lower() == "pg":
-        return True
-    return isinstance(tape_backend, str) and tape_backend.strip().lower() == "pg"
+    if session_backend is not None:
+        return (
+            isinstance(session_backend, str)
+            and session_backend.strip().lower() == "pg"
+        )
+
+    tape_backend = str(storage_config.get("tape_backend", "jsonl")).strip().lower()
+    return tape_backend == "pg"
 
 
 def _configured_owner_id(storage_config: dict[str, Any]) -> str:
@@ -135,6 +141,8 @@ def _build_session_manager() -> SessionManager:
 
 
 async def _renew_owner_leases() -> None:
+    if not session_manager.has_owner_leases_configured:
+        return
     while True:
         try:
             await session_manager.renew_owner_leases()

@@ -10,6 +10,7 @@ import types
 from collections.abc import AsyncIterator
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 from typing import cast
 from unittest.mock import patch
 
@@ -267,6 +268,53 @@ class TestSessionCreation:
         assert manager._fencing_token == 9
         assert manager.owner_lease_seconds == 40.0
 
+    def test_build_session_manager_does_not_enable_owner_store_for_non_pg_http_sessions(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_storage_config",
+            lambda: {
+                "http_session_backend": "redis",
+                "tape_backend": "pg",
+                "checkpoint_backend": "pg",
+                "dsn": "postgresql://example",
+            },
+        )
+
+        manager = _build_session_manager()
+
+        assert manager._owner_store is None
+
+    async def test_renew_owner_leases_exits_when_owner_leases_are_not_configured(
+        self, monkeypatch
+    ):
+        events: list[str] = []
+
+        async def fail_sleep(delay: float) -> None:
+            del delay
+            events.append("sleep")
+            raise AssertionError("renew loop should not sleep without owner leases")
+
+        async def fail_renew_owner_leases() -> None:
+            events.append("renew")
+            raise AssertionError("renew loop should not renew without owner leases")
+
+        session_manager.configure_owner_leases(
+            owner_store=None,
+            owner_id=None,
+            fencing_token=None,
+        )
+        monkeypatch.setattr(
+            session_manager,
+            "renew_owner_leases",
+            fail_renew_owner_leases,
+        )
+        monkeypatch.setattr("coding_agent.ui.http_server.asyncio.sleep", fail_sleep)
+
+        await _renew_owner_leases()
+
+        assert events == []
+
     async def test_renew_owner_leases_renews_current_sessions(self, monkeypatch):
         renew_calls: list[tuple[str, str, float, int, int]] = []
 
@@ -379,7 +427,12 @@ class TestSessionCreation:
             if sleep_calls == 2:
                 raise asyncio.CancelledError
 
-        monkeypatch.setattr(session_manager, "_owner_lease_seconds", 30.0)
+        session_manager.configure_owner_leases(
+            owner_store=cast(Any, object()),
+            owner_id="pod-a",
+            fencing_token=9,
+            owner_lease_seconds=30.0,
+        )
         monkeypatch.setattr(
             session_manager,
             "renew_owner_leases",
@@ -404,7 +457,12 @@ class TestSessionCreation:
             events.append("sleep")
             raise asyncio.CancelledError
 
-        monkeypatch.setattr(session_manager, "_owner_lease_seconds", 30.0)
+        session_manager.configure_owner_leases(
+            owner_store=cast(Any, object()),
+            owner_id="pod-a",
+            fencing_token=9,
+            owner_lease_seconds=30.0,
+        )
         monkeypatch.setattr(
             session_manager,
             "renew_owner_leases",

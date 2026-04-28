@@ -10,6 +10,7 @@ import types
 from unittest.mock import patch
 from datetime import UTC, datetime
 from coding_agent.ui.session_owner_store import SessionOwnershipConflictError
+from coding_agent.ui.session_owner_store import SessionOwnershipConflictReason
 
 from coding_agent.ui.session_owner_store import (
     SessionOwnerRecord,
@@ -22,6 +23,12 @@ class DeleteFailingSessionStore(InMemorySessionStore):
     def delete(self, session_id: str) -> None:
         del session_id
         raise RuntimeError("session store delete failed")
+
+
+class CancellationDeleteSessionStore(InMemorySessionStore):
+    def delete(self, session_id: str) -> None:
+        del session_id
+        raise asyncio.CancelledError
 
 
 class FakeOwnerStore:
@@ -283,8 +290,10 @@ async def test_run_agent_rejects_expired_owner_lease() -> None:
     with pytest.raises(
         SessionOwnershipConflictError,
         match="session owner lease expired",
-    ):
+    ) as exc_info:
         await manager.run_agent(session_id, "hello")
+
+    assert exc_info.value.reason == SessionOwnershipConflictReason.EXPIRED_LEASE
 
     assert create_agent_calls == 0
     assert manager.get_session(session_id).turn_in_progress is False
@@ -499,6 +508,35 @@ async def test_create_session_preserves_owner_error_when_rollback_delete_fails(
 
     assert manager._session_cache == {}
     assert "Failed to delete partially created session during rollback" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_create_session_does_not_log_rollback_delete_cancellation(caplog) -> None:
+    owner_store = FakeOwnerStore()
+    manager = SessionManager(
+        store=CancellationDeleteSessionStore(),
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=7,
+    )
+
+    async def reject_acquire(
+        session_id: str,
+        owner_id: str,
+        lease_seconds: float = 30.0,
+        fencing_token: int = 1,
+    ) -> bool:
+        del session_id, owner_id, lease_seconds, fencing_token
+        return False
+
+    owner_store.acquire = reject_acquire
+
+    with pytest.raises(SessionOwnershipConflictError):
+        await manager.create_session()
+
+    assert manager._session_cache == {}
+    assert "Failed to delete partially created session during rollback" not in caplog.text
 
 
 @pytest.mark.asyncio

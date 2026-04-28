@@ -409,6 +409,10 @@ class SessionManager:
         return self._owner_lease_seconds
 
     @property
+    def has_owner_leases_configured(self) -> bool:
+        return self._owner_store is not None
+
+    @property
     def pg_pool(self) -> PGPool:
         return self._get_pg_pool()
 
@@ -1022,6 +1026,8 @@ class SessionManager:
                 self._session_cache.pop(session_id, None)
                 try:
                     await self._run_store_io(self._store.delete, session_id)
+                except asyncio.CancelledError:
+                    pass
                 except BaseException:
                     logger.exception(
                         "Failed to delete partially created session during rollback: %s",
