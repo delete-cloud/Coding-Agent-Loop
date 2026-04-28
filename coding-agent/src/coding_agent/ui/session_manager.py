@@ -47,6 +47,7 @@ from coding_agent.ui.session_store import (
 )
 from coding_agent.ui.session_owner_store import SessionOwnerStoreProtocol
 from coding_agent.ui.session_owner_store import SessionOwnershipConflictError
+from coding_agent.ui.session_owner_store import SessionOwnershipConflictReason
 from coding_agent.ui.binding_resolver import BindingResolver, DefaultBindingResolver
 from coding_agent.ui.execution_binding import ExecutionBinding, LocalExecutionBinding
 
@@ -542,9 +543,15 @@ class SessionManager:
 
         owner = await self._owner_store.get_owner(session_id)
         if owner is None:
-            raise SessionOwnershipConflictError("session has no owner")
+            raise SessionOwnershipConflictError(
+                "session has no owner",
+                reason=SessionOwnershipConflictReason.MISSING_OWNER,
+            )
         if owner.lease_expires_at <= datetime.now(UTC):
-            raise SessionOwnershipConflictError("session owner lease expired")
+            raise SessionOwnershipConflictError(
+                "session owner lease expired",
+                reason=SessionOwnershipConflictReason.EXPIRED_LEASE,
+            )
 
         current_owner_id = owner.owner_id
         current_fencing_token = owner.fencing_token
