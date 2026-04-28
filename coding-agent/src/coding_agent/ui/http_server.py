@@ -113,7 +113,7 @@ def _configured_fencing_token(storage_config: dict[str, Any]) -> int:
     token = storage_config.get("fencing_token")
     if isinstance(token, int) and token > 0:
         return token
-    return 1
+    raise ValueError("storage.fencing_token must be a positive integer")
 
 
 def _configured_owner_lease_seconds(storage_config: dict[str, Any]) -> float:

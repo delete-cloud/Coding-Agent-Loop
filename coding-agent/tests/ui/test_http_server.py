@@ -8,7 +8,7 @@ import json
 import sys
 import types
 from collections.abc import AsyncIterator
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from typing import cast
@@ -268,6 +268,28 @@ class TestSessionCreation:
         assert manager._fencing_token == 9
         assert manager.owner_lease_seconds == 40.0
 
+    @pytest.mark.parametrize("fencing_token", [None, 0, -1, "9"])
+    def test_build_session_manager_requires_explicit_positive_fencing_token_for_pg_http_sessions(
+        self, monkeypatch, fencing_token
+    ):
+        storage_config = {
+            "http_session_backend": "pg",
+            "tape_backend": "pg",
+            "checkpoint_backend": "pg",
+            "dsn": "postgresql://example",
+            "owner_id": "pod-a",
+            "owner_lease_seconds": 40.0,
+        }
+        if fencing_token is not None:
+            storage_config["fencing_token"] = fencing_token
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_storage_config",
+            lambda: storage_config,
+        )
+
+        with pytest.raises(ValueError, match="storage.fencing_token"):
+            _build_session_manager()
+
     def test_build_session_manager_does_not_enable_owner_store_for_non_pg_http_sessions(
         self, monkeypatch
     ):
@@ -323,12 +345,12 @@ class TestSessionCreation:
                 self._owners = {
                     "session-a": SessionOwnerRecord(
                         owner_id="pod-a",
-                        lease_expires_at=datetime.now() + timedelta(seconds=40),
+                        lease_expires_at=datetime.now(UTC) + timedelta(seconds=40),
                         fencing_token=9,
                     ),
                     "session-b": SessionOwnerRecord(
                         owner_id="pod-a",
-                        lease_expires_at=datetime.now() + timedelta(seconds=40),
+                        lease_expires_at=datetime.now(UTC) + timedelta(seconds=40),
                         fencing_token=9,
                     ),
                 }
