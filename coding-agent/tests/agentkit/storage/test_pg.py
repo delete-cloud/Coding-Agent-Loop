@@ -208,8 +208,6 @@ class FakePool:
                 lease_expires_at = owner.get("lease_expires_at")
                 if not isinstance(lease_expires_at, datetime):
                     raise TypeError("lease_expires_at must be a datetime")
-                if lease_expires_at <= datetime.now(UTC):
-                    return None
                 return owner
             if (
                 "SELECT meta, entries, plugin_states, extra FROM agent_checkpoints"
@@ -644,7 +642,7 @@ class TestPGSessionOwnerStore:
         assert await store.get_owner("s1") is None
 
     @pytest.mark.asyncio
-    async def test_get_owner_filters_expired_leases(
+    async def test_get_owner_returns_expired_leases(
         self, store: PGSessionOwnerStore, fake_pool: FakePool
     ) -> None:
         fake_pool.session_owners["s1"] = {
@@ -653,7 +651,10 @@ class TestPGSessionOwnerStore:
             "fencing_token": 1,
         }
 
-        assert await store.get_owner("s1") is None
+        owner = await store.get_owner("s1")
+
+        assert owner is not None
+        assert owner["owner_id"] == "owner-a"
 
 
 class TestPGTapeStore:

@@ -364,7 +364,7 @@ class PGSessionOwnerStore:
     """
     _GET_SQL: Final[str] = (
         "SELECT owner_id, lease_expires_at, fencing_token FROM session_owners "
-        "WHERE session_id = $1 AND lease_expires_at > NOW()"
+        "WHERE session_id = $1"
     )
 
     def __init__(self, *, pool: PGPool) -> None:
