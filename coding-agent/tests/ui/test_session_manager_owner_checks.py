@@ -651,6 +651,31 @@ async def test_renew_owner_leases_skips_sessions_owned_by_other_replicas() -> No
 
 
 @pytest.mark.asyncio
+async def test_renew_owner_leases_skips_expired_owner_leases(caplog) -> None:
+    owner_store = RecordingOwnerStore()
+    store = InMemorySessionStore()
+    manager = SessionManager(
+        store=store,
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=7,
+    )
+    session_id = await manager.create_session()
+    owner_store._owners[session_id] = SessionOwnerRecord(
+        owner_id="owner-a",
+        lease_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+        fencing_token=7,
+    )
+
+    await manager.renew_owner_leases()
+
+    assert owner_store.get_owner_calls == [session_id]
+    assert owner_store.renew_calls == []
+    assert "Failed to renew owner lease" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_release_owned_sessions_logs_and_continues_after_release_exception(
     caplog,
 ) -> None:

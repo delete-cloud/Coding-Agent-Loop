@@ -655,8 +655,16 @@ class SessionManager:
             return
         if self._owner_id is None or self._fencing_token is None:
             raise SessionOwnershipConflictError("stale owner or fencing token rejected")
+        now = datetime.now(UTC)
         for session_id in await self.list_sessions_async():
-            if not await self._holds_owner_lease(session_id):
+            owner = await self._owner_store.get_owner(session_id)
+            if owner is None:
+                continue
+            if (
+                owner.owner_id != self._owner_id
+                or owner.fencing_token != self._fencing_token
+                or owner.lease_expires_at <= now
+            ):
                 continue
             try:
                 renewed = await self._owner_store.renew(
