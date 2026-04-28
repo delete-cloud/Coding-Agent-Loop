@@ -24,6 +24,7 @@ from coding_agent.ui.session_manager import Session, SessionManager
 from coding_agent.ui.session_owner_store import (
     SessionOwnerStore,
     SessionOwnershipConflictError,
+    SessionOwnershipConflictReason,
 )
 from coding_agent.ui.schemas import (
     PromptRequest,
@@ -150,6 +151,19 @@ def _key_error_detail(exc: KeyError) -> str:
     if exc.args and isinstance(exc.args[0], str):
         return exc.args[0]
     return str(exc)
+
+
+def _owner_conflict_http_exception(
+    exc: SessionOwnershipConflictError,
+    *,
+    session_id: str,
+) -> HTTPException:
+    if exc.reason == SessionOwnershipConflictReason.MISSING_OWNER:
+        return HTTPException(
+            status_code=404,
+            detail=f"Session not found: {session_id}",
+        )
+    return HTTPException(status_code=409, detail=str(exc))
 
 
 @asynccontextmanager
@@ -731,12 +745,7 @@ async def get_events(
     try:
         await session_manager.authorize_event_stream(session_id)
     except SessionOwnershipConflictError as exc:
-        if str(exc) == "session has no owner":
-            raise HTTPException(
-                status_code=404,
-                detail=f"Session not found: {session_id}",
-            ) from exc
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise _owner_conflict_http_exception(exc, session_id=session_id) from exc
 
     queue: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=100)
     try:
@@ -744,12 +753,7 @@ async def get_events(
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
     except SessionOwnershipConflictError as exc:
-        if str(exc) == "session has no owner":
-            raise HTTPException(
-                status_code=404,
-                detail=f"Session not found: {session_id}",
-            ) from exc
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise _owner_conflict_http_exception(exc, session_id=session_id) from exc
 
     async def event_generator() -> AsyncIterator[dict[str, str]]:
         """Generate events from queue."""
