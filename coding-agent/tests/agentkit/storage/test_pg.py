@@ -1006,7 +1006,7 @@ class MockPoolForLock:
         self._conn = FakePoolConnection()
         self.release = AsyncMock()
 
-    async def acquire(self) -> FakePoolConnection:
+    async def acquire(self) -> "FakePoolConnection":
         return self._conn
 
 
