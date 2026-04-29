@@ -122,6 +122,8 @@ def _configured_owner_lease_seconds(storage_config: dict[str, Any]) -> float:
         raise ValueError("storage.owner_lease_seconds must be numeric")
     if lease_seconds <= 0:
         raise ValueError("storage.owner_lease_seconds must be positive")
+    if lease_seconds < 2.0:
+        raise ValueError("storage.owner_lease_seconds must be >= 2 seconds")
     return float(lease_seconds)
 
 

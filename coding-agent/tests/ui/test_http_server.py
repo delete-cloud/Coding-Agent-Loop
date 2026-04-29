@@ -261,12 +261,14 @@ class TestSessionCreation:
         )
 
         manager = _build_session_manager()
-
-        assert isinstance(manager._owner_store, FakeOwnerStore)
-        assert manager._owner_store.pg_pool is manager._pg_pool
-        assert manager._owner_id == "pod-a"
-        assert manager._fencing_token == 9
-        assert manager.owner_lease_seconds == 40.0
+        try:
+            assert isinstance(manager._owner_store, FakeOwnerStore)
+            assert manager._owner_store.pg_pool is manager._pg_pool
+            assert manager._owner_id == "pod-a"
+            assert manager._fencing_token == 9
+            assert manager.owner_lease_seconds == 40.0
+        finally:
+            asyncio.run(manager.close())
 
     @pytest.mark.parametrize("fencing_token", [None, 0, -1, "9"])
     def test_build_session_manager_requires_explicit_positive_fencing_token_for_pg_http_sessions(
