@@ -691,6 +691,30 @@ class SessionManager:
                     self._fencing_token,
                 )
 
+    async def backfill_owner_leases(self) -> None:
+        if self._owner_store is None:
+            return
+        if self._owner_id is None or self._fencing_token is None:
+            raise SessionOwnershipConflictError("stale owner or fencing token rejected")
+
+        for session_id in await self.list_sessions_async():
+            owner = await self._owner_store.get_owner(session_id)
+            if owner is not None:
+                continue
+            acquired = await self._owner_store.acquire(
+                session_id,
+                self._owner_id,
+                lease_seconds=self._owner_lease_seconds,
+                fencing_token=self._fencing_token,
+            )
+            if not acquired:
+                logger.warning(
+                    "Failed to backfill owner lease for session %s owned by %s with fencing token %s",
+                    session_id,
+                    self._owner_id,
+                    self._fencing_token,
+                )
+
     async def get_session_async(self, session_id: str) -> Session:
         session = self._session_cache.get(session_id)
         if session is not None:

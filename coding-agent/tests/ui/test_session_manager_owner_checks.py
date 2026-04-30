@@ -676,6 +676,61 @@ async def test_renew_owner_leases_skips_expired_owner_leases(caplog) -> None:
 
 
 @pytest.mark.asyncio
+async def test_backfill_owner_leases_claims_legacy_sessions_without_owner_rows() -> None:
+    owner_store = RecordingOwnerStore()
+    store = InMemorySessionStore()
+    store.save("legacy-session", {"id": "legacy-session"})
+    manager = SessionManager(
+        store=store,
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=7,
+        owner_lease_seconds=45.0,
+    )
+
+    await manager.backfill_owner_leases()
+
+    owner = await owner_store.get_owner("legacy-session")
+    assert owner is not None
+    assert owner == SessionOwnerRecord(
+        owner_id="owner-a",
+        lease_expires_at=owner.lease_expires_at,
+        fencing_token=7,
+    )
+    assert owner_store.renew_calls == []
+
+
+@pytest.mark.asyncio
+async def test_backfill_owner_leases_skips_sessions_owned_by_other_replicas() -> None:
+    owner_store = RecordingOwnerStore()
+    store = InMemorySessionStore()
+    store.save("other-session", {"id": "other-session"})
+    owner_store._owners["other-session"] = SessionOwnerRecord(
+        owner_id="owner-b",
+        lease_expires_at=datetime.now(UTC) + timedelta(seconds=30),
+        fencing_token=8,
+    )
+    manager = SessionManager(
+        store=store,
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=7,
+    )
+
+    await manager.backfill_owner_leases()
+
+    owner = await owner_store.get_owner("other-session")
+    assert owner is not None
+    assert owner == SessionOwnerRecord(
+        owner_id="owner-b",
+        lease_expires_at=owner.lease_expires_at,
+        fencing_token=8,
+    )
+
+
+@pytest.mark.asyncio
 async def test_release_owned_sessions_logs_and_continues_after_release_exception(
     caplog,
 ) -> None:
