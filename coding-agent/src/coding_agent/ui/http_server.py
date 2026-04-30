@@ -180,7 +180,10 @@ def _owner_conflict_http_exception(
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown."""
     # Startup
-    await session_manager.backfill_owner_leases()
+    try:
+        await session_manager.backfill_owner_leases()
+    except Exception:
+        logger.exception("Failed to backfill owner leases during startup")
     cleanup_task = asyncio.create_task(_cleanup_idle_sessions())
     owner_renew_task = asyncio.create_task(_renew_owner_leases())
     logger.info("HTTP server starting up")
