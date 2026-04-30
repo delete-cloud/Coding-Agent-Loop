@@ -539,6 +539,17 @@ class SessionManager:
             self._session_turn_locks[session_id] = lock
         return lock
 
+    async def prepare_session_turn(self, session_id: str) -> Session:
+        turn_lock = self._turn_lock_for(session_id)
+        if turn_lock.locked():
+            raise RuntimeError("turn already in progress")
+
+        session = await self.get_session_async(session_id)
+        await self._assert_owner(session_id)
+        if session.turn_in_progress or (session.task and not session.task.done()):
+            raise RuntimeError("turn already in progress")
+        return session
+
     async def _assert_owner(self, session_id: str) -> None:
         if self._owner_store is None:
             return
@@ -699,15 +710,25 @@ class SessionManager:
 
         now = datetime.now(UTC)
         for session_id in await self.list_sessions_async():
-            owner = await self._owner_store.get_owner(session_id)
-            if owner is not None and owner.lease_expires_at > now:
+            try:
+                owner = await self._owner_store.get_owner(session_id)
+                if owner is not None and owner.lease_expires_at > now:
+                    continue
+                acquired = await self._owner_store.acquire(
+                    session_id,
+                    self._owner_id,
+                    lease_seconds=self._owner_lease_seconds,
+                    fencing_token=self._fencing_token,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to backfill owner lease for session %s owned by %s with fencing token %s",
+                    session_id,
+                    self._owner_id,
+                    self._fencing_token,
+                    exc_info=True,
+                )
                 continue
-            acquired = await self._owner_store.acquire(
-                session_id,
-                self._owner_id,
-                lease_seconds=self._owner_lease_seconds,
-                fencing_token=self._fencing_token,
-            )
             if not acquired:
                 logger.warning(
                     "Failed to backfill owner lease for session %s owned by %s with fencing token %s",

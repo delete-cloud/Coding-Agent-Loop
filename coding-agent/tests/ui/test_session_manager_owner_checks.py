@@ -779,6 +779,41 @@ async def test_backfill_owner_leases_skips_sessions_owned_by_other_replicas() ->
 
 
 @pytest.mark.asyncio
+async def test_backfill_owner_leases_continues_after_session_owner_error(
+    caplog,
+) -> None:
+    owner_store = RecordingOwnerStore()
+    store = InMemorySessionStore()
+    store.save("broken-session", {"id": "broken-session"})
+    store.save("legacy-session", {"id": "legacy-session"})
+    manager = SessionManager(
+        store=store,
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=7,
+    )
+
+    original_get_owner = owner_store.get_owner
+
+    async def get_owner_with_failure(session_id: str) -> SessionOwnerRecord | None:
+        if session_id == "broken-session":
+            raise RuntimeError("owner store unavailable")
+        return await original_get_owner(session_id)
+
+    owner_store.get_owner = get_owner_with_failure
+
+    await manager.backfill_owner_leases()
+
+    owner = await original_get_owner("legacy-session")
+    assert owner is not None
+    assert owner.owner_id == "owner-a"
+    assert owner_store.acquire_calls == ["legacy-session"]
+    assert "Failed to backfill owner lease" in caplog.text
+    assert "broken-session" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_release_owned_sessions_logs_and_continues_after_release_exception(
     caplog,
 ) -> None:
