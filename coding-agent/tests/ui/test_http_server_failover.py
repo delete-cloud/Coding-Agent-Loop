@@ -22,6 +22,8 @@ from coding_agent.ui.http_server import (
     session_manager,
 )
 from coding_agent.ui.session_owner_store import SessionOwnerRecord
+from coding_agent.ui.session_owner_store import SessionOwnershipConflictError
+from coding_agent.ui.session_owner_store import SessionOwnershipConflictReason
 from coding_agent.ui.session_store import InMemorySessionStore
 
 
@@ -200,6 +202,35 @@ async def test_get_events_rejects_stale_owner_before_stream_registration(
     response = exc_info.value
     assert getattr(response, "status_code", None) == 409
     assert getattr(response, "detail", None) == "stale owner or fencing token rejected"
+
+
+@pytest.mark.asyncio
+async def test_get_events_maps_missing_owner_reason_without_message_coupling(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    create_resp = await client.post("/sessions", json={})
+    session_id = create_resp.json()["session_id"]
+
+    async def fail_authorize_event_stream(current_session_id: str) -> None:
+        assert current_session_id == session_id
+        raise SessionOwnershipConflictError(
+            "owner row disappeared during stream authorization",
+            reason=SessionOwnershipConflictReason.MISSING_OWNER,
+        )
+
+    monkeypatch.setattr(
+        session_manager,
+        "authorize_event_stream",
+        fail_authorize_event_stream,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await get_events(_events_request(session_id), session_id, None)
+
+    response = exc_info.value
+    assert response.status_code == 404
+    assert response.detail == f"Session not found: {session_id}"
 
 
 @pytest.mark.asyncio
