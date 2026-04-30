@@ -42,7 +42,8 @@ class FakeOwnerStore:
         lease_seconds: float = 30.0,
         fencing_token: int = 1,
     ) -> bool:
-        if session_id in self._owners:
+        owner = self._owners.get(session_id)
+        if owner is not None and owner.lease_expires_at > datetime.now(UTC):
             return False
         self._owners[session_id] = SessionOwnerRecord(
             owner_id=owner_id,
@@ -92,9 +93,25 @@ class FakeOwnerStore:
 class RecordingOwnerStore(FakeOwnerStore):
     def __init__(self) -> None:
         super().__init__()
+        self.acquire_calls: list[str] = []
         self.get_owner_calls: list[str] = []
         self.release_calls: list[str] = []
         self.renew_calls: list[str] = []
+
+    async def acquire(
+        self,
+        session_id: str,
+        owner_id: str,
+        lease_seconds: float = 30.0,
+        fencing_token: int = 1,
+    ) -> bool:
+        self.acquire_calls.append(session_id)
+        return await super().acquire(
+            session_id,
+            owner_id,
+            lease_seconds,
+            fencing_token,
+        )
 
     async def get_owner(self, session_id: str) -> SessionOwnerRecord | None:
         self.get_owner_calls.append(session_id)
@@ -698,7 +715,37 @@ async def test_backfill_owner_leases_claims_legacy_sessions_without_owner_rows()
         lease_expires_at=owner.lease_expires_at,
         fencing_token=7,
     )
+    assert owner_store.acquire_calls == ["legacy-session"]
     assert owner_store.renew_calls == []
+
+
+@pytest.mark.asyncio
+async def test_backfill_owner_leases_reacquires_expired_owner_rows() -> None:
+    owner_store = RecordingOwnerStore()
+    store = InMemorySessionStore()
+    store.save("expired-session", {"id": "expired-session"})
+    owner_store._owners["expired-session"] = SessionOwnerRecord(
+        owner_id="dead-owner",
+        lease_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+        fencing_token=3,
+    )
+    manager = SessionManager(
+        store=store,
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=7,
+        owner_lease_seconds=45.0,
+    )
+
+    await manager.backfill_owner_leases()
+
+    owner = await owner_store.get_owner("expired-session")
+    assert owner is not None
+    assert owner.owner_id == "owner-a"
+    assert owner.fencing_token == 7
+    assert owner.lease_expires_at > datetime.now(UTC)
+    assert owner_store.acquire_calls == ["expired-session"]
 
 
 @pytest.mark.asyncio
@@ -728,6 +775,7 @@ async def test_backfill_owner_leases_skips_sessions_owned_by_other_replicas() ->
         lease_expires_at=owner.lease_expires_at,
         fencing_token=8,
     )
+    assert owner_store.acquire_calls == []
 
 
 @pytest.mark.asyncio

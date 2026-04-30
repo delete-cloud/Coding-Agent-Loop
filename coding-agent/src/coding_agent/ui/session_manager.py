@@ -697,9 +697,10 @@ class SessionManager:
         if self._owner_id is None or self._fencing_token is None:
             raise SessionOwnershipConflictError("stale owner or fencing token rejected")
 
+        now = datetime.now(UTC)
         for session_id in await self.list_sessions_async():
             owner = await self._owner_store.get_owner(session_id)
-            if owner is not None:
+            if owner is not None and owner.lease_expires_at > now:
                 continue
             acquired = await self._owner_store.acquire(
                 session_id,
