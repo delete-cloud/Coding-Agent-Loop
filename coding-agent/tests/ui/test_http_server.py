@@ -1348,6 +1348,56 @@ class TestLifespanShutdown:
         assert close_calls == ["closed"]
         assert "Owner lease renewal task failed during shutdown" in caplog.text
 
+    async def test_lifespan_backfills_owner_leases_before_renewal(
+        self, monkeypatch
+    ):
+        events: list[str] = []
+
+        async def fake_cleanup_idle_sessions() -> None:
+            try:
+                while True:
+                    await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                raise
+
+        async def fake_backfill_owner_leases() -> None:
+            events.append("backfill")
+
+        async def fake_renew_owner_leases() -> None:
+            events.append("renew")
+            raise asyncio.CancelledError
+
+        async def fake_list_sessions_async() -> list[str]:
+            return []
+
+        async def fake_close() -> None:
+            events.append("close")
+
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._cleanup_idle_sessions",
+            fake_cleanup_idle_sessions,
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._renew_owner_leases",
+            fake_renew_owner_leases,
+        )
+        monkeypatch.setattr(
+            session_manager,
+            "backfill_owner_leases",
+            fake_backfill_owner_leases,
+        )
+        monkeypatch.setattr(
+            session_manager, "list_sessions_async", fake_list_sessions_async
+        )
+        monkeypatch.setattr(session_manager, "close", fake_close)
+
+        cm = app.router.lifespan_context(app)
+        await cm.__aenter__()
+        await asyncio.sleep(0)
+        await cm.__aexit__(None, None, None)
+
+        assert events == ["backfill", "renew", "close"]
+
 
 class TestGetSession:
     """Tests for get session endpoint."""
