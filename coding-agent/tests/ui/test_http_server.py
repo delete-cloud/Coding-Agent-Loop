@@ -512,6 +512,111 @@ class TestPromptStreaming:
         assert response.status_code == 404
         assert "not found" in response.json()["detail"].lower()
 
+    async def test_prompt_missing_session_returns_404_before_owner_check(self, client):
+        class FailingOwnerStore:
+            async def acquire(
+                self,
+                session_id: str,
+                owner_id: str,
+                lease_seconds: float = 30.0,
+                fencing_token: int = 1,
+            ) -> bool:
+                del session_id, owner_id, lease_seconds, fencing_token
+                return True
+
+            async def renew(
+                self,
+                session_id: str,
+                owner_id: str,
+                lease_seconds: float = 30.0,
+                new_fencing_token: int = 2,
+                current_fencing_token: int = 1,
+            ) -> bool:
+                del session_id, owner_id, lease_seconds, new_fencing_token, current_fencing_token
+                return True
+
+            async def release(
+                self,
+                session_id: str,
+                owner_id: str,
+                fencing_token: int,
+            ) -> bool:
+                del session_id, owner_id, fencing_token
+                return True
+
+            async def get_owner(self, session_id: str) -> SessionOwnerRecord | None:
+                raise AssertionError(f"owner check should not run for {session_id}")
+
+        session_manager.configure_owner_leases(
+            owner_store=FailingOwnerStore(),
+            owner_id="owner-a",
+            fencing_token=7,
+        )
+
+        response = await client.post(
+            "/sessions/missing-session/prompt",
+            json={"prompt": "Hello"},
+        )
+
+        assert response.status_code == 404
+
+    async def test_prompt_returns_409_for_stale_owner_before_streaming(self, client):
+        class FakeOwnerStore:
+            async def acquire(
+                self,
+                session_id: str,
+                owner_id: str,
+                lease_seconds: float = 30.0,
+                fencing_token: int = 1,
+            ) -> bool:
+                del session_id, owner_id, lease_seconds, fencing_token
+                return True
+
+            async def renew(
+                self,
+                session_id: str,
+                owner_id: str,
+                lease_seconds: float = 30.0,
+                new_fencing_token: int = 2,
+                current_fencing_token: int = 1,
+            ) -> bool:
+                del session_id, owner_id, lease_seconds, new_fencing_token, current_fencing_token
+                return True
+
+            async def release(
+                self,
+                session_id: str,
+                owner_id: str,
+                fencing_token: int,
+            ) -> bool:
+                del session_id, owner_id, fencing_token
+                return True
+
+            async def get_owner(self, session_id: str) -> SessionOwnerRecord | None:
+                del session_id
+                return SessionOwnerRecord(
+                    owner_id="other-owner",
+                    lease_expires_at=datetime.now(UTC) + timedelta(seconds=30),
+                    fencing_token=8,
+                )
+
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+        session_manager.configure_owner_leases(
+            owner_store=FakeOwnerStore(),
+            owner_id="owner-a",
+            fencing_token=7,
+        )
+
+        response = await client.post(
+            f"/sessions/{session_id}/prompt",
+            json={"prompt": "Hello"},
+        )
+
+        assert response.status_code == 409
+        assert response.json()["detail"] == "stale owner or fencing token rejected"
+        assert not session_manager.get_session(session_id).turn_in_progress
+
     async def test_prompt_streaming_events(self, client):
         """Test that prompt returns SSE events."""
         # Create session first
@@ -1911,6 +2016,20 @@ class TestWireStreamingBehavior:
             "ToolResultDelta",
             "TurnEnd",
         ]
+
+    async def test_stream_wire_messages_reports_task_failure_before_wire_output(self):
+        wire = LocalWire("parent-session")
+
+        async def fail_before_output() -> None:
+            raise RuntimeError("owner rejected")
+
+        producer = asyncio.create_task(fail_before_output())
+        events = []
+        async for event in stream_wire_messages(wire, producer):
+            events.append(event)
+
+        assert [event["event"] for event in events] == ["Error"]
+        assert "owner rejected" in json.loads(events[0]["data"])["error"]
 
 
 class TestSessionToDict:

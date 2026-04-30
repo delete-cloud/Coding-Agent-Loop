@@ -512,24 +512,47 @@ async def _cleanup_idle_sessions() -> None:
             logger.exception("Error during idle session cleanup")
 
 
-async def stream_wire_messages(wire: LocalWire) -> AsyncIterator[dict[str, str]]:
+async def stream_wire_messages(
+    wire: LocalWire,
+    task: asyncio.Task[Any] | None = None,
+) -> AsyncIterator[dict[str, str]]:
     """Stream wire messages as SSE events.
 
     Consumes messages from the wire's outgoing queue and yields SSE events.
     Stops when a TurnEnd message is received.
     """
     while True:
+        get_message_task = asyncio.create_task(wire.get_next_outgoing())
         try:
-            msg = await wire.get_next_outgoing()
+            if task is not None:
+                done, pending = await asyncio.wait(
+                    {get_message_task, task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if task in done and get_message_task in pending:
+                    get_message_task.cancel()
+                    try:
+                        await get_message_task
+                    except asyncio.CancelledError:
+                        pass
+                    task.result()
+                    break
+                msg = get_message_task.result()
+            else:
+                msg = await get_message_task
             event = _wire_message_to_event(msg)
             yield event
 
             if isinstance(msg, TurnEnd) and not msg.agent_id:
                 break
         except asyncio.CancelledError:
+            if not get_message_task.done():
+                get_message_task.cancel()
             # Client disconnected
             raise
         except Exception as e:
+            if not get_message_task.done():
+                get_message_task.cancel()
             logger.exception("Error streaming wire message")
             yield {
                 "event": "Error",
@@ -626,13 +649,16 @@ async def send_prompt(
     if not prompt_text:
         raise HTTPException(status_code=422, detail="Prompt is required")
 
-    if not await session_manager.has_session_async(session_id):
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    session = await session_manager.get_session_async(session_id)
-
-    if session.turn_in_progress or (session.task and not session.task.done()):
-        raise HTTPException(status_code=409, detail="Turn already in progress")
+    try:
+        session = await session_manager.prepare_session_turn(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Session not found") from exc
+    except SessionOwnershipConflictError as exc:
+        raise _owner_conflict_http_exception(exc, session_id=session_id) from exc
+    except RuntimeError as exc:
+        if str(exc) == "turn already in progress":
+            raise HTTPException(status_code=409, detail="Turn already in progress") from exc
+        raise
 
     session.turn_in_progress = True
     session.last_activity = datetime.now()
@@ -644,7 +670,7 @@ async def send_prompt(
                 session_manager.run_agent(session_id, prompt_text)
             )
 
-            async for event in stream_wire_messages(session.wire):
+            async for event in stream_wire_messages(session.wire, session.task):
                 await _broadcast_event(session, event)
                 yield event
 
