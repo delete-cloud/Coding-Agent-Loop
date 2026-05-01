@@ -95,6 +95,17 @@ class LLMProviderPlugin:
                 base_url="https://api.kimi.com/coding/",
                 default_headers={"User-Agent": "claude-code/1.0.17"},
             )
+        elif self._provider_name == "deepseek":
+            import os
+
+            from coding_agent.providers.anthropic import AnthropicProvider
+
+            api_key = self._api_key or os.environ.get("DEEPSEEK_API_KEY", "")
+            self._instance = AnthropicProvider(
+                model=self._model,
+                api_key=api_key,
+                base_url="https://api.deepseek.com/anthropic",
+            )
         else:
             raise ValueError(f"unsupported provider: {self._provider_name}")
 
