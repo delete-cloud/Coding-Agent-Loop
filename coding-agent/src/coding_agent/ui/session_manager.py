@@ -152,6 +152,10 @@ class Session:
             "last_activity": self.last_activity.isoformat(),
             "turn_in_progress": self.turn_in_progress,
             "pending_approval": self.pending_approval is not None,
+            "provider_name": self.provider_name,
+            "model_name": self.model_name,
+            "base_url": self.base_url,
+            "max_steps": self.max_steps,
         }
 
     def to_store_data(self) -> dict[str, Any]:
