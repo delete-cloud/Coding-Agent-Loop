@@ -114,7 +114,14 @@ async def cmd_model(args: list[str], context: dict[str, Any]) -> None:
                 output=_out(),
             )
             return
-        context["model"] = new_model
+        on_model_change = cast(
+            Callable[[str], Coroutine[Any, Any, None]] | None,
+            context.get("on_model_change"),
+        )
+        if callable(on_model_change):
+            await on_model_change(new_model)
+        else:
+            context["model"] = new_model
         output = _out()
         print_html(
             f"Model changed to: <ansicyan><b>{_h(new_model)}</b></ansicyan>",

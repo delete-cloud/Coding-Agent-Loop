@@ -134,6 +134,7 @@ class InteractiveSession:
         self.context["create_session"] = self._create_managed_session
         self.context["switch_session"] = self._switch_session
         self.context["restore_checkpoint"] = self._restore_checkpoint
+        self.context["on_model_change"] = self._change_model_for_next_turn
         pipeline, pipeline_ctx = create_agent(
             api_key=str(self.config.api_key.get_secret_value())
             if self.config.api_key
@@ -259,6 +260,21 @@ class InteractiveSession:
         if self._pipeline_ctx is not None:
             self._pipeline_ctx.config["wire_consumer"] = self._consumer
         self._refresh_command_context_from_pipeline_ctx(managed_session.runtime_ctx)
+
+    async def _change_model_for_next_turn(self, model_name: str) -> None:
+        if self.config.model == model_name:
+            return
+        self.config.model = model_name
+        self.context["model"] = model_name
+        session_id = self.context.get("session_id")
+        if not isinstance(session_id, str):
+            self._setup_agent()
+            return
+        await self._session_manager.shutdown_session_runtime(session_id)
+        managed_session = self._session_manager.get_session(session_id)
+        managed_session.model_name = model_name
+        self._session_manager._persist_session(managed_session)
+        await self._switch_session(session_id)
 
     async def _restore_checkpoint(self, checkpoint_id: str) -> None:
         session_id = self.context.get("session_id")

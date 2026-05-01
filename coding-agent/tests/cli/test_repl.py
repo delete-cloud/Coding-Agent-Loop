@@ -1,13 +1,48 @@
 """Tests for REPL functionality."""
 
+from collections.abc import Callable
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Literal, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from prompt_toolkit.key_binding.key_processor import KeyPressEvent
 from prompt_toolkit.keys import Keys
 
 from coding_agent.cli import input_handler as input_handler_module
 from coding_agent.cli.input_handler import InputHandler
+from coding_agent.core.config import Config
+
+
+ProviderName = Literal[
+    "openai",
+    "anthropic",
+    "copilot",
+    "kimi",
+    "kimi-code",
+    "kimi-code-anthropic",
+]
+ApprovalMode = Literal["yolo", "interactive", "auto"]
+
+
+def _make_config(
+    *,
+    model: str = "gpt-4o",
+    provider: ProviderName = "openai",
+    base_url: str | None = None,
+    max_steps: int = 30,
+    approval_mode: ApprovalMode = "auto",
+) -> Config:
+    return Config(
+        model=model,
+        api_key=None,
+        provider=provider,
+        repo=Path("."),
+        base_url=base_url,
+        max_steps=max_steps,
+        approval_mode=approval_mode,
+    )
 
 
 def _get_key_binding(handler: InputHandler, key: Keys):
@@ -219,7 +254,7 @@ class TestInputHandler:
 
         event = SimpleNamespace(app=DummyApp())
 
-        ctrlc_binding.handler(event)
+        _ = ctrlc_binding.handler(cast(KeyPressEvent, cast(object, event)))
 
         assert event.app.current_buffer.reset_called is True
         assert event.app.exit_called is False
@@ -242,8 +277,9 @@ class TestREPLImports:
         from coding_agent.cli.repl import InteractiveSession
 
         # Should raise TypeError without config
+        session_constructor = cast(Callable[[], object], InteractiveSession)
         with pytest.raises(TypeError):
-            InteractiveSession()
+            session_constructor()
 
 
 class TestBashIntegration:
@@ -267,16 +303,9 @@ class TestBashIntegration:
 
         monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
 
-        config = SimpleNamespace(
-            model="kimi-for-coding",
-            repo=None,
-            api_key=None,
-            provider="kimi-code",
-            base_url=None,
-            max_steps=None,
-            approval_mode=None,
+        session = InteractiveSession(
+            _make_config(model="kimi-for-coding", provider="kimi-code")
         )
-        session = InteractiveSession(config)
 
         inputs = iter(["pwd", "exit", None])
         executed: list[str] = []
@@ -308,16 +337,9 @@ class TestBashIntegration:
 
         monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
 
-        config = SimpleNamespace(
-            model="kimi-for-coding",
-            repo=None,
-            api_key=None,
-            provider="kimi-code",
-            base_url=None,
-            max_steps=None,
-            approval_mode=None,
+        session = InteractiveSession(
+            _make_config(model="kimi-for-coding", provider="kimi-code")
         )
-        session = InteractiveSession(config)
 
         inputs = iter(["ls -la", "exit", None])
         executed: list[str] = []
@@ -351,16 +373,9 @@ class TestBashIntegration:
 
         monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
 
-        config = SimpleNamespace(
-            model="kimi-for-coding",
-            repo=None,
-            api_key=None,
-            provider="kimi-code",
-            base_url=None,
-            max_steps=None,
-            approval_mode=None,
+        session = InteractiveSession(
+            _make_config(model="kimi-for-coding", provider="kimi-code")
         )
-        session = InteractiveSession(config)
 
         inputs = iter(["ls -la", None])
         executed: list[str] = []
@@ -386,16 +401,9 @@ class TestBashIntegration:
 
         monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
 
-        config = SimpleNamespace(
-            model="kimi-for-coding",
-            repo=None,
-            api_key=None,
-            provider="kimi-code",
-            base_url=None,
-            max_steps=None,
-            approval_mode=None,
+        session = InteractiveSession(
+            _make_config(model="kimi-for-coding", provider="kimi-code")
         )
-        session = InteractiveSession(config)
 
         patched = {"active": False}
         observed: list[bool] = []
@@ -432,16 +440,7 @@ class TestPasteFoldingInRepl:
         from coding_agent.cli.repl import InteractiveSession
 
         monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
-        config = SimpleNamespace(
-            model="test",
-            repo=None,
-            api_key=None,
-            provider="test",
-            base_url=None,
-            max_steps=None,
-            approval_mode=None,
-        )
-        session = InteractiveSession(config)
+        session = InteractiveSession(_make_config(model="test"))
 
         rendered_messages: list[str] = []
         turned_messages: list[str] = []
@@ -457,7 +456,7 @@ class TestPasteFoldingInRepl:
             def user_message(self, msg: str):
                 rendered_messages.append(msg)
 
-        session._renderer = FakeRenderer()
+        monkeypatch.setattr(session, "_renderer", FakeRenderer())
         session._pipeline_adapter = FakeAdapter()
 
         await session._process_message("short message")
@@ -472,16 +471,7 @@ class TestPasteFoldingInRepl:
         from coding_agent.cli.repl import InteractiveSession
 
         monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
-        config = SimpleNamespace(
-            model="test",
-            repo=None,
-            api_key=None,
-            provider="test",
-            base_url=None,
-            max_steps=None,
-            approval_mode=None,
-        )
-        session = InteractiveSession(config)
+        session = InteractiveSession(_make_config(model="test"))
 
         long_message = "\n".join(f"line {i}" for i in range(25))
         rendered_messages: list[str] = []
@@ -498,7 +488,7 @@ class TestPasteFoldingInRepl:
             def user_message(self, msg: str):
                 rendered_messages.append(msg)
 
-        session._renderer = FakeRenderer()
+        monkeypatch.setattr(session, "_renderer", FakeRenderer())
         session._pipeline_adapter = FakeAdapter()
 
         # Simulate what BracketedPaste handler does: fold and store refs
@@ -520,16 +510,7 @@ class TestPasteFoldingInRepl:
         from coding_agent.cli.repl import InteractiveSession
 
         monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
-        config = SimpleNamespace(
-            model="test",
-            repo=None,
-            api_key=None,
-            provider="test",
-            base_url=None,
-            max_steps=None,
-            approval_mode=None,
-        )
-        session = InteractiveSession(config)
+        session = InteractiveSession(_make_config(model="test"))
 
         block = "\n".join(f"line {i}" for i in range(25))
         mixed_message = f"before context\n\n{block}\n\nafter context"
@@ -547,7 +528,7 @@ class TestPasteFoldingInRepl:
             def user_message(self, msg: str):
                 rendered_messages.append(msg)
 
-        session._renderer = FakeRenderer()
+        monkeypatch.setattr(session, "_renderer", FakeRenderer())
         session._pipeline_adapter = FakeAdapter()
 
         # Simulate BracketedPaste: fold and store refs
@@ -564,15 +545,15 @@ class TestPasteFoldingInRepl:
 
 
 class TestFooterIntegration:
-    def _make_config(self):
-        return SimpleNamespace(
+    def _make_config(self) -> Config:
+        return Config(
             model="gpt-4o",
-            repo=None,
             api_key=None,
             provider="openai",
+            repo=Path("."),
             base_url=None,
-            max_steps=None,
-            approval_mode=None,
+            max_steps=30,
+            approval_mode="auto",
         )
 
     def test_init_creates_footer(self, monkeypatch):
@@ -637,7 +618,9 @@ class TestFooterIntegration:
         session._footer._mode = "persistent"
         session._footer._enabled = True
 
-        session._renderer = SimpleNamespace(user_message=lambda msg: None)
+        monkeypatch.setattr(
+            session, "_renderer", SimpleNamespace(user_message=lambda msg: None)
+        )
         session._pipeline_adapter = SimpleNamespace(
             run_turn=lambda msg: _async_return(
                 SimpleNamespace(stop_reason=SimpleNamespace(ERROR=None), error=None)
@@ -666,8 +649,9 @@ class TestFooterIntegration:
 
         await handle_command("/clear", session.context)
 
-        if hasattr(session, "_on_clear"):
-            session._on_clear()
+        on_clear = getattr(session, "_on_clear", None)
+        if callable(on_clear):
+            on_clear()
             assert redraw_calls == ["redraw"]
 
     def test_footer_not_enabled_in_nontty(self, monkeypatch):
@@ -742,19 +726,11 @@ class TestFooterIntegration:
 class TestSessionManagerIntegration:
     @pytest.mark.asyncio
     async def test_switch_active_session_rebinds_runtime_context(self, monkeypatch):
+        from coding_agent.approval import ApprovalPolicy
         from coding_agent.cli.repl import InteractiveSession
 
         monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
-        config = SimpleNamespace(
-            model="gpt-4o",
-            repo=None,
-            api_key=None,
-            provider="openai",
-            base_url=None,
-            max_steps=None,
-            approval_mode=None,
-        )
-        session = InteractiveSession(config)
+        session = InteractiveSession(_make_config(model="gpt-4o"))
 
         fake_ctx = SimpleNamespace(
             config={
@@ -784,14 +760,19 @@ class TestSessionManagerIntegration:
                 assert session_id == "session-b"
                 return SimpleNamespace(
                     id="session-b",
+                    provider_name="openai",
                     model_name="gpt-4o-mini",
+                    base_url=None,
+                    max_steps=30,
+                    approval_policy=ApprovalPolicy.AUTO,
                     runtime_pipeline=fake_pipeline,
                     runtime_ctx=fake_ctx,
                     runtime_adapter=fake_adapter,
                 )
 
-        session._session_manager = FakeSessionManager()
-        session.context["session_manager"] = session._session_manager
+        fake_session_manager = FakeSessionManager()
+        monkeypatch.setattr(session, "_session_manager", fake_session_manager)
+        session.context["session_manager"] = fake_session_manager
         await session._switch_session("session-b")
 
         assert session.context["session_id"] == "session-b"
@@ -804,19 +785,11 @@ class TestSessionManagerIntegration:
 
     @pytest.mark.asyncio
     async def test_switch_active_session_rebinds_adapter_consumer(self, monkeypatch):
+        from coding_agent.approval import ApprovalPolicy
         from coding_agent.cli.repl import InteractiveSession
 
         monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
-        config = SimpleNamespace(
-            model="gpt-4o",
-            repo=None,
-            api_key=None,
-            provider="openai",
-            base_url=None,
-            max_steps=None,
-            approval_mode=None,
-        )
-        session = InteractiveSession(config)
+        session = InteractiveSession(_make_config(model="gpt-4o"))
 
         fake_ctx = SimpleNamespace(
             config={
@@ -846,19 +819,25 @@ class TestSessionManagerIntegration:
                 assert session_id == "session-b"
                 return SimpleNamespace(
                     id="session-b",
+                    provider_name="openai",
                     model_name="gpt-4o-mini",
+                    base_url=None,
+                    max_steps=30,
+                    approval_policy=ApprovalPolicy.AUTO,
                     runtime_pipeline=object(),
                     runtime_ctx=fake_ctx,
                     runtime_adapter=adapter,
                 )
 
-        session._session_manager = FakeSessionManager()
-        session.context["session_manager"] = session._session_manager
+        fake_session_manager = FakeSessionManager()
+        monkeypatch.setattr(session, "_session_manager", fake_session_manager)
+        session.context["session_manager"] = fake_session_manager
 
         await session._switch_session("session-b")
 
         assert session._pipeline_adapter is adapter
         assert adapter.consumer is session._consumer
+        assert session._pipeline_ctx is not None
         assert session._pipeline_ctx.config["wire_consumer"] is session._consumer
 
     @pytest.mark.asyncio
@@ -869,11 +848,8 @@ class TestSessionManagerIntegration:
         from coding_agent.approval import ApprovalPolicy
 
         monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
-        config = SimpleNamespace(
+        config = _make_config(
             model="current-model",
-            repo=None,
-            api_key=None,
-            provider="openai",
             base_url="http://current.local",
             max_steps=30,
             approval_mode="auto",
@@ -907,8 +883,9 @@ class TestSessionManagerIntegration:
                     runtime_adapter=None,
                 )
 
-        session._session_manager = FakeSessionManager()
-        session.context["session_manager"] = session._session_manager
+        fake_session_manager = FakeSessionManager()
+        monkeypatch.setattr(session, "_session_manager", fake_session_manager)
+        session.context["session_manager"] = fake_session_manager
 
         await session._switch_session("session-b")
 
@@ -927,11 +904,8 @@ class TestSessionManagerIntegration:
         from coding_agent.approval import ApprovalPolicy
 
         monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
-        config = SimpleNamespace(
+        config = _make_config(
             model="current-model",
-            repo=None,
-            api_key=None,
-            provider="openai",
             base_url="http://current.local",
             max_steps=30,
             approval_mode="auto",
@@ -964,8 +938,9 @@ class TestSessionManagerIntegration:
                     runtime_adapter=None,
                 )
 
-        session._session_manager = FakeSessionManager()
-        session.context["session_manager"] = session._session_manager
+        fake_session_manager = FakeSessionManager()
+        monkeypatch.setattr(session, "_session_manager", fake_session_manager)
+        session.context["session_manager"] = fake_session_manager
 
         with pytest.raises(RuntimeError, match="invalid max_steps"):
             await session._switch_session("session-b")
@@ -986,11 +961,8 @@ class TestSessionManagerIntegration:
         from coding_agent.approval import ApprovalPolicy
 
         monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
-        config = SimpleNamespace(
+        config = _make_config(
             model="current-model",
-            repo=None,
-            api_key=None,
-            provider="openai",
             base_url="http://current.local",
             max_steps=30,
             approval_mode="auto",
@@ -1022,8 +994,9 @@ class TestSessionManagerIntegration:
                     runtime_adapter=None,
                 )
 
-        session._session_manager = FakeSessionManager()
-        session.context["session_manager"] = session._session_manager
+        fake_session_manager = FakeSessionManager()
+        monkeypatch.setattr(session, "_session_manager", fake_session_manager)
+        session.context["session_manager"] = fake_session_manager
 
         with pytest.raises(RuntimeError, match="invalid provider_name"):
             await session._switch_session("session-b")
@@ -1090,6 +1063,54 @@ class TestSessionManagerIntegration:
 
 class TestReplInitialization:
     @pytest.mark.asyncio
+    async def test_model_command_rebuilds_pipeline_on_next_turn(self, monkeypatch):
+        from coding_agent.cli.commands import handle_command
+        from coding_agent.cli.repl import InteractiveSession
+        from coding_agent.core.config import Config
+
+        create_agent_calls: list[dict[str, object]] = []
+        run_models: list[str | None] = []
+
+        class FakeAdapter:
+            def __init__(self, pipeline, ctx, consumer) -> None:
+                del pipeline, consumer
+                self.ctx = ctx
+
+            async def initialize(self) -> None:
+                return None
+
+            async def close(self) -> None:
+                return None
+
+            async def run_turn(self, message: str):
+                del message
+                run_models.append(self.ctx.config.get("model"))
+                stop_reason = SimpleNamespace(ERROR="error")
+                return SimpleNamespace(stop_reason=stop_reason, error=None)
+
+        def fake_create_agent(*args, **kwargs):
+            del args
+            create_agent_calls.append(dict(kwargs))
+            model = kwargs.get("model_override")
+            tape = kwargs.get("tape") or SimpleNamespace(tape_id="repl-tape")
+            return object(), SimpleNamespace(
+                config={"model": model, "tool_registry": "registry-a"},
+                tape=tape,
+            )
+
+        monkeypatch.setattr("coding_agent.cli.repl.create_agent", fake_create_agent)
+        monkeypatch.setattr("coding_agent.cli.repl.PipelineAdapter", FakeAdapter)
+        session = InteractiveSession(Config(model="gpt-4o-test", max_steps=10))
+
+        handled = await handle_command("/model claude-next", session.context)
+        await session._process_message("hello")
+
+        assert handled is True
+        assert session.config.model == "claude-next"
+        assert create_agent_calls[-1]["model_override"] == "claude-next"
+        assert run_models == ["claude-next"]
+
+    @pytest.mark.asyncio
     async def test_initialize_creates_managed_session_without_asyncio_run(
         self, monkeypatch
     ):
@@ -1142,8 +1163,9 @@ class TestReplInitialization:
         monkeypatch.setattr("coding_agent.cli.repl.PipelineAdapter", FakeAdapter)
         session = InteractiveSession(TestFooterIntegration()._make_config())
 
-        session._session_manager = FakeSessionManager()
-        session.context["session_manager"] = session._session_manager
+        fake_session_manager = FakeSessionManager()
+        monkeypatch.setattr(session, "_session_manager", fake_session_manager)
+        session.context["session_manager"] = fake_session_manager
 
         await session.initialize()
 
@@ -1222,8 +1244,9 @@ class TestReplInitialization:
         monkeypatch.setattr("coding_agent.cli.repl.PipelineAdapter", FakeAdapter)
         session = InteractiveSession(TestFooterIntegration()._make_config())
 
-        session._session_manager = FakeSessionManager()
-        session.context["session_manager"] = session._session_manager
+        fake_session_manager = FakeSessionManager()
+        monkeypatch.setattr(session, "_session_manager", fake_session_manager)
+        session.context["session_manager"] = fake_session_manager
 
         await session.initialize()
 
