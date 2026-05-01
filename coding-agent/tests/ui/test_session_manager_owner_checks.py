@@ -10,12 +10,25 @@ import types
 from unittest.mock import patch
 from datetime import UTC, datetime
 from coding_agent.ui.session_owner_store import SessionOwnershipConflictError
+from coding_agent.ui.session_owner_store import SessionOwnershipConflictReason
 
 from coding_agent.ui.session_owner_store import (
     SessionOwnerRecord,
 )
 from coding_agent.ui.session_store import InMemorySessionStore
 from agentkit.tape.tape import Tape
+
+
+class DeleteFailingSessionStore(InMemorySessionStore):
+    def delete(self, session_id: str) -> None:
+        del session_id
+        raise RuntimeError("session store delete failed")
+
+
+class CancellationDeleteSessionStore(InMemorySessionStore):
+    def delete(self, session_id: str) -> None:
+        del session_id
+        raise asyncio.CancelledError
 
 
 class FakeOwnerStore:
@@ -29,7 +42,8 @@ class FakeOwnerStore:
         lease_seconds: float = 30.0,
         fencing_token: int = 1,
     ) -> bool:
-        if session_id in self._owners:
+        owner = self._owners.get(session_id)
+        if owner is not None and owner.lease_expires_at > datetime.now(UTC):
             return False
         self._owners[session_id] = SessionOwnerRecord(
             owner_id=owner_id,
@@ -74,6 +88,60 @@ class FakeOwnerStore:
             return False
         del self._owners[session_id]
         return True
+
+
+class RecordingOwnerStore(FakeOwnerStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.acquire_calls: list[str] = []
+        self.get_owner_calls: list[str] = []
+        self.release_calls: list[str] = []
+        self.renew_calls: list[str] = []
+
+    async def acquire(
+        self,
+        session_id: str,
+        owner_id: str,
+        lease_seconds: float = 30.0,
+        fencing_token: int = 1,
+    ) -> bool:
+        self.acquire_calls.append(session_id)
+        return await super().acquire(
+            session_id,
+            owner_id,
+            lease_seconds,
+            fencing_token,
+        )
+
+    async def get_owner(self, session_id: str) -> SessionOwnerRecord | None:
+        self.get_owner_calls.append(session_id)
+        return await super().get_owner(session_id)
+
+    async def release(
+        self,
+        session_id: str,
+        owner_id: str,
+        fencing_token: int,
+    ) -> bool:
+        self.release_calls.append(session_id)
+        return await super().release(session_id, owner_id, fencing_token)
+
+    async def renew(
+        self,
+        session_id: str,
+        owner_id: str,
+        lease_seconds: float = 30.0,
+        new_fencing_token: int = 2,
+        current_fencing_token: int = 1,
+    ) -> bool:
+        self.renew_calls.append(session_id)
+        return await super().renew(
+            session_id,
+            owner_id,
+            lease_seconds,
+            new_fencing_token,
+            current_fencing_token,
+        )
 
 
 class FakeCheckpointStore:
@@ -135,7 +203,11 @@ async def test_run_agent_rejects_non_owner_instance() -> None:
         fencing_token=2,
     )
     session_id = await manager.create_session()
-    await owner_store.acquire(session_id, "owner-a", 30.0, 1)
+    owner_store._owners[session_id] = SessionOwnerRecord(
+        owner_id="owner-a",
+        lease_expires_at=datetime.now(UTC) + timedelta(seconds=30),
+        fencing_token=1,
+    )
 
     with pytest.raises(
         SessionOwnershipConflictError,
@@ -166,7 +238,11 @@ async def test_restore_checkpoint_rejects_stale_owner() -> None:
         fencing_token=2,
     )
     session_id = await manager.create_session()
-    await owner_store.acquire(session_id, "owner-a", 30.0, 1)
+    owner_store._owners[session_id] = SessionOwnerRecord(
+        owner_id="owner-a",
+        lease_expires_at=datetime.now(UTC) + timedelta(seconds=30),
+        fencing_token=1,
+    )
 
     with pytest.raises(
         SessionOwnershipConflictError,
@@ -188,7 +264,11 @@ async def test_close_session_rejects_stale_owner() -> None:
         fencing_token=2,
     )
     session_id = await manager.create_session()
-    await owner_store.acquire(session_id, "owner-a", 30.0, 1)
+    owner_store._owners[session_id] = SessionOwnerRecord(
+        owner_id="owner-a",
+        lease_expires_at=datetime.now(UTC) + timedelta(seconds=30),
+        fencing_token=1,
+    )
 
     with pytest.raises(
         SessionOwnershipConflictError,
@@ -227,8 +307,10 @@ async def test_run_agent_rejects_expired_owner_lease() -> None:
     with pytest.raises(
         SessionOwnershipConflictError,
         match="session owner lease expired",
-    ):
+    ) as exc_info:
         await manager.run_agent(session_id, "hello")
+
+    assert exc_info.value.reason == SessionOwnershipConflictReason.EXPIRED_LEASE
 
     assert create_agent_calls == 0
     assert manager.get_session(session_id).turn_in_progress is False
@@ -286,7 +368,11 @@ async def test_ensure_session_runtime_rejects_stale_owner() -> None:
         fencing_token=2,
     )
     session_id = await manager.create_session()
-    await owner_store.acquire(session_id, "owner-a", 30.0, 1)
+    owner_store._owners[session_id] = SessionOwnerRecord(
+        owner_id="owner-a",
+        lease_expires_at=datetime.now(UTC) + timedelta(seconds=30),
+        fencing_token=1,
+    )
 
     fake_ctx = types.SimpleNamespace(
         config={"tool_registry": object()},
@@ -333,7 +419,11 @@ async def test_submit_approval_rejects_stale_owner() -> None:
         fencing_token=2,
     )
     session_id = await manager.create_session()
-    await owner_store.acquire(session_id, "owner-a", 30.0, 1)
+    owner_store._owners[session_id] = SessionOwnerRecord(
+        owner_id="owner-a",
+        lease_expires_at=datetime.now(UTC) + timedelta(seconds=30),
+        fencing_token=1,
+    )
 
     with pytest.raises(
         SessionOwnershipConflictError,
@@ -344,3 +434,499 @@ async def test_submit_approval_rejects_stale_owner() -> None:
             request_id="req-1",
             approved=True,
         )
+
+
+@pytest.mark.asyncio
+async def test_create_session_acquires_owner_when_owner_store_is_configured() -> None:
+    owner_store = FakeOwnerStore()
+    owner_lease_seconds = 45.0
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=7,
+        owner_lease_seconds=owner_lease_seconds,
+    )
+
+    now = datetime.now(UTC)
+    session_id = await manager.create_session()
+
+    owner = await owner_store.get_owner(session_id)
+    assert owner is not None
+    assert owner.owner_id == "owner-a"
+    assert owner.fencing_token == 7
+    expected_expiry = now + timedelta(seconds=owner_lease_seconds)
+    assert abs((owner.lease_expires_at - expected_expiry).total_seconds()) < 2.0
+
+
+@pytest.mark.asyncio
+async def test_create_session_rolls_back_persisted_session_when_owner_acquire_fails() -> None:
+    owner_store = FakeOwnerStore()
+    store = InMemorySessionStore()
+    manager = SessionManager(
+        store=store,
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=7,
+    )
+
+    async def reject_acquire(
+        session_id: str,
+        owner_id: str,
+        lease_seconds: float = 30.0,
+        fencing_token: int = 1,
+    ) -> bool:
+        del session_id, owner_id, lease_seconds, fencing_token
+        return False
+
+    owner_store.acquire = reject_acquire
+
+    with pytest.raises(
+        SessionOwnershipConflictError,
+        match="stale owner or fencing token rejected",
+    ):
+        await manager.create_session()
+
+    assert store.list_sessions() == []
+    assert manager.list_sessions() == []
+
+
+@pytest.mark.asyncio
+async def test_create_session_preserves_owner_error_when_rollback_delete_fails(
+    caplog,
+) -> None:
+    owner_store = FakeOwnerStore()
+    manager = SessionManager(
+        store=DeleteFailingSessionStore(),
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=7,
+    )
+
+    async def reject_acquire(
+        session_id: str,
+        owner_id: str,
+        lease_seconds: float = 30.0,
+        fencing_token: int = 1,
+    ) -> bool:
+        del session_id, owner_id, lease_seconds, fencing_token
+        return False
+
+    owner_store.acquire = reject_acquire
+
+    with pytest.raises(
+        SessionOwnershipConflictError,
+        match="stale owner or fencing token rejected",
+    ):
+        await manager.create_session()
+
+    assert manager._session_cache == {}
+    assert "Failed to delete partially created session during rollback" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_create_session_does_not_log_rollback_delete_cancellation(caplog) -> None:
+    owner_store = FakeOwnerStore()
+    manager = SessionManager(
+        store=CancellationDeleteSessionStore(),
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=7,
+    )
+
+    async def reject_acquire(
+        session_id: str,
+        owner_id: str,
+        lease_seconds: float = 30.0,
+        fencing_token: int = 1,
+    ) -> bool:
+        del session_id, owner_id, lease_seconds, fencing_token
+        return False
+
+    owner_store.acquire = reject_acquire
+
+    with pytest.raises(SessionOwnershipConflictError):
+        await manager.create_session()
+
+    assert manager._session_cache == {}
+    assert "Failed to delete partially created session during rollback" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_release_owned_sessions_releases_current_owner_only() -> None:
+    owner_store = FakeOwnerStore()
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=7,
+    )
+    session_id = await manager.create_session()
+    owner_store._owners["other-session"] = SessionOwnerRecord(
+        owner_id="owner-b",
+        lease_expires_at=datetime.now(UTC) + timedelta(seconds=30),
+        fencing_token=8,
+    )
+
+    await manager.release_owned_sessions()
+
+    assert await owner_store.get_owner(session_id) is None
+    other_owner = await owner_store.get_owner("other-session")
+    assert other_owner is not None
+    assert other_owner == SessionOwnerRecord(
+        owner_id="owner-b",
+        lease_expires_at=other_owner.lease_expires_at,
+        fencing_token=8,
+    )
+
+
+@pytest.mark.asyncio
+async def test_release_owned_sessions_logs_failed_owner_release(caplog) -> None:
+    owner_store = FakeOwnerStore()
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=7,
+    )
+    session_id = await manager.create_session()
+
+    async def reject_release(
+        session_id: str,
+        owner_id: str,
+        fencing_token: int,
+    ) -> bool:
+        assert session_id == expected_session_id
+        assert owner_id == "owner-a"
+        assert fencing_token == 7
+        return False
+
+    expected_session_id = session_id
+    owner_store.release = reject_release
+
+    await manager.release_owned_sessions()
+
+    assert "Failed to release owner lease" in caplog.text
+    assert session_id in caplog.text
+    assert "owner-a" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_release_owned_sessions_skips_sessions_owned_by_other_replicas() -> None:
+    owner_store = RecordingOwnerStore()
+    store = InMemorySessionStore()
+    manager = SessionManager(
+        store=store,
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=7,
+    )
+    owned_session_id = await manager.create_session()
+    store.save("other-session", {})
+    owner_store._owners["other-session"] = SessionOwnerRecord(
+        owner_id="owner-b",
+        lease_expires_at=datetime.now(UTC) + timedelta(seconds=30),
+        fencing_token=8,
+    )
+
+    await manager.release_owned_sessions()
+
+    assert owner_store.get_owner_calls == [owned_session_id, "other-session"]
+    assert owner_store.release_calls == [owned_session_id]
+
+
+@pytest.mark.asyncio
+async def test_renew_owner_leases_skips_sessions_owned_by_other_replicas() -> None:
+    owner_store = RecordingOwnerStore()
+    store = InMemorySessionStore()
+    manager = SessionManager(
+        store=store,
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=7,
+    )
+    owned_session_id = await manager.create_session()
+    store.save("other-session", {})
+    owner_store._owners["other-session"] = SessionOwnerRecord(
+        owner_id="owner-b",
+        lease_expires_at=datetime.now(UTC) + timedelta(seconds=30),
+        fencing_token=8,
+    )
+
+    await manager.renew_owner_leases()
+
+    assert owner_store.get_owner_calls == [owned_session_id, "other-session"]
+    assert owner_store.renew_calls == [owned_session_id]
+
+
+@pytest.mark.asyncio
+async def test_renew_owner_leases_skips_expired_owner_leases(caplog) -> None:
+    owner_store = RecordingOwnerStore()
+    store = InMemorySessionStore()
+    manager = SessionManager(
+        store=store,
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=7,
+    )
+    session_id = await manager.create_session()
+    owner_store._owners[session_id] = SessionOwnerRecord(
+        owner_id="owner-a",
+        lease_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+        fencing_token=7,
+    )
+
+    await manager.renew_owner_leases()
+
+    assert owner_store.get_owner_calls == [session_id]
+    assert owner_store.renew_calls == []
+    assert "Failed to renew owner lease" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_backfill_owner_leases_claims_legacy_sessions_without_owner_rows() -> None:
+    owner_store = RecordingOwnerStore()
+    store = InMemorySessionStore()
+    store.save("legacy-session", {"id": "legacy-session"})
+    manager = SessionManager(
+        store=store,
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=7,
+        owner_lease_seconds=45.0,
+    )
+
+    await manager.backfill_owner_leases()
+
+    owner = await owner_store.get_owner("legacy-session")
+    assert owner is not None
+    assert owner == SessionOwnerRecord(
+        owner_id="owner-a",
+        lease_expires_at=owner.lease_expires_at,
+        fencing_token=7,
+    )
+    assert owner_store.acquire_calls == ["legacy-session"]
+    assert owner_store.renew_calls == []
+
+
+@pytest.mark.asyncio
+async def test_backfill_owner_leases_reacquires_expired_owner_rows() -> None:
+    owner_store = RecordingOwnerStore()
+    store = InMemorySessionStore()
+    store.save("expired-session", {"id": "expired-session"})
+    owner_store._owners["expired-session"] = SessionOwnerRecord(
+        owner_id="dead-owner",
+        lease_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+        fencing_token=3,
+    )
+    manager = SessionManager(
+        store=store,
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=7,
+        owner_lease_seconds=45.0,
+    )
+
+    await manager.backfill_owner_leases()
+
+    owner = await owner_store.get_owner("expired-session")
+    assert owner is not None
+    assert owner.owner_id == "owner-a"
+    assert owner.fencing_token == 7
+    assert owner.lease_expires_at > datetime.now(UTC)
+    assert owner_store.acquire_calls == ["expired-session"]
+
+
+@pytest.mark.asyncio
+async def test_backfill_owner_leases_skips_sessions_owned_by_other_replicas() -> None:
+    owner_store = RecordingOwnerStore()
+    store = InMemorySessionStore()
+    store.save("other-session", {"id": "other-session"})
+    owner_store._owners["other-session"] = SessionOwnerRecord(
+        owner_id="owner-b",
+        lease_expires_at=datetime.now(UTC) + timedelta(seconds=30),
+        fencing_token=8,
+    )
+    manager = SessionManager(
+        store=store,
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=7,
+    )
+
+    await manager.backfill_owner_leases()
+
+    owner = await owner_store.get_owner("other-session")
+    assert owner is not None
+    assert owner == SessionOwnerRecord(
+        owner_id="owner-b",
+        lease_expires_at=owner.lease_expires_at,
+        fencing_token=8,
+    )
+    assert owner_store.acquire_calls == []
+
+
+@pytest.mark.asyncio
+async def test_backfill_owner_leases_continues_after_session_owner_error(
+    caplog,
+) -> None:
+    owner_store = RecordingOwnerStore()
+    store = InMemorySessionStore()
+    store.save("broken-session", {"id": "broken-session"})
+    store.save("legacy-session", {"id": "legacy-session"})
+    manager = SessionManager(
+        store=store,
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=7,
+    )
+
+    original_get_owner = owner_store.get_owner
+
+    async def get_owner_with_failure(session_id: str) -> SessionOwnerRecord | None:
+        if session_id == "broken-session":
+            raise RuntimeError("owner store unavailable")
+        return await original_get_owner(session_id)
+
+    owner_store.get_owner = get_owner_with_failure
+
+    await manager.backfill_owner_leases()
+
+    owner = await original_get_owner("legacy-session")
+    assert owner is not None
+    assert owner.owner_id == "owner-a"
+    assert owner_store.acquire_calls == ["legacy-session"]
+    assert "Failed to backfill owner lease" in caplog.text
+    assert "broken-session" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_release_owned_sessions_logs_and_continues_after_release_exception(
+    caplog,
+) -> None:
+    owner_store = RecordingOwnerStore()
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=7,
+    )
+    first_session_id = await manager.create_session()
+    second_session_id = await manager.create_session()
+
+    async def release_with_failure(
+        session_id: str,
+        owner_id: str,
+        fencing_token: int,
+    ) -> bool:
+        owner_store.release_calls.append(session_id)
+        if session_id == first_session_id:
+            raise RuntimeError("release failed")
+        return await FakeOwnerStore.release(owner_store, session_id, owner_id, fencing_token)
+
+    owner_store.release = release_with_failure
+
+    await manager.release_owned_sessions()
+
+    assert owner_store.release_calls == [first_session_id, second_session_id]
+    assert "Failed to release owner lease" in caplog.text
+    assert first_session_id in caplog.text
+    assert second_session_id not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_renew_owner_leases_logs_and_continues_after_renew_exception(caplog) -> None:
+    owner_store = RecordingOwnerStore()
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=7,
+    )
+    first_session_id = await manager.create_session()
+    second_session_id = await manager.create_session()
+
+    async def renew_with_failure(
+        session_id: str,
+        owner_id: str,
+        lease_seconds: float = 30.0,
+        new_fencing_token: int = 2,
+        current_fencing_token: int = 1,
+    ) -> bool:
+        owner_store.renew_calls.append(session_id)
+        if session_id == first_session_id:
+            raise RuntimeError("renew failed")
+        return await FakeOwnerStore.renew(
+            owner_store,
+            session_id,
+            owner_id,
+            lease_seconds,
+            new_fencing_token,
+            current_fencing_token,
+        )
+
+    owner_store.renew = renew_with_failure
+
+    await manager.renew_owner_leases()
+
+    assert owner_store.renew_calls == [first_session_id, second_session_id]
+    assert "Failed to renew owner lease" in caplog.text
+    assert first_session_id in caplog.text
+    assert second_session_id not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_close_session_releases_owner_lease_after_deleting_metadata() -> None:
+    owner_store = FakeOwnerStore()
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=7,
+    )
+    session_id = await manager.create_session()
+
+    await manager.close_session(session_id)
+
+    assert manager.list_sessions() == []
+    assert await owner_store.get_owner(session_id) is None
+
+
+@pytest.mark.asyncio
+async def test_close_session_keeps_owner_lease_when_metadata_delete_fails() -> None:
+    owner_store = FakeOwnerStore()
+    manager = SessionManager(
+        store=DeleteFailingSessionStore(),
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=7,
+    )
+    session_id = await manager.create_session()
+
+    with pytest.raises(RuntimeError, match="session store delete failed"):
+        await manager.close_session(session_id)
+
+    owner = await owner_store.get_owner(session_id)
+    assert owner is not None
+    assert owner == SessionOwnerRecord(
+        owner_id="owner-a",
+        lease_expires_at=owner.lease_expires_at,
+        fencing_token=7,
+    )

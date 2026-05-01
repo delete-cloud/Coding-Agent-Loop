@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Literal, TypeVar, cast
 
 from agentkit.storage.checkpoint_fs import FSCheckpointStore
+from agentkit.storage.pg import PGPool
 from agentkit.checkpoint.models import CheckpointMeta
 from agentkit.checkpoint import CheckpointService
 from agentkit.storage.protocols import CheckpointStore, TapeStore
@@ -46,6 +47,7 @@ from coding_agent.ui.session_store import (
 )
 from coding_agent.ui.session_owner_store import SessionOwnerStoreProtocol
 from coding_agent.ui.session_owner_store import SessionOwnershipConflictError
+from coding_agent.ui.session_owner_store import SessionOwnershipConflictReason
 from coding_agent.ui.binding_resolver import BindingResolver, DefaultBindingResolver
 from coding_agent.ui.execution_binding import ExecutionBinding, LocalExecutionBinding
 
@@ -374,6 +376,7 @@ class SessionManager:
         owner_store: SessionOwnerStoreProtocol | None = None,
         owner_id: str | None = None,
         fencing_token: int | None = None,
+        owner_lease_seconds: float = 30.0,
     ):
         self._storage_config = storage_config or {}
         self._pg_pool = pg_pool
@@ -394,6 +397,33 @@ class SessionManager:
         )
         self._create_agent = create_agent_fn
         self._binding_resolver = binding_resolver or DefaultBindingResolver()
+        self.configure_owner_leases(
+            owner_store=owner_store,
+            owner_id=owner_id,
+            fencing_token=fencing_token,
+            owner_lease_seconds=owner_lease_seconds,
+        )
+
+    @property
+    def owner_lease_seconds(self) -> float:
+        return self._owner_lease_seconds
+
+    @property
+    def has_owner_leases_configured(self) -> bool:
+        return self._owner_store is not None
+
+    @property
+    def pg_pool(self) -> PGPool:
+        return self._get_pg_pool()
+
+    def configure_owner_leases(
+        self,
+        *,
+        owner_store: SessionOwnerStoreProtocol | None,
+        owner_id: str | None,
+        fencing_token: int | None,
+        owner_lease_seconds: float = 30.0,
+    ) -> None:
         if owner_store is None and (owner_id is not None or fencing_token is not None):
             raise ValueError(
                 "owner_store must be provided when owner_id or fencing_token is set"
@@ -402,23 +432,26 @@ class SessionManager:
             raise ValueError(
                 "owner_id and fencing_token must be provided when owner_store is set"
             )
+        if owner_lease_seconds <= 0:
+            raise ValueError("owner_lease_seconds must be positive")
         self._owner_store = owner_store
         self._owner_id = owner_id
         self._fencing_token = fencing_token
+        self._owner_lease_seconds = owner_lease_seconds
 
-    def _get_pg_pool(self) -> AsyncPGSessionPool:
+    def _get_pg_pool(self) -> PGPool:
         if self._pg_pool is not None:
-            return cast(AsyncPGSessionPool, self._pg_pool)
+            return cast(PGPool, self._pg_pool)
 
-        PGPool, _, _ = _load_pg_storage_types()
+        pg_pool_type, _, _ = _load_pg_storage_types()
 
         dsn_obj = self._storage_config.get("dsn")
         if not isinstance(dsn_obj, str) or not dsn_obj.strip():
             raise RuntimeError("PG storage requires storage_config['dsn']")
         dsn = dsn_obj.strip()
-        self._pg_pool = PGPool(dsn=dsn)
+        self._pg_pool = pg_pool_type(dsn=dsn)
         self._owns_pg_pool = True
-        return cast(AsyncPGSessionPool, self._pg_pool)
+        return cast(PGPool, self._pg_pool)
 
     def _create_http_session_store(self) -> SessionStore:
         configured_backend = self._storage_config.get("http_session_backend")
@@ -506,6 +539,17 @@ class SessionManager:
             self._session_turn_locks[session_id] = lock
         return lock
 
+    async def prepare_session_turn(self, session_id: str) -> Session:
+        turn_lock = self._turn_lock_for(session_id)
+        if turn_lock.locked():
+            raise RuntimeError("turn already in progress")
+
+        session = await self.get_session_async(session_id)
+        await self._assert_owner(session_id)
+        if session.turn_in_progress or (session.task and not session.task.done()):
+            raise RuntimeError("turn already in progress")
+        return session
+
     async def _assert_owner(self, session_id: str) -> None:
         if self._owner_store is None:
             return
@@ -514,9 +558,15 @@ class SessionManager:
 
         owner = await self._owner_store.get_owner(session_id)
         if owner is None:
-            raise SessionOwnershipConflictError("session has no owner")
+            raise SessionOwnershipConflictError(
+                "session has no owner",
+                reason=SessionOwnershipConflictReason.MISSING_OWNER,
+            )
         if owner.lease_expires_at <= datetime.now(UTC):
-            raise SessionOwnershipConflictError("session owner lease expired")
+            raise SessionOwnershipConflictError(
+                "session owner lease expired",
+                reason=SessionOwnershipConflictReason.EXPIRED_LEASE,
+            )
 
         current_owner_id = owner.owner_id
         current_fencing_token = owner.fencing_token
@@ -545,6 +595,147 @@ class SessionManager:
             session.id,
             cast(dict[str, Any], session.to_store_data()),
         )
+
+    async def _acquire_owner_for_session(self, session_id: str) -> None:
+        if self._owner_store is None:
+            return
+        if self._owner_id is None or self._fencing_token is None:
+            raise SessionOwnershipConflictError("stale owner or fencing token rejected")
+        acquired = await self._owner_store.acquire(
+            session_id,
+            self._owner_id,
+            lease_seconds=self._owner_lease_seconds,
+            fencing_token=self._fencing_token,
+        )
+        if not acquired:
+            raise SessionOwnershipConflictError("stale owner or fencing token rejected")
+
+    async def _holds_owner_lease(self, session_id: str) -> bool:
+        if self._owner_store is None:
+            return False
+        if self._owner_id is None or self._fencing_token is None:
+            raise SessionOwnershipConflictError("stale owner or fencing token rejected")
+        owner = await self._owner_store.get_owner(session_id)
+        if owner is None:
+            return False
+        return (
+            owner.owner_id == self._owner_id
+            and owner.fencing_token == self._fencing_token
+        )
+
+    async def release_owned_sessions(self) -> None:
+        if self._owner_store is None:
+            return
+        if self._owner_id is None or self._fencing_token is None:
+            raise SessionOwnershipConflictError("stale owner or fencing token rejected")
+        for session_id in await self.list_sessions_async():
+            await self._release_owner_lease_for_session(session_id)
+
+    async def _release_owner_lease_for_session(self, session_id: str) -> None:
+        if self._owner_store is None:
+            return
+        if self._owner_id is None or self._fencing_token is None:
+            raise SessionOwnershipConflictError("stale owner or fencing token rejected")
+        if not await self._holds_owner_lease(session_id):
+            return
+        try:
+            released = await self._owner_store.release(
+                session_id,
+                self._owner_id,
+                self._fencing_token,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to release owner lease for session %s owned by %s with fencing token %s",
+                session_id,
+                self._owner_id,
+                self._fencing_token,
+                exc_info=True,
+            )
+            return
+        if not released:
+            logger.warning(
+                "Failed to release owner lease for session %s owned by %s with fencing token %s",
+                session_id,
+                self._owner_id,
+                self._fencing_token,
+            )
+
+    async def renew_owner_leases(self) -> None:
+        if self._owner_store is None:
+            return
+        if self._owner_id is None or self._fencing_token is None:
+            raise SessionOwnershipConflictError("stale owner or fencing token rejected")
+        now = datetime.now(UTC)
+        for session_id in await self.list_sessions_async():
+            owner = await self._owner_store.get_owner(session_id)
+            if owner is None:
+                continue
+            if (
+                owner.owner_id != self._owner_id
+                or owner.fencing_token != self._fencing_token
+                or owner.lease_expires_at <= now
+            ):
+                continue
+            try:
+                renewed = await self._owner_store.renew(
+                    session_id,
+                    self._owner_id,
+                    lease_seconds=self._owner_lease_seconds,
+                    new_fencing_token=self._fencing_token,
+                    current_fencing_token=self._fencing_token,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to renew owner lease for session %s owned by %s with fencing token %s",
+                    session_id,
+                    self._owner_id,
+                    self._fencing_token,
+                    exc_info=True,
+                )
+                continue
+            if not renewed:
+                logger.warning(
+                    "Failed to renew owner lease for session %s owned by %s with fencing token %s",
+                    session_id,
+                    self._owner_id,
+                    self._fencing_token,
+                )
+
+    async def backfill_owner_leases(self) -> None:
+        if self._owner_store is None:
+            return
+        if self._owner_id is None or self._fencing_token is None:
+            raise SessionOwnershipConflictError("stale owner or fencing token rejected")
+
+        now = datetime.now(UTC)
+        for session_id in await self.list_sessions_async():
+            try:
+                owner = await self._owner_store.get_owner(session_id)
+                if owner is not None and owner.lease_expires_at > now:
+                    continue
+                acquired = await self._owner_store.acquire(
+                    session_id,
+                    self._owner_id,
+                    lease_seconds=self._owner_lease_seconds,
+                    fencing_token=self._fencing_token,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to backfill owner lease for session %s owned by %s with fencing token %s",
+                    session_id,
+                    self._owner_id,
+                    self._fencing_token,
+                    exc_info=True,
+                )
+                continue
+            if not acquired:
+                logger.warning(
+                    "Failed to backfill owner lease for session %s owned by %s with fencing token %s",
+                    session_id,
+                    self._owner_id,
+                    self._fencing_token,
+                )
 
     async def get_session_async(self, session_id: str) -> Session:
         session = self._session_cache.get(session_id)
@@ -629,6 +820,7 @@ class SessionManager:
         await self._close_runtime(session)
         self._session_cache.pop(session_id, None)
         await self._run_store_io(self._store.delete, session_id)
+        await self._release_owner_lease_for_session(session_id)
         self._approval_stores.pop(session_id, None)
         self._session_turn_locks.pop(session_id, None)
 
@@ -881,7 +1073,22 @@ class SessionManager:
         )
 
         async with self._lock:
-            await self._persist_session_async(session)
+            try:
+                await self._persist_session_async(session)
+                await self._acquire_owner_for_session(session_id)
+            except BaseException:
+                self._session_cache.pop(session_id, None)
+                try:
+                    await self._run_store_io(self._store.delete, session_id)
+                except asyncio.CancelledError:
+                    pass
+                except BaseException:
+                    logger.exception(
+                        "Failed to delete partially created session during rollback: %s",
+                        session_id,
+                    )
+                self._approval_stores.pop(session_id, None)
+                raise
 
         logger.info(f"Created session: {session_id}")
         return session_id

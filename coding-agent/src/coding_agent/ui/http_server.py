@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import socket
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -19,7 +21,11 @@ from agentkit.config.loader import load_config as load_agent_toml
 from agentkit.errors import ConfigError
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.ui.session_manager import Session, SessionManager
-from coding_agent.ui.session_owner_store import SessionOwnershipConflictError
+from coding_agent.ui.session_owner_store import (
+    SessionOwnerStore,
+    SessionOwnershipConflictError,
+    SessionOwnershipConflictReason,
+)
 from coding_agent.ui.schemas import (
     PromptRequest,
     CreateSessionRequest,
@@ -80,8 +86,71 @@ def _load_storage_config() -> dict[str, Any]:
         return {}
 
 
+def _storage_uses_pg_http_sessions(storage_config: dict[str, Any]) -> bool:
+    http_backend = storage_config.get("http_session_backend")
+    if http_backend is not None:
+        return isinstance(http_backend, str) and http_backend.strip().lower() == "pg"
+
+    session_backend = storage_config.get("session_backend")
+    if session_backend is not None:
+        return (
+            isinstance(session_backend, str)
+            and session_backend.strip().lower() == "pg"
+        )
+
+    tape_backend = str(storage_config.get("tape_backend", "jsonl")).strip().lower()
+    return tape_backend == "pg"
+
+
+def _configured_owner_id(storage_config: dict[str, Any]) -> str:
+    owner_id = storage_config.get("owner_id")
+    if isinstance(owner_id, str) and owner_id.strip():
+        return owner_id.strip()
+    return f"{socket.gethostname()}:{uuid.uuid4().hex}"
+
+
+def _configured_fencing_token(storage_config: dict[str, Any]) -> int:
+    token = storage_config.get("fencing_token")
+    if isinstance(token, int) and token > 0:
+        return token
+    raise ValueError("storage.fencing_token must be a positive integer")
+
+
+def _configured_owner_lease_seconds(storage_config: dict[str, Any]) -> float:
+    lease_seconds = storage_config.get("owner_lease_seconds", 30.0)
+    if not isinstance(lease_seconds, (int, float)):
+        raise ValueError("storage.owner_lease_seconds must be numeric")
+    if lease_seconds <= 0:
+        raise ValueError("storage.owner_lease_seconds must be positive")
+    if lease_seconds < 2.0:
+        raise ValueError("storage.owner_lease_seconds must be >= 2 seconds")
+    return float(lease_seconds)
+
+
 def _build_session_manager() -> SessionManager:
-    return SessionManager(storage_config=_load_storage_config())
+    storage_config = _load_storage_config()
+    manager = SessionManager(storage_config=storage_config)
+    if not _storage_uses_pg_http_sessions(storage_config):
+        return manager
+    owner_store = SessionOwnerStore(pg_pool=manager.pg_pool)
+    manager.configure_owner_leases(
+        owner_store=owner_store,
+        owner_id=_configured_owner_id(storage_config),
+        fencing_token=_configured_fencing_token(storage_config),
+        owner_lease_seconds=_configured_owner_lease_seconds(storage_config),
+    )
+    return manager
+
+
+async def _renew_owner_leases() -> None:
+    if not session_manager.has_owner_leases_configured:
+        return
+    while True:
+        try:
+            await session_manager.renew_owner_leases()
+        except Exception:
+            logger.exception("Error renewing owner leases")
+        await asyncio.sleep(max(session_manager.owner_lease_seconds / 2.0, 1.0))
 
 
 # Global session manager
@@ -94,14 +163,41 @@ def _key_error_detail(exc: KeyError) -> str:
     return str(exc)
 
 
+def _owner_conflict_http_exception(
+    exc: SessionOwnershipConflictError,
+    *,
+    session_id: str,
+) -> HTTPException:
+    if exc.reason == SessionOwnershipConflictReason.MISSING_OWNER:
+        return HTTPException(
+            status_code=404,
+            detail=f"Session not found: {session_id}",
+        )
+    return HTTPException(status_code=409, detail=str(exc))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown."""
     # Startup
+    try:
+        await session_manager.backfill_owner_leases()
+    except Exception:
+        logger.exception("Failed to backfill owner leases during startup")
     cleanup_task = asyncio.create_task(_cleanup_idle_sessions())
+    owner_renew_task = asyncio.create_task(_renew_owner_leases())
     logger.info("HTTP server starting up")
 
-    yield  # Server runs here
+    try:
+        yield  # Server runs here
+    finally:
+        owner_renew_task.cancel()
+        try:
+            await owner_renew_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("Owner lease renewal task failed during shutdown")
 
     # Shutdown
     cleanup_task.cancel()
@@ -122,7 +218,10 @@ async def lifespan(app: FastAPI):
                     exc_info=True,
                 )
     finally:
-        await session_manager.close()
+        try:
+            await session_manager.release_owned_sessions()
+        finally:
+            await session_manager.close()
 
     logger.info("HTTP server shut down")
 
@@ -413,24 +512,47 @@ async def _cleanup_idle_sessions() -> None:
             logger.exception("Error during idle session cleanup")
 
 
-async def stream_wire_messages(wire: LocalWire) -> AsyncIterator[dict[str, str]]:
+async def stream_wire_messages(
+    wire: LocalWire,
+    task: asyncio.Task[Any] | None = None,
+) -> AsyncIterator[dict[str, str]]:
     """Stream wire messages as SSE events.
 
     Consumes messages from the wire's outgoing queue and yields SSE events.
     Stops when a TurnEnd message is received.
     """
     while True:
+        get_message_task = asyncio.create_task(wire.get_next_outgoing())
         try:
-            msg = await wire.get_next_outgoing()
+            if task is not None:
+                done, pending = await asyncio.wait(
+                    {get_message_task, task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if task in done and get_message_task in pending:
+                    get_message_task.cancel()
+                    try:
+                        await get_message_task
+                    except asyncio.CancelledError:
+                        pass
+                    task.result()
+                    break
+                msg = get_message_task.result()
+            else:
+                msg = await get_message_task
             event = _wire_message_to_event(msg)
             yield event
 
             if isinstance(msg, TurnEnd) and not msg.agent_id:
                 break
         except asyncio.CancelledError:
+            if not get_message_task.done():
+                get_message_task.cancel()
             # Client disconnected
             raise
         except Exception as e:
+            if not get_message_task.done():
+                get_message_task.cancel()
             logger.exception("Error streaming wire message")
             yield {
                 "event": "Error",
@@ -527,13 +649,16 @@ async def send_prompt(
     if not prompt_text:
         raise HTTPException(status_code=422, detail="Prompt is required")
 
-    if not await session_manager.has_session_async(session_id):
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    session = await session_manager.get_session_async(session_id)
-
-    if session.turn_in_progress or (session.task and not session.task.done()):
-        raise HTTPException(status_code=409, detail="Turn already in progress")
+    try:
+        session = await session_manager.prepare_session_turn(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Session not found") from exc
+    except SessionOwnershipConflictError as exc:
+        raise _owner_conflict_http_exception(exc, session_id=session_id) from exc
+    except RuntimeError as exc:
+        if str(exc) == "turn already in progress":
+            raise HTTPException(status_code=409, detail="Turn already in progress") from exc
+        raise
 
     session.turn_in_progress = True
     session.last_activity = datetime.now()
@@ -545,7 +670,7 @@ async def send_prompt(
                 session_manager.run_agent(session_id, prompt_text)
             )
 
-            async for event in stream_wire_messages(session.wire):
+            async for event in stream_wire_messages(session.wire, session.task):
                 await _broadcast_event(session, event)
                 yield event
 
@@ -660,7 +785,7 @@ async def get_events(
     try:
         await session_manager.authorize_event_stream(session_id)
     except SessionOwnershipConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise _owner_conflict_http_exception(exc, session_id=session_id) from exc
 
     queue: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=100)
     try:
@@ -668,7 +793,7 @@ async def get_events(
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
     except SessionOwnershipConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise _owner_conflict_http_exception(exc, session_id=session_id) from exc
 
     async def event_generator() -> AsyncIterator[dict[str, str]]:
         """Generate events from queue."""

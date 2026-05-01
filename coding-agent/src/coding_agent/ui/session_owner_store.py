@@ -2,13 +2,29 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from typing import Protocol
 
 from agentkit.storage.pg import PGPool, PGSessionOwnerStore
 
 
+class SessionOwnershipConflictReason(StrEnum):
+    STALE_OWNER = "stale_owner"
+    MISSING_OWNER = "missing_owner"
+    EXPIRED_LEASE = "expired_lease"
+
+
 class SessionOwnershipConflictError(RuntimeError):
     """Raised when the current instance is not authorized to mutate a session."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: SessionOwnershipConflictReason = SessionOwnershipConflictReason.STALE_OWNER,
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 @dataclass(frozen=True)
