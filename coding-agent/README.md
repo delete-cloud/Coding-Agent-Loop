@@ -16,7 +16,7 @@ Today the repo contains both:
 - HTTP server mode via `python -m coding_agent serve`
 - Hook-driven runtime built from `agentkit` pipeline stages and plugins
 - Tooling for file reads/writes, grep/glob, shell commands, file patching, planning, web search, and subagents
-- Provider support for `openai`, `anthropic`, `copilot`, `kimi`, `kimi-code`, and `kimi-code-anthropic`
+- Provider support for `openai`, `anthropic`, `copilot`, `kimi`, `kimi-code`, `kimi-code-anthropic`, and `deepseek`
 - Approval policies for risky tools and external requests
 - Dependency-aware parallel tool execution
 - Topic detection, context summarization, memory grounding, session metrics, skills, and MCP server integration
@@ -121,6 +121,7 @@ Provider-specific fallback keys currently supported by the implementation:
 - `GITHUB_TOKEN` for `copilot`
 - `MOONSHOT_API_KEY` for `kimi`
 - `KIMI_CODE_API_KEY` for `kimi-code` and `kimi-code-anthropic`
+- `DEEPSEEK_API_KEY` for `deepseek`
 
 ## Repository Layout
 
