@@ -20,6 +20,7 @@ class Config(BaseModel):
         "kimi",
         "kimi-code",
         "kimi-code-anthropic",
+        "deepseek",
     ] = "openai"
     model: str = "gpt-4o"
     api_key: SecretStr | None = None
@@ -99,6 +100,11 @@ def load_config(cli_args: dict[str, object] | None = None) -> Config:
         kimi_code_token = os.environ.get("KIMI_CODE_API_KEY")
         if kimi_code_token:
             values["api_key"] = kimi_code_token
+
+    if values.get("provider") == "deepseek" and not values.get("api_key"):
+        deepseek_token = os.environ.get("DEEPSEEK_API_KEY")
+        if deepseek_token:
+            values["api_key"] = deepseek_token
 
     return Config.model_validate(values)
 

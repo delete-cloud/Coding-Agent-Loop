@@ -208,6 +208,7 @@ class InteractiveSession:
             "kimi",
             "kimi-code",
             "kimi-code-anthropic",
+            "deepseek",
         }
         if provider_name not in allowed_providers:
             raise RuntimeError(

@@ -220,3 +220,55 @@ class TestKimiCodeAnthropicProvider:
         assert isinstance(result, AnthropicProvider)
         headers = result._client.default_headers
         assert headers.get("User-Agent") == "claude-code/1.0.17"
+
+
+class TestDeepSeekProvider:
+    def test_deepseek_creates_anthropic_instance(self):
+        plugin = LLMProviderPlugin(
+            provider="deepseek",
+            model="deepseek-v4-pro",
+            api_key="sk-deepseek-test",
+        )
+
+        result = plugin.provide_llm()
+
+        assert isinstance(result, AnthropicProvider)
+        assert result.model_name == "deepseek-v4-pro"
+
+    def test_deepseek_uses_deepseek_anthropic_base_url(self):
+        plugin = LLMProviderPlugin(
+            provider="deepseek",
+            model="deepseek-v4-flash",
+            api_key="sk-deepseek-test",
+        )
+
+        result = plugin.provide_llm()
+
+        assert isinstance(result, AnthropicProvider)
+        assert result._base_url == "https://api.deepseek.com/anthropic"
+
+    def test_deepseek_api_key_env_fallback(self, monkeypatch):
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek-from-env")
+        plugin = LLMProviderPlugin(
+            provider="deepseek",
+            model="deepseek-v4-pro",
+            api_key="",
+        )
+
+        result = plugin.provide_llm()
+
+        assert isinstance(result, AnthropicProvider)
+        assert result._api_key == "sk-deepseek-from-env"
+
+    def test_deepseek_explicit_key_takes_priority_over_env(self, monkeypatch):
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek-from-env")
+        plugin = LLMProviderPlugin(
+            provider="deepseek",
+            model="deepseek-v4-pro",
+            api_key="sk-explicit",
+        )
+
+        result = plugin.provide_llm()
+
+        assert isinstance(result, AnthropicProvider)
+        assert result._api_key == "sk-explicit"
