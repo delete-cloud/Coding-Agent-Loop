@@ -1516,25 +1516,39 @@ class SessionManager:
 
         return closed
 
-    async def ensure_session_runtime(self, session_id: str) -> Any:
-        await self._assert_owner(session_id)
-        session = await self.get_session_async(session_id)
-        if session.runtime_ctx is not None and session.runtime_adapter is not None:
-            return session.runtime_ctx
-
+    async def _build_session_runtime(
+        self,
+        session: Session,
+        *,
+        model_name: str | None = None,
+        provider_name: str | None = None,
+        base_url: str | None = None,
+        max_steps: int | None = None,
+        approval_policy: ApprovalPolicy | None = None,
+    ) -> tuple[Any, Any, PipelineAdapter]:
         approval_mode_map = {
             ApprovalPolicy.YOLO: "yolo",
             ApprovalPolicy.INTERACTIVE: "interactive",
             ApprovalPolicy.AUTO: "auto",
         }
+        resolved_provider_name = (
+            session.provider_name if provider_name is None else provider_name
+        )
+        resolved_model_name = session.model_name if model_name is None else model_name
+        resolved_base_url = session.base_url if base_url is None else base_url
+        resolved_max_steps = session.max_steps if max_steps is None else max_steps
+        resolved_approval_policy = (
+            session.approval_policy if approval_policy is None else approval_policy
+        )
+
         consumer = self._make_session_consumer(session)
         pipeline, ctx = self._create_agent_for_session(
             workspace_root=self._resolve_workspace_root(session),
-            model_override=session.model_name,
-            provider_override=session.provider_name,
-            base_url_override=session.base_url,
-            max_steps_override=session.max_steps,
-            approval_mode_override=approval_mode_map[session.approval_policy],
+            model_override=resolved_model_name,
+            provider_override=resolved_provider_name,
+            base_url_override=resolved_base_url,
+            max_steps_override=resolved_max_steps,
+            approval_mode_override=approval_mode_map[resolved_approval_policy],
             session_id_override=session.id,
             api_key=None,
             tape=await self._restore_tape(session.tape_id),
@@ -1543,11 +1557,30 @@ class SessionManager:
         ctx.config["agent_id"] = ""
 
         llm_plugin = pipeline._registry.get("llm_provider")
-        if session.provider is not None:
+        provider_model_name = getattr(session.provider, "model_name", None)
+        if (
+            session.provider is not None
+            and session.provider_name == resolved_provider_name
+            and provider_model_name == resolved_model_name
+            and session.base_url == resolved_base_url
+        ):
             llm_plugin._instance = session.provider
 
         adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
-        await adapter.initialize()
+        try:
+            await adapter.initialize()
+        except Exception:
+            await self._close_runtime_adapter(adapter)
+            raise
+        return pipeline, ctx, adapter
+
+    async def ensure_session_runtime(self, session_id: str) -> Any:
+        await self._assert_owner(session_id)
+        session = await self.get_session_async(session_id)
+        if session.runtime_ctx is not None and session.runtime_adapter is not None:
+            return session.runtime_ctx
+
+        pipeline, ctx, adapter = await self._build_session_runtime(session)
 
         session.runtime_pipeline = pipeline
         session.runtime_ctx = ctx
@@ -1555,6 +1588,64 @@ class SessionManager:
         session.tape_id = ctx.tape.tape_id
         await self._persist_session_async(session)
         return ctx
+
+    async def replace_session_runtime_config(
+        self,
+        session_id: str,
+        *,
+        model_name: str,
+    ) -> Session:
+        turn_lock = self._turn_lock_for(session_id)
+        if turn_lock.locked():
+            raise RuntimeError("turn already in progress")
+
+        async with turn_lock:
+            await self._assert_owner(session_id)
+            session = await self.get_session_async(session_id)
+            if session.task and not session.task.done():
+                raise RuntimeError("turn already in progress")
+            if session.turn_in_progress:
+                raise RuntimeError("turn already in progress")
+
+            old_provider = session.provider
+            old_model_name = session.model_name
+            old_tape_id = session.tape_id
+            old_runtime_pipeline = session.runtime_pipeline
+            old_runtime_ctx = session.runtime_ctx
+            old_runtime_adapter = session.runtime_adapter
+
+            pipeline, ctx, adapter = await self._build_session_runtime(
+                session,
+                model_name=model_name,
+            )
+
+            session.provider = None
+            session.model_name = model_name
+            session.runtime_pipeline = pipeline
+            session.runtime_ctx = ctx
+            session.runtime_adapter = adapter
+            session.tape_id = ctx.tape.tape_id
+            try:
+                await self._persist_session_async(session)
+            except Exception:
+                session.provider = old_provider
+                session.model_name = old_model_name
+                session.runtime_pipeline = old_runtime_pipeline
+                session.runtime_ctx = old_runtime_ctx
+                session.runtime_adapter = old_runtime_adapter
+                session.tape_id = old_tape_id
+                await self._close_runtime_adapter(adapter)
+                raise
+
+            try:
+                await self._close_runtime_adapter(old_runtime_adapter)
+            except Exception:
+                logger.warning(
+                    "Failed to close previous runtime adapter for session %s",
+                    session_id,
+                    exc_info=True,
+                )
+            return session
 
     async def capture_checkpoint(
         self,

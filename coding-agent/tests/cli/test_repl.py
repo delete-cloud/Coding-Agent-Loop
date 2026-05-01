@@ -3,9 +3,11 @@
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Literal, cast
+from typing import Any, Literal, cast
+from inspect import isawaitable
 from unittest.mock import AsyncMock, MagicMock
 
+import asyncio
 import pytest
 from prompt_toolkit.key_binding.key_processor import KeyPressEvent
 from prompt_toolkit.keys import Keys
@@ -13,6 +15,7 @@ from prompt_toolkit.keys import Keys
 from coding_agent.cli import input_handler as input_handler_module
 from coding_agent.cli.input_handler import InputHandler
 from coding_agent.core.config import Config
+from coding_agent.ui import session_manager as session_manager_module
 
 
 ProviderName = Literal[
@@ -1109,6 +1112,183 @@ class TestReplInitialization:
         assert session.config.model == "claude-next"
         assert create_agent_calls[-1]["model_override"] == "claude-next"
         assert run_models == ["claude-next"]
+
+    @pytest.mark.asyncio
+    async def test_model_change_failure_keeps_existing_runtime(self, monkeypatch):
+        from coding_agent.cli.repl import InteractiveSession
+        from coding_agent.core.config import Config
+
+        current_pipeline = object()
+        current_ctx = SimpleNamespace(config={"tool_registry": "registry-a"})
+
+        class CurrentAdapter:
+            def __init__(self) -> None:
+                self.closed = False
+
+            async def close(self) -> None:
+                self.closed = True
+
+        current_adapter = CurrentAdapter()
+        managed_session = SimpleNamespace(
+            id="session-a",
+            model_name="gpt-4o-test",
+            runtime_pipeline=current_pipeline,
+            runtime_ctx=current_ctx,
+            runtime_adapter=current_adapter,
+        )
+
+        class FakeSessionManager:
+            def __init__(self) -> None:
+                self.replace_calls: list[tuple[str, str]] = []
+
+            async def replace_session_runtime_config(
+                self,
+                session_id: str,
+                *,
+                model_name: str,
+            ):
+                self.replace_calls.append((session_id, model_name))
+                raise RuntimeError("new runtime failed")
+
+        session = InteractiveSession(Config(model="gpt-4o-test", max_steps=10))
+        fake_session_manager = cast(Any, FakeSessionManager())
+        session._session_manager = fake_session_manager
+        session.context["session_manager"] = fake_session_manager
+        session.context["session_id"] = "session-a"
+        session.context["model"] = "gpt-4o-test"
+        session._pipeline = current_pipeline
+        session._pipeline_ctx = current_ctx
+        session._pipeline_adapter = current_adapter
+
+        with pytest.raises(RuntimeError, match="new runtime failed"):
+            await session._change_model_for_next_turn("claude-next")
+
+        assert session._pipeline is current_pipeline
+        assert session._pipeline_ctx is current_ctx
+        assert session._pipeline_adapter is current_adapter
+        assert session.context["model"] == "gpt-4o-test"
+        assert session.config.model == "gpt-4o-test"
+        assert managed_session.model_name == "gpt-4o-test"
+        assert managed_session.runtime_pipeline is current_pipeline
+        assert managed_session.runtime_ctx is current_ctx
+        assert managed_session.runtime_adapter is current_adapter
+        assert current_adapter.closed is False
+        assert fake_session_manager.replace_calls == [("session-a", "claude-next")]
+
+    @pytest.mark.asyncio
+    async def test_model_change_persist_failure_restores_existing_runtime(self, monkeypatch):
+        from coding_agent.cli.repl import InteractiveSession
+        from coding_agent.core.config import Config
+
+        current_pipeline = object()
+        current_ctx = SimpleNamespace(config={"tool_registry": "registry-a"})
+
+        class CurrentAdapter:
+            def __init__(self) -> None:
+                self.closed = False
+
+            async def close(self) -> None:
+                self.closed = True
+
+        current_adapter = CurrentAdapter()
+        replacement_pipeline = object()
+        replacement_ctx = SimpleNamespace(
+            config={"tool_registry": "registry-b", "wire_consumer": None},
+            tape=SimpleNamespace(tape_id="replacement-tape"),
+        )
+
+        class ReplacementAdapter:
+            def __init__(self) -> None:
+                self.consumer = None
+                self.closed = False
+
+            def set_consumer(self, consumer):
+                self.consumer = consumer
+
+            async def close(self) -> None:
+                self.closed = True
+
+        replacement_adapter = ReplacementAdapter()
+        managed_session = SimpleNamespace(
+            id="session-a",
+            provider=None,
+            provider_name="openai",
+            model_name="gpt-4o-test",
+            base_url=None,
+            max_steps=10,
+            tape_id="current-tape",
+            task=None,
+            turn_in_progress=False,
+            runtime_pipeline=current_pipeline,
+            runtime_ctx=current_ctx,
+            runtime_adapter=current_adapter,
+        )
+
+        class FakeSessionManager:
+            def __init__(self) -> None:
+                self.build_calls: list[str] = []
+                self.persisted_models: list[str] = []
+                self.closed_adapters: list[object] = []
+
+            def _turn_lock_for(self, session_id: str):
+                del session_id
+                return asyncio.Lock()
+
+            async def _assert_owner(self, session_id: str) -> None:
+                assert session_id == "session-a"
+
+            async def get_session_async(self, session_id: str):
+                assert session_id == "session-a"
+                return managed_session
+
+            async def _build_session_runtime(self, session, *, model_name: str):
+                assert session is managed_session
+                self.build_calls.append(model_name)
+                return replacement_pipeline, replacement_ctx, replacement_adapter
+
+            async def _persist_session_async(self, session) -> None:
+                self.persisted_models.append(session.model_name)
+                if session.model_name == "claude-next":
+                    raise RuntimeError("persist failed")
+
+            async def _close_runtime_adapter(self, adapter) -> None:
+                self.closed_adapters.append(adapter)
+                close = getattr(adapter, "close", None)
+                if callable(close):
+                    result = close()
+                    if isawaitable(result):
+                        await result
+
+            replace_session_runtime_config = session_manager_module.SessionManager.replace_session_runtime_config
+
+        session = InteractiveSession(Config(model="gpt-4o-test", max_steps=10))
+        fake_session_manager = cast(Any, FakeSessionManager())
+        session._session_manager = fake_session_manager
+        session.context["session_manager"] = fake_session_manager
+        session.context["session_id"] = "session-a"
+        session.context["model"] = "gpt-4o-test"
+        session._pipeline = current_pipeline
+        session._pipeline_ctx = current_ctx
+        session._pipeline_adapter = current_adapter
+
+        with pytest.raises(RuntimeError, match="persist failed"):
+            await session._change_model_for_next_turn("claude-next")
+
+        assert session.config.model == "gpt-4o-test"
+        assert session.context["model"] == "gpt-4o-test"
+        assert session._pipeline is current_pipeline
+        assert session._pipeline_ctx is current_ctx
+        assert session._pipeline_adapter is current_adapter
+        assert managed_session.model_name == "gpt-4o-test"
+        assert managed_session.tape_id == "current-tape"
+        assert managed_session.runtime_pipeline is current_pipeline
+        assert managed_session.runtime_ctx is current_ctx
+        assert managed_session.runtime_adapter is current_adapter
+        assert current_adapter.closed is False
+        assert replacement_adapter.closed is True
+        assert fake_session_manager.build_calls == ["claude-next"]
+        assert fake_session_manager.persisted_models == ["claude-next"]
+        assert fake_session_manager.closed_adapters == [replacement_adapter]
 
     @pytest.mark.asyncio
     async def test_initialize_creates_managed_session_without_asyncio_run(

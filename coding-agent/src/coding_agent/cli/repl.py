@@ -269,17 +269,40 @@ class InteractiveSession:
     async def _change_model_for_next_turn(self, model_name: str) -> None:
         if self.config.model == model_name:
             return
-        self.config.model = model_name
-        self.context["model"] = model_name
+        old_model_name = self.config.model
         session_id = self.context.get("session_id")
         if not isinstance(session_id, str):
-            self._setup_agent()
+            self.config.model = model_name
+            self.context["model"] = model_name
+            try:
+                self._setup_agent()
+            except Exception:
+                self.config.model = old_model_name
+                self.context["model"] = old_model_name
+                raise
             return
-        await self._session_manager.shutdown_session_runtime(session_id)
-        managed_session = self._session_manager.get_session(session_id)
-        managed_session.model_name = model_name
-        await self._session_manager._persist_session_async(managed_session)
-        await self._switch_session(session_id)
+
+        try:
+            managed_session = await self._session_manager.replace_session_runtime_config(
+                session_id,
+                model_name=model_name,
+            )
+        except Exception:
+            self.config.model = old_model_name
+            self.context["model"] = old_model_name
+            raise
+
+        self._sync_config_from_managed_session(managed_session)
+        self.context["session_id"] = managed_session.id
+        self.context["model"] = self.config.model
+        self._pipeline = managed_session.runtime_pipeline
+        self._pipeline_ctx = managed_session.runtime_ctx
+        self._pipeline_adapter = managed_session.runtime_adapter
+        if self._pipeline_adapter is not None:
+            self._pipeline_adapter.set_consumer(self._consumer)
+        if self._pipeline_ctx is not None:
+            self._pipeline_ctx.config["wire_consumer"] = self._consumer
+        self._refresh_command_context_from_pipeline_ctx(managed_session.runtime_ctx)
 
     async def _restore_checkpoint(self, checkpoint_id: str) -> None:
         session_id = self.context.get("session_id")
