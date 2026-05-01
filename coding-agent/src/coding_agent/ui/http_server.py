@@ -623,7 +623,10 @@ async def create_session(
     session_id = await session_manager.create_session(
         repo_path=repo_path,
         approval_policy=approval_policy,
-        provider=None,  # Will use mock/test provider
+        provider_name=body.provider if body else None,
+        model_name=body.model if body else None,
+        base_url=body.base_url if body else None,
+        max_steps=body.max_steps if body and body.max_steps is not None else 30,
     )
 
     logger.info(f"Created session: {session_id}")

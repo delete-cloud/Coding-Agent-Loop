@@ -236,6 +236,42 @@ class TestSessionCreation:
         assert session.execution_binding.workspace_root == str(tmp_path.resolve())
         assert session.repo_path == tmp_path.resolve()
 
+    async def test_create_session_accepts_runtime_provider_metadata(self, client):
+        response = await client.post(
+            "/sessions",
+            json={
+                "provider": "anthropic",
+                "model": "claude-test-http",
+                "base_url": "http://llm.local/v1",
+                "max_steps": 9,
+            },
+        )
+        assert response.status_code == 200
+
+        session = session_manager.get_session(response.json()["session_id"])
+
+        assert session.provider is None
+        assert session.provider_name == "anthropic"
+        assert session.model_name == "claude-test-http"
+        assert session.base_url == "http://llm.local/v1"
+        assert session.max_steps == 9
+
+        info_response = await client.get(f"/sessions/{response.json()['session_id']}")
+        assert info_response.status_code == 200
+        info = info_response.json()
+        assert info["provider_name"] == "anthropic"
+        assert info["model_name"] == "claude-test-http"
+        assert info["base_url"] == "http://llm.local/v1"
+        assert info["max_steps"] == 9
+
+    async def test_create_session_rejects_invalid_runtime_provider(self, client):
+        response = await client.post(
+            "/sessions",
+            json={"provider": "not-a-provider", "model": "test-model"},
+        )
+
+        assert response.status_code == 422
+
     def test_build_session_manager_enables_owner_store_for_pg_http_sessions(
         self, monkeypatch
     ):

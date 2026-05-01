@@ -19,6 +19,17 @@ class CreateSessionRequest(BaseModel):
 
     repo_path: str | None = Field(None, max_length=500)
     approval_policy: str = Field("auto", pattern="^(yolo|interactive|auto)$")
+    provider: Literal[
+        "openai",
+        "anthropic",
+        "copilot",
+        "kimi",
+        "kimi-code",
+        "kimi-code-anthropic",
+    ] | None = None
+    model: str | None = Field(None, min_length=1, max_length=200)
+    base_url: str | None = Field(None, min_length=1, max_length=500)
+    max_steps: int | None = Field(None, ge=0)
 
 
 class ApproveRequest(BaseModel):
