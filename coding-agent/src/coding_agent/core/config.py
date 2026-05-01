@@ -101,7 +101,7 @@ def load_config(cli_args: dict[str, object] | None = None) -> Config:
         if kimi_code_token:
             values["api_key"] = kimi_code_token
 
-    if values.get("provider") == "deepseek" and "api_key" not in values:
+    if values.get("provider") == "deepseek" and not values.get("api_key"):
         deepseek_token = os.environ.get("DEEPSEEK_API_KEY")
         if deepseek_token:
             values["api_key"] = deepseek_token

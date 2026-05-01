@@ -518,6 +518,7 @@ class TestCliProviderChoices:
     def test_run_uses_deepseek_api_key_env_without_cli_api_key(self, monkeypatch):
         from coding_agent.__main__ import main
 
+        monkeypatch.delenv("AGENT_API_KEY", raising=False)
         monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-env-key")
         runner = CliRunner()
 

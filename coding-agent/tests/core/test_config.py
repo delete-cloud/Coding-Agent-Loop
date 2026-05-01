@@ -127,3 +127,15 @@ class TestLoadConfig:
         assert c.provider == "deepseek"
         assert c.api_key is not None
         assert c.api_key.get_secret_value() == "sk-deepseek-token"
+
+    def test_deepseek_uses_deepseek_api_key_when_agent_api_key_is_empty(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("AGENT_API_KEY", "")
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek-token")
+
+        c = load_config(cli_args={"provider": "deepseek"})
+
+        assert c.provider == "deepseek"
+        assert c.api_key is not None
+        assert c.api_key.get_secret_value() == "sk-deepseek-token"
