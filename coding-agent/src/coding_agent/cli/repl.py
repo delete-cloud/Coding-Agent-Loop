@@ -81,8 +81,13 @@ class InteractiveSession:
         )
         self._footer = StatusFooter(console=console)
         self._managed_session_initialized = False
+        self.context["on_clear"] = self._on_clear
 
         self._setup_agent()
+
+    def _on_clear(self) -> None:
+        if self._footer.enabled:
+            self._footer.clear_and_redraw()
 
     def _refresh_command_context_from_pipeline_ctx(self, pipeline_ctx: Any) -> None:
         self.context["pipeline_ctx"] = pipeline_ctx
@@ -273,7 +278,7 @@ class InteractiveSession:
         await self._session_manager.shutdown_session_runtime(session_id)
         managed_session = self._session_manager.get_session(session_id)
         managed_session.model_name = model_name
-        self._session_manager._persist_session(managed_session)
+        await self._session_manager._persist_session_async(managed_session)
         await self._switch_session(session_id)
 
     async def _restore_checkpoint(self, checkpoint_id: str) -> None:
@@ -345,8 +350,6 @@ class InteractiveSession:
 
                 if user_input.startswith("/"):
                     await handle_command(user_input, self.context)
-                    if user_input.strip() == "/clear" and self._footer.enabled:
-                        self._footer.clear_and_redraw()
                     continue
 
                 try:

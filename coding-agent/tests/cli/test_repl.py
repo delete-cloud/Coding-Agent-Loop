@@ -649,10 +649,10 @@ class TestFooterIntegration:
 
         await handle_command("/clear", session.context)
 
-        on_clear = getattr(session, "_on_clear", None)
-        if callable(on_clear):
-            on_clear()
-            assert redraw_calls == ["redraw"]
+        on_clear = session._on_clear
+        assert callable(on_clear)
+        assert callable(session.context["on_clear"])
+        assert redraw_calls == ["redraw"]
 
     def test_footer_not_enabled_in_nontty(self, monkeypatch):
         from coding_agent.cli.repl import InteractiveSession

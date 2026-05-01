@@ -90,6 +90,9 @@ async def cmd_quit(args: list[str], context: dict[str, Any]) -> None:
 @command("clear", "Clear the screen")
 async def cmd_clear(args: list[str], context: dict[str, Any]) -> None:
     print("\033[2J\033[H", end="")
+    on_clear = context.get("on_clear")
+    if callable(on_clear):
+        on_clear()
 
 
 @command("plan", "Show current plan")
