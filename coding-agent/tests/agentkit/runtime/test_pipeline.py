@@ -7,6 +7,7 @@ from agentkit.tape.tape import Tape
 from agentkit.tape.models import Entry
 from agentkit.tape.anchor import Anchor
 from agentkit.errors import PipelineError
+from agentkit.tools import UNHANDLED_TOOL_RESULT
 from agentkit.tools.schema import ToolSchema
 
 
@@ -65,7 +66,7 @@ class GreedyToolPlugin:
 
     def execute_tool(self, name: str = "", **kwargs):
         if name != "known_tool":
-            return None
+            return UNHANDLED_TOOL_RESULT
         return "known-tool-result"
 
 
@@ -97,7 +98,7 @@ class SkillsLikePlugin:
         self, name: str = "", arguments: dict[str, object] | None = None, **kwargs
     ):
         if name != "skill_invoke":
-            return None
+            return UNHANDLED_TOOL_RESULT
         return f"activated:{(arguments or {}).get('name', '')}"
 
 

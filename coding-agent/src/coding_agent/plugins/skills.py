@@ -12,6 +12,7 @@ import logging
 from pathlib import Path
 from typing import Any, Callable
 
+from agentkit.tools import UNHANDLED_TOOL_RESULT
 from agentkit.tools.schema import ToolSchema
 
 from coding_agent.skills import SkillMetadata, discover_skills
@@ -155,7 +156,7 @@ class SkillsPlugin:
             return self._handle_skill_invoke(arguments or {})
         if name == "skill_list":
             return self._handle_skill_list()
-        return None
+        return UNHANDLED_TOOL_RESULT
 
     def _handle_skill_invoke(self, arguments: dict[str, Any]) -> str:
         skill_name = arguments.get("name", "")

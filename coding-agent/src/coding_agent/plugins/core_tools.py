@@ -5,7 +5,7 @@ from typing import Any, Callable
 
 from agentkit.environment import Environment
 from agentkit.runtime.pipeline import PipelineContext
-from agentkit.tools import ToolRegistry, ToolSchema
+from agentkit.tools import ToolRegistry, ToolSchema, UNHANDLED_TOOL_RESULT
 
 from coding_agent.environment import LocalEnvironment
 from coding_agent.plugins.shell_session import ShellSessionPlugin
@@ -94,7 +94,7 @@ class CoreToolsPlugin:
         self, name: str = "", arguments: dict[str, Any] | None = None, **kwargs: Any
     ) -> Any:
         if name not in self._registry.names():
-            return None
+            return UNHANDLED_TOOL_RESULT
         args = self._prepare_arguments(name, arguments)
         pipeline_ctx = kwargs.get("ctx")
         if isinstance(pipeline_ctx, PipelineContext):
@@ -109,7 +109,7 @@ class CoreToolsPlugin:
         self, name: str = "", arguments: dict[str, Any] | None = None, **kwargs: Any
     ) -> Any:
         if name not in self._registry.names():
-            return None
+            return UNHANDLED_TOOL_RESULT
         args = self._prepare_arguments(name, arguments)
         pipeline_ctx = kwargs.get("ctx")
         if isinstance(pipeline_ctx, PipelineContext):

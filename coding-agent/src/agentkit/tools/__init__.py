@@ -10,6 +10,7 @@ from agentkit.tools.toolset import (
     ToolProvider,
     ToolValidationError,
     Toolset,
+    UNHANDLED_TOOL_RESULT,
 )
 
 __all__ = [
@@ -23,5 +24,6 @@ __all__ = [
     "ToolSchema",
     "ToolValidationError",
     "Toolset",
+    "UNHANDLED_TOOL_RESULT",
     "tool",
 ]

@@ -770,14 +770,20 @@ class TestPipelineE2E:
 
         _mock_provider(pipeline, mock_stream)
 
-        original_call_first = pipeline._runtime.call_first
+        core_tools = pipeline._registry.get("core_tools")
+        original_execute_tool = core_tools.execute_tool
 
-        def patched_call_first(hook_name, **kwargs):
-            if hook_name == "execute_tool" and kwargs.get("name") == "bash_run":
+        def fake_execute_tool(name="", arguments=None, **kwargs):
+            if name == "bash_run":
                 return large_result
-            return original_call_first(hook_name, **kwargs)
+            return original_execute_tool(name=name, arguments=arguments, **kwargs)
 
-        pipeline._runtime.call_first = patched_call_first
+        pipeline._registry._hook_index["execute_tool"] = [
+            fake_execute_tool
+            if getattr(hook, "__self__", None) is core_tools
+            else hook
+            for hook in pipeline._registry._hook_index["execute_tool"]
+        ]
 
         await pipeline.mount(ctx)
 
