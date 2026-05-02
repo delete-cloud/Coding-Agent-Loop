@@ -396,14 +396,21 @@ class Toolset:
 
         raw_payload = [call.to_hook_payload() for call in calls]
         for hook in hooks:
-            try:
-                raw_results = hook(tool_calls=raw_payload, ctx=ctx)
-                raw_results = await self._await_if_needed(
-                    raw_results,
-                    timeout_seconds=options.timeout_seconds,
-                )
-            except Exception as exc:
-                return self._error_results(calls, exc)
+            remaining_attempts = options.max_retries + 1
+            while remaining_attempts > 0:
+                remaining_attempts -= 1
+                try:
+                    raw_results = hook(tool_calls=raw_payload, ctx=ctx)
+                    raw_results = await self._await_if_needed(
+                        raw_results,
+                        timeout_seconds=options.timeout_seconds,
+                    )
+                    break
+                except Exception as exc:
+                    if remaining_attempts == 0:
+                        return self._error_results(calls, exc)
+            else:
+                raise RuntimeError("unreachable")
 
             if raw_results is None:
                 continue

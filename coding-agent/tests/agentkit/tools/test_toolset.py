@@ -130,6 +130,24 @@ class RaisingBatchToolPlugin:
         raise RuntimeError("batch exploded")
 
 
+class FlakyBatchToolPlugin:
+    state_key = "flaky_batch_tool"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def hooks(self):
+        return {"execute_tools_batch": self.execute_tools_batch}
+
+    async def execute_tools_batch(self, **kwargs: Any) -> list[str]:
+        del kwargs
+        self.calls += 1
+        await asyncio.sleep(0)
+        if self.calls == 1:
+            raise RuntimeError("batch transient")
+        return ["retried-one", "retried-two"]
+
+
 class NoneBatchToolPlugin:
     state_key = "none_batch_tool"
 
@@ -523,6 +541,35 @@ async def test_toolset_wraps_batch_hook_exceptions_for_each_tool_call() -> None:
     assert [result.name for result in results] == ["one", "two"]
     assert all(isinstance(result.error, RuntimeError) for result in results)
     assert all(result.is_error for result in results)
+
+
+@pytest.mark.asyncio
+async def test_toolset_retries_transient_batch_hook_failures() -> None:
+    plugin = FlakyBatchToolPlugin()
+    toolset = Toolset(runtime=_runtime(plugin))
+
+    results = await toolset.execute_tools(
+        [
+            ToolCallRequest(tool_call_id="tc-batch-1", name="one", arguments={}),
+            ToolCallRequest(tool_call_id="tc-batch-2", name="two", arguments={}),
+        ],
+        ctx=object(),
+        options=ToolExecutionOptions(max_retries=1),
+    )
+
+    assert results == [
+        ToolExecutionResult(
+            tool_call_id="tc-batch-1",
+            name="one",
+            result="retried-one",
+        ),
+        ToolExecutionResult(
+            tool_call_id="tc-batch-2",
+            name="two",
+            result="retried-two",
+        ),
+    ]
+    assert plugin.calls == 2
 
 
 @pytest.mark.asyncio
