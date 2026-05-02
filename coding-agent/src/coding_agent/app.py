@@ -18,6 +18,7 @@ from agentkit.runtime.hookspecs import HOOK_SPECS
 from agentkit.runtime.pipeline import Pipeline, PipelineContext
 from agentkit.tape.tape import Tape
 
+from coding_agent.agent_identity import legacy_agent_id_str
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.environment import LocalEnvironment
 from coding_agent.plugins.approval import ApprovalPlugin
@@ -41,9 +42,7 @@ ToolFilter = Any
 
 
 def _legacy_config_agent_id(run_context: AgentRunContext) -> str:
-    if run_context.agent_id is None:
-        return ""
-    return run_context.agent_id
+    return legacy_agent_id_str(run_context.agent_id)
 
 
 def _child_system_prompt_suffix(tool_filter: ToolFilter) -> str:
@@ -313,7 +312,12 @@ def create_child_pipeline(
         directive_executor=directive_executor,
     )
 
-    session_id = session_id_override or uuid.uuid4().hex
+    if session_id_override is None:
+        session_id = uuid.uuid4().hex
+    else:
+        if not session_id_override:
+            raise ValueError("session_id_override must be None or a non-empty string")
+        session_id = session_id_override
     run_context = AgentRunContext(
         session_id=session_id,
         run_id=uuid.uuid4().hex,

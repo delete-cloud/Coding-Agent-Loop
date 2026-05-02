@@ -199,6 +199,53 @@ enabled = ["storage", "core_tools"]
         assert ctx.config["model"] == "gpt-test"
         assert ctx.config["max_tool_rounds"] == 7
 
+    def test_create_agent_normalizes_explicit_none_agent_id_override(self, tmp_path):
+        """Explicit None must produce run_context.agent_id is None and "" in legacy config."""
+        config_path = (
+            Path(__file__).parent.parent.parent / "src" / "coding_agent" / "agent.toml"
+        )
+        if not config_path.exists():
+            pytest.skip("agent.toml not found")
+
+        environment = LocalEnvironment(workspace_root=tmp_path / "env-workspace")
+
+        _pipeline, ctx = create_agent(
+            config_path=config_path,
+            data_dir=tmp_path / "data",
+            api_key="[REDACTED:api-key]",
+            model_override="gpt-test",
+            provider_override="openai",
+            base_url_override="http://localhost:1234/v1",
+            session_id_override="session-1",
+            agent_id_override=None,
+            environment=environment,
+        )
+
+        assert ctx.run_context.agent_id is None
+        assert ctx.config["agent_id"] == ""
+
+    def test_create_agent_rejects_empty_session_id_override(self, tmp_path):
+        """Empty (but not None) session_id_override must fail fast, not become a uuid."""
+        config_path = (
+            Path(__file__).parent.parent.parent / "src" / "coding_agent" / "agent.toml"
+        )
+        if not config_path.exists():
+            pytest.skip("agent.toml not found")
+
+        environment = LocalEnvironment(workspace_root=tmp_path / "env-workspace")
+
+        with pytest.raises(ValueError, match="session_id_override"):
+            create_agent(
+                config_path=config_path,
+                data_dir=tmp_path / "data",
+                api_key="[REDACTED:api-key]",
+                model_override="gpt-test",
+                provider_override="openai",
+                base_url_override="http://localhost:1234/v1",
+                session_id_override="",
+                environment=environment,
+            )
+
     def test_create_agent_reads_subagent_timeout_from_config(self, tmp_path):
         config_path = tmp_path / "agent.toml"
         config_path.write_text(

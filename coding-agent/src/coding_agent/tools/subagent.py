@@ -13,10 +13,16 @@ from agentkit.tools import tool
 
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.adapter_types import StopReason, TurnOutcome
+from coding_agent.agent_identity import effective_agent_id, legacy_agent_id_str
 from coding_agent.wire.protocol import ToolCallDelta, WireMessage
 
 
 ChildPipelineBuilder = Callable[..., tuple[Pipeline, PipelineContext]]
+
+# Trace metadata keys reserved by subagent dispatch. Namespaced so they cannot
+# collide with caller-supplied trace metadata.
+_TRACE_KEY_PARENT_AGENT_ID = "subagent.parent_agent_id"
+_TRACE_KEY_CHILD_AGENT_ID = "subagent.child_agent_id"
 
 _READ_ONLY_CHILD_TOOLS = {
     "file_read",
@@ -91,23 +97,8 @@ async def _close_adapter_if_supported(adapter: object) -> None:
     await maybe_awaitable
 
 
-def _pipeline_agent_id(pipeline_ctx: PipelineContext) -> str | None:
-    if pipeline_ctx.run_context is not None:
-        return pipeline_ctx.run_context.agent_id
-    raw_agent_id = pipeline_ctx.config.get("agent_id")
-    if raw_agent_id is None or raw_agent_id == "":
-        return None
-    return str(raw_agent_id)
-
-
-def _legacy_agent_id(agent_id: str | None) -> str:
-    if agent_id is None:
-        return ""
-    return agent_id
-
-
 def _child_agent_id(pipeline_ctx: PipelineContext) -> str:
-    parent_agent_id = _legacy_agent_id(_pipeline_agent_id(pipeline_ctx))
+    parent_agent_id = legacy_agent_id_str(effective_agent_id(pipeline_ctx))
     coordinator = pipeline_ctx.config.get("child_worker_coordinator")
     if coordinator is not None:
         allocate_child_id = getattr(coordinator, "allocate_child_id", None)
@@ -195,7 +186,21 @@ def build_subagent_tool(child_pipeline_builder: ChildPipelineBuilder):
         child_tape = _fork_child_tape(__pipeline_ctx__.tape)
         child_agent_id = _child_agent_id(__pipeline_ctx__)
         parent_run_context = __pipeline_ctx__.run_context
-        parent_agent_id = _legacy_agent_id(_pipeline_agent_id(__pipeline_ctx__))
+        parent_agent_id = legacy_agent_id_str(effective_agent_id(__pipeline_ctx__))
+        # Prefer the run_context's session_id (canonical) and fall back to the
+        # legacy ctx.session_id only if no run_context is attached. Empty
+        # session identity must never silently become a fresh uuid in the
+        # child, so fail fast here.
+        parent_session_id = (
+            parent_run_context.session_id
+            if parent_run_context is not None
+            else __pipeline_ctx__.session_id
+        )
+        if not parent_session_id:
+            raise ValueError(
+                "subagent requires a non-empty parent session_id; "
+                "ensure PipelineContext.session_id or run_context is populated"
+            )
         merged_trace_metadata: dict[str, Any] = (
             dict(parent_run_context.trace_metadata)
             if parent_run_context is not None
@@ -203,15 +208,15 @@ def build_subagent_tool(child_pipeline_builder: ChildPipelineBuilder):
         )
         merged_trace_metadata.update(
             {
-                "parent_agent_id": parent_agent_id,
-                "child_agent_id": child_agent_id,
+                _TRACE_KEY_PARENT_AGENT_ID: parent_agent_id,
+                _TRACE_KEY_CHILD_AGENT_ID: child_agent_id,
             }
         )
         child_pipeline, child_ctx = child_pipeline_builder(
             parent_provider=__pipeline_ctx__.llm_provider,
             tape_fork=child_tape,
             tool_filter=lambda tool_name: tool_name != "subagent",
-            session_id_override=__pipeline_ctx__.session_id,
+            session_id_override=parent_session_id,
             agent_id_override=child_agent_id,
             parent_run_id_override=(
                 parent_run_context.run_id if parent_run_context is not None else None
@@ -223,10 +228,8 @@ def build_subagent_tool(child_pipeline_builder: ChildPipelineBuilder):
             ),
             trace_metadata=merged_trace_metadata,
         )
-        child_ctx.config["agent_id"] = _legacy_agent_id(
-            child_ctx.run_context.agent_id
-            if child_ctx.run_context is not None
-            else child_agent_id
+        child_ctx.config["agent_id"] = legacy_agent_id_str(
+            effective_agent_id(child_ctx) or child_agent_id
         )
         timeout_seconds = _subagent_timeout_seconds(__pipeline_ctx__)
         child_base_length = len(child_tape)

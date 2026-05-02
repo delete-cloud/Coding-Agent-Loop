@@ -6,6 +6,8 @@ import time
 from collections import defaultdict
 from typing import Any, Callable
 
+from coding_agent.agent_identity import effective_agent_id, legacy_agent_id_str
+
 
 class SessionMetricsPlugin:
     state_key = "session_metrics"
@@ -89,7 +91,7 @@ class SessionMetricsPlugin:
 
         tool_call_entries = ctx.tape.filter("tool_call")
         self._steps_count = len(tool_call_entries)
-        self._current_agent_id = str(getattr(ctx, "config", {}).get("agent_id", ""))
+        self._current_agent_id = legacy_agent_id_str(effective_agent_id(ctx))
 
         self._tool_calls = defaultdict(int)
         for entry in tool_call_entries:

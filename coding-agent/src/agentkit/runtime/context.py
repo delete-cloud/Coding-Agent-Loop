@@ -10,6 +10,18 @@ from typing import Any
 from agentkit.environment import Environment
 
 
+def _validate_token_count(field_name: str, value: int | None) -> None:
+    """Reject negative budgets and disallow ``bool`` (a sneaky ``int`` subclass)."""
+    if value is None:
+        return
+    if isinstance(value, bool):
+        raise TypeError(f"{field_name} must be int or None, got bool")
+    if not isinstance(value, int):
+        raise TypeError(f"{field_name} must be int or None, got {type(value).__name__}")
+    if value < 0:
+        raise ValueError(f"{field_name} must be non-negative")
+
+
 @dataclass(frozen=True, slots=True)
 class ContextBudget:
     """Context budget limits carried for later context-management enforcement."""
@@ -20,19 +32,28 @@ class ContextBudget:
 
     def __post_init__(self) -> None:
         """Validate configured token budgets."""
-        for field_name in (
-            "max_input_tokens",
-            "reserved_output_tokens",
-            "max_output_tokens",
+        _validate_token_count("max_input_tokens", self.max_input_tokens)
+        _validate_token_count("reserved_output_tokens", self.reserved_output_tokens)
+        _validate_token_count("max_output_tokens", self.max_output_tokens)
+        if (
+            self.max_output_tokens is not None
+            and self.reserved_output_tokens > self.max_output_tokens
         ):
-            value = getattr(self, field_name)
-            if value is not None and value < 0:
-                raise ValueError(f"{field_name} must be non-negative")
+            raise ValueError(
+                "reserved_output_tokens must not exceed max_output_tokens"
+            )
 
 
 @dataclass(frozen=True, slots=True)
 class AgentRunContext:
-    """Runtime identity and dependencies for one agent run."""
+    """Runtime identity and dependencies for one agent run.
+
+    ``trace_metadata`` is shallow-frozen via ``MappingProxyType``: top-level keys
+    cannot be mutated, but nested mutable values (lists, dicts) are *not*
+    deep-copied. Callers must only pass JSON-scalar values (or otherwise
+    immutable ones); mutating nested values after construction is undefined
+    behavior. ``derive_child`` performs a shallow merge with the same caveat.
+    """
 
     session_id: str
     run_id: str

@@ -319,6 +319,7 @@ class TestCoreToolsPlugin:
             session_id_override: str | None = None,
             agent_id_override: str | None = None,
             parent_run_id_override: str | None = None,
+            context_budget: object | None = None,
             trace_metadata: dict[str, object] | None = None,
         ):
             child_registry = ToolRegistry()
@@ -377,8 +378,8 @@ class TestCoreToolsPlugin:
         assert captured["agent_id_override"] == "child-1"
         assert captured["parent_run_id_override"] is None
         assert captured["trace_metadata"] == {
-            "parent_agent_id": "",
-            "child_agent_id": "child-1",
+            "subagent.parent_agent_id": "",
+            "subagent.child_agent_id": "child-1",
         }
         assert parent_ctx.plugin_states["doom_detector"] is parent_doom_state
         appended_entries = list(parent_tape)[2:]

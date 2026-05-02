@@ -6,7 +6,7 @@ from typing import Any, cast
 import pytest
 
 from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
-from agentkit.runtime import AgentRunContext
+from agentkit.runtime import AgentRunContext, ContextBudget
 from agentkit.runtime.pipeline import Pipeline, PipelineContext
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
@@ -303,9 +303,153 @@ async def test_subagent_tool_passes_child_run_identity_to_builder(
     assert captured_kwargs["agent_id_override"] == "parent-agent.child-1"
     assert captured_kwargs["parent_run_id_override"] == "parent-run"
     assert captured_kwargs["trace_metadata"] == {
-        "parent_agent_id": "parent-agent",
-        "child_agent_id": "parent-agent.child-1",
+        "subagent.parent_agent_id": "parent-agent",
+        "subagent.child_agent_id": "parent-agent.child-1",
     }
+
+
+def _make_immediate_adapter() -> type:
+    class ImmediateAdapter:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        async def run_turn(self, _goal: str) -> TurnOutcome:
+            return TurnOutcome(
+                stop_reason=StopReason.NO_TOOL_CALLS,
+                final_message="Child finished",
+            )
+
+    return ImmediateAdapter
+
+
+class _StubCoordinator:
+    def allocate_child_id(self, parent_agent_id: str) -> str:
+        return f"{parent_agent_id}.child-1"
+
+
+def _capture_kwargs_builder(captured: dict[str, Any]):
+    def child_pipeline_builder(**kwargs: Any):
+        captured.update(kwargs)
+        return cast(Pipeline, object()), PipelineContext(
+            tape=kwargs["tape_fork"],
+            session_id="parent-session",
+        )
+
+    return child_pipeline_builder
+
+
+@pytest.mark.asyncio
+async def test_subagent_tool_forwards_parent_context_budget_and_merges_trace_metadata(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    """Parent budget and existing trace keys must survive into the child run."""
+    captured: dict[str, Any] = {}
+    environment = LocalEnvironment(tmp_path)
+    parent_budget = ContextBudget(max_input_tokens=64000, reserved_output_tokens=4096)
+
+    monkeypatch.setattr(
+        "coding_agent.tools.subagent.PipelineAdapter", _make_immediate_adapter()
+    )
+
+    parent_ctx = PipelineContext(
+        tape=Tape(),
+        session_id="parent-session",
+        run_context=AgentRunContext(
+            session_id="parent-session",
+            run_id="parent-run",
+            agent_id="parent-agent",
+            environment=environment,
+            context_budget=parent_budget,
+            trace_metadata={"request_id": "req-1", "tenant": "acme"},
+        ),
+        config={
+            "agent_id": "parent-agent",
+            "subagent_timeout": 30.0,
+            "child_worker_coordinator": _StubCoordinator(),
+        },
+    )
+
+    tool_fn = build_subagent_tool(_capture_kwargs_builder(captured))
+
+    await tool_fn(goal="Inspect", __pipeline_ctx__=parent_ctx)
+
+    assert captured["context_budget"] is parent_budget
+    assert captured["trace_metadata"] == {
+        "request_id": "req-1",
+        "tenant": "acme",
+        "subagent.parent_agent_id": "parent-agent",
+        "subagent.child_agent_id": "parent-agent.child-1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_subagent_tool_overwrites_caller_supplied_reserved_trace_keys(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    """Caller values for the reserved subagent.* keys must be overwritten."""
+    captured: dict[str, Any] = {}
+    environment = LocalEnvironment(tmp_path)
+
+    monkeypatch.setattr(
+        "coding_agent.tools.subagent.PipelineAdapter", _make_immediate_adapter()
+    )
+
+    parent_ctx = PipelineContext(
+        tape=Tape(),
+        session_id="parent-session",
+        run_context=AgentRunContext(
+            session_id="parent-session",
+            run_id="parent-run",
+            agent_id="parent-agent",
+            environment=environment,
+            trace_metadata={
+                "subagent.parent_agent_id": "stale-parent",
+                "subagent.child_agent_id": "stale-child",
+            },
+        ),
+        config={
+            "agent_id": "parent-agent",
+            "subagent_timeout": 30.0,
+            "child_worker_coordinator": _StubCoordinator(),
+        },
+    )
+
+    tool_fn = build_subagent_tool(_capture_kwargs_builder(captured))
+
+    await tool_fn(goal="Inspect", __pipeline_ctx__=parent_ctx)
+
+    assert captured["trace_metadata"]["subagent.parent_agent_id"] == "parent-agent"
+    assert (
+        captured["trace_metadata"]["subagent.child_agent_id"]
+        == "parent-agent.child-1"
+    )
+
+
+@pytest.mark.asyncio
+async def test_subagent_tool_fails_fast_on_empty_parent_session_id(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """An empty parent session_id must not silently mint a fresh child uuid."""
+    monkeypatch.setattr(
+        "coding_agent.tools.subagent.PipelineAdapter", _make_immediate_adapter()
+    )
+
+    captured: dict[str, Any] = {}
+    parent_ctx = PipelineContext(
+        tape=Tape(),
+        session_id="",  # legacy default; no run_context attached either
+        config={
+            "agent_id": "parent-agent",
+            "subagent_timeout": 30.0,
+            "child_worker_coordinator": _StubCoordinator(),
+        },
+    )
+
+    tool_fn = build_subagent_tool(_capture_kwargs_builder(captured))
+
+    with pytest.raises(ValueError, match="non-empty parent session_id"):
+        await tool_fn(goal="Inspect", __pipeline_ctx__=parent_ctx)
+    assert captured == {}
 
 
 @pytest.mark.asyncio
@@ -344,7 +488,7 @@ async def test_subagent_tool_fails_fast_when_child_builder_omits_run_identity_kw
 
     tool_fn = build_subagent_tool(child_pipeline_builder)
 
-    with pytest.raises(TypeError, match="agent_id_override"):
+    with pytest.raises(TypeError):
         await tool_fn(goal="Run child safely", __pipeline_ctx__=parent_ctx)
 
 

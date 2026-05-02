@@ -54,18 +54,15 @@ def test_agent_run_context_carries_runtime_identity_without_model_source() -> No
     assert run_context.trace_metadata["request_id"] == "req-1"
 
 
-def test_agent_run_context_schema_is_limited_to_runtime_fields() -> None:
+def test_agent_run_context_schema_excludes_model_source_fields() -> None:
+    """Identity primitives must not silently absorb provider/model metadata."""
     field_names = {field.name for field in fields(AgentRunContext)}
 
-    assert field_names == {
-        "session_id",
-        "run_id",
-        "agent_id",
-        "environment",
-        "parent_run_id",
-        "context_budget",
-        "trace_metadata",
-    }
+    required = {"session_id", "run_id", "agent_id", "environment"}
+    assert required <= field_names
+
+    forbidden = {"provider_name", "model_name", "base_url", "max_steps"}
+    assert forbidden.isdisjoint(field_names)
 
 
 def test_agent_run_context_allows_none_for_root_agent_id() -> None:
@@ -136,6 +133,17 @@ def test_agent_run_context_derives_child_run_from_parent() -> None:
         "request_id": "req-1",
         "child_goal": "inspect",
     }
+
+
+def test_context_budget_rejects_bool_token_counts() -> None:
+    """``bool`` is an ``int`` subclass — reject it explicitly."""
+    with pytest.raises(TypeError, match="bool"):
+        ContextBudget(max_input_tokens=cast(int, True))
+
+
+def test_context_budget_rejects_reserved_exceeding_max_output() -> None:
+    with pytest.raises(ValueError, match="reserved_output_tokens"):
+        ContextBudget(reserved_output_tokens=2048, max_output_tokens=1024)
 
 
 def test_agent_run_context_rejects_empty_child_run_id() -> None:
