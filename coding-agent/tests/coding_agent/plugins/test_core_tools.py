@@ -317,6 +317,10 @@ class TestCoreToolsPlugin:
             tape_fork: Tape,
             tool_filter,
             session_id_override: str | None = None,
+            agent_id_override: str | None = None,
+            parent_run_id_override: str | None = None,
+            context_budget: object | None = None,
+            trace_metadata: dict[str, object] | None = None,
         ):
             child_registry = ToolRegistry()
 
@@ -347,6 +351,9 @@ class TestCoreToolsPlugin:
             captured["child_registry_names"] = child_registry.names()
             captured["child_plugin_states"] = child_ctx.plugin_states
             captured["session_id_override"] = session_id_override
+            captured["agent_id_override"] = agent_id_override
+            captured["parent_run_id_override"] = parent_run_id_override
+            captured["trace_metadata"] = trace_metadata
             return FakeChildPipeline(), child_ctx
 
         plugin = CoreToolsPlugin(
@@ -368,6 +375,12 @@ class TestCoreToolsPlugin:
         assert captured["child_plugin_states"] == {}
         assert captured["child_plugin_states"] is not parent_ctx.plugin_states
         assert captured["session_id_override"] == parent_ctx.session_id
+        assert captured["agent_id_override"] == "child-1"
+        assert captured["parent_run_id_override"] is None
+        assert captured["trace_metadata"] == {
+            "subagent.parent_agent_id": "",
+            "subagent.child_agent_id": "child-1",
+        }
         assert parent_ctx.plugin_states["doom_detector"] is parent_doom_state
         appended_entries = list(parent_tape)[2:]
         assert len(appended_entries) == 2

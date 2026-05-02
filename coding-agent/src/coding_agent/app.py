@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import inspect
 import uuid
+from collections.abc import Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -11,11 +12,13 @@ from agentkit.config.loader import load_config
 from agentkit.directive.executor import DirectiveExecutor
 from agentkit.environment import Environment
 from agentkit.plugin.registry import PluginRegistry
+from agentkit.runtime import AgentRunContext, ContextBudget
 from agentkit.runtime.hook_runtime import HookRuntime
 from agentkit.runtime.hookspecs import HOOK_SPECS
 from agentkit.runtime.pipeline import Pipeline, PipelineContext
 from agentkit.tape.tape import Tape
 
+from coding_agent.agent_identity import legacy_agent_id_str
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.environment import LocalEnvironment
 from coding_agent.plugins.approval import ApprovalPlugin
@@ -36,6 +39,10 @@ from coding_agent.subagents.coordinator import ChildWorkerCoordinator
 from coding_agent.tools.web_search import create_web_search_backend
 
 ToolFilter = Any
+
+
+def _legacy_config_agent_id(run_context: AgentRunContext) -> str:
+    return legacy_agent_id_str(run_context.agent_id)
 
 
 def _child_system_prompt_suffix(tool_filter: ToolFilter) -> str:
@@ -116,6 +123,10 @@ def create_child_pipeline(
     max_steps_override: int | None = None,
     approval_mode_override: str | None = None,
     session_id_override: str | None = None,
+    agent_id_override: str | None = None,
+    parent_run_id_override: str | None = None,
+    context_budget: ContextBudget | None = None,
+    trace_metadata: Mapping[str, Any] | None = None,
 ) -> tuple[Any, Any]:
     if config_path is None:
         config_path = Path(__file__).parent / "agent.toml"
@@ -301,15 +312,33 @@ def create_child_pipeline(
         directive_executor=directive_executor,
     )
 
+    if session_id_override is None:
+        session_id = uuid.uuid4().hex
+    else:
+        if not session_id_override:
+            raise ValueError("session_id_override must be None or a non-empty string")
+        session_id = session_id_override
+    run_context = AgentRunContext(
+        session_id=session_id,
+        run_id=uuid.uuid4().hex,
+        agent_id=agent_id_override,
+        parent_run_id=parent_run_id_override,
+        environment=environment,
+        context_budget=ContextBudget() if context_budget is None else context_budget,
+        trace_metadata={} if trace_metadata is None else trace_metadata,
+    )
+
     ctx = PipelineContext(
         tape=tape_fork,
-        session_id=session_id_override or uuid.uuid4().hex,
+        session_id=session_id,
+        run_context=run_context,
         config={
             "system_prompt": cfg.system_prompt,
             "model": cfg.model,
             "provider": cfg.provider,
             "approval_mode": policy_str,
             "max_tool_rounds": cfg.max_turns,
+            "agent_id": _legacy_config_agent_id(run_context),
             "subagent_timeout": float(subagent_cfg.get("timeout", 30.0)),
             "child_worker_coordinator": ChildWorkerCoordinator(),
             "web_search": web_search_cfg,
@@ -345,6 +374,10 @@ def create_agent(
     max_steps_override: int | None = None,
     approval_mode_override: str | None = None,
     session_id_override: str | None = None,
+    agent_id_override: str | None = None,
+    parent_run_id_override: str | None = None,
+    context_budget: ContextBudget | None = None,
+    trace_metadata: Mapping[str, Any] | None = None,
     tape: Tape | None = None,
 ) -> tuple[Any, Any]:
     return create_child_pipeline(
@@ -362,4 +395,8 @@ def create_agent(
         max_steps_override=max_steps_override,
         approval_mode_override=approval_mode_override,
         session_id_override=session_id_override,
+        agent_id_override=agent_id_override,
+        parent_run_id_override=parent_run_id_override,
+        context_budget=context_budget,
+        trace_metadata=trace_metadata,
     )
