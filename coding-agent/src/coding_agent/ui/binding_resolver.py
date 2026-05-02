@@ -27,7 +27,7 @@ class CloudBindingNotImplementedError(NotImplementedError):
 class DefaultBindingResolver:
     def resolve_workspace_root(self, binding: ExecutionBinding) -> Path:
         if isinstance(binding, LocalExecutionBinding):
-            return Path(binding.workspace_root).resolve()
+            return Path(binding.workspace_root).expanduser().resolve()
         if isinstance(binding, CloudWorkspaceBinding):
             raise CloudBindingNotImplementedError(
                 "cloud workspace resolution is not yet implemented"
