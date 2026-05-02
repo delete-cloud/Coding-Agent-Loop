@@ -90,6 +90,9 @@ async def cmd_quit(args: list[str], context: dict[str, Any]) -> None:
 @command("clear", "Clear the screen")
 async def cmd_clear(args: list[str], context: dict[str, Any]) -> None:
     print("\033[2J\033[H", end="")
+    on_clear = context.get("on_clear")
+    if callable(on_clear):
+        on_clear()
 
 
 @command("plan", "Show current plan")
@@ -114,7 +117,14 @@ async def cmd_model(args: list[str], context: dict[str, Any]) -> None:
                 output=_out(),
             )
             return
-        context["model"] = new_model
+        on_model_change = cast(
+            Callable[[str], Coroutine[Any, Any, None]] | None,
+            context.get("on_model_change"),
+        )
+        if callable(on_model_change):
+            await on_model_change(new_model)
+        else:
+            context["model"] = new_model
         output = _out()
         print_html(
             f"Model changed to: <ansicyan><b>{_h(new_model)}</b></ansicyan>",

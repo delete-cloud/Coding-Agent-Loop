@@ -81,8 +81,13 @@ class InteractiveSession:
         )
         self._footer = StatusFooter(console=console)
         self._managed_session_initialized = False
+        self.context["on_clear"] = self._on_clear
 
         self._setup_agent()
+
+    def _on_clear(self) -> None:
+        if self._footer.enabled:
+            self._footer.clear_and_redraw()
 
     def _refresh_command_context_from_pipeline_ctx(self, pipeline_ctx: Any) -> None:
         self.context["pipeline_ctx"] = pipeline_ctx
@@ -134,6 +139,7 @@ class InteractiveSession:
         self.context["create_session"] = self._create_managed_session
         self.context["switch_session"] = self._switch_session
         self.context["restore_checkpoint"] = self._restore_checkpoint
+        self.context["on_model_change"] = self._change_model_for_next_turn
         pipeline, pipeline_ctx = create_agent(
             api_key=str(self.config.api_key.get_secret_value())
             if self.config.api_key
@@ -261,6 +267,44 @@ class InteractiveSession:
             self._pipeline_ctx.config["wire_consumer"] = self._consumer
         self._refresh_command_context_from_pipeline_ctx(managed_session.runtime_ctx)
 
+    async def _change_model_for_next_turn(self, model_name: str) -> None:
+        if self.config.model == model_name:
+            return
+        old_model_name = self.config.model
+        session_id = self.context.get("session_id")
+        if not isinstance(session_id, str):
+            self.config.model = model_name
+            self.context["model"] = model_name
+            try:
+                self._setup_agent()
+            except Exception:
+                self.config.model = old_model_name
+                self.context["model"] = old_model_name
+                raise
+            return
+
+        try:
+            managed_session = await self._session_manager.replace_session_runtime_config(
+                session_id,
+                model_name=model_name,
+            )
+        except Exception:
+            self.config.model = old_model_name
+            self.context["model"] = old_model_name
+            raise
+
+        self._sync_config_from_managed_session(managed_session)
+        self.context["session_id"] = managed_session.id
+        self.context["model"] = self.config.model
+        self._pipeline = managed_session.runtime_pipeline
+        self._pipeline_ctx = managed_session.runtime_ctx
+        self._pipeline_adapter = managed_session.runtime_adapter
+        if self._pipeline_adapter is not None:
+            self._pipeline_adapter.set_consumer(self._consumer)
+        if self._pipeline_ctx is not None:
+            self._pipeline_ctx.config["wire_consumer"] = self._consumer
+        self._refresh_command_context_from_pipeline_ctx(managed_session.runtime_ctx)
+
     async def _restore_checkpoint(self, checkpoint_id: str) -> None:
         session_id = self.context.get("session_id")
         if not isinstance(session_id, str):
@@ -330,8 +374,6 @@ class InteractiveSession:
 
                 if user_input.startswith("/"):
                     await handle_command(user_input, self.context)
-                    if user_input.strip() == "/clear" and self._footer.enabled:
-                        self._footer.clear_and_redraw()
                     continue
 
                 try:

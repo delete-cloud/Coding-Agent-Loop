@@ -212,6 +212,26 @@ def test_session_preserves_explicit_execution_binding_with_repo_path(
     assert session.execution_binding.workspace_root == str(explicit_root)
 
 
+def test_session_as_dict_includes_restart_metadata() -> None:
+    session = Session(
+        id="session-as-dict",
+        created_at=datetime.now(),
+        last_activity=datetime.now(),
+        approval_store=ApprovalStore(),
+    )
+    session.provider_name = "anthropic"
+    session.model_name = "claude-test"
+    session.base_url = "http://llm.local"
+    session.max_steps = 12
+
+    payload = session.as_dict()
+
+    assert payload["provider_name"] == "anthropic"
+    assert payload["model_name"] == "claude-test"
+    assert payload["base_url"] == "http://llm.local"
+    assert payload["max_steps"] == 12
+
+
 def test_session_metadata_defaults_missing_binding_to_local_from_repo_path(
     tmp_path: Path,
 ) -> None:
