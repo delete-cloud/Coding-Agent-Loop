@@ -312,6 +312,111 @@ def test_toolset_validates_required_and_unknown_arguments() -> None:
     assert extra.message == "unexpected argument: extra"
 
 
+def test_toolset_validates_json_schema_types_enums_and_ranges() -> None:
+    toolset = Toolset(runtime=_runtime())
+    schema = ToolSchema(
+        name="configure",
+        description="Configure execution",
+        parameters={
+            "type": "object",
+            "properties": {
+                "count": {"type": "integer", "minimum": 1, "maximum": 5},
+                "mode": {"type": "string", "enum": ["fast", "safe"]},
+            },
+            "required": ["count", "mode"],
+            "additionalProperties": False,
+        },
+    )
+
+    wrong_type = toolset.validate_tool_call(
+        ToolCallRequest(
+            tool_call_id="tc-type",
+            name="configure",
+            arguments={"count": "not-int", "mode": "fast"},
+        ),
+        schemas=[schema],
+    )
+    bad_enum = toolset.validate_tool_call(
+        ToolCallRequest(
+            tool_call_id="tc-enum",
+            name="configure",
+            arguments={"count": 2, "mode": "turbo"},
+        ),
+        schemas=[schema],
+    )
+    too_small = toolset.validate_tool_call(
+        ToolCallRequest(
+            tool_call_id="tc-minimum",
+            name="configure",
+            arguments={"count": 0, "mode": "safe"},
+        ),
+        schemas=[schema],
+    )
+    too_large = toolset.validate_tool_call(
+        ToolCallRequest(
+            tool_call_id="tc-maximum",
+            name="configure",
+            arguments={"count": 6, "mode": "safe"},
+        ),
+        schemas=[schema],
+    )
+
+    assert wrong_type is not None
+    assert wrong_type.message == "invalid argument count: expected integer"
+    assert bad_enum is not None
+    assert bad_enum.message == "invalid argument mode: expected one of fast, safe"
+    assert too_small is not None
+    assert too_small.message == "invalid argument count: must be >= 1"
+    assert too_large is not None
+    assert too_large.message == "invalid argument count: must be <= 5"
+
+
+def test_toolset_validates_nested_required_arguments() -> None:
+    toolset = Toolset(runtime=_runtime())
+    schema = ToolSchema(
+        name="deploy",
+        description="Deploy a service",
+        parameters={
+            "type": "object",
+            "properties": {
+                "target": {
+                    "type": "object",
+                    "properties": {
+                        "region": {"type": "string"},
+                        "replicas": {"type": "integer"},
+                    },
+                    "required": ["region"],
+                    "additionalProperties": False,
+                }
+            },
+            "required": ["target"],
+            "additionalProperties": False,
+        },
+    )
+
+    missing_nested = toolset.validate_tool_call(
+        ToolCallRequest(
+            tool_call_id="tc-nested-required",
+            name="deploy",
+            arguments={"target": {"replicas": 2}},
+        ),
+        schemas=[schema],
+    )
+    unexpected_nested = toolset.validate_tool_call(
+        ToolCallRequest(
+            tool_call_id="tc-nested-extra",
+            name="deploy",
+            arguments={"target": {"region": "iad", "extra": True}},
+        ),
+        schemas=[schema],
+    )
+
+    assert missing_nested is not None
+    assert missing_nested.message == "missing required argument: target.region"
+    assert unexpected_nested is not None
+    assert unexpected_nested.message == "unexpected argument: target.extra"
+
+
 @pytest.mark.asyncio
 async def test_toolset_retries_transient_tool_execution_failures() -> None:
     plugin = FlakyToolPlugin()
@@ -391,23 +496,39 @@ async def test_toolset_wraps_batch_hook_exceptions_for_each_tool_call() -> None:
 
 
 @pytest.mark.asyncio
-async def test_toolset_wraps_registered_batch_hook_none_as_errors() -> None:
-    toolset = Toolset(runtime=_runtime(NoneBatchToolPlugin()))
+async def test_toolset_falls_back_to_single_tool_execution_when_batch_hook_declines() -> None:
+    single_tool = SingleToolPlugin()
+    toolset = Toolset(runtime=_runtime(NoneBatchToolPlugin(), single_tool))
 
     results = await toolset.execute_tools(
         [
-            ToolCallRequest(tool_call_id="tc-batch-1", name="one", arguments={}),
-            ToolCallRequest(tool_call_id="tc-batch-2", name="two", arguments={}),
+            ToolCallRequest(
+                tool_call_id="tc-batch-1",
+                name="known_tool",
+                arguments={"value": "one"},
+            ),
+            ToolCallRequest(
+                tool_call_id="tc-batch-2",
+                name="known_tool",
+                arguments={"value": "two"},
+            ),
         ],
         ctx=object(),
     )
 
-    assert [result.tool_call_id for result in results] == [
-        "tc-batch-1",
-        "tc-batch-2",
+    assert results == [
+        ToolExecutionResult(
+            tool_call_id="tc-batch-1",
+            name="known_tool",
+            result="ok:one",
+        ),
+        ToolExecutionResult(
+            tool_call_id="tc-batch-2",
+            name="known_tool",
+            result="ok:two",
+        ),
     ]
-    assert all(isinstance(result.error, TypeError) for result in results)
-    assert all(
-        "execute_tools_batch returned None" in result.error_message
-        for result in results
-    )
+    assert single_tool.calls == [
+        ("known_tool", {"value": "one"}),
+        ("known_tool", {"value": "two"}),
+    ]

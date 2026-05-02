@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Sequence
+from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -151,32 +151,173 @@ class Toolset:
         if schema is None:
             return None
 
-        parameters = schema.parameters
-        properties = parameters.get("properties", {})
+        message = self._validate_schema_value(
+            call.arguments,
+            schema.parameters,
+            path=(),
+        )
+        if message is None:
+            return None
+        return ToolValidationError(
+            tool_call_id=call.tool_call_id,
+            name=call.name,
+            message=message,
+        )
+
+    def _validate_schema_value(
+        self,
+        value: Any,
+        schema: Mapping[str, Any],
+        *,
+        path: tuple[str, ...],
+    ) -> str | None:
+        expected_type = schema.get("type")
+        if not self._matches_json_type(value, expected_type):
+            return (
+                f"invalid argument {self._format_path(path)}: "
+                f"expected {self._format_expected_type(expected_type)}"
+            )
+
+        enum_values = schema.get("enum")
+        if isinstance(enum_values, list) and value not in enum_values:
+            return (
+                f"invalid argument {self._format_path(path)}: "
+                f"expected one of {', '.join(str(item) for item in enum_values)}"
+            )
+
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            minimum = schema.get("minimum")
+            if isinstance(minimum, int | float) and value < minimum:
+                return f"invalid argument {self._format_path(path)}: must be >= {minimum}"
+            maximum = schema.get("maximum")
+            if isinstance(maximum, int | float) and value > maximum:
+                return f"invalid argument {self._format_path(path)}: must be <= {maximum}"
+
+        if isinstance(value, str):
+            min_length = schema.get("minLength")
+            if isinstance(min_length, int) and len(value) < min_length:
+                return (
+                    f"invalid argument {self._format_path(path)}: "
+                    f"length must be >= {min_length}"
+                )
+            max_length = schema.get("maxLength")
+            if isinstance(max_length, int) and len(value) > max_length:
+                return (
+                    f"invalid argument {self._format_path(path)}: "
+                    f"length must be <= {max_length}"
+                )
+
+        if isinstance(value, dict):
+            return self._validate_object_schema(value, schema, path=path)
+
+        if isinstance(value, list):
+            return self._validate_array_schema(value, schema, path=path)
+
+        return None
+
+    def _validate_object_schema(
+        self,
+        value: dict[str, Any],
+        schema: Mapping[str, Any],
+        *,
+        path: tuple[str, ...],
+    ) -> str | None:
+        properties = schema.get("properties", {})
         if not isinstance(properties, dict):
             return None
 
-        required = parameters.get("required", [])
+        required = schema.get("required", [])
         if isinstance(required, list):
             for name in required:
-                if isinstance(name, str) and name not in call.arguments:
-                    return ToolValidationError(
-                        tool_call_id=call.tool_call_id,
-                        name=call.name,
-                        message=f"missing required argument: {name}",
-                    )
+                if isinstance(name, str) and name not in value:
+                    return f"missing required argument: {self._format_path((*path, name))}"
 
-        if parameters.get("additionalProperties") is False:
+        if schema.get("additionalProperties") is False:
             allowed = set(properties)
-            unexpected = sorted(set(call.arguments) - allowed)
+            unexpected = sorted(set(value) - allowed)
             if unexpected:
-                return ToolValidationError(
-                    tool_call_id=call.tool_call_id,
-                    name=call.name,
-                    message=f"unexpected argument: {unexpected[0]}",
-                )
+                return f"unexpected argument: {self._format_path((*path, unexpected[0]))}"
+
+        for name, child_schema in properties.items():
+            if name not in value or not isinstance(name, str):
+                continue
+            if not isinstance(child_schema, Mapping):
+                continue
+            message = self._validate_schema_value(
+                value[name],
+                child_schema,
+                path=(*path, name),
+            )
+            if message is not None:
+                return message
 
         return None
+
+    def _validate_array_schema(
+        self,
+        value: list[Any],
+        schema: Mapping[str, Any],
+        *,
+        path: tuple[str, ...],
+    ) -> str | None:
+        min_items = schema.get("minItems")
+        if isinstance(min_items, int) and len(value) < min_items:
+            return (
+                f"invalid argument {self._format_path(path)}: "
+                f"items length must be >= {min_items}"
+            )
+        max_items = schema.get("maxItems")
+        if isinstance(max_items, int) and len(value) > max_items:
+            return (
+                f"invalid argument {self._format_path(path)}: "
+                f"items length must be <= {max_items}"
+            )
+
+        items_schema = schema.get("items")
+        if not isinstance(items_schema, Mapping):
+            return None
+
+        for index, item in enumerate(value):
+            message = self._validate_schema_value(
+                item,
+                items_schema,
+                path=(*path, str(index)),
+            )
+            if message is not None:
+                return message
+
+        return None
+
+    def _matches_json_type(self, value: Any, expected_type: Any) -> bool:
+        if expected_type is None:
+            return True
+        if isinstance(expected_type, list):
+            return any(self._matches_json_type(value, item) for item in expected_type)
+        if not isinstance(expected_type, str):
+            return True
+        if expected_type == "string":
+            return isinstance(value, str)
+        if expected_type == "integer":
+            return isinstance(value, int) and not isinstance(value, bool)
+        if expected_type == "number":
+            return isinstance(value, int | float) and not isinstance(value, bool)
+        if expected_type == "boolean":
+            return isinstance(value, bool)
+        if expected_type == "object":
+            return isinstance(value, dict)
+        if expected_type == "array":
+            return isinstance(value, list)
+        if expected_type == "null":
+            return value is None
+        return True
+
+    def _format_expected_type(self, expected_type: Any) -> str:
+        if isinstance(expected_type, list):
+            return " or ".join(str(item) for item in expected_type)
+        return str(expected_type)
+
+    def _format_path(self, path: tuple[str, ...]) -> str:
+        return ".".join(path) if path else "<root>"
 
     async def approve_tool_call(
         self,
@@ -280,10 +421,7 @@ class Toolset:
                 for call, result in zip(calls, raw_results, strict=True)
             ]
 
-        return self._error_results(
-            calls,
-            TypeError("execute_tools_batch returned None"),
-        )
+        return None
 
     async def _execute_one(
         self,
