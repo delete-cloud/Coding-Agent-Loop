@@ -22,6 +22,18 @@ class TestShellSessionPlugin:
         assert "env_vars" in state
         assert "active" in state
 
+    def test_mount_uses_pipeline_workspace_root(self, tmp_path):
+        plugin = ShellSessionPlugin()
+        ctx = type(
+            "Ctx",
+            (),
+            {"config": {"workspace_root": str(tmp_path / "workspace")}},
+        )()
+
+        state = plugin.do_mount(ctx=ctx)
+
+        assert state["cwd"] == str((tmp_path / "workspace").resolve())
+
     def test_checkpoint_captures_cwd(self):
         plugin = ShellSessionPlugin()
         plugin._state = {

@@ -16,6 +16,7 @@ from inspect import isawaitable
 from pathlib import Path
 from typing import Any, Literal, TypeVar, cast
 
+from agentkit.environment import Environment
 from agentkit.storage.checkpoint_fs import FSCheckpointStore
 from agentkit.storage.pg import PGPool
 from agentkit.checkpoint.models import CheckpointMeta
@@ -928,6 +929,7 @@ class SessionManager:
         }
         pipeline, ctx = self._create_agent_for_session(
             workspace_root=self._resolve_workspace_root(session),
+            environment=self._resolve_environment(session),
             model_override=restored_config.model_name,
             provider_override=restored_config.provider_name,
             base_url_override=restored_config.base_url,
@@ -992,6 +994,9 @@ class SessionManager:
 
     def _resolve_workspace_root(self, session: Session) -> Path:
         return self._binding_resolver.resolve_workspace_root(session.execution_binding)
+
+    def _resolve_environment(self, session: Session) -> Environment:
+        return self._binding_resolver.resolve_environment(session.execution_binding)
 
     def _invalidate_runtime(self, session: Session) -> None:
         session.runtime_pipeline = None
@@ -1293,6 +1298,7 @@ class SessionManager:
                 if pipeline is None or ctx is None or adapter is None:
                     pipeline, ctx = self._create_agent_for_session(
                         workspace_root=self._resolve_workspace_root(session),
+                        environment=self._resolve_environment(session),
                         model_override=session.model_name,
                         provider_override=session.provider_name,
                         base_url_override=session.base_url,
@@ -1544,6 +1550,7 @@ class SessionManager:
         consumer = self._make_session_consumer(session)
         pipeline, ctx = self._create_agent_for_session(
             workspace_root=self._resolve_workspace_root(session),
+            environment=self._resolve_environment(session),
             model_override=resolved_model_name,
             provider_override=resolved_provider_name,
             base_url_override=resolved_base_url,

@@ -15,6 +15,7 @@ from coding_agent.tools.shell import (
 )
 from agentkit.tools.schema import ToolSchema
 from coding_agent.core.planner import PlanManager
+from coding_agent.environment import LocalEnvironment
 import json
 
 
@@ -46,6 +47,24 @@ class TestCoreToolsPlugin:
         f.write_text("test content")
         result = plugin.execute_tool(name="file_read", arguments={"path": "test.txt"})
         assert "test content" in result
+
+    def test_execute_tool_uses_injected_environment(self, tmp_path):
+        env = LocalEnvironment(workspace_root=tmp_path)
+        plugin = CoreToolsPlugin(environment=env)
+        target = tmp_path / "env.txt"
+        target.write_text("environment content")
+
+        result = plugin.execute_tool(name="file_read", arguments={"path": "env.txt"})
+
+        assert result == "environment content"
+
+    def test_bash_run_uses_injected_environment_workspace(self, tmp_path):
+        env = LocalEnvironment(workspace_root=tmp_path)
+        plugin = CoreToolsPlugin(environment=env)
+
+        result = plugin.execute_tool(name="bash_run", arguments={"command": "pwd"})
+
+        assert str(tmp_path.resolve()) in result
 
     def test_execute_tool_blocks_paths_outside_workspace(self, tmp_path):
         plugin = CoreToolsPlugin(workspace_root=tmp_path)
@@ -212,6 +231,15 @@ class TestCoreToolsPlugin:
         )
         assert "subdir" in result
         assert "session-ok" in result
+
+    def test_bash_run_with_shell_session_missing_cwd_uses_workspace(self, tmp_path):
+        shell_session = ShellSessionPlugin()
+        shell_session._state = {"cwd": None, "env_vars": {}, "active": True}
+        plugin = CoreToolsPlugin(workspace_root=tmp_path, shell_session=shell_session)
+
+        result = plugin.execute_tool(name="bash_run", arguments={"command": "pwd"})
+
+        assert str(tmp_path.resolve()) in result
 
     def test_export_with_spaces_updates_shell_session_from_result(self, tmp_path):
         shell_session = ShellSessionPlugin()

@@ -11,6 +11,7 @@ import pytest
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
 from coding_agent.approval import ApprovalPolicy
+from coding_agent.environment import LocalEnvironment
 from coding_agent.ui.execution_binding import LocalExecutionBinding
 from coding_agent.wire.protocol import (
     ApprovalRequest,
@@ -1179,6 +1180,8 @@ async def test_run_agent_uses_resolved_workspace_root_from_binding(
         await manager.run_agent(session_id, "hello")
 
     assert captured_kwargs["workspace_root"] == bound_workspace.resolve()
+    assert isinstance(captured_kwargs["environment"], LocalEnvironment)
+    assert captured_kwargs["environment"].workspace_root == bound_workspace.resolve()
 
 
 @pytest.mark.asyncio
@@ -1251,6 +1254,8 @@ async def test_restore_checkpoint_preserves_execution_binding(tmp_path: Path) ->
         await manager._restore_checkpoint(session, "cp-binding")
 
     assert captured_kwargs["workspace_root"] == restore_bound.resolve()
+    assert isinstance(captured_kwargs["environment"], LocalEnvironment)
+    assert captured_kwargs["environment"].workspace_root == restore_bound.resolve()
     assert isinstance(session.execution_binding, LocalExecutionBinding)
     assert session.execution_binding.workspace_root == str(restore_bound)
 

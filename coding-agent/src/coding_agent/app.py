@@ -9,6 +9,7 @@ from typing import Any
 
 from agentkit.config.loader import load_config
 from agentkit.directive.executor import DirectiveExecutor
+from agentkit.environment import Environment
 from agentkit.plugin.registry import PluginRegistry
 from agentkit.runtime.hook_runtime import HookRuntime
 from agentkit.runtime.hookspecs import HOOK_SPECS
@@ -16,6 +17,7 @@ from agentkit.runtime.pipeline import Pipeline, PipelineContext
 from agentkit.tape.tape import Tape
 
 from coding_agent.approval import ApprovalPolicy
+from coding_agent.environment import LocalEnvironment
 from coding_agent.plugins.approval import ApprovalPlugin
 from coding_agent.plugins.core_tools import CoreToolsPlugin
 from coding_agent.plugins.doom_detector import DoomDetectorPlugin
@@ -110,6 +112,7 @@ def create_child_pipeline(
     provider_override: str | None = None,
     base_url_override: str | None = None,
     workspace_root: Path | None = None,
+    environment: Environment | None = None,
     max_steps_override: int | None = None,
     approval_mode_override: str | None = None,
     session_id_override: str | None = None,
@@ -120,6 +123,12 @@ def create_child_pipeline(
         data_dir = Path(os.environ.get("AGENT_DATA_DIR", "./data"))
 
     workspace_root = workspace_root or Path.cwd()
+    environment = environment or LocalEnvironment(workspace_root)
+    tool_config = environment.tool_config()
+    workspace_root_value = tool_config.get("workspace_root")
+    if not isinstance(workspace_root_value, str):
+        raise ValueError("environment tool_config must include string workspace_root")
+    workspace_root = Path(workspace_root_value).expanduser().resolve()
 
     cfg = load_config(config_path)
 
@@ -169,6 +178,10 @@ def create_child_pipeline(
     storage_cfg = cfg.extra.get("storage", {})
     kb_cfg = cfg.extra.get("kb", {})
 
+    def _create_child_with_environment(**kwargs: Any) -> tuple[Any, PipelineContext]:
+        kwargs.setdefault("environment", environment)
+        return create_child_pipeline(**kwargs)
+
     plugin_factories: dict[str, Any] = {
         "llm_provider": lambda: _build_llm_provider_plugin(
             provider=cfg.provider,
@@ -179,10 +192,10 @@ def create_child_pipeline(
         ),
         "storage": lambda: StoragePlugin(data_dir=data_dir, config=storage_cfg),
         "core_tools": lambda: CoreToolsPlugin(
-            workspace_root=workspace_root,
+            environment=environment,
             shell_session=shell_session,
             web_search_backend=web_search_backend,
-            child_pipeline_builder=create_child_pipeline,
+            child_pipeline_builder=_create_child_with_environment,
         ),
         "approval": lambda: ApprovalPlugin(
             policy=policy,
@@ -301,6 +314,7 @@ def create_child_pipeline(
             "child_worker_coordinator": ChildWorkerCoordinator(),
             "web_search": web_search_cfg,
             "workspace_root": str(workspace_root),
+            "environment": environment,
             "shell": shell_cfg,
             "structured_tool_result_scope": structured_tool_result_scope,
         },
@@ -327,6 +341,7 @@ def create_agent(
     provider_override: str | None = None,
     base_url_override: str | None = None,
     workspace_root: Path | None = None,
+    environment: Environment | None = None,
     max_steps_override: int | None = None,
     approval_mode_override: str | None = None,
     session_id_override: str | None = None,
@@ -343,6 +358,7 @@ def create_agent(
         provider_override=provider_override,
         base_url_override=base_url_override,
         workspace_root=workspace_root,
+        environment=environment,
         max_steps_override=max_steps_override,
         approval_mode_override=approval_mode_override,
         session_id_override=session_id_override,
