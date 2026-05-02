@@ -13,28 +13,67 @@ This ADR records the PR order and scope gates before implementation begins. It i
 
 ## Decision
 
+Use `agentkit` for product-agnostic protocols, runtime primitives, and
+execution envelopes. Keep `coding_agent` responsible for concrete product
+integrations, HTTP/UI ownership, local shell and file implementations, provider
+runtime persistence, MCP configuration, skills, memory, KB, and web-search
+plugins.
+
+The ownership boundary is:
+
+- `agentkit.environment`: environment protocols and shared types only.
+- `agentkit.runtime`: per-run identity, context budget references, trace
+  metadata, tool execution boundaries, and subagent derivation primitives.
+- `agentkit.tools`: generic tool provider, validation, execution result, and
+  policy/approval interfaces.
+- `agentkit.channel` or `agentkit.runtime`: inbound runtime message protocols
+  and idempotent consumption semantics.
+- `coding_agent`: `LocalEnvironment`, `SessionManager`, `ExecutionBinding`,
+  `BindingResolver`, HTTP owner routing, leases, REPL model switching, provider
+  runtime metadata persistence, concrete file/shell/sandbox tools, MCP plugin
+  implementation, and product-specific tool risk policy.
+
 Implement the work in the following PR sequence.
 
 1. PR 1: Add `Environment` and `LocalEnvironment`
-   - Add an environment protocol for file, shell, patch, glob, grep, and workspace identity operations.
-   - Add a local implementation that preserves current path confinement, shell, sandbox, and structured result behavior.
+   - Add an `agentkit.environment` protocol for file, shell, patch, glob, grep,
+     and workspace identity operations.
+   - Keep the protocol and common callable types in `agentkit`.
+   - Add the local implementation in `coding_agent`, because it depends on
+     `coding_agent.tools.file_ops`, shell behavior, sandbox policy, and current
+     app wiring.
    - Extend binding resolution so `LocalExecutionBinding` can produce an environment, while `CloudWorkspaceBinding` keeps an explicit not-implemented failure path.
    - Update `CoreToolsPlugin` to depend on an environment boundary while keeping backward compatibility for existing `workspace_root` construction.
    - Keep runtime provider metadata from PR 86 in session metadata. Do not duplicate it inside the environment.
 
 2. PR 2: Add lightweight runtime context
-   - Add a small `AgentRunContext` or equivalent runtime object for per-run identity, environment reference, session id, agent id, context budget, and trace metadata.
-   - Keep provider, model, base URL, and max steps sourced from session runtime metadata introduced by PR 86.
+   - Add a small `AgentRunContext` or `RunContext` in `agentkit.runtime` for
+     per-run identity and runtime references.
+   - Include `session_id`, `run_id`, `agent_id`, `parent_run_id`, `environment`,
+     `context_budget`, and `trace_metadata`.
+   - Keep provider, model, base URL, and max steps sourced from session runtime metadata introduced by PR 86. PR 2 may snapshot or reference those fields for tracing, but it must not make `AgentRunContext` their new durable source of truth.
    - Keep `PipelineContext`, `ContextBuilder`, and `TapeView` focused on prompt assembly and pipeline state.
 
 3. PR 3: Add `Toolset` governance
    - Keep `ToolRegistry` as the registration mechanism.
-   - Add a tool execution boundary for schema validation, tool policy, approval, timeout, retry, environment injection, structured result handling, and tape recording.
-   - Treat `CoreToolsPlugin` and `MCPPlugin` as tool providers.
+   - Add a generic tool execution boundary in `agentkit.tools` or
+     `agentkit.runtime` because `approve_tool_call`, `execute_tool`, and
+     `execute_tools_batch` already live in the agentkit pipeline layer.
+   - Move only framework-level concepts upward: tool provider protocols, schema
+     validation, timeout/retry wrapping points, execution result envelopes, tape
+     recording hooks, and policy/approval interfaces.
+   - Treat `CoreToolsPlugin` and `MCPPlugin` as `coding_agent` tool providers.
+   - Keep concrete safe-tool lists, HTTP approval, TUI approval, shell/file risk
+     policy, and MCP implementation details in `coding_agent`.
 
 4. PR 4: Add runtime message bus and runtime context injection
-   - Add inbound runtime messages for interrupt, user steering, approval decision, subagent message, and system notice.
+   - Add an inbound `RuntimeMessageBus` protocol in `agentkit.channel` or
+     `agentkit.runtime`.
+   - Cover `interrupt`, `user_steer`, `approval_decision`,
+     `subagent_message`, and `system_notice`, with consumed cursor or
+     idempotency semantics.
    - Keep outbound event streams separate from inbound runtime control.
+   - Keep HTTP SSE, owner routing, and UI event queues in `coding_agent`.
    - Add prompt-time runtime context injection for run id, agent id, environment summary, cwd, elapsed time, context budget, and active approvals.
 
 5. PR 5: Add tool proxy for dynamic toolsets
@@ -46,6 +85,11 @@ Cloud workspace execution and full subagent orchestration are tracked as follow-
 
 - Cloud workspace execution must wait until PR 1 defines the environment protocol and local parity tests. Until then, cloud bindings must fail explicitly rather than partially executing through local path assumptions.
 - Full subagent orchestration must wait until PR 2, PR 3, and PR 4 define run identity, environment sharing, tool governance, inbound messages, and prompt-time runtime injection. Until then, the existing subagent tool may remain as-is.
+- Generic subagent foundations may move into `agentkit`: child run id, parent
+  run id, child tape trace metadata, and an interface for deriving child
+  context from parent context. Full coding subagent orchestration must stay in
+  `coding_agent` until write leases, tool filtering, workspace policy, and
+  approval behavior are stable enough to generalize.
 
 Parallel agents may work on design review tasks for cloud workspace and subagent orchestration while PR 1 is being implemented. Those agents should produce interface requirements, risk lists, and test expectations only. They should not edit environment, runtime, toolset, or message bus implementation files until the prerequisite PRs land.
 
@@ -55,12 +99,23 @@ Parallel agents may work on design review tasks for cloud workspace and subagent
 - Implement full subagent orchestration before runtime context and message bus. Rejected because subagents need stable agent identity, parent-child run linkage, tool policy, approval routing, and inbound steering semantics.
 - Combine Environment, AgentRunContext, Toolset, MessageBus, Tool Proxy, cloud execution, and subagent orchestration in one PR. Rejected because the write scope would span session management, app construction, tool registration, pipeline execution, tape semantics, HTTP events, and tests.
 - Make `AgentRunContext` own provider, model, base URL, and max steps. Rejected because PR 86 already made those fields durable session runtime metadata, and duplicating them would create two sources of truth.
+- Move `SessionManager`, `ExecutionBinding`, `BindingResolver`, HTTP ownership,
+  leases, REPL model switching, provider runtime persistence, concrete
+  file/shell/sandbox tools, MCP implementation, skills, memory, KB, or web
+  search plugins into `agentkit`. Rejected because these are application and
+  product integration concerns, not reusable framework contracts.
 - Proxy all tools as soon as tool proxy exists. Rejected because direct core tools are still the clearest interface for common coding workflows, while MCP and dynamic tools are the main source of prompt schema churn.
 
 ## Acceptance Criteria
 
 - [ ] `docs/adr/0016-stage-environment-runtime-and-tool-orchestration-prs.md` exists and records the ordered PR sequence.
+- [ ] The ADR states the ownership boundary between reusable `agentkit` protocols/runtime primitives and concrete `coding_agent` product integrations.
 - [ ] The ADR states that PR 1 implements `Environment` and `LocalEnvironment` before cloud workspace execution.
+- [ ] The ADR states that `Environment` protocol and common types belong in `agentkit`, while `LocalEnvironment` remains in `coding_agent`.
+- [ ] The ADR states that PR 2 adds `AgentRunContext` or `RunContext` under `agentkit.runtime` with session id, run id, agent id, parent run id, environment, context budget, and trace metadata.
+- [ ] The ADR states that Toolset governance moves only generic provider, validation, execution envelope, tape hook, timeout/retry, and policy/approval interfaces into `agentkit`.
+- [ ] The ADR states that RuntimeMessageBus moves only inbound message protocols and idempotent consumption semantics into `agentkit`.
+- [ ] The ADR states that only generic subagent identity, trace metadata, and child-context derivation primitives may move into `agentkit`.
 - [ ] The ADR states that cloud workspace execution is deferred to follow-up work with explicit failure behavior for unresolved cloud bindings.
 - [ ] The ADR states that full subagent orchestration is deferred until runtime context, tool governance, and runtime messaging exist.
 - [ ] The ADR references PR 86 session runtime metadata and prevents duplicating provider, model, base URL, and max steps in the environment layer.
