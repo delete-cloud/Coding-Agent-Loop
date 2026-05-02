@@ -27,6 +27,7 @@ from agentkit.providers.models import (
     ToolResultEvent,
     UsageEvent,
 )
+from agentkit.runtime.context import AgentRunContext
 from agentkit.runtime.hook_runtime import HookRuntime
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
@@ -85,6 +86,7 @@ class PipelineContext:
 
     tape: Tape
     session_id: str = ""
+    run_context: AgentRunContext | None = None
     config: dict[str, Any] = field(default_factory=dict)
     plugin_states: dict[str, Any] = field(default_factory=dict)
     messages: list[dict[str, Any]] = field(default_factory=list)

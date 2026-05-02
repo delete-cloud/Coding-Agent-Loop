@@ -91,7 +91,23 @@ async def _close_adapter_if_supported(adapter: object) -> None:
     await maybe_awaitable
 
 
+def _pipeline_agent_id(pipeline_ctx: PipelineContext) -> str | None:
+    if pipeline_ctx.run_context is not None:
+        return pipeline_ctx.run_context.agent_id
+    legacy_agent_id = str(pipeline_ctx.config.get("agent_id", ""))
+    if legacy_agent_id == "":
+        return None
+    return legacy_agent_id
+
+
+def _legacy_agent_id(agent_id: str | None) -> str:
+    if agent_id is None:
+        return ""
+    return agent_id
+
+
 def _child_agent_id(pipeline_ctx: PipelineContext) -> str:
+    parent_agent_id = _legacy_agent_id(_pipeline_agent_id(pipeline_ctx))
     coordinator = pipeline_ctx.config.get("child_worker_coordinator")
     if coordinator is not None:
         allocate_child_id = getattr(coordinator, "allocate_child_id", None)
@@ -99,9 +115,8 @@ def _child_agent_id(pipeline_ctx: PipelineContext) -> str:
             raise TypeError(
                 "child_worker_coordinator must provide callable allocate_child_id"
             )
-        return str(allocate_child_id(str(pipeline_ctx.config.get("agent_id", ""))))
+        return str(allocate_child_id(parent_agent_id))
 
-    parent_agent_id = str(pipeline_ctx.config.get("agent_id", ""))
     if parent_agent_id:
         return f"{parent_agent_id}.child-1"
     return "child-1"
@@ -178,14 +193,28 @@ def build_subagent_tool(child_pipeline_builder: ChildPipelineBuilder):
             raise ValueError("subagent requires active pipeline context")
 
         child_tape = _fork_child_tape(__pipeline_ctx__.tape)
+        child_agent_id = _child_agent_id(__pipeline_ctx__)
+        parent_run_context = __pipeline_ctx__.run_context
+        parent_agent_id = _legacy_agent_id(_pipeline_agent_id(__pipeline_ctx__))
         child_pipeline, child_ctx = child_pipeline_builder(
             parent_provider=__pipeline_ctx__.llm_provider,
             tape_fork=child_tape,
             tool_filter=lambda tool_name: tool_name != "subagent",
             session_id_override=__pipeline_ctx__.session_id,
+            agent_id_override=child_agent_id,
+            parent_run_id_override=(
+                parent_run_context.run_id if parent_run_context is not None else None
+            ),
+            trace_metadata={
+                "parent_agent_id": parent_agent_id,
+                "child_agent_id": child_agent_id,
+            },
         )
-        child_agent_id = _child_agent_id(__pipeline_ctx__)
-        child_ctx.config["agent_id"] = child_agent_id
+        child_ctx.config["agent_id"] = _legacy_agent_id(
+            child_ctx.run_context.agent_id
+            if child_ctx.run_context is not None
+            else child_agent_id
+        )
         timeout_seconds = _subagent_timeout_seconds(__pipeline_ctx__)
         child_base_length = len(child_tape)
         child_consumer = _ChildWriteLeaseConsumer(

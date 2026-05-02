@@ -4,6 +4,7 @@ from typing import Protocol, runtime_checkable
 
 from .hook_runtime import HookRuntime
 from .hookspecs import HOOK_SPECS, HookSpec
+from .context import AgentRunContext, ContextBudget
 from .pipeline import Pipeline, PipelineContext
 
 
@@ -20,6 +21,8 @@ class Lifecycle(Protocol):
 
 __all__ = [
     "HOOK_SPECS",
+    "AgentRunContext",
+    "ContextBudget",
     "HookRuntime",
     "HookSpec",
     "Lifecycle",

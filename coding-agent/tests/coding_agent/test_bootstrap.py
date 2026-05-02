@@ -1,6 +1,7 @@
 import pytest
 from pathlib import Path
 
+from agentkit.runtime import AgentRunContext, ContextBudget
 from coding_agent.__main__ import create_agent
 from coding_agent.environment import LocalEnvironment
 
@@ -161,6 +162,42 @@ enabled = ["storage", "core_tools"]
         core_tools = pipeline._registry.get("core_tools")
         assert core_tools._environment is environment
         assert core_tools._workspace_root == workspace_root.resolve()
+
+    def test_create_agent_builds_agent_run_context(self, tmp_path):
+        config_path = (
+            Path(__file__).parent.parent.parent / "src" / "coding_agent" / "agent.toml"
+        )
+        if not config_path.exists():
+            pytest.skip("agent.toml not found")
+
+        workspace_root = tmp_path / "env-workspace"
+        environment = LocalEnvironment(workspace_root=workspace_root)
+
+        _pipeline, ctx = create_agent(
+            config_path=config_path,
+            data_dir=tmp_path / "data",
+            api_key="sk-test",
+            model_override="gpt-test",
+            provider_override="openai",
+            base_url_override="http://localhost:1234/v1",
+            max_steps_override=7,
+            session_id_override="session-1",
+            environment=environment,
+        )
+
+        assert isinstance(ctx.run_context, AgentRunContext)
+        assert ctx.run_context.session_id == "session-1"
+        assert ctx.run_context.run_id
+        assert ctx.run_context.agent_id is None
+        assert ctx.run_context.parent_run_id is None
+        assert ctx.run_context.environment is environment
+        assert isinstance(ctx.run_context.context_budget, ContextBudget)
+        assert ctx.run_context.trace_metadata == {}
+        # Existing UI/wire code still uses "" as the root-agent marker.
+        assert ctx.config["agent_id"] == ""
+        assert ctx.config["provider"] == "openai"
+        assert ctx.config["model"] == "gpt-test"
+        assert ctx.config["max_tool_rounds"] == 7
 
     def test_create_agent_reads_subagent_timeout_from_config(self, tmp_path):
         config_path = tmp_path / "agent.toml"
