@@ -94,10 +94,10 @@ async def _close_adapter_if_supported(adapter: object) -> None:
 def _pipeline_agent_id(pipeline_ctx: PipelineContext) -> str | None:
     if pipeline_ctx.run_context is not None:
         return pipeline_ctx.run_context.agent_id
-    legacy_agent_id = str(pipeline_ctx.config.get("agent_id", ""))
-    if legacy_agent_id == "":
+    raw_agent_id = pipeline_ctx.config.get("agent_id")
+    if raw_agent_id is None or raw_agent_id == "":
         return None
-    return legacy_agent_id
+    return str(raw_agent_id)
 
 
 def _legacy_agent_id(agent_id: str | None) -> str:
