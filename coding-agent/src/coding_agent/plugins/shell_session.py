@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
@@ -35,11 +36,21 @@ class ShellSessionPlugin:
     def do_mount(self, **kwargs: Any) -> dict[str, Any]:
         """Initialize shell session state."""
         self._state = {
-            "cwd": os.getcwd(),
+            "cwd": self._initial_cwd(kwargs.get("ctx")),
             "env_vars": {},
             "active": True,
         }
         return dict(self._state)
+
+    def _initial_cwd(self, ctx: Any) -> str:
+        config = getattr(ctx, "config", None) if ctx is not None else None
+        if isinstance(config, dict):
+            workspace_root = config.get("workspace_root")
+            if workspace_root is not None:
+                if not isinstance(workspace_root, (str, Path)):
+                    raise ValueError("workspace_root must be a string or path")
+                return str(Path(workspace_root).expanduser().resolve())
+        return os.getcwd()
 
     def on_checkpoint(self, **kwargs: Any) -> None:
         """Observer: log session state for persistence."""

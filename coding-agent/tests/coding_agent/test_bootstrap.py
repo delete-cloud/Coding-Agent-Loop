@@ -2,6 +2,7 @@ import pytest
 from pathlib import Path
 
 from coding_agent.__main__ import create_agent
+from coding_agent.environment import LocalEnvironment
 
 
 class TestBootstrap:
@@ -136,6 +137,30 @@ enabled = ["storage", "core_tools"]
 
         approval_plugin = pipeline._registry.get("approval")
         assert approval_plugin._policy.name == "INTERACTIVE"
+
+    def test_create_agent_uses_injected_environment(self, tmp_path):
+        config_path = (
+            Path(__file__).parent.parent.parent / "src" / "coding_agent" / "agent.toml"
+        )
+        if not config_path.exists():
+            pytest.skip("agent.toml not found")
+
+        workspace_root = tmp_path / "env-workspace"
+        environment = LocalEnvironment(workspace_root=workspace_root)
+
+        pipeline, ctx = create_agent(
+            config_path=config_path,
+            data_dir=tmp_path / "data",
+            api_key="sk-test",
+            workspace_root=tmp_path / "ignored-workspace",
+            environment=environment,
+        )
+
+        assert ctx.config["environment"] is environment
+        assert ctx.config["workspace_root"] == str(workspace_root.resolve())
+        core_tools = pipeline._registry.get("core_tools")
+        assert core_tools._environment is environment
+        assert core_tools._workspace_root == workspace_root.resolve()
 
     def test_create_agent_reads_subagent_timeout_from_config(self, tmp_path):
         config_path = tmp_path / "agent.toml"

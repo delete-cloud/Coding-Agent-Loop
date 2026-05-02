@@ -3,9 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
+from agentkit.environment import Environment
 from agentkit.runtime.pipeline import PipelineContext
 from agentkit.tools import ToolRegistry, ToolSchema
 
+from coding_agent.environment import LocalEnvironment
 from coding_agent.plugins.shell_session import ShellSessionPlugin
 
 
@@ -22,13 +24,19 @@ class CoreToolsPlugin:
     def __init__(
         self,
         workspace_root: Path | str = ".",
+        environment: Environment | None = None,
         planner: Any = None,
         shell_session: ShellSessionPlugin | None = None,
         web_search_backend: Any = None,
         child_pipeline_builder: Callable[..., tuple[Any, PipelineContext]]
         | None = None,
     ) -> None:
-        self._workspace_root = Path(workspace_root).resolve()
+        self._environment = environment or LocalEnvironment(workspace_root)
+        tool_config = self._environment.tool_config()
+        workspace_root_value = tool_config.get("workspace_root")
+        if not isinstance(workspace_root_value, str):
+            raise ValueError("environment tool_config must include string workspace_root")
+        self._workspace_root = Path(workspace_root_value).expanduser().resolve()
         self._planner = planner
         self._shell_session = shell_session
         self._web_search_backend = web_search_backend
@@ -43,17 +51,15 @@ class CoreToolsPlugin:
         return self._registry
 
     def _register_tools(self) -> None:
-        from coding_agent.tools.file_ops import build_file_tools
-        from coding_agent.tools.file_patch_tool import build_file_patch_tool
         from coding_agent.tools.planner import build_planner_tools
-        from coding_agent.tools.shell import bash_run
         from coding_agent.tools.subagent import build_subagent_tool
         from coding_agent.tools.web_search import build_web_search_tool
 
-        file_read, file_write, file_replace, glob_files, grep_search = build_file_tools(
-            self._workspace_root
+        file_read, file_write, file_replace, glob_files, grep_search = (
+            self._environment.build_file_tools()
         )
-        file_patch = build_file_patch_tool(self._workspace_root)
+        file_patch = self._environment.build_file_patch_tool()
+        shell_tool = self._environment.build_shell_tool()
         todo_write, todo_read = build_planner_tools(self._planner)
         web_search = build_web_search_tool(self._web_search_backend)
         subagent = build_subagent_tool(self._child_pipeline_builder)
@@ -64,7 +70,7 @@ class CoreToolsPlugin:
             file_replace,
             glob_files,
             grep_search,
-            bash_run,
+            shell_tool,
             todo_write,
             todo_read,
             file_patch,
@@ -118,10 +124,16 @@ class CoreToolsPlugin:
         self, name: str, arguments: dict[str, Any] | None = None
     ) -> dict[str, Any]:
         args = dict(arguments or {})
-        if name == "bash_run" and self._shell_session is not None:
+        if name != "bash_run":
+            return args
+        if self._shell_session is not None:
             session = self._shell_session.get_session_context()
-            args.setdefault("cwd", session.get("cwd"))
+            if args.get("cwd") is None:
+                args["cwd"] = session.get("cwd") or self._workspace_root
             args.setdefault("env", session.get("env_vars", {}))
+            return args
+        if args.get("cwd") is None:
+            args["cwd"] = self._workspace_root
         return args
 
     def _sync_shell_session(self, name: str, args: dict[str, Any], result: Any) -> None:
