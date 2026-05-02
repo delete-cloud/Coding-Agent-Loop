@@ -326,16 +326,36 @@ class Toolset:
         ctx: Any,
     ) -> ToolApprovalResult:
         """Run generic approval policy hooks for a tool call."""
-        for hook in self._runtime.get_hooks("approve_tool_call"):
-            directive = hook(
-                tool_name=call.name,
-                arguments=call.arguments,
-                ctx=ctx,
+        try:
+            hooks = self._runtime.get_hooks("approve_tool_call")
+        except Exception as exc:
+            logger.warning(
+                "approve_tool_call hook lookup failed for tool %r, rejecting (fail-closed): %s: %s",
+                call.name,
+                type(exc).__name__,
+                exc,
             )
-            directive = await self._await_if_needed(
-                directive,
-                timeout_seconds=None,
-            )
+            return ToolApprovalResult(approved=False, reason="policy")
+
+        for hook in hooks:
+            try:
+                directive = hook(
+                    tool_name=call.name,
+                    arguments=call.arguments,
+                    ctx=ctx,
+                )
+                directive = await self._await_if_needed(
+                    directive,
+                    timeout_seconds=None,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "approve_tool_call hook failed for tool %r, rejecting (fail-closed): %s: %s",
+                    call.name,
+                    type(exc).__name__,
+                    exc,
+                )
+                return ToolApprovalResult(approved=False, reason="policy")
             if directive is None:
                 continue
             if not isinstance(directive, Directive):
@@ -351,8 +371,21 @@ class Toolset:
                     reason="missing directive executor",
                     directive=directive,
                 )
-            approved = await self._directive_executor.execute(directive)
             reason = str(getattr(directive, "reason", "policy"))
+            try:
+                approved = await self._directive_executor.execute(directive)
+            except Exception as exc:
+                logger.warning(
+                    "directive_executor failed for tool %r, rejecting (fail-closed): %s: %s",
+                    call.name,
+                    type(exc).__name__,
+                    exc,
+                )
+                return ToolApprovalResult(
+                    approved=False,
+                    reason=reason,
+                    directive=directive,
+                )
             return ToolApprovalResult(
                 approved=bool(approved),
                 reason=reason,

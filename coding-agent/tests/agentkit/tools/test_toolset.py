@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+import logging
+from typing import Any, cast
 
 import pytest
 
@@ -76,6 +77,35 @@ class AsyncApprovalPlugin:
         del kwargs
         await asyncio.sleep(0)
         return Approve()
+
+
+class RaisingApprovalPlugin:
+    state_key = "raising_approval"
+
+    def hooks(self):
+        return {"approve_tool_call": self.approve_tool_call}
+
+    def approve_tool_call(self, **kwargs: Any) -> Any:
+        del kwargs
+        raise RuntimeError("hook exploded")
+
+
+class AsyncRaisingApprovalPlugin:
+    state_key = "async_raising_approval"
+
+    def hooks(self):
+        return {"approve_tool_call": self.approve_tool_call}
+
+    async def approve_tool_call(self, **kwargs: Any) -> Any:
+        del kwargs
+        await asyncio.sleep(0)
+        raise RuntimeError("async hook exploded")
+
+
+class RaisingHookLookupRuntime:
+    def get_hooks(self, hook_name: str) -> Any:
+        del hook_name
+        raise RuntimeError("hook lookup exploded")
 
 
 class FlakyToolPlugin:
@@ -250,6 +280,60 @@ async def test_toolset_approval_rejects_non_directive_fail_closed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_toolset_approval_rejects_when_hook_lookup_raises(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    toolset = Toolset(runtime=cast(HookRuntime, RaisingHookLookupRuntime()))
+
+    with caplog.at_level(logging.WARNING):
+        approval = await toolset.approve_tool_call(
+            ToolCallRequest(tool_call_id="tc-lookup", name="bash_run", arguments={}),
+            ctx=object(),
+        )
+
+    assert approval.approved is False
+    assert approval.reason == "policy"
+    assert "RuntimeError" in caplog.text
+    assert "bash_run" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_toolset_approval_rejects_when_hook_raises(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    toolset = Toolset(runtime=_runtime(RaisingApprovalPlugin()))
+
+    with caplog.at_level(logging.WARNING):
+        approval = await toolset.approve_tool_call(
+            ToolCallRequest(tool_call_id="tc-hook", name="bash_run", arguments={}),
+            ctx=object(),
+        )
+
+    assert approval.approved is False
+    assert approval.reason == "policy"
+    assert "RuntimeError" in caplog.text
+    assert "bash_run" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_toolset_approval_rejects_when_async_hook_raises(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    toolset = Toolset(runtime=_runtime(AsyncRaisingApprovalPlugin()))
+
+    with caplog.at_level(logging.WARNING):
+        approval = await toolset.approve_tool_call(
+            ToolCallRequest(tool_call_id="tc-async-hook", name="bash_run", arguments={}),
+            ctx=object(),
+        )
+
+    assert approval.approved is False
+    assert approval.reason == "policy"
+    assert "RuntimeError" in caplog.text
+    assert "bash_run" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_toolset_approval_executes_directive() -> None:
     executed: list[Approve] = []
 
@@ -272,6 +356,34 @@ async def test_toolset_approval_executes_directive() -> None:
     assert approval.approved is True
     assert approval.directive is directive
     assert executed == [directive]
+
+
+@pytest.mark.asyncio
+async def test_toolset_approval_rejects_with_directive_reason_when_executor_raises(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class DirectiveExecutor:
+        async def execute(self, directive: Reject) -> bool:
+            del directive
+            raise RuntimeError("executor exploded")
+
+    directive = Reject(reason="blocked")
+    toolset = Toolset(
+        runtime=_runtime(ApprovalPlugin(result=directive)),
+        directive_executor=DirectiveExecutor(),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        approval = await toolset.approve_tool_call(
+            ToolCallRequest(tool_call_id="tc-executor", name="bash_run", arguments={}),
+            ctx=object(),
+        )
+
+    assert approval.approved is False
+    assert approval.reason == "blocked"
+    assert approval.directive is directive
+    assert "RuntimeError" in caplog.text
+    assert "bash_run" in caplog.text
 
 
 @pytest.mark.asyncio
