@@ -31,6 +31,7 @@ from agentkit.runtime.context import AgentRunContext
 from agentkit.runtime.hook_runtime import HookRuntime
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
+from agentkit.tools.toolset import ToolCallRequest, ToolExecutionOptions, Toolset
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,7 @@ class PipelineContext:
     messages: list[dict[str, Any]] = field(default_factory=list)
     llm_provider: Any = None
     storage: Any = None
+    toolset: Toolset | None = None
     tool_schemas: list[Any] = field(default_factory=list)
     response_entries: list[Any] = field(default_factory=list)
     output: Any = None
@@ -220,13 +222,12 @@ class Pipeline:
         if ctx.llm_provider is None:
             ctx.llm_provider = self._runtime.call_first("provide_llm")
 
-        tool_lists = self._runtime.call_many("get_tools")
-        ctx.tool_schemas = []
-        for tool_list in tool_lists:
-            if isinstance(tool_list, list):
-                ctx.tool_schemas.extend(tool_list)
-            else:
-                ctx.tool_schemas.append(tool_list)
+        if ctx.toolset is None:
+            ctx.toolset = Toolset(
+                runtime=self._runtime,
+                directive_executor=self._directive_executor,
+            )
+        ctx.tool_schemas = ctx.toolset.collect_schemas()
 
     async def _stage_build_context(self, ctx: PipelineContext) -> None:
         from agentkit.tape.view import TapeView
@@ -346,6 +347,12 @@ class Pipeline:
             return
 
         max_tool_rounds = ctx.config.get("max_tool_rounds", 20)
+        if ctx.toolset is None:
+            ctx.toolset = Toolset(
+                runtime=self._runtime,
+                directive_executor=self._directive_executor,
+            )
+        toolset = ctx.toolset
 
         for _round in range(max_tool_rounds):
             tool_dicts = (
@@ -415,15 +422,19 @@ class Pipeline:
                         )
                     )
 
-                executable_calls: list[dict[str, Any]] = []
-                executable_metas: list[dict[str, Any]] = []
+                executable_calls: list[ToolCallRequest] = []
                 checkpoint_entry_count: int | None = None
 
                 for i, tc in enumerate(tool_calls):
+                    tool_call = ToolCallRequest(
+                        tool_call_id=tc["id"],
+                        name=tc["name"],
+                        arguments=tc["arguments"],
+                    )
                     tc_payload: dict[str, Any] = {
-                        "id": tc["id"],
-                        "name": tc["name"],
-                        "arguments": tc["arguments"],
+                        "id": tool_call.tool_call_id,
+                        "name": tool_call.name,
+                        "arguments": tool_call.arguments,
                         "role": "assistant",
                     }
                     if i == 0 and thinking_chunks and not text_chunks:
@@ -435,31 +446,19 @@ class Pipeline:
                         )
                     )
 
-                    directive = self._runtime.call_first(
-                        "approve_tool_call",
-                        tool_name=tc["name"],
-                        arguments=tc["arguments"],
+                    validation_error = toolset.validate_tool_call(
+                        tool_call,
+                        schemas=ctx.tool_schemas,
                     )
-
-                    approved = True
-                    if directive is not None:
-                        if not isinstance(directive, Directive):
-                            logger.warning(
-                                "approve_tool_call returned non-Directive type %s for tool %r, rejecting (fail-closed)",
-                                type(directive).__name__,
-                                tc["name"],
-                            )
-                            approved = False
-                        elif self._directive_executor is not None:
-                            approved = await self._directive_executor.execute(directive)
-
-                    if not approved:
-                        rejection_msg = f"Tool call rejected: {getattr(directive, 'reason', 'policy')}"
+                    if validation_error is not None:
+                        rejection_msg = (
+                            f"Tool call validation failed: {validation_error.message}"
+                        )
                         ctx.tape.append(
                             Entry(
                                 kind="tool_result",
                                 payload={
-                                    "tool_call_id": tc["id"],
+                                    "tool_call_id": tool_call.tool_call_id,
                                     "content": rejection_msg,
                                 },
                             )
@@ -467,18 +466,39 @@ class Pipeline:
                         if ctx.on_event:
                             await ctx.on_event(
                                 ToolResultEvent(
-                                    tool_call_id=tc["id"],
-                                    name=tc["name"],
+                                    tool_call_id=tool_call.tool_call_id,
+                                    name=tool_call.name,
                                     result=rejection_msg,
                                     is_error=True,
                                 )
                             )
                         continue
 
-                    executable_calls.append(
-                        {"name": tc["name"], "arguments": tc["arguments"]}
-                    )
-                    executable_metas.append(tc)
+                    approval = await toolset.approve_tool_call(tool_call, ctx=ctx)
+
+                    if not approval.approved:
+                        rejection_msg = f"Tool call rejected: {approval.reason or 'policy'}"
+                        ctx.tape.append(
+                            Entry(
+                                kind="tool_result",
+                                payload={
+                                    "tool_call_id": tool_call.tool_call_id,
+                                    "content": rejection_msg,
+                                },
+                            )
+                        )
+                        if ctx.on_event:
+                            await ctx.on_event(
+                                ToolResultEvent(
+                                    tool_call_id=tool_call.tool_call_id,
+                                    name=tool_call.name,
+                                    result=rejection_msg,
+                                    is_error=True,
+                                )
+                            )
+                        continue
+
+                    executable_calls.append(tool_call)
 
                 if executable_calls:
                     max_size = ctx.config.get("max_tool_result_size", 10000)
@@ -487,69 +507,34 @@ class Pipeline:
                     )
                     checkpoint_entry_count = len(ctx.tape)
                     with _structured_tool_result_scope(ctx, structured_results_enabled):
-                        batch_results = (
-                            self._runtime.call_first(
-                                "execute_tools_batch",
-                                tool_calls=executable_calls,
-                                ctx=ctx,
+                        execution_results = await toolset.execute_tools(
+                            executable_calls,
+                            ctx=ctx,
+                            options=ToolExecutionOptions(
+                                timeout_seconds=ctx.config.get(
+                                    "tool_timeout_seconds"
+                                ),
+                                max_retries=int(
+                                    ctx.config.get("tool_max_retries", 0)
+                                ),
                             )
-                            if len(executable_calls) > 1
-                            else None
-                        )
-                    if isawaitable(batch_results):
-                        batch_results = await batch_results
-
-                    if batch_results is None:
-                        batch_results = []
-                        for call in executable_calls:
-                            try:
-                                with _structured_tool_result_scope(
-                                    ctx, structured_results_enabled
-                                ):
-                                    result = self._runtime.call_first(
-                                        "execute_tool",
-                                        name=call["name"],
-                                        arguments=call["arguments"],
-                                        ctx=ctx,
-                                    )
-                                    if isawaitable(result):
-                                        result = await result
-                                batch_results.append(result)
-                            except Exception as exc:
-                                batch_results.append(exc)
-
-                    if len(batch_results) != len(executable_calls):
-                        raise PipelineError(
-                            "execute_tools_batch returned "
-                            f"{len(batch_results)} results for {len(executable_calls)} tool calls"
                         )
 
-                    for tc, result in zip(
-                        executable_metas, batch_results, strict=False
-                    ):
-                        if isinstance(result, Exception):
-                            result_str = (
-                                f"Error executing tool '{tc['name']}': {str(result)}"
-                            )
+                    for result in execution_results:
+                        if result.is_error:
+                            result_str = result.error_message
                             event_result: str | dict[str, Any] = result_str
-                            is_error = True
-                        elif result is None:
-                            result_str = (
-                                f"Error executing tool '{tc['name']}': "
-                                f"tool '{tc['name']}' not found"
-                            )
-                            event_result = result_str
                             is_error = True
                         else:
                             result_str = _format_result(
-                                result,
+                                result.result,
                                 structured=structured_results_enabled,
                                 max_size=max_size,
                             )
                             event_result = (
-                                result
+                                result.result
                                 if structured_results_enabled
-                                and isinstance(result, dict)
+                                and isinstance(result.result, dict)
                                 else result_str
                             )
                             is_error = False
@@ -558,7 +543,7 @@ class Pipeline:
                             Entry(
                                 kind="tool_result",
                                 payload={
-                                    "tool_call_id": tc["id"],
+                                    "tool_call_id": result.tool_call_id,
                                     "content": result_str,
                                 },
                             )
@@ -566,8 +551,8 @@ class Pipeline:
                         if ctx.on_event:
                             await ctx.on_event(
                                 ToolResultEvent(
-                                    tool_call_id=tc["id"],
-                                    name=tc["name"],
+                                    tool_call_id=result.tool_call_id,
+                                    name=result.name,
                                     result=event_result,
                                     is_error=is_error,
                                 )
@@ -578,7 +563,7 @@ class Pipeline:
                 await self._stage_build_context(ctx)
                 if checkpoint_entry_count is not None and len(
                     ctx.tape
-                ) != checkpoint_entry_count + len(executable_metas):
+                ) != checkpoint_entry_count + len(executable_calls):
                     ctx.incremental_tool_round_count = 0
                     ctx.incremental_entry_count = 0
                 continue

@@ -836,7 +836,7 @@ class TestPipelineE2E:
                 yield ToolCallEvent(
                     tool_call_id="tc-p2",
                     name="grep_search",
-                    arguments={"pattern": "test", "path": "."},
+                    arguments={"pattern": "test", "directory": "."},
                 )
                 yield DoneEvent()
             else:
@@ -889,7 +889,7 @@ class TestPipelineE2E:
                 yield ToolCallEvent(
                     tool_call_id="tc-s2",
                     name="grep_search",
-                    arguments={"pattern": "test", "path": "."},
+                    arguments={"pattern": "test", "directory": "."},
                 )
                 yield DoneEvent()
             else:
@@ -920,7 +920,7 @@ class TestPipelineE2E:
 
         assert execute_calls == [
             ("file_read", {"path": "file_a.txt"}),
-            ("grep_search", {"pattern": "test", "path": "."}),
+            ("grep_search", {"pattern": "test", "directory": "."}),
         ]
 
         tool_results = ctx.tape.filter("tool_result")
@@ -932,7 +932,7 @@ class TestPipelineE2E:
             },
             {
                 "tool": "grep_search",
-                "arguments": {"pattern": "test", "path": "."},
+                "arguments": {"pattern": "test", "directory": "."},
                 "kind": "structured",
             },
         ]

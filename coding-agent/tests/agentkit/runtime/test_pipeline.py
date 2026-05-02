@@ -117,6 +117,38 @@ class BatchToolPlugin:
         return self.batch_results
 
 
+class SchemaValidatedToolPlugin:
+    state_key = "schema_validated_tool"
+
+    def __init__(self):
+        self.execute_calls = 0
+
+    def hooks(self):
+        return {
+            "get_tools": self.get_tools,
+            "execute_tool": self.execute_tool,
+        }
+
+    def get_tools(self, **kwargs):
+        return [
+            ToolSchema(
+                name="file_read",
+                description="Read a file",
+                parameters={
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                    "additionalProperties": False,
+                },
+            )
+        ]
+
+    def execute_tool(self, **kwargs):
+        del kwargs
+        self.execute_calls += 1
+        return "should-not-run"
+
+
 class TestPipelineContext:
     def test_create_context(self):
         tape = Tape()
@@ -292,6 +324,50 @@ class TestPipeline:
             tool_result_entries[0].payload["content"] == "activated:using-superpowers"
         )
         assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_run_turn_rejects_tool_call_with_invalid_schema_arguments(self):
+        registry = PluginRegistry()
+        llm_plugin = MinimalPlugin()
+        tool_plugin = SchemaValidatedToolPlugin()
+        registry.register(llm_plugin)
+        registry.register(tool_plugin)
+        runtime = HookRuntime(registry)
+        pipeline = Pipeline(runtime=runtime, registry=registry)
+
+        async def mock_stream(messages, tools=None, **kwargs):
+            from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
+
+            if not any(entry.kind == "tool_result" for entry in ctx.tape):
+                assert tools is not None
+                yield ToolCallEvent(
+                    tool_call_id="tc-invalid",
+                    name="file_read",
+                    arguments={"path": "a.txt", "extra": True},
+                )
+                yield DoneEvent()
+                return
+
+            yield TextEvent(text="Validation handled")
+            yield DoneEvent()
+
+        mock_llm = MagicMock()
+        mock_llm.stream = mock_stream
+        llm_plugin._mock_llm = mock_llm
+
+        tape = Tape()
+        tape.append(Entry(kind="message", payload={"role": "user", "content": "read"}))
+        ctx = PipelineContext(tape=tape, session_id="s-validation")
+        await pipeline.mount(ctx)
+
+        await pipeline.run_turn(ctx)
+
+        tool_result_entries = [entry for entry in ctx.tape if entry.kind == "tool_result"]
+        assert tool_result_entries[0].payload == {
+            "tool_call_id": "tc-invalid",
+            "content": "Tool call validation failed: unexpected argument: extra",
+        }
+        assert tool_plugin.execute_calls == 0
 
     @pytest.mark.asyncio
     async def test_run_turn_commits_active_fork_and_updates_context_tape(self, setup):
