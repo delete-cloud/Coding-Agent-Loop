@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from agentkit.directive.types import Approve
+from agentkit.directive.types import Approve, AskUser, Reject
 from agentkit.plugin.registry import PluginRegistry
 from agentkit.runtime.hook_runtime import HookRuntime
 from agentkit.runtime.hookspecs import HOOK_SPECS
@@ -254,6 +254,36 @@ async def test_toolset_approval_executes_directive() -> None:
     assert approval.approved is True
     assert approval.directive is directive
     assert executed == [directive]
+
+
+@pytest.mark.asyncio
+async def test_toolset_approval_rejects_directive_when_executor_missing() -> None:
+    directive = Reject(reason="blocked")
+    toolset = Toolset(runtime=_runtime(ApprovalPlugin(result=directive)))
+
+    approval = await toolset.approve_tool_call(
+        ToolCallRequest(tool_call_id="tc-missing-executor", name="bash_run", arguments={}),
+        ctx=object(),
+    )
+
+    assert approval.approved is False
+    assert approval.directive is directive
+    assert approval.reason == "missing directive executor"
+
+
+@pytest.mark.asyncio
+async def test_toolset_approval_rejects_ask_user_when_executor_missing() -> None:
+    directive = AskUser(question="Allow bash_run?")
+    toolset = Toolset(runtime=_runtime(ApprovalPlugin(result=directive)))
+
+    approval = await toolset.approve_tool_call(
+        ToolCallRequest(tool_call_id="tc-missing-executor", name="bash_run", arguments={}),
+        ctx=object(),
+    )
+
+    assert approval.approved is False
+    assert approval.directive is directive
+    assert approval.reason == "missing directive executor"
 
 
 @pytest.mark.asyncio

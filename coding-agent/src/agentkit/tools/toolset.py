@@ -346,7 +346,11 @@ class Toolset:
                 )
                 return ToolApprovalResult(approved=False, reason="policy")
             if self._directive_executor is None:
-                return ToolApprovalResult(approved=True, directive=directive)
+                return ToolApprovalResult(
+                    approved=False,
+                    reason="missing directive executor",
+                    directive=directive,
+                )
             approved = await self._directive_executor.execute(directive)
             reason = str(getattr(directive, "reason", "policy"))
             return ToolApprovalResult(
