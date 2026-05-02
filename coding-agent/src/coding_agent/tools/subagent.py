@@ -196,6 +196,17 @@ def build_subagent_tool(child_pipeline_builder: ChildPipelineBuilder):
         child_agent_id = _child_agent_id(__pipeline_ctx__)
         parent_run_context = __pipeline_ctx__.run_context
         parent_agent_id = _legacy_agent_id(_pipeline_agent_id(__pipeline_ctx__))
+        merged_trace_metadata: dict[str, Any] = (
+            dict(parent_run_context.trace_metadata)
+            if parent_run_context is not None
+            else {}
+        )
+        merged_trace_metadata.update(
+            {
+                "parent_agent_id": parent_agent_id,
+                "child_agent_id": child_agent_id,
+            }
+        )
         child_pipeline, child_ctx = child_pipeline_builder(
             parent_provider=__pipeline_ctx__.llm_provider,
             tape_fork=child_tape,
@@ -205,10 +216,12 @@ def build_subagent_tool(child_pipeline_builder: ChildPipelineBuilder):
             parent_run_id_override=(
                 parent_run_context.run_id if parent_run_context is not None else None
             ),
-            trace_metadata={
-                "parent_agent_id": parent_agent_id,
-                "child_agent_id": child_agent_id,
-            },
+            context_budget=(
+                parent_run_context.context_budget
+                if parent_run_context is not None
+                else None
+            ),
+            trace_metadata=merged_trace_metadata,
         )
         child_ctx.config["agent_id"] = _legacy_agent_id(
             child_ctx.run_context.agent_id
