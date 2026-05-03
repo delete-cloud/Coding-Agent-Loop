@@ -374,11 +374,127 @@ class TestPipeline:
         assert "environment: local" in system_content
         assert "workspace_root: /repo" in system_content
         assert "elapsed_seconds:" in system_content
-        assert "context_budget: max_input=128000 reserved_output=4096 max_output=8192" in system_content
+        assert (
+            "context_budget: max_input=128000 reserved_output=4096 max_output=8192"
+            in system_content
+        )
         assert "active_approvals: req-1:bash_run" in system_content
         assert "user_steer msg-steer: Prefer a short answer" in system_content
         assert "system_notice msg-notice: Checkpoint restored" in system_content
         assert ctx.runtime_message_cursor.sequence == 2
+
+    @pytest.mark.asyncio
+    async def test_runtime_message_consumed_after_build_context_reaches_prompt(
+        self, setup
+    ):
+        pipeline, plugin = setup
+        bus = InMemoryRuntimeMessageBus()
+        captured_messages: list[list[dict[str, object]]] = []
+
+        async def mock_stream(messages, tools=None, **kwargs):
+            del tools, kwargs
+            captured_messages.append(messages)
+            from agentkit.providers.models import DoneEvent, TextEvent
+
+            yield TextEvent(text="Hello back!")
+            yield DoneEvent()
+
+        original_build_context = pipeline._stage_build_context
+        published_late_message = False
+
+        async def build_context_then_publish(ctx):
+            nonlocal published_late_message
+            await original_build_context(ctx)
+            if published_late_message:
+                return
+            published_late_message = True
+            await bus.publish(
+                RuntimeMessage(
+                    message_id="msg-late-steer",
+                    kind=RuntimeMessageKind.USER_STEER,
+                    payload={"text": "Use the new instruction"},
+                )
+            )
+
+        plugin._mock_llm.stream = mock_stream
+        pipeline._stage_build_context = build_context_then_publish
+        ctx = PipelineContext(
+            tape=Tape(),
+            session_id="session-1",
+            runtime_message_bus=bus,
+            config={"system_prompt": "system"},
+        )
+
+        await pipeline.run_turn(ctx)
+
+        system_content = "\n".join(
+            str(message.get("content", ""))
+            for message in captured_messages[0]
+            if message.get("role") == "system"
+        )
+        assert "user_steer msg-late-steer: Use the new instruction" in system_content
+        assert ctx.runtime_message_cursor.sequence == 1
+
+    @pytest.mark.asyncio
+    async def test_prompt_runtime_message_after_run_model_is_kept_for_next_turn(
+        self, setup
+    ):
+        pipeline, plugin = setup
+        bus = InMemoryRuntimeMessageBus()
+        captured_messages: list[list[dict[str, object]]] = []
+
+        async def mock_stream(messages, tools=None, **kwargs):
+            del tools, kwargs
+            captured_messages.append(messages)
+            from agentkit.providers.models import DoneEvent, TextEvent
+
+            yield TextEvent(text="Hello back!")
+            yield DoneEvent()
+
+        original_run_model = pipeline._stage_run_model
+        published_late_message = False
+
+        async def run_model_then_publish(ctx):
+            nonlocal published_late_message
+            await original_run_model(ctx)
+            if published_late_message:
+                return
+            published_late_message = True
+            await bus.publish(
+                RuntimeMessage(
+                    message_id="msg-after-model",
+                    kind=RuntimeMessageKind.USER_STEER,
+                    payload={"text": "Use this next turn"},
+                )
+            )
+
+        plugin._mock_llm.stream = mock_stream
+        pipeline._stage_run_model = run_model_then_publish
+        ctx = PipelineContext(
+            tape=Tape(),
+            session_id="session-1",
+            runtime_message_bus=bus,
+            config={"system_prompt": "system"},
+        )
+
+        await pipeline.run_turn(ctx)
+        await pipeline.run_turn(ctx)
+
+        first_system_content = "\n".join(
+            str(message.get("content", ""))
+            for message in captured_messages[0]
+            if message.get("role") == "system"
+        )
+        second_system_content = "\n".join(
+            str(message.get("content", ""))
+            for message in captured_messages[1]
+            if message.get("role") == "system"
+        )
+        assert (
+            "user_steer msg-after-model: Use this next turn" not in first_system_content
+        )
+        assert "user_steer msg-after-model: Use this next turn" in second_system_content
+        assert ctx.runtime_message_cursor.sequence == 1
 
     @pytest.mark.asyncio
     async def test_runtime_context_includes_elapsed_without_run_context(self, setup):
@@ -411,9 +527,7 @@ class TestPipeline:
         assert "elapsed_seconds:" in system_content
 
     @pytest.mark.asyncio
-    async def test_runtime_approval_decision_is_left_for_product_consumer(
-        self, setup
-    ):
+    async def test_runtime_approval_decision_is_left_for_product_consumer(self, setup):
         pipeline, plugin = setup
         bus = InMemoryRuntimeMessageBus()
         await bus.publish(
@@ -499,7 +613,9 @@ class TestPipeline:
             runtime_message_bus=bus,
         )
 
-        with pytest.raises(PipelineError, match="runtime interrupted: user stopped turn"):
+        with pytest.raises(
+            PipelineError, match="runtime interrupted: user stopped turn"
+        ):
             await pipeline.run_turn(ctx)
 
         assert stream_called is False
@@ -542,7 +658,9 @@ class TestPipeline:
             runtime_message_bus=bus,
         )
 
-        with pytest.raises(PipelineError, match="runtime interrupted: user stopped turn"):
+        with pytest.raises(
+            PipelineError, match="runtime interrupted: user stopped turn"
+        ):
             await pipeline.run_turn(ctx)
 
         retry_batch = await bus.consume_after(RuntimeMessageCursor())
@@ -721,7 +839,9 @@ class TestPipeline:
 
         await pipeline.run_turn(ctx)
 
-        tool_result_entries = [entry for entry in ctx.tape if entry.kind == "tool_result"]
+        tool_result_entries = [
+            entry for entry in ctx.tape if entry.kind == "tool_result"
+        ]
         assert tool_result_entries[0].payload == {
             "tool_call_id": "tc-invalid",
             "content": "Tool call validation failed: unexpected argument: extra",
