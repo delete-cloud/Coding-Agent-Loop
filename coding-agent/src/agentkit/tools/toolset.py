@@ -30,11 +30,17 @@ class ToolProvider(Protocol):
 
     def execute_tool(
         self,
-        name: str = "",
-        arguments: dict[str, Any] | None = None,
+        name: str,
+        arguments: dict[str, Any] | None,
         **kwargs: Any,
     ) -> Any:
-        """Return a tool result, or UNHANDLED_TOOL_RESULT for unknown tools."""
+        """Return a tool result, or UNHANDLED_TOOL_RESULT before side effects.
+
+        Returning UNHANDLED_TOOL_RESULT means the provider does not own this tool
+        call and must not perform I/O or mutate state. Toolset retries are scoped
+        to the provider hook that raised, so earlier unhandled providers are not
+        called again for the same retry cycle.
+        """
         ...
 
 
@@ -43,8 +49,8 @@ class ToolApprovalPolicy(Protocol):
 
     def approve_tool_call(
         self,
-        tool_name: str = "",
-        arguments: dict[str, Any] | None = None,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
         **kwargs: Any,
     ) -> Directive: ...
 
@@ -429,9 +435,8 @@ class Toolset:
 
         raw_payload = [call.to_hook_payload() for call in calls]
         for hook in hooks:
-            remaining_attempts = options.max_retries + 1
-            while remaining_attempts > 0:
-                remaining_attempts -= 1
+            raw_results: Any = None
+            for attempt in range(options.max_retries + 1):
                 try:
                     raw_results = hook(tool_calls=raw_payload, ctx=ctx)
                     raw_results = await self._await_if_needed(
@@ -440,10 +445,8 @@ class Toolset:
                     )
                     break
                 except Exception as exc:
-                    if remaining_attempts == 0:
+                    if attempt == options.max_retries:
                         return self._error_results(calls, exc)
-            else:
-                raise RuntimeError("unreachable")
 
             if raw_results is None:
                 continue
@@ -474,11 +477,10 @@ class Toolset:
         ctx: Any,
         options: ToolExecutionOptions,
     ) -> ToolExecutionResult:
-        remaining_attempts = options.max_retries + 1
-        while remaining_attempts > 0:
-            remaining_attempts -= 1
-            try:
-                for hook in self._runtime.get_hooks("execute_tool"):
+        for hook in self._runtime.get_hooks("execute_tool"):
+            result: Any = UNHANDLED_TOOL_RESULT
+            for attempt in range(options.max_retries + 1):
+                try:
                     result = hook(
                         name=call.name,
                         arguments=call.arguments,
@@ -488,19 +490,19 @@ class Toolset:
                         result,
                         timeout_seconds=options.timeout_seconds,
                     )
-                    if result is UNHANDLED_TOOL_RESULT:
-                        continue
-                    return self._envelope_raw_result(call, result)
-                return self._envelope_raw_result(call, UNHANDLED_TOOL_RESULT)
-            except Exception as exc:
-                if remaining_attempts == 0:
-                    return ToolExecutionResult(
-                        tool_call_id=call.tool_call_id,
-                        name=call.name,
-                        error=exc,
-                    )
+                    break
+                except Exception as exc:
+                    if attempt == options.max_retries:
+                        return ToolExecutionResult(
+                            tool_call_id=call.tool_call_id,
+                            name=call.name,
+                            error=exc,
+                        )
+            if result is UNHANDLED_TOOL_RESULT:
+                continue
+            return self._envelope_raw_result(call, result)
 
-        raise RuntimeError("unreachable")
+        return self._envelope_raw_result(call, UNHANDLED_TOOL_RESULT)
 
     def _envelope_raw_result(
         self,

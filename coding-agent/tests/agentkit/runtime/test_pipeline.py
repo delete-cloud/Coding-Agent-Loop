@@ -198,6 +198,29 @@ class TestPipeline:
         assert "minimal" in ctx.plugin_states
 
     @pytest.mark.asyncio
+    async def test_mount_initializes_toolset_once(self, setup):
+        pipeline, plugin = setup
+        ctx = PipelineContext(tape=Tape(), session_id="s1")
+
+        await pipeline.mount(ctx)
+        mounted_toolset = ctx.toolset
+
+        assert mounted_toolset is not None
+
+        async def mock_stream(messages, tools=None, **kwargs):
+            del messages, tools, kwargs
+            from agentkit.providers.models import DoneEvent, TextEvent
+
+            yield TextEvent(text="Hello back!")
+            yield DoneEvent()
+
+        plugin._mock_llm.stream = mock_stream
+
+        await pipeline.run_turn(ctx)
+
+        assert ctx.toolset is mounted_toolset
+
+    @pytest.mark.asyncio
     async def test_shutdown_notifies_plugins(self, setup):
         pipeline, plugin = setup
         ctx = PipelineContext(tape=Tape(), session_id="s1")

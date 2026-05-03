@@ -745,7 +745,7 @@ class TestPipelineE2E:
         assert "recovered" in outcome.final_message
 
     @pytest.mark.asyncio
-    async def test_large_tool_result_truncated(self, tmp_path):
+    async def test_large_tool_result_truncated(self, tmp_path, monkeypatch):
         """Given a tool returning 20k chars and max_tool_result_size=10000, when pipeline processes it, then tape entry is truncated with notice."""
         pipeline, ctx = _setup_agent(tmp_path, approval_mode="yolo")
 
@@ -771,19 +771,14 @@ class TestPipelineE2E:
         _mock_provider(pipeline, mock_stream)
 
         core_tools = pipeline._registry.get("core_tools")
-        original_execute_tool = core_tools.execute_tool
+        original_execute = core_tools.registry.execute
 
-        def fake_execute_tool(name="", arguments=None, **kwargs):
+        def fake_execute(name, **kwargs):
             if name == "bash_run":
                 return large_result
-            return original_execute_tool(name=name, arguments=arguments, **kwargs)
+            return original_execute(name, **kwargs)
 
-        pipeline._registry._hook_index["execute_tool"] = [
-            fake_execute_tool
-            if getattr(hook, "__self__", None) is core_tools
-            else hook
-            for hook in pipeline._registry._hook_index["execute_tool"]
-        ]
+        monkeypatch.setattr(core_tools.registry, "execute", fake_execute)
 
         await pipeline.mount(ctx)
 

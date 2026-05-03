@@ -268,6 +268,35 @@ notify(hook, **kwargs)       → Fire-and-forget, swallows exceptions
    → Ready for call_first/call_many/notify
 ```
 
+### 4.5 Toolset Governance
+
+`Pipeline.mount()` initializes one `agentkit.tools.Toolset` for the run context.
+`load_state` uses that instance to collect schemas, and `run_model` reuses it for
+validation, approval, and execution.
+
+Tool execution options are read from `PipelineContext.config`:
+
+| Config Key | Type | Default | Meaning |
+|---|---|---|---|
+| `tool_timeout_seconds` | `float | None` | `None` | Per hook-call timeout in seconds for tool execution hooks |
+| `tool_max_retries` | `int` | `0` | Number of retries after the first failed tool execution hook attempt |
+
+Single-tool retries are scoped to the provider hook that raised. Earlier
+providers that already returned `UNHANDLED_TOOL_RESULT` are not called again for
+that retry cycle. Returning `UNHANDLED_TOOL_RESULT` is therefore a no-ownership
+decision: providers must make it before performing I/O or mutating state.
+
+Schema validation runs before approval and execution. This intentionally exposes
+stale fixtures or callers whose arguments drift from the registered schema; for
+example, `grep_search` accepts `directory`, so legacy fixture arguments using
+`path` are rejected when `additionalProperties: false` is present.
+
+Approval is fail-closed. A non-`Directive` return, approval hook lookup failure,
+approval hook exception, async approval await failure, or directive executor
+exception produces a rejected `ToolApprovalResult` instead of aborting the turn.
+Executor failures keep the directive on the result and use the directive reason
+when available; other approval failures use `reason="policy"`.
+
 ---
 
 ## 5. Pipeline Stages

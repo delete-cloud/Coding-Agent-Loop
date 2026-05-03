@@ -62,6 +62,12 @@ Implement the work in the following PR sequence.
    - Move only framework-level concepts upward: tool provider protocols, schema
      validation, timeout/retry wrapping points, execution result envelopes, tape
      recording hooks, and policy/approval interfaces.
+   - Scope single-tool retries to the provider hook that raised. Providers that
+     return `UNHANDLED_TOOL_RESULT` must do so before I/O or state mutation.
+   - Treat approval hook lookup failures, approval hook exceptions, async
+     approval await failures, non-`Directive` returns, and directive executor
+     exceptions as fail-closed denials. Executor failures keep the directive
+     reason when one exists; other approval failures use `reason="policy"`.
    - Treat `CoreToolsPlugin` and `MCPPlugin` as `coding_agent` tool providers.
    - Keep concrete safe-tool lists, HTTP approval, TUI approval, shell/file risk
      policy, and MCP implementation details in `coding_agent`.
@@ -114,6 +120,8 @@ Parallel agents may work on design review tasks for cloud workspace and subagent
 - [ ] The ADR states that `Environment` protocol and common types belong in `agentkit`, while `LocalEnvironment` remains in `coding_agent`.
 - [ ] The ADR states that PR 2 adds `AgentRunContext` or `RunContext` under `agentkit.runtime` with session id, run id, agent id, parent run id, environment, context budget, and trace metadata.
 - [ ] The ADR states that Toolset governance moves only generic provider, validation, execution envelope, tape hook, timeout/retry, and policy/approval interfaces into `agentkit`.
+- [ ] The ADR states that Toolset retries are scoped to the failing provider hook and that unhandled providers must not perform side effects.
+- [ ] The ADR states that approval hook and directive executor failures are fail-closed denials.
 - [ ] The ADR states that RuntimeMessageBus moves only inbound message protocols and idempotent consumption semantics into `agentkit`.
 - [ ] The ADR states that only generic subagent identity, trace metadata, and child-context derivation primitives may move into `agentkit`.
 - [ ] The ADR states that cloud workspace execution is deferred to follow-up work with explicit failure behavior for unresolved cloud bindings.

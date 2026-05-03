@@ -125,6 +125,38 @@ class FlakyToolPlugin:
         return "retried"
 
 
+class UnhandledSideEffectToolPlugin:
+    state_key = "unhandled_side_effect_tool"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def hooks(self):
+        return {"execute_tool": self.execute_tool}
+
+    def execute_tool(self, **kwargs: Any) -> object:
+        del kwargs
+        self.calls += 1
+        return UNHANDLED_TOOL_RESULT
+
+
+class FlakySecondToolPlugin:
+    state_key = "flaky_second_tool"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def hooks(self):
+        return {"execute_tool": self.execute_tool}
+
+    def execute_tool(self, **kwargs: Any) -> str:
+        del kwargs
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("second provider transient")
+        return "retried-second"
+
+
 class SlowToolPlugin:
     state_key = "slow_tool"
 
@@ -596,6 +628,29 @@ async def test_toolset_retries_transient_tool_execution_failures() -> None:
         )
     ]
     assert plugin.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_toolset_retries_only_the_failing_tool_provider() -> None:
+    unhandled = UnhandledSideEffectToolPlugin()
+    flaky_second = FlakySecondToolPlugin()
+    toolset = Toolset(runtime=_runtime(unhandled, flaky_second))
+
+    results = await toolset.execute_tools(
+        [ToolCallRequest(tool_call_id="tc-retry", name="known_tool", arguments={})],
+        ctx=object(),
+        options=ToolExecutionOptions(max_retries=1),
+    )
+
+    assert results == [
+        ToolExecutionResult(
+            tool_call_id="tc-retry",
+            name="known_tool",
+            result="retried-second",
+        )
+    ]
+    assert unhandled.calls == 1
+    assert flaky_second.calls == 2
 
 
 @pytest.mark.asyncio

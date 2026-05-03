@@ -149,7 +149,24 @@ class Pipeline:
     def stage_names(self) -> list[str]:
         return list(self.STAGES)
 
+    def _ensure_toolset(self, ctx: PipelineContext) -> Toolset:
+        if ctx.toolset is None:
+            ctx.toolset = Toolset(
+                runtime=self._runtime,
+                directive_executor=self._directive_executor,
+            )
+        return ctx.toolset
+
+    def _require_toolset(self, ctx: PipelineContext, *, stage: StageName) -> Toolset:
+        if ctx.toolset is None:
+            raise PipelineError(
+                "toolset must be initialized before pipeline stages",
+                stage=stage,
+            )
+        return ctx.toolset
+
     async def mount(self, ctx: PipelineContext) -> None:
+        self._ensure_toolset(ctx)
         for plugin_id in self._registry.plugin_ids():
             plugin = self._registry.get(plugin_id)
             mount_hook = plugin.hooks().get("mount")
@@ -169,6 +186,7 @@ class Pipeline:
         fork = None
         original_tape = ctx.tape
         ctx._handoff_done = False
+        self._ensure_toolset(ctx)
 
         try:
             for stage in self.STAGES:
@@ -222,12 +240,8 @@ class Pipeline:
         if ctx.llm_provider is None:
             ctx.llm_provider = self._runtime.call_first("provide_llm")
 
-        if ctx.toolset is None:
-            ctx.toolset = Toolset(
-                runtime=self._runtime,
-                directive_executor=self._directive_executor,
-            )
-        ctx.tool_schemas = ctx.toolset.collect_schemas()
+        toolset = self._require_toolset(ctx, stage="load_state")
+        ctx.tool_schemas = toolset.collect_schemas()
 
     async def _stage_build_context(self, ctx: PipelineContext) -> None:
         from agentkit.tape.view import TapeView
@@ -347,12 +361,7 @@ class Pipeline:
             return
 
         max_tool_rounds = ctx.config.get("max_tool_rounds", 20)
-        if ctx.toolset is None:
-            ctx.toolset = Toolset(
-                runtime=self._runtime,
-                directive_executor=self._directive_executor,
-            )
-        toolset = ctx.toolset
+        toolset = self._require_toolset(ctx, stage="run_model")
 
         for _round in range(max_tool_rounds):
             tool_dicts = (
