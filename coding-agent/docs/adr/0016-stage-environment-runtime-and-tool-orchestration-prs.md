@@ -80,9 +80,13 @@ Implement the work in the following PR sequence.
      idempotency semantics.
    - Keep runtime message consumption cursor-based so applying the same cursor
      is idempotent and ownership layers can persist the cursor later.
+   - Keep cursors consumer-owned: the agentkit pipeline cursor only covers
+     messages agentkit interprets, while product approval stores consume
+     `approval_decision` messages with their own cursor.
    - Consume runtime messages only at pipeline safe points: stage boundaries,
      between model rounds, and before tool execution.
-   - Treat `interrupt` as a fail-fast turn stop at the next safe point.
+   - Treat `interrupt` as a fail-fast turn stop at the next safe point without
+     advancing the pipeline cursor for that batch.
    - Keep outbound event streams separate from inbound runtime control.
    - Keep HTTP SSE, owner routing, and UI event queues in `coding_agent`.
    - Add prompt-time runtime context injection for run id, agent id, environment summary, cwd, elapsed time, context budget, and active approvals.

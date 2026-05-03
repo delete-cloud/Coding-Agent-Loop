@@ -5,6 +5,7 @@ from agentkit.runtime import (
     ContextBudget,
     InMemoryRuntimeMessageBus,
     RuntimeMessage,
+    RuntimeMessageCursor,
     RuntimeMessageKind,
 )
 from agentkit.runtime.pipeline import Pipeline, PipelineContext
@@ -292,12 +293,10 @@ class TestPipeline:
                 ),
             ),
             runtime_message_bus=bus,
-            config={
-                "system_prompt": "system",
-                "active_approvals": [
-                    {"request_id": "req-1", "tool": "bash_run"},
-                ],
-            },
+            active_approvals=[
+                {"request_id": "req-1", "tool": "bash_run"},
+            ],
+            config={"system_prompt": "system"},
         )
 
         await pipeline.run_turn(ctx)
@@ -320,6 +319,96 @@ class TestPipeline:
         assert "user_steer msg-steer: Prefer a short answer" in system_content
         assert "system_notice msg-notice: Checkpoint restored" in system_content
         assert ctx.runtime_message_cursor.sequence == 2
+
+    @pytest.mark.asyncio
+    async def test_runtime_context_includes_elapsed_without_run_context(self, setup):
+        pipeline, plugin = setup
+        captured_messages: list[list[dict[str, object]]] = []
+
+        async def mock_stream(messages, tools=None, **kwargs):
+            del tools, kwargs
+            captured_messages.append(messages)
+            from agentkit.providers.models import DoneEvent, TextEvent
+
+            yield TextEvent(text="Hello back!")
+            yield DoneEvent()
+
+        plugin._mock_llm.stream = mock_stream
+        ctx = PipelineContext(
+            tape=Tape(),
+            session_id="session-1",
+            config={"system_prompt": "system"},
+        )
+
+        await pipeline.run_turn(ctx)
+
+        system_content = "\n".join(
+            str(message.get("content", ""))
+            for message in captured_messages[0]
+            if message.get("role") == "system"
+        )
+        assert "Runtime context" in system_content
+        assert "elapsed_seconds:" in system_content
+
+    @pytest.mark.asyncio
+    async def test_runtime_approval_decision_is_left_for_product_consumer(
+        self, setup
+    ):
+        pipeline, plugin = setup
+        bus = InMemoryRuntimeMessageBus()
+        await bus.publish(
+            RuntimeMessage(
+                message_id="msg-approval",
+                kind=RuntimeMessageKind.APPROVAL_DECISION,
+                payload={"request_id": "req-1", "approved": True},
+            )
+        )
+        await bus.publish(
+            RuntimeMessage(
+                message_id="msg-steer",
+                kind=RuntimeMessageKind.USER_STEER,
+                payload={"text": "Prefer a short answer"},
+            )
+        )
+
+        captured_messages: list[list[dict[str, object]]] = []
+
+        async def mock_stream(messages, tools=None, **kwargs):
+            del tools, kwargs
+            captured_messages.append(messages)
+            from agentkit.providers.models import DoneEvent, TextEvent
+
+            yield TextEvent(text="Hello back!")
+            yield DoneEvent()
+
+        plugin._mock_llm.stream = mock_stream
+        ctx = PipelineContext(
+            tape=Tape(),
+            session_id="session-1",
+            runtime_message_bus=bus,
+            config={"system_prompt": "system"},
+        )
+
+        await pipeline.run_turn(ctx)
+
+        system_content = "\n".join(
+            str(message.get("content", ""))
+            for message in captured_messages[0]
+            if message.get("role") == "system"
+        )
+        approval_batch = await bus.consume_after(
+            RuntimeMessageCursor(),
+            kinds={RuntimeMessageKind.APPROVAL_DECISION},
+        )
+
+        assert [item.message.message_id for item in ctx.runtime_messages] == [
+            "msg-steer"
+        ]
+        assert "user_steer msg-steer: Prefer a short answer" in system_content
+        assert "approval_decision" not in system_content
+        assert [item.message.message_id for item in approval_batch.messages] == [
+            "msg-approval"
+        ]
 
     @pytest.mark.asyncio
     async def test_runtime_interrupt_stops_before_model_stream(self, setup):
@@ -354,8 +443,57 @@ class TestPipeline:
             await pipeline.run_turn(ctx)
 
         assert stream_called is False
-        assert [item.message.message_id for item in ctx.runtime_messages] == ["msg-stop"]
-        assert ctx.runtime_message_cursor.sequence == 1
+        assert ctx.runtime_messages == []
+        assert ctx.runtime_message_cursor.sequence == 0
+
+    @pytest.mark.asyncio
+    async def test_runtime_interrupt_mixed_batch_does_not_advance_cursor(self, setup):
+        pipeline, plugin = setup
+        bus = InMemoryRuntimeMessageBus()
+        await bus.publish(
+            RuntimeMessage(
+                message_id="msg-steer",
+                kind=RuntimeMessageKind.USER_STEER,
+                payload={"text": "Keep this for retry"},
+            )
+        )
+        await bus.publish(
+            RuntimeMessage(
+                message_id="msg-stop",
+                kind=RuntimeMessageKind.INTERRUPT,
+                payload={"reason": "user stopped turn"},
+            )
+        )
+        stream_called = False
+
+        async def mock_stream(messages, tools=None, **kwargs):
+            del messages, tools, kwargs
+            nonlocal stream_called
+            stream_called = True
+            from agentkit.providers.models import DoneEvent, TextEvent
+
+            yield TextEvent(text="should not stream")
+            yield DoneEvent()
+
+        plugin._mock_llm.stream = mock_stream
+        ctx = PipelineContext(
+            tape=Tape(),
+            session_id="session-1",
+            runtime_message_bus=bus,
+        )
+
+        with pytest.raises(PipelineError, match="runtime interrupted: user stopped turn"):
+            await pipeline.run_turn(ctx)
+
+        retry_batch = await bus.consume_after(RuntimeMessageCursor())
+
+        assert stream_called is False
+        assert ctx.runtime_messages == []
+        assert ctx.runtime_message_cursor.sequence == 0
+        assert [item.message.message_id for item in retry_batch.messages] == [
+            "msg-steer",
+            "msg-stop",
+        ]
 
     @pytest.mark.asyncio
     async def test_shutdown_notifies_plugins(self, setup):

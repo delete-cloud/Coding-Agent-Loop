@@ -308,24 +308,30 @@ outbound UI/event streams. The framework message kinds are:
 - `subagent_message`
 - `system_notice`
 
-`RuntimeMessageBus.consume_after(cursor)` is cursor-based and idempotent. Calling
-it repeatedly with the same `RuntimeMessageCursor` returns the same batch; the
-caller advances `PipelineContext.runtime_message_cursor` only after applying the
-batch. The in-memory implementation is process-local and intended for tests and
-single-runtime wiring. HTTP routing, owner fencing, and durable message storage
-remain `coding_agent` responsibilities.
+`RuntimeMessageBus.consume_after(cursor, kinds=...)` is cursor-based and
+idempotent. Calling it repeatedly with the same `RuntimeMessageCursor` returns
+the same batch for that consumer and kind filter; each consumer owns and persists
+its own cursor. The caller advances its cursor only after applying the batch.
+The in-memory implementation is process-local, keeps all messages and message
+IDs in memory, and is intended for tests and single-runtime wiring rather than
+long-running durable processes. HTTP routing, owner fencing, and durable message
+storage remain `coding_agent` responsibilities.
 
-`Pipeline` consumes runtime messages at stage boundaries, before each model
-round, and before tool execution. `interrupt` fails the turn at the safe point
-with `PipelineError`. `user_steer`, `system_notice`, and `subagent_message`
-messages consumed in the current turn are injected into the runtime context
-system message. `approval_decision` is typed by the bus but not interpreted by
-agentkit; product-specific approval stores handle that routing.
+`Pipeline` consumes only `interrupt`, `user_steer`, `system_notice`, and
+`subagent_message` at stage boundaries, before each model round, and before tool
+execution. `interrupt` fails the turn at the safe point with `PipelineError`
+before the pipeline cursor is advanced. `user_steer`, `system_notice`, and
+`subagent_message` messages consumed in the current turn are injected into the
+runtime context system message. `approval_decision` is typed by the bus but not
+consumed or interpreted by agentkit; product-specific approval stores consume it
+with their own cursor.
 
 The runtime context system message includes known run identity (`session_id`,
 `run_id`, `agent_id`, `parent_run_id`), environment kind and workspace root,
 elapsed turn time, context budget, optional active approval summaries, and
-current-turn runtime messages.
+current-turn runtime messages. Active approval summaries live on
+`PipelineContext.active_approvals` as non-empty strings or mappings with
+`request_id` and optional `tool`.
 
 ---
 

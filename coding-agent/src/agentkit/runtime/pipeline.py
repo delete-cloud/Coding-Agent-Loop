@@ -42,6 +42,15 @@ from agentkit.tools.toolset import ToolCallRequest, ToolExecutionOptions, Toolse
 
 logger = logging.getLogger(__name__)
 
+_PIPELINE_RUNTIME_MESSAGE_KINDS = frozenset(
+    {
+        RuntimeMessageKind.INTERRUPT,
+        RuntimeMessageKind.USER_STEER,
+        RuntimeMessageKind.SUBAGENT_MESSAGE,
+        RuntimeMessageKind.SYSTEM_NOTICE,
+    }
+)
+
 StructuredToolResultScopeFactory = Callable[[bool], AbstractContextManager[None]]
 
 
@@ -97,6 +106,11 @@ def _string_payload_value(payload: Mapping[str, Any], *names: str) -> str:
 
 
 def _format_active_approvals(value: Any) -> str:
+    """Format active approval summaries.
+
+    Items must be non-empty strings or mappings with a non-empty ``request_id``
+    and optional ``tool`` string; other entries are ignored.
+    """
     if not isinstance(value, list):
         return ""
 
@@ -156,6 +170,7 @@ class PipelineContext:
     )
     runtime_messages: list[SequencedRuntimeMessage] = field(default_factory=list)
     runtime_started_at: float | None = None
+    active_approvals: list[Any] = field(default_factory=list)
     toolset: Toolset | None = None
     tool_schemas: list[Any] = field(default_factory=list)
     response_entries: list[Any] = field(default_factory=list)
@@ -237,12 +252,12 @@ class Pipeline:
         if ctx.runtime_message_bus is None:
             return
 
-        batch = await ctx.runtime_message_bus.consume_after(ctx.runtime_message_cursor)
+        batch = await ctx.runtime_message_bus.consume_after(
+            ctx.runtime_message_cursor,
+            kinds=_PIPELINE_RUNTIME_MESSAGE_KINDS,
+        )
         if not batch.messages:
             return
-
-        ctx.runtime_messages.extend(batch.messages)
-        ctx.runtime_message_cursor = batch.cursor
 
         for item in batch.messages:
             message = item.message
@@ -251,6 +266,9 @@ class Pipeline:
                 if not reason:
                     reason = message.message_id
                 raise PipelineError(f"runtime interrupted: {reason}", stage=stage)
+
+        ctx.runtime_messages.extend(batch.messages)
+        ctx.runtime_message_cursor = batch.cursor
 
     def _runtime_context_grounding(self, ctx: PipelineContext) -> dict[str, Any] | None:
         lines: list[str] = []
@@ -277,13 +295,11 @@ class Pipeline:
                 f"max_output={budget.max_output_tokens}"
             )
 
-        if run_context is not None and ctx.runtime_started_at is not None:
+        if ctx.runtime_started_at is not None:
             elapsed = max(0, int(time.monotonic() - ctx.runtime_started_at))
             lines.append(f"elapsed_seconds: {elapsed}")
 
-        active_approvals = _format_active_approvals(
-            ctx.config.get("active_approvals")
-        )
+        active_approvals = _format_active_approvals(ctx.active_approvals)
         if active_approvals:
             lines.append(f"active_approvals: {active_approvals}")
 

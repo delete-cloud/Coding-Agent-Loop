@@ -1,10 +1,15 @@
-"""Inbound runtime message primitives."""
+"""Inbound runtime message primitives.
+
+Each consumer owns its own cursor. Product approval stores should consume
+``approval_decision`` messages with a cursor separate from the agentkit pipeline
+cursor. ``subagent_message`` payloads should use ``{"text": str}``.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
@@ -21,6 +26,27 @@ class RuntimeMessageKind(StrEnum):
     SYSTEM_NOTICE = "system_notice"
 
 
+def _coerce_runtime_message_kind(kind: RuntimeMessageKind | str) -> RuntimeMessageKind:
+    try:
+        return RuntimeMessageKind(kind)
+    except ValueError as exc:
+        raise ValueError(f"unknown runtime message kind: {kind}") from exc
+
+
+def _normalize_runtime_message_kinds(
+    kinds: Iterable[RuntimeMessageKind | str] | RuntimeMessageKind | str | None,
+) -> frozenset[RuntimeMessageKind] | None:
+    if kinds is None:
+        return None
+    if isinstance(kinds, str):
+        kinds = (kinds,)
+
+    normalized = frozenset(_coerce_runtime_message_kind(kind) for kind in kinds)
+    if not normalized:
+        raise ValueError("kinds must be non-empty when provided")
+    return normalized
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeMessage:
     """A runtime control message before it is assigned a bus sequence."""
@@ -34,7 +60,11 @@ class RuntimeMessage:
         if not self.message_id:
             raise ValueError("message_id must be non-empty")
         if not isinstance(self.kind, RuntimeMessageKind):
-            object.__setattr__(self, "kind", RuntimeMessageKind(self.kind))
+            object.__setattr__(
+                self,
+                "kind",
+                _coerce_runtime_message_kind(self.kind),
+            )
         if isinstance(self.created_at, bool) or not isinstance(
             self.created_at, int | float
         ):
@@ -88,12 +118,17 @@ class RuntimeMessageBus(Protocol):
         self,
         cursor: RuntimeMessageCursor,
         *,
+        kinds: Iterable[RuntimeMessageKind | str] | None = None,
         limit: int | None = None,
     ) -> RuntimeMessageBatch: ...
 
 
 class InMemoryRuntimeMessageBus:
-    """Process-local runtime message bus for tests and single-runtime wiring."""
+    """Process-local runtime message bus for tests and single-runtime wiring.
+
+    The bus keeps all messages and message IDs in memory, so it is not suitable
+    for long-running durable processes.
+    """
 
     def __init__(self) -> None:
         self._messages: list[SequencedRuntimeMessage] = []
@@ -116,8 +151,10 @@ class InMemoryRuntimeMessageBus:
         self,
         cursor: RuntimeMessageCursor,
         *,
+        kinds: Iterable[RuntimeMessageKind | str] | None = None,
         limit: int | None = None,
     ) -> RuntimeMessageBatch:
+        normalized_kinds = _normalize_runtime_message_kinds(kinds)
         if limit is not None:
             if isinstance(limit, bool) or not isinstance(limit, int):
                 raise TypeError("limit must be an integer or None")
@@ -128,6 +165,10 @@ class InMemoryRuntimeMessageBus:
             messages = [
                 item for item in self._messages if item.sequence > cursor.sequence
             ]
+            if normalized_kinds is not None:
+                messages = [
+                    item for item in messages if item.message.kind in normalized_kinds
+                ]
             if limit is not None:
                 messages = messages[:limit]
             next_cursor = (
