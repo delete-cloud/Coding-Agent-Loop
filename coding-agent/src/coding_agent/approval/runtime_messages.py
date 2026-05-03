@@ -24,6 +24,7 @@ class ApprovalDecisionConsumptionResult:
     cursor: RuntimeMessageCursor
     applied_request_ids: tuple[str, ...]
     skipped_message_ids: tuple[str, ...]
+    deferred_message_ids: tuple[str, ...]
 
 
 class ApprovalDecisionConsumer:
@@ -47,6 +48,8 @@ class ApprovalDecisionConsumer:
         )
         applied_request_ids: list[str] = []
         skipped_message_ids: list[str] = []
+        deferred_message_ids: list[str] = []
+        cursor_sequence = cursor.sequence
 
         for item in batch.messages:
             response = self._response_from_payload(
@@ -55,22 +58,26 @@ class ApprovalDecisionConsumer:
             )
             if response is None:
                 skipped_message_ids.append(item.message.message_id)
+                cursor_sequence = item.sequence
                 continue
 
             if self._coordinator.respond(response):
                 applied_request_ids.append(response.request_id)
+                cursor_sequence = item.sequence
             else:
-                skipped_message_ids.append(item.message.message_id)
+                deferred_message_ids.append(item.message.message_id)
                 logger.warning(
                     "approval_decision for unknown request %r in session %r",
                     response.request_id,
                     self._session_id,
                 )
+                break
 
         return ApprovalDecisionConsumptionResult(
-            cursor=batch.cursor,
+            cursor=RuntimeMessageCursor(cursor_sequence),
             applied_request_ids=tuple(applied_request_ids),
             skipped_message_ids=tuple(skipped_message_ids),
+            deferred_message_ids=tuple(deferred_message_ids),
         )
 
     def _response_from_payload(

@@ -345,3 +345,55 @@ async def test_session_manager_submit_approval_advances_pending_projection(
         "tool_name": second.tool,
         "arguments": second.args,
     }
+
+
+@pytest.mark.asyncio
+async def test_session_manager_defers_prepublished_decision_until_request_attaches(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENT_DATA_DIR", str(tmp_path / "data"))
+    manager = SessionManager(store=InMemorySessionStore())
+    session_id = await manager.create_session(
+        repo_path=tmp_path,
+        provider=MockProvider(),
+        provider_name="mock",
+        model_name="mock",
+    )
+    session = await manager.get_session_async(session_id)
+    request = _approval_request(session_id=session_id, request_id="approval-early")
+    await session.runtime_message_bus.publish(
+        RuntimeMessage(
+            message_id=f"approval_decision:{session_id}:{request.request_id}",
+            kind=RuntimeMessageKind.APPROVAL_DECISION,
+            payload={
+                "session_id": session_id,
+                "request_id": request.request_id,
+                "approved": True,
+                "feedback": "arrived early",
+                "scope": "once",
+            },
+        )
+    )
+
+    early_response = await manager.submit_approval_response(
+        session_id=session_id,
+        request_id=request.request_id,
+        approved=False,
+        feedback="retry body",
+        scope="once",
+    )
+
+    assert early_response is None
+    assert session.approval_decision_cursor.sequence == 0
+
+    session.turn_in_progress = True
+    applied_response = await manager.wait_for_http_approval(
+        session_id=session_id,
+        approval_req=request,
+        timeout_seconds=1,
+    )
+
+    assert applied_response.approved is True
+    assert applied_response.feedback == "arrived early"
+    assert session.approval_decision_cursor.sequence == 1

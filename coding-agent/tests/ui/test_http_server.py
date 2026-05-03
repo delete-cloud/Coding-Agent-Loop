@@ -963,6 +963,31 @@ class TestApprovalEndpoint:
         assert response.status_code == 409
         assert response.json()["detail"] == "stale owner or fencing token rejected"
 
+    async def test_approve_returns_500_without_internal_detail_for_unexpected_error(
+        self, client, monkeypatch
+    ):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        async def failing_submit_approval_response(**kwargs) -> ApprovalResponse:
+            assert kwargs["session_id"] == session_id
+            assert kwargs["request_id"] == "req123"
+            raise RuntimeError("secret internal failure")
+
+        monkeypatch.setattr(
+            session_manager,
+            "submit_approval_response",
+            failing_submit_approval_response,
+        )
+
+        response = await client.post(
+            f"/sessions/{session_id}/approve",
+            json={"request_id": "req123", "approved": True},
+        )
+
+        assert response.status_code == 500
+        assert response.json()["detail"] == "Internal server error"
+
     async def test_approve_success(self, client):
         create_resp = await client.post("/sessions", json={})
         session_id = create_resp.json()["session_id"]
