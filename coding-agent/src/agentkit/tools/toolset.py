@@ -22,6 +22,10 @@ class _UnhandledToolResult:
 
 UNHANDLED_TOOL_RESULT = _UnhandledToolResult()
 
+SEARCH_TOOLS_NAME = "search_tools"
+CALL_TOOL_NAME = "call_tool"
+_PROXY_AFFORDANCE_NAMES = frozenset({SEARCH_TOOLS_NAME, CALL_TOOL_NAME})
+
 
 class ToolProvider(Protocol):
     """Provider contract for components that expose executable tools."""
@@ -41,6 +45,21 @@ class ToolProvider(Protocol):
         to the provider hook that raised, so earlier unhandled providers are not
         called again for the same retry cycle.
         """
+        ...
+
+
+class ProxyToolProvider(Protocol):
+    """Provider contract for dynamic tools hidden behind proxy affordances."""
+
+    def get_proxy_tools(self, **kwargs: Any) -> list[ToolSchema]: ...
+
+    def execute_proxy_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any] | None,
+        **kwargs: Any,
+    ) -> Any:
+        """Return a proxied tool result, or UNHANDLED_TOOL_RESULT before side effects."""
         ...
 
 
@@ -137,7 +156,18 @@ class Toolset:
 
     def collect_schemas(self) -> list[ToolSchema]:
         """Collect tool schemas from registered tool providers."""
-        tool_lists = self._runtime.call_many("get_tools")
+        direct_schemas = self._collect_schemas_from_hook("get_tools")
+        proxy_schemas = self._collect_schemas_from_hook("get_proxy_tools")
+        if not proxy_schemas:
+            return direct_schemas
+        return [
+            *direct_schemas,
+            self._search_tools_schema(),
+            self._call_tool_schema(),
+        ]
+
+    def _collect_schemas_from_hook(self, hook_name: str) -> list[ToolSchema]:
+        tool_lists = self._runtime.call_many(hook_name)
         schemas: list[ToolSchema] = []
         for tool_list in tool_lists:
             if isinstance(tool_list, list):
@@ -145,6 +175,58 @@ class Toolset:
             else:
                 schemas.append(tool_list)
         return schemas
+
+    def _proxy_schemas(self) -> list[ToolSchema]:
+        return self._collect_schemas_from_hook("get_proxy_tools")
+
+    def _search_tools_schema(self) -> ToolSchema:
+        return ToolSchema(
+            name=SEARCH_TOOLS_NAME,
+            description=(
+                "Search dynamically available tools by name and description. "
+                "Use call_tool with the returned name to execute one."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search text matched against tool names and descriptions.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of matches to return.",
+                        "minimum": 1,
+                        "maximum": 50,
+                    },
+                },
+                "additionalProperties": False,
+            },
+        )
+
+    def _call_tool_schema(self) -> ToolSchema:
+        return ToolSchema(
+            name=CALL_TOOL_NAME,
+            description=(
+                "Call a dynamic tool returned by search_tools. The nested tool "
+                "call is validated and approved before execution."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Name of the dynamic tool to call.",
+                    },
+                    "arguments": {
+                        "type": "object",
+                        "description": "Arguments for the dynamic tool.",
+                    },
+                },
+                "required": ["name", "arguments"],
+                "additionalProperties": False,
+            },
+        )
 
     def validate_tool_call(
         self,
@@ -408,7 +490,9 @@ class Toolset:
     ) -> list[ToolExecutionResult]:
         """Execute tool calls through batch hooks or per-tool fallback hooks."""
         resolved_options = options or ToolExecutionOptions()
-        if len(calls) > 1:
+        if len(calls) > 1 and not any(
+            call.name in _PROXY_AFFORDANCE_NAMES for call in calls
+        ):
             batch_results = await self._execute_batch(
                 calls,
                 ctx=ctx,
@@ -477,7 +561,26 @@ class Toolset:
         ctx: Any,
         options: ToolExecutionOptions,
     ) -> ToolExecutionResult:
-        for hook in self._runtime.get_hooks("execute_tool"):
+        if call.name == SEARCH_TOOLS_NAME:
+            return self._execute_search_tools(call)
+        if call.name == CALL_TOOL_NAME:
+            return await self._execute_call_tool(call, ctx=ctx, options=options)
+        return await self._execute_one_from_hook(
+            "execute_tool",
+            call,
+            ctx=ctx,
+            options=options,
+        )
+
+    async def _execute_one_from_hook(
+        self,
+        hook_name: str,
+        call: ToolCallRequest,
+        *,
+        ctx: Any,
+        options: ToolExecutionOptions,
+    ) -> ToolExecutionResult:
+        for hook in self._runtime.get_hooks(hook_name):
             result: Any = UNHANDLED_TOOL_RESULT
             for attempt in range(options.max_retries + 1):
                 try:
@@ -503,6 +606,139 @@ class Toolset:
             return self._envelope_raw_result(call, result)
 
         return self._envelope_raw_result(call, UNHANDLED_TOOL_RESULT)
+
+    def _execute_search_tools(self, call: ToolCallRequest) -> ToolExecutionResult:
+        query_value = call.arguments.get("query", "")
+        if not isinstance(query_value, str):
+            return ToolExecutionResult(
+                tool_call_id=call.tool_call_id,
+                name=call.name,
+                error=TypeError("search_tools.query must be a string"),
+            )
+        limit_value = call.arguments.get("limit", 20)
+        if (
+            isinstance(limit_value, bool)
+            or not isinstance(limit_value, int)
+            or limit_value < 1
+            or limit_value > 50
+        ):
+            return ToolExecutionResult(
+                tool_call_id=call.tool_call_id,
+                name=call.name,
+                error=ValueError("search_tools.limit must be an integer from 1 to 50"),
+            )
+
+        terms = [
+            term
+            for term in query_value.strip().casefold().split()
+            if term
+        ]
+        matches: list[ToolSchema] = []
+        for schema in self._proxy_schemas():
+            haystack = f"{schema.name} {schema.description}".casefold()
+            if terms and not all(term in haystack for term in terms):
+                continue
+            matches.append(schema)
+            if len(matches) >= limit_value:
+                break
+
+        return ToolExecutionResult(
+            tool_call_id=call.tool_call_id,
+            name=call.name,
+            result={
+                "tools": [self._proxy_schema_descriptor(schema) for schema in matches],
+                "count": len(matches),
+            },
+        )
+
+    def _proxy_schema_descriptor(self, schema: ToolSchema) -> dict[str, Any]:
+        return {
+            "name": schema.name,
+            "description": schema.description,
+            "parameters": schema.parameters,
+        }
+
+    async def _execute_call_tool(
+        self,
+        call: ToolCallRequest,
+        *,
+        ctx: Any,
+        options: ToolExecutionOptions,
+    ) -> ToolExecutionResult:
+        target_name = call.arguments.get("name")
+        if not isinstance(target_name, str) or not target_name:
+            return ToolExecutionResult(
+                tool_call_id=call.tool_call_id,
+                name=call.name,
+                error=ValueError("call_tool.name must be a non-empty string"),
+            )
+        target_arguments = call.arguments.get("arguments")
+        if not isinstance(target_arguments, dict):
+            return ToolExecutionResult(
+                tool_call_id=call.tool_call_id,
+                name=call.name,
+                error=TypeError("call_tool.arguments must be an object"),
+            )
+
+        proxy_schemas = self._proxy_schemas()
+        target_schema = next(
+            (schema for schema in proxy_schemas if schema.name == target_name),
+            None,
+        )
+        if target_schema is None:
+            return ToolExecutionResult(
+                tool_call_id=call.tool_call_id,
+                name=call.name,
+                error=LookupError(f"proxied tool '{target_name}' not found"),
+            )
+
+        target_call = ToolCallRequest(
+            tool_call_id=f"{call.tool_call_id}:{target_name}",
+            name=target_schema.name,
+            arguments=dict(target_arguments),
+        )
+        validation_error = self.validate_tool_call(
+            target_call,
+            schemas=proxy_schemas,
+        )
+        if validation_error is not None:
+            return ToolExecutionResult(
+                tool_call_id=call.tool_call_id,
+                name=call.name,
+                error=ValueError(
+                    f"Tool call validation failed for {target_name!r}: "
+                    f"{validation_error.message}"
+                ),
+            )
+
+        approval = await self.approve_tool_call(target_call, ctx=ctx)
+        if not approval.approved:
+            return ToolExecutionResult(
+                tool_call_id=call.tool_call_id,
+                name=call.name,
+                error=PermissionError(
+                    f"Tool call rejected: {approval.reason or 'policy'}"
+                ),
+            )
+
+        target_result = await self._execute_one_from_hook(
+            "execute_proxy_tool",
+            target_call,
+            ctx=ctx,
+            options=options,
+        )
+        if target_result.is_error:
+            return ToolExecutionResult(
+                tool_call_id=call.tool_call_id,
+                name=call.name,
+                error=RuntimeError(target_result.error_message),
+            )
+
+        return ToolExecutionResult(
+            tool_call_id=call.tool_call_id,
+            name=call.name,
+            result=target_result.result,
+        )
 
     def _envelope_raw_result(
         self,

@@ -77,7 +77,7 @@ src/agentkit/
 │   └── models.py            #   StreamEvent types
 │
 ├── runtime/                 # Execution engine
-│   ├── hookspecs.py         #   15 hook specifications
+│   ├── hookspecs.py         #   17 hook specifications
 │   ├── hook_runtime.py      #   HookRuntime dispatcher
 │   └── pipeline.py          #   7-stage Pipeline
 │
@@ -218,7 +218,7 @@ The `@tool` decorator generates `ToolSchema` from function signatures and docstr
 
 ### 4.1 Hook Specifications
 
-AgentKit defines **15 hooks** in the `HOOK_SPECS` registry. Each `HookSpec` declares:
+AgentKit defines **17 hooks** in the `HOOK_SPECS` registry. Each `HookSpec` declares:
 
 | Field | Purpose |
 |---|---|
@@ -228,25 +228,27 @@ AgentKit defines **15 hooks** in the `HOOK_SPECS` registry. Each `HookSpec` decl
 | `returns_directive` | Return value is a Directive |
 | `return_type` | Expected return type for validation |
 
-### 4.2 The 15 Hooks
+### 4.2 The 17 Hooks
 
 | # | Hook | Mode | Stage | Purpose |
 |---|---|---|---|---|
 | 1 | `provide_storage` | first_result | load_state | Return TapeStore instance |
-| 2 | `get_tools` | collect_all | load_state | Return list of ToolSchema |
-| 3 | `provide_llm` | first_result | load_state | Return LLMProvider instance |
-| 4 | `approve_tool_call` | first_result | run_model | Return Approve/Reject/AskUser |
-| 5 | `summarize_context` | first_result | build_context | Legacy: compress tape entries |
-| 6 | `resolve_context_window` | first_result | build_context | Return (window_start, summary_anchor) |
-| 7 | `on_error` | observer | any | Notified on pipeline errors |
-| 8 | `mount` | collect_all | init | Plugin initialization, return state |
-| 9 | `on_shutdown` | observer | any | Notified when pipeline is shutting down |
-| 10 | `on_checkpoint` | observer | save_state | Persist state at turn boundaries |
-| 11 | `build_context` | collect_all | build_context | Inject grounding context (memories, KB) |
-| 12 | `on_turn_end` | collect_all | render | Produce MemoryRecord directives |
-| 13 | `execute_tool` | first_result | run_model | Execute single tool call |
-| 14 | `on_session_event` | observer | any | Session-level events (topic, handoff) |
-| 15 | `execute_tools_batch` | first_result | run_model | Execute tool batch in parallel |
+| 2 | `get_tools` | collect_all | load_state | Return directly exposed ToolSchema list |
+| 3 | `get_proxy_tools` | collect_all | load_state | Return dynamic ToolSchema list hidden behind proxy |
+| 4 | `provide_llm` | first_result | load_state | Return LLMProvider instance |
+| 5 | `approve_tool_call` | first_result | run_model | Return Approve/Reject/AskUser |
+| 6 | `summarize_context` | first_result | build_context | Legacy: compress tape entries |
+| 7 | `resolve_context_window` | first_result | build_context | Return (window_start, summary_anchor) |
+| 8 | `on_error` | observer | any | Notified on pipeline errors |
+| 9 | `mount` | collect_all | init | Plugin initialization, return state |
+| 10 | `on_shutdown` | observer | any | Notified when pipeline is shutting down |
+| 11 | `on_checkpoint` | observer | save_state | Persist state at turn boundaries |
+| 12 | `build_context` | collect_all | build_context | Inject grounding context (memories, KB) |
+| 13 | `on_turn_end` | collect_all | render | Produce MemoryRecord directives |
+| 14 | `execute_tool` | first_result | run_model | Execute directly exposed single tool call |
+| 15 | `execute_proxy_tool` | first_result | run_model | Execute dynamic tool called through `call_tool` |
+| 16 | `on_session_event` | observer | any | Session-level events (topic, handoff) |
+| 17 | `execute_tools_batch` | first_result | run_model | Execute directly exposed tool batch in parallel |
 
 ### 4.3 Hook Dispatch Modes
 
@@ -296,6 +298,16 @@ approval hook exception, async approval await failure, or directive executor
 exception produces a rejected `ToolApprovalResult` instead of aborting the turn.
 Executor failures keep the directive on the result and use the directive reason
 when available; other approval failures use `reason="policy"`.
+
+Dynamic providers can implement `get_proxy_tools` and `execute_proxy_tool`.
+Those schemas are not exposed to the model directly. When any proxy schemas are
+available, `Toolset.collect_schemas()` adds stable `search_tools` and
+`call_tool` affordances alongside direct tools. `search_tools` returns matching
+dynamic tool descriptors. `call_tool` validates the nested target arguments
+against the target schema, runs the target through `approve_tool_call`, and then
+executes it through `execute_proxy_tool` with the same timeout/retry envelope.
+Calls containing `search_tools` or `call_tool` bypass `execute_tools_batch` so
+the proxy path cannot be swallowed by direct-tool batch executors.
 
 ### 4.6 Runtime Message Bus
 
@@ -349,7 +361,7 @@ User Input
          │
          ▼
 ┌─────────────────┐
-│   load_state    │  provide_storage → provide_llm → get_tools
+│   load_state    │  provide_storage → provide_llm → get_tools/get_proxy_tools
 │                 │  Collects: storage, llm_provider, tool_schemas
 │                 │  Begins ForkTapeStore transaction
 └────────┬────────┘
@@ -416,8 +428,9 @@ for round in range(max_tool_rounds):
                │
     ┌──────────▼──────────────────┐
     │ Batch or sequential execute │
-    │ execute_tools_batch (≥2)    │
-    │ execute_tool (single)       │
+    │ execute_tools_batch (direct ≥2) │
+    │ execute_tool (direct single)    │
+    │ call_tool → execute_proxy_tool  │
     │ → Append tool_result Entry  │
     │ → Fire ToolResultEvent      │
     └──────────┬──────────────────┘

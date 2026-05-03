@@ -75,7 +75,7 @@ src/agentkit/
 │   └── models.py            #   StreamEvent 类型
 │
 ├── runtime/                 # 执行引擎
-│   ├── hookspecs.py         #   15 个钩子规格
+│   ├── hookspecs.py         #   17 个钩子规格
 │   ├── hook_runtime.py      #   HookRuntime 分发器
 │   └── pipeline.py          #   7 阶段 Pipeline
 │
@@ -216,7 +216,7 @@ class ToolRegistry:
 
 ### 4.1 钩子规格
 
-AgentKit 在 `HOOK_SPECS` 注册表中定义了 **15 个钩子**。每个 `HookSpec` 声明：
+AgentKit 在 `HOOK_SPECS` 注册表中定义了 **17 个钩子**。每个 `HookSpec` 声明：
 
 | 字段 | 用途 |
 |---|---|
@@ -226,25 +226,27 @@ AgentKit 在 `HOOK_SPECS` 注册表中定义了 **15 个钩子**。每个 `HookS
 | `returns_directive` | 返回值为 Directive |
 | `return_type` | 用于验证的预期返回类型 |
 
-### 4.2 15 个钩子
+### 4.2 17 个钩子
 
 | # | 钩子 | 模式 | 阶段 | 用途 |
 |---|---|---|---|---|
 | 1 | `provide_storage` | first_result | load_state | 返回 TapeStore 实例 |
-| 2 | `get_tools` | collect_all | load_state | 返回 ToolSchema 列表 |
-| 3 | `provide_llm` | first_result | load_state | 返回 LLMProvider 实例 |
-| 4 | `approve_tool_call` | first_result | run_model | 返回 Approve/Reject/AskUser |
-| 5 | `summarize_context` | first_result | build_context | 遗留：压缩 tape 条目 |
-| 6 | `resolve_context_window` | first_result | build_context | 返回 (window_start, summary_anchor) |
-| 7 | `on_error` | observer | any | 流水线错误时通知 |
-| 8 | `mount` | collect_all | init | 插件初始化，返回状态 |
-| 9 | `on_shutdown` | observer | any | 流水线关闭时通知 |
-| 10 | `on_checkpoint` | observer | save_state | 在轮次边界持久化状态 |
-| 11 | `build_context` | collect_all | build_context | 注入 grounding 上下文（记忆、知识库） |
-| 12 | `on_turn_end` | collect_all | render | 产生 MemoryRecord 指令 |
-| 13 | `execute_tool` | first_result | run_model | 执行单个工具调用 |
-| 14 | `on_session_event` | observer | any | 会话级事件（topic、handoff） |
-| 15 | `execute_tools_batch` | first_result | run_model | 并行批量执行工具 |
+| 2 | `get_tools` | collect_all | load_state | 返回直接暴露的 ToolSchema 列表 |
+| 3 | `get_proxy_tools` | collect_all | load_state | 返回隐藏在 proxy 后的动态 ToolSchema 列表 |
+| 4 | `provide_llm` | first_result | load_state | 返回 LLMProvider 实例 |
+| 5 | `approve_tool_call` | first_result | run_model | 返回 Approve/Reject/AskUser |
+| 6 | `summarize_context` | first_result | build_context | 遗留：压缩 tape 条目 |
+| 7 | `resolve_context_window` | first_result | build_context | 返回 (window_start, summary_anchor) |
+| 8 | `on_error` | observer | any | 流水线错误时通知 |
+| 9 | `mount` | collect_all | init | 插件初始化，返回状态 |
+| 10 | `on_shutdown` | observer | any | 流水线关闭时通知 |
+| 11 | `on_checkpoint` | observer | save_state | 在轮次边界持久化状态 |
+| 12 | `build_context` | collect_all | build_context | 注入 grounding 上下文（记忆、知识库） |
+| 13 | `on_turn_end` | collect_all | render | 产生 MemoryRecord 指令 |
+| 14 | `execute_tool` | first_result | run_model | 执行直接暴露的单个工具调用 |
+| 15 | `execute_proxy_tool` | first_result | run_model | 执行通过 `call_tool` 调用的动态工具 |
+| 16 | `on_session_event` | observer | any | 会话级事件（topic、handoff） |
+| 17 | `execute_tools_batch` | first_result | run_model | 并行批量执行直接暴露的工具 |
 
 ### 4.3 钩子分发模式
 
@@ -282,7 +284,7 @@ notify(hook, **kwargs)       → 即发即忘，吞掉异常
          │
          ▼
 ┌─────────────────┐
-│   load_state    │  provide_storage → provide_llm → get_tools
+│   load_state    │  provide_storage → provide_llm → get_tools/get_proxy_tools
 │                 │  收集：storage, llm_provider, tool_schemas
 │                 │  开始 ForkTapeStore 事务
 └────────┬────────┘
@@ -349,8 +351,9 @@ for round in range(max_tool_rounds):
                │
     ┌──────────▼──────────────────┐
     │ 批量或顺序执行               │
-    │ execute_tools_batch (≥2)    │
-    │ execute_tool（单个）         │
+    │ execute_tools_batch（直接工具 ≥2） │
+    │ execute_tool（直接工具单个）       │
+    │ call_tool → execute_proxy_tool    │
     │ → 追加 tool_result Entry    │
     │ → 触发 ToolResultEvent      │
     └──────────┬──────────────────┘

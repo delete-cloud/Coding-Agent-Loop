@@ -4,10 +4,11 @@ from agentkit.directive.types import Directive
 
 
 class TestHookSpecs:
-    def test_all_15_hooks_defined(self):
+    def test_all_17_hooks_defined(self):
         expected = {
             "provide_storage",
             "get_tools",
+            "get_proxy_tools",
             "provide_llm",
             "approve_tool_call",
             "summarize_context",
@@ -19,6 +20,7 @@ class TestHookSpecs:
             "build_context",
             "on_turn_end",
             "execute_tool",
+            "execute_proxy_tool",
             "on_session_event",
             "execute_tools_batch",
         }
@@ -39,6 +41,9 @@ class TestHookSpecs:
 
     def test_get_tools_is_not_firstresult(self):
         assert HOOK_SPECS["get_tools"].firstresult is False
+
+    def test_get_proxy_tools_is_not_firstresult(self):
+        assert HOOK_SPECS["get_proxy_tools"].firstresult is False
 
     def test_on_error_is_observer(self):
         assert HOOK_SPECS["on_error"].is_observer is True
@@ -64,6 +69,11 @@ class TestHookSpecs:
 
     def test_execute_tool_is_firstresult(self):
         spec = HOOK_SPECS["execute_tool"]
+        assert spec.firstresult is True
+        assert spec.is_observer is False
+
+    def test_execute_proxy_tool_is_firstresult(self):
+        spec = HOOK_SPECS["execute_proxy_tool"]
         assert spec.firstresult is True
         assert spec.is_observer is False
 
