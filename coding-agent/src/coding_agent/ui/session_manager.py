@@ -21,16 +21,30 @@ from agentkit.storage.checkpoint_fs import FSCheckpointStore
 from agentkit.storage.pg import PGPool
 from agentkit.checkpoint.models import CheckpointMeta
 from agentkit.checkpoint import CheckpointService
+from agentkit.providers.models import DoneEvent, TextEvent
+from agentkit.runtime import (
+    DuplicateRuntimeMessageError,
+    InMemoryRuntimeMessageBus,
+    RuntimeMessage,
+    RuntimeMessageBus,
+    RuntimeMessageCursor,
+    RuntimeMessageKind,
+)
 from agentkit.storage.protocols import CheckpointStore, TapeStore
+from agentkit.tape.tape import Tape
+from agentkit.tape.models import Entry
 from coding_agent.adapter import PipelineAdapter
-from coding_agent.approval import ApprovalCoordinator, ApprovalPolicy
+from coding_agent.approval import (
+    ApprovalCoordinator,
+    ApprovalDecisionConsumer,
+    ApprovalDecisionConsumptionResult,
+    ApprovalPolicy,
+    approval_response_from_runtime_payload,
+)
 from coding_agent.approval.store import ApprovalStore
 from coding_agent.core import config as core_config
 from coding_agent.plugins.storage import JSONLTapeStore
 from coding_agent.providers.base import ChatProvider, ToolSchema
-from agentkit.providers.models import DoneEvent, TextEvent
-from agentkit.tape.tape import Tape
-from agentkit.tape.models import Entry
 from coding_agent.wire.local import LocalWire
 from coding_agent.wire.protocol import (
     ApprovalRequest,
@@ -57,6 +71,24 @@ logger = logging.getLogger(__name__)
 _CHECKPOINT_SESSION_CONFIG_KEY = "session_restart_config"
 _DEFAULT_EXECUTION_BINDING = object()
 T = TypeVar("T")
+
+
+def _approval_decision_message_id(session_id: str, request_id: str) -> str:
+    return f"approval_decision:{session_id}:{request_id}"
+
+
+def _approval_response_projection(response: ApprovalResponse) -> dict[str, Any]:
+    return {
+        "request_id": response.request_id,
+        "decision": "approve" if response.approved else "deny",
+        "feedback": response.feedback,
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class _PublishedApprovalDecision:
+    sequence: int
+    response: ApprovalResponse
 
 
 class MockProvider:
@@ -131,6 +163,12 @@ class Session:
     runtime_pipeline: Any | None = None
     runtime_ctx: Any | None = None
     runtime_adapter: Any | None = None
+    runtime_message_bus: RuntimeMessageBus = field(
+        default_factory=InMemoryRuntimeMessageBus
+    )
+    approval_decision_cursor: RuntimeMessageCursor = field(
+        default_factory=RuntimeMessageCursor
+    )
     approval_coordinator: ApprovalCoordinator = field(init=False)
 
     def __post_init__(self) -> None:
@@ -866,6 +904,18 @@ class SessionManager:
             session.approval_event.clear()
             session.approval_response = None
             await self._persist_session_async(session)
+            published_decision = await self._published_approval_decision(
+                session,
+                req.request_id,
+            )
+            if published_decision is not None:
+                response = await self._apply_published_approval_decision(
+                    session,
+                    req.request_id,
+                    published_decision,
+                )
+                if response is not None:
+                    return response
             await session.wire.send(req)
             try:
                 response = await session.approval_coordinator.wait_for_response(
@@ -1312,6 +1362,7 @@ class SessionManager:
                     )
                     session.tape_id = ctx.tape.tape_id
                     await self._persist_session_async(session)
+                    ctx.runtime_message_bus = session.runtime_message_bus
                     ctx.config["wire_consumer"] = None
                     ctx.config["agent_id"] = ""
 
@@ -1329,6 +1380,7 @@ class SessionManager:
                 set_consumer = getattr(adapter, "set_consumer", None)
                 if callable(set_consumer):
                     set_consumer(consumer)
+                ctx.runtime_message_bus = session.runtime_message_bus
                 ctx.config["wire_consumer"] = consumer
                 await adapter.run_turn(prompt)
                 session.tape_id = ctx.tape.tape_id
@@ -1358,14 +1410,95 @@ class SessionManager:
                 session.last_activity = datetime.now()
                 await self._persist_session_async(session)
 
-    async def submit_approval(
+    async def _consume_approval_decisions_for_session(
+        self,
+        session: Session,
+        *,
+        limit: int | None = None,
+    ) -> ApprovalDecisionConsumptionResult:
+        consumer = ApprovalDecisionConsumer(
+            session_id=session.id,
+            coordinator=session.approval_coordinator,
+        )
+        result = await consumer.consume(
+            session.runtime_message_bus,
+            session.approval_decision_cursor,
+            limit=limit,
+        )
+        if result.applied_request_ids or not result.deferred_message_ids:
+            session.approval_decision_cursor = result.cursor
+        if result.applied_request_ids:
+            session.pending_approval = session.approval_coordinator.projection()
+            session.approval_event.set()
+        return result
+
+    async def _published_approval_decision(
+        self,
+        session: Session,
+        request_id: str,
+    ) -> _PublishedApprovalDecision | None:
+        message_id = _approval_decision_message_id(session.id, request_id)
+        batch = await session.runtime_message_bus.consume_after(
+            RuntimeMessageCursor(),
+            kinds={RuntimeMessageKind.APPROVAL_DECISION},
+        )
+        for item in batch.messages:
+            if item.message.message_id != message_id:
+                continue
+            response = approval_response_from_runtime_payload(
+                session_id=session.id,
+                message_id=item.message.message_id,
+                payload=item.message.payload,
+            )
+            if response is None:
+                return None
+            return _PublishedApprovalDecision(
+                sequence=item.sequence,
+                response=response,
+            )
+        return None
+
+    async def _apply_published_approval_decision(
+        self,
+        session: Session,
+        request_id: str,
+        decision: _PublishedApprovalDecision,
+    ) -> ApprovalResponse | None:
+        already_consumed = decision.sequence <= session.approval_decision_cursor.sequence
+        applied = False
+        if session.approval_coordinator.get_request(request_id) is not None:
+            applied = session.approval_coordinator.respond(decision.response)
+            if applied and not already_consumed:
+                session.approval_decision_cursor = RuntimeMessageCursor(
+                    max(
+                        session.approval_decision_cursor.sequence,
+                        decision.sequence,
+                    )
+                )
+        if not applied and not already_consumed:
+            return None
+
+        session.last_activity = datetime.now()
+        session.pending_approval = session.approval_coordinator.projection()
+        session.approval_response = _approval_response_projection(decision.response)
+        session.approval_event.set()
+        await self._persist_session_async(session)
+        if not applied:
+            logger.info(
+                "approval_decision for session %s request %s was already published; keeping the first decision",
+                session.id,
+                request_id,
+            )
+        return decision.response
+
+    async def submit_approval_response(
         self,
         session_id: str,
         request_id: str,
         approved: bool,
         feedback: str | None = None,
         scope: Literal["once", "session", "always"] = "once",
-    ) -> bool:
+    ) -> ApprovalResponse | None:
         """Submit an approval response for a pending request.
 
         Uses the session's ApprovalStore to record the response.
@@ -1377,40 +1510,117 @@ class SessionManager:
             feedback: Optional feedback message
 
         Returns:
-            True if the response was recorded successfully, False otherwise
+            The stored/applied approval response, or None if no matching request exists
 
         Raises:
             KeyError: If session not found
         """
         await self._assert_owner(session_id)
         session = await self.get_session_async(session_id)
+        message_id = _approval_decision_message_id(session_id, request_id)
 
-        # Create approval response and submit to ApprovalStore
-        response = ApprovalResponse(
+        published_decision = await self._published_approval_decision(
+            session,
+            request_id,
+        )
+        if published_decision is not None:
+            return await self._apply_published_approval_decision(
+                session,
+                request_id,
+                published_decision,
+            )
+
+        if session.approval_coordinator.get_request(request_id) is None:
+            logger.warning(
+                f"Approval submission failed for session {session_id}: request {request_id} not found"
+            )
+            return None
+
+        try:
+            await session.runtime_message_bus.publish(
+                RuntimeMessage(
+                    message_id=message_id,
+                    kind=RuntimeMessageKind.APPROVAL_DECISION,
+                    payload={
+                        "session_id": session_id,
+                        "request_id": request_id,
+                        "approved": approved,
+                        "feedback": feedback,
+                        "scope": scope,
+                    },
+                )
+            )
+        except DuplicateRuntimeMessageError as exc:
+            if exc.message_id != message_id:
+                raise
+            published_decision = await self._published_approval_decision(
+                session,
+                request_id,
+            )
+            if published_decision is None:
+                raise RuntimeError(
+                    f"duplicate approval_decision {message_id!r} was not readable"
+                ) from exc
+            logger.info(
+                "approval_decision already published for session %s request %s",
+                session_id,
+                request_id,
+            )
+
+        if published_decision is None:
+            published_decision = await self._published_approval_decision(
+                session,
+                request_id,
+            )
+        if published_decision is None:
+            raise RuntimeError(f"approval_decision {message_id!r} was not readable")
+
+        result = await self._consume_approval_decisions_for_session(session)
+        success = request_id in result.applied_request_ids
+        session.last_activity = datetime.now()
+
+        if success:
+            session.pending_approval = session.approval_coordinator.projection()
+            session.approval_response = _approval_response_projection(
+                published_decision.response
+            )
+            session.approval_event.set()
+            await self._persist_session_async(session)
+            logger.info(
+                "Approval submitted for session %s: %s",
+                session_id,
+                published_decision.response.approved,
+            )
+        else:
+            logger.warning(
+                "approval_decision for session %s request %s was not applied (validation failure or race)",
+                session_id,
+                request_id,
+            )
+            if result.applied_request_ids:
+                # A consume batch can apply other requests even when this
+                # specific submission is skipped.
+                await self._persist_session_async(session)
+            return None
+
+        return published_decision.response
+
+    async def submit_approval(
+        self,
+        session_id: str,
+        request_id: str,
+        approved: bool,
+        feedback: str | None = None,
+        scope: Literal["once", "session", "always"] = "once",
+    ) -> bool:
+        response = await self.submit_approval_response(
             session_id=session_id,
             request_id=request_id,
             approved=approved,
             feedback=feedback,
             scope=scope,
         )
-        success = session.approval_coordinator.respond(response)
-        session.last_activity = datetime.now()
-
-        if success:
-            session.pending_approval = session.approval_coordinator.projection()
-            session.approval_response = {
-                "decision": "approve" if approved else "deny",
-                "feedback": feedback,
-            }
-            session.approval_event.set()
-            await self._persist_session_async(session)
-            logger.info(f"Approval submitted for session {session_id}: {approved}")
-        else:
-            logger.warning(
-                f"Approval submission failed for session {session_id}: request {request_id} not found"
-            )
-
-        return success
+        return response is not None
 
     async def wait_for_http_approval(
         self,
@@ -1449,6 +1659,18 @@ class SessionManager:
         session.approval_event.clear()
         session.approval_response = None
         await self._persist_session_async(session)
+        published_decision = await self._published_approval_decision(
+            session,
+            approval_req.request_id,
+        )
+        if published_decision is not None:
+            response = await self._apply_published_approval_decision(
+                session,
+                approval_req.request_id,
+                published_decision,
+            )
+            if response is not None:
+                return response
 
         try:
             response = await session.approval_coordinator.wait_for_response(

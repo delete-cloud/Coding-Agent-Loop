@@ -944,13 +944,15 @@ class TestApprovalEndpoint:
         session = session_manager.get_session(session_id)
         add_store_backed_approval_request(session, session_id, "req123")
 
-        async def conflicting_submit_approval(**kwargs) -> bool:
+        async def conflicting_submit_approval_response(**kwargs) -> ApprovalResponse:
             assert kwargs["session_id"] == session_id
             assert kwargs["request_id"] == "req123"
             raise SessionOwnershipConflictError("stale owner or fencing token rejected")
 
         monkeypatch.setattr(
-            session_manager, "submit_approval", conflicting_submit_approval
+            session_manager,
+            "submit_approval_response",
+            conflicting_submit_approval_response,
         )
 
         response = await client.post(
@@ -960,6 +962,31 @@ class TestApprovalEndpoint:
 
         assert response.status_code == 409
         assert response.json()["detail"] == "stale owner or fencing token rejected"
+
+    async def test_approve_returns_500_without_internal_detail_for_unexpected_error(
+        self, client, monkeypatch
+    ):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        async def failing_submit_approval_response(**kwargs) -> ApprovalResponse:
+            assert kwargs["session_id"] == session_id
+            assert kwargs["request_id"] == "req123"
+            raise RuntimeError("secret internal failure")
+
+        monkeypatch.setattr(
+            session_manager,
+            "submit_approval_response",
+            failing_submit_approval_response,
+        )
+
+        response = await client.post(
+            f"/sessions/{session_id}/approve",
+            json={"request_id": "req123", "approved": True},
+        )
+
+        assert response.status_code == 500
+        assert response.json()["detail"] == "Internal server error"
 
     async def test_approve_success(self, client):
         create_resp = await client.post("/sessions", json={})
@@ -1014,6 +1041,87 @@ class TestApprovalEndpoint:
         assert response.status_code == 200
         assert session.approval_event.is_set()
         assert session.pending_approval is None
+
+    async def test_approve_retry_with_changed_body_uses_first_decision_before_waiter_consumes(
+        self, client
+    ):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        session = session_manager.get_session(session_id)
+        approval_req = ApprovalRequest(
+            session_id=session_id,
+            request_id="req123",
+            tool_call=ToolCallDelta(
+                session_id=session_id,
+                tool_name="bash",
+                arguments={"command": "ls"},
+                call_id="call1",
+            ),
+            timeout_seconds=120,
+        )
+        session.approval_coordinator.add_request(approval_req)
+
+        first = await client.post(
+            f"/sessions/{session_id}/approve",
+            json={"request_id": "req123", "approved": True, "feedback": "first"},
+        )
+        retry = await client.post(
+            f"/sessions/{session_id}/approve",
+            json={"request_id": "req123", "approved": False, "feedback": "changed"},
+        )
+
+        assert first.status_code == 200
+        assert retry.status_code == 200
+        assert retry.json()["decision"] == "approved"
+        response = await session.approval_coordinator.wait_for_response(
+            "req123",
+            timeout=0.01,
+        )
+        assert response is not None
+        assert response.approved is True
+        assert response.feedback == "first"
+
+    async def test_approve_retry_with_changed_body_uses_first_decision_after_waiter_consumes(
+        self, client
+    ):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        session = session_manager.get_session(session_id)
+        approval_req = ApprovalRequest(
+            session_id=session_id,
+            request_id="req123",
+            tool_call=ToolCallDelta(
+                session_id=session_id,
+                tool_name="bash",
+                arguments={"command": "ls"},
+                call_id="call1",
+            ),
+            timeout_seconds=120,
+        )
+        session.approval_coordinator.add_request(approval_req)
+
+        first = await client.post(
+            f"/sessions/{session_id}/approve",
+            json={"request_id": "req123", "approved": True, "feedback": "first"},
+        )
+        applied = await session.approval_coordinator.wait_for_response(
+            "req123",
+            timeout=0.01,
+        )
+        retry = await client.post(
+            f"/sessions/{session_id}/approve",
+            json={"request_id": "req123", "approved": False, "feedback": "changed"},
+        )
+
+        assert first.status_code == 200
+        assert applied is not None
+        assert applied.approved is True
+        assert applied.feedback == "first"
+        assert session.approval_store.get_request("req123") is None
+        assert retry.status_code == 200
+        assert retry.json()["decision"] == "approved"
 
     async def test_deny_success(self, client):
         """Test successful denial."""
@@ -2228,7 +2336,16 @@ class TestWaitForApproval:
 
         try:
             wait_task = asyncio.create_task(wait_for_approval(session_id, req))
-            await asyncio.sleep(0)
+            for _ in range(20):
+                if (
+                    session_manager.get_session(session_id)
+                    .approval_coordinator.get_request("req-http-wait")
+                    is not None
+                ):
+                    break
+                await asyncio.sleep(0)
+            else:
+                pytest.fail("approval request was not registered")
 
             response = await client.post(
                 f"/sessions/{session_id}/approve",
@@ -2243,7 +2360,7 @@ class TestWaitForApproval:
         finally:
             http_server.APPROVAL_TIMEOUT_SECONDS = original_timeout
 
-        assert response.status_code == 200
+        assert response.status_code == 200, response.text
         assert approval_response.approved is True
         assert approval_response.feedback == "approved over http"
 

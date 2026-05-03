@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from agentkit.runtime import (
+    DuplicateRuntimeMessageError,
     InMemoryRuntimeMessageBus,
     RuntimeMessage,
     RuntimeMessageCursor,
@@ -121,8 +122,9 @@ async def test_runtime_message_bus_rejects_duplicate_message_ids() -> None:
 
     await bus.publish(message)
 
-    with pytest.raises(ValueError, match="duplicate runtime message_id"):
+    with pytest.raises(DuplicateRuntimeMessageError) as exc_info:
         await bus.publish(message)
+    assert exc_info.value.message_id == "msg-1"
 
 
 def test_runtime_message_rejects_empty_message_id() -> None:

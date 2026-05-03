@@ -2,7 +2,9 @@
 
 Each consumer owns its own cursor. Product approval stores should consume
 ``approval_decision`` messages with a cursor separate from the agentkit pipeline
-cursor. ``subagent_message`` payloads should use ``{"text": str}``.
+cursor. ``approval_decision`` payloads should use ``{"request_id": str,
+"approved": bool}`` plus product-specific routing fields. ``subagent_message``
+payloads should use ``{"text": str}``.
 """
 
 from __future__ import annotations
@@ -24,6 +26,14 @@ class RuntimeMessageKind(StrEnum):
     APPROVAL_DECISION = "approval_decision"
     SUBAGENT_MESSAGE = "subagent_message"
     SYSTEM_NOTICE = "system_notice"
+
+
+class DuplicateRuntimeMessageError(ValueError):
+    """Raised when a runtime bus rejects an already-published message ID."""
+
+    def __init__(self, message_id: str) -> None:
+        super().__init__(f"duplicate runtime message_id: {message_id}")
+        self.message_id = message_id
 
 
 def _coerce_runtime_message_kind(kind: RuntimeMessageKind | str) -> RuntimeMessageKind:
@@ -138,7 +148,7 @@ class InMemoryRuntimeMessageBus:
     async def publish(self, message: RuntimeMessage) -> SequencedRuntimeMessage:
         async with self._lock:
             if message.message_id in self._message_ids:
-                raise ValueError(f"duplicate runtime message_id: {message.message_id}")
+                raise DuplicateRuntimeMessageError(message.message_id)
             sequenced = SequencedRuntimeMessage(
                 sequence=len(self._messages) + 1,
                 message=message,

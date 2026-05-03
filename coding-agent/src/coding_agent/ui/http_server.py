@@ -744,31 +744,31 @@ async def approve_request(
     if not await session_manager.has_session_async(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
 
-    session = await session_manager.get_session_async(session_id)
-    if session.approval_store.get_request(req_id) is None:
-        raise HTTPException(status_code=400, detail="No pending approval request")
-
     try:
-        success = await session_manager.submit_approval(
+        approval_response = await session_manager.submit_approval_response(
             session_id=session_id,
             request_id=req_id,
             approved=is_approved,
             feedback=fb,
             scope=resolved_scope,
         )
-        if not success:
+        if approval_response is None:
             raise HTTPException(status_code=400, detail="No pending approval request")
     except SessionOwnershipConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.exception(
+            "Unexpected error while submitting approval for session %s",
+            session_id,
+        )
+        raise HTTPException(status_code=500, detail="Internal server error") from exc
 
     return ApprovalResponseSchema(
         status="ok",
         request_id=req_id,
-        decision="approved" if is_approved else "denied",
+        decision="approved" if approval_response.approved else "denied",
     )
 
 
