@@ -114,7 +114,7 @@ class ApprovalDecisionConsumer:
             return None
 
         scope_value = typed_payload.get("scope", "once")
-        if scope_value not in _APPROVAL_SCOPES:
+        if not isinstance(scope_value, str) or scope_value not in _APPROVAL_SCOPES:
             logger.warning("approval_decision %r has invalid scope", message_id)
             return None
 

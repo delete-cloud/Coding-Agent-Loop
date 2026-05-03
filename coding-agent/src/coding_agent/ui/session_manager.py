@@ -71,6 +71,10 @@ _DEFAULT_EXECUTION_BINDING = object()
 T = TypeVar("T")
 
 
+def _is_duplicate_runtime_message_error(exc: ValueError, message_id: str) -> bool:
+    return str(exc) == f"duplicate runtime message_id: {message_id}"
+
+
 class MockProvider:
     """Mock provider for testing that simulates LLM responses."""
 
@@ -1449,19 +1453,29 @@ class SessionManager:
             )
             return False
 
-        await session.runtime_message_bus.publish(
-            RuntimeMessage(
-                message_id=f"approval_decision:{session_id}:{request_id}",
-                kind=RuntimeMessageKind.APPROVAL_DECISION,
-                payload={
-                    "session_id": session_id,
-                    "request_id": request_id,
-                    "approved": approved,
-                    "feedback": feedback,
-                    "scope": scope,
-                },
+        message_id = f"approval_decision:{session_id}:{request_id}"
+        try:
+            await session.runtime_message_bus.publish(
+                RuntimeMessage(
+                    message_id=message_id,
+                    kind=RuntimeMessageKind.APPROVAL_DECISION,
+                    payload={
+                        "session_id": session_id,
+                        "request_id": request_id,
+                        "approved": approved,
+                        "feedback": feedback,
+                        "scope": scope,
+                    },
+                )
             )
-        )
+        except ValueError as exc:
+            if not _is_duplicate_runtime_message_error(exc, message_id):
+                raise
+            logger.info(
+                "approval_decision already published for session %s request %s",
+                session_id,
+                request_id,
+            )
         result = await self._consume_approval_decisions_for_session(session)
         success = request_id in result.applied_request_ids
         session.last_activity = datetime.now()
