@@ -343,7 +343,11 @@ before the pipeline cursor is advanced. `user_steer`, `system_notice`, and
 `subagent_message` messages consumed in the current turn are injected into the
 runtime context system message. `approval_decision` is typed by the bus but not
 consumed or interpreted by agentkit; product-specific approval stores consume it
-with their own cursor.
+with their own cursor. The `coding_agent` HTTP session manager uses a
+session-local runtime bus for approval decisions with payload shape
+`{"session_id": str, "request_id": str, "approved": bool, "feedback": str | None,
+"scope": "once" | "session" | "always"}`. Its approval cursor is independent of
+`PipelineContext.runtime_message_cursor`.
 
 The runtime context system message includes known run identity (`session_id`,
 `run_id`, `agent_id`, `parent_run_id`), environment kind and workspace root,

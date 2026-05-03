@@ -821,6 +821,27 @@ def approve_tool_call(self, tool_name, arguments, **kwargs):
 
 `RichConsumer` tracks `_session_approved_tools: set[str]`. When a user approves with `scope="session"`, subsequent calls to the same tool are auto-approved without prompting.
 
+### Runtime Approval Decisions
+
+HTTP sessions own a session-local `RuntimeMessageBus` and an
+`approval_decision` cursor. `/sessions/{session_id}/approve` flows through
+`SessionManager.submit_approval()`, which publishes an `approval_decision`
+message and then applies it via `ApprovalDecisionConsumer` to the session's
+`ApprovalCoordinator`. Agentkit's pipeline cursor never consumes these messages;
+it only consumes runtime controls that affect model execution.
+
+`approval_decision` payloads use:
+
+```python
+{
+    "session_id": str,
+    "request_id": str,
+    "approved": bool,
+    "feedback": str | None,
+    "scope": "once" | "session" | "always",
+}
+```
+
 ---
 
 ## 13. Configuration

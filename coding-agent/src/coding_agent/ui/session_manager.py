@@ -21,16 +21,28 @@ from agentkit.storage.checkpoint_fs import FSCheckpointStore
 from agentkit.storage.pg import PGPool
 from agentkit.checkpoint.models import CheckpointMeta
 from agentkit.checkpoint import CheckpointService
+from agentkit.providers.models import DoneEvent, TextEvent
+from agentkit.runtime import (
+    InMemoryRuntimeMessageBus,
+    RuntimeMessage,
+    RuntimeMessageBus,
+    RuntimeMessageCursor,
+    RuntimeMessageKind,
+)
 from agentkit.storage.protocols import CheckpointStore, TapeStore
+from agentkit.tape.tape import Tape
+from agentkit.tape.models import Entry
 from coding_agent.adapter import PipelineAdapter
-from coding_agent.approval import ApprovalCoordinator, ApprovalPolicy
+from coding_agent.approval import (
+    ApprovalCoordinator,
+    ApprovalDecisionConsumer,
+    ApprovalDecisionConsumptionResult,
+    ApprovalPolicy,
+)
 from coding_agent.approval.store import ApprovalStore
 from coding_agent.core import config as core_config
 from coding_agent.plugins.storage import JSONLTapeStore
 from coding_agent.providers.base import ChatProvider, ToolSchema
-from agentkit.providers.models import DoneEvent, TextEvent
-from agentkit.tape.tape import Tape
-from agentkit.tape.models import Entry
 from coding_agent.wire.local import LocalWire
 from coding_agent.wire.protocol import (
     ApprovalRequest,
@@ -131,6 +143,12 @@ class Session:
     runtime_pipeline: Any | None = None
     runtime_ctx: Any | None = None
     runtime_adapter: Any | None = None
+    runtime_message_bus: RuntimeMessageBus = field(
+        default_factory=InMemoryRuntimeMessageBus
+    )
+    approval_decision_cursor: RuntimeMessageCursor = field(
+        default_factory=RuntimeMessageCursor
+    )
     approval_coordinator: ApprovalCoordinator = field(init=False)
 
     def __post_init__(self) -> None:
@@ -1312,6 +1330,7 @@ class SessionManager:
                     )
                     session.tape_id = ctx.tape.tape_id
                     await self._persist_session_async(session)
+                    ctx.runtime_message_bus = session.runtime_message_bus
                     ctx.config["wire_consumer"] = None
                     ctx.config["agent_id"] = ""
 
@@ -1329,6 +1348,7 @@ class SessionManager:
                 set_consumer = getattr(adapter, "set_consumer", None)
                 if callable(set_consumer):
                     set_consumer(consumer)
+                ctx.runtime_message_bus = session.runtime_message_bus
                 ctx.config["wire_consumer"] = consumer
                 await adapter.run_turn(prompt)
                 session.tape_id = ctx.tape.tape_id
@@ -1358,6 +1378,45 @@ class SessionManager:
                 session.last_activity = datetime.now()
                 await self._persist_session_async(session)
 
+    async def _consume_approval_decisions_for_session(
+        self,
+        session: Session,
+        *,
+        limit: int | None = None,
+    ) -> ApprovalDecisionConsumptionResult:
+        consumer = ApprovalDecisionConsumer(
+            session_id=session.id,
+            coordinator=session.approval_coordinator,
+        )
+        result = await consumer.consume(
+            session.runtime_message_bus,
+            session.approval_decision_cursor,
+            limit=limit,
+        )
+        session.approval_decision_cursor = result.cursor
+        if result.applied_request_ids:
+            session.pending_approval = session.approval_coordinator.projection()
+            session.approval_event.set()
+        return result
+
+    async def consume_approval_decisions(
+        self,
+        session_id: str,
+        *,
+        limit: int | None = None,
+    ) -> ApprovalDecisionConsumptionResult:
+        """Consume product-owned approval_decision messages for a session."""
+        await self._assert_owner(session_id)
+        session = await self.get_session_async(session_id)
+        result = await self._consume_approval_decisions_for_session(
+            session,
+            limit=limit,
+        )
+        if result.applied_request_ids:
+            session.last_activity = datetime.now()
+            await self._persist_session_async(session)
+        return result
+
     async def submit_approval(
         self,
         session_id: str,
@@ -1384,16 +1443,27 @@ class SessionManager:
         """
         await self._assert_owner(session_id)
         session = await self.get_session_async(session_id)
+        if session.approval_coordinator.get_request(request_id) is None:
+            logger.warning(
+                f"Approval submission failed for session {session_id}: request {request_id} not found"
+            )
+            return False
 
-        # Create approval response and submit to ApprovalStore
-        response = ApprovalResponse(
-            session_id=session_id,
-            request_id=request_id,
-            approved=approved,
-            feedback=feedback,
-            scope=scope,
+        await session.runtime_message_bus.publish(
+            RuntimeMessage(
+                message_id=f"approval_decision:{session_id}:{request_id}",
+                kind=RuntimeMessageKind.APPROVAL_DECISION,
+                payload={
+                    "session_id": session_id,
+                    "request_id": request_id,
+                    "approved": approved,
+                    "feedback": feedback,
+                    "scope": scope,
+                },
+            )
         )
-        success = session.approval_coordinator.respond(response)
+        result = await self._consume_approval_decisions_for_session(session)
+        success = request_id in result.applied_request_ids
         session.last_activity = datetime.now()
 
         if success:
@@ -1409,6 +1479,8 @@ class SessionManager:
             logger.warning(
                 f"Approval submission failed for session {session_id}: request {request_id} not found"
             )
+            if result.applied_request_ids:
+                await self._persist_session_async(session)
 
         return success
 

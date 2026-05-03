@@ -2,7 +2,9 @@
 
 Each consumer owns its own cursor. Product approval stores should consume
 ``approval_decision`` messages with a cursor separate from the agentkit pipeline
-cursor. ``subagent_message`` payloads should use ``{"text": str}``.
+cursor. ``approval_decision`` payloads should use ``{"request_id": str,
+"approved": bool}`` plus product-specific routing fields. ``subagent_message``
+payloads should use ``{"text": str}``.
 """
 
 from __future__ import annotations
