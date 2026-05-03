@@ -79,49 +79,62 @@ class ApprovalDecisionConsumer:
         message_id: str,
         payload: object,
     ) -> ApprovalResponse | None:
-        if not isinstance(payload, Mapping):
-            logger.warning(
-                "approval_decision %r has non-object payload",
-                message_id,
-            )
-            return None
-
-        typed_payload = cast(Mapping[str, Any], payload)
-
-        session_id = typed_payload.get("session_id")
-        if session_id is not None and session_id != self._session_id:
-            logger.warning(
-                "approval_decision %r targets session %r but consumer owns %r",
-                message_id,
-                session_id,
-                self._session_id,
-            )
-            return None
-
-        request_id = typed_payload.get("request_id")
-        if not isinstance(request_id, str) or not request_id:
-            logger.warning("approval_decision %r is missing request_id", message_id)
-            return None
-
-        approved = typed_payload.get("approved")
-        if not isinstance(approved, bool):
-            logger.warning("approval_decision %r has invalid approved", message_id)
-            return None
-
-        feedback = typed_payload.get("feedback")
-        if feedback is not None and not isinstance(feedback, str):
-            logger.warning("approval_decision %r has invalid feedback", message_id)
-            return None
-
-        scope_value = typed_payload.get("scope", "once")
-        if not isinstance(scope_value, str) or scope_value not in _APPROVAL_SCOPES:
-            logger.warning("approval_decision %r has invalid scope", message_id)
-            return None
-
-        return ApprovalResponse(
+        return approval_response_from_runtime_payload(
             session_id=self._session_id,
-            request_id=request_id,
-            approved=approved,
-            feedback=feedback,
-            scope=cast(Literal["once", "session", "always"], scope_value),
+            message_id=message_id,
+            payload=payload,
         )
+
+
+def approval_response_from_runtime_payload(
+    *,
+    session_id: str,
+    message_id: str,
+    payload: object,
+) -> ApprovalResponse | None:
+    if not isinstance(payload, Mapping):
+        logger.warning(
+            "approval_decision %r has non-object payload",
+            message_id,
+        )
+        return None
+
+    typed_payload = cast(Mapping[str, Any], payload)
+
+    payload_session_id = typed_payload.get("session_id")
+    if payload_session_id is not None and payload_session_id != session_id:
+        logger.warning(
+            "approval_decision %r targets session %r but consumer owns %r",
+            message_id,
+            payload_session_id,
+            session_id,
+        )
+        return None
+
+    request_id = typed_payload.get("request_id")
+    if not isinstance(request_id, str) or not request_id:
+        logger.warning("approval_decision %r is missing request_id", message_id)
+        return None
+
+    approved = typed_payload.get("approved")
+    if not isinstance(approved, bool):
+        logger.warning("approval_decision %r has invalid approved", message_id)
+        return None
+
+    feedback = typed_payload.get("feedback")
+    if feedback is not None and not isinstance(feedback, str):
+        logger.warning("approval_decision %r has invalid feedback", message_id)
+        return None
+
+    scope_value = typed_payload.get("scope", "once")
+    if not isinstance(scope_value, str) or scope_value not in _APPROVAL_SCOPES:
+        logger.warning("approval_decision %r has invalid scope", message_id)
+        return None
+
+    return ApprovalResponse(
+        session_id=session_id,
+        request_id=request_id,
+        approved=approved,
+        feedback=feedback,
+        scope=cast(Literal["once", "session", "always"], scope_value),
+    )

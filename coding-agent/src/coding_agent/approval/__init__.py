@@ -11,6 +11,7 @@ from coding_agent.approval.policy import ApprovalPolicy, PolicyConfig, PolicyEng
 from coding_agent.approval.runtime_messages import (
     ApprovalDecisionConsumer,
     ApprovalDecisionConsumptionResult,
+    approval_response_from_runtime_payload,
 )
 from coding_agent.approval.store import ApprovalStore, PendingRequest
 
@@ -19,6 +20,7 @@ __all__ = [
     "ApprovalCoordinator",
     "ApprovalDecisionConsumer",
     "ApprovalDecisionConsumptionResult",
+    "approval_response_from_runtime_payload",
     "PolicyConfig",
     "PolicyEngine",
     "ApprovalStore",

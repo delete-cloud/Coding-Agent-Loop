@@ -39,6 +39,7 @@ from coding_agent.approval import (
     ApprovalDecisionConsumer,
     ApprovalDecisionConsumptionResult,
     ApprovalPolicy,
+    approval_response_from_runtime_payload,
 )
 from coding_agent.approval.store import ApprovalStore
 from coding_agent.core import config as core_config
@@ -70,6 +71,18 @@ logger = logging.getLogger(__name__)
 _CHECKPOINT_SESSION_CONFIG_KEY = "session_restart_config"
 _DEFAULT_EXECUTION_BINDING = object()
 T = TypeVar("T")
+
+
+def _approval_decision_message_id(session_id: str, request_id: str) -> str:
+    return f"approval_decision:{session_id}:{request_id}"
+
+
+def _approval_response_projection(response: ApprovalResponse) -> dict[str, Any]:
+    return {
+        "request_id": response.request_id,
+        "decision": "approve" if response.approved else "deny",
+        "feedback": response.feedback,
+    }
 
 
 class MockProvider:
@@ -1400,14 +1413,34 @@ class SessionManager:
             session.approval_event.set()
         return result
 
-    async def submit_approval(
+    async def _published_approval_response(
+        self,
+        session: Session,
+        request_id: str,
+    ) -> ApprovalResponse | None:
+        message_id = _approval_decision_message_id(session.id, request_id)
+        batch = await session.runtime_message_bus.consume_after(
+            RuntimeMessageCursor(),
+            kinds={RuntimeMessageKind.APPROVAL_DECISION},
+        )
+        for item in batch.messages:
+            if item.message.message_id != message_id:
+                continue
+            return approval_response_from_runtime_payload(
+                session_id=session.id,
+                message_id=item.message.message_id,
+                payload=item.message.payload,
+            )
+        return None
+
+    async def submit_approval_response(
         self,
         session_id: str,
         request_id: str,
         approved: bool,
         feedback: str | None = None,
         scope: Literal["once", "session", "always"] = "once",
-    ) -> bool:
+    ) -> ApprovalResponse | None:
         """Submit an approval response for a pending request.
 
         Uses the session's ApprovalStore to record the response.
@@ -1419,21 +1452,41 @@ class SessionManager:
             feedback: Optional feedback message
 
         Returns:
-            True if the response was recorded successfully, False otherwise
+            The stored/applied approval response, or None if no matching request exists
 
         Raises:
             KeyError: If session not found
         """
         await self._assert_owner(session_id)
         session = await self.get_session_async(session_id)
+        message_id = _approval_decision_message_id(session_id, request_id)
+
+        published_response = await self._published_approval_response(
+            session,
+            request_id,
+        )
+        if published_response is not None:
+            result = await self._consume_approval_decisions_for_session(session)
+            session.last_activity = datetime.now()
+            session.approval_response = _approval_response_projection(
+                published_response
+            )
+            session.approval_event.set()
+            await self._persist_session_async(session)
+            if request_id not in result.applied_request_ids:
+                logger.info(
+                    "approval_decision for session %s request %s was already published; keeping the first decision",
+                    session_id,
+                    request_id,
+                )
+            return published_response
+
         if session.approval_coordinator.get_request(request_id) is None:
             logger.warning(
                 f"Approval submission failed for session {session_id}: request {request_id} not found"
             )
-            return False
+            return None
 
-        message_id = f"approval_decision:{session_id}:{request_id}"
-        duplicate_decision = False
         try:
             await session.runtime_message_bus.publish(
                 RuntimeMessage(
@@ -1451,35 +1504,44 @@ class SessionManager:
         except DuplicateRuntimeMessageError as exc:
             if exc.message_id != message_id:
                 raise
-            duplicate_decision = True
+            published_response = await self._published_approval_response(
+                session,
+                request_id,
+            )
+            if published_response is None:
+                raise RuntimeError(
+                    f"duplicate approval_decision {message_id!r} was not readable"
+                ) from exc
             logger.info(
                 "approval_decision already published for session %s request %s",
                 session_id,
                 request_id,
             )
+
+        if published_response is None:
+            published_response = await self._published_approval_response(
+                session,
+                request_id,
+            )
+        if published_response is None:
+            raise RuntimeError(f"approval_decision {message_id!r} was not readable")
+
         result = await self._consume_approval_decisions_for_session(session)
         success = request_id in result.applied_request_ids
         session.last_activity = datetime.now()
 
         if success:
             session.pending_approval = session.approval_coordinator.projection()
-            session.approval_response = {
-                "decision": "approve" if approved else "deny",
-                "feedback": feedback,
-            }
+            session.approval_response = _approval_response_projection(
+                published_response
+            )
             session.approval_event.set()
             await self._persist_session_async(session)
-            logger.info(f"Approval submitted for session {session_id}: {approved}")
-        elif duplicate_decision:
             logger.info(
-                "approval_decision for session %s request %s was already published; keeping the first decision",
+                "Approval submitted for session %s: %s",
                 session_id,
-                request_id,
+                published_response.approved,
             )
-            # Persist last_activity and any partial-batch side effects from
-            # other approval decisions consumed alongside this duplicate.
-            await self._persist_session_async(session)
-            return True
         else:
             logger.warning(
                 "approval_decision for session %s request %s was not applied (validation failure or race)",
@@ -1490,8 +1552,26 @@ class SessionManager:
                 # A consume batch can apply other requests even when this
                 # specific submission is skipped.
                 await self._persist_session_async(session)
+            return None
 
-        return success
+        return published_response
+
+    async def submit_approval(
+        self,
+        session_id: str,
+        request_id: str,
+        approved: bool,
+        feedback: str | None = None,
+        scope: Literal["once", "session", "always"] = "once",
+    ) -> bool:
+        response = await self.submit_approval_response(
+            session_id=session_id,
+            request_id=request_id,
+            approved=approved,
+            feedback=feedback,
+            scope=scope,
+        )
+        return response is not None
 
     async def wait_for_http_approval(
         self,
