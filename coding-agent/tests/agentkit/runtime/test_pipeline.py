@@ -1,5 +1,6 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock
+from agentkit.directive.types import Reject
 from agentkit.runtime import (
     AgentRunContext,
     ContextBudget,
@@ -156,6 +157,65 @@ class SchemaValidatedToolPlugin:
         del kwargs
         self.execute_calls += 1
         return "should-not-run"
+
+
+class ProxyToolPlugin:
+    state_key = "proxy_tool"
+
+    def __init__(self):
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def hooks(self):
+        return {
+            "get_proxy_tools": self.get_proxy_tools,
+            "execute_proxy_tool": self.execute_proxy_tool,
+        }
+
+    def get_proxy_tools(self, **kwargs):
+        del kwargs
+        return [
+            ToolSchema(
+                name="dynamic_echo",
+                description="Dynamic echo tool",
+                parameters={
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                    "required": ["value"],
+                    "additionalProperties": False,
+                },
+            )
+        ]
+
+    def execute_proxy_tool(
+        self, name: str = "", arguments: dict[str, object] | None = None, **kwargs
+    ):
+        del kwargs
+        self.calls.append((name, arguments or {}))
+        if name != "dynamic_echo":
+            return UNHANDLED_TOOL_RESULT
+        return f"proxy:{(arguments or {}).get('value')}"
+
+
+class RejectingCallToolApprovalPlugin:
+    state_key = "rejecting_call_tool_approval"
+
+    def __init__(self):
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def hooks(self):
+        return {"approve_tool_call": self.approve_tool_call}
+
+    def approve_tool_call(
+        self,
+        tool_name: str = "",
+        arguments: dict[str, object] | None = None,
+        **kwargs,
+    ):
+        del kwargs
+        self.calls.append((tool_name, arguments or {}))
+        if tool_name == "call_tool":
+            return Reject(reason="outer affordance should not be approved")
+        return None
 
 
 class RuntimeContextEnvironment:
@@ -667,6 +727,58 @@ class TestPipeline:
             "content": "Tool call validation failed: unexpected argument: extra",
         }
         assert tool_plugin.execute_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_run_turn_skips_outer_approval_for_call_tool_affordance(self):
+        registry = PluginRegistry()
+        llm_plugin = MinimalPlugin()
+        proxy_plugin = ProxyToolPlugin()
+        approval_plugin = RejectingCallToolApprovalPlugin()
+        registry.register(llm_plugin)
+        registry.register(proxy_plugin)
+        registry.register(approval_plugin)
+        runtime = HookRuntime(registry)
+        pipeline = Pipeline(runtime=runtime, registry=registry)
+
+        call_count = 0
+
+        async def mock_stream(messages, tools=None, **kwargs):
+            del messages, kwargs
+            nonlocal call_count
+            call_count += 1
+            from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
+
+            if call_count == 1:
+                assert tools is not None
+                yield ToolCallEvent(
+                    tool_call_id="tc-call-tool",
+                    name="call_tool",
+                    arguments={
+                        "name": "dynamic_echo",
+                        "arguments": {"value": "hello"},
+                    },
+                )
+                yield DoneEvent()
+                return
+
+            yield TextEvent(text="Proxy handled")
+            yield DoneEvent()
+
+        llm_plugin._mock_llm.stream = mock_stream
+        tape = Tape()
+        tape.append(Entry(kind="message", payload={"role": "user", "content": "call"}))
+        ctx = PipelineContext(tape=tape, session_id="s-proxy")
+        await pipeline.mount(ctx)
+
+        await pipeline.run_turn(ctx)
+
+        tool_results = [entry for entry in ctx.tape if entry.kind == "tool_result"]
+        assert tool_results[0].payload == {
+            "tool_call_id": "tc-call-tool",
+            "content": "proxy:hello",
+        }
+        assert approval_plugin.calls == [("dynamic_echo", {"value": "hello"})]
+        assert proxy_plugin.calls == [("dynamic_echo", {"value": "hello"})]
 
     @pytest.mark.asyncio
     async def test_run_turn_commits_active_fork_and_updates_context_tape(self, setup):

@@ -1,4 +1,4 @@
-"""Hook specifications — metadata for the 14 agentkit hooks.
+"""Hook specifications — metadata for the 17 agentkit hooks.
 
 Each HookSpec declares:
   - name: the hook identifier
@@ -36,6 +36,11 @@ HOOK_SPECS: dict[str, HookSpec] = {
         name="get_tools",
         firstresult=False,
         doc="Collect tool schemas from all plugins. call_many gathers lists.",
+    ),
+    "get_proxy_tools": HookSpec(
+        name="get_proxy_tools",
+        firstresult=False,
+        doc="Collect dynamic tool schemas hidden behind search_tools/call_tool.",
     ),
     "provide_llm": HookSpec(
         name="provide_llm",
@@ -98,6 +103,12 @@ HOOK_SPECS: dict[str, HookSpec] = {
         name="execute_tool",
         firstresult=True,
         doc="Execute a tool by name and return the result. Called by Pipeline.run_model.",
+    ),
+    "execute_proxy_tool": HookSpec(
+        name="execute_proxy_tool",
+        firstresult=True,
+        doc="Execute a dynamic proxied tool by name for call_tool. Return "
+        "UNHANDLED_TOOL_RESULT before I/O when another proxy provider owns the tool.",
     ),
     "on_session_event": HookSpec(
         name="on_session_event",

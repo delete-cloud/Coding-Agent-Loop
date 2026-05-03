@@ -126,7 +126,7 @@ src/coding_agent/
 │   ├── llm_provider.py      #   provide_llm → LLMProvider factory
 │   ├── memory.py            #   build_context + on_turn_end → memory
 │   ├── metrics.py           #   on_checkpoint → performance metrics
-│   ├── mcp.py               #   mount/get_tools/execute_tool → MCP server tools
+│   ├── mcp.py               #   mount/get_proxy_tools/execute_proxy_tool → MCP proxy tools
 │   ├── kb.py                #   build_context → KB chunk injection
 │   ├── parallel_executor.py #   execute_tools_batch → parallel execution
 │   ├── shell_session.py     #   mount + on_checkpoint → shell state
@@ -406,7 +406,7 @@ Plugins are registered in `create_agent()` via factory lambdas, supporting defer
 | **SummarizerPlugin** | `summarizer` | `resolve_context_window` | Context compression via topic boundaries or entry-count truncation |
 | **MemoryPlugin** | `memory` | `build_context`, `on_turn_end`, `on_checkpoint`, `mount` | Grounding injection + memory extraction |
 | **SkillsPlugin** | `skills` | `build_context`, `get_tools`, `execute_tool`, `on_checkpoint`, `on_session_event`, `mount` | Discovers `.agents/skills`, injects skill summaries, and activates skills |
-| **MCPPlugin** | `mcp` | `mount`, `get_tools`, `execute_tool`, `on_checkpoint` | Starts MCP servers and re-exposes their tools |
+| **MCPPlugin** | `mcp` | `mount`, `get_proxy_tools`, `execute_proxy_tool`, `on_checkpoint` | Starts MCP servers and exposes their tools through `search_tools`/`call_tool` |
 | **DoomDetectorPlugin** | `doom_detector` | `on_checkpoint` | Detects N consecutive identical tool calls |
 | **ParallelExecutorPlugin** | `parallel_executor` | `execute_tools_batch` | Dependency-aware parallel tool execution |
 | **TopicPlugin** | `topic` | `on_checkpoint`, `on_session_event`, `mount` | File-overlap-based topic boundary detection |
@@ -424,6 +424,7 @@ Pipeline.run_turn()
     │
     ├── provide_llm ────────→ LLMProviderPlugin
     ├── get_tools ──────────→ CoreToolsPlugin
+    ├── get_proxy_tools ────→ MCPPlugin
     ├── build_context ──────→ MemoryPlugin (injects memories)
     ├── resolve_context_window → SummarizerPlugin (compresses tape)
     │
@@ -438,6 +439,7 @@ Pipeline.run_turn()
     │       │       │
     │       │       ├── execute_tool ────→ CoreToolsPlugin
     │       │       │       └── bash_run → ShellSessionPlugin (sync CWD)
+    │       │       ├── call_tool ───────→ execute_proxy_tool → MCPPlugin
     │       │       │
     │       │       └── execute_tools_batch → ParallelExecutorPlugin
     │       │

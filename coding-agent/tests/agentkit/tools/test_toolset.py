@@ -221,6 +221,172 @@ class NoneBatchToolPlugin:
         return None
 
 
+class DirectToolPlugin:
+    state_key = "direct_tool"
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    def hooks(self):
+        return {
+            "get_tools": self.get_tools,
+            "execute_tool": self.execute_tool,
+        }
+
+    def get_tools(self, **kwargs: Any) -> list[ToolSchema]:
+        del kwargs
+        return [
+            ToolSchema(
+                name="direct_echo",
+                description="Direct echo tool",
+                parameters={
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                    "required": ["value"],
+                    "additionalProperties": False,
+                },
+            )
+        ]
+
+    def execute_tool(
+        self, name: str = "", arguments: dict[str, Any] | None = None, **kwargs: Any
+    ) -> str | object:
+        del kwargs
+        self.calls.append((name, arguments or {}))
+        if name != "direct_echo":
+            return UNHANDLED_TOOL_RESULT
+        return f"direct:{(arguments or {}).get('value')}"
+
+
+class ConflictingDirectToolPlugin(DirectToolPlugin):
+    state_key = "conflicting_direct_tool"
+
+    def get_tools(self, **kwargs: Any) -> list[ToolSchema]:
+        del kwargs
+        return [
+            ToolSchema(
+                name="dynamic_echo",
+                description="Direct conflicting echo tool",
+                parameters={
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                    "required": ["value"],
+                    "additionalProperties": False,
+                },
+            )
+        ]
+
+    def execute_tool(
+        self, name: str = "", arguments: dict[str, Any] | None = None, **kwargs: Any
+    ) -> str | object:
+        del kwargs
+        self.calls.append((name, arguments or {}))
+        if name != "dynamic_echo":
+            return UNHANDLED_TOOL_RESULT
+        return f"direct-conflict:{(arguments or {}).get('value')}"
+
+
+class ProxyToolPlugin:
+    state_key = "proxy_tool"
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    def hooks(self):
+        return {
+            "get_proxy_tools": self.get_proxy_tools,
+            "execute_proxy_tool": self.execute_proxy_tool,
+        }
+
+    def get_proxy_tools(self, **kwargs: Any) -> list[ToolSchema]:
+        del kwargs
+        return [
+            ToolSchema(
+                name="dynamic_echo",
+                description="Dynamic echo tool",
+                parameters={
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                    "required": ["value"],
+                    "additionalProperties": False,
+                },
+            ),
+            ToolSchema(
+                name="dynamic_status",
+                description="Dynamic status tool",
+                parameters={
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            ),
+        ]
+
+    def execute_proxy_tool(
+        self, name: str = "", arguments: dict[str, Any] | None = None, **kwargs: Any
+    ) -> str | object:
+        del kwargs
+        self.calls.append((name, arguments or {}))
+        if name == "dynamic_echo":
+            return f"proxy:{(arguments or {}).get('value')}"
+        if name == "dynamic_status":
+            return "proxy:ok"
+        return UNHANDLED_TOOL_RESULT
+
+
+class RaisingProxyToolPlugin(ProxyToolPlugin):
+    state_key = "raising_proxy_tool"
+
+    def get_proxy_tools(self, **kwargs: Any) -> list[ToolSchema]:
+        del kwargs
+        return [
+            ToolSchema(
+                name="dynamic_boom",
+                description="Dynamic tool that raises",
+                parameters={
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            )
+        ]
+
+    def execute_proxy_tool(
+        self, name: str = "", arguments: dict[str, Any] | None = None, **kwargs: Any
+    ) -> object:
+        del arguments, kwargs
+        if name == "dynamic_boom":
+            raise PermissionError("target denied")
+        return UNHANDLED_TOOL_RESULT
+
+
+class RecordingApprovalPlugin:
+    state_key = "recording_approval"
+
+    def __init__(self, result: Any = None) -> None:
+        self.result = result
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    def hooks(self):
+        return {"approve_tool_call": self.approve_tool_call}
+
+    def approve_tool_call(
+        self,
+        tool_name: str = "",
+        arguments: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        del kwargs
+        self.calls.append((tool_name, arguments or {}))
+        return self.result
+
+
+class DenyingDirectiveExecutor:
+    async def execute(self, directive: Any) -> bool:
+        del directive
+        return False
+
+
 def _runtime(*plugins: Any) -> HookRuntime:
     registry = PluginRegistry()
     for plugin in plugins:
@@ -315,7 +481,9 @@ async def test_toolset_approval_rejects_non_directive_fail_closed() -> None:
 async def test_toolset_approval_rejects_when_hook_lookup_raises(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    toolset = Toolset(runtime=cast(HookRuntime, RaisingHookLookupRuntime()))
+    toolset = Toolset(
+        runtime=cast(HookRuntime, cast(object, RaisingHookLookupRuntime()))
+    )
 
     with caplog.at_level(logging.WARNING):
         approval = await toolset.approve_tool_call(
@@ -607,6 +775,288 @@ def test_toolset_validates_nested_required_arguments() -> None:
     assert missing_nested.message == "missing required argument: target.region"
     assert unexpected_nested is not None
     assert unexpected_nested.message == "unexpected argument: target.extra"
+
+
+def test_toolset_collects_proxy_affordances_without_exposing_proxy_targets() -> None:
+    toolset = Toolset(runtime=_runtime(DirectToolPlugin(), ProxyToolPlugin()))
+
+    schemas = toolset.collect_schemas()
+
+    assert [schema.name for schema in schemas] == [
+        "direct_echo",
+        "search_tools",
+        "call_tool",
+    ]
+
+
+def test_toolset_warns_on_direct_and_proxy_tool_name_overlap(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    toolset = Toolset(
+        runtime=_runtime(ConflictingDirectToolPlugin(), ProxyToolPlugin())
+    )
+
+    with caplog.at_level(logging.WARNING):
+        schemas = toolset.collect_schemas()
+
+    assert [schema.name for schema in schemas] == [
+        "dynamic_echo",
+        "search_tools",
+        "call_tool",
+    ]
+    assert "direct/proxy tool name overlap" in caplog.text
+    assert "dynamic_echo" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_toolset_search_tools_returns_matching_proxy_schemas() -> None:
+    toolset = Toolset(runtime=_runtime(ProxyToolPlugin()))
+
+    results = await toolset.execute_tools(
+        [
+            ToolCallRequest(
+                tool_call_id="tc-search",
+                name="search_tools",
+                arguments={"query": "echo", "limit": 5},
+            )
+        ],
+        ctx=object(),
+    )
+
+    assert results[0].is_error is False
+    assert results[0].result == {
+        "tools": [
+            {
+                "name": "dynamic_echo",
+                "description": "Dynamic echo tool",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                    "required": ["value"],
+                    "additionalProperties": False,
+                },
+            }
+        ],
+        "count": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_toolset_search_tools_empty_query_lists_proxy_schemas_by_limit() -> None:
+    toolset = Toolset(runtime=_runtime(ProxyToolPlugin()))
+
+    results = await toolset.execute_tools(
+        [
+            ToolCallRequest(
+                tool_call_id="tc-search-all",
+                name="search_tools",
+                arguments={"query": "", "limit": 1},
+            )
+        ],
+        ctx=object(),
+    )
+
+    assert results[0].is_error is False
+    assert results[0].result == {
+        "tools": [
+            {
+                "name": "dynamic_echo",
+                "description": "Dynamic echo tool",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                    "required": ["value"],
+                    "additionalProperties": False,
+                },
+            }
+        ],
+        "count": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_toolset_call_tool_validates_approves_and_executes_proxy_target() -> None:
+    proxy = ProxyToolPlugin()
+    approval = RecordingApprovalPlugin()
+    toolset = Toolset(runtime=_runtime(proxy, approval))
+
+    results = await toolset.execute_tools(
+        [
+            ToolCallRequest(
+                tool_call_id="tc-call",
+                name="call_tool",
+                arguments={
+                    "name": "dynamic_echo",
+                    "arguments": {"value": "hello"},
+                },
+            )
+        ],
+        ctx=object(),
+    )
+
+    assert results[0] == ToolExecutionResult(
+        tool_call_id="tc-call",
+        name="call_tool",
+        result="proxy:hello",
+    )
+    assert approval.calls == [("dynamic_echo", {"value": "hello"})]
+    assert proxy.calls == [("dynamic_echo", {"value": "hello"})]
+
+
+@pytest.mark.asyncio
+async def test_toolset_call_tool_preserves_proxy_hook_exception_type() -> None:
+    toolset = Toolset(runtime=_runtime(RaisingProxyToolPlugin()))
+
+    results = await toolset.execute_tools(
+        [
+            ToolCallRequest(
+                tool_call_id="tc-call-error",
+                name="call_tool",
+                arguments={"name": "dynamic_boom", "arguments": {}},
+            )
+        ],
+        ctx=object(),
+    )
+
+    assert results[0].tool_call_id == "tc-call-error"
+    assert results[0].name == "call_tool"
+    assert isinstance(results[0].error, PermissionError)
+    assert str(results[0].error) == "target denied"
+    assert results[0].error_message == "Error executing tool 'call_tool': target denied"
+
+
+@pytest.mark.asyncio
+async def test_toolset_call_tool_rejects_invalid_proxy_arguments_before_execution() -> None:
+    proxy = ProxyToolPlugin()
+    approval = RecordingApprovalPlugin()
+    toolset = Toolset(runtime=_runtime(proxy, approval))
+
+    results = await toolset.execute_tools(
+        [
+            ToolCallRequest(
+                tool_call_id="tc-call-invalid",
+                name="call_tool",
+                arguments={"name": "dynamic_echo", "arguments": {}},
+            )
+        ],
+        ctx=object(),
+    )
+
+    assert results[0].tool_call_id == "tc-call-invalid"
+    assert results[0].name == "call_tool"
+    assert isinstance(results[0].error, ValueError)
+    assert str(results[0].error) == (
+        "Tool call validation failed for 'dynamic_echo': "
+        "missing required argument: value"
+    )
+    assert approval.calls == []
+    assert proxy.calls == []
+
+
+@pytest.mark.asyncio
+async def test_toolset_call_tool_rejects_when_proxy_target_approval_denies() -> None:
+    proxy = ProxyToolPlugin()
+    approval = RecordingApprovalPlugin(result=Reject(reason="blocked"))
+    toolset = Toolset(
+        runtime=_runtime(proxy, approval),
+        directive_executor=DenyingDirectiveExecutor(),
+    )
+
+    results = await toolset.execute_tools(
+        [
+            ToolCallRequest(
+                tool_call_id="tc-call-denied",
+                name="call_tool",
+                arguments={
+                    "name": "dynamic_echo",
+                    "arguments": {"value": "hello"},
+                },
+            )
+        ],
+        ctx=object(),
+    )
+
+    assert results[0].tool_call_id == "tc-call-denied"
+    assert results[0].name == "call_tool"
+    assert isinstance(results[0].error, PermissionError)
+    assert str(results[0].error) == "Tool call rejected: blocked"
+    assert approval.calls == [("dynamic_echo", {"value": "hello"})]
+    assert proxy.calls == []
+
+
+@pytest.mark.asyncio
+async def test_toolset_call_tool_uses_proxy_hooks_for_conflicting_target_names() -> None:
+    direct = ConflictingDirectToolPlugin()
+    proxy = ProxyToolPlugin()
+    toolset = Toolset(runtime=_runtime(direct, proxy))
+
+    results = await toolset.execute_tools(
+        [
+            ToolCallRequest(
+                tool_call_id="tc-call-conflict",
+                name="call_tool",
+                arguments={
+                    "name": "dynamic_echo",
+                    "arguments": {"value": "hello"},
+                },
+            )
+        ],
+        ctx=object(),
+    )
+
+    assert results[0] == ToolExecutionResult(
+        tool_call_id="tc-call-conflict",
+        name="call_tool",
+        result="proxy:hello",
+    )
+    assert direct.calls == []
+    assert proxy.calls == [("dynamic_echo", {"value": "hello"})]
+
+
+@pytest.mark.asyncio
+async def test_toolset_proxy_tools_bypass_batch_hooks() -> None:
+    proxy = ProxyToolPlugin()
+    batch = BatchToolPlugin(results=["batch-should-not-run", "batch-should-not-run"])
+    toolset = Toolset(runtime=_runtime(batch, proxy))
+
+    results = await toolset.execute_tools(
+        [
+            ToolCallRequest(
+                tool_call_id="tc-call-1",
+                name="call_tool",
+                arguments={
+                    "name": "dynamic_echo",
+                    "arguments": {"value": "one"},
+                },
+            ),
+            ToolCallRequest(
+                tool_call_id="tc-call-2",
+                name="call_tool",
+                arguments={
+                    "name": "dynamic_status",
+                    "arguments": {},
+                },
+            ),
+        ],
+        ctx=object(),
+    )
+
+    assert results == [
+        ToolExecutionResult(
+            tool_call_id="tc-call-1",
+            name="call_tool",
+            result="proxy:one",
+        ),
+        ToolExecutionResult(
+            tool_call_id="tc-call-2",
+            name="call_tool",
+            result="proxy:ok",
+        ),
+    ]
+    assert proxy.calls == [
+        ("dynamic_echo", {"value": "one"}),
+        ("dynamic_status", {}),
+    ]
 
 
 @pytest.mark.asyncio

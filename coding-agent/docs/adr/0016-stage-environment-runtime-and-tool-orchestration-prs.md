@@ -93,8 +93,16 @@ Implement the work in the following PR sequence.
 
 5. PR 5: Add tool proxy for dynamic toolsets
    - Add stable `search_tools` and `call_tool` affordances for MCP and dynamically loaded tools.
+   - Add separate `get_proxy_tools` and `execute_proxy_tool` hooks so dynamic
+     providers do not compete with directly exposed core tool names.
+   - Treat `search_tools` and `call_tool` as proxy affordances whose outer
+     approval is skipped; the nested target tool remains governed by Toolset
+     approval.
    - Keep core file, shell, planner, patch, web search, and subagent tools directly visible until there is evidence that proxying them improves behavior.
-   - Route proxied execution through the same `Toolset` governance path.
+   - Route proxied execution through the same `Toolset` schema validation,
+     approval, timeout, retry, and result-envelope path.
+   - Document that mixed direct/proxy batches execute sequentially until a later
+     partitioning PR is justified.
 
 Cloud workspace execution and full subagent orchestration are tracked as follow-up implementation areas, not as PR 1 work.
 

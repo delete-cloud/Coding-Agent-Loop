@@ -14,12 +14,17 @@ class _FakeConnection:
     tools: list[dict[str, object]] = field(default_factory=list)
     stopped: int = 0
     alive: bool = True
+    calls: list[tuple[str, dict[str, object]]] = field(default_factory=list)
 
     def is_alive(self) -> bool:
         return self.alive
 
     def stop(self) -> None:
         self.stopped += 1
+
+    def call_tool(self, tool_name: str, arguments: dict[str, object]) -> str:
+        self.calls.append((tool_name, arguments))
+        return f"{self.cfg.name}:{tool_name}:{arguments.get('value', '')}"
 
 
 def _make_connection(server_name: str, tool_names: list[str]) -> _MCPConnection:
@@ -64,6 +69,17 @@ def test_mount_reports_server_status_and_tool_count() -> None:
         "servers": {"filesystem": True},
         "tool_count": 2,
     }
+
+
+def test_hooks_expose_mcp_tools_only_through_proxy_hooks() -> None:
+    plugin = MCPPlugin()
+
+    hooks = plugin.hooks()
+
+    assert "get_proxy_tools" in hooks
+    assert "execute_proxy_tool" in hooks
+    assert "get_tools" not in hooks
+    assert "execute_tool" not in hooks
 
 
 def test_reload_servers_restarts_connections_and_rebuilds_index() -> None:
@@ -114,3 +130,30 @@ def test_list_servers_exposes_alive_status_and_tool_names() -> None:
             "tools": [],
         },
     ]
+
+
+def test_get_proxy_tools_returns_discovered_mcp_schemas() -> None:
+    plugin = MCPPlugin()
+    conn = _make_connection("filesystem", ["read_file"])
+    plugin._connections = {"filesystem": conn}
+    plugin._rebuild_tool_index()
+
+    schemas = plugin.get_proxy_tools()
+
+    assert [schema.name for schema in schemas] == ["read_file"]
+    assert schemas[0].description == "read_file from filesystem"
+
+
+def test_execute_proxy_tool_routes_to_owning_mcp_server() -> None:
+    plugin = MCPPlugin()
+    conn = _make_connection("filesystem", ["read_file"])
+    plugin._connections = {"filesystem": conn}
+    plugin._rebuild_tool_index()
+
+    result = plugin.execute_proxy_tool(
+        name="read_file",
+        arguments={"value": "a.txt"},
+    )
+
+    assert result == "filesystem:read_file:a.txt"
+    assert conn.calls == [("read_file", {"value": "a.txt"})]

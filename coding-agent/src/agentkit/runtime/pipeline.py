@@ -639,29 +639,30 @@ class Pipeline:
                             )
                         continue
 
-                    approval = await toolset.approve_tool_call(tool_call, ctx=ctx)
+                    if not toolset.is_proxy_affordance(tool_call.name):
+                        approval = await toolset.approve_tool_call(tool_call, ctx=ctx)
 
-                    if not approval.approved:
-                        rejection_msg = f"Tool call rejected: {approval.reason or 'policy'}"
-                        ctx.tape.append(
-                            Entry(
-                                kind="tool_result",
-                                payload={
-                                    "tool_call_id": tool_call.tool_call_id,
-                                    "content": rejection_msg,
-                                },
-                            )
-                        )
-                        if ctx.on_event:
-                            await ctx.on_event(
-                                ToolResultEvent(
-                                    tool_call_id=tool_call.tool_call_id,
-                                    name=tool_call.name,
-                                    result=rejection_msg,
-                                    is_error=True,
+                        if not approval.approved:
+                            rejection_msg = f"Tool call rejected: {approval.reason or 'policy'}"
+                            ctx.tape.append(
+                                Entry(
+                                    kind="tool_result",
+                                    payload={
+                                        "tool_call_id": tool_call.tool_call_id,
+                                        "content": rejection_msg,
+                                    },
                                 )
                             )
-                        continue
+                            if ctx.on_event:
+                                await ctx.on_event(
+                                    ToolResultEvent(
+                                        tool_call_id=tool_call.tool_call_id,
+                                        name=tool_call.name,
+                                        result=rejection_msg,
+                                        is_error=True,
+                                    )
+                                )
+                            continue
 
                     executable_calls.append(tool_call)
 

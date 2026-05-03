@@ -5,8 +5,8 @@ discovers the tools exposed by every configured server at mount-time and
 re-exposes them through the standard AgentKit hook surface:
 
   - mount         : starts server processes and discovers tools
-  - get_tools     : returns the aggregated ToolSchema list
-  - execute_tool  : routes calls to the owning server
+  - get_proxy_tools: returns aggregated dynamic ToolSchema list for tool proxy
+  - execute_proxy_tool: routes calls from call_tool to the owning server
   - on_checkpoint : health-check / reconnect logic
 
 Configuration example (agent.toml):
@@ -275,8 +275,8 @@ class MCPPlugin:
     def hooks(self) -> dict[str, Callable[..., Any]]:
         return {
             "mount": self.do_mount,
-            "get_tools": self.get_tools,
-            "execute_tool": self.execute_tool,
+            "get_proxy_tools": self.get_proxy_tools,
+            "execute_proxy_tool": self.execute_proxy_tool,
             "on_checkpoint": self.on_checkpoint,
         }
 
@@ -291,18 +291,18 @@ class MCPPlugin:
         }
 
     # ------------------------------------------------------------------ #
-    # get_tools
+    # get_proxy_tools
     # ------------------------------------------------------------------ #
 
-    def get_tools(self, **kwargs: Any) -> list[ToolSchema]:
-        """Return all tools discovered from MCP servers."""
+    def get_proxy_tools(self, **kwargs: Any) -> list[ToolSchema]:
+        """Return all tools discovered from MCP servers for tool proxying."""
         return list(self._tool_schemas)
 
     # ------------------------------------------------------------------ #
-    # execute_tool
+    # execute_proxy_tool
     # ------------------------------------------------------------------ #
 
-    def execute_tool(
+    def execute_proxy_tool(
         self,
         name: str = "",
         arguments: dict[str, Any] | None = None,

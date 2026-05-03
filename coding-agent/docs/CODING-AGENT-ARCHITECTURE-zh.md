@@ -126,7 +126,7 @@ src/coding_agent/
 │   ├── llm_provider.py      #   provide_llm → LLMProvider 工厂
 │   ├── memory.py            #   build_context + on_turn_end → 记忆
 │   ├── metrics.py           #   on_checkpoint → 性能指标
-│   ├── mcp.py               #   mount/get_tools/execute_tool → MCP 服务工具
+│   ├── mcp.py               #   mount/get_proxy_tools/execute_proxy_tool → MCP proxy 工具
 │   ├── parallel_executor.py #   execute_tools_batch → 并行执行
 │   ├── shell_session.py     #   mount + on_checkpoint → Shell 状态
 │   ├── skills.py            #   build_context + execute_tool → 技能发现与激活
@@ -404,7 +404,7 @@ class SomePlugin:
 | **SummarizerPlugin** | `summarizer` | `resolve_context_window` | 通过主题边界或条目数截断进行上下文压缩 |
 | **MemoryPlugin** | `memory` | `build_context`、`on_turn_end`、`on_checkpoint`、`mount` | Grounding 注入 + 记忆提取 |
 | **SkillsPlugin** | `skills` | `build_context`、`get_tools`、`execute_tool`、`on_checkpoint`、`on_session_event`、`mount` | 发现 `.agents/skills`，注入技能摘要，并激活技能 |
-| **MCPPlugin** | `mcp` | `mount`、`get_tools`、`execute_tool`、`on_checkpoint` | 启动 MCP 服务并将其工具重新暴露给 Agent |
+| **MCPPlugin** | `mcp` | `mount`、`get_proxy_tools`、`execute_proxy_tool`、`on_checkpoint` | 启动 MCP 服务，并通过 `search_tools`/`call_tool` 暴露其工具 |
 | **DoomDetectorPlugin** | `doom_detector` | `on_checkpoint` | 检测 N 次连续相同工具调用 |
 | **ParallelExecutorPlugin** | `parallel_executor` | `execute_tools_batch` | 依赖感知的并行工具执行 |
 | **TopicPlugin** | `topic` | `on_checkpoint`、`on_session_event`、`mount` | 基于文件重叠的主题边界检测 |
@@ -422,6 +422,7 @@ Pipeline.run_turn()
     │
     ├── provide_llm ──────────→ LLMProviderPlugin
     ├── get_tools ────────────→ CoreToolsPlugin
+    ├── get_proxy_tools ──────→ MCPPlugin
     ├── build_context ────────→ MemoryPlugin（注入记忆）
     ├── resolve_context_window → SummarizerPlugin（压缩 tape）
     │
@@ -436,6 +437,7 @@ Pipeline.run_turn()
     │       │       │
     │       │       ├── execute_tool ──────→ CoreToolsPlugin
     │       │       │       └── bash_run → ShellSessionPlugin（同步 CWD）
+    │       │       ├── call_tool ─────────→ execute_proxy_tool → MCPPlugin
     │       │       │
     │       │       └── execute_tools_batch → ParallelExecutorPlugin
     │       │
