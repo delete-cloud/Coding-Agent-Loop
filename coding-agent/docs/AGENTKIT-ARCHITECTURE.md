@@ -297,6 +297,36 @@ exception produces a rejected `ToolApprovalResult` instead of aborting the turn.
 Executor failures keep the directive on the result and use the directive reason
 when available; other approval failures use `reason="policy"`.
 
+### 4.6 Runtime Message Bus
+
+`agentkit.runtime.messages` defines inbound runtime controls separately from
+outbound UI/event streams. The framework message kinds are:
+
+- `interrupt`
+- `user_steer`
+- `approval_decision`
+- `subagent_message`
+- `system_notice`
+
+`RuntimeMessageBus.consume_after(cursor)` is cursor-based and idempotent. Calling
+it repeatedly with the same `RuntimeMessageCursor` returns the same batch; the
+caller advances `PipelineContext.runtime_message_cursor` only after applying the
+batch. The in-memory implementation is process-local and intended for tests and
+single-runtime wiring. HTTP routing, owner fencing, and durable message storage
+remain `coding_agent` responsibilities.
+
+`Pipeline` consumes runtime messages at stage boundaries, before each model
+round, and before tool execution. `interrupt` fails the turn at the safe point
+with `PipelineError`. `user_steer`, `system_notice`, and `subagent_message`
+messages consumed in the current turn are injected into the runtime context
+system message. `approval_decision` is typed by the bus but not interpreted by
+agentkit; product-specific approval stores handle that routing.
+
+The runtime context system message includes known run identity (`session_id`,
+`run_id`, `agent_id`, `parent_run_id`), environment kind and workspace root,
+elapsed turn time, context budget, optional active approval summaries, and
+current-turn runtime messages.
+
 ---
 
 ## 5. Pipeline Stages

@@ -78,6 +78,11 @@ Implement the work in the following PR sequence.
    - Cover `interrupt`, `user_steer`, `approval_decision`,
      `subagent_message`, and `system_notice`, with consumed cursor or
      idempotency semantics.
+   - Keep runtime message consumption cursor-based so applying the same cursor
+     is idempotent and ownership layers can persist the cursor later.
+   - Consume runtime messages only at pipeline safe points: stage boundaries,
+     between model rounds, and before tool execution.
+   - Treat `interrupt` as a fail-fast turn stop at the next safe point.
    - Keep outbound event streams separate from inbound runtime control.
    - Keep HTTP SSE, owner routing, and UI event queues in `coding_agent`.
    - Add prompt-time runtime context injection for run id, agent id, environment summary, cwd, elapsed time, context budget, and active approvals.
@@ -123,6 +128,7 @@ Parallel agents may work on design review tasks for cloud workspace and subagent
 - [ ] The ADR states that Toolset retries are scoped to the failing provider hook and that unhandled providers must not perform side effects.
 - [ ] The ADR states that approval hook and directive executor failures are fail-closed denials.
 - [ ] The ADR states that RuntimeMessageBus moves only inbound message protocols and idempotent consumption semantics into `agentkit`.
+- [ ] The ADR states that runtime messages are consumed at pipeline safe points and `interrupt` stops the turn at the next safe point.
 - [ ] The ADR states that only generic subagent identity, trace metadata, and child-context derivation primitives may move into `agentkit`.
 - [ ] The ADR states that cloud workspace execution is deferred to follow-up work with explicit failure behavior for unresolved cloud bindings.
 - [ ] The ADR states that full subagent orchestration is deferred until runtime context, tool governance, and runtime messaging exist.

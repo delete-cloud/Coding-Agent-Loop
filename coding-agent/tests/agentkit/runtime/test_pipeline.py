@@ -1,5 +1,12 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock
+from agentkit.runtime import (
+    AgentRunContext,
+    ContextBudget,
+    InMemoryRuntimeMessageBus,
+    RuntimeMessage,
+    RuntimeMessageKind,
+)
 from agentkit.runtime.pipeline import Pipeline, PipelineContext
 from agentkit.runtime.hook_runtime import HookRuntime
 from agentkit.plugin.registry import PluginRegistry
@@ -150,6 +157,24 @@ class SchemaValidatedToolPlugin:
         return "should-not-run"
 
 
+class RuntimeContextEnvironment:
+    @property
+    def kind(self) -> str:
+        return "local"
+
+    def tool_config(self) -> dict[str, object]:
+        return {"workspace_root": "/repo"}
+
+    def build_file_tools(self):
+        raise NotImplementedError
+
+    def build_file_patch_tool(self):
+        raise NotImplementedError
+
+    def build_shell_tool(self):
+        raise NotImplementedError
+
+
 class TestPipelineContext:
     def test_create_context(self):
         tape = Tape()
@@ -219,6 +244,118 @@ class TestPipeline:
         await pipeline.run_turn(ctx)
 
         assert ctx.toolset is mounted_toolset
+
+    @pytest.mark.asyncio
+    async def test_runtime_context_and_messages_are_injected_into_prompt(self, setup):
+        pipeline, plugin = setup
+        bus = InMemoryRuntimeMessageBus()
+        await bus.publish(
+            RuntimeMessage(
+                message_id="msg-steer",
+                kind=RuntimeMessageKind.USER_STEER,
+                payload={"text": "Prefer a short answer"},
+            )
+        )
+        await bus.publish(
+            RuntimeMessage(
+                message_id="msg-notice",
+                kind=RuntimeMessageKind.SYSTEM_NOTICE,
+                payload={"text": "Checkpoint restored"},
+            )
+        )
+
+        captured_messages: list[list[dict[str, object]]] = []
+
+        async def mock_stream(messages, tools=None, **kwargs):
+            del tools, kwargs
+            captured_messages.append(messages)
+            from agentkit.providers.models import DoneEvent, TextEvent
+
+            yield TextEvent(text="Hello back!")
+            yield DoneEvent()
+
+        plugin._mock_llm.stream = mock_stream
+
+        ctx = PipelineContext(
+            tape=Tape(),
+            session_id="session-1",
+            run_context=AgentRunContext(
+                session_id="session-1",
+                run_id="run-1",
+                agent_id="agent-main",
+                parent_run_id="parent-run",
+                environment=RuntimeContextEnvironment(),
+                context_budget=ContextBudget(
+                    max_input_tokens=128000,
+                    reserved_output_tokens=4096,
+                    max_output_tokens=8192,
+                ),
+            ),
+            runtime_message_bus=bus,
+            config={
+                "system_prompt": "system",
+                "active_approvals": [
+                    {"request_id": "req-1", "tool": "bash_run"},
+                ],
+            },
+        )
+
+        await pipeline.run_turn(ctx)
+
+        system_content = "\n".join(
+            str(message.get("content", ""))
+            for message in captured_messages[0]
+            if message.get("role") == "system"
+        )
+        assert "Runtime context" in system_content
+        assert "session_id: session-1" in system_content
+        assert "run_id: run-1" in system_content
+        assert "agent_id: agent-main" in system_content
+        assert "parent_run_id: parent-run" in system_content
+        assert "environment: local" in system_content
+        assert "workspace_root: /repo" in system_content
+        assert "elapsed_seconds:" in system_content
+        assert "context_budget: max_input=128000 reserved_output=4096 max_output=8192" in system_content
+        assert "active_approvals: req-1:bash_run" in system_content
+        assert "user_steer msg-steer: Prefer a short answer" in system_content
+        assert "system_notice msg-notice: Checkpoint restored" in system_content
+        assert ctx.runtime_message_cursor.sequence == 2
+
+    @pytest.mark.asyncio
+    async def test_runtime_interrupt_stops_before_model_stream(self, setup):
+        pipeline, plugin = setup
+        bus = InMemoryRuntimeMessageBus()
+        await bus.publish(
+            RuntimeMessage(
+                message_id="msg-stop",
+                kind=RuntimeMessageKind.INTERRUPT,
+                payload={"reason": "user stopped turn"},
+            )
+        )
+        stream_called = False
+
+        async def mock_stream(messages, tools=None, **kwargs):
+            del messages, tools, kwargs
+            nonlocal stream_called
+            stream_called = True
+            from agentkit.providers.models import DoneEvent, TextEvent
+
+            yield TextEvent(text="should not stream")
+            yield DoneEvent()
+
+        plugin._mock_llm.stream = mock_stream
+        ctx = PipelineContext(
+            tape=Tape(),
+            session_id="session-1",
+            runtime_message_bus=bus,
+        )
+
+        with pytest.raises(PipelineError, match="runtime interrupted: user stopped turn"):
+            await pipeline.run_turn(ctx)
+
+        assert stream_called is False
+        assert [item.message.message_id for item in ctx.runtime_messages] == ["msg-stop"]
+        assert ctx.runtime_message_cursor.sequence == 1
 
     @pytest.mark.asyncio
     async def test_shutdown_notifies_plugins(self, setup):
