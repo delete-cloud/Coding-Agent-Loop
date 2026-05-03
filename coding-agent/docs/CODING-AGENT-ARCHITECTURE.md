@@ -830,6 +830,11 @@ message and then applies it via `ApprovalDecisionConsumer` to the session's
 `ApprovalCoordinator`. Agentkit's pipeline cursor never consumes these messages;
 it only consumes runtime controls that affect model execution.
 
+Approval decisions are first-write-wins per `(session_id, request_id)`.
+Repeated submissions publish the same deterministic message ID; if the decision
+was already published, later payloads are ignored and the first decision remains
+authoritative.
+
 `approval_decision` payloads use:
 
 ```python
@@ -841,6 +846,10 @@ it only consumes runtime controls that affect model execution.
     "scope": "once" | "session" | "always",
 }
 ```
+
+The session-local bus currently retains all messages and message IDs in memory
+for the session lifetime. Long-running sessions can accumulate runtime message
+history indefinitely; durable storage and compaction are deferred.
 
 ---
 

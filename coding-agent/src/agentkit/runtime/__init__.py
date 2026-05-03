@@ -6,6 +6,7 @@ from .hook_runtime import HookRuntime
 from .hookspecs import HOOK_SPECS, HookSpec
 from .context import AgentRunContext, ContextBudget
 from .messages import (
+    DuplicateRuntimeMessageError,
     InMemoryRuntimeMessageBus,
     RuntimeMessage,
     RuntimeMessageBatch,
@@ -32,6 +33,7 @@ __all__ = [
     "HOOK_SPECS",
     "AgentRunContext",
     "ContextBudget",
+    "DuplicateRuntimeMessageError",
     "HookRuntime",
     "HookSpec",
     "InMemoryRuntimeMessageBus",

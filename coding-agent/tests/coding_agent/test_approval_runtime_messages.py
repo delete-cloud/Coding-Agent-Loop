@@ -89,15 +89,15 @@ async def test_approval_decision_consumer_applies_decisions_with_own_cursor() ->
 
 
 @pytest.mark.asyncio
-async def test_approval_decision_consumer_skips_unhashable_scope() -> None:
+async def test_approval_decision_consumer_skips_invalid_scope_type() -> None:
     bus = InMemoryRuntimeMessageBus()
     coordinator = ApprovalCoordinator()
-    request = _approval_request(request_id="approval-unhashable-scope")
+    request = _approval_request(request_id="approval-invalid-scope-type")
     coordinator.add_request(request)
 
     await bus.publish(
         RuntimeMessage(
-            message_id="approval-decision-unhashable-scope",
+            message_id="approval-decision-invalid-scope-type",
             kind=RuntimeMessageKind.APPROVAL_DECISION,
             payload={
                 "session_id": request.session_id,
@@ -115,7 +115,39 @@ async def test_approval_decision_consumer_skips_unhashable_scope() -> None:
     result = await consumer.consume(bus, RuntimeMessageCursor())
 
     assert result.applied_request_ids == ()
-    assert result.skipped_message_ids == ("approval-decision-unhashable-scope",)
+    assert result.skipped_message_ids == ("approval-decision-invalid-scope-type",)
+    assert result.cursor.sequence == 1
+    assert coordinator.get_request(request.request_id) is request
+
+
+@pytest.mark.asyncio
+async def test_approval_decision_consumer_rejects_cross_session_payload() -> None:
+    bus = InMemoryRuntimeMessageBus()
+    coordinator = ApprovalCoordinator()
+    request = _approval_request(session_id="session-approval")
+    coordinator.add_request(request)
+
+    await bus.publish(
+        RuntimeMessage(
+            message_id="approval-decision-cross-session",
+            kind=RuntimeMessageKind.APPROVAL_DECISION,
+            payload={
+                "session_id": "other-session",
+                "request_id": request.request_id,
+                "approved": True,
+                "scope": "once",
+            },
+        )
+    )
+
+    consumer = ApprovalDecisionConsumer(
+        session_id=request.session_id,
+        coordinator=coordinator,
+    )
+    result = await consumer.consume(bus, RuntimeMessageCursor())
+
+    assert result.applied_request_ids == ()
+    assert result.skipped_message_ids == ("approval-decision-cross-session",)
     assert result.cursor.sequence == 1
     assert coordinator.get_request(request.request_id) is request
 
@@ -219,3 +251,97 @@ async def test_session_manager_submit_approval_accepts_duplicate_published_decis
     assert response is not None
     assert response.approved is True
     assert response.feedback == "already published"
+
+
+@pytest.mark.asyncio
+async def test_session_manager_submit_approval_is_first_write_wins(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENT_DATA_DIR", str(tmp_path / "data"))
+    manager = SessionManager(store=InMemorySessionStore())
+    session_id = await manager.create_session(
+        repo_path=tmp_path,
+        provider=MockProvider(),
+        provider_name="mock",
+        model_name="mock",
+    )
+    session = await manager.get_session_async(session_id)
+    request = _approval_request(session_id=session_id, request_id="approval-once")
+    session.approval_coordinator.add_request(request)
+    session.pending_approval = session.approval_coordinator.projection()
+
+    first_success = await manager.submit_approval(
+        session_id=session_id,
+        request_id=request.request_id,
+        approved=True,
+        feedback="first decision",
+        scope="once",
+    )
+    second_success = await manager.submit_approval(
+        session_id=session_id,
+        request_id=request.request_id,
+        approved=False,
+        feedback="changed decision",
+        scope="once",
+    )
+
+    assert first_success is True
+    assert second_success is True
+    bus_batch = await session.runtime_message_bus.consume_after(
+        RuntimeMessageCursor(),
+        kinds={RuntimeMessageKind.APPROVAL_DECISION},
+    )
+    assert [item.message.payload for item in bus_batch.messages] == [
+        {
+            "session_id": session_id,
+            "request_id": request.request_id,
+            "approved": True,
+            "feedback": "first decision",
+            "scope": "once",
+        }
+    ]
+    response = await session.approval_coordinator.wait_for_response(
+        request.request_id,
+        timeout=0.01,
+    )
+    assert response is not None
+    assert response.approved is True
+    assert response.feedback == "first decision"
+
+
+@pytest.mark.asyncio
+async def test_session_manager_submit_approval_advances_pending_projection(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENT_DATA_DIR", str(tmp_path / "data"))
+    manager = SessionManager(store=InMemorySessionStore())
+    session_id = await manager.create_session(
+        repo_path=tmp_path,
+        provider=MockProvider(),
+        provider_name="mock",
+        model_name="mock",
+    )
+    session = await manager.get_session_async(session_id)
+    first = _approval_request(session_id=session_id, request_id="approval-1")
+    second = _approval_request(session_id=session_id, request_id="approval-2")
+    third = _approval_request(session_id=session_id, request_id="approval-3")
+    session.approval_coordinator.add_request(first)
+    session.approval_coordinator.add_request(second)
+    session.approval_coordinator.add_request(third)
+    session.pending_approval = session.approval_coordinator.projection()
+
+    success = await manager.submit_approval(
+        session_id=session_id,
+        request_id=first.request_id,
+        approved=True,
+        scope="once",
+    )
+
+    assert success is True
+    assert session.pending_approval == {
+        "request_id": second.request_id,
+        "tool_name": second.tool,
+        "arguments": second.args,
+    }

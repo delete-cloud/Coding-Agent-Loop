@@ -23,6 +23,7 @@ from agentkit.checkpoint.models import CheckpointMeta
 from agentkit.checkpoint import CheckpointService
 from agentkit.providers.models import DoneEvent, TextEvent
 from agentkit.runtime import (
+    DuplicateRuntimeMessageError,
     InMemoryRuntimeMessageBus,
     RuntimeMessage,
     RuntimeMessageBus,
@@ -69,10 +70,6 @@ logger = logging.getLogger(__name__)
 _CHECKPOINT_SESSION_CONFIG_KEY = "session_restart_config"
 _DEFAULT_EXECUTION_BINDING = object()
 T = TypeVar("T")
-
-
-def _is_duplicate_runtime_message_error(exc: ValueError, message_id: str) -> bool:
-    return str(exc) == f"duplicate runtime message_id: {message_id}"
 
 
 class MockProvider:
@@ -1403,24 +1400,6 @@ class SessionManager:
             session.approval_event.set()
         return result
 
-    async def consume_approval_decisions(
-        self,
-        session_id: str,
-        *,
-        limit: int | None = None,
-    ) -> ApprovalDecisionConsumptionResult:
-        """Consume product-owned approval_decision messages for a session."""
-        await self._assert_owner(session_id)
-        session = await self.get_session_async(session_id)
-        result = await self._consume_approval_decisions_for_session(
-            session,
-            limit=limit,
-        )
-        if result.applied_request_ids:
-            session.last_activity = datetime.now()
-            await self._persist_session_async(session)
-        return result
-
     async def submit_approval(
         self,
         session_id: str,
@@ -1454,6 +1433,7 @@ class SessionManager:
             return False
 
         message_id = f"approval_decision:{session_id}:{request_id}"
+        duplicate_decision = False
         try:
             await session.runtime_message_bus.publish(
                 RuntimeMessage(
@@ -1468,9 +1448,10 @@ class SessionManager:
                     },
                 )
             )
-        except ValueError as exc:
-            if not _is_duplicate_runtime_message_error(exc, message_id):
+        except DuplicateRuntimeMessageError as exc:
+            if exc.message_id != message_id:
                 raise
+            duplicate_decision = True
             logger.info(
                 "approval_decision already published for session %s request %s",
                 session_id,
@@ -1489,11 +1470,25 @@ class SessionManager:
             session.approval_event.set()
             await self._persist_session_async(session)
             logger.info(f"Approval submitted for session {session_id}: {approved}")
+        elif duplicate_decision:
+            logger.info(
+                "approval_decision for session %s request %s was already published; keeping the first decision",
+                session_id,
+                request_id,
+            )
+            # Persist last_activity and any partial-batch side effects from
+            # other approval decisions consumed alongside this duplicate.
+            await self._persist_session_async(session)
+            return True
         else:
             logger.warning(
-                f"Approval submission failed for session {session_id}: request {request_id} not found"
+                "approval_decision for session %s request %s was not applied (validation failure or race)",
+                session_id,
+                request_id,
             )
             if result.applied_request_ids:
+                # A consume batch can apply other requests even when this
+                # specific submission is skipped.
                 await self._persist_session_async(session)
 
         return success
