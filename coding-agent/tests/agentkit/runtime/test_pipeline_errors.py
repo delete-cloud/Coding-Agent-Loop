@@ -7,6 +7,7 @@ from agentkit.runtime.hook_runtime import HookRuntime
 from agentkit.plugin.registry import PluginRegistry
 from agentkit.tape.tape import Tape
 from agentkit.tape.models import Entry
+from agentkit.tools import UNHANDLED_TOOL_RESULT
 
 
 class ErrorPlugin:
@@ -52,7 +53,7 @@ class ErrorPlugin:
             raise RuntimeError(f"Tool '{name}' failed: simulated error")
         if name == "ok_tool":
             return f"executed:{name}"
-        return None
+        return UNHANDLED_TOOL_RESULT
 
 
 class TestPipelineToolErrorHandling:

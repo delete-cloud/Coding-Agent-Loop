@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from agentkit.errors import HookError, HookTypeError
@@ -51,6 +52,10 @@ class HookRuntime:
                     hook_name=hook_name,
                 ) from exc
         return None
+
+    def get_hooks(self, hook_name: str) -> list[Callable[..., Any]]:
+        """Return registered hook callables for direct async-aware dispatch."""
+        return self._registry.get_hooks(hook_name)
 
     def call_many(self, hook_name: str, **kwargs: Any) -> list[Any]:
         """Call all hooks, collect non-None results.

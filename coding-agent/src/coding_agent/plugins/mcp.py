@@ -34,6 +34,7 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from agentkit.tools import UNHANDLED_TOOL_RESULT
 from agentkit.tools.schema import ToolSchema
 
 logger = logging.getLogger(__name__)
@@ -310,7 +311,7 @@ class MCPPlugin:
         """Route a tool call to the owning MCP server."""
         entry = self._tool_index.get(name)
         if entry is None:
-            return None  # not our tool
+            return UNHANDLED_TOOL_RESULT
 
         server_name, raw_name = entry
         conn = self._connections.get(server_name)

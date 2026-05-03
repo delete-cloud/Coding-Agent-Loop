@@ -745,7 +745,7 @@ class TestPipelineE2E:
         assert "recovered" in outcome.final_message
 
     @pytest.mark.asyncio
-    async def test_large_tool_result_truncated(self, tmp_path):
+    async def test_large_tool_result_truncated(self, tmp_path, monkeypatch):
         """Given a tool returning 20k chars and max_tool_result_size=10000, when pipeline processes it, then tape entry is truncated with notice."""
         pipeline, ctx = _setup_agent(tmp_path, approval_mode="yolo")
 
@@ -770,14 +770,15 @@ class TestPipelineE2E:
 
         _mock_provider(pipeline, mock_stream)
 
-        original_call_first = pipeline._runtime.call_first
+        core_tools = pipeline._registry.get("core_tools")
+        original_execute = core_tools.registry.execute
 
-        def patched_call_first(hook_name, **kwargs):
-            if hook_name == "execute_tool" and kwargs.get("name") == "bash_run":
+        def fake_execute(name, **kwargs):
+            if name == "bash_run":
                 return large_result
-            return original_call_first(hook_name, **kwargs)
+            return original_execute(name, **kwargs)
 
-        pipeline._runtime.call_first = patched_call_first
+        monkeypatch.setattr(core_tools.registry, "execute", fake_execute)
 
         await pipeline.mount(ctx)
 
@@ -836,7 +837,7 @@ class TestPipelineE2E:
                 yield ToolCallEvent(
                     tool_call_id="tc-p2",
                     name="grep_search",
-                    arguments={"pattern": "test", "path": "."},
+                    arguments={"pattern": "test", "directory": "."},
                 )
                 yield DoneEvent()
             else:
@@ -889,7 +890,7 @@ class TestPipelineE2E:
                 yield ToolCallEvent(
                     tool_call_id="tc-s2",
                     name="grep_search",
-                    arguments={"pattern": "test", "path": "."},
+                    arguments={"pattern": "test", "directory": "."},
                 )
                 yield DoneEvent()
             else:
@@ -920,7 +921,7 @@ class TestPipelineE2E:
 
         assert execute_calls == [
             ("file_read", {"path": "file_a.txt"}),
-            ("grep_search", {"pattern": "test", "path": "."}),
+            ("grep_search", {"pattern": "test", "directory": "."}),
         ]
 
         tool_results = ctx.tape.filter("tool_result")
@@ -932,7 +933,7 @@ class TestPipelineE2E:
             },
             {
                 "tool": "grep_search",
-                "arguments": {"pattern": "test", "path": "."},
+                "arguments": {"pattern": "test", "directory": "."},
                 "kind": "structured",
             },
         ]
