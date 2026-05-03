@@ -334,6 +334,32 @@ class ProxyToolPlugin:
         return UNHANDLED_TOOL_RESULT
 
 
+class RaisingProxyToolPlugin(ProxyToolPlugin):
+    state_key = "raising_proxy_tool"
+
+    def get_proxy_tools(self, **kwargs: Any) -> list[ToolSchema]:
+        del kwargs
+        return [
+            ToolSchema(
+                name="dynamic_boom",
+                description="Dynamic tool that raises",
+                parameters={
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            )
+        ]
+
+    def execute_proxy_tool(
+        self, name: str = "", arguments: dict[str, Any] | None = None, **kwargs: Any
+    ) -> object:
+        del arguments, kwargs
+        if name == "dynamic_boom":
+            raise PermissionError("target denied")
+        return UNHANDLED_TOOL_RESULT
+
+
 class RecordingApprovalPlugin:
     state_key = "recording_approval"
 
@@ -763,6 +789,25 @@ def test_toolset_collects_proxy_affordances_without_exposing_proxy_targets() -> 
     ]
 
 
+def test_toolset_warns_on_direct_and_proxy_tool_name_overlap(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    toolset = Toolset(
+        runtime=_runtime(ConflictingDirectToolPlugin(), ProxyToolPlugin())
+    )
+
+    with caplog.at_level(logging.WARNING):
+        schemas = toolset.collect_schemas()
+
+    assert [schema.name for schema in schemas] == [
+        "dynamic_echo",
+        "search_tools",
+        "call_tool",
+    ]
+    assert "direct/proxy tool name overlap" in caplog.text
+    assert "dynamic_echo" in caplog.text
+
+
 @pytest.mark.asyncio
 async def test_toolset_search_tools_returns_matching_proxy_schemas() -> None:
     toolset = Toolset(runtime=_runtime(ProxyToolPlugin()))
@@ -773,6 +818,39 @@ async def test_toolset_search_tools_returns_matching_proxy_schemas() -> None:
                 tool_call_id="tc-search",
                 name="search_tools",
                 arguments={"query": "echo", "limit": 5},
+            )
+        ],
+        ctx=object(),
+    )
+
+    assert results[0].is_error is False
+    assert results[0].result == {
+        "tools": [
+            {
+                "name": "dynamic_echo",
+                "description": "Dynamic echo tool",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                    "required": ["value"],
+                    "additionalProperties": False,
+                },
+            }
+        ],
+        "count": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_toolset_search_tools_empty_query_lists_proxy_schemas_by_limit() -> None:
+    toolset = Toolset(runtime=_runtime(ProxyToolPlugin()))
+
+    results = await toolset.execute_tools(
+        [
+            ToolCallRequest(
+                tool_call_id="tc-search-all",
+                name="search_tools",
+                arguments={"query": "", "limit": 1},
             )
         ],
         ctx=object(),
@@ -823,6 +901,28 @@ async def test_toolset_call_tool_validates_approves_and_executes_proxy_target() 
     )
     assert approval.calls == [("dynamic_echo", {"value": "hello"})]
     assert proxy.calls == [("dynamic_echo", {"value": "hello"})]
+
+
+@pytest.mark.asyncio
+async def test_toolset_call_tool_preserves_proxy_hook_exception_type() -> None:
+    toolset = Toolset(runtime=_runtime(RaisingProxyToolPlugin()))
+
+    results = await toolset.execute_tools(
+        [
+            ToolCallRequest(
+                tool_call_id="tc-call-error",
+                name="call_tool",
+                arguments={"name": "dynamic_boom", "arguments": {}},
+            )
+        ],
+        ctx=object(),
+    )
+
+    assert results[0].tool_call_id == "tc-call-error"
+    assert results[0].name == "call_tool"
+    assert isinstance(results[0].error, PermissionError)
+    assert str(results[0].error) == "target denied"
+    assert results[0].error_message == "Error executing tool 'call_tool': target denied"
 
 
 @pytest.mark.asyncio

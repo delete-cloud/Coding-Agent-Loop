@@ -160,11 +160,23 @@ class Toolset:
         proxy_schemas = self._collect_schemas_from_hook("get_proxy_tools")
         if not proxy_schemas:
             return direct_schemas
+        overlap = {schema.name for schema in direct_schemas} & {
+            schema.name for schema in proxy_schemas
+        }
+        if overlap:
+            logger.warning(
+                "direct/proxy tool name overlap: %s",
+                ", ".join(sorted(overlap)),
+            )
         return [
             *direct_schemas,
             self._search_tools_schema(),
             self._call_tool_schema(),
         ]
+
+    def is_proxy_affordance(self, tool_name: str) -> bool:
+        """Return whether the tool is a proxy affordance, not a target tool."""
+        return tool_name in _PROXY_AFFORDANCE_NAMES
 
     def _collect_schemas_from_hook(self, hook_name: str) -> list[ToolSchema]:
         tool_lists = self._runtime.call_many(hook_name)
@@ -731,7 +743,8 @@ class Toolset:
             return ToolExecutionResult(
                 tool_call_id=call.tool_call_id,
                 name=call.name,
-                error=RuntimeError(target_result.error_message),
+                error=target_result.error
+                or RuntimeError(target_result.error_message),
             )
 
         return ToolExecutionResult(

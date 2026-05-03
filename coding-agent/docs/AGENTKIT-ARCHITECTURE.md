@@ -303,11 +303,18 @@ Dynamic providers can implement `get_proxy_tools` and `execute_proxy_tool`.
 Those schemas are not exposed to the model directly. When any proxy schemas are
 available, `Toolset.collect_schemas()` adds stable `search_tools` and
 `call_tool` affordances alongside direct tools. `search_tools` returns matching
-dynamic tool descriptors. `call_tool` validates the nested target arguments
+dynamic tool descriptors, or every dynamic descriptor when `query=""`.
+`call_tool` is treated as a proxy affordance rather than a real target tool, so
+the pipeline skips outer approval for `search_tools` and `call_tool`. Governance
+is applied to the nested target: `call_tool` validates the target arguments
 against the target schema, runs the target through `approve_tool_call`, and then
 executes it through `execute_proxy_tool` with the same timeout/retry envelope.
-Calls containing `search_tools` or `call_tool` bypass `execute_tools_batch` so
-the proxy path cannot be swallowed by direct-tool batch executors.
+Calls containing `search_tools` or `call_tool` currently bypass
+`execute_tools_batch` as a batch-level tradeoff, so mixed direct/proxy batches
+execute sequentially. Direct/proxy tool name overlap is treated as product
+wiring ambiguity and logged as a warning. `search_tools` currently returns full
+target `parameters`; schema-size trimming or a later `describe_tool` affordance
+is intentionally deferred.
 
 ### 4.6 Runtime Message Bus
 

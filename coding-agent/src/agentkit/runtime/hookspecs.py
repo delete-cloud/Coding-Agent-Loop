@@ -107,7 +107,8 @@ HOOK_SPECS: dict[str, HookSpec] = {
     "execute_proxy_tool": HookSpec(
         name="execute_proxy_tool",
         firstresult=True,
-        doc="Execute a dynamic proxied tool by name for call_tool.",
+        doc="Execute a dynamic proxied tool by name for call_tool. Return "
+        "UNHANDLED_TOOL_RESULT before I/O when another proxy provider owns the tool.",
     ),
     "on_session_event": HookSpec(
         name="on_session_event",
