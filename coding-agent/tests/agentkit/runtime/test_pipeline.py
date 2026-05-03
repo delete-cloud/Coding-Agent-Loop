@@ -497,6 +497,67 @@ class TestPipeline:
         assert ctx.runtime_message_cursor.sequence == 1
 
     @pytest.mark.asyncio
+    async def test_prompt_runtime_message_published_during_stream_is_kept_for_next_turn(
+        self, setup
+    ):
+        pipeline, plugin = setup
+        bus = InMemoryRuntimeMessageBus()
+        captured_messages: list[list[dict[str, object]]] = []
+        published_during_stream = False
+
+        async def mock_stream(messages, tools=None, **kwargs):
+            nonlocal published_during_stream
+            del tools, kwargs
+            captured_messages.append(messages)
+            from agentkit.providers.models import DoneEvent, TextEvent
+
+            if not published_during_stream:
+                published_during_stream = True
+                yield TextEvent(text="Hello")
+                await bus.publish(
+                    RuntimeMessage(
+                        message_id="msg-during-stream",
+                        kind=RuntimeMessageKind.USER_STEER,
+                        payload={"text": "Use this after stream"},
+                    )
+                )
+                yield TextEvent(text=" back!")
+            else:
+                yield TextEvent(text="Hello back!")
+            yield DoneEvent()
+
+        plugin._mock_llm.stream = mock_stream
+        ctx = PipelineContext(
+            tape=Tape(),
+            session_id="session-1",
+            runtime_message_bus=bus,
+            config={"system_prompt": "system"},
+        )
+
+        await pipeline.run_turn(ctx)
+        await pipeline.run_turn(ctx)
+
+        first_system_content = "\n".join(
+            str(message.get("content", ""))
+            for message in captured_messages[0]
+            if message.get("role") == "system"
+        )
+        second_system_content = "\n".join(
+            str(message.get("content", ""))
+            for message in captured_messages[1]
+            if message.get("role") == "system"
+        )
+        assert (
+            "user_steer msg-during-stream: Use this after stream"
+            not in first_system_content
+        )
+        assert (
+            "user_steer msg-during-stream: Use this after stream"
+            in second_system_content
+        )
+        assert ctx.runtime_message_cursor.sequence == 1
+
+    @pytest.mark.asyncio
     async def test_runtime_context_includes_elapsed_without_run_context(self, setup):
         pipeline, plugin = setup
         captured_messages: list[list[dict[str, object]]] = []
