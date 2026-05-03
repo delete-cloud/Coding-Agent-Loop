@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterator
+import time
+from collections.abc import Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager
 from inspect import isawaitable
 from dataclasses import dataclass, field
@@ -29,11 +30,26 @@ from agentkit.providers.models import (
 )
 from agentkit.runtime.context import AgentRunContext
 from agentkit.runtime.hook_runtime import HookRuntime
+from agentkit.runtime.messages import (
+    RuntimeMessageBus,
+    RuntimeMessageCursor,
+    RuntimeMessageKind,
+    SequencedRuntimeMessage,
+)
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
 from agentkit.tools.toolset import ToolCallRequest, ToolExecutionOptions, Toolset
 
 logger = logging.getLogger(__name__)
+
+_PIPELINE_RUNTIME_MESSAGE_KINDS = frozenset(
+    {
+        RuntimeMessageKind.INTERRUPT,
+        RuntimeMessageKind.USER_STEER,
+        RuntimeMessageKind.SUBAGENT_MESSAGE,
+        RuntimeMessageKind.SYSTEM_NOTICE,
+    }
+)
 
 StructuredToolResultScopeFactory = Callable[[bool], AbstractContextManager[None]]
 
@@ -81,6 +97,61 @@ def _format_result(
     return result_str
 
 
+def _string_payload_value(payload: Mapping[str, Any], *names: str) -> str:
+    for name in names:
+        value = payload.get(name)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def _format_active_approvals(value: Any) -> str:
+    """Format active approval summaries.
+
+    Items must be non-empty strings or mappings with a non-empty ``request_id``
+    and optional ``tool`` string; other entries are ignored.
+    """
+    if not isinstance(value, list):
+        return ""
+
+    formatted: list[str] = []
+    for item in value:
+        if isinstance(item, str) and item:
+            formatted.append(item)
+            continue
+        if not isinstance(item, Mapping):
+            continue
+        request_id = item.get("request_id")
+        tool = item.get("tool")
+        if isinstance(request_id, str) and request_id:
+            if isinstance(tool, str) and tool:
+                formatted.append(f"{request_id}:{tool}")
+            else:
+                formatted.append(request_id)
+    return ", ".join(formatted)
+
+
+def _format_runtime_prompt_messages(
+    messages: list[SequencedRuntimeMessage],
+) -> list[str]:
+    prompt_kinds = {
+        RuntimeMessageKind.USER_STEER,
+        RuntimeMessageKind.SUBAGENT_MESSAGE,
+        RuntimeMessageKind.SYSTEM_NOTICE,
+    }
+    formatted: list[str] = []
+    for item in messages:
+        message = item.message
+        if message.kind not in prompt_kinds:
+            continue
+        text = _string_payload_value(message.payload, "text", "message", "content")
+        if text:
+            formatted.append(f"{message.kind.value} {message.message_id}: {text}")
+        else:
+            formatted.append(f"{message.kind.value} {message.message_id}")
+    return formatted
+
+
 @dataclass
 class PipelineContext:
     """Mutable context threaded through pipeline stages."""
@@ -93,6 +164,13 @@ class PipelineContext:
     messages: list[dict[str, Any]] = field(default_factory=list)
     llm_provider: Any = None
     storage: Any = None
+    runtime_message_bus: RuntimeMessageBus | None = None
+    runtime_message_cursor: RuntimeMessageCursor = field(
+        default_factory=RuntimeMessageCursor
+    )
+    runtime_messages: list[SequencedRuntimeMessage] = field(default_factory=list)
+    runtime_started_at: float | None = None
+    active_approvals: list[Any] = field(default_factory=list)
     toolset: Toolset | None = None
     tool_schemas: list[Any] = field(default_factory=list)
     response_entries: list[Any] = field(default_factory=list)
@@ -165,6 +243,77 @@ class Pipeline:
             )
         return ctx.toolset
 
+    async def _consume_runtime_messages(
+        self,
+        ctx: PipelineContext,
+        *,
+        stage: StageName,
+    ) -> None:
+        if ctx.runtime_message_bus is None:
+            return
+
+        batch = await ctx.runtime_message_bus.consume_after(
+            ctx.runtime_message_cursor,
+            kinds=_PIPELINE_RUNTIME_MESSAGE_KINDS,
+        )
+        if not batch.messages:
+            return
+
+        for item in batch.messages:
+            message = item.message
+            if message.kind is RuntimeMessageKind.INTERRUPT:
+                reason = _string_payload_value(message.payload, "reason", "text")
+                if not reason:
+                    reason = message.message_id
+                raise PipelineError(f"runtime interrupted: {reason}", stage=stage)
+
+        ctx.runtime_messages.extend(batch.messages)
+        ctx.runtime_message_cursor = batch.cursor
+
+    def _runtime_context_grounding(self, ctx: PipelineContext) -> dict[str, Any] | None:
+        lines: list[str] = []
+        run_context = ctx.run_context
+
+        if run_context is not None:
+            lines.append(f"session_id: {run_context.session_id}")
+            lines.append(f"run_id: {run_context.run_id}")
+            if run_context.agent_id is not None:
+                lines.append(f"agent_id: {run_context.agent_id}")
+            if run_context.parent_run_id is not None:
+                lines.append(f"parent_run_id: {run_context.parent_run_id}")
+            lines.append(f"environment: {run_context.environment.kind}")
+            tool_config = run_context.environment.tool_config()
+            workspace_root = tool_config.get("workspace_root")
+            if isinstance(workspace_root, str) and workspace_root:
+                lines.append(f"workspace_root: {workspace_root}")
+
+            budget = run_context.context_budget
+            lines.append(
+                "context_budget: "
+                f"max_input={budget.max_input_tokens} "
+                f"reserved_output={budget.reserved_output_tokens} "
+                f"max_output={budget.max_output_tokens}"
+            )
+
+        if ctx.runtime_started_at is not None:
+            elapsed = max(0, int(time.monotonic() - ctx.runtime_started_at))
+            lines.append(f"elapsed_seconds: {elapsed}")
+
+        active_approvals = _format_active_approvals(ctx.active_approvals)
+        if active_approvals:
+            lines.append(f"active_approvals: {active_approvals}")
+
+        runtime_messages = _format_runtime_prompt_messages(ctx.runtime_messages)
+        lines.extend(runtime_messages)
+
+        if not lines:
+            return None
+
+        return {
+            "role": "system",
+            "content": "Runtime context\n" + "\n".join(lines),
+        }
+
     async def mount(self, ctx: PipelineContext) -> None:
         self._ensure_toolset(ctx)
         for plugin_id in self._registry.plugin_ids():
@@ -186,11 +335,14 @@ class Pipeline:
         fork = None
         original_tape = ctx.tape
         ctx._handoff_done = False
+        ctx.runtime_messages = []
+        ctx.runtime_started_at = time.monotonic()
         self._ensure_toolset(ctx)
 
         try:
             for stage in self.STAGES:
                 try:
+                    await self._consume_runtime_messages(ctx, stage=stage)
                     handler = getattr(self, f"_stage_{stage}", None)
                     if handler is not None:
                         if _tracer is not None:
@@ -302,6 +454,9 @@ class Pipeline:
 
         grounding_results = self._runtime.call_many("build_context", tape=ctx.tape)
         grounding: list[dict[str, Any]] = []
+        runtime_context = self._runtime_context_grounding(ctx)
+        if runtime_context is not None:
+            grounding.append(runtime_context)
         for result in grounding_results:
             if isinstance(result, list):
                 grounding.extend(result)
@@ -364,6 +519,7 @@ class Pipeline:
         toolset = self._require_toolset(ctx, stage="run_model")
 
         for _round in range(max_tool_rounds):
+            await self._consume_runtime_messages(ctx, stage="run_model")
             tool_dicts = (
                 [s.to_openai_format() for s in ctx.tool_schemas]
                 if ctx.tool_schemas
@@ -510,6 +666,7 @@ class Pipeline:
                     executable_calls.append(tool_call)
 
                 if executable_calls:
+                    await self._consume_runtime_messages(ctx, stage="run_model")
                     max_size = ctx.config.get("max_tool_result_size", 10000)
                     structured_results_enabled = bool(
                         ctx.config.get("structured_results", False)

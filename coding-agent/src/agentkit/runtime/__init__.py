@@ -5,6 +5,15 @@ from typing import Protocol, runtime_checkable
 from .hook_runtime import HookRuntime
 from .hookspecs import HOOK_SPECS, HookSpec
 from .context import AgentRunContext, ContextBudget
+from .messages import (
+    InMemoryRuntimeMessageBus,
+    RuntimeMessage,
+    RuntimeMessageBatch,
+    RuntimeMessageBus,
+    RuntimeMessageCursor,
+    RuntimeMessageKind,
+    SequencedRuntimeMessage,
+)
 from .pipeline import Pipeline, PipelineContext
 
 
@@ -25,7 +34,14 @@ __all__ = [
     "ContextBudget",
     "HookRuntime",
     "HookSpec",
+    "InMemoryRuntimeMessageBus",
     "Lifecycle",
     "Pipeline",
     "PipelineContext",
+    "RuntimeMessage",
+    "RuntimeMessageBatch",
+    "RuntimeMessageBus",
+    "RuntimeMessageCursor",
+    "RuntimeMessageKind",
+    "SequencedRuntimeMessage",
 ]
