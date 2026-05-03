@@ -397,3 +397,61 @@ async def test_session_manager_defers_prepublished_decision_until_request_attach
     assert applied_response.approved is True
     assert applied_response.feedback == "arrived early"
     assert session.approval_decision_cursor.sequence == 1
+
+
+@pytest.mark.asyncio
+async def test_session_manager_stale_early_decision_does_not_block_later_valid_decision(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENT_DATA_DIR", str(tmp_path / "data"))
+    manager = SessionManager(store=InMemorySessionStore())
+    session_id = await manager.create_session(
+        repo_path=tmp_path,
+        provider=MockProvider(),
+        provider_name="mock",
+        model_name="mock",
+    )
+    session = await manager.get_session_async(session_id)
+    await session.runtime_message_bus.publish(
+        RuntimeMessage(
+            message_id=f"approval_decision:{session_id}:stale",
+            kind=RuntimeMessageKind.APPROVAL_DECISION,
+            payload={
+                "session_id": session_id,
+                "request_id": "stale",
+                "approved": False,
+                "feedback": "never attaches",
+                "scope": "once",
+            },
+        )
+    )
+    valid = _approval_request(session_id=session_id, request_id="valid")
+    session.approval_coordinator.add_request(valid)
+    session.pending_approval = session.approval_coordinator.projection()
+
+    response = await manager.submit_approval_response(
+        session_id=session_id,
+        request_id=valid.request_id,
+        approved=True,
+        feedback="valid decision",
+        scope="once",
+    )
+
+    assert response is not None
+    assert response.request_id == valid.request_id
+    assert response.approved is True
+    assert response.feedback == "valid decision"
+    assert session.approval_decision_cursor.sequence == 2
+
+    session.turn_in_progress = True
+    stale = _approval_request(session_id=session_id, request_id="stale")
+    stale_response = await manager.wait_for_http_approval(
+        session_id=session_id,
+        approval_req=stale,
+        timeout_seconds=1,
+    )
+
+    assert stale_response.approved is False
+    assert stale_response.feedback == "never attaches"
+    assert session.approval_decision_cursor.sequence == 2

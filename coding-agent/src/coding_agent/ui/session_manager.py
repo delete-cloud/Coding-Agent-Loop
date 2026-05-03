@@ -904,6 +904,18 @@ class SessionManager:
             session.approval_event.clear()
             session.approval_response = None
             await self._persist_session_async(session)
+            published_decision = await self._published_approval_decision(
+                session,
+                req.request_id,
+            )
+            if published_decision is not None:
+                response = await self._apply_published_approval_decision(
+                    session,
+                    req.request_id,
+                    published_decision,
+                )
+                if response is not None:
+                    return response
             await session.wire.send(req)
             try:
                 response = await session.approval_coordinator.wait_for_response(
@@ -1453,15 +1465,21 @@ class SessionManager:
         decision: _PublishedApprovalDecision,
     ) -> ApprovalResponse | None:
         already_consumed = decision.sequence <= session.approval_decision_cursor.sequence
-        result = await self._consume_approval_decisions_for_session(session)
-        applied = request_id in result.applied_request_ids
+        applied = False
+        if session.approval_coordinator.get_request(request_id) is not None:
+            applied = session.approval_coordinator.respond(decision.response)
+            if applied and not already_consumed:
+                session.approval_decision_cursor = RuntimeMessageCursor(
+                    max(
+                        session.approval_decision_cursor.sequence,
+                        decision.sequence,
+                    )
+                )
         if not applied and not already_consumed:
-            if result.applied_request_ids:
-                session.last_activity = datetime.now()
-                await self._persist_session_async(session)
             return None
 
         session.last_activity = datetime.now()
+        session.pending_approval = session.approval_coordinator.projection()
         session.approval_response = _approval_response_projection(decision.response)
         session.approval_event.set()
         await self._persist_session_async(session)
@@ -1641,7 +1659,18 @@ class SessionManager:
         session.approval_event.clear()
         session.approval_response = None
         await self._persist_session_async(session)
-        _ = await self._consume_approval_decisions_for_session(session)
+        published_decision = await self._published_approval_decision(
+            session,
+            approval_req.request_id,
+        )
+        if published_decision is not None:
+            response = await self._apply_published_approval_decision(
+                session,
+                approval_req.request_id,
+                published_decision,
+            )
+            if response is not None:
+                return response
 
         try:
             response = await session.approval_coordinator.wait_for_response(

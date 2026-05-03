@@ -61,17 +61,27 @@ class ApprovalDecisionConsumer:
                 cursor_sequence = item.sequence
                 continue
 
-            if self._coordinator.respond(response):
-                applied_request_ids.append(response.request_id)
-                cursor_sequence = item.sequence
-            else:
+            if self._coordinator.get_request(response.request_id) is None:
                 deferred_message_ids.append(item.message.message_id)
+                cursor_sequence = item.sequence
                 logger.warning(
                     "approval_decision for unknown request %r in session %r",
                     response.request_id,
                     self._session_id,
                 )
-                break
+                continue
+
+            if self._coordinator.respond(response):
+                applied_request_ids.append(response.request_id)
+                cursor_sequence = item.sequence
+            else:
+                skipped_message_ids.append(item.message.message_id)
+                cursor_sequence = item.sequence
+                logger.warning(
+                    "approval_decision for duplicate request %r in session %r",
+                    response.request_id,
+                    self._session_id,
+                )
 
         return ApprovalDecisionConsumptionResult(
             cursor=RuntimeMessageCursor(cursor_sequence),
