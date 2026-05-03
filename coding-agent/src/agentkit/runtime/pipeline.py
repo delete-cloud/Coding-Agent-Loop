@@ -710,8 +710,10 @@ class Pipeline:
                     executable_calls.append(tool_call)
 
                 if executable_calls:
-                    if await self._consume_runtime_messages(ctx, stage="run_model"):
-                        await self._stage_build_context(ctx)
+                    await self._raise_if_runtime_interrupted(
+                        ctx,
+                        stage="run_model",
+                    )
                     max_size = ctx.config.get("max_tool_result_size", 10000)
                     structured_results_enabled = bool(
                         ctx.config.get("structured_results", False)

@@ -818,6 +818,83 @@ class TestPipeline:
         assert entries[-1].payload["role"] == "assistant"
 
     @pytest.mark.asyncio
+    async def test_prompt_runtime_message_before_tool_execution_survives_failed_turn(
+        self, setup
+    ):
+        pipeline, plugin = setup
+        bus = InMemoryRuntimeMessageBus()
+        tape = Tape()
+        tape.append(
+            Entry(kind="message", payload={"role": "user", "content": "read file.txt"})
+        )
+        ctx = PipelineContext(tape=tape, session_id="s1", runtime_message_bus=bus)
+        await pipeline.mount(ctx)
+
+        from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
+
+        call_count = 0
+        captured_messages: list[list[dict[str, object]]] = []
+        published_late_message = False
+        original_build_context = pipeline._stage_build_context
+        fail_rebuild_once = False
+
+        async def mock_stream(messages, tools=None, **kwargs):
+            nonlocal call_count, published_late_message
+            del tools, kwargs
+            captured_messages.append(messages)
+            call_count += 1
+            if call_count == 1:
+                yield ToolCallEvent(
+                    tool_call_id="tc1", name="file_read", arguments={"path": "file.txt"}
+                )
+                if not published_late_message:
+                    published_late_message = True
+                    await bus.publish(
+                        RuntimeMessage(
+                            message_id="msg-before-tool-execution",
+                            kind=RuntimeMessageKind.USER_STEER,
+                            payload={"text": "Keep this steer after failure"},
+                        )
+                    )
+                yield DoneEvent()
+            else:
+                yield TextEvent(text="File contents: test data")
+                yield DoneEvent()
+
+        async def build_context_fail_after_tool_call(current_ctx):
+            nonlocal fail_rebuild_once
+            if fail_rebuild_once and any(
+                entry.kind == "tool_call" for entry in current_ctx.tape
+            ):
+                fail_rebuild_once = False
+                raise RuntimeError("rebuild exploded")
+            await original_build_context(current_ctx)
+
+        mock_llm = MagicMock()
+        mock_llm.stream = mock_stream
+        plugin._mock_llm = mock_llm
+        pipeline._stage_build_context = build_context_fail_after_tool_call
+        fail_rebuild_once = True
+
+        with pytest.raises(PipelineError, match="rebuild exploded"):
+            await pipeline.run_turn(ctx)
+
+        assert ctx.runtime_message_cursor.sequence == 0
+
+        await pipeline.run_turn(ctx)
+
+        second_system_content = "\n".join(
+            str(message.get("content", ""))
+            for message in captured_messages[-1]
+            if message.get("role") == "system"
+        )
+        assert (
+            "user_steer msg-before-tool-execution: Keep this steer after failure"
+            in second_system_content
+        )
+        assert ctx.runtime_message_cursor.sequence == 1
+
+    @pytest.mark.asyncio
     async def test_run_turn_allows_later_plugin_to_handle_unknown_tool(self):
         registry = PluginRegistry()
         llm_plugin = MinimalPlugin()
