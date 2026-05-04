@@ -1373,7 +1373,6 @@ class SessionManager:
                     ctx.runtime_message_bus = session.runtime_message_bus
                     ctx.config["wire_consumer"] = None
                     ctx.config["agent_id"] = ""
-                    self._bind_subagent_message_publisher(ctx)
 
                     llm_plugin = pipeline._registry.get("llm_provider")
                     if session.provider is not None:
