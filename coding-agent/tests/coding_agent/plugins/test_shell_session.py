@@ -1,5 +1,6 @@
 # tests/coding_agent/plugins/test_shell_session.py
 import pytest
+from agentkit.environment import WorkspaceSummary
 from coding_agent.plugins.shell_session import ShellSessionPlugin
 from agentkit.directive.types import Checkpoint
 
@@ -33,6 +34,21 @@ class TestShellSessionPlugin:
         state = plugin.do_mount(ctx=ctx)
 
         assert state["cwd"] == str((tmp_path / "workspace").resolve())
+
+    def test_mount_uses_environment_default_cwd_without_workspace_root(self):
+        class Env:
+            def workspace_summary(self) -> WorkspaceSummary:
+                return WorkspaceSummary(
+                    display_name="Cloud workspace workspace-1",
+                    default_cwd="/workspace",
+                )
+
+        plugin = ShellSessionPlugin()
+        ctx = type("Ctx", (), {"config": {"environment": Env()}})()
+
+        state = plugin.do_mount(ctx=ctx)
+
+        assert state["cwd"] == "/workspace"
 
     def test_checkpoint_captures_cwd(self):
         plugin = ShellSessionPlugin()

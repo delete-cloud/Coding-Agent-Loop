@@ -32,11 +32,13 @@ class CoreToolsPlugin:
         | None = None,
     ) -> None:
         self._environment = environment or LocalEnvironment(workspace_root)
-        tool_config = self._environment.tool_config()
-        workspace_root_value = tool_config.get("workspace_root")
-        if not isinstance(workspace_root_value, str):
-            raise ValueError("environment tool_config must include string workspace_root")
-        self._workspace_root = Path(workspace_root_value).expanduser().resolve()
+        workspace_summary = self._environment.workspace_summary()
+        self._workspace_root = (
+            Path(workspace_summary.local_root).expanduser().resolve()
+            if workspace_summary.local_root is not None
+            else None
+        )
+        self._default_cwd = workspace_summary.default_cwd
         self._planner = planner
         self._shell_session = shell_session
         self._web_search_backend = web_search_backend
@@ -129,11 +131,15 @@ class CoreToolsPlugin:
         if self._shell_session is not None:
             session = self._shell_session.get_session_context()
             if args.get("cwd") is None:
-                args["cwd"] = session.get("cwd") or self._workspace_root
+                args["cwd"] = (
+                    session.get("cwd") or self._workspace_root or self._default_cwd
+                )
             args.setdefault("env", session.get("env_vars", {}))
             return args
-        if args.get("cwd") is None:
+        if args.get("cwd") is None and (self._workspace_root or self._default_cwd):
             args["cwd"] = self._workspace_root
+            if args["cwd"] is None:
+                args["cwd"] = self._default_cwd
         return args
 
     def _sync_shell_session(self, name: str, args: dict[str, Any], result: Any) -> None:

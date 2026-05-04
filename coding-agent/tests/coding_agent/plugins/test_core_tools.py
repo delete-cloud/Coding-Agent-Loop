@@ -1,6 +1,9 @@
 # pyright: reportMissingTypeStubs=false, reportUnknownParameterType=false, reportMissingParameterType=false, reportUnknownArgumentType=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportAny=false, reportUnannotatedClassAttribute=false, reportPrivateUsage=false, reportUnusedCallResult=false
 
+from typing import Any
+
 import pytest
+from agentkit.environment import WorkspaceSummary
 from agentkit.runtime.pipeline import PipelineContext
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
@@ -17,6 +20,66 @@ from agentkit.tools.schema import ToolSchema
 from coding_agent.core.planner import PlanManager
 from coding_agent.environment import LocalEnvironment
 import json
+
+
+class NonLocalEnvironment:
+    def __init__(self) -> None:
+        self.shell_calls: list[dict[str, Any]] = []
+
+    @property
+    def kind(self) -> str:
+        return "cloud"
+
+    def tool_config(self) -> dict[str, Any]:
+        return {"workspace_id": "workspace-1"}
+
+    def workspace_summary(self) -> WorkspaceSummary:
+        return WorkspaceSummary(
+            display_name="Cloud workspace workspace-1",
+            default_cwd="/workspace",
+        )
+
+    def build_file_tools(self):
+        @tool(name="file_read", description="Read a file")
+        def file_read(path: str) -> str:
+            return f"cloud-read:{path}"
+
+        @tool(name="file_write", description="Write a file")
+        def file_write(path: str, content: str) -> str:
+            return f"cloud-write:{path}:{content}"
+
+        @tool(name="file_replace", description="Replace text in a file")
+        def file_replace(path: str, old: str, new: str) -> str:
+            return f"cloud-replace:{path}:{old}:{new}"
+
+        @tool(name="glob_files", description="Glob files")
+        def glob_files(pattern: str, directory: str = ".") -> str:
+            return f"cloud-glob:{directory}:{pattern}"
+
+        @tool(name="grep_search", description="Search files")
+        def grep_search(pattern: str, directory: str = ".", include: str = "") -> str:
+            return f"cloud-grep:{directory}:{pattern}:{include}"
+
+        return file_read, file_write, file_replace, glob_files, grep_search
+
+    def build_file_patch_tool(self):
+        @tool(name="file_patch", description="Apply a patch")
+        def file_patch(path: str, patch: str) -> str:
+            return f"cloud-patch:{path}:{patch}"
+
+        return file_patch
+
+    def build_shell_tool(self):
+        @tool(name="bash_run", description="Run a shell command")
+        def bash_run(
+            command: str,
+            cwd: str | None = None,
+            env: dict[str, str] | None = None,
+        ) -> str:
+            self.shell_calls.append({"command": command, "cwd": cwd, "env": env})
+            return f"cloud-shell:{cwd}:{command}"
+
+        return bash_run
 
 
 class TestCoreToolsPlugin:
@@ -65,6 +128,28 @@ class TestCoreToolsPlugin:
         result = plugin.execute_tool(name="bash_run", arguments={"command": "pwd"})
 
         assert str(tmp_path.resolve()) in result
+
+    def test_core_tools_accepts_non_local_environment_without_workspace_root(self):
+        env = NonLocalEnvironment()
+        shell_session = ShellSessionPlugin()
+        shell_session._state = {
+            "cwd": "/workspace",
+            "env_vars": {"A": "B"},
+            "active": True,
+        }
+        plugin = CoreToolsPlugin(environment=env, shell_session=shell_session)
+
+        read_result = plugin.execute_tool(
+            name="file_read", arguments={"path": "README.md"}
+        )
+        shell_result = plugin.execute_tool(name="bash_run", arguments={"command": "pwd"})
+
+        assert plugin._workspace_root is None
+        assert read_result == "cloud-read:README.md"
+        assert shell_result == "cloud-shell:/workspace:pwd"
+        assert env.shell_calls == [
+            {"command": "pwd", "cwd": "/workspace", "env": {"A": "B"}}
+        ]
 
     def test_execute_tool_blocks_paths_outside_workspace(self, tmp_path):
         plugin = CoreToolsPlugin(workspace_root=tmp_path)

@@ -313,10 +313,13 @@ class Pipeline:
             if run_context.parent_run_id is not None:
                 lines.append(f"parent_run_id: {run_context.parent_run_id}")
             lines.append(f"environment: {run_context.environment.kind}")
-            tool_config = run_context.environment.tool_config()
-            workspace_root = tool_config.get("workspace_root")
-            if isinstance(workspace_root, str) and workspace_root:
-                lines.append(f"workspace_root: {workspace_root}")
+            workspace_summary = run_context.environment.workspace_summary()
+            if workspace_summary.display_name:
+                lines.append(f"workspace: {workspace_summary.display_name}")
+            if workspace_summary.local_root:
+                lines.append(f"workspace_root: {workspace_summary.local_root}")
+            if workspace_summary.default_cwd:
+                lines.append(f"default_cwd: {workspace_summary.default_cwd}")
 
             budget = run_context.context_budget
             lines.append(
