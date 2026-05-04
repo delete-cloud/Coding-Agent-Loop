@@ -142,6 +142,10 @@ class ToolExecutionResult:
         return ""
 
 
+class FatalToolExecutionError(RuntimeError):
+    """Tool exception that must escape generic tool-result wrapping."""
+
+
 class Toolset:
     """Coordinates tool schema validation, approval, and execution hooks."""
 
@@ -540,6 +544,8 @@ class Toolset:
                         timeout_seconds=options.timeout_seconds,
                     )
                     break
+                except FatalToolExecutionError:
+                    raise
                 except Exception as exc:
                     if attempt == options.max_retries:
                         return self._error_results(calls, exc)
@@ -606,6 +612,8 @@ class Toolset:
                         timeout_seconds=options.timeout_seconds,
                     )
                     break
+                except FatalToolExecutionError:
+                    raise
                 except Exception as exc:
                     if attempt == options.max_retries:
                         return ToolExecutionResult(
@@ -758,6 +766,8 @@ class Toolset:
         call: ToolCallRequest,
         result: Any,
     ) -> ToolExecutionResult:
+        if isinstance(result, FatalToolExecutionError):
+            raise result
         if isinstance(result, Exception):
             return ToolExecutionResult(
                 tool_call_id=call.tool_call_id,
