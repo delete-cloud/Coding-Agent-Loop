@@ -11,8 +11,9 @@ import pytest
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
 from coding_agent.approval import ApprovalPolicy
-from coding_agent.environment import LocalEnvironment
-from coding_agent.ui.execution_binding import LocalExecutionBinding
+from coding_agent.environment import CloudCommandResult, CloudEnvironment, LocalEnvironment
+from coding_agent.ui.binding_resolver import DefaultBindingResolver
+from coding_agent.ui.execution_binding import CloudWorkspaceBinding, LocalExecutionBinding
 from coding_agent.wire.protocol import (
     ApprovalRequest,
     CompletionStatus,
@@ -1258,6 +1259,174 @@ async def test_restore_checkpoint_preserves_execution_binding(tmp_path: Path) ->
     assert captured_kwargs["environment"].workspace_root == restore_bound.resolve()
     assert isinstance(session.execution_binding, LocalExecutionBinding)
     assert session.execution_binding.workspace_root == str(restore_bound)
+
+
+class FakeCloudClient:
+    workspace_id = "ws-123"
+    workspace_url = "https://workspace.example.com"
+    default_cwd = "/workspace"
+
+    def read_file(self, path: str) -> str:
+        return path
+
+    def write_file(self, path: str, content: str) -> None:
+        del path, content
+
+    def replace_file(self, path: str, old: str, new: str) -> None:
+        del path, old, new
+
+    def glob_files(self, pattern: str, directory: str) -> list[str]:
+        del pattern, directory
+        return []
+
+    def grep_search(self, pattern: str, directory: str, include: str) -> list[str]:
+        del pattern, directory, include
+        return []
+
+    def apply_patch(self, path: str, patch: str) -> dict[str, object]:
+        del patch
+        return {"success": True, "path": path, "changed": False}
+
+    def run_command(
+        self,
+        command: str,
+        *,
+        cwd: str | None,
+        env: dict[str, str] | None,
+        timeout: int,
+    ) -> CloudCommandResult:
+        del command, cwd, env, timeout
+        return CloudCommandResult(stdout="", stderr="", exit_code=0)
+
+
+@pytest.mark.asyncio
+async def test_run_agent_passes_cloud_environment_from_execution_binding() -> None:
+    captured_kwargs: dict[str, object] = {}
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        )
+    )
+    fake_ctx = types.SimpleNamespace(config={}, tape=Tape())
+
+    def fake_create_agent(**kwargs):
+        captured_kwargs.update(kwargs)
+        return fake_pipeline, fake_ctx
+
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        create_agent_fn=fake_create_agent,
+        binding_resolver=DefaultBindingResolver(
+            cloud_client_factory=lambda binding: FakeCloudClient()
+        ),
+    )
+    session_id = await manager.create_session(
+        execution_binding=CloudWorkspaceBinding(
+            workspace_url="https://workspace.example.com",
+            workspace_id="ws-123",
+        )
+    )
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+            self.ctx = ctx
+
+        async def run_turn(self, prompt: str) -> None:
+            del prompt
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        await manager.run_agent(session_id, "hello")
+
+    assert captured_kwargs["workspace_root"] is None
+    assert isinstance(captured_kwargs["environment"], CloudEnvironment)
+    assert captured_kwargs["environment"].tool_config() == {
+        "workspace_id": "ws-123",
+        "workspace_url": "https://workspace.example.com",
+    }
+
+
+@pytest.mark.asyncio
+async def test_restore_checkpoint_preserves_cloud_execution_binding() -> None:
+    captured_kwargs: dict[str, object] = {}
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        )
+    )
+
+    def fake_create_agent(**kwargs):
+        captured_kwargs.update(kwargs)
+        return fake_pipeline, types.SimpleNamespace(
+            config={}, tape=kwargs.get("tape"), plugin_states={}
+        )
+
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        create_agent_fn=fake_create_agent,
+        binding_resolver=DefaultBindingResolver(
+            cloud_client_factory=lambda binding: FakeCloudClient()
+        ),
+    )
+    session_id = await manager.create_session(
+        execution_binding=CloudWorkspaceBinding(
+            workspace_url="https://workspace.example.com",
+            workspace_id="ws-123",
+        )
+    )
+    session = manager.get_session(session_id)
+    session.tape_id = "cloud-restore-tape"
+    manager.register_session(session)
+
+    snapshot = types.SimpleNamespace(
+        meta=types.SimpleNamespace(
+            checkpoint_id="cp-cloud-binding",
+            tape_id="cloud-restore-tape",
+            entry_count=0,
+            window_start=0,
+        ),
+        tape_entries=(),
+        plugin_states={},
+        extra={},
+    )
+
+    class FakeCheckpointService:
+        async def restore(self, checkpoint_id: str):
+            assert checkpoint_id == "cp-cloud-binding"
+            return snapshot
+
+        async def list(self, tape_id: str):
+            assert tape_id == "cloud-restore-tape"
+            return [snapshot.meta]
+
+        async def delete(self, checkpoint_id: str) -> None:
+            del checkpoint_id
+
+    class FakeTapeStore:
+        async def truncate(self, tape_id: str, keep: int) -> None:
+            del tape_id, keep
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+            self.ctx = ctx
+
+        async def initialize(self) -> None:
+            return None
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr(
+            manager, "_checkpoint_service", FakeCheckpointService(), raising=False
+        )
+        mp.setattr(manager, "_tape_store", FakeTapeStore(), raising=False)
+        await manager._restore_checkpoint(session, "cp-cloud-binding")
+
+    assert captured_kwargs["workspace_root"] is None
+    assert isinstance(captured_kwargs["environment"], CloudEnvironment)
+    assert isinstance(session.execution_binding, CloudWorkspaceBinding)
+    assert session.execution_binding.workspace_id == "ws-123"
 
 
 @pytest.mark.asyncio
