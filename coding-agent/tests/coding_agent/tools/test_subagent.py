@@ -13,7 +13,8 @@ from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
 from coding_agent.adapter_types import StopReason, TurnOutcome
 from coding_agent.__main__ import create_agent, create_child_pipeline
-from coding_agent.environment import LocalEnvironment
+from coding_agent.environment import CloudCommandResult, CloudEnvironment, LocalEnvironment
+from coding_agent.ui.session_owner_store import SessionOwnershipConflictError
 from coding_agent.wire.protocol import StreamDelta, TurnEnd, WireMessage
 from coding_agent.tools.subagent import build_subagent_tool
 
@@ -70,6 +71,44 @@ class RecordingConsumer:
         return ApprovalResponse(
             session_id=req.session_id, request_id=req.request_id, approved=True
         )
+
+
+class CloudTraceClient:
+    workspace_id: str = "ws-subagent-123"
+    workspace_url: str = "https://workspace.example.com?token=secret"
+    default_cwd: str = "/workspace"
+
+    def read_file(self, path: str) -> str:
+        return path
+
+    def write_file(self, path: str, content: str) -> None:
+        del path, content
+
+    def replace_file(self, path: str, old: str, new: str) -> None:
+        del path, old, new
+
+    def glob_files(self, pattern: str, directory: str) -> list[str]:
+        del pattern, directory
+        return []
+
+    def grep_search(self, pattern: str, directory: str, include: str) -> list[str]:
+        del pattern, directory, include
+        return []
+
+    def apply_patch(self, path: str, patch: str) -> dict[str, object]:
+        del patch
+        return {"success": True, "path": path, "changed": False}
+
+    def run_command(
+        self,
+        command: str,
+        *,
+        cwd: str | None,
+        env: dict[str, str] | None,
+        timeout: int,
+    ) -> CloudCommandResult:
+        del command, cwd, env, timeout
+        return CloudCommandResult(stdout="", stderr="", exit_code=0)
 
 
 @pytest.mark.asyncio
@@ -651,6 +690,85 @@ async def test_subagent_tool_forwards_parent_environment_to_child_builder(
 
 
 @pytest.mark.asyncio
+async def test_subagent_tool_forwards_cloud_environment_to_child_builder(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured: dict[str, Any] = {}
+    environment = CloudEnvironment(CloudTraceClient())
+
+    monkeypatch.setattr(
+        "coding_agent.tools.subagent.PipelineAdapter", _make_immediate_adapter()
+    )
+
+    parent_ctx = PipelineContext(
+        tape=Tape(),
+        session_id="parent-session",
+        run_context=AgentRunContext(
+            session_id="parent-session",
+            run_id="parent-run",
+            agent_id="parent-agent",
+            environment=environment,
+        ),
+        config={
+            "agent_id": "parent-agent",
+            "subagent_timeout": 30.0,
+            "child_worker_coordinator": _StubCoordinator(),
+        },
+    )
+
+    tool_fn = build_subagent_tool(_capture_kwargs_builder(captured))
+
+    await tool_fn(goal="Inspect", __pipeline_ctx__=parent_ctx)
+
+    assert captured["environment"] is environment
+
+
+@pytest.mark.asyncio
+async def test_subagent_tool_preserves_authoritative_cloud_trace_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured: dict[str, Any] = {}
+    environment = CloudEnvironment(CloudTraceClient())
+
+    monkeypatch.setattr(
+        "coding_agent.tools.subagent.PipelineAdapter", _make_immediate_adapter()
+    )
+
+    parent_ctx = PipelineContext(
+        tape=Tape(),
+        session_id="parent-session",
+        run_context=AgentRunContext(
+            session_id="parent-session",
+            run_id="parent-run",
+            agent_id="parent-agent",
+            environment=environment,
+            trace_metadata={
+                "request_id": "req-1",
+                "cloud.workspace_id": "ws-subagent-123",
+            },
+        ),
+        config={
+            "agent_id": "parent-agent",
+            "subagent_timeout": 30.0,
+            "child_worker_coordinator": _StubCoordinator(),
+        },
+    )
+
+    tool_fn = build_subagent_tool(_capture_kwargs_builder(captured))
+
+    await tool_fn(goal="Inspect", __pipeline_ctx__=parent_ctx)
+
+    assert captured["trace_metadata"] == {
+        "request_id": "req-1",
+        "cloud.workspace_id": "ws-subagent-123",
+        "subagent.parent_agent_id": "parent-agent",
+        "subagent.child_agent_id": "parent-agent.child-1",
+    }
+    assert "workspace_url" not in captured["trace_metadata"]
+    assert "secret" not in str(dict(captured["trace_metadata"]))
+
+
+@pytest.mark.asyncio
 async def test_subagent_tool_overwrites_caller_supplied_reserved_trace_keys(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ):
@@ -691,6 +809,48 @@ async def test_subagent_tool_overwrites_caller_supplied_reserved_trace_keys(
         captured["trace_metadata"]["subagent.child_agent_id"]
         == "parent-agent.child-1"
     )
+
+
+@pytest.mark.asyncio
+async def test_subagent_tool_does_not_swallow_stale_owner_summary_publish(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    child_ctx = PipelineContext(tape=Tape(), session_id="parent-session")
+
+    async def publish_subagent_message(
+        session_id: str,
+        text: str,
+        *,
+        message_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        del session_id, text, message_id, metadata
+        raise SessionOwnershipConflictError("stale owner or fencing token rejected")
+
+    def child_pipeline_builder(**_kwargs: Any):
+        return cast(Pipeline, object()), child_ctx
+
+    monkeypatch.setattr(
+        "coding_agent.tools.subagent.PipelineAdapter", _make_immediate_adapter()
+    )
+
+    tool_fn = build_subagent_tool(child_pipeline_builder)
+    parent_ctx = PipelineContext(
+        tape=Tape(),
+        session_id="parent-session",
+        config={
+            "agent_id": "parent-agent",
+            "subagent_timeout": 30.0,
+            "child_worker_coordinator": _StubCoordinator(),
+            "subagent_message_publisher": publish_subagent_message,
+        },
+    )
+
+    with pytest.raises(
+        SessionOwnershipConflictError,
+        match="stale owner or fencing token rejected",
+    ):
+        await tool_fn(goal="Inspect", __pipeline_ctx__=parent_ctx)
 
 
 @pytest.mark.asyncio
