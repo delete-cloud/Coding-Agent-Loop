@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import uuid
 from collections.abc import Callable
 from inspect import isawaitable
@@ -16,6 +17,9 @@ from coding_agent.adapter import PipelineAdapter
 from coding_agent.adapter_types import StopReason, TurnOutcome
 from coding_agent.agent_identity import effective_agent_id, legacy_agent_id_str
 from coding_agent.wire.protocol import ToolCallDelta, WireMessage
+
+
+logger = logging.getLogger(__name__)
 
 
 ChildPipelineBuilder = Callable[..., tuple[Pipeline, PipelineContext]]
@@ -141,14 +145,21 @@ async def _publish_subagent_summary(
     if not callable(publisher):
         raise TypeError("subagent_message_publisher must be callable")
 
-    publish_result = publisher(
-        session_id,
-        summary,
-        message_id=None,
-        metadata={"source": "subagent", "child_agent_id": child_agent_id},
-    )
-    if isawaitable(publish_result):
-        await publish_result
+    try:
+        publish_result = publisher(
+            session_id,
+            summary,
+            message_id=None,
+            metadata={"source": "subagent", "child_agent_id": child_agent_id},
+        )
+        if isawaitable(publish_result):
+            await publish_result
+    except Exception:
+        logger.warning(
+            "Failed to publish subagent summary for session %s; returning summary anyway",
+            session_id,
+            exc_info=True,
+        )
 
 
 def _subagent_timeout_seconds(pipeline_ctx: PipelineContext) -> float:
