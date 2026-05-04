@@ -1,13 +1,14 @@
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from agentkit.environment import WorkspaceSummary
 from agentkit.runtime import AgentRunContext, ContextBudget
+from agentkit.runtime.pipeline import PipelineContext
 from agentkit.tools import tool
 from agentkit.tape.tape import Tape
 from coding_agent.__main__ import create_agent, create_child_pipeline
-from coding_agent.environment import LocalEnvironment
+from coding_agent.environment import CloudCommandResult, CloudEnvironment, LocalEnvironment
 
 
 class NonLocalEnvironment:
@@ -64,6 +65,44 @@ class NonLocalEnvironment:
             return f"shell:{cwd}:{command}:{env or {}}"
 
         return bash_run
+
+
+class CloudTraceClient:
+    workspace_id: str = "ws-trace-123"
+    workspace_url: str = "https://workspace.example.com?token=secret"
+    default_cwd: str = "/workspace"
+
+    def read_file(self, path: str) -> str:
+        return path
+
+    def write_file(self, path: str, content: str) -> None:
+        del path, content
+
+    def replace_file(self, path: str, old: str, new: str) -> None:
+        del path, old, new
+
+    def glob_files(self, pattern: str, directory: str) -> list[str]:
+        del pattern, directory
+        return []
+
+    def grep_search(self, pattern: str, directory: str, include: str) -> list[str]:
+        del pattern, directory, include
+        return []
+
+    def apply_patch(self, path: str, patch: str) -> dict[str, object]:
+        del patch
+        return {"success": True, "path": path, "changed": False}
+
+    def run_command(
+        self,
+        command: str,
+        *,
+        cwd: str | None,
+        env: dict[str, str] | None,
+        timeout: int,
+    ) -> CloudCommandResult:
+        del command, cwd, env, timeout
+        return CloudCommandResult(stdout="", stderr="", exit_code=0)
 
 
 class TestBootstrap:
@@ -289,6 +328,40 @@ enabled = ["storage", "core_tools", "shell_session"]
         assert ctx.config["provider"] == "openai"
         assert ctx.config["model"] == "gpt-test"
         assert ctx.config["max_tool_rounds"] == 7
+
+    def test_create_agent_adds_secret_free_cloud_workspace_trace_metadata(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        config_path = (
+            Path(__file__).parent.parent.parent / "src" / "coding_agent" / "agent.toml"
+        )
+        if not config_path.exists():
+            pytest.skip("agent.toml not found")
+
+        _pipeline, raw_ctx = create_agent(
+            config_path=config_path,
+            data_dir=tmp_path / "data",
+            api_key="sk-test",
+            model_override="gpt-test",
+            provider_override="openai",
+            base_url_override="http://localhost:1234/v1",
+            session_id_override="session-1",
+            environment=CloudEnvironment(CloudTraceClient()),
+            trace_metadata={
+                "request_id": "req-1",
+                "cloud.workspace_id": "stale-spoofed-id",
+            },
+        )
+        ctx = cast(PipelineContext, raw_ctx)
+
+        assert ctx.run_context is not None
+        assert ctx.run_context.trace_metadata == {
+            "request_id": "req-1",
+            "cloud.workspace_id": "ws-trace-123",
+        }
+        assert "workspace_url" not in ctx.run_context.trace_metadata
+        assert "secret" not in str(dict(ctx.run_context.trace_metadata))
 
     def test_create_agent_normalizes_explicit_none_agent_id_override(self, tmp_path):
         """Explicit None must produce run_context.agent_id is None and "" in legacy config."""
