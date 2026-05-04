@@ -202,22 +202,15 @@ def build_subagent_tool(child_pipeline_builder: ChildPipelineBuilder):
                 "subagent requires a non-empty parent session_id; "
                 "ensure PipelineContext.session_id or run_context is populated"
             )
-        merged_trace_metadata: dict[str, Any] = (
-            dict(parent_run_context.trace_metadata)
-            if parent_run_context is not None
-            else {}
-        )
-        merged_trace_metadata.update(
-            {
-                _TRACE_KEY_PARENT_AGENT_ID: parent_agent_id,
-                _TRACE_KEY_CHILD_AGENT_ID: child_agent_id,
-            }
-        )
+        child_trace_metadata = {
+            _TRACE_KEY_PARENT_AGENT_ID: parent_agent_id,
+            _TRACE_KEY_CHILD_AGENT_ID: child_agent_id,
+        }
         child_run_context = (
             parent_run_context.derive_child(
                 run_id=uuid.uuid4().hex,
                 agent_id=child_agent_id,
-                trace_metadata=merged_trace_metadata,
+                trace_metadata=child_trace_metadata,
             )
             if parent_run_context is not None
             else None
@@ -241,7 +234,7 @@ def build_subagent_tool(child_pipeline_builder: ChildPipelineBuilder):
             "trace_metadata": (
                 child_run_context.trace_metadata
                 if child_run_context is not None
-                else merged_trace_metadata
+                else child_trace_metadata
             ),
         }
         if child_run_context is not None:
