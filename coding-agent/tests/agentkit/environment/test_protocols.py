@@ -3,9 +3,34 @@ from __future__ import annotations
 import json
 import textwrap
 from pathlib import Path
+from typing import Any
 
-from agentkit.environment import Environment
+from agentkit.environment import Environment, WorkspaceSummary
 from coding_agent.environment import LocalEnvironment
+
+
+class SummaryOnlyEnvironment:
+    @property
+    def kind(self) -> str:
+        return "cloud"
+
+    def tool_config(self) -> dict[str, Any]:
+        return {"workspace_id": "workspace-1"}
+
+    def workspace_summary(self) -> WorkspaceSummary:
+        return WorkspaceSummary(
+            display_name="Cloud workspace workspace-1",
+            default_cwd="/workspace",
+        )
+
+    def build_file_tools(self):
+        raise NotImplementedError
+
+    def build_file_patch_tool(self):
+        raise NotImplementedError
+
+    def build_shell_tool(self):
+        raise NotImplementedError
 
 
 def test_local_environment_satisfies_environment_protocol(tmp_path: Path) -> None:
@@ -13,6 +38,21 @@ def test_local_environment_satisfies_environment_protocol(tmp_path: Path) -> Non
 
     assert env.kind == "local"
     assert env.tool_config() == {"workspace_root": str(tmp_path.resolve())}
+    assert env.workspace_summary() == WorkspaceSummary(
+        display_name=str(tmp_path.resolve()),
+        default_cwd=str(tmp_path.resolve()),
+        local_root=str(tmp_path.resolve()),
+    )
+
+
+def test_environment_workspace_summary_does_not_require_local_workspace_root() -> None:
+    env: Environment = SummaryOnlyEnvironment()
+
+    assert env.tool_config() == {"workspace_id": "workspace-1"}
+    assert env.workspace_summary() == WorkspaceSummary(
+        display_name="Cloud workspace workspace-1",
+        default_cwd="/workspace",
+    )
 
 
 def test_environment_file_tools_return_expected_callables(tmp_path: Path) -> None:

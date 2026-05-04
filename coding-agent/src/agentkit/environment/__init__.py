@@ -1,3 +1,3 @@
-from agentkit.environment.protocols import Environment, FileTools
+from agentkit.environment.protocols import Environment, FileTools, WorkspaceSummary
 
-__all__ = ["Environment", "FileTools"]
+__all__ = ["Environment", "FileTools", "WorkspaceSummary"]

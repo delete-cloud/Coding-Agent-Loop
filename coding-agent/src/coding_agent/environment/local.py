@@ -4,7 +4,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from agentkit.environment import FileTools
+from agentkit.environment import FileTools, WorkspaceSummary
 
 
 class LocalEnvironment:
@@ -23,6 +23,10 @@ class LocalEnvironment:
 
     def tool_config(self) -> dict[str, Any]:
         return {"workspace_root": str(self._workspace_root)}
+
+    def workspace_summary(self) -> WorkspaceSummary:
+        root = str(self._workspace_root)
+        return WorkspaceSummary(display_name=root, default_cwd=root, local_root=root)
 
     def build_file_tools(self) -> FileTools:
         from coding_agent.tools.file_ops import build_file_tools
