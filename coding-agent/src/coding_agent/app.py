@@ -52,6 +52,25 @@ def _legacy_config_agent_id(run_context: AgentRunContext) -> str:
     return legacy_agent_id_str(run_context.agent_id)
 
 
+def _run_trace_metadata(
+    environment: Environment,
+    trace_metadata: Mapping[str, object] | None,
+) -> dict[str, object]:
+    metadata = dict(trace_metadata or {})
+    for key in list(metadata):
+        if key.startswith("cloud."):
+            del metadata[key]
+
+    if environment.kind != "cloud":
+        return metadata
+
+    workspace_id = environment.tool_config().get("workspace_id")
+    if not isinstance(workspace_id, str) or not workspace_id:
+        raise ValueError("cloud environment must expose string workspace_id")
+    metadata["cloud.workspace_id"] = workspace_id
+    return metadata
+
+
 def _child_system_prompt_suffix(tool_filter: ToolFilter) -> str:
     if tool_filter is None:
         return ""
@@ -335,7 +354,7 @@ def create_child_pipeline(
         parent_run_id=parent_run_id_override,
         environment=environment,
         context_budget=ContextBudget() if context_budget is None else context_budget,
-        trace_metadata={} if trace_metadata is None else trace_metadata,
+        trace_metadata=_run_trace_metadata(environment, trace_metadata),
     )
 
     ctx_config: dict[str, Any] = {

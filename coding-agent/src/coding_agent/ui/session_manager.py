@@ -978,7 +978,8 @@ class SessionManager:
         previous_provider_name = session.provider_name
         previous_model_name = session.model_name
         previous_base_url = session.base_url
-        workspace_root, environment = self._resolve_runtime_environment(session)
+        environment = self._resolve_environment(session)
+        workspace_root = self._environment_workspace_root(environment)
 
         approval_mode_map = {
             ApprovalPolicy.YOLO: "yolo",
@@ -1051,9 +1052,6 @@ class SessionManager:
         self._session_cache[session.id] = session
         self._store.save(session.id, cast(dict[str, Any], session.to_store_data()))
 
-    def _resolve_workspace_root(self, session: Session) -> Path:
-        return self._binding_resolver.resolve_workspace_root(session.execution_binding)
-
     def _resolve_environment(self, session: Session) -> Environment:
         return self._binding_resolver.resolve_environment(session.execution_binding)
 
@@ -1062,13 +1060,6 @@ class SessionManager:
         if local_root is None:
             return None
         return Path(local_root).expanduser().resolve()
-
-    def _resolve_runtime_environment(
-        self,
-        session: Session,
-    ) -> tuple[Path | None, Environment]:
-        environment = self._resolve_environment(session)
-        return self._environment_workspace_root(environment), environment
 
     def _invalidate_runtime(self, session: Session) -> None:
         session.runtime_pipeline = None
@@ -1374,9 +1365,8 @@ class SessionManager:
                 adapter = session.runtime_adapter
 
                 if pipeline is None or ctx is None or adapter is None:
-                    workspace_root, environment = self._resolve_runtime_environment(
-                        session
-                    )
+                    environment = self._resolve_environment(session)
+                    workspace_root = self._environment_workspace_root(environment)
                     pipeline, ctx = self._create_agent_for_session(
                         workspace_root=workspace_root,
                         environment=environment,
@@ -1841,7 +1831,8 @@ class SessionManager:
         resolved_approval_policy = (
             session.approval_policy if approval_policy is None else approval_policy
         )
-        workspace_root, environment = self._resolve_runtime_environment(session)
+        environment = self._resolve_environment(session)
+        workspace_root = self._environment_workspace_root(environment)
 
         consumer = self._make_session_consumer(session)
         pipeline, ctx = self._create_agent_for_session(
