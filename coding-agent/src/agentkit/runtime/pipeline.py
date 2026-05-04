@@ -50,6 +50,13 @@ _PIPELINE_RUNTIME_MESSAGE_KINDS = frozenset(
         RuntimeMessageKind.SYSTEM_NOTICE,
     }
 )
+_PROMPT_RUNTIME_MESSAGE_KINDS = frozenset(
+    {
+        RuntimeMessageKind.USER_STEER,
+        RuntimeMessageKind.SUBAGENT_MESSAGE,
+        RuntimeMessageKind.SYSTEM_NOTICE,
+    }
+)
 
 StructuredToolResultScopeFactory = Callable[[bool], AbstractContextManager[None]]
 
@@ -248,16 +255,16 @@ class Pipeline:
         ctx: PipelineContext,
         *,
         stage: StageName,
-    ) -> None:
+    ) -> bool:
         if ctx.runtime_message_bus is None:
-            return
+            return False
 
         batch = await ctx.runtime_message_bus.consume_after(
             ctx.runtime_message_cursor,
             kinds=_PIPELINE_RUNTIME_MESSAGE_KINDS,
         )
         if not batch.messages:
-            return
+            return False
 
         for item in batch.messages:
             message = item.message
@@ -269,6 +276,30 @@ class Pipeline:
 
         ctx.runtime_messages.extend(batch.messages)
         ctx.runtime_message_cursor = batch.cursor
+        return any(
+            item.message.kind in _PROMPT_RUNTIME_MESSAGE_KINDS
+            for item in batch.messages
+        )
+
+    async def _raise_if_runtime_interrupted(
+        self,
+        ctx: PipelineContext,
+        *,
+        stage: StageName,
+    ) -> None:
+        if ctx.runtime_message_bus is None:
+            return
+
+        batch = await ctx.runtime_message_bus.consume_after(
+            ctx.runtime_message_cursor,
+            kinds={RuntimeMessageKind.INTERRUPT},
+        )
+        for item in batch.messages:
+            message = item.message
+            reason = _string_payload_value(message.payload, "reason", "text")
+            if not reason:
+                reason = message.message_id
+            raise PipelineError(f"runtime interrupted: {reason}", stage=stage)
 
     def _runtime_context_grounding(self, ctx: PipelineContext) -> dict[str, Any] | None:
         lines: list[str] = []
@@ -342,9 +373,18 @@ class Pipeline:
         try:
             for stage in self.STAGES:
                 try:
-                    await self._consume_runtime_messages(ctx, stage=stage)
+                    if stage in {"save_state", "render", "dispatch"}:
+                        await self._raise_if_runtime_interrupted(ctx, stage=stage)
+                        runtime_prompt_changed = False
+                    else:
+                        runtime_prompt_changed = await self._consume_runtime_messages(
+                            ctx,
+                            stage=stage,
+                        )
                     handler = getattr(self, f"_stage_{stage}", None)
                     if handler is not None:
+                        if stage == "run_model" and runtime_prompt_changed:
+                            await self._stage_build_context(ctx)
                         if _tracer is not None:
                             _tracer.info(
                                 "stage_start", stage=stage, entry_count=len(ctx.tape)
@@ -519,7 +559,8 @@ class Pipeline:
         toolset = self._require_toolset(ctx, stage="run_model")
 
         for _round in range(max_tool_rounds):
-            await self._consume_runtime_messages(ctx, stage="run_model")
+            if await self._consume_runtime_messages(ctx, stage="run_model"):
+                await self._stage_build_context(ctx)
             tool_dicts = (
                 [s.to_openai_format() for s in ctx.tool_schemas]
                 if ctx.tool_schemas
@@ -643,7 +684,9 @@ class Pipeline:
                         approval = await toolset.approve_tool_call(tool_call, ctx=ctx)
 
                         if not approval.approved:
-                            rejection_msg = f"Tool call rejected: {approval.reason or 'policy'}"
+                            rejection_msg = (
+                                f"Tool call rejected: {approval.reason or 'policy'}"
+                            )
                             ctx.tape.append(
                                 Entry(
                                     kind="tool_result",
@@ -667,7 +710,10 @@ class Pipeline:
                     executable_calls.append(tool_call)
 
                 if executable_calls:
-                    await self._consume_runtime_messages(ctx, stage="run_model")
+                    await self._raise_if_runtime_interrupted(
+                        ctx,
+                        stage="run_model",
+                    )
                     max_size = ctx.config.get("max_tool_result_size", 10000)
                     structured_results_enabled = bool(
                         ctx.config.get("structured_results", False)
@@ -678,13 +724,9 @@ class Pipeline:
                             executable_calls,
                             ctx=ctx,
                             options=ToolExecutionOptions(
-                                timeout_seconds=ctx.config.get(
-                                    "tool_timeout_seconds"
-                                ),
-                                max_retries=int(
-                                    ctx.config.get("tool_max_retries", 0)
-                                ),
-                            )
+                                timeout_seconds=ctx.config.get("tool_timeout_seconds"),
+                                max_retries=int(ctx.config.get("tool_max_retries", 0)),
+                            ),
                         )
 
                     for result in execution_results:
