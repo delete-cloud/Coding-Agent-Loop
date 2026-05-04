@@ -115,7 +115,7 @@ class CloudEnvironment:
 
         return file_patch
 
-    def _resolve_cwd(self, cwd: str | None, target: str) -> str:
+    def _resolve_workspace_path(self, target: str, *, cwd: str | None = None) -> str:
         base = cwd or self._client.default_cwd
         resolved = target if target.startswith("/") else posixpath.join(base, target)
         normalized = posixpath.normpath(resolved)
@@ -129,13 +129,7 @@ class CloudEnvironment:
     def _validate_command_cwd(self, cwd: str | None) -> str | None:
         if cwd is None:
             return None
-        try:
-            return self._resolve_cwd(self._client.default_cwd, cwd)
-        except ValueError as exc:
-            message = str(exc).removeprefix("Directory is outside cloud workspace")
-            raise ValueError(
-                f"Working directory is outside cloud workspace{message}"
-            ) from exc
+        return self._resolve_workspace_path(cwd)
 
     def _apply_cd(self, command: str, cwd: str | None) -> str | None:
         args = shlex.split(command)
@@ -143,13 +137,9 @@ class CloudEnvironment:
             return None
         if len(args) != 2:
             raise ValueError("cd requires exactly one target directory")
-        return self._resolve_cwd(cwd, args[1])
+        return self._resolve_workspace_path(args[1], cwd=cwd)
 
-    def _apply_export(
-        self,
-        command: str,
-        env: dict[str, str] | None,
-    ) -> tuple[str, str] | None:
+    def _apply_export(self, command: str) -> tuple[str, str] | None:
         args = shlex.split(command)
         if not args or args[0] != "export":
             return None
@@ -158,8 +148,6 @@ class CloudEnvironment:
         key, value = args[1].split("=", 1)
         if not key:
             raise ValueError("export requires a non-empty variable name")
-        if env is not None:
-            env[key] = value
         return key, value
 
     def build_shell_tool(self):
@@ -174,7 +162,7 @@ class CloudEnvironment:
                 changed_dir = self._apply_cd(command, cwd)
                 if changed_dir is not None:
                     return f"Changed directory to {changed_dir}"
-                exported = self._apply_export(command, env)
+                exported = self._apply_export(command)
                 if exported is not None:
                     key, value = exported
                     return f"Exported {key}={value}"

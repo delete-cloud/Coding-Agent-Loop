@@ -209,6 +209,18 @@ def test_cloud_environment_rejects_invalid_session_commands_without_mutation() -
     assert client.shell_calls == []
 
 
+def test_cloud_environment_export_does_not_mutate_input_env() -> None:
+    client = FakeCloudWorkspaceClient()
+    shell_tool = CloudEnvironment(client).build_shell_tool()
+    caller_env = {"EXISTING": "1"}
+
+    result = shell_tool("export NEW_VALUE=2", env=caller_env)
+
+    assert result == "Exported NEW_VALUE=2"
+    assert caller_env == {"EXISTING": "1"}
+    assert client.shell_calls == []
+
+
 def test_cloud_environment_rejects_explicit_cwd_outside_workspace() -> None:
     client = FakeCloudWorkspaceClient()
     shell_tool = CloudEnvironment(client).build_shell_tool()
@@ -216,8 +228,20 @@ def test_cloud_environment_rejects_explicit_cwd_outside_workspace() -> None:
     absolute_result = shell_tool("pwd", cwd="/etc")
     relative_result = shell_tool("pwd", cwd="/workspace/../etc")
 
-    assert absolute_result == "Error: Working directory is outside cloud workspace: /etc"
-    assert relative_result == "Error: Working directory is outside cloud workspace: /etc"
+    assert absolute_result == "Error: Directory is outside cloud workspace: /etc"
+    assert relative_result == "Error: Directory is outside cloud workspace: /etc"
+    assert client.shell_calls == []
+
+
+def test_cloud_environment_rejects_cd_and_explicit_cwd_with_same_prefix() -> None:
+    client = FakeCloudWorkspaceClient()
+    shell_tool = CloudEnvironment(client).build_shell_tool()
+
+    cd_result = shell_tool("cd /etc", cwd="/workspace")
+    cwd_result = shell_tool("pwd", cwd="/etc")
+
+    assert cd_result == "Error: Directory is outside cloud workspace: /etc"
+    assert cwd_result == "Error: Directory is outside cloud workspace: /etc"
     assert client.shell_calls == []
 
 
