@@ -579,6 +579,9 @@ class SessionManager:
             factory = importlib.import_module("coding_agent.__main__").create_agent
         return factory(**kwargs)
 
+    def _bind_subagent_message_publisher(self, ctx: Any) -> None:
+        ctx.config["subagent_message_publisher"] = self.publish_subagent_message
+
     def _turn_lock_for(self, session_id: str) -> asyncio.Lock:
         lock = self._session_turn_locks.get(session_id)
         if lock is None:
@@ -995,6 +998,7 @@ class SessionManager:
         )
         ctx.config["wire_consumer"] = None
         ctx.config["agent_id"] = ""
+        self._bind_subagent_message_publisher(ctx)
 
         provider_model_name = getattr(session.provider, "model_name", None)
         can_reuse_provider = (
@@ -1369,6 +1373,7 @@ class SessionManager:
                     ctx.runtime_message_bus = session.runtime_message_bus
                     ctx.config["wire_consumer"] = None
                     ctx.config["agent_id"] = ""
+                    self._bind_subagent_message_publisher(ctx)
 
                     llm_plugin = pipeline._registry.get("llm_provider")
                     if session.provider is not None:
@@ -1386,6 +1391,7 @@ class SessionManager:
                     set_consumer(consumer)
                 ctx.runtime_message_bus = session.runtime_message_bus
                 ctx.config["wire_consumer"] = consumer
+                self._bind_subagent_message_publisher(ctx)
                 await adapter.run_turn(prompt)
                 session.tape_id = ctx.tape.tape_id
                 await self._persist_session_async(session)
@@ -1829,6 +1835,7 @@ class SessionManager:
         )
         ctx.config["wire_consumer"] = consumer
         ctx.config["agent_id"] = ""
+        self._bind_subagent_message_publisher(ctx)
 
         llm_plugin = pipeline._registry.get("llm_provider")
         provider_model_name = getattr(session.provider, "model_name", None)
