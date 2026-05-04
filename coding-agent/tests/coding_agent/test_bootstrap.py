@@ -246,6 +246,51 @@ enabled = ["storage", "core_tools"]
                 environment=environment,
             )
 
+    def test_create_agent_applies_run_id_override(self, tmp_path):
+        config_path = (
+            Path(__file__).parent.parent.parent / "src" / "coding_agent" / "agent.toml"
+        )
+        if not config_path.exists():
+            pytest.skip("agent.toml not found")
+
+        environment = LocalEnvironment(workspace_root=tmp_path / "env-workspace")
+
+        _pipeline, ctx = create_agent(
+            config_path=config_path,
+            data_dir=tmp_path / "data",
+            api_key="[REDACTED:api-key]",
+            model_override="gpt-test",
+            provider_override="openai",
+            base_url_override="http://localhost:1234/v1",
+            session_id_override="session-1",
+            run_id_override="run-1",
+            environment=environment,
+        )
+
+        assert ctx.run_context.run_id == "run-1"
+
+    def test_create_agent_rejects_empty_run_id_override(self, tmp_path):
+        config_path = (
+            Path(__file__).parent.parent.parent / "src" / "coding_agent" / "agent.toml"
+        )
+        if not config_path.exists():
+            pytest.skip("agent.toml not found")
+
+        environment = LocalEnvironment(workspace_root=tmp_path / "env-workspace")
+
+        with pytest.raises(ValueError, match="run_id_override"):
+            create_agent(
+                config_path=config_path,
+                data_dir=tmp_path / "data",
+                api_key="[REDACTED:api-key]",
+                model_override="gpt-test",
+                provider_override="openai",
+                base_url_override="http://localhost:1234/v1",
+                session_id_override="session-1",
+                run_id_override="",
+                environment=environment,
+            )
+
     def test_create_agent_reads_subagent_timeout_from_config(self, tmp_path):
         config_path = tmp_path / "agent.toml"
         config_path.write_text(

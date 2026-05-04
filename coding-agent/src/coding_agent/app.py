@@ -123,6 +123,7 @@ def create_child_pipeline(
     max_steps_override: int | None = None,
     approval_mode_override: str | None = None,
     session_id_override: str | None = None,
+    run_id_override: str | None = None,
     agent_id_override: str | None = None,
     parent_run_id_override: str | None = None,
     context_budget: ContextBudget | None = None,
@@ -318,9 +319,15 @@ def create_child_pipeline(
         if not session_id_override:
             raise ValueError("session_id_override must be None or a non-empty string")
         session_id = session_id_override
+    if run_id_override is None:
+        run_id = uuid.uuid4().hex
+    else:
+        if not run_id_override:
+            raise ValueError("run_id_override must be None or a non-empty string")
+        run_id = run_id_override
     run_context = AgentRunContext(
         session_id=session_id,
-        run_id=uuid.uuid4().hex,
+        run_id=run_id,
         agent_id=agent_id_override,
         parent_run_id=parent_run_id_override,
         environment=environment,
@@ -374,6 +381,7 @@ def create_agent(
     max_steps_override: int | None = None,
     approval_mode_override: str | None = None,
     session_id_override: str | None = None,
+    run_id_override: str | None = None,
     agent_id_override: str | None = None,
     parent_run_id_override: str | None = None,
     context_budget: ContextBudget | None = None,
@@ -395,6 +403,7 @@ def create_agent(
         max_steps_override=max_steps_override,
         approval_mode_override=approval_mode_override,
         session_id_override=session_id_override,
+        run_id_override=run_id_override,
         agent_id_override=agent_id_override,
         parent_run_id_override=parent_run_id_override,
         context_budget=context_budget,
