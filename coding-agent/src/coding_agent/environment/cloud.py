@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import posixpath
+import shlex
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -46,7 +48,7 @@ class CloudEnvironment:
     """Provider-neutral cloud workspace environment backed by a client."""
 
     def __init__(self, client: CloudWorkspaceClient) -> None:
-        self._client = client
+        self._client: CloudWorkspaceClient = client
 
     @property
     def kind(self) -> str:
@@ -113,6 +115,53 @@ class CloudEnvironment:
 
         return file_patch
 
+    def _resolve_cwd(self, cwd: str | None, target: str) -> str:
+        base = cwd or self._client.default_cwd
+        resolved = target if target.startswith("/") else posixpath.join(base, target)
+        normalized = posixpath.normpath(resolved)
+        workspace_root = posixpath.normpath(self._client.default_cwd)
+        if normalized != workspace_root and not normalized.startswith(
+            workspace_root.rstrip("/") + "/"
+        ):
+            raise ValueError(f"Directory is outside cloud workspace: {normalized}")
+        return normalized
+
+    def _validate_command_cwd(self, cwd: str | None) -> str | None:
+        if cwd is None:
+            return None
+        try:
+            return self._resolve_cwd(self._client.default_cwd, cwd)
+        except ValueError as exc:
+            message = str(exc).removeprefix("Directory is outside cloud workspace")
+            raise ValueError(
+                f"Working directory is outside cloud workspace{message}"
+            ) from exc
+
+    def _apply_cd(self, command: str, cwd: str | None) -> str | None:
+        args = shlex.split(command)
+        if not args or args[0] != "cd":
+            return None
+        if len(args) != 2:
+            raise ValueError("cd requires exactly one target directory")
+        return self._resolve_cwd(cwd, args[1])
+
+    def _apply_export(
+        self,
+        command: str,
+        env: dict[str, str] | None,
+    ) -> tuple[str, str] | None:
+        args = shlex.split(command)
+        if not args or args[0] != "export":
+            return None
+        if len(args) != 2 or "=" not in args[1]:
+            raise ValueError("export requires KEY=VALUE")
+        key, value = args[1].split("=", 1)
+        if not key:
+            raise ValueError("export requires a non-empty variable name")
+        if env is not None:
+            env[key] = value
+        return key, value
+
     def build_shell_tool(self):
         @tool(description="Run a shell command and return stdout/stderr.")
         def bash_run(
@@ -121,12 +170,29 @@ class CloudEnvironment:
             cwd: str | None = None,
             env: dict[str, str] | None = None,
         ) -> str:
-            result = self._client.run_command(
-                command,
-                cwd=cwd,
-                env=env,
-                timeout=timeout,
-            )
+            try:
+                changed_dir = self._apply_cd(command, cwd)
+                if changed_dir is not None:
+                    return f"Changed directory to {changed_dir}"
+                exported = self._apply_export(command, env)
+                if exported is not None:
+                    key, value = exported
+                    return f"Exported {key}={value}"
+            except ValueError as exc:
+                return f"Error: {exc}"
+
+            try:
+                execution_cwd = self._validate_command_cwd(cwd)
+                result = self._client.run_command(
+                    command,
+                    cwd=execution_cwd,
+                    env=env,
+                    timeout=timeout,
+                )
+            except ValueError as exc:
+                return f"Error: {exc}"
+            except TimeoutError:
+                return f"Error: command timed out after {timeout}s"
             output = ""
             if result.stdout:
                 output += result.stdout

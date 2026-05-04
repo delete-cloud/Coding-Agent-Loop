@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -10,17 +11,19 @@ from agentkit.runtime.hook_runtime import HookRuntime
 from agentkit.tools import ToolCallRequest, Toolset
 from coding_agent.environment import CloudCommandResult, CloudEnvironment
 from coding_agent.plugins.core_tools import CoreToolsPlugin
+from coding_agent.plugins.shell_session import ShellSessionPlugin
 
 
 class FakeCloudWorkspaceClient:
-    workspace_id = "ws-123"
-    workspace_url = "https://workspace.example.com"
-    default_cwd = "/workspace"
+    workspace_id: str = "ws-123"
+    workspace_url: str = "https://workspace.example.com"
+    default_cwd: str = "/workspace"
 
     def __init__(self) -> None:
         self.files: dict[str, str] = {"note.txt": "hello cloud"}
         self.shell_calls: list[dict[str, Any]] = []
-        self.fail_read = False
+        self.fail_read: bool = False
+        self.command_timeout: bool = False
 
     def read_file(self, path: str) -> str:
         if self.fail_read:
@@ -57,6 +60,8 @@ class FakeCloudWorkspaceClient:
         env: dict[str, str] | None,
         timeout: int,
     ) -> CloudCommandResult:
+        if self.command_timeout:
+            raise TimeoutError("cloud command timed out")
         self.shell_calls.append(
             {"command": command, "cwd": cwd, "env": env, "timeout": timeout}
         )
@@ -117,9 +122,118 @@ def test_cloud_environment_shell_tool_preserves_cwd_and_env() -> None:
     ]
 
 
+def test_cloud_environment_shell_tool_updates_session_cwd_and_env() -> None:
+    client = FakeCloudWorkspaceClient()
+    shell_session = ShellSessionPlugin()
+    _ = shell_session.do_mount(
+        ctx=type("Ctx", (), {"config": {"environment": CloudEnvironment(client)}})()
+    )
+    plugin = CoreToolsPlugin(
+        environment=CloudEnvironment(client),
+        shell_session=shell_session,
+    )
+
+    cd_result = cast(
+        str,
+        plugin.execute_tool(
+            name="bash_run",
+            arguments={"command": "cd pkg"},
+        ),
+    )
+    export_result = cast(
+        str,
+        plugin.execute_tool(
+            name="bash_run",
+            arguments={"command": 'export TEST_VALUE="cloud ok"'},
+        ),
+    )
+    command_result = cast(
+        str,
+        plugin.execute_tool(
+            name="bash_run",
+            arguments={"command": "pytest -q", "timeout": 7},
+        ),
+    )
+
+    assert cd_result == "Changed directory to /workspace/pkg"
+    assert export_result == "Exported TEST_VALUE=cloud ok"
+    assert command_result == "cloud output"
+    assert shell_session.get_session_context() == {
+        "cwd": "/workspace/pkg",
+        "env_vars": {"TEST_VALUE": "cloud ok"},
+        "active": True,
+    }
+    assert client.shell_calls == [
+        {
+            "command": "pytest -q",
+            "cwd": "/workspace/pkg",
+            "env": {"TEST_VALUE": "cloud ok"},
+            "timeout": 7,
+        }
+    ]
+
+
+def test_cloud_environment_rejects_invalid_session_commands_without_mutation() -> None:
+    client = FakeCloudWorkspaceClient()
+    shell_session = ShellSessionPlugin()
+    _ = shell_session.do_mount(
+        ctx=type("Ctx", (), {"config": {"environment": CloudEnvironment(client)}})()
+    )
+    plugin = CoreToolsPlugin(
+        environment=CloudEnvironment(client),
+        shell_session=shell_session,
+    )
+
+    cd_result = cast(
+        str,
+        plugin.execute_tool(
+            name="bash_run",
+            arguments={"command": "cd one two"},
+        ),
+    )
+    export_result = cast(
+        str,
+        plugin.execute_tool(
+            name="bash_run",
+            arguments={"command": "export MISSING_VALUE"},
+        ),
+    )
+
+    assert cd_result == "Error: cd requires exactly one target directory"
+    assert export_result == "Error: export requires KEY=VALUE"
+    assert shell_session.get_session_context() == {
+        "cwd": "/workspace",
+        "env_vars": {},
+        "active": True,
+    }
+    assert client.shell_calls == []
+
+
+def test_cloud_environment_rejects_explicit_cwd_outside_workspace() -> None:
+    client = FakeCloudWorkspaceClient()
+    shell_tool = CloudEnvironment(client).build_shell_tool()
+
+    absolute_result = shell_tool("pwd", cwd="/etc")
+    relative_result = shell_tool("pwd", cwd="/workspace/../etc")
+
+    assert absolute_result == "Error: Working directory is outside cloud workspace: /etc"
+    assert relative_result == "Error: Working directory is outside cloud workspace: /etc"
+    assert client.shell_calls == []
+
+
+def test_cloud_environment_shell_timeout_is_model_visible() -> None:
+    client = FakeCloudWorkspaceClient()
+    client.command_timeout = True
+    shell_tool = CloudEnvironment(client).build_shell_tool()
+
+    result = shell_tool("sleep 10", timeout=7, cwd="/workspace", env={})
+
+    assert result == "Error: command timed out after 7s"
+
+
 @pytest.mark.asyncio
 async def test_cloud_environment_tool_errors_do_not_fallback_to_local_execution(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     local_note = tmp_path / "note.txt"
     local_note.write_text("local content")
