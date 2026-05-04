@@ -300,6 +300,8 @@ async def test_subagent_tool_passes_child_run_identity_to_builder(
 
     assert result == "Subagent completed: Child finished"
     assert captured_kwargs["session_id_override"] == "parent-session"
+    assert captured_kwargs["run_id_override"]
+    assert captured_kwargs["run_id_override"] != "parent-run"
     assert captured_kwargs["agent_id_override"] == "parent-agent.child-1"
     assert captured_kwargs["parent_run_id_override"] == "parent-run"
     assert captured_kwargs["trace_metadata"] == {
@@ -380,6 +382,40 @@ async def test_subagent_tool_forwards_parent_context_budget_and_merges_trace_met
         "subagent.parent_agent_id": "parent-agent",
         "subagent.child_agent_id": "parent-agent.child-1",
     }
+
+
+@pytest.mark.asyncio
+async def test_subagent_tool_forwards_parent_environment_to_child_builder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    captured: dict[str, Any] = {}
+    environment = LocalEnvironment(tmp_path)
+
+    monkeypatch.setattr(
+        "coding_agent.tools.subagent.PipelineAdapter", _make_immediate_adapter()
+    )
+
+    parent_ctx = PipelineContext(
+        tape=Tape(),
+        session_id="parent-session",
+        run_context=AgentRunContext(
+            session_id="parent-session",
+            run_id="parent-run",
+            agent_id="parent-agent",
+            environment=environment,
+        ),
+        config={
+            "agent_id": "parent-agent",
+            "subagent_timeout": 30.0,
+            "child_worker_coordinator": _StubCoordinator(),
+        },
+    )
+
+    tool_fn = build_subagent_tool(_capture_kwargs_builder(captured))
+
+    await tool_fn(goal="Inspect", __pipeline_ctx__=parent_ctx)
+
+    assert captured["environment"] is environment
 
 
 @pytest.mark.asyncio

@@ -2,7 +2,8 @@ import pytest
 from pathlib import Path
 
 from agentkit.runtime import AgentRunContext, ContextBudget
-from coding_agent.__main__ import create_agent
+from agentkit.tape.tape import Tape
+from coding_agent.__main__ import create_agent, create_child_pipeline
 from coding_agent.environment import LocalEnvironment
 
 
@@ -243,6 +244,100 @@ enabled = ["storage", "core_tools"]
                 provider_override="openai",
                 base_url_override="http://localhost:1234/v1",
                 session_id_override="",
+                environment=environment,
+            )
+
+    def test_create_agent_applies_run_id_override(self, tmp_path):
+        config_path = (
+            Path(__file__).parent.parent.parent / "src" / "coding_agent" / "agent.toml"
+        )
+        if not config_path.exists():
+            pytest.skip("agent.toml not found")
+
+        environment = LocalEnvironment(workspace_root=tmp_path / "env-workspace")
+
+        _pipeline, ctx = create_agent(
+            config_path=config_path,
+            data_dir=tmp_path / "data",
+            api_key="[REDACTED:api-key]",
+            model_override="gpt-test",
+            provider_override="openai",
+            base_url_override="http://localhost:1234/v1",
+            session_id_override="session-1",
+            run_id_override="run-1",
+            environment=environment,
+        )
+
+        assert ctx.run_context.run_id == "run-1"
+
+    def test_create_child_pipeline_applies_run_id_override(self, tmp_path):
+        config_path = (
+            Path(__file__).parent.parent.parent / "src" / "coding_agent" / "agent.toml"
+        )
+        if not config_path.exists():
+            pytest.skip("agent.toml not found")
+
+        environment = LocalEnvironment(workspace_root=tmp_path / "env-workspace")
+
+        _pipeline, ctx = create_child_pipeline(
+            parent_provider=None,
+            tape_fork=Tape(),
+            config_path=config_path,
+            data_dir=tmp_path / "data",
+            api_key="[REDACTED:api-key]",
+            model_override="gpt-test",
+            provider_override="openai",
+            base_url_override="http://localhost:1234/v1",
+            session_id_override="session-1",
+            run_id_override="run-1",
+            environment=environment,
+        )
+
+        assert ctx.run_context.run_id == "run-1"
+
+    def test_create_agent_rejects_empty_run_id_override(self, tmp_path):
+        config_path = (
+            Path(__file__).parent.parent.parent / "src" / "coding_agent" / "agent.toml"
+        )
+        if not config_path.exists():
+            pytest.skip("agent.toml not found")
+
+        environment = LocalEnvironment(workspace_root=tmp_path / "env-workspace")
+
+        with pytest.raises(ValueError, match="run_id_override"):
+            create_agent(
+                config_path=config_path,
+                data_dir=tmp_path / "data",
+                api_key="[REDACTED:api-key]",
+                model_override="gpt-test",
+                provider_override="openai",
+                base_url_override="http://localhost:1234/v1",
+                session_id_override="session-1",
+                run_id_override="",
+                environment=environment,
+            )
+
+    def test_create_child_pipeline_rejects_empty_run_id_override(self, tmp_path):
+        config_path = (
+            Path(__file__).parent.parent.parent / "src" / "coding_agent" / "agent.toml"
+        )
+        if not config_path.exists():
+            pytest.skip("agent.toml not found")
+
+        environment = LocalEnvironment(workspace_root=tmp_path / "env-workspace")
+
+        with pytest.raises(ValueError, match="run_id_override"):
+            create_child_pipeline(
+                parent_provider=None,
+                tape_fork=Tape(),
+                config_path=config_path,
+                data_dir=tmp_path / "data",
+                api_key="[REDACTED:api-key]",
+                model_override="gpt-test",
+                provider_override="openai",
+                base_url_override="http://localhost:1234/v1",
+                session_id_override="session-1",
+                run_id_override="",
                 environment=environment,
             )
 

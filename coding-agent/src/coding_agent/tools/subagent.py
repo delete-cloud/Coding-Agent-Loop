@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import uuid
 from collections.abc import Callable
 from inspect import isawaitable
 from typing import Any, AsyncContextManager, cast
@@ -201,33 +202,45 @@ def build_subagent_tool(child_pipeline_builder: ChildPipelineBuilder):
                 "subagent requires a non-empty parent session_id; "
                 "ensure PipelineContext.session_id or run_context is populated"
             )
-        merged_trace_metadata: dict[str, Any] = (
-            dict(parent_run_context.trace_metadata)
+        child_trace_metadata = {
+            _TRACE_KEY_PARENT_AGENT_ID: parent_agent_id,
+            _TRACE_KEY_CHILD_AGENT_ID: child_agent_id,
+        }
+        child_run_context = (
+            parent_run_context.derive_child(
+                run_id=uuid.uuid4().hex,
+                agent_id=child_agent_id,
+                trace_metadata=child_trace_metadata,
+            )
             if parent_run_context is not None
-            else {}
+            else None
         )
-        merged_trace_metadata.update(
-            {
-                _TRACE_KEY_PARENT_AGENT_ID: parent_agent_id,
-                _TRACE_KEY_CHILD_AGENT_ID: child_agent_id,
-            }
-        )
-        child_pipeline, child_ctx = child_pipeline_builder(
-            parent_provider=__pipeline_ctx__.llm_provider,
-            tape_fork=child_tape,
-            tool_filter=lambda tool_name: tool_name != "subagent",
-            session_id_override=parent_session_id,
-            agent_id_override=child_agent_id,
-            parent_run_id_override=(
-                parent_run_context.run_id if parent_run_context is not None else None
-            ),
-            context_budget=(
-                parent_run_context.context_budget
-                if parent_run_context is not None
+        child_pipeline_kwargs: dict[str, Any] = {
+            "parent_provider": __pipeline_ctx__.llm_provider,
+            "tape_fork": child_tape,
+            "tool_filter": lambda tool_name: tool_name != "subagent",
+            "session_id_override": parent_session_id,
+            "agent_id_override": child_agent_id,
+            "parent_run_id_override": (
+                child_run_context.parent_run_id
+                if child_run_context is not None
                 else None
             ),
-            trace_metadata=merged_trace_metadata,
-        )
+            "context_budget": (
+                child_run_context.context_budget
+                if child_run_context is not None
+                else None
+            ),
+            "trace_metadata": (
+                child_run_context.trace_metadata
+                if child_run_context is not None
+                else child_trace_metadata
+            ),
+        }
+        if child_run_context is not None:
+            child_pipeline_kwargs["environment"] = child_run_context.environment
+            child_pipeline_kwargs["run_id_override"] = child_run_context.run_id
+        child_pipeline, child_ctx = child_pipeline_builder(**child_pipeline_kwargs)
         child_ctx.config["agent_id"] = legacy_agent_id_str(
             effective_agent_id(child_ctx) or child_agent_id
         )
