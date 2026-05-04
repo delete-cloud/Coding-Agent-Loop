@@ -7,10 +7,14 @@ from typing import Any
 
 import pytest
 
+from agentkit.plugin.registry import PluginRegistry
+from agentkit.runtime.hook_runtime import HookRuntime
+from agentkit.tools import ToolCallRequest, Toolset
 from coding_agent.plugins.parallel_executor import (
     DependencyAnalyzer,
     ParallelExecutorPlugin,
 )
+from coding_agent.ui.session_owner_store import SessionOwnershipConflictError
 
 
 class TestDependencyAnalyzer:
@@ -232,6 +236,41 @@ class TestParallelExecutorPlugin:
         assert len(results) == 1
         assert "error" in results[0].lower()
         assert "boom" in results[0].lower()
+
+    @pytest.mark.asyncio
+    async def test_toolset_parallel_batch_propagates_owner_conflict(self):
+        async def stale_owner_execute(
+            name: str, arguments: dict[str, Any]
+        ) -> str:
+            del name, arguments
+            raise SessionOwnershipConflictError(
+                "stale owner or fencing token rejected"
+            )
+
+        plugin = ParallelExecutorPlugin(execute_fn=stale_owner_execute)
+        registry = PluginRegistry()
+        registry.register(plugin)
+        toolset = Toolset(runtime=HookRuntime(registry))
+
+        with pytest.raises(
+            SessionOwnershipConflictError,
+            match="stale owner or fencing token rejected",
+        ):
+            await toolset.execute_tools(
+                [
+                    ToolCallRequest(
+                        tool_call_id="tc-1",
+                        name="file_read",
+                        arguments={"path": "a.py"},
+                    ),
+                    ToolCallRequest(
+                        tool_call_id="tc-2",
+                        name="glob_files",
+                        arguments={"pattern": "*.py"},
+                    ),
+                ],
+                ctx=object(),
+            )
 
     @pytest.mark.asyncio
     async def test_semaphore_limits_concurrency(self):

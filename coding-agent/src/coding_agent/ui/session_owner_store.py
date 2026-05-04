@@ -6,6 +6,7 @@ from enum import StrEnum
 from typing import Protocol
 
 from agentkit.storage.pg import PGPool, PGSessionOwnerStore
+from agentkit.tools import FatalToolExecutionError
 
 
 class SessionOwnershipConflictReason(StrEnum):
@@ -14,7 +15,7 @@ class SessionOwnershipConflictReason(StrEnum):
     EXPIRED_LEASE = "expired_lease"
 
 
-class SessionOwnershipConflictError(RuntimeError):
+class SessionOwnershipConflictError(FatalToolExecutionError):
     """Raised when the current instance is not authorized to mutate a session."""
 
     def __init__(

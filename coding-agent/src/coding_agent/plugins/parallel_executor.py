@@ -5,6 +5,8 @@ import inspect
 import json
 from typing import Any, Awaitable, Callable, cast
 
+from agentkit.tools import FatalToolExecutionError
+
 _FILE_TOOLS = frozenset({"file_read", "file_write", "file_replace"})
 
 _CONFLICT_PAIRS: frozenset[tuple[str, str]] = frozenset(
@@ -144,6 +146,8 @@ class ParallelExecutorPlugin:
                                 call["arguments"],
                             )
                         return idx, result
+                    except FatalToolExecutionError:
+                        raise
                     except Exception as exc:
                         return idx, json.dumps({"error": str(exc)})
 
