@@ -8,6 +8,20 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
+class LocalExecutionBindingRequest(BaseModel):
+    kind: Literal["local"]
+    workspace_root: str = Field(..., min_length=1, max_length=500)
+
+
+class CloudWorkspaceBindingRequest(BaseModel):
+    kind: Literal["cloud"]
+    workspace_url: str = Field(..., min_length=1, max_length=500)
+    workspace_id: str = Field(..., min_length=1, max_length=200)
+
+
+ExecutionBindingRequest = LocalExecutionBindingRequest | CloudWorkspaceBindingRequest
+
+
 class PromptRequest(BaseModel):
     """Request schema for sending a prompt."""
 
@@ -18,6 +32,7 @@ class CreateSessionRequest(BaseModel):
     """Request schema for creating a session."""
 
     repo_path: str | None = Field(None, max_length=500)
+    execution_binding: ExecutionBindingRequest | None = None
     approval_policy: str = Field("auto", pattern="^(yolo|interactive|auto)$")
     provider: Literal[
         "openai",

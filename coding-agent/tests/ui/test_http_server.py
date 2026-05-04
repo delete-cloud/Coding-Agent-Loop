@@ -24,7 +24,7 @@ from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
 
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.approval.store import ApprovalStore
-from coding_agent.ui.execution_binding import LocalExecutionBinding
+from coding_agent.ui.execution_binding import CloudWorkspaceBinding, LocalExecutionBinding
 from coding_agent.wire.local import LocalWire
 from coding_agent.ui.session_manager import Session
 from coding_agent.ui.session_owner_store import SessionOwnerRecord
@@ -235,6 +235,24 @@ class TestSessionCreation:
         assert isinstance(session.execution_binding, LocalExecutionBinding)
         assert session.execution_binding.workspace_root == str(tmp_path.resolve())
         assert session.repo_path == tmp_path.resolve()
+
+    async def test_http_create_session_stores_cloud_execution_binding(self, client):
+        response = await client.post(
+            "/sessions",
+            json={
+                "execution_binding": {
+                    "kind": "cloud",
+                    "workspace_url": "https://workspace.example.com",
+                    "workspace_id": "ws-123",
+                }
+            },
+        )
+
+        assert response.status_code == 200
+        session = session_manager.get_session(response.json()["session_id"])
+        assert isinstance(session.execution_binding, CloudWorkspaceBinding)
+        assert session.execution_binding.workspace_url == "https://workspace.example.com"
+        assert session.execution_binding.workspace_id == "ws-123"
 
     async def test_create_session_accepts_runtime_provider_metadata(self, client):
         response = await client.post(

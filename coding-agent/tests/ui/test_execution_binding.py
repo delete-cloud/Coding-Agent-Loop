@@ -8,12 +8,50 @@ from coding_agent.ui.binding_resolver import (
     CloudBindingNotImplementedError,
     DefaultBindingResolver,
 )
-from coding_agent.environment import LocalEnvironment
+from coding_agent.environment import CloudCommandResult, CloudEnvironment, LocalEnvironment
 from coding_agent.ui.execution_binding import (
     CloudWorkspaceBinding,
     ExecutionBinding,
     LocalExecutionBinding,
 )
+
+
+class FakeCloudClient:
+    workspace_url = "https://workspace.example.com"
+    workspace_id = "ws-123"
+    default_cwd = "/workspace"
+
+    def read_file(self, path: str) -> str:
+        return f"read:{path}"
+
+    def write_file(self, path: str, content: str) -> None:
+        del path, content
+
+    def replace_file(self, path: str, old: str, new: str) -> None:
+        del path, old, new
+
+    def glob_files(self, pattern: str, directory: str) -> list[str]:
+        del pattern, directory
+        return []
+
+    def grep_search(self, pattern: str, directory: str, include: str) -> list[str]:
+        del pattern, directory, include
+        return []
+
+    def apply_patch(self, path: str, patch: str) -> dict[str, object]:
+        del patch
+        return {"success": True, "path": path, "changed": False}
+
+    def run_command(
+        self,
+        command: str,
+        *,
+        cwd: str | None,
+        env: dict[str, str] | None,
+        timeout: int,
+    ) -> CloudCommandResult:
+        del command, cwd, env, timeout
+        return CloudCommandResult(stdout="", stderr="", exit_code=0)
 
 
 def test_local_binding_round_trip(tmp_path: Path) -> None:
@@ -125,3 +163,26 @@ def test_cloud_resolver_environment_raises_typed_not_implemented() -> None:
 
     with pytest.raises(CloudBindingNotImplementedError, match="cloud workspace"):
         resolver.resolve_environment(binding)
+
+
+def test_cloud_binding_resolves_to_cloud_environment_when_client_available() -> None:
+    binding = CloudWorkspaceBinding(
+        workspace_url="https://workspace.example.com",
+        workspace_id="ws-123",
+    )
+    captured: list[CloudWorkspaceBinding] = []
+
+    def build_client(resolved_binding: CloudWorkspaceBinding) -> FakeCloudClient:
+        captured.append(resolved_binding)
+        return FakeCloudClient()
+
+    resolver = DefaultBindingResolver(cloud_client_factory=build_client)
+
+    env = resolver.resolve_environment(binding)
+
+    assert isinstance(env, CloudEnvironment)
+    assert captured == [binding]
+    assert env.tool_config() == {
+        "workspace_id": "ws-123",
+        "workspace_url": "https://workspace.example.com",
+    }

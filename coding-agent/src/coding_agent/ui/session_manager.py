@@ -978,6 +978,7 @@ class SessionManager:
         previous_provider_name = session.provider_name
         previous_model_name = session.model_name
         previous_base_url = session.base_url
+        workspace_root, environment = self._resolve_runtime_environment(session)
 
         approval_mode_map = {
             ApprovalPolicy.YOLO: "yolo",
@@ -985,8 +986,8 @@ class SessionManager:
             ApprovalPolicy.AUTO: "auto",
         }
         pipeline, ctx = self._create_agent_for_session(
-            workspace_root=self._resolve_workspace_root(session),
-            environment=self._resolve_environment(session),
+            workspace_root=workspace_root,
+            environment=environment,
             model_override=restored_config.model_name,
             provider_override=restored_config.provider_name,
             base_url_override=restored_config.base_url,
@@ -1056,6 +1057,19 @@ class SessionManager:
     def _resolve_environment(self, session: Session) -> Environment:
         return self._binding_resolver.resolve_environment(session.execution_binding)
 
+    def _environment_workspace_root(self, environment: Environment) -> Path | None:
+        local_root = environment.workspace_summary().local_root
+        if local_root is None:
+            return None
+        return Path(local_root).expanduser().resolve()
+
+    def _resolve_runtime_environment(
+        self,
+        session: Session,
+    ) -> tuple[Path | None, Environment]:
+        environment = self._resolve_environment(session)
+        return self._environment_workspace_root(environment), environment
+
     def _invalidate_runtime(self, session: Session) -> None:
         session.runtime_pipeline = None
         session.runtime_ctx = None
@@ -1082,6 +1096,7 @@ class SessionManager:
         max_steps: int = 30,
         enable_parallel: bool = True,
         max_parallel: int = 5,
+        execution_binding: ExecutionBinding | None = None,
     ) -> str:
         """Create a new agent session.
 
@@ -1095,6 +1110,8 @@ class SessionManager:
             max_steps: Maximum steps per turn
             enable_parallel: Enable parallel tool execution
             max_parallel: Maximum number of parallel tool executions
+            execution_binding: Explicit workspace execution binding. If omitted,
+                a local binding is derived from repo_path or the current directory.
 
         Returns:
             The session ID
@@ -1115,13 +1132,16 @@ class SessionManager:
                 base_url = cfg.base_url
 
         resolved_repo_path = repo_path.resolve() if repo_path is not None else None
-        binding = LocalExecutionBinding(
-            workspace_root=(
-                str(resolved_repo_path)
-                if resolved_repo_path is not None
-                else str(Path.cwd().resolve())
+        if execution_binding is None:
+            binding = LocalExecutionBinding(
+                workspace_root=(
+                    str(resolved_repo_path)
+                    if resolved_repo_path is not None
+                    else str(Path.cwd().resolve())
+                )
             )
-        )
+        else:
+            binding = execution_binding
 
         session = Session(
             id=session_id,
@@ -1354,9 +1374,12 @@ class SessionManager:
                 adapter = session.runtime_adapter
 
                 if pipeline is None or ctx is None or adapter is None:
+                    workspace_root, environment = self._resolve_runtime_environment(
+                        session
+                    )
                     pipeline, ctx = self._create_agent_for_session(
-                        workspace_root=self._resolve_workspace_root(session),
-                        environment=self._resolve_environment(session),
+                        workspace_root=workspace_root,
+                        environment=environment,
                         model_override=session.model_name,
                         provider_override=session.provider_name,
                         base_url_override=session.base_url,
@@ -1818,11 +1841,12 @@ class SessionManager:
         resolved_approval_policy = (
             session.approval_policy if approval_policy is None else approval_policy
         )
+        workspace_root, environment = self._resolve_runtime_environment(session)
 
         consumer = self._make_session_consumer(session)
         pipeline, ctx = self._create_agent_for_session(
-            workspace_root=self._resolve_workspace_root(session),
-            environment=self._resolve_environment(session),
+            workspace_root=workspace_root,
+            environment=environment,
             model_override=resolved_model_name,
             provider_override=resolved_provider_name,
             base_url_override=resolved_base_url,

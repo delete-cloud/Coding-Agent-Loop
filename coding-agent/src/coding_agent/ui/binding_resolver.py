@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Protocol
 
 from agentkit.environment import Environment
-from coding_agent.environment import LocalEnvironment
+from coding_agent.environment import CloudEnvironment, CloudWorkspaceClient, LocalEnvironment
 from coding_agent.ui.execution_binding import (
     CloudWorkspaceBinding,
     ExecutionBinding,
@@ -12,10 +13,13 @@ from coding_agent.ui.execution_binding import (
 )
 
 
+CloudClientFactory = Callable[[CloudWorkspaceBinding], CloudWorkspaceClient]
+
+
 class BindingResolver(Protocol):
     def resolve_workspace_root(self, binding: ExecutionBinding) -> Path: ...
 
-    def resolve_tool_config(self, binding: ExecutionBinding) -> dict[str, Any]: ...
+    def resolve_tool_config(self, binding: ExecutionBinding) -> dict[str, object]: ...
 
     def resolve_environment(self, binding: ExecutionBinding) -> Environment: ...
 
@@ -25,6 +29,13 @@ class CloudBindingNotImplementedError(NotImplementedError):
 
 
 class DefaultBindingResolver:
+    def __init__(
+        self,
+        *,
+        cloud_client_factory: CloudClientFactory | None = None,
+    ) -> None:
+        self._cloud_client_factory: CloudClientFactory | None = cloud_client_factory
+
     def resolve_workspace_root(self, binding: ExecutionBinding) -> Path:
         if isinstance(binding, LocalExecutionBinding):
             return Path(binding.workspace_root).expanduser().resolve()
@@ -34,20 +45,26 @@ class DefaultBindingResolver:
             )
         raise ValueError(f"unsupported binding type: {type(binding).__name__}")
 
-    def resolve_tool_config(self, binding: ExecutionBinding) -> dict[str, Any]:
+    def resolve_tool_config(self, binding: ExecutionBinding) -> dict[str, object]:
         if isinstance(binding, LocalExecutionBinding):
             return {"workspace_root": str(self.resolve_workspace_root(binding))}
         if isinstance(binding, CloudWorkspaceBinding):
-            raise CloudBindingNotImplementedError(
-                "cloud workspace tool config is not yet implemented"
-            )
+            return self._resolve_cloud_environment(binding).tool_config()
         raise ValueError(f"unsupported binding type: {type(binding).__name__}")
 
     def resolve_environment(self, binding: ExecutionBinding) -> Environment:
         if isinstance(binding, LocalExecutionBinding):
             return LocalEnvironment(self.resolve_workspace_root(binding))
         if isinstance(binding, CloudWorkspaceBinding):
+            return self._resolve_cloud_environment(binding)
+        raise ValueError(f"unsupported binding type: {type(binding).__name__}")
+
+    def _resolve_cloud_environment(
+        self,
+        binding: CloudWorkspaceBinding,
+    ) -> CloudEnvironment:
+        if self._cloud_client_factory is None:
             raise CloudBindingNotImplementedError(
                 "cloud workspace environment is not yet implemented"
             )
-        raise ValueError(f"unsupported binding type: {type(binding).__name__}")
+        return CloudEnvironment(self._cloud_client_factory(binding))

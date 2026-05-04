@@ -41,6 +41,11 @@ from coding_agent.ui.schemas import (
     ReadinessResponse,
 )
 from coding_agent.ui.auth import verify_api_key
+from coding_agent.ui.execution_binding import (
+    CloudWorkspaceBinding,
+    ExecutionBinding,
+    LocalExecutionBinding,
+)
 from coding_agent.ui.rate_limit import limiter, RateLimits
 from slowapi.errors import RateLimitExceeded
 from coding_agent.wire import (
@@ -250,6 +255,20 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
 def _session_to_dict(session: Session) -> dict[str, Any]:
     """Convert session state to dictionary."""
     return session.as_dict()
+
+
+def _execution_binding_from_request(
+    body: CreateSessionRequest | None,
+) -> ExecutionBinding | None:
+    if body is None or body.execution_binding is None:
+        return None
+    binding = body.execution_binding
+    if binding.kind == "local":
+        return LocalExecutionBinding(workspace_root=binding.workspace_root)
+    return CloudWorkspaceBinding(
+        workspace_url=binding.workspace_url,
+        workspace_id=binding.workspace_id,
+    )
 
 
 def _http_safe_tool_result_payload(msg: ToolResultDelta) -> dict[str, Any]:
@@ -622,6 +641,7 @@ async def create_session(
     # Create session using SessionManager
     session_id = await session_manager.create_session(
         repo_path=repo_path,
+        execution_binding=_execution_binding_from_request(body),
         approval_policy=approval_policy,
         provider_name=body.provider if body else None,
         model_name=body.model if body else None,
