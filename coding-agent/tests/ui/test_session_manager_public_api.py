@@ -1340,6 +1340,48 @@ async def test_publish_subagent_message_rejects_invalid_text(text: object) -> No
 
 
 @pytest.mark.asyncio
+async def test_publish_subagent_message_does_not_resurrect_removed_session() -> None:
+    store = InMemorySessionStore()
+    manager = SessionManager(store=store)
+    session_id = await manager.create_session()
+    session = manager.get_session(session_id)
+    publish_started = asyncio.Event()
+    allow_publish = asyncio.Event()
+
+    class BlockingBus:
+        async def publish(self, message: object) -> object:
+            del message
+            publish_started.set()
+            await allow_publish.wait()
+            return object()
+
+    session.runtime_message_bus = cast(Any, BlockingBus())
+
+    publish_task = asyncio.create_task(
+        manager.publish_subagent_message(
+            session_id,
+            "worker finished analysis",
+            message_id="subagent-msg-race",
+        )
+    )
+    await publish_started.wait()
+
+    remove_task = asyncio.create_task(manager.remove_session_async(session_id))
+    await asyncio.sleep(0)
+
+    assert remove_task.done() is False
+    assert manager.has_session(session_id) is True
+    assert store.get(session_id) is not None
+
+    allow_publish.set()
+    assert await publish_task is True
+    await remove_task
+
+    assert manager.has_session(session_id) is False
+    assert store.get(session_id) is None
+
+
+@pytest.mark.asyncio
 async def test_list_checkpoints_returns_metadata_for_session_tape() -> None:
     manager = SessionManager(store=InMemorySessionStore())
     session_id = await manager.create_session()
