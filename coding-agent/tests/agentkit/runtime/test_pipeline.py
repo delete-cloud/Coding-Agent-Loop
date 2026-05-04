@@ -1,6 +1,7 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from agentkit.directive.types import Reject
+from agentkit.environment import WorkspaceSummary
 from agentkit.runtime import (
     AgentRunContext,
     ContextBudget,
@@ -225,6 +226,13 @@ class RuntimeContextEnvironment:
 
     def tool_config(self) -> dict[str, object]:
         return {"workspace_root": "/repo"}
+
+    def workspace_summary(self) -> WorkspaceSummary:
+        return WorkspaceSummary(
+            display_name="/repo",
+            default_cwd="/repo",
+            local_root="/repo",
+        )
 
     def build_file_tools(self):
         raise NotImplementedError

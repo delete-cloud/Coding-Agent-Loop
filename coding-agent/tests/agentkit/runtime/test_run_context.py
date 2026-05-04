@@ -6,6 +6,7 @@ from typing import Any, cast
 
 import pytest
 
+from agentkit.environment import WorkspaceSummary
 from agentkit.runtime import AgentRunContext, ContextBudget
 
 
@@ -16,6 +17,13 @@ class StubEnvironment:
 
     def tool_config(self) -> dict[str, Any]:
         return {"workspace_root": "/tmp/workspace"}
+
+    def workspace_summary(self) -> WorkspaceSummary:
+        return WorkspaceSummary(
+            display_name="/tmp/workspace",
+            default_cwd="/tmp/workspace",
+            local_root="/tmp/workspace",
+        )
 
     def build_file_tools(self) -> tuple[
         Callable[[str], str | dict[str, Any]],
