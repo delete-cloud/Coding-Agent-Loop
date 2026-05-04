@@ -172,6 +172,78 @@ async def test_subagent_tool_returns_timeout_summary(monkeypatch: pytest.MonkeyP
     assert result == "Subagent timed out after 0.01 seconds"
 
 
+@pytest.mark.asyncio
+async def test_subagent_tool_publishes_completion_summary_to_parent_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    async def publish_subagent_message(
+        session_id: str,
+        text: str,
+        *,
+        message_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        calls.append(
+            {
+                "session_id": session_id,
+                "text": text,
+                "message_id": message_id,
+                "metadata": metadata,
+            }
+        )
+        return True
+
+    class StubCoordinator:
+        def allocate_child_id(self, parent_agent_id: str) -> str:
+            return f"{parent_agent_id}.child-1"
+
+    child_ctx = PipelineContext(tape=Tape(), session_id="parent-session")
+
+    def child_pipeline_builder(**_kwargs: Any):
+        return cast(Pipeline, object()), child_ctx
+
+    class ImmediateAdapter:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        async def run_turn(self, _goal: str) -> TurnOutcome:
+            return TurnOutcome(
+                stop_reason=StopReason.NO_TOOL_CALLS,
+                final_message="Child finished",
+            )
+
+    monkeypatch.setattr("coding_agent.tools.subagent.PipelineAdapter", ImmediateAdapter)
+
+    tool_fn = build_subagent_tool(child_pipeline_builder)
+    parent_ctx = PipelineContext(
+        tape=Tape(),
+        session_id="parent-session",
+        config={
+            "agent_id": "parent-agent",
+            "subagent_timeout": 30.0,
+            "child_worker_coordinator": StubCoordinator(),
+            "subagent_message_publisher": publish_subagent_message,
+        },
+    )
+
+    result = await tool_fn(goal="Inspect", __pipeline_ctx__=parent_ctx)
+
+    assert result == "Subagent completed: Child finished"
+    assert calls == [
+        {
+            "session_id": "parent-session",
+            "text": "Subagent completed: Child finished",
+            "message_id": None,
+            "metadata": {
+                "source": "subagent",
+                "child_agent_id": "parent-agent.child-1",
+            },
+        }
+    ]
+
+
 def test_create_agent_injects_default_child_worker_coordinator() -> None:
     _pipeline, ctx = create_agent(session_id_override="test-session")
 

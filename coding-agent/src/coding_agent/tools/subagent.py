@@ -128,6 +128,29 @@ def _summarize_subagent_outcome(outcome: TurnOutcome) -> str:
     )
 
 
+async def _publish_subagent_summary(
+    pipeline_ctx: PipelineContext,
+    *,
+    session_id: str,
+    summary: str,
+    child_agent_id: str,
+) -> None:
+    publisher = pipeline_ctx.config.get("subagent_message_publisher")
+    if publisher is None:
+        return
+    if not callable(publisher):
+        raise TypeError("subagent_message_publisher must be callable")
+
+    publish_result = publisher(
+        session_id,
+        summary,
+        message_id=None,
+        metadata={"source": "subagent", "child_agent_id": child_agent_id},
+    )
+    if isawaitable(publish_result):
+        await publish_result
+
+
 def _subagent_timeout_seconds(pipeline_ctx: PipelineContext) -> float:
     timeout = pipeline_ctx.config.get("subagent_timeout")
     if timeout is None:
@@ -285,6 +308,13 @@ def build_subagent_tool(child_pipeline_builder: ChildPipelineBuilder):
         )
         if outcome is None:
             raise RuntimeError("subagent turn ended without outcome")
-        return _summarize_subagent_outcome(outcome)
+        summary = _summarize_subagent_outcome(outcome)
+        await _publish_subagent_summary(
+            __pipeline_ctx__,
+            session_id=parent_session_id,
+            summary=summary,
+            child_agent_id=child_agent_id,
+        )
+        return summary
 
     return subagent_dispatch
