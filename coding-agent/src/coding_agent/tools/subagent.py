@@ -303,13 +303,11 @@ def build_subagent_tool(child_pipeline_builder: ChildPipelineBuilder):
             await _close_adapter_if_supported(child_adapter)
 
         if timed_out:
-            _append_child_trace_to_parent(
-                __pipeline_ctx__.tape,
-                child_ctx.tape,
-                base_length=child_base_length,
-                child_agent_id=child_agent_id,
-            )
-            return f"Subagent timed out after {timeout_seconds:g} seconds"
+            summary = f"Subagent timed out after {timeout_seconds:g} seconds"
+        else:
+            if outcome is None:
+                raise RuntimeError("subagent turn ended without outcome")
+            summary = _summarize_subagent_outcome(outcome)
 
         _append_child_trace_to_parent(
             __pipeline_ctx__.tape,
@@ -317,9 +315,6 @@ def build_subagent_tool(child_pipeline_builder: ChildPipelineBuilder):
             base_length=child_base_length,
             child_agent_id=child_agent_id,
         )
-        if outcome is None:
-            raise RuntimeError("subagent turn ended without outcome")
-        summary = _summarize_subagent_outcome(outcome)
         await _publish_subagent_summary(
             __pipeline_ctx__,
             session_id=parent_session_id,
