@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import types
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
@@ -1108,7 +1109,9 @@ async def test_run_agent_does_not_hardcode_api_key() -> None:
 
     with (
         patch("importlib.import_module") as import_module,
-        patch("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter),
+        patch.dict(
+            SessionManager.run_agent.__globals__, {"PipelineAdapter": FakeAdapter}
+        ),
     ):
         import_module.return_value = types.SimpleNamespace(
             create_agent=lambda **kwargs: (fake_pipeline, fake_ctx, kwargs)
@@ -1128,6 +1131,63 @@ async def test_run_agent_does_not_hardcode_api_key() -> None:
 
     assert captured_kwargs["session_id_override"] == session_id
     assert captured_kwargs["api_key"] is None
+
+
+@pytest.mark.asyncio
+async def test_run_agent_injects_subagent_message_publisher() -> None:
+    manager = SessionManager(store=InMemorySessionStore())
+    session_id = await manager.create_session()
+    captured_publisher: Callable[..., Awaitable[bool]] | None = None
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+            self.ctx = ctx
+
+        async def run_turn(self, prompt: str) -> None:
+            del prompt
+            nonlocal captured_publisher
+            captured_publisher = cast(
+                Callable[..., Awaitable[bool]],
+                self.ctx.config["subagent_message_publisher"],
+            )
+            assert captured_publisher is not None
+            await captured_publisher(
+                session_id,
+                "worker finished analysis",
+                message_id="subagent-msg-from-tool",
+            )
+
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        ),
+        _directive_executor=None,
+    )
+    fake_ctx = types.SimpleNamespace(config={}, tape=Tape())
+
+    with (
+        patch("importlib.import_module") as import_module,
+        patch.dict(
+            SessionManager.run_agent.__globals__, {"PipelineAdapter": FakeAdapter}
+        ),
+    ):
+        import_module.return_value = types.SimpleNamespace(
+            create_agent=lambda **kwargs: (fake_pipeline, fake_ctx)
+        )
+
+        await manager.run_agent(session_id, "hello")
+
+    session = manager.get_session(session_id)
+    batch = await session.runtime_message_bus.consume_after(
+        RuntimeMessageCursor(),
+        kinds={RuntimeMessageKind.SUBAGENT_MESSAGE},
+    )
+
+    assert callable(captured_publisher)
+    assert [item.message.payload for item in batch.messages] == [
+        {"text": "worker finished analysis"}
+    ]
 
 
 @pytest.mark.asyncio

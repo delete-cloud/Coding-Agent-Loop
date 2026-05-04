@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import uuid
 from collections.abc import Callable
 from inspect import isawaitable
@@ -16,6 +17,9 @@ from coding_agent.adapter import PipelineAdapter
 from coding_agent.adapter_types import StopReason, TurnOutcome
 from coding_agent.agent_identity import effective_agent_id, legacy_agent_id_str
 from coding_agent.wire.protocol import ToolCallDelta, WireMessage
+
+
+logger = logging.getLogger(__name__)
 
 
 ChildPipelineBuilder = Callable[..., tuple[Pipeline, PipelineContext]]
@@ -126,6 +130,36 @@ def _summarize_subagent_outcome(outcome: TurnOutcome) -> str:
     return (
         f"Subagent finished ({outcome.stop_reason.value}, steps={outcome.steps_taken})"
     )
+
+
+async def _publish_subagent_summary(
+    pipeline_ctx: PipelineContext,
+    *,
+    session_id: str,
+    summary: str,
+    child_agent_id: str,
+) -> None:
+    publisher = pipeline_ctx.config.get("subagent_message_publisher")
+    if publisher is None:
+        return
+    if not callable(publisher):
+        raise TypeError("subagent_message_publisher must be callable")
+
+    try:
+        publish_result = publisher(
+            session_id,
+            summary,
+            message_id=None,
+            metadata={"source": "subagent", "child_agent_id": child_agent_id},
+        )
+        if isawaitable(publish_result):
+            await publish_result
+    except Exception:
+        logger.warning(
+            "Failed to publish subagent summary for session %s; returning summary anyway",
+            session_id,
+            exc_info=True,
+        )
 
 
 def _subagent_timeout_seconds(pipeline_ctx: PipelineContext) -> float:
@@ -269,13 +303,11 @@ def build_subagent_tool(child_pipeline_builder: ChildPipelineBuilder):
             await _close_adapter_if_supported(child_adapter)
 
         if timed_out:
-            _append_child_trace_to_parent(
-                __pipeline_ctx__.tape,
-                child_ctx.tape,
-                base_length=child_base_length,
-                child_agent_id=child_agent_id,
-            )
-            return f"Subagent timed out after {timeout_seconds:g} seconds"
+            summary = f"Subagent timed out after {timeout_seconds:g} seconds"
+        else:
+            if outcome is None:
+                raise RuntimeError("subagent turn ended without outcome")
+            summary = _summarize_subagent_outcome(outcome)
 
         _append_child_trace_to_parent(
             __pipeline_ctx__.tape,
@@ -283,8 +315,12 @@ def build_subagent_tool(child_pipeline_builder: ChildPipelineBuilder):
             base_length=child_base_length,
             child_agent_id=child_agent_id,
         )
-        if outcome is None:
-            raise RuntimeError("subagent turn ended without outcome")
-        return _summarize_subagent_outcome(outcome)
+        await _publish_subagent_summary(
+            __pipeline_ctx__,
+            session_id=parent_session_id,
+            summary=summary,
+            child_agent_id=child_agent_id,
+        )
+        return summary
 
     return subagent_dispatch

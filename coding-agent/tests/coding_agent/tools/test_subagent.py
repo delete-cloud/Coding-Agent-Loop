@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, cast
 
 import pytest
@@ -170,6 +171,237 @@ async def test_subagent_tool_returns_timeout_summary(monkeypatch: pytest.MonkeyP
     result = await tool_fn(goal="Take too long", __pipeline_ctx__=parent_ctx)
 
     assert result == "Subagent timed out after 0.01 seconds"
+
+
+@pytest.mark.asyncio
+async def test_subagent_tool_publishes_timeout_summary_to_parent_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+    child_ctx = PipelineContext(tape=Tape(), session_id="parent-session")
+
+    async def publish_subagent_message(
+        session_id: str,
+        text: str,
+        *,
+        message_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        calls.append(
+            {
+                "session_id": session_id,
+                "text": text,
+                "message_id": message_id,
+                "metadata": metadata,
+            }
+        )
+        return True
+
+    def child_pipeline_builder(**_kwargs: Any):
+        return cast(Pipeline, object()), child_ctx
+
+    class HangingAdapter:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        async def run_turn(self, _goal: str) -> TurnOutcome:
+            await asyncio.sleep(1)
+            return TurnOutcome(stop_reason=StopReason.NO_TOOL_CALLS)
+
+    monkeypatch.setattr("coding_agent.tools.subagent.PipelineAdapter", HangingAdapter)
+
+    tool_fn = build_subagent_tool(child_pipeline_builder)
+    parent_ctx = PipelineContext(
+        tape=Tape(),
+        session_id="parent-session",
+        config={
+            "agent_id": "parent-agent",
+            "subagent_timeout": 0.01,
+            "child_worker_coordinator": _StubCoordinator(),
+            "subagent_message_publisher": publish_subagent_message,
+        },
+    )
+
+    result = await tool_fn(goal="Take too long", __pipeline_ctx__=parent_ctx)
+
+    assert result == "Subagent timed out after 0.01 seconds"
+    assert calls == [
+        {
+            "session_id": "parent-session",
+            "text": "Subagent timed out after 0.01 seconds",
+            "message_id": None,
+            "metadata": {
+                "source": "subagent",
+                "child_agent_id": "parent-agent.child-1",
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_subagent_tool_publishes_completion_summary_to_parent_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    async def publish_subagent_message(
+        session_id: str,
+        text: str,
+        *,
+        message_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        calls.append(
+            {
+                "session_id": session_id,
+                "text": text,
+                "message_id": message_id,
+                "metadata": metadata,
+            }
+        )
+        return True
+
+    child_ctx = PipelineContext(tape=Tape(), session_id="parent-session")
+
+    def child_pipeline_builder(**_kwargs: Any):
+        return cast(Pipeline, object()), child_ctx
+
+    monkeypatch.setattr(
+        "coding_agent.tools.subagent.PipelineAdapter", _make_immediate_adapter()
+    )
+
+    tool_fn = build_subagent_tool(child_pipeline_builder)
+    parent_ctx = PipelineContext(
+        tape=Tape(),
+        session_id="parent-session",
+        config={
+            "agent_id": "parent-agent",
+            "subagent_timeout": 30.0,
+            "child_worker_coordinator": _StubCoordinator(),
+            "subagent_message_publisher": publish_subagent_message,
+        },
+    )
+
+    result = await tool_fn(goal="Inspect", __pipeline_ctx__=parent_ctx)
+
+    assert result == "Subagent completed: Child finished"
+    assert calls == [
+        {
+            "session_id": "parent-session",
+            "text": "Subagent completed: Child finished",
+            "message_id": None,
+            "metadata": {
+                "source": "subagent",
+                "child_agent_id": "parent-agent.child-1",
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_subagent_tool_returns_summary_when_publisher_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def publish_subagent_message(
+        session_id: str,
+        text: str,
+        *,
+        message_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        del session_id, text, message_id, metadata
+        raise RuntimeError("publisher unavailable")
+
+    child_ctx = PipelineContext(tape=Tape(), session_id="parent-session")
+
+    def child_pipeline_builder(**_kwargs: Any):
+        return cast(Pipeline, object()), child_ctx
+
+    monkeypatch.setattr(
+        "coding_agent.tools.subagent.PipelineAdapter", _make_immediate_adapter()
+    )
+    tool_fn = build_subagent_tool(child_pipeline_builder)
+    parent_ctx = PipelineContext(
+        tape=Tape(),
+        session_id="parent-session",
+        config={
+            "agent_id": "parent-agent",
+            "subagent_timeout": 30.0,
+            "child_worker_coordinator": _StubCoordinator(),
+            "subagent_message_publisher": publish_subagent_message,
+        },
+    )
+
+    with caplog.at_level(logging.WARNING, logger="coding_agent.tools.subagent"):
+        result = await tool_fn(goal="Inspect", __pipeline_ctx__=parent_ctx)
+
+    assert result == "Subagent completed: Child finished"
+    assert "Failed to publish subagent summary" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_subagent_tool_publishes_error_summary_to_parent_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+    child_ctx = PipelineContext(tape=Tape(), session_id="parent-session")
+
+    async def publish_subagent_message(
+        session_id: str,
+        text: str,
+        *,
+        message_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        calls.append(
+            {
+                "session_id": session_id,
+                "text": text,
+                "message_id": message_id,
+                "metadata": metadata,
+            }
+        )
+        return True
+
+    def child_pipeline_builder(**_kwargs: Any):
+        return cast(Pipeline, object()), child_ctx
+
+    class ErrorAdapter:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        async def run_turn(self, _goal: str) -> TurnOutcome:
+            return TurnOutcome(stop_reason=StopReason.ERROR, error="Child failed")
+
+    monkeypatch.setattr("coding_agent.tools.subagent.PipelineAdapter", ErrorAdapter)
+
+    tool_fn = build_subagent_tool(child_pipeline_builder)
+    parent_ctx = PipelineContext(
+        tape=Tape(),
+        session_id="parent-session",
+        config={
+            "agent_id": "parent-agent",
+            "subagent_timeout": 30.0,
+            "child_worker_coordinator": _StubCoordinator(),
+            "subagent_message_publisher": publish_subagent_message,
+        },
+    )
+
+    result = await tool_fn(goal="Inspect", __pipeline_ctx__=parent_ctx)
+
+    assert result == "Subagent failed: Child failed"
+    assert calls == [
+        {
+            "session_id": "parent-session",
+            "text": "Subagent failed: Child failed",
+            "message_id": None,
+            "metadata": {
+                "source": "subagent",
+                "child_agent_id": "parent-agent.child-1",
+            },
+        }
+    ]
 
 
 def test_create_agent_injects_default_child_worker_coordinator() -> None:
