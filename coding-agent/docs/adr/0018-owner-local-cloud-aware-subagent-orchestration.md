@@ -159,7 +159,7 @@ fencing semantics, retry/idempotency model, and cloud workspace write policy.
 - [x] `test_subagent_tool_skips_write_lease_for_read_only_child_turn`
 - [x] `test_subagent_tool_publishes_completion_summary_to_parent_session`
 - [x] `test_subagent_summary_publish_rejects_stale_owner`
-- [x] `uv run pytest tests/coding_agent/tools/test_subagent.py tests/coding_agent/subagents/test_coordinator.py tests/coding_agent/test_bootstrap.py tests/ui/test_session_manager_public_api.py -k "subagent or cloud" -v`
+- [x] `uv run pytest tests/coding_agent/tools/test_subagent.py tests/coding_agent/subagents/test_coordinator.py tests/coding_agent/test_bootstrap.py tests/ui/test_session_manager_public_api.py tests/ui/test_session_manager_owner_checks.py -k "subagent or cloud" -v`
 
 ## References
 
