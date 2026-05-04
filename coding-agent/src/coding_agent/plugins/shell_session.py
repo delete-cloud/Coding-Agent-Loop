@@ -50,6 +50,11 @@ class ShellSessionPlugin:
                 if not isinstance(workspace_root, (str, Path)):
                     raise ValueError("workspace_root must be a string or path")
                 return str(Path(workspace_root).expanduser().resolve())
+            environment = config.get("environment")
+            if environment is not None:
+                default_cwd = environment.workspace_summary().default_cwd
+                if default_cwd:
+                    return default_cwd
         return os.getcwd()
 
     def on_checkpoint(self, **kwargs: Any) -> None:
