@@ -363,6 +363,38 @@ enabled = ["storage", "core_tools", "shell_session"]
         assert "workspace_url" not in ctx.run_context.trace_metadata
         assert "secret" not in str(dict(ctx.run_context.trace_metadata))
 
+    def test_create_agent_strips_cloud_trace_metadata_for_local_environment(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        config_path = (
+            Path(__file__).parent.parent.parent / "src" / "coding_agent" / "agent.toml"
+        )
+        if not config_path.exists():
+            pytest.skip("agent.toml not found")
+
+        _pipeline, raw_ctx = create_agent(
+            config_path=config_path,
+            data_dir=tmp_path / "data",
+            api_key="sk-test",
+            model_override="gpt-test",
+            provider_override="openai",
+            base_url_override="http://localhost:1234/v1",
+            session_id_override="session-1",
+            environment=LocalEnvironment(tmp_path / "workspace"),
+            trace_metadata={
+                "request_id": "req-1",
+                "cloud.workspace_id": "stale-cloud-id",
+                "cloud.workspace_url": "https://workspace.example.com?token=secret",
+            },
+        )
+        ctx = cast(PipelineContext, raw_ctx)
+
+        assert ctx.run_context is not None
+        assert ctx.run_context.trace_metadata == {"request_id": "req-1"}
+        assert "cloud." not in str(dict(ctx.run_context.trace_metadata))
+        assert "secret" not in str(dict(ctx.run_context.trace_metadata))
+
     def test_create_agent_normalizes_explicit_none_agent_id_override(self, tmp_path):
         """Explicit None must produce run_context.agent_id is None and "" in legacy config."""
         config_path = (

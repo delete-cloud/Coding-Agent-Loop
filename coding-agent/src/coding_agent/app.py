@@ -57,12 +57,13 @@ def _run_trace_metadata(
     trace_metadata: Mapping[str, object] | None,
 ) -> dict[str, object]:
     metadata = dict(trace_metadata or {})
-    if environment.kind != "cloud":
-        return metadata
-
     for key in list(metadata):
         if key.startswith("cloud."):
             del metadata[key]
+
+    if environment.kind != "cloud":
+        return metadata
+
     workspace_id = environment.tool_config().get("workspace_id")
     if not isinstance(workspace_id, str) or not workspace_id:
         raise ValueError("cloud environment must expose string workspace_id")
