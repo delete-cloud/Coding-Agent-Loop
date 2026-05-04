@@ -77,6 +77,10 @@ def _approval_decision_message_id(session_id: str, request_id: str) -> str:
     return f"approval_decision:{session_id}:{request_id}"
 
 
+def _subagent_message_id(session_id: str) -> str:
+    return f"subagent_message:{session_id}:{uuid.uuid4().hex}"
+
+
 def _approval_response_projection(response: ApprovalResponse) -> dict[str, Any]:
     return {
         "request_id": response.request_id,
@@ -1621,6 +1625,46 @@ class SessionManager:
             scope=scope,
         )
         return response is not None
+
+    async def publish_subagent_message(
+        self,
+        session_id: str,
+        text: str,
+        *,
+        message_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("text must be a non-empty string")
+        if message_id is not None and not message_id:
+            raise ValueError("message_id must be None or a non-empty string")
+
+        await self._assert_owner(session_id)
+        session = await self.get_session_async(session_id)
+        effective_message_id = message_id or _subagent_message_id(session_id)
+        payload: dict[str, Any] = {"text": text}
+        if metadata is not None:
+            payload["metadata"] = dict(metadata)
+
+        try:
+            await session.runtime_message_bus.publish(
+                RuntimeMessage(
+                    message_id=effective_message_id,
+                    kind=RuntimeMessageKind.SUBAGENT_MESSAGE,
+                    payload=payload,
+                )
+            )
+        except DuplicateRuntimeMessageError as exc:
+            if exc.message_id != effective_message_id:
+                raise
+            logger.info(
+                "subagent_message already published for session %s message %s",
+                session_id,
+                effective_message_id,
+            )
+        session.last_activity = datetime.now()
+        await self._persist_session_async(session)
+        return True
 
     async def wait_for_http_approval(
         self,

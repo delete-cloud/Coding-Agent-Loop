@@ -4,12 +4,18 @@ import threading
 import types
 from datetime import datetime
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
 
 from agentkit.checkpoint import CheckpointService
 from agentkit.checkpoint.models import CheckpointMeta
+from agentkit.plugin.registry import PluginRegistry
+from agentkit.providers.models import DoneEvent, TextEvent
+from agentkit.runtime import RuntimeMessageCursor, RuntimeMessageKind
+from agentkit.runtime.hook_runtime import HookRuntime
+from agentkit.runtime.pipeline import Pipeline, PipelineContext
 from agentkit.tape.tape import Tape
 from coding_agent.approval.store import ApprovalStore
 from coding_agent.approval import ApprovalPolicy
@@ -29,6 +35,46 @@ from coding_agent.ui.session_store import (
     RedisSessionStore,
     create_session_store,
 )
+
+
+class _PromptCaptureProvider:
+    def __init__(self) -> None:
+        self.messages: list[list[dict[str, object]]] = []
+
+    async def stream(self, messages, tools=None, **kwargs):
+        del tools, kwargs
+        self.messages.append(messages)
+        yield TextEvent(text="ok")
+        yield DoneEvent()
+
+
+class _PromptCapturePlugin:
+    state_key = "prompt_capture"
+
+    def __init__(self) -> None:
+        self.provider = _PromptCaptureProvider()
+
+    def hooks(self):
+        return {"provide_llm": self.provide_llm}
+
+    def provide_llm(self, **kwargs):
+        del kwargs
+        return self.provider
+
+
+def _pipeline_with_prompt_capture() -> tuple[Pipeline, _PromptCaptureProvider]:
+    registry = PluginRegistry()
+    plugin = _PromptCapturePlugin()
+    registry.register(plugin)
+    return Pipeline(runtime=HookRuntime(registry), registry=registry), plugin.provider
+
+
+def _system_prompt_content(messages: list[dict[str, object]]) -> str:
+    return "\n".join(
+        str(message.get("content", ""))
+        for message in messages
+        if message.get("role") == "system"
+    )
 
 
 def test_register_session_uses_public_api() -> None:
@@ -1196,6 +1242,101 @@ async def test_submit_approval_rejects_stale_pending_projection_without_store_re
     assert session.pending_approval == {"request_id": "stale-req", "tool_name": "bash"}
     assert session.approval_response is None
     assert session.approval_event.is_set() is False
+
+
+@pytest.mark.asyncio
+async def test_publish_subagent_message_reaches_next_pipeline_prompt() -> None:
+    manager = SessionManager(store=InMemorySessionStore())
+    session_id = await manager.create_session()
+    session = manager.get_session(session_id)
+    pipeline, provider = _pipeline_with_prompt_capture()
+    ctx = PipelineContext(
+        tape=Tape(),
+        session_id=session_id,
+        config={"system_prompt": "system"},
+    )
+    session.runtime_pipeline = pipeline
+    session.runtime_ctx = ctx
+    session.runtime_adapter = object()
+
+    published = await manager.publish_subagent_message(
+        session_id,
+        "worker finished analysis",
+        message_id="subagent-msg-1",
+    )
+    ctx.runtime_message_bus = session.runtime_message_bus
+    await pipeline.run_turn(ctx)
+
+    assert published is True
+    system_content = _system_prompt_content(provider.messages[0])
+    assert "subagent_message subagent-msg-1: worker finished analysis" in system_content
+    assert ctx.runtime_message_cursor.sequence == 1
+
+
+@pytest.mark.asyncio
+async def test_publish_subagent_message_duplicate_id_is_idempotent() -> None:
+    manager = SessionManager(store=InMemorySessionStore())
+    session_id = await manager.create_session()
+    session = manager.get_session(session_id)
+
+    first = await manager.publish_subagent_message(
+        session_id,
+        "first body wins",
+        message_id="subagent-msg-dup",
+    )
+    second = await manager.publish_subagent_message(
+        session_id,
+        "retry body ignored",
+        message_id="subagent-msg-dup",
+    )
+    batch = await session.runtime_message_bus.consume_after(
+        RuntimeMessageCursor(),
+        kinds={RuntimeMessageKind.SUBAGENT_MESSAGE},
+    )
+
+    assert first is True
+    assert second is True
+    assert [item.message.payload for item in batch.messages] == [
+        {"text": "first body wins"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_publish_subagent_message_does_not_advance_approval_cursor() -> None:
+    manager = SessionManager(store=InMemorySessionStore())
+    session_id = await manager.create_session()
+    session = manager.get_session(session_id)
+
+    published = await manager.publish_subagent_message(
+        session_id,
+        "child update",
+        message_id="subagent-msg-cursor",
+    )
+
+    assert published is True
+    assert session.approval_decision_cursor == RuntimeMessageCursor()
+    approval_batch = await session.runtime_message_bus.consume_after(
+        RuntimeMessageCursor(),
+        kinds={RuntimeMessageKind.APPROVAL_DECISION},
+    )
+    subagent_batch = await session.runtime_message_bus.consume_after(
+        RuntimeMessageCursor(),
+        kinds={RuntimeMessageKind.SUBAGENT_MESSAGE},
+    )
+    assert approval_batch.messages == ()
+    assert [item.message.message_id for item in subagent_batch.messages] == [
+        "subagent-msg-cursor"
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["", "   ", 123])
+async def test_publish_subagent_message_rejects_invalid_text(text: object) -> None:
+    manager = SessionManager(store=InMemorySessionStore())
+    session_id = await manager.create_session()
+
+    with pytest.raises(ValueError, match="text must be a non-empty string"):
+        await manager.publish_subagent_message(session_id, cast(Any, text))
 
 
 @pytest.mark.asyncio
