@@ -160,6 +160,16 @@ fencing semantics, retry/idempotency model, and cloud workspace write policy.
 - [x] `test_subagent_tool_publishes_completion_summary_to_parent_session`
 - [x] `test_subagent_summary_publish_rejects_stale_owner`
 - [x] `uv run pytest tests/coding_agent/tools/test_subagent.py tests/coding_agent/subagents/test_coordinator.py tests/coding_agent/test_bootstrap.py tests/ui/test_session_manager_public_api.py tests/ui/test_session_manager_owner_checks.py -k "subagent or cloud" -v`
+- [x] `test_subagent_tool_publishes_interrupted_summary_to_parent_session`
+- [x] `test_subagent_tool_publishes_run_exception_summary_to_parent_session`
+- [x] `test_subagent_tool_publishes_adapter_close_failure_summary_to_parent_session`
+- [x] `test_subagent_tool_releases_write_lease_and_closes_adapter_on_cancellation`
+- [x] `test_subagent_tool_stale_owner_publish_escapes_toolset_execution`
+- [x] `test_toolset_parallel_batch_propagates_owner_conflict`
+- [x] `uv run pytest tests/agentkit/tools/test_toolset.py -v`
+- [x] `uv run pytest tests/coding_agent/plugins/test_parallel_executor.py -v`
+- [x] `uv run pytest tests/coding_agent/tools/test_subagent.py tests/coding_agent/subagents/test_coordinator.py -v`
+- [x] `uv run pytest tests/coding_agent/test_bootstrap.py tests/ui/test_session_manager_public_api.py tests/ui/test_session_manager_owner_checks.py -k "subagent or cloud" -v`
 
 ## References
 
