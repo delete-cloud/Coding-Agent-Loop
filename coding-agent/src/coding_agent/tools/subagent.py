@@ -16,6 +16,7 @@ from agentkit.tools import tool
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.adapter_types import StopReason, TurnOutcome
 from coding_agent.agent_identity import effective_agent_id, legacy_agent_id_str
+from coding_agent.ui.session_owner_store import SessionOwnershipConflictError
 from coding_agent.wire.protocol import ToolCallDelta, WireMessage
 
 
@@ -154,6 +155,8 @@ async def _publish_subagent_summary(
         )
         if isawaitable(publish_result):
             await publish_result
+    except SessionOwnershipConflictError:
+        raise
     except Exception:
         logger.warning(
             "Failed to publish subagent summary for session %s; returning summary anyway",

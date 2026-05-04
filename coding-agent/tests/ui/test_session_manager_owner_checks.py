@@ -5,6 +5,7 @@ from datetime import timedelta
 import pytest
 
 from agentkit.checkpoint import CheckpointService
+from agentkit.runtime import RuntimeMessageCursor, RuntimeMessageKind
 from coding_agent.ui.session_manager import SessionManager
 import types
 from unittest.mock import patch
@@ -434,6 +435,41 @@ async def test_submit_approval_rejects_stale_owner() -> None:
             request_id="req-1",
             approved=True,
         )
+
+
+@pytest.mark.asyncio
+async def test_subagent_summary_publish_rejects_stale_owner() -> None:
+    owner_store = FakeOwnerStore()
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=owner_store,
+        owner_id="owner-b",
+        fencing_token=2,
+    )
+    session_id = await manager.create_session()
+    owner_store._owners[session_id] = SessionOwnerRecord(
+        owner_id="owner-a",
+        lease_expires_at=datetime.now(UTC) + timedelta(seconds=30),
+        fencing_token=1,
+    )
+
+    with pytest.raises(
+        SessionOwnershipConflictError,
+        match="stale owner or fencing token rejected",
+    ):
+        await manager.publish_subagent_message(
+            session_id,
+            "child finished",
+            message_id="subagent-stale-owner",
+        )
+
+    session = manager.get_session(session_id)
+    batch = await session.runtime_message_bus.consume_after(
+        RuntimeMessageCursor(),
+        kinds={RuntimeMessageKind.SUBAGENT_MESSAGE},
+    )
+    assert batch.messages == ()
 
 
 @pytest.mark.asyncio
