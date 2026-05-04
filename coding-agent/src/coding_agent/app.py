@@ -41,6 +41,13 @@ from coding_agent.tools.web_search import create_web_search_backend
 ToolFilter = Any
 
 
+def _local_workspace_root(environment: Environment) -> Path | None:
+    local_root = environment.workspace_summary().local_root
+    if local_root is None:
+        return None
+    return Path(local_root).expanduser().resolve()
+
+
 def _legacy_config_agent_id(run_context: AgentRunContext) -> str:
     return legacy_agent_id_str(run_context.agent_id)
 
@@ -134,13 +141,9 @@ def create_child_pipeline(
     if data_dir is None:
         data_dir = Path(os.environ.get("AGENT_DATA_DIR", "./data"))
 
-    workspace_root = workspace_root or Path.cwd()
-    environment = environment or LocalEnvironment(workspace_root)
-    tool_config = environment.tool_config()
-    workspace_root_value = tool_config.get("workspace_root")
-    if not isinstance(workspace_root_value, str):
-        raise ValueError("environment tool_config must include string workspace_root")
-    workspace_root = Path(workspace_root_value).expanduser().resolve()
+    if environment is None:
+        environment = LocalEnvironment(workspace_root or Path.cwd())
+    local_workspace_root = _local_workspace_root(environment)
 
     cfg = load_config(config_path)
 
@@ -260,7 +263,7 @@ def create_child_pipeline(
             ),
             "session_metrics": lambda: SessionMetricsPlugin(),
             "skills": lambda: SkillsPlugin(
-                workspace_root=workspace_root,
+                workspace_root=local_workspace_root,
                 extra_dirs=skills_cfg.get("extra_dirs", []),
             ),
             "mcp": lambda: MCPPlugin(
@@ -335,25 +338,28 @@ def create_child_pipeline(
         trace_metadata={} if trace_metadata is None else trace_metadata,
     )
 
+    ctx_config: dict[str, Any] = {
+        "system_prompt": cfg.system_prompt,
+        "model": cfg.model,
+        "provider": cfg.provider,
+        "approval_mode": policy_str,
+        "max_tool_rounds": cfg.max_turns,
+        "agent_id": _legacy_config_agent_id(run_context),
+        "subagent_timeout": float(subagent_cfg.get("timeout", 30.0)),
+        "child_worker_coordinator": ChildWorkerCoordinator(),
+        "web_search": web_search_cfg,
+        "environment": environment,
+        "shell": shell_cfg,
+        "structured_tool_result_scope": structured_tool_result_scope,
+    }
+    if local_workspace_root is not None:
+        ctx_config["workspace_root"] = str(local_workspace_root)
+
     ctx = PipelineContext(
         tape=tape_fork,
         session_id=session_id,
         run_context=run_context,
-        config={
-            "system_prompt": cfg.system_prompt,
-            "model": cfg.model,
-            "provider": cfg.provider,
-            "approval_mode": policy_str,
-            "max_tool_rounds": cfg.max_turns,
-            "agent_id": _legacy_config_agent_id(run_context),
-            "subagent_timeout": float(subagent_cfg.get("timeout", 30.0)),
-            "child_worker_coordinator": ChildWorkerCoordinator(),
-            "web_search": web_search_cfg,
-            "workspace_root": str(workspace_root),
-            "environment": environment,
-            "shell": shell_cfg,
-            "structured_tool_result_scope": structured_tool_result_scope,
-        },
+        config=ctx_config,
     )
 
     if "core_tools" in registry.plugin_ids():
