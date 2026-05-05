@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -197,7 +198,9 @@ class FakeWorkspaceProvider:
     def __init__(self) -> None:
         self.seen_configs: list[dict[str, object]] = []
 
-    def build_cloud_client_factory(self, config: dict[str, object]):
+    def build_cloud_client_factory(
+        self, config: dict[str, object]
+    ) -> Callable[[CloudWorkspaceBinding], FakeCloudClient]:
         self.seen_configs.append(dict(config))
 
         def build_client(binding: CloudWorkspaceBinding) -> FakeCloudClient:
