@@ -13,6 +13,7 @@ from agentkit.runtime.hook_runtime import HookRuntime
 from agentkit.runtime.pipeline import Pipeline, PipelineContext
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
+from agentkit.tools import FatalToolExecutionError
 from agentkit.tools import ToolCallRequest, Toolset
 from coding_agent.adapter_types import StopReason, TurnOutcome
 from coding_agent.__main__ import create_agent, create_child_pipeline
@@ -1149,6 +1150,102 @@ async def test_subagent_tool_stale_owner_publish_escapes_toolset_execution(
 
 
 @pytest.mark.asyncio
+async def test_subagent_tool_does_not_swallow_fatal_summary_publish(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    child_ctx = PipelineContext(tape=Tape(), session_id="parent-session")
+
+    async def publish_subagent_message(
+        session_id: str,
+        text: str,
+        *,
+        message_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        del session_id, text, message_id, metadata
+        raise FatalToolExecutionError("fatal summary publish rejected")
+
+    def child_pipeline_builder(**_kwargs: Any):
+        return cast(Pipeline, object()), child_ctx
+
+    monkeypatch.setattr(
+        "coding_agent.tools.subagent.PipelineAdapter", _make_immediate_adapter()
+    )
+
+    tool_fn = build_subagent_tool(child_pipeline_builder)
+    parent_ctx = PipelineContext(
+        tape=Tape(),
+        session_id="parent-session",
+        config={
+            "agent_id": "parent-agent",
+            "subagent_timeout": 30.0,
+            "child_worker_coordinator": _StubCoordinator(),
+            "subagent_message_publisher": publish_subagent_message,
+        },
+    )
+
+    with pytest.raises(
+        FatalToolExecutionError,
+        match="fatal summary publish rejected",
+    ):
+        await tool_fn(goal="Inspect", __pipeline_ctx__=parent_ctx)
+
+
+@pytest.mark.asyncio
+async def test_subagent_tool_fatal_summary_publish_escapes_toolset_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    child_ctx = PipelineContext(tape=Tape(), session_id="parent-session")
+
+    async def publish_subagent_message(
+        session_id: str,
+        text: str,
+        *,
+        message_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        del session_id, text, message_id, metadata
+        raise FatalToolExecutionError("fatal summary publish rejected")
+
+    def child_pipeline_builder(**_kwargs: Any):
+        return cast(Pipeline, object()), child_ctx
+
+    monkeypatch.setattr(
+        "coding_agent.tools.subagent.PipelineAdapter", _make_immediate_adapter()
+    )
+
+    core_tools = CoreToolsPlugin(child_pipeline_builder=child_pipeline_builder)
+    registry = PluginRegistry()
+    registry.register(core_tools)
+    toolset = Toolset(runtime=HookRuntime(registry))
+    parent_ctx = PipelineContext(
+        tape=Tape(),
+        session_id="parent-session",
+        config={
+            "agent_id": "parent-agent",
+            "subagent_timeout": 30.0,
+            "child_worker_coordinator": _StubCoordinator(),
+            "subagent_message_publisher": publish_subagent_message,
+        },
+    )
+
+    with pytest.raises(
+        FatalToolExecutionError,
+        match="fatal summary publish rejected",
+    ):
+        await toolset.execute_tools(
+            [
+                ToolCallRequest(
+                    tool_call_id="tc-subagent",
+                    name="subagent",
+                    arguments={"goal": "Inspect"},
+                )
+            ],
+            ctx=parent_ctx,
+        )
+
+
+@pytest.mark.asyncio
 async def test_subagent_tool_reraises_stale_owner_from_child_run_turn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1186,6 +1283,50 @@ async def test_subagent_tool_reraises_stale_owner_from_child_run_turn(
     with pytest.raises(
         SessionOwnershipConflictError,
         match="stale owner inside child run",
+    ):
+        await tool_fn(goal="Inspect", __pipeline_ctx__=parent_ctx)
+
+    assert events == ["adapter-close"]
+
+
+@pytest.mark.asyncio
+async def test_subagent_tool_reraises_fatal_tool_execution_error_from_child_run_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    child_ctx = PipelineContext(tape=Tape(), session_id="parent-session")
+    events: list[str] = []
+
+    def child_pipeline_builder(**_kwargs: Any):
+        return cast(Pipeline, object()), child_ctx
+
+    class FatalChildAdapter:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        async def run_turn(self, _goal: str) -> TurnOutcome:
+            raise FatalToolExecutionError("fatal child run rejected")
+
+        async def close(self) -> None:
+            events.append("adapter-close")
+
+    monkeypatch.setattr(
+        "coding_agent.tools.subagent.PipelineAdapter", FatalChildAdapter
+    )
+
+    tool_fn = build_subagent_tool(child_pipeline_builder)
+    parent_ctx = PipelineContext(
+        tape=Tape(),
+        session_id="parent-session",
+        config={
+            "agent_id": "parent-agent",
+            "subagent_timeout": 30.0,
+            "child_worker_coordinator": _StubCoordinator(),
+        },
+    )
+
+    with pytest.raises(
+        FatalToolExecutionError,
+        match="fatal child run rejected",
     ):
         await tool_fn(goal="Inspect", __pipeline_ctx__=parent_ctx)
 
