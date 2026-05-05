@@ -273,6 +273,37 @@ class TestParallelExecutorPlugin:
             )
 
     @pytest.mark.asyncio
+    async def test_execute_batch_cancels_sibling_tasks_on_fatal_error(self):
+        sibling_cancelled = asyncio.Event()
+
+        async def execute(name: str, arguments: dict[str, Any]) -> str:
+            del arguments
+            if name == "fatal":
+                raise SessionOwnershipConflictError("stale owner or fencing token rejected")
+            try:
+                await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                sibling_cancelled.set()
+                raise
+            return "unexpected"
+
+        plugin = ParallelExecutorPlugin(execute_fn=execute)
+
+        with pytest.raises(
+            SessionOwnershipConflictError,
+            match="stale owner or fencing token rejected",
+        ):
+            await plugin.execute_batch(
+                tool_calls=[
+                    {"name": "fatal", "arguments": {}},
+                    {"name": "grep", "arguments": {"pattern": "x"}},
+                ]
+            )
+
+        await asyncio.sleep(0)
+        assert sibling_cancelled.is_set() is True
+
+    @pytest.mark.asyncio
     async def test_semaphore_limits_concurrency(self):
         concurrent_count = 0
         max_concurrent = 0
