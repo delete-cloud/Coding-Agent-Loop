@@ -20,6 +20,8 @@ from sse_starlette.sse import EventSourceResponse
 from agentkit.config.loader import load_config as load_agent_toml
 from agentkit.errors import ConfigError
 from coding_agent.approval import ApprovalPolicy
+from coding_agent.environment import cloud_client_factory_from_config
+from coding_agent.ui.binding_resolver import DefaultBindingResolver
 from coding_agent.ui.session_manager import Session, SessionManager
 from coding_agent.ui.session_owner_store import (
     SessionOwnerStore,
@@ -91,6 +93,34 @@ def _load_storage_config() -> dict[str, Any]:
         return {}
 
 
+def _load_cloud_workspace_config() -> dict[str, Any]:
+    config_path = Path(__file__).resolve().parent.parent / "agent.toml"
+    try:
+        return cast(
+            dict[str, Any], load_agent_toml(config_path).extra.get("cloud_workspace", {})
+        )
+    except (ConfigError, OSError) as exc:
+        if isinstance(exc, ConfigError):
+            detail = exc.args[0] if exc.args and isinstance(exc.args[0], str) else ""
+            if not detail.startswith("config file not found:"):
+                raise
+        logger.warning(
+            "Unable to load cloud workspace config from %s; using defaults",
+            config_path,
+            exc_info=True,
+        )
+        return {}
+
+
+def _build_binding_resolver() -> DefaultBindingResolver:
+    cloud_workspace_config = _load_cloud_workspace_config()
+    if cloud_workspace_config.get("enabled") is not True:
+        return DefaultBindingResolver()
+    return DefaultBindingResolver(
+        cloud_client_factory=cloud_client_factory_from_config(cloud_workspace_config)
+    )
+
+
 def _storage_uses_pg_http_sessions(storage_config: dict[str, Any]) -> bool:
     http_backend = storage_config.get("http_session_backend")
     if http_backend is not None:
@@ -134,7 +164,10 @@ def _configured_owner_lease_seconds(storage_config: dict[str, Any]) -> float:
 
 def _build_session_manager() -> SessionManager:
     storage_config = _load_storage_config()
-    manager = SessionManager(storage_config=storage_config)
+    manager = SessionManager(
+        storage_config=storage_config,
+        binding_resolver=_build_binding_resolver(),
+    )
     if not _storage_uses_pg_http_sessions(storage_config):
         return manager
     owner_store = SessionOwnerStore(pg_pool=manager.pg_pool)
