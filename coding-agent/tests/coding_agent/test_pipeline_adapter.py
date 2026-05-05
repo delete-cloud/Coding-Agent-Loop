@@ -23,6 +23,7 @@ from agentkit.tape.models import Entry
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.adapter_types import StopReason, TurnOutcome
 from coding_agent.plugins.metrics import SessionMetricsPlugin
+from coding_agent.ui.session_owner_store import SessionOwnershipConflictError
 from coding_agent.wire.protocol import (
     CompletionStatus,
     StreamDelta,
@@ -973,6 +974,26 @@ class TestErrorRecovery:
         assert outcome.stop_reason == StopReason.ERROR
         assert outcome.error is not None
         assert "stage blew up" in outcome.error
+
+    @pytest.mark.asyncio
+    async def test_session_ownership_conflict_reraises_from_run_turn(self):
+        adapter, ctx, _ = self._make_adapter_with_mock_pipeline(
+            SessionOwnershipConflictError("stale owner or fencing token rejected")
+        )
+
+        with pytest.raises(
+            SessionOwnershipConflictError,
+            match="stale owner or fencing token rejected",
+        ):
+            await adapter.run_turn("hello")
+
+        user_entries = [
+            e
+            for e in ctx.tape
+            if e.kind == "message" and e.payload.get("role") == "user"
+        ]
+        assert len(user_entries) == 1
+        assert user_entries[0].payload["content"] == "hello"
 
     # ── 2. User message preserved after Pipeline rollback ────────────────
 

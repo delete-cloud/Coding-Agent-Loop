@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from pydantic import BaseModel
 
+from agentkit.tools import FatalToolExecutionError
 from agentkit.providers.models import (
     DoneEvent,
     TextEvent,
@@ -222,6 +223,9 @@ class PipelineAdapter:
         except KeyboardInterrupt:
             self._ensure_user_message(user_entry)
             return await self._finish(StopReason.INTERRUPTED, error="Interrupted")
+        except FatalToolExecutionError:
+            self._ensure_user_message(user_entry)
+            raise
         except Exception as exc:
             self._ensure_user_message(user_entry)
             return await self._finish(StopReason.ERROR, error=str(exc))
