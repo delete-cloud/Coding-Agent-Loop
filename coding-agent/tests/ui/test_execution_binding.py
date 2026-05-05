@@ -9,6 +9,11 @@ from coding_agent.ui.binding_resolver import (
     DefaultBindingResolver,
 )
 from coding_agent.environment import CloudCommandResult, CloudEnvironment, LocalEnvironment
+from coding_agent.environment import workspace_provider as workspace_provider_module
+from coding_agent.environment.workspace_provider import (
+    cloud_client_factory_from_config,
+    register_workspace_provider,
+)
 from coding_agent.ui.execution_binding import (
     CloudWorkspaceBinding,
     ExecutionBinding,
@@ -186,3 +191,51 @@ def test_cloud_binding_resolves_to_cloud_environment_when_client_available() -> 
         "workspace_id": "ws-123",
         "workspace_url": "https://workspace.example.com",
     }
+
+
+class FakeWorkspaceProvider:
+    def __init__(self) -> None:
+        self.seen_configs: list[dict[str, object]] = []
+
+    def build_cloud_client_factory(self, config: dict[str, object]):
+        self.seen_configs.append(dict(config))
+
+        def build_client(binding: CloudWorkspaceBinding) -> FakeCloudClient:
+            assert binding.workspace_url == "https://workspace.example.com"
+            assert binding.workspace_id == "ws-123"
+            return FakeCloudClient()
+
+        return build_client
+
+
+def test_cloud_workspace_provider_registry_builds_factory(monkeypatch) -> None:
+    monkeypatch.setattr(workspace_provider_module, "_WORKSPACE_PROVIDERS", {})
+    provider = FakeWorkspaceProvider()
+    register_workspace_provider("fake-provider", provider)
+
+    factory = cloud_client_factory_from_config(
+        {
+            "provider": "fake-provider",
+            "workspace_root": "/srv/workspaces",
+        }
+    )
+
+    client = factory(
+        CloudWorkspaceBinding(
+            workspace_url="https://workspace.example.com",
+            workspace_id="ws-123",
+        )
+    )
+
+    assert isinstance(client, FakeCloudClient)
+    assert provider.seen_configs == [
+        {"provider": "fake-provider", "workspace_root": "/srv/workspaces"}
+    ]
+
+
+def test_cloud_workspace_provider_config_requires_provider() -> None:
+    with pytest.raises(
+        ValueError,
+        match="cloud_workspace.provider is required when cloud_workspace.enabled=true",
+    ):
+        cloud_client_factory_from_config({"enabled": True})
