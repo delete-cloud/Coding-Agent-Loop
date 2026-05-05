@@ -309,6 +309,8 @@ def build_subagent_tool(child_pipeline_builder: ChildPipelineBuilder):
             timed_out = True
         except asyncio.CancelledError:
             raise
+        except SessionOwnershipConflictError:
+            raise
         except Exception as exc:
             outcome = TurnOutcome(stop_reason=StopReason.ERROR, error=str(exc))
         finally:

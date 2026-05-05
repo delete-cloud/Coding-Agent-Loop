@@ -1149,6 +1149,50 @@ async def test_subagent_tool_stale_owner_publish_escapes_toolset_execution(
 
 
 @pytest.mark.asyncio
+async def test_subagent_tool_reraises_stale_owner_from_child_run_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    child_ctx = PipelineContext(tape=Tape(), session_id="parent-session")
+    events: list[str] = []
+
+    def child_pipeline_builder(**_kwargs: Any):
+        return cast(Pipeline, object()), child_ctx
+
+    class StaleOwnerAdapter:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        async def run_turn(self, _goal: str) -> TurnOutcome:
+            raise SessionOwnershipConflictError("stale owner inside child run")
+
+        async def close(self) -> None:
+            events.append("adapter-close")
+
+    monkeypatch.setattr(
+        "coding_agent.tools.subagent.PipelineAdapter", StaleOwnerAdapter
+    )
+
+    tool_fn = build_subagent_tool(child_pipeline_builder)
+    parent_ctx = PipelineContext(
+        tape=Tape(),
+        session_id="parent-session",
+        config={
+            "agent_id": "parent-agent",
+            "subagent_timeout": 30.0,
+            "child_worker_coordinator": _StubCoordinator(),
+        },
+    )
+
+    with pytest.raises(
+        SessionOwnershipConflictError,
+        match="stale owner inside child run",
+    ):
+        await tool_fn(goal="Inspect", __pipeline_ctx__=parent_ctx)
+
+    assert events == ["adapter-close"]
+
+
+@pytest.mark.asyncio
 async def test_subagent_tool_fails_fast_on_empty_parent_session_id(
     monkeypatch: pytest.MonkeyPatch,
 ):
