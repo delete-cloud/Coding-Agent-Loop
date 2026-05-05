@@ -1,6 +1,6 @@
 # ADR-0018: Keep cloud-aware subagent orchestration owner-local
 
-**Status**: Proposed
+**Status**: Accepted
 **Date**: 2026-05-04
 
 ## Context
