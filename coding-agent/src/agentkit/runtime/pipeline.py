@@ -38,6 +38,7 @@ from agentkit.runtime.messages import (
 )
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
+from agentkit.tools import FatalToolExecutionError
 from agentkit.tools.toolset import ToolCallRequest, ToolExecutionOptions, Toolset
 
 logger = logging.getLogger(__name__)
@@ -410,6 +411,8 @@ class Pipeline:
                     else:
                         logger.debug("Stage '%s' has no handler, skipping", stage)
                 except PipelineError:
+                    raise
+                except FatalToolExecutionError:
                     raise
                 except Exception as exc:
                     self._runtime.notify("on_error", stage=stage, error=exc)

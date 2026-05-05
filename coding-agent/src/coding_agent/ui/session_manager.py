@@ -32,6 +32,7 @@ from agentkit.runtime import (
 )
 from agentkit.storage.protocols import CheckpointStore, TapeStore
 from agentkit.tape.tape import Tape
+from agentkit.tools import FatalToolExecutionError
 from agentkit.tape.models import Entry
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.approval import (
@@ -1407,7 +1408,7 @@ class SessionManager:
                 await adapter.run_turn(prompt)
                 session.tape_id = ctx.tape.tape_id
                 await self._persist_session_async(session)
-            except SessionOwnershipConflictError:
+            except FatalToolExecutionError:
                 await self._close_runtime(session)
                 raise
             except Exception as exc:

@@ -11,12 +11,12 @@ from typing import Any, AsyncContextManager, cast
 from agentkit.runtime.pipeline import Pipeline, PipelineContext
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
+from agentkit.tools import FatalToolExecutionError
 from agentkit.tools import tool
 
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.adapter_types import StopReason, TurnOutcome
 from coding_agent.agent_identity import effective_agent_id, legacy_agent_id_str
-from coding_agent.ui.session_owner_store import SessionOwnershipConflictError
 from coding_agent.wire.protocol import ToolCallDelta, WireMessage
 
 
@@ -160,7 +160,7 @@ async def _publish_subagent_summary(
         )
         if isawaitable(publish_result):
             await publish_result
-    except SessionOwnershipConflictError:
+    except FatalToolExecutionError:
         raise
     except Exception:
         logger.warning(
@@ -309,7 +309,7 @@ def build_subagent_tool(child_pipeline_builder: ChildPipelineBuilder):
             timed_out = True
         except asyncio.CancelledError:
             raise
-        except SessionOwnershipConflictError:
+        except FatalToolExecutionError:
             raise
         except Exception as exc:
             outcome = TurnOutcome(stop_reason=StopReason.ERROR, error=str(exc))

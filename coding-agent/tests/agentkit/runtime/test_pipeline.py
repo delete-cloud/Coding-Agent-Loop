@@ -17,6 +17,7 @@ from agentkit.tape.tape import Tape
 from agentkit.tape.models import Entry
 from agentkit.tape.anchor import Anchor
 from agentkit.errors import PipelineError
+from agentkit.tools import FatalToolExecutionError
 from agentkit.tools import UNHANDLED_TOOL_RESULT
 from agentkit.tools.schema import ToolSchema
 
@@ -126,6 +127,41 @@ class BatchToolPlugin:
     def execute_tools_batch(self, tool_calls=None, **kwargs):
         del tool_calls, kwargs
         return self.batch_results
+
+
+class FatalExecuteToolPlugin:
+    state_key = "fatal_execute_tool"
+
+    def __init__(self):
+        self.batch_called = False
+
+    def hooks(self):
+        return {
+            "get_tools": self.get_tools,
+            "execute_tools_batch": self.execute_tools_batch,
+        }
+
+    def get_tools(self, **kwargs):
+        del kwargs
+        return [
+            ToolSchema(
+                name="fatal_tool",
+                description="Fatal tool for testing",
+                parameters={
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            )
+        ]
+
+    def execute_tools_batch(self, tool_calls=None, **kwargs):
+        del kwargs
+        assert tool_calls is not None
+        assert len(tool_calls) == 2
+        assert all(call.get("name") == "fatal_tool" for call in tool_calls)
+        self.batch_called = True
+        raise FatalToolExecutionError("fatal batch tool failure")
 
 
 class SchemaValidatedToolPlugin:
@@ -1401,6 +1437,47 @@ class TestPipeline:
             match="execute_tools_batch returned 3 results for 2 tool calls",
         ):
             await pipeline.run_turn(ctx)
+
+    @pytest.mark.asyncio
+    async def test_run_turn_reraises_fatal_tool_execution_error_from_batch_hook(
+        self, setup
+    ):
+        _pipeline, plugin = setup
+        registry = PluginRegistry()
+        registry.register(plugin)
+        fatal_plugin = FatalExecuteToolPlugin()
+        registry.register(fatal_plugin)
+        pipeline = Pipeline(runtime=HookRuntime(registry), registry=registry)
+
+        tape = Tape()
+        tape.append(
+            Entry(kind="message", payload={"role": "user", "content": "do one thing"})
+        )
+        ctx = PipelineContext(tape=tape, session_id="s1")
+        await pipeline.mount(ctx)
+
+        from agentkit.providers.models import ToolCallEvent, DoneEvent
+
+        async def mock_stream(messages, tools=None, **kwargs):
+            del messages, tools, kwargs
+            yield ToolCallEvent(
+                tool_call_id="tc1", name="fatal_tool", arguments={}
+            )
+            yield ToolCallEvent(
+                tool_call_id="tc2", name="fatal_tool", arguments={}
+            )
+            yield DoneEvent()
+
+        plugin._mock_llm = MagicMock()
+        plugin._mock_llm.stream = mock_stream
+
+        with pytest.raises(
+            FatalToolExecutionError,
+            match="fatal batch tool failure",
+        ):
+            await pipeline.run_turn(ctx)
+
+        assert fatal_plugin.batch_called is True
 
 
 class TestPipelineView:

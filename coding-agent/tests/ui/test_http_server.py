@@ -21,6 +21,8 @@ from starlette.requests import Request
 from agentkit.errors import ConfigError
 from agentkit.checkpoint.models import CheckpointMeta
 from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
+from agentkit.tape.tape import Tape
+from agentkit.tools import FatalToolExecutionError
 
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.approval.store import ApprovalStore
@@ -758,6 +760,55 @@ class TestPromptStreaming:
         assert events[-1]["data"]["agent_id"] == ""
         assert events[-1]["data"]["completion_status"] == CompletionStatus.ERROR.value
 
+    async def test_prompt_streams_fatal_tool_execution_error_as_error_event_without_fake_turn(
+        self, client, monkeypatch
+    ):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        class FakeAdapter:
+            def __init__(self, pipeline, ctx, consumer) -> None:
+                del pipeline, consumer
+                self.ctx = ctx
+
+            async def run_turn(self, prompt: str) -> None:
+                del prompt
+                raise FatalToolExecutionError("fatal tool failure")
+
+            async def close(self) -> None:
+                return None
+
+        fake_pipeline = types.SimpleNamespace(
+            _registry=types.SimpleNamespace(
+                get=lambda _: types.SimpleNamespace(_instance=None)
+            ),
+            _directive_executor=None,
+        )
+
+        monkeypatch.setattr(
+            "coding_agent.__main__.create_agent",
+            lambda **kwargs: (
+                fake_pipeline,
+                types.SimpleNamespace(config={}, tape=kwargs.get("tape") or Tape()),
+            ),
+        )
+        monkeypatch.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+
+        events = []
+        async with aconnect_sse(
+            client,
+            "POST",
+            f"/sessions/{session_id}/prompt",
+            json={"prompt": "Hello"},
+        ) as event_source:
+            async for sse in event_source.aiter_sse():
+                events.append({"event": sse.event, "data": json.loads(sse.data)})
+                if sse.event in {"Error", "TurnEnd"}:
+                    break
+
+        assert [event["event"] for event in events] == ["Error"]
+        assert events[0]["data"]["error"] == "fatal tool failure"
+
     async def test_prompt_sets_turn_in_progress(self, client):
         """Test that prompt sets turn_in_progress flag."""
         create_resp = await client.post("/sessions", json={})
@@ -890,6 +941,100 @@ class TestPromptStreaming:
             for event in events
         )
         assert provider.calls == 3
+
+    async def test_prompt_streams_fatal_subagent_summary_publish_as_error_event_in_real_http_session(
+        self, client, tmp_path, monkeypatch
+    ):
+        class FatalSubagentProvider:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            @property
+            def model_name(self) -> str:
+                return "scripted-subagent-fatal"
+
+            @property
+            def max_context_size(self) -> int:
+                return 128000
+
+            async def stream(self, messages, tools=None, **kwargs):
+                del messages, kwargs
+                self.calls += 1
+                if self.calls == 1:
+                    yield ToolCallEvent(
+                        tool_call_id="tc-http-subagent",
+                        name="subagent",
+                        arguments={"goal": "Inspect child task"},
+                    )
+                    yield DoneEvent()
+                    return
+
+                if self.calls == 2:
+                    assert tools is not None
+                    tool_names = {
+                        tool["function"]["name"]
+                        for tool in tools
+                        if isinstance(tool, dict)
+                        and isinstance(tool.get("function"), dict)
+                    }
+                    assert "subagent" not in tool_names
+                    yield TextEvent(text="Child finished summary")
+                    yield DoneEvent()
+                    return
+
+                yield TextEvent(text="Parent should not receive child result")
+                yield DoneEvent()
+
+        async def fatal_publish_subagent_message(
+            session_id: str,
+            text: str,
+            *,
+            message_id: str | None = None,
+            metadata: dict[str, Any] | None = None,
+        ) -> bool:
+            del session_id, text, message_id, metadata
+            raise FatalToolExecutionError("fatal summary publish rejected")
+
+        provider = FatalSubagentProvider()
+        session_id = "http-subagent-fatal-session"
+        session = register_session(
+            session_id,
+            provider=provider,
+            repo_path=tmp_path,
+            approval_policy=ApprovalPolicy.YOLO,
+        )
+        monkeypatch.setattr(
+            session_manager,
+            "publish_subagent_message",
+            fatal_publish_subagent_message,
+        )
+        session.runtime_pipeline = None
+        session.runtime_ctx = None
+        session.runtime_adapter = None
+
+        events = []
+        async with aconnect_sse(
+            client,
+            "POST",
+            f"/sessions/{session_id}/prompt",
+            json={"prompt": "Please delegate this to a subagent"},
+        ) as event_source:
+            async for sse in event_source.aiter_sse():
+                events.append({"event": sse.event, "data": json.loads(sse.data)})
+                if sse.event == "Error":
+                    break
+
+        assert any(
+            event["event"] == "ToolCallDelta"
+            and event["data"]["tool_name"] == "subagent"
+            for event in events
+        )
+        assert any(
+            event["event"] == "Error"
+            and event["data"]["error"] == "fatal summary publish rejected"
+            for event in events
+        )
+        assert provider.calls == 2
 
 
 class TestConcurrentTurns:

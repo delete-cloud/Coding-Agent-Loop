@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
+from agentkit.tools import FatalToolExecutionError
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
 from coding_agent.approval import ApprovalPolicy
@@ -346,6 +347,52 @@ async def test_run_agent_reraises_owner_conflict_without_sending_error_turn() ->
             SessionOwnershipConflictError,
             match="stale owner or fencing token rejected",
         ):
+            await manager.run_agent(session_id, "boom")
+
+    assert close_calls == ["closed"]
+    assert session.runtime_pipeline is None
+    assert session.runtime_ctx is None
+    assert session.runtime_adapter is None
+    assert session.turn_in_progress is False
+    assert session.wire.consume_outgoing() is None
+
+
+@pytest.mark.asyncio
+async def test_run_agent_reraises_fatal_tool_execution_error_without_sending_error_turn() -> None:
+    manager = SessionManager(store=InMemorySessionStore())
+    session_id = await manager.create_session()
+    session = manager.get_session(session_id)
+
+    close_calls: list[str] = []
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+            self.ctx = ctx
+
+        async def run_turn(self, prompt: str) -> None:
+            del prompt
+            raise FatalToolExecutionError("fatal tool failure")
+
+        async def close(self) -> None:
+            close_calls.append("closed")
+
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        ),
+        _directive_executor=None,
+    )
+
+    def fake_create_agent(**kwargs):
+        return fake_pipeline, types.SimpleNamespace(
+            config={}, tape=kwargs.get("tape") or Tape()
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
+        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        with pytest.raises(FatalToolExecutionError, match="fatal tool failure"):
             await manager.run_agent(session_id, "boom")
 
     assert close_calls == ["closed"]
