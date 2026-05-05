@@ -19,6 +19,8 @@ if TYPE_CHECKING:
 
 _WORKSPACE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_DOCKER_TIMEOUT_KILL_AFTER_SECONDS = 2
+_DOCKER_TIMEOUT_MARGIN_SECONDS = 1
 
 
 @dataclass(frozen=True)
@@ -112,6 +114,8 @@ class DockerCloudWorkspaceClient:
         env: dict[str, str] | None,
         timeout: int,
     ) -> CloudCommandResult:
+        if timeout <= 0:
+            raise ValueError("timeout must be positive")
         remote_cwd, host_cwd = self._resolve_directory_path(cwd or self.default_cwd)
         if not host_cwd.is_dir():
             raise ValueError(f"Working directory does not exist: {remote_cwd}")
@@ -126,7 +130,25 @@ class DockerCloudWorkspaceClient:
             docker_command.extend(["--user", self._exec_user])
         for key, value in self._filtered_env_items(env):
             docker_command.extend(["-e", f"{key}={value}"])
-        docker_command.extend([self._container_name, "/bin/sh", "-c", command])
+        docker_command.extend(
+            [
+                self._container_name,
+                "timeout",
+                "-s",
+                "TERM",
+                "-k",
+                f"{_DOCKER_TIMEOUT_KILL_AFTER_SECONDS}s",
+                f"{timeout}s",
+                "/bin/sh",
+                "-c",
+                command,
+            ]
+        )
+        local_timeout = (
+            timeout
+            + _DOCKER_TIMEOUT_KILL_AFTER_SECONDS
+            + _DOCKER_TIMEOUT_MARGIN_SECONDS
+        )
 
         try:
             result = subprocess.run(
@@ -134,11 +156,14 @@ class DockerCloudWorkspaceClient:
                 shell=False,
                 capture_output=True,
                 text=True,
-                timeout=timeout,
+                timeout=local_timeout,
                 env=None,
             )
         except subprocess.TimeoutExpired as exc:
-            raise TimeoutError("docker exec timed out") from exc
+            raise TimeoutError(f"docker exec command timed out after {timeout}s") from exc
+
+        if result.returncode in {124, 137}:
+            raise TimeoutError(f"docker exec command timed out after {timeout}s")
 
         return CloudCommandResult(
             stdout=result.stdout,
@@ -241,6 +266,8 @@ def _container_workspace_root(config: dict[str, object]) -> str:
     normalized = posixpath.normpath(root)
     if not normalized.startswith("/"):
         raise ValueError("cloud_workspace.container_workspace_root must be absolute")
+    if not normalized.lstrip("/"):
+        raise ValueError("cloud_workspace.container_workspace_root must not resolve to /")
     return normalized
 
 
@@ -291,10 +318,13 @@ def _workspace_root_for_id(workspace_root: Path, workspace_id: str) -> Path:
 
 
 def _normalize_remote_path(path: str, workspace_root: str) -> str:
+    normalized_root = posixpath.normpath(workspace_root)
+    if not normalized_root.lstrip("/"):
+        raise ValueError("cloud_workspace.container_workspace_root must not resolve to /")
     resolved = path if path.startswith("/") else posixpath.join(workspace_root, path)
     normalized = posixpath.normpath(resolved)
-    workspace_prefix = workspace_root.rstrip("/") + "/"
-    if normalized != workspace_root and not normalized.startswith(workspace_prefix):
+    workspace_prefix = normalized_root.rstrip("/") + "/"
+    if normalized != normalized_root and not normalized.startswith(workspace_prefix):
         raise ValueError(f"Path is outside docker workspace: {normalized}")
     return normalized
 

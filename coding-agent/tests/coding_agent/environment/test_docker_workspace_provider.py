@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -157,6 +159,12 @@ def test_docker_cloud_client_runs_shell_in_workspace_cwd(
         "-e",
         "SAFE_VAR=1",
         "agent-ws-123",
+        "timeout",
+        "-s",
+        "TERM",
+        "-k",
+        "2s",
+        "9s",
         "/bin/sh",
         "-c",
         "python -V",
@@ -165,9 +173,82 @@ def test_docker_cloud_client_runs_shell_in_workspace_cwd(
         "shell": False,
         "capture_output": True,
         "text": True,
-        "timeout": 9,
+        "timeout": 12,
         "env": None,
     }
+
+
+def test_docker_cloud_client_raises_timeout_when_container_command_times_out(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    target_root = workspace_root / "ws-123"
+    target_root.mkdir(parents=True)
+
+    client = cloud_client_factory_from_config(
+        {
+            "provider": "docker",
+            "workspace_root": str(workspace_root),
+        }
+    )(
+        CloudWorkspaceBinding(
+            workspace_url="https://workspace.example.com",
+            workspace_id="ws-123",
+        )
+    )
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        _ = kwargs
+        return subprocess.CompletedProcess(command, 124, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(TimeoutError, match="docker exec command timed out after 1s"):
+        _ = client.run_command("sleep 10", cwd="/workspace", env=None, timeout=1)
+
+
+def test_docker_cloud_client_timeout_contract_blocks_post_timeout_mutation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    target_root = workspace_root / "ws-123"
+    target_root.mkdir(parents=True)
+    marker = target_root / "late-write.txt"
+
+    client = cloud_client_factory_from_config(
+        {
+            "provider": "docker",
+            "workspace_root": str(workspace_root),
+        }
+    )(
+        CloudWorkspaceBinding(
+            workspace_url="https://workspace.example.com",
+            workspace_id="ws-123",
+        )
+    )
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        _ = kwargs
+        if "timeout" not in command:
+            timer = threading.Timer(
+                0.05,
+                lambda: marker.write_text("late write\n", encoding="utf-8"),
+            )
+            timer.start()
+            raise subprocess.TimeoutExpired(command, timeout=1)
+        return subprocess.CompletedProcess(command, 124, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(TimeoutError, match="docker exec command timed out after 1s"):
+        _ = client.run_command("sleep 10", cwd="/workspace", env=None, timeout=1)
+
+    time.sleep(0.1)
+    assert not marker.exists()
 
 
 def test_docker_cloud_client_rejects_disallowed_env_names(tmp_path: Path) -> None:
@@ -296,3 +377,18 @@ def test_docker_workspace_provider_requires_workspace_root() -> None:
         match="cloud_workspace.workspace_root is required for provider=docker",
     ):
         _ = cloud_client_factory_from_config({"provider": "docker"})
+
+
+@pytest.mark.parametrize("root", ["/", "//", "/./", "/workspace/.."])
+def test_docker_workspace_provider_rejects_root_container_workspace_root(root: str) -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"cloud_workspace\.container_workspace_root must not resolve to /",
+    ):
+        _ = cloud_client_factory_from_config(
+            {
+                "provider": "docker",
+                "workspace_root": "/srv/workspaces",
+                "container_workspace_root": root,
+            }
+        )
