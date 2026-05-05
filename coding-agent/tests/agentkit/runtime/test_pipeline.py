@@ -132,10 +132,13 @@ class BatchToolPlugin:
 class FatalExecuteToolPlugin:
     state_key = "fatal_execute_tool"
 
+    def __init__(self):
+        self.batch_called = False
+
     def hooks(self):
         return {
             "get_tools": self.get_tools,
-            "execute_tool": self.execute_tool,
+            "execute_tools_batch": self.execute_tools_batch,
         }
 
     def get_tools(self, **kwargs):
@@ -152,10 +155,12 @@ class FatalExecuteToolPlugin:
             )
         ]
 
-    def execute_tool(self, name: str = "", arguments=None, **kwargs):
-        del arguments, kwargs
-        if name != "fatal_tool":
-            return UNHANDLED_TOOL_RESULT
+    def execute_tools_batch(self, tool_calls=None, **kwargs):
+        del kwargs
+        assert tool_calls is not None
+        assert len(tool_calls) == 2
+        assert all(call.get("name") == "fatal_tool" for call in tool_calls)
+        self.batch_called = True
         raise FatalToolExecutionError("fatal batch tool failure")
 
 
@@ -1440,7 +1445,8 @@ class TestPipeline:
         _pipeline, plugin = setup
         registry = PluginRegistry()
         registry.register(plugin)
-        registry.register(FatalExecuteToolPlugin())
+        fatal_plugin = FatalExecuteToolPlugin()
+        registry.register(fatal_plugin)
         pipeline = Pipeline(runtime=HookRuntime(registry), registry=registry)
 
         tape = Tape()
@@ -1453,8 +1459,12 @@ class TestPipeline:
         from agentkit.providers.models import ToolCallEvent, DoneEvent
 
         async def mock_stream(messages, tools=None, **kwargs):
+            del messages, tools, kwargs
             yield ToolCallEvent(
                 tool_call_id="tc1", name="fatal_tool", arguments={}
+            )
+            yield ToolCallEvent(
+                tool_call_id="tc2", name="fatal_tool", arguments={}
             )
             yield DoneEvent()
 
@@ -1466,6 +1476,8 @@ class TestPipeline:
             match="fatal batch tool failure",
         ):
             await pipeline.run_turn(ctx)
+
+        assert fatal_plugin.batch_called is True
 
 
 class TestPipelineView:
