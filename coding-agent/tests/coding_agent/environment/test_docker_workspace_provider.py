@@ -11,6 +11,9 @@ from coding_agent.environment import DockerCloudWorkspaceClient, cloud_client_fa
 from coding_agent.ui.execution_binding import CloudWorkspaceBinding
 
 
+TIMEOUT_SENTINEL = "__CODING_AGENT_DOCKER_TIMEOUT__"
+
+
 def test_docker_workspace_provider_builds_client_from_config(tmp_path: Path) -> None:
     workspace_root = tmp_path / "workspaces"
     workspace_root.mkdir()
@@ -128,13 +131,15 @@ def test_docker_cloud_client_runs_shell_in_workspace_cwd(
         )
     )
 
-    captured: dict[str, object] = {}
+    captured_command: list[str] = []
+    captured_kwargs: dict[str, object] = {}
 
     def fake_run(
         command: list[str], **kwargs: object
     ) -> subprocess.CompletedProcess[str]:
-        captured["command"] = command
-        captured["kwargs"] = kwargs
+        captured_command[:] = command
+        captured_kwargs.clear()
+        captured_kwargs.update(kwargs)
         return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -149,7 +154,7 @@ def test_docker_cloud_client_runs_shell_in_workspace_cwd(
     assert result.stdout == "ok"
     assert result.stderr == ""
     assert result.exit_code == 0
-    assert captured["command"] == [
+    assert captured_command[:17] == [
         "/usr/bin/docker",
         "exec",
         "--workdir",
@@ -167,9 +172,13 @@ def test_docker_cloud_client_runs_shell_in_workspace_cwd(
         "9s",
         "/bin/sh",
         "-c",
-        "python -V",
     ]
-    assert captured["kwargs"] == {
+    timeout_wrapper = captured_command[17]
+    assert TIMEOUT_SENTINEL in timeout_wrapper
+    assert 'trap _coding_agent_timeout TERM' in timeout_wrapper
+    assert '/bin/sh -c "$1" &' in timeout_wrapper
+    assert captured_command[18:] == ["sh", "python -V"]
+    assert captured_kwargs == {
         "shell": False,
         "capture_output": True,
         "text": True,
@@ -201,12 +210,50 @@ def test_docker_cloud_client_raises_timeout_when_container_command_times_out(
         command: list[str], **kwargs: object
     ) -> subprocess.CompletedProcess[str]:
         _ = kwargs
-        return subprocess.CompletedProcess(command, 124, stdout="", stderr="")
+        return subprocess.CompletedProcess(
+            command,
+            124,
+            stdout="",
+            stderr=f"{TIMEOUT_SENTINEL}\n",
+        )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     with pytest.raises(TimeoutError, match="docker exec command timed out after 1s"):
         _ = client.run_command("sleep 10", cwd="/workspace", env=None, timeout=1)
+
+
+@pytest.mark.parametrize("exit_code", [124, 137])
+def test_docker_cloud_client_preserves_legitimate_exit_codes(
+    exit_code: int, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    target_root = workspace_root / "ws-123"
+    target_root.mkdir(parents=True)
+
+    client = cloud_client_factory_from_config(
+        {
+            "provider": "docker",
+            "workspace_root": str(workspace_root),
+        }
+    )(
+        CloudWorkspaceBinding(
+            workspace_url="https://workspace.example.com",
+            workspace_id="ws-123",
+        )
+    )
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        _ = kwargs
+        return subprocess.CompletedProcess(command, exit_code, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = client.run_command("exit 0", cwd="/workspace", env=None, timeout=1)
+
+    assert result.exit_code == exit_code
 
 
 def test_docker_cloud_client_timeout_contract_blocks_post_timeout_mutation(
@@ -233,14 +280,19 @@ def test_docker_cloud_client_timeout_contract_blocks_post_timeout_mutation(
         command: list[str], **kwargs: object
     ) -> subprocess.CompletedProcess[str]:
         _ = kwargs
-        if "timeout" not in command:
+        if not any(TIMEOUT_SENTINEL in arg for arg in command):
             timer = threading.Timer(
                 0.05,
                 lambda: marker.write_text("late write\n", encoding="utf-8"),
             )
             timer.start()
             raise subprocess.TimeoutExpired(command, timeout=1)
-        return subprocess.CompletedProcess(command, 124, stdout="", stderr="")
+        return subprocess.CompletedProcess(
+            command,
+            124,
+            stdout="",
+            stderr=f"{TIMEOUT_SENTINEL}\n",
+        )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 

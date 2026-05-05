@@ -21,6 +21,7 @@ _WORKSPACE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DOCKER_TIMEOUT_KILL_AFTER_SECONDS = 2
 _DOCKER_TIMEOUT_MARGIN_SECONDS = 1
+_DOCKER_TIMEOUT_SENTINEL = "__CODING_AGENT_DOCKER_TIMEOUT__"
 
 
 @dataclass(frozen=True)
@@ -130,6 +131,24 @@ class DockerCloudWorkspaceClient:
             docker_command.extend(["--user", self._exec_user])
         for key, value in self._filtered_env_items(env):
             docker_command.extend(["-e", f"{key}={value}"])
+        timeout_wrapper = "\n".join(
+            [
+                "child=''",
+                "_coding_agent_timeout() {",
+                '  if [ -n "$child" ]; then',
+                '    kill -TERM "$child" 2>/dev/null || true',
+                "  fi",
+                f"  printf '%s\\n' '{_DOCKER_TIMEOUT_SENTINEL}' >&2",
+                '  wait "$child" 2>/dev/null || true',
+                "  exit 124",
+                "}",
+                "trap _coding_agent_timeout TERM",
+                '/bin/sh -c "$1" &',
+                "child=$!",
+                'wait "$child"',
+                "exit $?",
+            ]
+        )
         docker_command.extend(
             [
                 self._container_name,
@@ -141,6 +160,8 @@ class DockerCloudWorkspaceClient:
                 f"{timeout}s",
                 "/bin/sh",
                 "-c",
+                timeout_wrapper,
+                "sh",
                 command,
             ]
         )
@@ -162,7 +183,7 @@ class DockerCloudWorkspaceClient:
         except subprocess.TimeoutExpired as exc:
             raise TimeoutError(f"docker exec command timed out after {timeout}s") from exc
 
-        if result.returncode in {124, 137}:
+        if _DOCKER_TIMEOUT_SENTINEL in result.stderr:
             raise TimeoutError(f"docker exec command timed out after {timeout}s")
 
         return CloudCommandResult(
