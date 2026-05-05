@@ -699,6 +699,32 @@ class TestPromptStreaming:
             CompletionStatus.ERROR.value,
         }
 
+    async def test_prompt_streams_owner_conflict_as_error_event_without_fake_turn(
+        self, client, monkeypatch
+    ):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        async def conflicting_run_agent(_session_id: str, _prompt: str) -> None:
+            assert _session_id == session_id
+            raise SessionOwnershipConflictError("stale owner or fencing token rejected")
+
+        monkeypatch.setattr(session_manager, "run_agent", conflicting_run_agent)
+
+        events = []
+        async with aconnect_sse(
+            client,
+            "POST",
+            f"/sessions/{session_id}/prompt",
+            json={"prompt": "Hello"},
+        ) as event_source:
+            async for sse in event_source.aiter_sse():
+                events.append({"event": sse.event, "data": json.loads(sse.data)})
+                break
+
+        assert [event["event"] for event in events] == ["Error"]
+        assert events[0]["data"]["error"] == "stale owner or fencing token rejected"
+
     async def test_prompt_returns_parent_turn_end_when_agent_bootstrap_fails(
         self, client
     ):
