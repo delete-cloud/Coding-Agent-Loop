@@ -26,6 +26,8 @@ from agentkit.tools import FatalToolExecutionError
 
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.approval.store import ApprovalStore
+from coding_agent.environment import CloudCommandResult, CloudEnvironment
+from coding_agent.ui.binding_resolver import CloudBindingNotImplementedError
 from coding_agent.ui.execution_binding import CloudWorkspaceBinding, LocalExecutionBinding
 from coding_agent.wire.local import LocalWire
 from coding_agent.ui.session_manager import Session
@@ -124,6 +126,44 @@ def add_store_backed_approval_request(
         timeout_seconds=120,
     )
     session.approval_store.add_request(approval_req)
+
+
+class FakeCloudClient:
+    workspace_id = "ws-configured"
+    workspace_url = "https://workspace.example.com"
+    default_cwd = "/workspace"
+
+    def read_file(self, path: str) -> str:
+        return path
+
+    def write_file(self, path: str, content: str) -> None:
+        del path, content
+
+    def replace_file(self, path: str, old: str, new: str) -> None:
+        del path, old, new
+
+    def glob_files(self, pattern: str, directory: str) -> list[str]:
+        del pattern, directory
+        return []
+
+    def grep_search(self, pattern: str, directory: str, include: str) -> list[str]:
+        del pattern, directory, include
+        return []
+
+    def apply_patch(self, path: str, patch: str) -> dict[str, object]:
+        del patch
+        return {"success": True, "path": path, "changed": False}
+
+    def run_command(
+        self,
+        command: str,
+        *,
+        cwd: str | None,
+        env: dict[str, str] | None,
+        timeout: int,
+    ) -> CloudCommandResult:
+        del command, cwd, env, timeout
+        return CloudCommandResult(stdout="", stderr="", exit_code=0)
 
 
 @pytest.fixture

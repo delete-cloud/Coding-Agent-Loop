@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,11 @@ from coding_agent.ui.binding_resolver import (
     DefaultBindingResolver,
 )
 from coding_agent.environment import CloudCommandResult, CloudEnvironment, LocalEnvironment
+from coding_agent.environment import workspace_provider as workspace_provider_module
+from coding_agent.environment.workspace_provider import (
+    cloud_client_factory_from_config,
+    register_workspace_provider,
+)
 from coding_agent.ui.execution_binding import (
     CloudWorkspaceBinding,
     ExecutionBinding,
@@ -17,9 +23,9 @@ from coding_agent.ui.execution_binding import (
 
 
 class FakeCloudClient:
-    workspace_url = "https://workspace.example.com"
-    workspace_id = "ws-123"
-    default_cwd = "/workspace"
+    workspace_url: str = "https://workspace.example.com"
+    workspace_id: str = "ws-123"
+    default_cwd: str = "/workspace"
 
     def read_file(self, path: str) -> str:
         return f"read:{path}"
@@ -79,12 +85,12 @@ def test_cloud_binding_round_trip() -> None:
 
 def test_unknown_binding_kind_raises() -> None:
     with pytest.raises(ValueError, match="unknown binding kind"):
-        ExecutionBinding.from_dict({"kind": "unknown"})
+        _ = ExecutionBinding.from_dict({"kind": "unknown"})
 
 
 def test_local_binding_requires_string_workspace_root() -> None:
     with pytest.raises(TypeError, match="string workspace_root"):
-        LocalExecutionBinding.from_dict({"kind": "local", "workspace_root": 123})
+        _ = LocalExecutionBinding.from_dict({"kind": "local", "workspace_root": 123})
 
 
 def test_local_resolver_returns_absolute_path(tmp_path: Path) -> None:
@@ -116,7 +122,7 @@ def test_cloud_resolver_raises_typed_not_implemented() -> None:
     resolver = DefaultBindingResolver()
 
     with pytest.raises(CloudBindingNotImplementedError, match="cloud workspace"):
-        resolver.resolve_workspace_root(binding)
+        _ = resolver.resolve_workspace_root(binding)
 
 
 @pytest.mark.parametrize(
@@ -140,7 +146,7 @@ def test_cloud_binding_rejects_invalid_field_types(
     payload: dict[str, object], message: str
 ) -> None:
     with pytest.raises(TypeError, match=message):
-        CloudWorkspaceBinding.from_dict(payload)
+        _ = CloudWorkspaceBinding.from_dict(payload)
 
 
 def test_cloud_resolver_tool_config_raises_typed_not_implemented() -> None:
@@ -151,7 +157,7 @@ def test_cloud_resolver_tool_config_raises_typed_not_implemented() -> None:
     resolver = DefaultBindingResolver()
 
     with pytest.raises(CloudBindingNotImplementedError, match="cloud workspace"):
-        resolver.resolve_tool_config(binding)
+        _ = resolver.resolve_tool_config(binding)
 
 
 def test_cloud_resolver_environment_raises_typed_not_implemented() -> None:
@@ -162,7 +168,7 @@ def test_cloud_resolver_environment_raises_typed_not_implemented() -> None:
     resolver = DefaultBindingResolver()
 
     with pytest.raises(CloudBindingNotImplementedError, match="cloud workspace"):
-        resolver.resolve_environment(binding)
+        _ = resolver.resolve_environment(binding)
 
 
 def test_cloud_binding_resolves_to_cloud_environment_when_client_available() -> None:
@@ -186,3 +192,55 @@ def test_cloud_binding_resolves_to_cloud_environment_when_client_available() -> 
         "workspace_id": "ws-123",
         "workspace_url": "https://workspace.example.com",
     }
+
+
+class FakeWorkspaceProvider:
+    def __init__(self) -> None:
+        self.seen_configs: list[dict[str, object]] = []
+
+    def build_cloud_client_factory(
+        self, config: dict[str, object]
+    ) -> Callable[[CloudWorkspaceBinding], FakeCloudClient]:
+        self.seen_configs.append(dict(config))
+
+        def build_client(binding: CloudWorkspaceBinding) -> FakeCloudClient:
+            assert binding.workspace_url == "https://workspace.example.com"
+            assert binding.workspace_id == "ws-123"
+            return FakeCloudClient()
+
+        return build_client
+
+
+def test_cloud_workspace_provider_registry_builds_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(workspace_provider_module, "_WORKSPACE_PROVIDERS", {})
+    provider = FakeWorkspaceProvider()
+    register_workspace_provider("fake-provider", provider)
+
+    factory = cloud_client_factory_from_config(
+        {
+            "provider": "fake-provider",
+            "workspace_root": "/srv/workspaces",
+        }
+    )
+
+    client = factory(
+        CloudWorkspaceBinding(
+            workspace_url="https://workspace.example.com",
+            workspace_id="ws-123",
+        )
+    )
+
+    assert isinstance(client, FakeCloudClient)
+    assert provider.seen_configs == [
+        {"provider": "fake-provider", "workspace_root": "/srv/workspaces"}
+    ]
+
+
+def test_cloud_workspace_provider_config_requires_provider() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"cloud_workspace\.provider is required when cloud_workspace\.enabled=true",
+    ):
+        _ = cloud_client_factory_from_config({"enabled": True})
