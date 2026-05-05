@@ -71,10 +71,11 @@ class DockerCloudWorkspaceClient:
 
     def glob_files(self, pattern: str, directory: str) -> list[str]:
         _, host_directory = self._resolve_directory_path(directory)
-        matches = [
-            self._remote_path_for_host(path)
-            for path in sorted(host_directory.glob(pattern))
-        ]
+        matches: list[str] = []
+        for path in sorted(host_directory.glob(pattern)):
+            remote_path = self._workspace_entry_remote_path(path)
+            _ = self._validated_workspace_path(path, remote_path)
+            matches.append(remote_path)
         return matches
 
     def grep_search(self, pattern: str, directory: str, include: str) -> list[str]:
@@ -83,16 +84,16 @@ class DockerCloudWorkspaceClient:
         include_pattern = include or "*"
         matches: list[str] = []
         for path in sorted(host_directory.rglob(include_pattern)):
-            if not path.is_file():
+            remote_path = self._workspace_entry_remote_path(path)
+            resolved_path = self._validated_workspace_path(path, remote_path)
+            if not resolved_path.is_file():
                 continue
             for line_number, line in enumerate(
-                path.read_text(encoding="utf-8", errors="replace").splitlines(),
+                resolved_path.read_text(encoding="utf-8", errors="replace").splitlines(),
                 start=1,
             ):
                 if matcher.search(line):
-                    matches.append(
-                        f"{self._remote_path_for_host(path)}:{line_number}:{line}"
-                    )
+                    matches.append(f"{remote_path}:{line_number}:{line}")
         return matches
 
     def apply_patch(self, path: str, patch: str) -> dict[str, object]:
@@ -125,7 +126,7 @@ class DockerCloudWorkspaceClient:
             docker_command.extend(["--user", self._exec_user])
         for key, value in self._filtered_env_items(env):
             docker_command.extend(["-e", f"{key}={value}"])
-        docker_command.extend([self._container_name, "/bin/sh", "-lc", command])
+        docker_command.extend([self._container_name, "/bin/sh", "-c", command])
 
         try:
             result = subprocess.run(
@@ -147,19 +148,17 @@ class DockerCloudWorkspaceClient:
 
     def _resolve_file_path(self, path: str) -> tuple[str, Path]:
         remote_path = _normalize_remote_path(path, self.default_cwd)
-        return remote_path, _host_path_for_remote(
-            self._workspace_root,
-            self.default_cwd,
-            remote_path,
+        host_path = _host_path_for_remote(
+            self._workspace_root, self.default_cwd, remote_path
         )
+        return remote_path, self._validated_workspace_path(host_path, remote_path)
 
     def _resolve_directory_path(self, directory: str) -> tuple[str, Path]:
         remote_path = _normalize_remote_path(directory, self.default_cwd)
-        return remote_path, _host_path_for_remote(
-            self._workspace_root,
-            self.default_cwd,
-            remote_path,
+        host_path = _host_path_for_remote(
+            self._workspace_root, self.default_cwd, remote_path
         )
+        return remote_path, self._validated_workspace_path(host_path, remote_path)
 
     def _filtered_env_items(
         self, env: dict[str, str] | None
@@ -179,6 +178,20 @@ class DockerCloudWorkspaceClient:
 
     def _remote_path_for_host(self, host_path: Path) -> str:
         relative = host_path.resolve().relative_to(self._workspace_root)
+        if not relative.parts:
+            return self.default_cwd
+        return posixpath.join(self.default_cwd, *relative.parts)
+
+    def _validated_workspace_path(self, host_path: Path, remote_path: str) -> Path:
+        resolved_path = host_path.resolve(strict=False)
+        try:
+            _ = resolved_path.relative_to(self._workspace_root)
+        except ValueError as exc:
+            raise ValueError(f"Path is outside docker workspace: {remote_path}") from exc
+        return resolved_path
+
+    def _workspace_entry_remote_path(self, host_path: Path) -> str:
+        relative = host_path.relative_to(self._workspace_root)
         if not relative.parts:
             return self.default_cwd
         return posixpath.join(self.default_cwd, *relative.parts)

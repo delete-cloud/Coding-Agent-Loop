@@ -158,7 +158,7 @@ def test_docker_cloud_client_runs_shell_in_workspace_cwd(
         "SAFE_VAR=1",
         "agent-ws-123",
         "/bin/sh",
-        "-lc",
+        "-c",
         "python -V",
     ]
     assert captured["kwargs"] == {
@@ -219,6 +219,75 @@ def test_docker_cloud_client_rejects_workspace_escape(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="Path is outside docker workspace: /etc"):
         _ = client.read_file("/etc/passwd")
+
+
+def test_docker_cloud_client_rejects_symlink_escape_paths(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "workspaces"
+    target_root = workspace_root / "ws-123"
+    target_root.mkdir(parents=True)
+    outside_root = tmp_path / "outside"
+    outside_root.mkdir()
+    secret = outside_root / "secret.txt"
+    _ = secret.write_text("top secret\n", encoding="utf-8")
+    escape_dir = target_root / "escape"
+    escape_dir.symlink_to(outside_root, target_is_directory=True)
+
+    client = cloud_client_factory_from_config(
+        {
+            "provider": "docker",
+            "workspace_root": str(workspace_root),
+        }
+    )(
+        CloudWorkspaceBinding(
+            workspace_url="https://workspace.example.com",
+            workspace_id="ws-123",
+        )
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"Path is outside docker workspace: /workspace/escape/secret\.txt",
+    ):
+        _ = client.read_file("escape/secret.txt")
+
+    with pytest.raises(
+        ValueError,
+        match=r"Path is outside docker workspace: /workspace/escape/new\.txt",
+    ):
+        _ = client.write_file("escape/new.txt", "blocked")
+
+    with pytest.raises(
+        ValueError,
+        match=r"Path is outside docker workspace: /workspace/escape/secret\.txt",
+    ):
+        _ = client.replace_file("escape/secret.txt", "top", "public")
+
+    with pytest.raises(
+        ValueError,
+        match=r"Path is outside docker workspace: /workspace/escape/secret\.txt",
+    ):
+        _ = client.apply_patch(
+            "escape/secret.txt",
+            "@@ -1 +1 @@\n-top secret\n+public\n",
+        )
+
+    with pytest.raises(
+        ValueError,
+        match=r"Path is outside docker workspace: /workspace/escape",
+    ):
+        _ = client.glob_files("*.txt", "/workspace/escape")
+
+    with pytest.raises(
+        ValueError,
+        match=r"Path is outside docker workspace: /workspace/escape",
+    ):
+        _ = client.grep_search("secret", "/workspace/escape", "*.txt")
+
+    with pytest.raises(
+        ValueError,
+        match=r"Path is outside docker workspace: /workspace/escape",
+    ):
+        _ = client.run_command("python -V", cwd="/workspace/escape", env=None, timeout=5)
 
 
 def test_docker_workspace_provider_requires_workspace_root() -> None:
