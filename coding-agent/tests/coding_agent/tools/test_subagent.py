@@ -453,6 +453,7 @@ async def test_subagent_tool_publishes_interrupted_summary_to_parent_session(
 ) -> None:
     calls: list[dict[str, object]] = []
     child_ctx = PipelineContext(tape=Tape(), session_id="parent-session")
+    events: list[str] = []
 
     async def publish_subagent_message(
         session_id: str,
@@ -484,6 +485,9 @@ async def test_subagent_tool_publishes_interrupted_summary_to_parent_session(
                 error="Cancelled by user",
             )
 
+        async def close(self) -> None:
+            events.append("adapter-close")
+
     monkeypatch.setattr("coding_agent.tools.subagent.PipelineAdapter", InterruptedAdapter)
 
     tool_fn = build_subagent_tool(child_pipeline_builder)
@@ -501,6 +505,7 @@ async def test_subagent_tool_publishes_interrupted_summary_to_parent_session(
     result = await tool_fn(goal="Inspect", __pipeline_ctx__=parent_ctx)
 
     assert result == "Subagent interrupted: Cancelled by user"
+    assert events == ["adapter-close"]
     assert calls == [
         {
             "session_id": "parent-session",
@@ -1639,3 +1644,54 @@ async def test_subagent_tool_releases_write_lease_and_closes_adapter_on_cancella
         await task
 
     assert events == ["lease-enter", "lease-exit", "adapter-close"]
+
+
+@pytest.mark.asyncio
+async def test_subagent_tool_closes_adapter_when_consumer_close_is_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    events: list[str] = []
+    child_ctx = PipelineContext(tape=Tape(), session_id="parent-session")
+
+    def child_pipeline_builder(**_kwargs: Any):
+        return cast(Pipeline, object()), child_ctx
+
+    class SuccessfulAdapter:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        async def run_turn(self, _goal: str) -> TurnOutcome:
+            return TurnOutcome(
+                stop_reason=StopReason.NO_TOOL_CALLS,
+                final_message="Child finished",
+            )
+
+        async def close(self) -> None:
+            events.append("adapter-close")
+
+    async def cancelled_close(self) -> None:
+        del self
+        events.append("consumer-close")
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr("coding_agent.tools.subagent.PipelineAdapter", SuccessfulAdapter)
+    monkeypatch.setattr(
+        "coding_agent.tools.subagent._ChildWriteLeaseConsumer.close",
+        cancelled_close,
+    )
+
+    tool_fn = build_subagent_tool(child_pipeline_builder)
+    parent_ctx = PipelineContext(
+        tape=Tape(),
+        session_id="parent-session",
+        config={
+            "agent_id": "parent-agent",
+            "subagent_timeout": 30.0,
+            "child_worker_coordinator": _StubCoordinator(),
+        },
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await tool_fn(goal="Inspect", __pipeline_ctx__=parent_ctx)
+
+    assert events == ["consumer-close", "adapter-close"]

@@ -312,16 +312,18 @@ def build_subagent_tool(child_pipeline_builder: ChildPipelineBuilder):
         except Exception as exc:
             outcome = TurnOutcome(stop_reason=StopReason.ERROR, error=str(exc))
         finally:
+            saved_cancel: asyncio.CancelledError | None = None
             try:
                 await child_consumer.close()
-            except asyncio.CancelledError:
-                raise
+            except asyncio.CancelledError as exc:
+                saved_cancel = exc
             except Exception as exc:
                 cleanup_error = f"child consumer close failed: {exc}"
             try:
                 await _close_adapter_if_supported(child_adapter)
-            except asyncio.CancelledError:
-                raise
+            except asyncio.CancelledError as exc:
+                if saved_cancel is None:
+                    saved_cancel = exc
             except Exception as exc:
                 adapter_close_error = f"child adapter close failed: {exc}"
                 cleanup_error = (
@@ -329,6 +331,8 @@ def build_subagent_tool(child_pipeline_builder: ChildPipelineBuilder):
                     if cleanup_error is None
                     else f"{cleanup_error}; {adapter_close_error}"
                 )
+            if saved_cancel is not None:
+                raise saved_cancel
 
         if cleanup_error is not None:
             if timed_out:
