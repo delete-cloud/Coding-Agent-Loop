@@ -1407,6 +1407,9 @@ class SessionManager:
                 await adapter.run_turn(prompt)
                 session.tape_id = ctx.tape.tape_id
                 await self._persist_session_async(session)
+            except SessionOwnershipConflictError:
+                await self._close_runtime(session)
+                raise
             except Exception as exc:
                 await self._close_runtime(session)
                 logger.exception("HTTP session turn failed")
