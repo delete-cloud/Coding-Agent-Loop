@@ -5,6 +5,8 @@ import inspect
 import json
 from typing import Any, Awaitable, Callable, cast
 
+from agentkit.tools import FatalToolExecutionError
+
 _FILE_TOOLS = frozenset({"file_read", "file_write", "file_replace"})
 
 _CONFLICT_PAIRS: frozenset[tuple[str, str]] = frozenset(
@@ -144,12 +146,20 @@ class ParallelExecutorPlugin:
                                 call["arguments"],
                             )
                         return idx, result
+                    except FatalToolExecutionError:
+                        raise
                     except Exception as exc:
                         return idx, json.dumps({"error": str(exc)})
 
-            batch_results = await asyncio.gather(
-                *[_run_one(idx, call) for idx, call in batch]
-            )
+            tasks: dict[int, asyncio.Task[tuple[int, Any]]] = {}
+            try:
+                async with asyncio.TaskGroup() as task_group:
+                    for idx, call in batch:
+                        tasks[idx] = task_group.create_task(_run_one(idx, call))
+            except* FatalToolExecutionError as exc_group:
+                raise exc_group.exceptions[0]
+
+            batch_results = [tasks[idx].result() for idx, _ in batch]
             for idx, result in batch_results:
                 results_by_index[idx] = result
 

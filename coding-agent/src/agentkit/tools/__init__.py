@@ -3,6 +3,7 @@ from agentkit.tools.registry import ToolRegistry
 from agentkit.tools.schema import ToolSchema
 from agentkit.tools.toolset import (
     CALL_TOOL_NAME,
+    FatalToolExecutionError,
     SEARCH_TOOLS_NAME,
     ProxyToolProvider,
     ToolApprovalPolicy,
@@ -29,6 +30,7 @@ __all__ = [
     "Toolset",
     "ProxyToolProvider",
     "CALL_TOOL_NAME",
+    "FatalToolExecutionError",
     "SEARCH_TOOLS_NAME",
     "UNHANDLED_TOOL_RESULT",
     "tool",

@@ -125,6 +125,11 @@ def _summarize_subagent_outcome(outcome: TurnOutcome) -> str:
             raise ValueError("subagent error outcome missing error message")
         return f"Subagent failed: {outcome.error}"
 
+    if outcome.stop_reason == StopReason.INTERRUPTED:
+        if outcome.error:
+            return f"Subagent interrupted: {outcome.error}"
+        return "Subagent interrupted"
+
     if outcome.final_message:
         return f"Subagent completed: {outcome.final_message}"
 
@@ -295,15 +300,53 @@ def build_subagent_tool(child_pipeline_builder: ChildPipelineBuilder):
         )
         outcome: TurnOutcome | None = None
         timed_out = False
+        cleanup_error: str | None = None
         try:
             outcome = await asyncio.wait_for(
                 child_adapter.run_turn(goal), timeout=timeout_seconds
             )
         except asyncio.TimeoutError:
             timed_out = True
+        except asyncio.CancelledError:
+            raise
+        except SessionOwnershipConflictError:
+            raise
+        except Exception as exc:
+            outcome = TurnOutcome(stop_reason=StopReason.ERROR, error=str(exc))
         finally:
-            await child_consumer.close()
-            await _close_adapter_if_supported(child_adapter)
+            saved_cancel: asyncio.CancelledError | None = None
+            try:
+                await child_consumer.close()
+            except asyncio.CancelledError as exc:
+                saved_cancel = exc
+            except Exception as exc:
+                cleanup_error = f"child consumer close failed: {exc}"
+            try:
+                await _close_adapter_if_supported(child_adapter)
+            except asyncio.CancelledError as exc:
+                if saved_cancel is None:
+                    saved_cancel = exc
+            except Exception as exc:
+                adapter_close_error = f"child adapter close failed: {exc}"
+                cleanup_error = (
+                    adapter_close_error
+                    if cleanup_error is None
+                    else f"{cleanup_error}; {adapter_close_error}"
+                )
+            if saved_cancel is not None:
+                raise saved_cancel
+
+        if cleanup_error is not None:
+            if timed_out:
+                cleanup_error = (
+                    f"timed out after {timeout_seconds:g} seconds; {cleanup_error}"
+                )
+            elif outcome is not None and outcome.stop_reason == StopReason.ERROR:
+                if outcome.error is None:
+                    raise ValueError("subagent error outcome missing error message")
+                cleanup_error = f"{outcome.error}; {cleanup_error}"
+            outcome = TurnOutcome(stop_reason=StopReason.ERROR, error=cleanup_error)
+            timed_out = False
 
         if timed_out:
             summary = f"Subagent timed out after {timeout_seconds:g} seconds"
