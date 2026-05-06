@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import posixpath
 import re
+import secrets
 import subprocess
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -21,7 +22,7 @@ _WORKSPACE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DOCKER_TIMEOUT_KILL_AFTER_SECONDS = 2
 _DOCKER_TIMEOUT_MARGIN_SECONDS = 1
-_DOCKER_TIMEOUT_SENTINEL = "__CODING_AGENT_DOCKER_TIMEOUT__"
+_DOCKER_TIMEOUT_SENTINEL_PREFIX = "__CODING_AGENT_DOCKER_TIMEOUT__:"
 
 
 @dataclass(frozen=True)
@@ -131,6 +132,7 @@ class DockerCloudWorkspaceClient:
             docker_command.extend(["--user", self._exec_user])
         for key, value in self._filtered_env_items(env):
             docker_command.extend(["-e", f"{key}={value}"])
+        timeout_sentinel = _docker_timeout_sentinel()
         timeout_wrapper = "\n".join(
             [
                 "child=''",
@@ -138,7 +140,7 @@ class DockerCloudWorkspaceClient:
                 '  if [ -n "$child" ]; then',
                 '    kill -TERM "$child" 2>/dev/null || true',
                 "  fi",
-                f"  printf '%s\\n' '{_DOCKER_TIMEOUT_SENTINEL}' >&2",
+                f"  printf '%s\\n' '{timeout_sentinel}' >&2",
                 '  wait "$child" 2>/dev/null || true',
                 "  exit 124",
                 "}",
@@ -183,7 +185,7 @@ class DockerCloudWorkspaceClient:
         except subprocess.TimeoutExpired as exc:
             raise TimeoutError(f"docker exec command timed out after {timeout}s") from exc
 
-        if _DOCKER_TIMEOUT_SENTINEL in result.stderr:
+        if _contains_timeout_sentinel(result.stderr, timeout_sentinel):
             raise TimeoutError(f"docker exec command timed out after {timeout}s")
 
         return CloudCommandResult(
@@ -322,6 +324,14 @@ def _json_object(payload: str) -> dict[str, object]:
         raise ValueError("docker workspace patch payload must decode to an object")
     decoded_dict = cast(dict[object, object], decoded)
     return {str(key): value for key, value in decoded_dict.items()}
+
+
+def _docker_timeout_sentinel() -> str:
+    return f"{_DOCKER_TIMEOUT_SENTINEL_PREFIX}{secrets.token_hex(16)}"
+
+
+def _contains_timeout_sentinel(stderr: str, sentinel: str) -> bool:
+    return any(line == sentinel for line in stderr.splitlines())
 
 
 def _validate_workspace_id(workspace_id: str) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 import threading
 import time
@@ -11,7 +12,15 @@ from coding_agent.environment import DockerCloudWorkspaceClient, cloud_client_fa
 from coding_agent.ui.execution_binding import CloudWorkspaceBinding
 
 
-TIMEOUT_SENTINEL = "__CODING_AGENT_DOCKER_TIMEOUT__"
+TIMEOUT_SENTINEL_PREFIX = "__CODING_AGENT_DOCKER_TIMEOUT__:"
+
+
+def _extract_timeout_sentinel(command: list[str]) -> str:
+    for arg in command:
+        match = re.search(r"__CODING_AGENT_DOCKER_TIMEOUT__:[0-9a-f]+", arg)
+        if match is not None:
+            return match.group(0)
+    raise AssertionError(f"timeout sentinel not found in command: {command}")
 
 
 def test_docker_workspace_provider_builds_client_from_config(tmp_path: Path) -> None:
@@ -174,7 +183,7 @@ def test_docker_cloud_client_runs_shell_in_workspace_cwd(
         "-c",
     ]
     timeout_wrapper = captured_command[17]
-    assert TIMEOUT_SENTINEL in timeout_wrapper
+    assert TIMEOUT_SENTINEL_PREFIX in timeout_wrapper
     assert 'trap _coding_agent_timeout TERM' in timeout_wrapper
     assert '/bin/sh -c "$1" &' in timeout_wrapper
     assert captured_command[18:] == ["sh", "python -V"]
@@ -210,17 +219,54 @@ def test_docker_cloud_client_raises_timeout_when_container_command_times_out(
         command: list[str], **kwargs: object
     ) -> subprocess.CompletedProcess[str]:
         _ = kwargs
+        timeout_sentinel = _extract_timeout_sentinel(command)
         return subprocess.CompletedProcess(
             command,
             124,
             stdout="",
-            stderr=f"{TIMEOUT_SENTINEL}\n",
+            stderr=f"{timeout_sentinel}\n",
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     with pytest.raises(TimeoutError, match="docker exec command timed out after 1s"):
         _ = client.run_command("sleep 10", cwd="/workspace", env=None, timeout=1)
+
+
+def test_docker_cloud_client_preserves_stderr_with_nonmatching_timeout_prefix(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    target_root = workspace_root / "ws-123"
+    target_root.mkdir(parents=True)
+
+    client = cloud_client_factory_from_config(
+        {
+            "provider": "docker",
+            "workspace_root": str(workspace_root),
+        }
+    )(
+        CloudWorkspaceBinding(
+            workspace_url="https://workspace.example.com",
+            workspace_id="ws-123",
+        )
+    )
+
+    stderr = f"{TIMEOUT_SENTINEL_PREFIX}not-current-run\n"
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        _ = command
+        _ = kwargs
+        return subprocess.CompletedProcess([], 1, stdout="", stderr=stderr)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = client.run_command("exit 1", cwd="/workspace", env=None, timeout=1)
+
+    assert result.exit_code == 1
+    assert result.stderr == stderr
 
 
 @pytest.mark.parametrize("exit_code", [124, 137])
@@ -279,19 +325,21 @@ def test_docker_cloud_client_timeout_contract_blocks_post_timeout_mutation(
     def fake_run(
         command: list[str], **kwargs: object
     ) -> subprocess.CompletedProcess[str]:
-        _ = kwargs
-        if not any(TIMEOUT_SENTINEL in arg for arg in command):
+        local_timeout = kwargs.get("timeout")
+        if local_timeout == 1:
             timer = threading.Timer(
                 0.05,
                 lambda: marker.write_text("late write\n", encoding="utf-8"),
             )
             timer.start()
             raise subprocess.TimeoutExpired(command, timeout=1)
+        assert local_timeout == 4
+        timeout_sentinel = _extract_timeout_sentinel(command)
         return subprocess.CompletedProcess(
             command,
             124,
             stdout="",
-            stderr=f"{TIMEOUT_SENTINEL}\n",
+            stderr=f"{timeout_sentinel}\n",
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
