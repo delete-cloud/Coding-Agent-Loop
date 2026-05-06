@@ -12,7 +12,9 @@ from coding_agent.ui.binding_resolver import (
 from coding_agent.environment import CloudCommandResult, CloudEnvironment, LocalEnvironment
 from coding_agent.environment import workspace_provider as workspace_provider_module
 from coding_agent.environment.workspace_provider import (
+    CloudWorkspaceSource,
     cloud_client_factory_from_config,
+    provision_cloud_binding_from_config,
     register_workspace_provider,
 )
 from coding_agent.ui.execution_binding import (
@@ -210,6 +212,26 @@ class FakeWorkspaceProvider:
 
         return build_client
 
+    def provision_cloud_workspace_binding(
+        self,
+        config: dict[str, object],
+        source: CloudWorkspaceSource,
+    ) -> CloudWorkspaceBinding:
+        self.seen_configs.append(dict(config))
+        assert source == {"kind": "docker"}
+        return CloudWorkspaceBinding(
+            workspace_url="https://workspace.example.com",
+            workspace_id="ws-123",
+        )
+
+    def cleanup_cloud_workspace_binding(
+        self,
+        config: dict[str, object],
+        binding: CloudWorkspaceBinding,
+    ) -> None:
+        self.seen_configs.append(dict(config))
+        assert binding.workspace_id == "ws-123"
+
 
 def test_cloud_workspace_provider_registry_builds_factory(
     monkeypatch: pytest.MonkeyPatch,
@@ -244,3 +266,22 @@ def test_cloud_workspace_provider_config_requires_provider() -> None:
         match=r"cloud_workspace\.provider is required when cloud_workspace\.enabled=true",
     ):
         _ = cloud_client_factory_from_config({"enabled": True})
+
+
+def test_workspace_provider_registry_provisions_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(workspace_provider_module, "_WORKSPACE_PROVIDERS", {})
+    provider = FakeWorkspaceProvider()
+    register_workspace_provider("fake-provider", provider)
+
+    binding = provision_cloud_binding_from_config(
+        {
+            "provider": "fake-provider",
+            "workspace_root": "/srv/workspaces",
+        },
+        {"kind": "docker"},
+    )
+
+    assert isinstance(binding, CloudWorkspaceBinding)
+    assert binding.workspace_id == "ws-123"
