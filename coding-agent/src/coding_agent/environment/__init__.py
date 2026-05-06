@@ -3,6 +3,7 @@ from .cloud import (
     CloudEnvironment,
     CloudWorkspaceClient,
 )
+from .docker_workspace_provider import DockerCloudWorkspaceClient
 from .local import LocalEnvironment
 from .workspace_provider import (
     CloudWorkspaceClientFactory,
@@ -13,6 +14,7 @@ from .workspace_provider import (
 
 __all__ = [
     "CloudCommandResult",
+    "DockerCloudWorkspaceClient",
     "CloudEnvironment",
     "CloudWorkspaceClient",
     "CloudWorkspaceClientFactory",
