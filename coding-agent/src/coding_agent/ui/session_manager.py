@@ -615,6 +615,15 @@ class SessionManager:
             return
         self._provisioned_cloud_binding_cleanup(binding)
 
+    async def _cleanup_provisioned_cloud_binding_async(self, session: Session) -> None:
+        try:
+            await asyncio.to_thread(self._cleanup_provisioned_cloud_binding, session)
+        except Exception:
+            logger.exception(
+                "Failed to clean up provisioned cloud workspace for session %s",
+                session.id,
+            )
+
     def _create_agent_for_session(self, **kwargs: Any) -> tuple[Any, Any]:
         factory = self._create_agent
         if factory is None:
@@ -910,7 +919,7 @@ class SessionManager:
     async def _remove_session_async_no_lock(self, session_id: str) -> None:
         session = await self.get_session_async(session_id)
         await self._close_runtime(session)
-        self._cleanup_provisioned_cloud_binding(session)
+        await self._cleanup_provisioned_cloud_binding_async(session)
         self._session_cache.pop(session_id, None)
         await self._run_store_io(self._store.delete, session_id)
         await self._release_owner_lease_for_session(session_id)

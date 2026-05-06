@@ -1552,6 +1552,71 @@ async def test_close_session_cleans_up_server_provisioned_cloud_binding() -> Non
 
 
 @pytest.mark.asyncio
+async def test_close_session_offloads_provisioned_cloud_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        provisioned_cloud_binding_cleanup=lambda binding: None,
+    )
+    binding = CloudWorkspaceBinding(
+        workspace_url="docker://agent-ws-threaded/workspace",
+        workspace_id="ws-threaded",
+    )
+    session_id = await manager.create_session(
+        execution_binding=binding,
+        origin={
+            "channel": "http",
+            "binding_kind": "cloud",
+            "workspace_source_kind": "docker",
+        },
+    )
+    session = manager.get_session(session_id)
+    to_thread_calls: list[tuple[object, tuple[object, ...]]] = []
+
+    async def fake_to_thread(func, *args):
+        to_thread_calls.append((func, args))
+        return func(*args)
+
+    monkeypatch.setattr("coding_agent.ui.session_manager.asyncio.to_thread", fake_to_thread)
+
+    await manager.close_session(session_id)
+
+    assert to_thread_calls == [(manager._cleanup_provisioned_cloud_binding, (session,))]
+
+
+@pytest.mark.asyncio
+async def test_close_session_logs_provisioned_cloud_cleanup_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def fail_cleanup(binding: CloudWorkspaceBinding) -> None:
+        del binding
+        raise RuntimeError("cleanup failed")
+
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        provisioned_cloud_binding_cleanup=fail_cleanup,
+    )
+    session_id = await manager.create_session(
+        execution_binding=CloudWorkspaceBinding(
+            workspace_url="docker://agent-ws-fails/workspace",
+            workspace_id="ws-fails",
+        ),
+        origin={
+            "channel": "http",
+            "binding_kind": "cloud",
+            "workspace_source_kind": "docker",
+        },
+    )
+
+    with caplog.at_level("ERROR"):
+        await manager.close_session(session_id)
+
+    assert not manager.has_session(session_id)
+    assert "Failed to clean up provisioned cloud workspace" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_close_session_keeps_explicit_cloud_binding_untouched() -> None:
     cleaned: list[CloudWorkspaceBinding] = []
     manager = SessionManager(

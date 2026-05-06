@@ -455,6 +455,49 @@ class TestSessionCreation:
         assert response.status_code == 500
         assert cleaned == [binding]
 
+    async def test_create_session_keeps_original_failure_when_rollback_cleanup_fails(
+        self, client, monkeypatch
+    ):
+        binding = CloudWorkspaceBinding(
+            workspace_url="docker://agent-ws-orphan/workspace",
+            workspace_id="ws-orphan-cleanup-fails",
+        )
+
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            lambda: {
+                "enabled": True,
+                "provider": "docker",
+                "workspace_root": "/tmp/unused",
+            },
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.provision_cloud_binding_from_config",
+            lambda config, source: binding,
+        )
+
+        async def fail_create_session(**kwargs):
+            del kwargs
+            raise RuntimeError("session store unavailable")
+
+        def fail_cleanup(target_binding):
+            del target_binding
+            raise RuntimeError("cleanup unavailable")
+
+        monkeypatch.setattr(session_manager, "create_session", fail_create_session)
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._cleanup_provisioned_cloud_binding",
+            fail_cleanup,
+        )
+
+        response = await client.post(
+            "/sessions",
+            json={"workspace_source": {"kind": "docker"}},
+        )
+
+        assert response.status_code == 500
+        assert response.json()["detail"] == "session store unavailable"
+
     async def test_close_session_cleans_up_provisioned_workspace_on_delete(
         self, client, monkeypatch, tmp_path
     ):
@@ -488,6 +531,51 @@ class TestSessionCreation:
             create_response.json()["session_id"]
         ).execution_binding
         assert isinstance(binding, CloudWorkspaceBinding)
+
+        close_response = await client.delete(
+            f"/sessions/{create_response.json()['session_id']}"
+        )
+
+        assert close_response.status_code == 200
+        assert cleaned == [binding]
+
+    async def test_close_session_cleans_up_when_new_provisioning_is_disabled(
+        self, client, monkeypatch, tmp_path
+    ):
+        cleaned: list[CloudWorkspaceBinding] = []
+        config_enabled = True
+
+        monkeypatch.setattr(
+            "coding_agent.environment.docker_workspace_provider._start_docker_workspace_container",
+            lambda provider_config, binding: None,
+        )
+
+        def cloud_workspace_config():
+            return {
+                "enabled": config_enabled,
+                "provider": "docker",
+                "workspace_root": str(tmp_path),
+                "container_name_prefix": "agent-",
+            }
+
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            cloud_workspace_config,
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.cleanup_cloud_binding_from_config",
+            lambda config, target_binding: cleaned.append(target_binding),
+        )
+
+        create_response = await client.post(
+            "/sessions",
+            json={"workspace_source": {"kind": "docker"}},
+        )
+        binding = session_manager.get_session(
+            create_response.json()["session_id"]
+        ).execution_binding
+        assert isinstance(binding, CloudWorkspaceBinding)
+        config_enabled = False
 
         close_response = await client.delete(
             f"/sessions/{create_response.json()['session_id']}"
@@ -554,7 +642,11 @@ class TestSessionCreation:
                 "container_name_prefix": "agent-",
             },
         )
-        session_manager._binding_resolver = _build_binding_resolver()
+        monkeypatch.setattr(
+            session_manager,
+            "_binding_resolver",
+            _build_binding_resolver(),
+        )
 
         captured = _CreateAgentCapture()
 

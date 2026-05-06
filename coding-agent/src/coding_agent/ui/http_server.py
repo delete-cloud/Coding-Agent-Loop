@@ -127,7 +127,8 @@ def _build_binding_resolver() -> DefaultBindingResolver:
 
 def _cleanup_provisioned_cloud_binding(binding: CloudWorkspaceBinding) -> None:
     cloud_workspace_config = _load_cloud_workspace_config()
-    if cloud_workspace_config.get("enabled") is not True:
+    provider = cloud_workspace_config.get("provider")
+    if not isinstance(provider, str) or not provider.strip():
         return
     cleanup_cloud_binding_from_config(cloud_workspace_config, binding)
 
@@ -721,15 +722,16 @@ async def create_session(
         "auto": ApprovalPolicy.AUTO,
     }
     approval_policy = approval_policy_map.get(approval_policy_str, ApprovalPolicy.AUTO)
-    cloud_workspace_config: dict[str, Any] | None = None
     provisioned_binding: CloudWorkspaceBinding | None = None
 
     try:
         execution_binding = _provisioned_execution_binding_from_request(body)
-        if body is not None and body.workspace_source is not None:
-            cloud_workspace_config = _load_cloud_workspace_config()
-            if isinstance(execution_binding, CloudWorkspaceBinding):
-                provisioned_binding = execution_binding
+        if (
+            body is not None
+            and body.workspace_source is not None
+            and isinstance(execution_binding, CloudWorkspaceBinding)
+        ):
+            provisioned_binding = execution_binding
         session_id = await session_manager.create_session(
             repo_path=repo_path,
             origin=_session_origin_from_request(body, execution_binding),
@@ -741,8 +743,13 @@ async def create_session(
             max_steps=body.max_steps if body and body.max_steps is not None else 30,
         )
     except Exception as exc:
-        if cloud_workspace_config is not None and provisioned_binding is not None:
-            cleanup_cloud_binding_from_config(cloud_workspace_config, provisioned_binding)
+        if provisioned_binding is not None:
+            try:
+                await asyncio.to_thread(
+                    _cleanup_provisioned_cloud_binding, provisioned_binding
+                )
+            except Exception:
+                logger.exception("Failed to roll back provisioned cloud workspace")
         if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
             raise
         if isinstance(exc, RuntimeError):
