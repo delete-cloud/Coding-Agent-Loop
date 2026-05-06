@@ -20,7 +20,11 @@ from sse_starlette.sse import EventSourceResponse
 from agentkit.config.loader import load_config as load_agent_toml
 from agentkit.errors import ConfigError
 from coding_agent.approval import ApprovalPolicy
-from coding_agent.environment import cloud_client_factory_from_config
+from coding_agent.environment import (
+    cleanup_cloud_binding_from_config,
+    cloud_client_factory_from_config,
+    provision_cloud_binding_from_config,
+)
 from coding_agent.ui.binding_resolver import DefaultBindingResolver
 from coding_agent.ui.session_manager import Session, SessionManager
 from coding_agent.ui.session_owner_store import (
@@ -121,6 +125,13 @@ def _build_binding_resolver() -> DefaultBindingResolver:
     )
 
 
+def _cleanup_provisioned_cloud_binding(binding: CloudWorkspaceBinding) -> None:
+    cloud_workspace_config = _load_cloud_workspace_config()
+    if cloud_workspace_config.get("enabled") is not True:
+        return
+    cleanup_cloud_binding_from_config(cloud_workspace_config, binding)
+
+
 def _storage_uses_pg_http_sessions(storage_config: dict[str, Any]) -> bool:
     http_backend = storage_config.get("http_session_backend")
     if http_backend is not None:
@@ -167,6 +178,7 @@ def _build_session_manager() -> SessionManager:
     manager = SessionManager(
         storage_config=storage_config,
         binding_resolver=_build_binding_resolver(),
+        provisioned_cloud_binding_cleanup=_cleanup_provisioned_cloud_binding,
     )
     if not _storage_uses_pg_http_sessions(storage_config):
         return manager
@@ -302,6 +314,45 @@ def _execution_binding_from_request(
         workspace_url=binding.workspace_url,
         workspace_id=binding.workspace_id,
     )
+
+
+def _provisioned_execution_binding_from_request(
+    body: CreateSessionRequest | None,
+) -> ExecutionBinding | None:
+    if body is None:
+        return None
+    if body.execution_binding is not None and body.workspace_source is not None:
+        raise ValueError(
+            "execution_binding and workspace_source cannot be set together"
+        )
+    explicit_binding = _execution_binding_from_request(body)
+    if explicit_binding is not None:
+        return explicit_binding
+    if body.workspace_source is None:
+        return None
+
+    cloud_workspace_config = _load_cloud_workspace_config()
+    if cloud_workspace_config.get("enabled") is not True:
+        raise ValueError(
+            "cloud workspace provisioning requires cloud_workspace.enabled=true"
+        )
+    return provision_cloud_binding_from_config(
+        cloud_workspace_config,
+        body.workspace_source.model_dump(mode="python"),
+    )
+
+
+def _session_origin_from_request(
+    body: CreateSessionRequest | None,
+    binding: ExecutionBinding | None,
+) -> dict[str, str]:
+    origin = {
+        "channel": "http",
+        "binding_kind": "local" if binding is None else binding.kind,
+    }
+    if body is not None and body.workspace_source is not None:
+        origin["workspace_source_kind"] = body.workspace_source.kind
+    return origin
 
 
 def _http_safe_tool_result_payload(msg: ToolResultDelta) -> dict[str, Any]:
@@ -670,17 +721,35 @@ async def create_session(
         "auto": ApprovalPolicy.AUTO,
     }
     approval_policy = approval_policy_map.get(approval_policy_str, ApprovalPolicy.AUTO)
+    cloud_workspace_config: dict[str, Any] | None = None
+    provisioned_binding: CloudWorkspaceBinding | None = None
 
-    # Create session using SessionManager
-    session_id = await session_manager.create_session(
-        repo_path=repo_path,
-        execution_binding=_execution_binding_from_request(body),
-        approval_policy=approval_policy,
-        provider_name=body.provider if body else None,
-        model_name=body.model if body else None,
-        base_url=body.base_url if body else None,
-        max_steps=body.max_steps if body and body.max_steps is not None else 30,
-    )
+    try:
+        execution_binding = _provisioned_execution_binding_from_request(body)
+        if body is not None and body.workspace_source is not None:
+            cloud_workspace_config = _load_cloud_workspace_config()
+            if isinstance(execution_binding, CloudWorkspaceBinding):
+                provisioned_binding = execution_binding
+        session_id = await session_manager.create_session(
+            repo_path=repo_path,
+            origin=_session_origin_from_request(body, execution_binding),
+            execution_binding=execution_binding,
+            approval_policy=approval_policy,
+            provider_name=body.provider if body else None,
+            model_name=body.model if body else None,
+            base_url=body.base_url if body else None,
+            max_steps=body.max_steps if body and body.max_steps is not None else 30,
+        )
+    except Exception as exc:
+        if cloud_workspace_config is not None and provisioned_binding is not None:
+            cleanup_cloud_binding_from_config(cloud_workspace_config, provisioned_binding)
+        if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
+            raise
+        if isinstance(exc, RuntimeError):
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        if isinstance(exc, (ValueError, TypeError)):
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     logger.info(f"Created session: {session_id}")
     return SessionResponse(session_id=session_id)
