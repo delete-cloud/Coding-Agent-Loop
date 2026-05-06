@@ -28,7 +28,10 @@ from coding_agent.approval import ApprovalPolicy
 from coding_agent.approval.store import ApprovalStore
 from coding_agent.environment import CloudCommandResult, CloudEnvironment
 from coding_agent.ui.binding_resolver import CloudBindingNotImplementedError
-from coding_agent.ui.execution_binding import CloudWorkspaceBinding, LocalExecutionBinding
+from coding_agent.ui.execution_binding import (
+    CloudWorkspaceBinding,
+    LocalExecutionBinding,
+)
 from coding_agent.wire.local import LocalWire
 from coding_agent.ui.session_manager import Session
 from coding_agent.ui.session_owner_store import SessionOwnerRecord
@@ -294,7 +297,9 @@ class TestSessionCreation:
         assert response.status_code == 200
         session = session_manager.get_session(response.json()["session_id"])
         assert isinstance(session.execution_binding, CloudWorkspaceBinding)
-        assert session.execution_binding.workspace_url == "https://workspace.example.com"
+        assert (
+            session.execution_binding.workspace_url == "https://workspace.example.com"
+        )
         assert session.execution_binding.workspace_id == "ws-123"
 
     async def test_http_create_session_provisions_docker_cloud_workspace(
@@ -498,6 +503,46 @@ class TestSessionCreation:
         assert response.status_code == 500
         assert response.json()["detail"] == "session store unavailable"
 
+    async def test_create_session_rolls_back_provisioned_workspace_on_cancellation(
+        self, client, monkeypatch
+    ):
+        binding = CloudWorkspaceBinding(
+            workspace_url="docker://agent-ws-cancelled/workspace",
+            workspace_id="ws-cancelled",
+        )
+        cleaned: list[CloudWorkspaceBinding] = []
+
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            lambda: {
+                "enabled": True,
+                "provider": "docker",
+                "workspace_root": "/tmp/unused",
+            },
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.provision_cloud_binding_from_config",
+            lambda config, source: binding,
+        )
+
+        async def cancel_create_session(**kwargs):
+            del kwargs
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(session_manager, "create_session", cancel_create_session)
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.cleanup_cloud_binding_from_config",
+            lambda config, target_binding: cleaned.append(target_binding),
+        )
+
+        with pytest.raises(asyncio.CancelledError):
+            await client.post(
+                "/sessions",
+                json={"workspace_source": {"kind": "docker"}},
+            )
+
+        assert cleaned == [binding]
+
     async def test_close_session_cleans_up_provisioned_workspace_on_delete(
         self, client, monkeypatch, tmp_path
     ):
@@ -627,6 +672,7 @@ class TestSessionCreation:
             "coding_agent.environment.docker_workspace_provider._start_docker_workspace_container",
             lambda provider_config, binding: None,
         )
+
         class _CreateAgentCapture:
             def __init__(self) -> None:
                 self.environment: CloudEnvironment | None = None
@@ -685,7 +731,9 @@ class TestSessionCreation:
             return fake_pipeline, types.SimpleNamespace(config={}, tape=Tape())
 
         monkeypatch.setattr(session_manager, "_create_agent", fake_create_agent)
-        monkeypatch.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        monkeypatch.setattr(
+            "coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter
+        )
 
         create_response = await client.post(
             "/sessions",
@@ -708,7 +756,9 @@ class TestSessionCreation:
         assert captured.environment is not None
         binding = session_manager.get_session(session_id).execution_binding
         assert isinstance(binding, CloudWorkspaceBinding)
-        assert captured.environment.tool_config()["workspace_id"] == binding.workspace_id
+        assert (
+            captured.environment.tool_config()["workspace_id"] == binding.workspace_id
+        )
         assert captured.workspace_root is None
         assert events[-1] == "TurnEnd"
 
@@ -1008,7 +1058,13 @@ class TestPromptStreaming:
                 new_fencing_token: int = 2,
                 current_fencing_token: int = 1,
             ) -> bool:
-                del session_id, owner_id, lease_seconds, new_fencing_token, current_fencing_token
+                del (
+                    session_id,
+                    owner_id,
+                    lease_seconds,
+                    new_fencing_token,
+                    current_fencing_token,
+                )
                 return True
 
             async def release(
@@ -1056,7 +1112,13 @@ class TestPromptStreaming:
                 new_fencing_token: int = 2,
                 current_fencing_token: int = 1,
             ) -> bool:
-                del session_id, owner_id, lease_seconds, new_fencing_token, current_fencing_token
+                del (
+                    session_id,
+                    owner_id,
+                    lease_seconds,
+                    new_fencing_token,
+                    current_fencing_token,
+                )
                 return True
 
             async def release(
@@ -1212,7 +1274,9 @@ class TestPromptStreaming:
                 types.SimpleNamespace(config={}, tape=kwargs.get("tape") or Tape()),
             ),
         )
-        monkeypatch.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        monkeypatch.setattr(
+            "coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter
+        )
 
         events = []
         async with aconnect_sse(
@@ -2206,9 +2270,7 @@ class TestLifespanShutdown:
         assert close_calls == ["closed"]
         assert "Owner lease renewal task failed during shutdown" in caplog.text
 
-    async def test_lifespan_backfills_owner_leases_before_renewal(
-        self, monkeypatch
-    ):
+    async def test_lifespan_backfills_owner_leases_before_renewal(self, monkeypatch):
         events: list[str] = []
 
         async def fake_cleanup_idle_sessions() -> None:
@@ -2947,8 +3009,9 @@ class TestWaitForApproval:
             wait_task = asyncio.create_task(wait_for_approval(session_id, req))
             for _ in range(20):
                 if (
-                    session_manager.get_session(session_id)
-                    .approval_coordinator.get_request("req-http-wait")
+                    session_manager.get_session(
+                        session_id
+                    ).approval_coordinator.get_request("req-http-wait")
                     is not None
                 ):
                     break

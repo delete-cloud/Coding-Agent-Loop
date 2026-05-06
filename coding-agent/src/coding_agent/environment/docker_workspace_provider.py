@@ -105,7 +105,9 @@ class DockerCloudWorkspaceClient:
             if not resolved_path.is_file():
                 continue
             for line_number, line in enumerate(
-                resolved_path.read_text(encoding="utf-8", errors="replace").splitlines(),
+                resolved_path.read_text(
+                    encoding="utf-8", errors="replace"
+                ).splitlines(),
                 start=1,
             ):
                 if matcher.search(line):
@@ -169,7 +171,7 @@ class DockerCloudWorkspaceClient:
                 "}",
                 "trap _coding_agent_cleanup EXIT",
                 "trap _coding_agent_timeout TERM",
-                'if command -v setsid >/dev/null 2>&1; then',
+                "if command -v setsid >/dev/null 2>&1; then",
                 '  setsid /bin/sh -c "$1" sh "$pidfile" "$2" &',
                 "else",
                 '  /bin/sh -c "$1" sh "$pidfile" "$2" &',
@@ -213,7 +215,9 @@ class DockerCloudWorkspaceClient:
             )
         except subprocess.TimeoutExpired as exc:
             self._cleanup_timed_out_command(timeout_pidfile)
-            raise TimeoutError(f"docker exec command timed out after {timeout}s") from exc
+            raise TimeoutError(
+                f"docker exec command timed out after {timeout}s"
+            ) from exc
 
         if _contains_timeout_sentinel(result.stderr, timeout_sentinel):
             raise TimeoutError(f"docker exec command timed out after {timeout}s")
@@ -238,9 +242,7 @@ class DockerCloudWorkspaceClient:
         )
         return remote_path, self._validated_workspace_path(host_path, remote_path)
 
-    def _filtered_env_items(
-        self, env: dict[str, str] | None
-    ) -> list[tuple[str, str]]:
+    def _filtered_env_items(self, env: dict[str, str] | None) -> list[tuple[str, str]]:
         if env is None:
             return []
         items: list[tuple[str, str]] = []
@@ -298,7 +300,9 @@ class DockerCloudWorkspaceClient:
         try:
             _ = resolved_path.relative_to(self._workspace_root)
         except ValueError as exc:
-            raise ValueError(f"Path is outside docker workspace: {remote_path}") from exc
+            raise ValueError(
+                f"Path is outside docker workspace: {remote_path}"
+            ) from exc
         return resolved_path
 
     def _workspace_entry_remote_path(self, host_path: Path) -> str:
@@ -336,7 +340,9 @@ class DockerWorkspaceProvider(WorkspaceProvider):
 
         provider_config = _docker_workspace_provider_config(config)
         workspace_id = f"ws-{uuid.uuid4().hex}"
-        workspace_root = _workspace_root_for_id(provider_config.workspace_root, workspace_id)
+        workspace_root = _workspace_root_for_id(
+            provider_config.workspace_root, workspace_id
+        )
         workspace_root.mkdir(parents=True, exist_ok=False)
         binding = CloudWorkspaceBinding(
             workspace_url=(
@@ -346,8 +352,19 @@ class DockerWorkspaceProvider(WorkspaceProvider):
         )
         try:
             _start_docker_workspace_container(provider_config, binding)
-        except Exception:
-            workspace_root.rmdir()
+        except Exception as exc:
+            cleanup_failed = False
+            try:
+                _remove_docker_workspace_container(provider_config, workspace_id)
+            except Exception as cleanup_exc:
+                cleanup_failed = True
+                note = (
+                    "failed to clean up docker workspace container after start failure: "
+                    + str(cleanup_exc)
+                )
+                exc.add_note(note)
+            if not cleanup_failed and workspace_root.exists():
+                shutil.rmtree(workspace_root)
             raise
         return binding
 
@@ -371,13 +388,17 @@ def _docker_workspace_provider_config(
 ) -> _DockerWorkspaceProviderConfig:
     workspace_root_raw = config.get("workspace_root")
     if not isinstance(workspace_root_raw, str) or not workspace_root_raw.strip():
-        raise ValueError("cloud_workspace.workspace_root is required for provider=docker")
+        raise ValueError(
+            "cloud_workspace.workspace_root is required for provider=docker"
+        )
 
     container_workspace_root = _container_workspace_root(config)
     container_name_prefix = _optional_string(config.get("container_name_prefix"), "")
     docker_binary = _optional_string(config.get("docker_binary"), "docker")
     exec_user = _optional_string(config.get("exec_user"), None)
-    env_allowlist = tuple(_string_list(config.get("env_allowlist"), key="env_allowlist"))
+    env_allowlist = tuple(
+        _string_list(config.get("env_allowlist"), key="env_allowlist")
+    )
     image = _optional_string(config.get("image"), "python:3.11-slim")
     assert container_name_prefix is not None
     assert docker_binary is not None
@@ -401,7 +422,9 @@ def _container_workspace_root(config: dict[str, object]) -> str:
     if not normalized.startswith("/"):
         raise ValueError("cloud_workspace.container_workspace_root must be absolute")
     if not normalized.lstrip("/"):
-        raise ValueError("cloud_workspace.container_workspace_root must not resolve to /")
+        raise ValueError(
+            "cloud_workspace.container_workspace_root must not resolve to /"
+        )
     return normalized
 
 
@@ -447,7 +470,9 @@ def _contains_timeout_sentinel(stderr: str, sentinel: str) -> bool:
 
 def _validate_workspace_id(workspace_id: str) -> None:
     if not _WORKSPACE_ID_RE.fullmatch(workspace_id):
-        raise ValueError(f"unsupported workspace id for docker provider: {workspace_id}")
+        raise ValueError(
+            f"unsupported workspace id for docker provider: {workspace_id}"
+        )
 
 
 def _workspace_root_for_id(workspace_root: Path, workspace_id: str) -> Path:
@@ -455,11 +480,15 @@ def _workspace_root_for_id(workspace_root: Path, workspace_id: str) -> Path:
     try:
         _ = candidate.relative_to(workspace_root)
     except ValueError as exc:
-        raise ValueError(f"workspace id escapes configured workspace root: {workspace_id}") from exc
+        raise ValueError(
+            f"workspace id escapes configured workspace root: {workspace_id}"
+        ) from exc
     return candidate
 
 
-def _container_name(provider_config: _DockerWorkspaceProviderConfig, workspace_id: str) -> str:
+def _container_name(
+    provider_config: _DockerWorkspaceProviderConfig, workspace_id: str
+) -> str:
     return f"{provider_config.container_name_prefix}{workspace_id}"
 
 
@@ -557,15 +586,25 @@ def _docker_container_exists(
             env=None,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(
+            f"failed to inspect docker workspace container: {container_name}"
+        ) from exc
+    if result.returncode == 0:
+        return True
+    if "No such container" in result.stderr:
         return False
-    return result.returncode == 0
+    raise RuntimeError(
+        f"failed to inspect docker workspace container: {container_name}"
+    )
 
 
 def _normalize_remote_path(path: str, workspace_root: str) -> str:
     normalized_root = posixpath.normpath(workspace_root)
     if not normalized_root.lstrip("/"):
-        raise ValueError("cloud_workspace.container_workspace_root must not resolve to /")
+        raise ValueError(
+            "cloud_workspace.container_workspace_root must not resolve to /"
+        )
     resolved = path if path.startswith("/") else posixpath.join(workspace_root, path)
     normalized = posixpath.normpath(resolved)
     workspace_prefix = normalized_root.rstrip("/") + "/"

@@ -101,7 +101,8 @@ def _load_cloud_workspace_config() -> dict[str, Any]:
     config_path = Path(__file__).resolve().parent.parent / "agent.toml"
     try:
         return cast(
-            dict[str, Any], load_agent_toml(config_path).extra.get("cloud_workspace", {})
+            dict[str, Any],
+            load_agent_toml(config_path).extra.get("cloud_workspace", {}),
         )
     except (ConfigError, OSError) as exc:
         if isinstance(exc, ConfigError):
@@ -141,8 +142,7 @@ def _storage_uses_pg_http_sessions(storage_config: dict[str, Any]) -> bool:
     session_backend = storage_config.get("session_backend")
     if session_backend is not None:
         return (
-            isinstance(session_backend, str)
-            and session_backend.strip().lower() == "pg"
+            isinstance(session_backend, str) and session_backend.strip().lower() == "pg"
         )
 
     tape_backend = str(storage_config.get("tape_backend", "jsonl")).strip().lower()
@@ -742,6 +742,15 @@ async def create_session(
             base_url=body.base_url if body else None,
             max_steps=body.max_steps if body and body.max_steps is not None else 30,
         )
+    except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+        if provisioned_binding is not None:
+            try:
+                await asyncio.to_thread(
+                    _cleanup_provisioned_cloud_binding, provisioned_binding
+                )
+            except Exception:
+                logger.exception("Failed to roll back provisioned cloud workspace")
+        raise
     except Exception as exc:
         if provisioned_binding is not None:
             try:
@@ -750,8 +759,6 @@ async def create_session(
                 )
             except Exception:
                 logger.exception("Failed to roll back provisioned cloud workspace")
-        if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
-            raise
         if isinstance(exc, RuntimeError):
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         if isinstance(exc, (ValueError, TypeError)):
@@ -789,7 +796,9 @@ async def send_prompt(
         raise _owner_conflict_http_exception(exc, session_id=session_id) from exc
     except RuntimeError as exc:
         if str(exc) == "turn already in progress":
-            raise HTTPException(status_code=409, detail="Turn already in progress") from exc
+            raise HTTPException(
+                status_code=409, detail="Turn already in progress"
+            ) from exc
         raise
 
     session.turn_in_progress = True
