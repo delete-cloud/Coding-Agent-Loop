@@ -322,25 +322,28 @@ def test_docker_cloud_client_timeout_contract_blocks_post_timeout_mutation(
         )
     )
 
+    cleanup_called = threading.Event()
+    observed_timeouts: list[object] = []
+    timers: list[threading.Timer] = []
+
     def fake_run(
         command: list[str], **kwargs: object
     ) -> subprocess.CompletedProcess[str]:
         local_timeout = kwargs.get("timeout")
-        if local_timeout == 1:
+        observed_timeouts.append(local_timeout)
+        if local_timeout == 4:
             timer = threading.Timer(
                 0.05,
-                lambda: marker.write_text("late write\n", encoding="utf-8"),
+                lambda: None
+                if cleanup_called.is_set()
+                else marker.write_text("late write\n", encoding="utf-8"),
             )
+            timers.append(timer)
             timer.start()
-            raise subprocess.TimeoutExpired(command, timeout=1)
-        assert local_timeout == 4
-        timeout_sentinel = _extract_timeout_sentinel(command)
-        return subprocess.CompletedProcess(
-            command,
-            124,
-            stdout="",
-            stderr=f"{timeout_sentinel}\n",
-        )
+            raise subprocess.TimeoutExpired(command, timeout=4)
+        assert local_timeout == 3
+        cleanup_called.set()
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
@@ -348,6 +351,8 @@ def test_docker_cloud_client_timeout_contract_blocks_post_timeout_mutation(
         _ = client.run_command("sleep 10", cwd="/workspace", env=None, timeout=1)
 
     time.sleep(0.1)
+    assert cleanup_called.is_set()
+    assert observed_timeouts == [4, 3]
     assert not marker.exists()
 
 

@@ -22,6 +22,7 @@ _WORKSPACE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DOCKER_TIMEOUT_KILL_AFTER_SECONDS = 2
 _DOCKER_TIMEOUT_MARGIN_SECONDS = 1
+_DOCKER_TIMEOUT_CLEANUP_SECONDS = 3
 _DOCKER_TIMEOUT_SENTINEL_PREFIX = "__CODING_AGENT_DOCKER_TIMEOUT__:"
 
 
@@ -133,20 +134,31 @@ class DockerCloudWorkspaceClient:
         for key, value in self._filtered_env_items(env):
             docker_command.extend(["-e", f"{key}={value}"])
         timeout_sentinel = _docker_timeout_sentinel()
+        timeout_pidfile = f"/tmp/coding-agent-docker-exec-{secrets.token_hex(16)}.pid"
         timeout_wrapper = "\n".join(
             [
+                f"pidfile='{timeout_pidfile}'",
                 "child=''",
+                "_coding_agent_cleanup() {",
+                '  rm -f "$pidfile"',
+                "}",
                 "_coding_agent_timeout() {",
                 '  if [ -n "$child" ]; then',
-                '    kill -TERM "$child" 2>/dev/null || true',
+                '    kill -TERM -- "-$child" 2>/dev/null || kill -TERM "$child" 2>/dev/null || true',
                 "  fi",
                 f"  printf '%s\\n' '{timeout_sentinel}' >&2",
                 '  wait "$child" 2>/dev/null || true',
                 "  exit 124",
                 "}",
+                "trap _coding_agent_cleanup EXIT",
                 "trap _coding_agent_timeout TERM",
-                '/bin/sh -c "$1" &',
+                'if command -v setsid >/dev/null 2>&1; then',
+                '  setsid /bin/sh -c "$1" &',
+                "else",
+                '  /bin/sh -c "$1" &',
+                "fi",
                 "child=$!",
+                'printf "%s\\n" "$child" > "$pidfile"',
                 'wait "$child"',
                 "exit $?",
             ]
@@ -183,6 +195,7 @@ class DockerCloudWorkspaceClient:
                 env=None,
             )
         except subprocess.TimeoutExpired as exc:
+            self._cleanup_timed_out_command(timeout_pidfile)
             raise TimeoutError(f"docker exec command timed out after {timeout}s") from exc
 
         if _contains_timeout_sentinel(result.stderr, timeout_sentinel):
@@ -229,6 +242,44 @@ class DockerCloudWorkspaceClient:
         if not relative.parts:
             return self.default_cwd
         return posixpath.join(self.default_cwd, *relative.parts)
+
+    def _cleanup_timed_out_command(self, timeout_pidfile: str) -> None:
+        cleanup_command = [self._docker_binary, "exec"]
+        if self._exec_user is not None:
+            cleanup_command.extend(["--user", self._exec_user])
+        cleanup_script = "\n".join(
+            [
+                'pid=$(cat "$1" 2>/dev/null || true)',
+                'if [ -z "$pid" ]; then',
+                "  exit 0",
+                "fi",
+                'kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true',
+                f"sleep {_DOCKER_TIMEOUT_KILL_AFTER_SECONDS}",
+                'kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true',
+                'rm -f "$1"',
+            ]
+        )
+        cleanup_command.extend(
+            [
+                self._container_name,
+                "/bin/sh",
+                "-c",
+                cleanup_script,
+                "sh",
+                timeout_pidfile,
+            ]
+        )
+        try:
+            _ = subprocess.run(
+                cleanup_command,
+                shell=False,
+                capture_output=True,
+                text=True,
+                timeout=_DOCKER_TIMEOUT_CLEANUP_SECONDS,
+                env=None,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return
 
     def _validated_workspace_path(self, host_path: Path, remote_path: str) -> Path:
         resolved_path = host_path.resolve(strict=False)
