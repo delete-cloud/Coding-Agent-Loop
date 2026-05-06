@@ -4,14 +4,22 @@ import json
 import posixpath
 import re
 import secrets
+import shutil
 import subprocess
+import time
+import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast, override
 
 from .cloud import CloudCommandResult
-from .workspace_provider import CloudWorkspaceClientFactory, WorkspaceProvider, register_workspace_provider
+from .workspace_provider import (
+    CloudWorkspaceClientFactory,
+    CloudWorkspaceSource,
+    WorkspaceProvider,
+    register_workspace_provider,
+)
 
 if TYPE_CHECKING:
     from .cloud import CloudWorkspaceClient
@@ -24,6 +32,8 @@ _DOCKER_TIMEOUT_KILL_AFTER_SECONDS = 2
 _DOCKER_TIMEOUT_MARGIN_SECONDS = 1
 _DOCKER_TIMEOUT_CLEANUP_SECONDS = 3
 _DOCKER_TIMEOUT_SENTINEL_PREFIX = "__CODING_AGENT_DOCKER_TIMEOUT__:"
+_DOCKER_CONTAINER_REMOVAL_WAIT_SECONDS = 5.0
+_DOCKER_CONTAINER_REMOVAL_POLL_INTERVAL_SECONDS = 0.1
 
 
 @dataclass(frozen=True)
@@ -34,6 +44,7 @@ class _DockerWorkspaceProviderConfig:
     docker_binary: str
     env_allowlist: tuple[str, ...]
     exec_user: str | None
+    image: str
 
 
 class DockerCloudWorkspaceClient:
@@ -309,6 +320,51 @@ class DockerWorkspaceProvider(WorkspaceProvider):
 
         return build_client
 
+    @override
+    def provision_cloud_workspace_binding(
+        self,
+        config: dict[str, object],
+        source: CloudWorkspaceSource,
+    ) -> CloudWorkspaceBinding:
+        from ..ui.execution_binding import CloudWorkspaceBinding
+
+        kind = source.get("kind")
+        if kind != "docker":
+            raise ValueError(
+                "cloud workspace source kind is not supported for provider=docker"
+            )
+
+        provider_config = _docker_workspace_provider_config(config)
+        workspace_id = f"ws-{uuid.uuid4().hex}"
+        workspace_root = _workspace_root_for_id(provider_config.workspace_root, workspace_id)
+        workspace_root.mkdir(parents=True, exist_ok=False)
+        binding = CloudWorkspaceBinding(
+            workspace_url=(
+                f"docker://{_container_name(provider_config, workspace_id)}{provider_config.container_workspace_root}"
+            ),
+            workspace_id=workspace_id,
+        )
+        try:
+            _start_docker_workspace_container(provider_config, binding)
+        except Exception:
+            workspace_root.rmdir()
+            raise
+        return binding
+
+    @override
+    def cleanup_cloud_workspace_binding(
+        self,
+        config: dict[str, object],
+        binding: CloudWorkspaceBinding,
+    ) -> None:
+        provider_config = _docker_workspace_provider_config(config)
+        _remove_docker_workspace_container(provider_config, binding.workspace_id)
+        workspace_root = _workspace_root_for_id(
+            provider_config.workspace_root, binding.workspace_id
+        )
+        if workspace_root.exists():
+            shutil.rmtree(workspace_root)
+
 
 def _docker_workspace_provider_config(
     config: dict[str, object],
@@ -322,8 +378,10 @@ def _docker_workspace_provider_config(
     docker_binary = _optional_string(config.get("docker_binary"), "docker")
     exec_user = _optional_string(config.get("exec_user"), None)
     env_allowlist = tuple(_string_list(config.get("env_allowlist"), key="env_allowlist"))
+    image = _optional_string(config.get("image"), "python:3.11-slim")
     assert container_name_prefix is not None
     assert docker_binary is not None
+    assert image is not None
 
     return _DockerWorkspaceProviderConfig(
         workspace_root=Path(workspace_root_raw).expanduser().resolve(),
@@ -332,6 +390,7 @@ def _docker_workspace_provider_config(
         docker_binary=docker_binary,
         env_allowlist=env_allowlist,
         exec_user=exec_user,
+        image=image,
     )
 
 
@@ -398,6 +457,98 @@ def _workspace_root_for_id(workspace_root: Path, workspace_id: str) -> Path:
     except ValueError as exc:
         raise ValueError(f"workspace id escapes configured workspace root: {workspace_id}") from exc
     return candidate
+
+
+def _container_name(provider_config: _DockerWorkspaceProviderConfig, workspace_id: str) -> str:
+    return f"{provider_config.container_name_prefix}{workspace_id}"
+
+
+def _start_docker_workspace_container(
+    provider_config: _DockerWorkspaceProviderConfig,
+    binding: CloudWorkspaceBinding,
+) -> None:
+    workspace_root = _workspace_root_for_id(
+        provider_config.workspace_root, binding.workspace_id
+    )
+    command = [
+        provider_config.docker_binary,
+        "run",
+        "-d",
+        "--name",
+        _container_name(provider_config, binding.workspace_id),
+        "-v",
+        f"{workspace_root}:{provider_config.container_workspace_root}",
+        "-w",
+        provider_config.container_workspace_root,
+        provider_config.image,
+        "sleep",
+        "infinity",
+    ]
+    _ = subprocess.run(
+        command,
+        shell=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=None,
+        check=True,
+    )
+
+
+def _remove_docker_workspace_container(
+    provider_config: _DockerWorkspaceProviderConfig,
+    workspace_id: str,
+) -> None:
+    container_name = _container_name(provider_config, workspace_id)
+    command = [
+        provider_config.docker_binary,
+        "rm",
+        "-f",
+        container_name,
+    ]
+    try:
+        _ = subprocess.run(
+            command,
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=None,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return
+
+    deadline = time.monotonic() + _DOCKER_CONTAINER_REMOVAL_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        if not _docker_container_exists(provider_config, container_name):
+            return
+        time.sleep(_DOCKER_CONTAINER_REMOVAL_POLL_INTERVAL_SECONDS)
+
+
+def _docker_container_exists(
+    provider_config: _DockerWorkspaceProviderConfig,
+    container_name: str,
+) -> bool:
+    command = [
+        provider_config.docker_binary,
+        "container",
+        "inspect",
+        container_name,
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=None,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
 
 
 def _normalize_remote_path(path: str, workspace_root: str) -> str:
