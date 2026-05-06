@@ -19,7 +19,12 @@ class CloudWorkspaceBindingRequest(BaseModel):
     workspace_id: str = Field(..., min_length=1, max_length=200)
 
 
+class DockerWorkspaceSourceRequest(BaseModel):
+    kind: Literal["docker"]
+
+
 ExecutionBindingRequest = LocalExecutionBindingRequest | CloudWorkspaceBindingRequest
+WorkspaceSourceRequest = DockerWorkspaceSourceRequest
 
 
 class PromptRequest(BaseModel):
@@ -33,6 +38,7 @@ class CreateSessionRequest(BaseModel):
 
     repo_path: str | None = Field(None, max_length=500)
     execution_binding: ExecutionBindingRequest | None = None
+    workspace_source: WorkspaceSourceRequest | None = None
     approval_policy: str = Field("auto", pattern="^(yolo|interactive|auto)$")
     provider: Literal[
         "openai",

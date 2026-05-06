@@ -21,7 +21,7 @@ from agentkit.tape.tape import Tape
 from coding_agent.approval.store import ApprovalStore
 from coding_agent.approval import ApprovalPolicy
 from agentkit.config.loader import ConfigError
-from coding_agent.ui.execution_binding import LocalExecutionBinding
+from coding_agent.ui.execution_binding import CloudWorkspaceBinding, LocalExecutionBinding
 from coding_agent.wire.protocol import (
     ApprovalRequest,
     CompletionStatus,
@@ -149,6 +149,38 @@ def test_clear_sessions_uses_public_api() -> None:
     assert manager.list_sessions() == []
 
 
+def test_clear_sessions_cleans_up_persisted_provisioned_cloud_sessions() -> None:
+    store = InMemorySessionStore()
+    cleaned: list[CloudWorkspaceBinding] = []
+    manager = SessionManager(
+        store=store,
+        provisioned_cloud_binding_cleanup=cleaned.append,
+    )
+    binding = CloudWorkspaceBinding(
+        workspace_url="docker://agent-ws-persisted/workspace",
+        workspace_id="ws-persisted",
+    )
+    session = Session(
+        id="persisted-provisioned-session",
+        created_at=datetime.now(),
+        last_activity=datetime.now(),
+        approval_store=ApprovalStore(),
+        execution_binding=binding,
+        origin={
+            "channel": "http",
+            "binding_kind": "cloud",
+            "workspace_source_kind": "docker",
+        },
+    )
+    manager.register_session(session)
+    manager._session_cache.clear()
+
+    manager.clear_sessions()
+
+    assert cleaned == [binding]
+    assert store.list_sessions() == []
+
+
 @pytest.mark.asyncio
 async def test_create_session_persists_to_store_backing() -> None:
     store = InMemorySessionStore()
@@ -225,6 +257,24 @@ def test_session_metadata_round_trips_local_execution_binding(tmp_path: Path) ->
     assert reloaded.execution_binding.workspace_root == str(bound_repo)
 
 
+def test_session_metadata_round_trips_origin() -> None:
+    store = InMemorySessionStore()
+    manager = SessionManager(store=store)
+    session = Session(
+        id="origin-session",
+        created_at=datetime.now(),
+        last_activity=datetime.now(),
+        approval_store=ApprovalStore(),
+        origin={"channel": "http", "binding_kind": "cloud"},
+    )
+
+    manager.register_session(session)
+
+    reloaded = SessionManager(store=store).get_session("origin-session")
+
+    assert reloaded.origin == {"channel": "http", "binding_kind": "cloud"}
+
+
 def test_session_defaults_local_execution_binding_from_repo_path(
     tmp_path: Path,
 ) -> None:
@@ -270,6 +320,7 @@ def test_session_as_dict_includes_restart_metadata() -> None:
     session.model_name = "claude-test"
     session.base_url = "http://llm.local"
     session.max_steps = 12
+    session.origin = {"channel": "http", "binding_kind": "local"}
 
     payload = session.as_dict()
 
@@ -277,6 +328,7 @@ def test_session_as_dict_includes_restart_metadata() -> None:
     assert payload["model_name"] == "claude-test"
     assert payload["base_url"] == "http://llm.local"
     assert payload["max_steps"] == 12
+    assert payload["origin"] == {"channel": "http", "binding_kind": "local"}
 
 
 def test_session_metadata_defaults_missing_binding_to_local_from_repo_path(

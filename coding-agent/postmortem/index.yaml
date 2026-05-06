@@ -590,3 +590,28 @@ patterns:
   - and
   - teardown
   - idempotent
+- id: PM-0024
+  title: Preserve cloud workspaces until cleanup is verified
+  path: patterns/PM-0024-preserve-cloud-workspaces-until-cleanup-is-verified.md
+  severity: medium
+  confidence: medium
+  subsystems:
+  - environment
+  - http
+  related_files:
+  - src/coding_agent/environment/docker_workspace_provider.py
+  - src/coding_agent/ui/http_server.py
+  - tests/coding_agent/environment/test_docker_workspace_provider.py
+  - tests/ui/test_http_server.py
+  related_commits: []
+  keywords:
+  - preserve
+  - cloud
+  - workspaces
+  - until
+  - cleanup
+  - verified
+  - rollback
+  - cancellation
+  - docker
+  - inspect

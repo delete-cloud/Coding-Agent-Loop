@@ -65,7 +65,11 @@ from coding_agent.ui.session_owner_store import SessionOwnerStoreProtocol
 from coding_agent.ui.session_owner_store import SessionOwnershipConflictError
 from coding_agent.ui.session_owner_store import SessionOwnershipConflictReason
 from coding_agent.ui.binding_resolver import BindingResolver, DefaultBindingResolver
-from coding_agent.ui.execution_binding import ExecutionBinding, LocalExecutionBinding
+from coding_agent.ui.execution_binding import (
+    CloudWorkspaceBinding,
+    ExecutionBinding,
+    LocalExecutionBinding,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +153,7 @@ class Session:
     wire: LocalWire = field(init=False)
     approval_store: ApprovalStore = field(default_factory=ApprovalStore)
     repo_path: Path | None = None  # legacy metadata; seeds default local binding
+    origin: dict[str, str] | None = None
     execution_binding: ExecutionBinding = field(  # type: ignore[assignment]
         default=cast(ExecutionBinding, _DEFAULT_EXECUTION_BINDING),
     )
@@ -200,6 +205,7 @@ class Session:
             "model_name": self.model_name,
             "base_url": self.base_url,
             "max_steps": self.max_steps,
+            "origin": None if self.origin is None else dict(self.origin),
         }
 
     def to_store_data(self) -> dict[str, Any]:
@@ -210,6 +216,7 @@ class Session:
             # repo_path remains backward-compatible metadata and seeds the
             # default local binding when execution_binding is omitted.
             "repo_path": None if self.repo_path is None else str(self.repo_path),
+            "origin": None if self.origin is None else dict(self.origin),
             "execution_binding": self.execution_binding.to_dict(),
             "approval_policy": self.approval_policy.value,
             "provider_name": self.provider_name,
@@ -224,6 +231,16 @@ class Session:
         repo_path_raw = data.get("repo_path")
         if repo_path_raw is not None and not isinstance(repo_path_raw, str):
             raise TypeError("session metadata has invalid repo_path")
+        origin_raw = data.get("origin")
+        if origin_raw is not None:
+            if not isinstance(origin_raw, dict):
+                raise TypeError("session metadata has invalid origin")
+            origin = {
+                key: _required_session_str(cast(dict[str, Any], origin_raw), key)
+                for key in cast(dict[str, Any], origin_raw)
+            }
+        else:
+            origin = None
         approval_policy_raw = data.get("approval_policy")
         if not isinstance(approval_policy_raw, str):
             raise TypeError("session metadata is missing approval_policy")
@@ -261,6 +278,7 @@ class Session:
             ),
             approval_store=ApprovalStore(),
             repo_path=None if repo_path_raw is None else Path(repo_path_raw),
+            origin=origin,
             execution_binding=execution_binding,
             approval_policy=ApprovalPolicy(approval_policy_raw),
             provider_name=provider_name_raw,
@@ -421,6 +439,9 @@ class SessionManager:
         checkpoint_service: CheckpointService | None = None,
         create_agent_fn: Callable[..., tuple[Any, Any]] | None = None,
         binding_resolver: BindingResolver | None = None,
+        provisioned_cloud_binding_cleanup: (
+            Callable[[CloudWorkspaceBinding], None] | None
+        ) = None,
         owner_store: SessionOwnerStoreProtocol | None = None,
         owner_id: str | None = None,
         fencing_token: int | None = None,
@@ -445,6 +466,7 @@ class SessionManager:
         )
         self._create_agent = create_agent_fn
         self._binding_resolver = binding_resolver or DefaultBindingResolver()
+        self._provisioned_cloud_binding_cleanup = provisioned_cloud_binding_cleanup
         self.configure_owner_leases(
             owner_store=owner_store,
             owner_id=owner_id,
@@ -573,6 +595,34 @@ class SessionManager:
             asyncio.run(self._close_runtime_adapter(adapter))
             return
         _ = loop.create_task(self._close_runtime_adapter(adapter))
+
+    def _session_uses_provisioned_cloud_workspace(self, session: Session) -> bool:
+        origin = session.origin
+        return (
+            isinstance(session.execution_binding, CloudWorkspaceBinding)
+            and origin is not None
+            and origin.get("binding_kind") == "cloud"
+            and origin.get("workspace_source_kind") is not None
+        )
+
+    def _cleanup_provisioned_cloud_binding(self, session: Session) -> None:
+        if self._provisioned_cloud_binding_cleanup is None:
+            return
+        if not self._session_uses_provisioned_cloud_workspace(session):
+            return
+        binding = session.execution_binding
+        if not isinstance(binding, CloudWorkspaceBinding):
+            return
+        self._provisioned_cloud_binding_cleanup(binding)
+
+    async def _cleanup_provisioned_cloud_binding_async(self, session: Session) -> None:
+        try:
+            await asyncio.to_thread(self._cleanup_provisioned_cloud_binding, session)
+        except Exception:
+            logger.exception(
+                "Failed to clean up provisioned cloud workspace for session %s",
+                session.id,
+            )
 
     def _create_agent_for_session(self, **kwargs: Any) -> tuple[Any, Any]:
         factory = self._create_agent
@@ -869,6 +919,7 @@ class SessionManager:
     async def _remove_session_async_no_lock(self, session_id: str) -> None:
         session = await self.get_session_async(session_id)
         await self._close_runtime(session)
+        await self._cleanup_provisioned_cloud_binding_async(session)
         self._session_cache.pop(session_id, None)
         await self._run_store_io(self._store.delete, session_id)
         await self._release_owner_lease_for_session(session_id)
@@ -1080,6 +1131,7 @@ class SessionManager:
     async def create_session(
         self,
         repo_path: Path | None = None,
+        origin: dict[str, str] | None = None,
         approval_policy: ApprovalPolicy = ApprovalPolicy.AUTO,
         provider: Any | None = None,
         provider_name: str | None = None,
@@ -1141,6 +1193,7 @@ class SessionManager:
             created_at=now,
             last_activity=now,
             repo_path=resolved_repo_path,
+            origin=None if origin is None else dict(origin),
             execution_binding=binding,
             approval_policy=approval_policy,
             provider=provider,
@@ -1217,15 +1270,23 @@ class SessionManager:
             raise KeyError(f"Session not found: {session_id}")
         session = self.get_session(session_id)
         self._close_runtime_sync_safe(session)
+        self._cleanup_provisioned_cloud_binding(session)
         self._session_cache.pop(session_id, None)
         self._store.delete(session_id)
         self._approval_stores.pop(session_id, None)
         self._session_turn_locks.pop(session_id, None)
 
     def clear_sessions(self) -> None:
+        cleared_session_ids = set(self._session_cache)
         for session in list(self._session_cache.values()):
             self._close_runtime_sync_safe(session)
+            self._cleanup_provisioned_cloud_binding(session)
         for session_id in list(self._store.list_sessions()):
+            if session_id not in cleared_session_ids:
+                session = self.get_session(session_id)
+                self._close_runtime_sync_safe(session)
+                self._cleanup_provisioned_cloud_binding(session)
+                self._session_cache.pop(session_id, None)
             self._store.delete(session_id)
         self._session_cache.clear()
         self._approval_stores.clear()

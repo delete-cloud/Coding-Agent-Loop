@@ -7,7 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from coding_agent.environment import DockerCloudWorkspaceClient, cloud_client_factory_from_config
+from coding_agent.environment import (
+    DockerCloudWorkspaceClient,
+    cleanup_cloud_binding_from_config,
+    cloud_client_factory_from_config,
+    provision_cloud_binding_from_config,
+)
 from coding_agent.ui.execution_binding import CloudWorkspaceBinding
 
 
@@ -50,7 +55,9 @@ def test_docker_workspace_provider_builds_client_from_config(tmp_path: Path) -> 
     assert client.default_cwd == "/workspace"
 
 
-def test_docker_cloud_client_maps_file_tools_to_remote_workspace(tmp_path: Path) -> None:
+def test_docker_cloud_client_maps_file_tools_to_remote_workspace(
+    tmp_path: Path,
+) -> None:
     workspace_root = tmp_path / "workspaces"
     target_root = workspace_root / "ws-123"
     nested = target_root / "pkg"
@@ -184,7 +191,7 @@ def test_docker_cloud_client_runs_shell_in_workspace_cwd(
     timeout_wrapper = captured_command[17]
     child_wrapper = captured_command[19]
     assert TIMEOUT_SENTINEL_PREFIX in timeout_wrapper
-    assert 'trap _coding_agent_timeout TERM' in timeout_wrapper
+    assert "trap _coding_agent_timeout TERM" in timeout_wrapper
     assert 'setsid /bin/sh -c "$1" sh "$pidfile" "$2" &' in timeout_wrapper
     assert 'printf "%s\\n" "$$" > "$1"' in child_wrapper
     assert 'exec /bin/sh -c "$2"' in child_wrapper
@@ -474,7 +481,9 @@ def test_docker_cloud_client_rejects_symlink_escape_paths(tmp_path: Path) -> Non
         ValueError,
         match=r"Path is outside docker workspace: /workspace/escape",
     ):
-        _ = client.run_command("python -V", cwd="/workspace/escape", env=None, timeout=5)
+        _ = client.run_command(
+            "python -V", cwd="/workspace/escape", env=None, timeout=5
+        )
 
 
 def test_docker_workspace_provider_requires_workspace_root() -> None:
@@ -486,7 +495,9 @@ def test_docker_workspace_provider_requires_workspace_root() -> None:
 
 
 @pytest.mark.parametrize("root", ["/", "//", "/./", "/workspace/.."])
-def test_docker_workspace_provider_rejects_root_container_workspace_root(root: str) -> None:
+def test_docker_workspace_provider_rejects_root_container_workspace_root(
+    root: str,
+) -> None:
     with pytest.raises(
         ValueError,
         match=r"cloud_workspace\.container_workspace_root must not resolve to /",
@@ -498,3 +509,388 @@ def test_docker_workspace_provider_rejects_root_container_workspace_root(root: s
                 "container_workspace_root": root,
             }
         )
+
+
+def test_docker_workspace_provider_provisions_runnable_container(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_root.mkdir()
+    captured_command: list[str] = []
+    captured_kwargs: dict[str, object] = {}
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        captured_command[:] = command
+        captured_kwargs.clear()
+        captured_kwargs.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    binding = provision_cloud_binding_from_config(
+        {
+            "provider": "docker",
+            "workspace_root": str(workspace_root),
+            "container_name_prefix": "agent-",
+            "docker_binary": "/usr/bin/docker",
+        },
+        {"kind": "docker"},
+    )
+
+    assert binding.workspace_id.startswith("ws-")
+    assert (workspace_root / binding.workspace_id).is_dir()
+    assert captured_command[:8] == [
+        "/usr/bin/docker",
+        "run",
+        "-d",
+        "--name",
+        f"agent-{binding.workspace_id}",
+        "-v",
+        f"{workspace_root / binding.workspace_id}:/workspace",
+        "-w",
+    ]
+    assert captured_command[8:] == [
+        "/workspace",
+        "python:3.11-slim",
+        "sleep",
+        "infinity",
+    ]
+    assert captured_kwargs == {
+        "shell": False,
+        "capture_output": True,
+        "text": True,
+        "timeout": 30,
+        "env": None,
+        "check": True,
+    }
+
+
+def test_docker_workspace_provider_provision_cleans_up_container_when_start_times_out(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_root.mkdir()
+    commands: list[list[str]] = []
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        if command[1:3] == ["run", "-d"]:
+            timeout = kwargs.get("timeout")
+            assert isinstance(timeout, int)
+            raise subprocess.TimeoutExpired(command, timeout=timeout)
+        if command[1:3] == ["rm", "-f"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[1:3] == ["container", "inspect"]:
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                stdout="",
+                stderr=f"Error: No such container: {command[-1]}\n",
+            )
+        raise AssertionError(f"unexpected docker command: {command}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        _ = provision_cloud_binding_from_config(
+            {
+                "provider": "docker",
+                "workspace_root": str(workspace_root),
+                "container_name_prefix": "agent-",
+                "docker_binary": "/usr/bin/docker",
+            },
+            {"kind": "docker"},
+        )
+
+    container_name = commands[0][4]
+    assert commands[1] == ["/usr/bin/docker", "rm", "-f", container_name]
+    assert commands[2] == ["/usr/bin/docker", "container", "inspect", container_name]
+    assert not any(workspace_root.iterdir())
+
+
+def test_docker_workspace_provider_cleanup_removes_nonempty_workspace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_root.mkdir()
+    removed_commands: list[list[str]] = []
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        removed_commands.append(command)
+        if command[1:3] == ["container", "inspect"]:
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                stdout="",
+                stderr=f"Error: No such container: {command[-1]}\n",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    binding = provision_cloud_binding_from_config(
+        {
+            "provider": "docker",
+            "workspace_root": str(workspace_root),
+            "container_name_prefix": "agent-",
+            "docker_binary": "/usr/bin/docker",
+        },
+        {"kind": "docker"},
+    )
+    proof_file = workspace_root / binding.workspace_id / "qa-proof.txt"
+    _ = proof_file.write_text("qa-from-cloud\n", encoding="utf-8")
+
+    cleanup_cloud_binding_from_config(
+        {
+            "provider": "docker",
+            "workspace_root": str(workspace_root),
+            "container_name_prefix": "agent-",
+            "docker_binary": "/usr/bin/docker",
+        },
+        binding,
+    )
+
+    assert removed_commands[1] == [
+        "/usr/bin/docker",
+        "rm",
+        "-f",
+        f"agent-{binding.workspace_id}",
+    ]
+    assert not (workspace_root / binding.workspace_id).exists()
+
+
+def test_docker_workspace_provider_cleanup_waits_for_container_removal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_root.mkdir()
+    commands: list[list[str]] = []
+    inspect_calls = 0
+    sleep_calls: list[float] = []
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal inspect_calls
+        del kwargs
+        commands.append(command)
+        if command[1:3] == ["container", "inspect"]:
+            inspect_calls += 1
+            if inspect_calls == 1:
+                return subprocess.CompletedProcess(command, 0, stdout="[]", stderr="")
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                stdout="",
+                stderr=f"Error: No such container: {command[-1]}\n",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "coding_agent.environment.docker_workspace_provider.time.sleep",
+        sleep_calls.append,
+    )
+
+    binding = provision_cloud_binding_from_config(
+        {
+            "provider": "docker",
+            "workspace_root": str(workspace_root),
+            "container_name_prefix": "agent-",
+            "docker_binary": "/usr/bin/docker",
+        },
+        {"kind": "docker"},
+    )
+
+    cleanup_cloud_binding_from_config(
+        {
+            "provider": "docker",
+            "workspace_root": str(workspace_root),
+            "container_name_prefix": "agent-",
+            "docker_binary": "/usr/bin/docker",
+        },
+        binding,
+    )
+
+    assert [command[1:3] for command in commands].count(["container", "inspect"]) == 2
+    assert sleep_calls == [0.1]
+
+
+def test_docker_workspace_provider_cleanup_preserves_workspace_when_container_remove_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_root.mkdir()
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if command[1:3] == ["container", "inspect"]:
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                stdout="",
+                stderr=f"Error: No such container: {command[-1]}\n",
+            )
+        if command[1:3] == ["run", "-d"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            stdout="",
+            stderr="permission denied",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    binding = provision_cloud_binding_from_config(
+        {
+            "provider": "docker",
+            "workspace_root": str(workspace_root),
+            "container_name_prefix": "agent-",
+            "docker_binary": "/usr/bin/docker",
+        },
+        {"kind": "docker"},
+    )
+    proof_file = workspace_root / binding.workspace_id / "qa-proof.txt"
+    _ = proof_file.write_text("qa-from-cloud\n", encoding="utf-8")
+
+    with pytest.raises(
+        RuntimeError, match="failed to remove docker workspace container"
+    ):
+        cleanup_cloud_binding_from_config(
+            {
+                "provider": "docker",
+                "workspace_root": str(workspace_root),
+                "container_name_prefix": "agent-",
+                "docker_binary": "/usr/bin/docker",
+            },
+            binding,
+        )
+
+    assert proof_file.exists()
+
+
+@pytest.mark.parametrize(
+    "inspect_failure",
+    [
+        subprocess.CompletedProcess(
+            ["/usr/bin/docker", "container", "inspect", "agent-ws-broken"],
+            1,
+            stdout="",
+            stderr="Cannot connect to the Docker daemon\n",
+        ),
+        OSError("docker unavailable"),
+    ],
+)
+def test_docker_workspace_provider_cleanup_preserves_workspace_when_container_inspect_fails(
+    inspect_failure: subprocess.CompletedProcess[str] | OSError,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_root.mkdir()
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if command[1:3] == ["run", "-d"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[1:3] == ["rm", "-f"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[1:3] == ["container", "inspect"]:
+            if isinstance(inspect_failure, OSError):
+                raise inspect_failure
+            return inspect_failure
+        raise AssertionError(f"unexpected docker command: {command}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    binding = provision_cloud_binding_from_config(
+        {
+            "provider": "docker",
+            "workspace_root": str(workspace_root),
+            "container_name_prefix": "agent-",
+            "docker_binary": "/usr/bin/docker",
+        },
+        {"kind": "docker"},
+    )
+    proof_file = workspace_root / binding.workspace_id / "qa-proof.txt"
+    _ = proof_file.write_text("qa-from-cloud\n", encoding="utf-8")
+
+    with pytest.raises(
+        RuntimeError, match="failed to inspect docker workspace container"
+    ):
+        cleanup_cloud_binding_from_config(
+            {
+                "provider": "docker",
+                "workspace_root": str(workspace_root),
+                "container_name_prefix": "agent-",
+                "docker_binary": "/usr/bin/docker",
+            },
+            binding,
+        )
+
+    assert proof_file.exists()
+
+
+def test_docker_workspace_provider_cleanup_preserves_workspace_when_container_removal_times_out(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_root.mkdir()
+    monotonic_values = iter([0.0, 0.0, 5.1])
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        return subprocess.CompletedProcess(command, 0, stdout="[]", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "coding_agent.environment.docker_workspace_provider.time.monotonic",
+        lambda: next(monotonic_values),
+    )
+
+    def ignore_sleep(delay: float) -> None:
+        _ = delay
+
+    monkeypatch.setattr(
+        "coding_agent.environment.docker_workspace_provider.time.sleep",
+        ignore_sleep,
+    )
+
+    binding = provision_cloud_binding_from_config(
+        {
+            "provider": "docker",
+            "workspace_root": str(workspace_root),
+            "container_name_prefix": "agent-",
+            "docker_binary": "/usr/bin/docker",
+        },
+        {"kind": "docker"},
+    )
+    proof_file = workspace_root / binding.workspace_id / "qa-proof.txt"
+    _ = proof_file.write_text("qa-from-cloud\n", encoding="utf-8")
+
+    with pytest.raises(TimeoutError, match="docker workspace container still exists"):
+        cleanup_cloud_binding_from_config(
+            {
+                "provider": "docker",
+                "workspace_root": str(workspace_root),
+                "container_name_prefix": "agent-",
+                "docker_binary": "/usr/bin/docker",
+            },
+            binding,
+        )
+
+    assert proof_file.exists()
