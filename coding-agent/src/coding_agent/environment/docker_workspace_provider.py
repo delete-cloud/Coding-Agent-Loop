@@ -135,6 +135,12 @@ class DockerCloudWorkspaceClient:
             docker_command.extend(["-e", f"{key}={value}"])
         timeout_sentinel = _docker_timeout_sentinel()
         timeout_pidfile = f"/tmp/coding-agent-docker-exec-{secrets.token_hex(16)}.pid"
+        child_wrapper = "\n".join(
+            [
+                'printf "%s\\n" "$$" > "$1" || exit 125',
+                'exec /bin/sh -c "$2"',
+            ]
+        )
         timeout_wrapper = "\n".join(
             [
                 f"pidfile='{timeout_pidfile}'",
@@ -153,12 +159,11 @@ class DockerCloudWorkspaceClient:
                 "trap _coding_agent_cleanup EXIT",
                 "trap _coding_agent_timeout TERM",
                 'if command -v setsid >/dev/null 2>&1; then',
-                '  setsid /bin/sh -c "$1" &',
+                '  setsid /bin/sh -c "$1" sh "$pidfile" "$2" &',
                 "else",
-                '  /bin/sh -c "$1" &',
+                '  /bin/sh -c "$1" sh "$pidfile" "$2" &',
                 "fi",
                 "child=$!",
-                'printf "%s\\n" "$child" > "$pidfile"',
                 'wait "$child"',
                 "exit $?",
             ]
@@ -176,6 +181,7 @@ class DockerCloudWorkspaceClient:
                 "-c",
                 timeout_wrapper,
                 "sh",
+                child_wrapper,
                 command,
             ]
         )
@@ -237,12 +243,6 @@ class DockerCloudWorkspaceClient:
             items.append((key, value))
         return items
 
-    def _remote_path_for_host(self, host_path: Path) -> str:
-        relative = host_path.resolve().relative_to(self._workspace_root)
-        if not relative.parts:
-            return self.default_cwd
-        return posixpath.join(self.default_cwd, *relative.parts)
-
     def _cleanup_timed_out_command(self, timeout_pidfile: str) -> None:
         cleanup_command = [self._docker_binary, "exec"]
         if self._exec_user is not None:
@@ -251,6 +251,7 @@ class DockerCloudWorkspaceClient:
             [
                 'pid=$(cat "$1" 2>/dev/null || true)',
                 'if [ -z "$pid" ]; then',
+                '  rm -f "$1"',
                 "  exit 0",
                 "fi",
                 'kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true',

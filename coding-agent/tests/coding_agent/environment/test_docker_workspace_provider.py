@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 import subprocess
 import threading
-import time
 from pathlib import Path
 
 import pytest
@@ -183,10 +182,13 @@ def test_docker_cloud_client_runs_shell_in_workspace_cwd(
         "-c",
     ]
     timeout_wrapper = captured_command[17]
+    child_wrapper = captured_command[19]
     assert TIMEOUT_SENTINEL_PREFIX in timeout_wrapper
     assert 'trap _coding_agent_timeout TERM' in timeout_wrapper
-    assert '/bin/sh -c "$1" &' in timeout_wrapper
-    assert captured_command[18:] == ["sh", "python -V"]
+    assert 'setsid /bin/sh -c "$1" sh "$pidfile" "$2" &' in timeout_wrapper
+    assert 'printf "%s\\n" "$$" > "$1"' in child_wrapper
+    assert 'exec /bin/sh -c "$2"' in child_wrapper
+    assert captured_command[18:] == ["sh", child_wrapper, "python -V"]
     assert captured_kwargs == {
         "shell": False,
         "capture_output": True,
@@ -323,8 +325,14 @@ def test_docker_cloud_client_timeout_contract_blocks_post_timeout_mutation(
     )
 
     cleanup_called = threading.Event()
+    late_write_checked = threading.Event()
     observed_timeouts: list[object] = []
-    timers: list[threading.Timer] = []
+
+    def maybe_late_write() -> None:
+        cleanup_happened = cleanup_called.wait(timeout=0.2)
+        if not cleanup_happened:
+            _ = marker.write_text("late write\n", encoding="utf-8")
+        late_write_checked.set()
 
     def fake_run(
         command: list[str], **kwargs: object
@@ -332,14 +340,7 @@ def test_docker_cloud_client_timeout_contract_blocks_post_timeout_mutation(
         local_timeout = kwargs.get("timeout")
         observed_timeouts.append(local_timeout)
         if local_timeout == 4:
-            timer = threading.Timer(
-                0.05,
-                lambda: None
-                if cleanup_called.is_set()
-                else marker.write_text("late write\n", encoding="utf-8"),
-            )
-            timers.append(timer)
-            timer.start()
+            threading.Thread(target=maybe_late_write, daemon=True).start()
             raise subprocess.TimeoutExpired(command, timeout=4)
         assert local_timeout == 3
         cleanup_called.set()
@@ -350,8 +351,8 @@ def test_docker_cloud_client_timeout_contract_blocks_post_timeout_mutation(
     with pytest.raises(TimeoutError, match="docker exec command timed out after 1s"):
         _ = client.run_command("sleep 10", cwd="/workspace", env=None, timeout=1)
 
-    time.sleep(0.1)
-    assert cleanup_called.is_set()
+    assert cleanup_called.wait(timeout=0.2)
+    assert late_write_checked.wait(timeout=0.2)
     assert observed_timeouts == [4, 3]
     assert not marker.exists()
 
