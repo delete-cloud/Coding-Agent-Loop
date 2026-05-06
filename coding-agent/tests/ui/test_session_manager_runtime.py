@@ -1527,6 +1527,51 @@ async def test_restore_checkpoint_preserves_cloud_execution_binding() -> None:
 
 
 @pytest.mark.asyncio
+async def test_close_session_cleans_up_server_provisioned_cloud_binding() -> None:
+    cleaned: list[CloudWorkspaceBinding] = []
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        provisioned_cloud_binding_cleanup=cleaned.append,
+    )
+    binding = CloudWorkspaceBinding(
+        workspace_url="docker://agent-ws-123/workspace",
+        workspace_id="ws-123",
+    )
+    session_id = await manager.create_session(
+        execution_binding=binding,
+        origin={
+            "channel": "http",
+            "binding_kind": "cloud",
+            "workspace_source_kind": "docker",
+        },
+    )
+
+    await manager.close_session(session_id)
+
+    assert cleaned == [binding]
+
+
+@pytest.mark.asyncio
+async def test_close_session_keeps_explicit_cloud_binding_untouched() -> None:
+    cleaned: list[CloudWorkspaceBinding] = []
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        provisioned_cloud_binding_cleanup=cleaned.append,
+    )
+    session_id = await manager.create_session(
+        execution_binding=CloudWorkspaceBinding(
+            workspace_url="https://workspace.example.com",
+            workspace_id="ws-explicit",
+        ),
+        origin={"channel": "http", "binding_kind": "cloud"},
+    )
+
+    await manager.close_session(session_id)
+
+    assert cleaned == []
+
+
+@pytest.mark.asyncio
 async def test_restore_legacy_checkpoint_without_session_config_uses_current_session_metadata() -> (
     None
 ):
