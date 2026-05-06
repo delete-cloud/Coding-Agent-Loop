@@ -567,6 +567,8 @@ def test_docker_workspace_provider_cleanup_removes_nonempty_workspace(
         command: list[str], **kwargs: object
     ) -> subprocess.CompletedProcess[str]:
         removed_commands.append(command)
+        if command[1:3] == ["container", "inspect"]:
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -649,3 +651,101 @@ def test_docker_workspace_provider_cleanup_waits_for_container_removal(
 
     assert [command[1:3] for command in commands].count(["container", "inspect"]) == 2
     assert sleep_calls == [0.1]
+
+
+def test_docker_workspace_provider_cleanup_preserves_workspace_when_container_remove_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_root.mkdir()
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if command[1:3] == ["container", "inspect"]:
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+        if command[1:3] == ["run", "-d"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            stdout="",
+            stderr="permission denied",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    binding = provision_cloud_binding_from_config(
+        {
+            "provider": "docker",
+            "workspace_root": str(workspace_root),
+            "container_name_prefix": "agent-",
+            "docker_binary": "/usr/bin/docker",
+        },
+        {"kind": "docker"},
+    )
+    proof_file = workspace_root / binding.workspace_id / "qa-proof.txt"
+    proof_file.write_text("qa-from-cloud\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="failed to remove docker workspace container"):
+        cleanup_cloud_binding_from_config(
+            {
+                "provider": "docker",
+                "workspace_root": str(workspace_root),
+                "container_name_prefix": "agent-",
+                "docker_binary": "/usr/bin/docker",
+            },
+            binding,
+        )
+
+    assert proof_file.exists()
+
+
+def test_docker_workspace_provider_cleanup_preserves_workspace_when_container_removal_times_out(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_root.mkdir()
+    monotonic_values = iter([0.0, 0.0, 5.1])
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        return subprocess.CompletedProcess(command, 0, stdout="[]", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "coding_agent.environment.docker_workspace_provider.time.monotonic",
+        lambda: next(monotonic_values),
+    )
+    monkeypatch.setattr(
+        "coding_agent.environment.docker_workspace_provider.time.sleep",
+        lambda delay: None,
+    )
+
+    binding = provision_cloud_binding_from_config(
+        {
+            "provider": "docker",
+            "workspace_root": str(workspace_root),
+            "container_name_prefix": "agent-",
+            "docker_binary": "/usr/bin/docker",
+        },
+        {"kind": "docker"},
+    )
+    proof_file = workspace_root / binding.workspace_id / "qa-proof.txt"
+    proof_file.write_text("qa-from-cloud\n", encoding="utf-8")
+
+    with pytest.raises(TimeoutError, match="docker workspace container still exists"):
+        cleanup_cloud_binding_from_config(
+            {
+                "provider": "docker",
+                "workspace_root": str(workspace_root),
+                "container_name_prefix": "agent-",
+                "docker_binary": "/usr/bin/docker",
+            },
+            binding,
+        )
+
+    assert proof_file.exists()

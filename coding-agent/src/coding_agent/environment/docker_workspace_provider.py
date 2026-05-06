@@ -507,7 +507,7 @@ def _remove_docker_workspace_container(
         container_name,
     ]
     try:
-        _ = subprocess.run(
+        result = subprocess.run(
             command,
             shell=False,
             capture_output=True,
@@ -516,14 +516,25 @@ def _remove_docker_workspace_container(
             env=None,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError):
-        return
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(
+            f"failed to remove docker workspace container: {container_name}"
+        ) from exc
+
+    if result.returncode != 0 and "No such container" not in result.stderr:
+        raise RuntimeError(
+            f"failed to remove docker workspace container: {container_name}"
+        )
 
     deadline = time.monotonic() + _DOCKER_CONTAINER_REMOVAL_WAIT_SECONDS
     while time.monotonic() < deadline:
         if not _docker_container_exists(provider_config, container_name):
             return
         time.sleep(_DOCKER_CONTAINER_REMOVAL_POLL_INTERVAL_SECONDS)
+
+    raise TimeoutError(
+        f"docker workspace container still exists after cleanup: {container_name}"
+    )
 
 
 def _docker_container_exists(
