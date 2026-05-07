@@ -23,6 +23,8 @@ from coding_agent.approval import ApprovalPolicy
 from coding_agent.environment import (
     cleanup_cloud_binding_from_config,
     cloud_client_factory_from_config,
+    export_workspace_archive_from_config,
+    import_workspace_archive_from_config,
     provision_cloud_binding_from_config,
 )
 from coding_agent.ui.binding_resolver import DefaultBindingResolver
@@ -45,6 +47,7 @@ from coding_agent.ui.schemas import (
     CloseSessionResponse,
     HealthResponse,
     ReadinessResponse,
+    WorkspaceArchiveResponse,
 )
 from coding_agent.ui.auth import verify_api_key
 from coding_agent.ui.execution_binding import (
@@ -132,6 +135,14 @@ def _cleanup_provisioned_cloud_binding(binding: CloudWorkspaceBinding) -> None:
     if not isinstance(provider, str) or not provider.strip():
         return
     cleanup_cloud_binding_from_config(cloud_workspace_config, binding)
+
+
+def _populate_provisioned_cloud_binding(
+    binding: CloudWorkspaceBinding,
+    archive_base64: str,
+) -> None:
+    cloud_workspace_config = _load_cloud_workspace_config()
+    import_workspace_archive_from_config(cloud_workspace_config, binding, archive_base64)
 
 
 def _storage_uses_pg_http_sessions(storage_config: dict[str, Any]) -> bool:
@@ -732,6 +743,12 @@ async def create_session(
             and isinstance(execution_binding, CloudWorkspaceBinding)
         ):
             provisioned_binding = execution_binding
+            if body.workspace_source.snapshot_archive_base64 is not None:
+                await asyncio.to_thread(
+                    _populate_provisioned_cloud_binding,
+                    provisioned_binding,
+                    body.workspace_source.snapshot_archive_base64,
+                )
         session_id = await session_manager.create_session(
             repo_path=repo_path,
             origin=_session_origin_from_request(body, execution_binding),
@@ -986,6 +1003,39 @@ async def get_session(
         return await session_manager.get_session_info_async(session_id)
 
     raise HTTPException(status_code=404, detail="Session not found")
+
+
+@app.get(
+    "/sessions/{session_id}/workspace",
+    response_model=WorkspaceArchiveResponse,
+)
+@limiter.limit(RateLimits.GET_SESSION)
+async def get_workspace_archive(
+    request: Request,
+    session_id: str,
+    api_key: str | None = Depends(verify_api_key),
+) -> WorkspaceArchiveResponse:
+    del request, api_key
+    try:
+        session = await session_manager.get_session_async(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
+
+    if not isinstance(session.execution_binding, CloudWorkspaceBinding):
+        raise HTTPException(status_code=400, detail="Workspace export requires cloud session")
+
+    try:
+        archive_base64 = await asyncio.to_thread(
+            export_workspace_archive_from_config,
+            _load_cloud_workspace_config(),
+            session.execution_binding,
+        )
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return WorkspaceArchiveResponse(format="tar.gz", archive_base64=archive_base64)
 
 
 @app.post(
