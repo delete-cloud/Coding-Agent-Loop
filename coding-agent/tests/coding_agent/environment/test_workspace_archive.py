@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import base64
 import io
+import os
 import tarfile
+import time
 from pathlib import Path
 
 import pytest
@@ -18,6 +20,11 @@ def test_workspace_archive_round_trips_nested_files(tmp_path: Path) -> None:
     (source / "nested").mkdir(parents=True)
     (source / "README.md").write_text("hello\n", encoding="utf-8")
     (source / "nested" / "data.txt").write_text("cloud\n", encoding="utf-8")
+    script = source / "nested" / "run.sh"
+    script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    script.chmod(0o755)
+    timestamp = int(time.time()) - 120
+    os.utime(script, (timestamp, timestamp))
 
     archive_base64 = create_workspace_archive_base64(source)
 
@@ -26,6 +33,10 @@ def test_workspace_archive_round_trips_nested_files(tmp_path: Path) -> None:
 
     assert (target / "README.md").read_text(encoding="utf-8") == "hello\n"
     assert (target / "nested" / "data.txt").read_text(encoding="utf-8") == "cloud\n"
+    extracted_script = target / "nested" / "run.sh"
+    assert extracted_script.read_text(encoding="utf-8") == "#!/bin/sh\nexit 0\n"
+    assert extracted_script.stat().st_mode & 0o777 == 0o755
+    assert int(extracted_script.stat().st_mtime) == timestamp
 
 
 def test_workspace_archive_rejects_path_traversal_members(tmp_path: Path) -> None:
@@ -41,3 +52,19 @@ def test_workspace_archive_rejects_path_traversal_members(tmp_path: Path) -> Non
             tmp_path / "target",
             base64.b64encode(buffer.getvalue()).decode("ascii"),
         )
+
+
+def test_workspace_archive_extract_reconciles_deletions_but_preserves_git(tmp_path: Path) -> None:
+    target = tmp_path / "repo"
+    (target / ".git").mkdir(parents=True)
+    (target / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (target / "deleted.txt").write_text("stale\n", encoding="utf-8")
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "kept.txt").write_text("fresh\n", encoding="utf-8")
+
+    extract_workspace_archive_base64(target, create_workspace_archive_base64(source))
+
+    assert not (target / "deleted.txt").exists()
+    assert (target / "kept.txt").read_text(encoding="utf-8") == "fresh\n"
+    assert (target / ".git" / "HEAD").read_text(encoding="utf-8") == "ref: refs/heads/main\n"

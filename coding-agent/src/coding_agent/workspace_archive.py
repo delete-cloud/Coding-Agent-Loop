@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import base64
 import io
+import os
+import shutil
 import tarfile
 from pathlib import Path
+
+
+_PRESERVED_ROOT_NAMES = frozenset({".git"})
 
 
 def create_workspace_archive_base64(workspace_root: Path) -> str:
@@ -21,9 +26,12 @@ def create_workspace_archive_base64(workspace_root: Path) -> str:
                 raise ValueError(f"workspace archive does not support symlinks: {relative}")
             if not path.is_file():
                 continue
+            stat_result = path.stat()
             data = path.read_bytes()
             info = tarfile.TarInfo(name=relative.as_posix())
             info.size = len(data)
+            info.mode = stat_result.st_mode & 0o777
+            info.mtime = int(stat_result.st_mtime)
             archive.addfile(info, io.BytesIO(data))
     return base64.b64encode(buffer.getvalue()).decode("ascii")
 
@@ -40,6 +48,8 @@ def extract_workspace_archive_base64(workspace_root: Path, archive_base64: str) 
     except ValueError as exc:
         raise ValueError("workspace archive must be valid base64") from exc
 
+    _clear_extract_target(root)
+
     with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as archive:
         for member in archive.getmembers():
             target_path = _safe_archive_target(root, member.name)
@@ -55,6 +65,18 @@ def extract_workspace_archive_base64(workspace_root: Path, archive_base64: str) 
                 raise ValueError(f"workspace archive member is unreadable: {member.name}")
             target_path.parent.mkdir(parents=True, exist_ok=True)
             _ = target_path.write_bytes(file_obj.read())
+            target_path.chmod(member.mode & 0o777)
+            os.utime(target_path, (member.mtime, member.mtime))
+
+
+def _clear_extract_target(workspace_root: Path) -> None:
+    for child in workspace_root.iterdir():
+        if child.name in _PRESERVED_ROOT_NAMES:
+            continue
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+            continue
+        child.unlink()
 
 
 def _safe_archive_target(workspace_root: Path, member_name: str) -> Path:
