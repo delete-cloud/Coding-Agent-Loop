@@ -418,6 +418,113 @@ def serve(port: int, host: str):
     uvicorn.run(app, host=host, port=port)
 
 
+@main.group()
+def remote() -> None:
+    """Manage and use remote Coding Agent servers."""
+
+
+@remote.command("add")
+@click.argument("name")
+@click.argument("url")
+@click.option("--token", default=None, help="Bearer token for the remote server")
+def remote_add(name: str, url: str, token: str | None) -> None:
+    """Add or update a named remote endpoint."""
+    from coding_agent.remote.client import add_remote
+
+    endpoint = add_remote(name, url, token)
+    click.echo(f"Added remote {endpoint.name}: {endpoint.url}")
+
+
+@remote.command("list")
+def remote_list() -> None:
+    """List named remote endpoints."""
+    from coding_agent.remote.client import load_remotes
+
+    remotes = load_remotes()
+    if not remotes:
+        click.echo("No remotes configured.")
+        return
+    for endpoint in remotes.values():
+        auth = "token" if endpoint.token is not None else "no-token"
+        click.echo(f"{endpoint.name}\t{endpoint.url}\t{auth}")
+
+
+@remote.command("remove")
+@click.argument("name")
+def remote_remove(name: str) -> None:
+    """Remove a named remote endpoint."""
+    from coding_agent.remote.client import remove_remote
+
+    remove_remote(name)
+    click.echo(f"Removed remote {name}")
+
+
+@remote.command("repl")
+@click.argument("name")
+@click.option(
+    "--repo",
+    default=None,
+    help="Reserved for future workspace upload; currently unsupported.",
+)
+@click.option(
+    "--empty-workspace",
+    is_flag=True,
+    help="Create an empty server-side Docker workspace.",
+)
+@click.option("--goal", required=True, help="Initial prompt to send to the remote session")
+def remote_repl(name: str, repo: str | None, empty_workspace: bool, goal: str) -> None:
+    """Create a remote cloud session and stream one prompt."""
+    from coding_agent.remote.client import (
+        auth_headers,
+        create_remote_session,
+        get_remote,
+        stream_prompt,
+    )
+
+    if repo is not None:
+        raise click.ClickException(
+            "--repo is not supported for remote Docker workspaces yet; "
+            "workspace upload/download is planned for the next slice. "
+            "Use --empty-workspace to create an empty server-side workspace."
+        )
+    if not empty_workspace:
+        raise click.ClickException(
+            "Remote repl currently creates an empty server-side Docker workspace. "
+            "Pass --empty-workspace to acknowledge that no local files are uploaded."
+        )
+
+    endpoint = get_remote(name)
+    session_id = create_remote_session(endpoint)
+    click.echo(f"Created remote session {session_id}")
+    raise SystemExit(
+        stream_prompt(
+            base_url=endpoint.url,
+            session_id=session_id,
+            prompt=goal,
+            headers=auth_headers(endpoint),
+        )
+    )
+
+
+@main.command()
+@click.argument("name")
+@click.option("--session", "session_id", required=True, help="Remote session ID")
+@click.option("--goal", required=True, help="Prompt to send to the remote session")
+def attach(name: str, session_id: str, goal: str) -> None:
+    """Attach to an existing remote session and stream one prompt."""
+    from coding_agent.remote.client import auth_headers, get_remote, stream_prompt
+
+    endpoint = get_remote(name)
+    raise SystemExit(
+        stream_prompt(
+            base_url=endpoint.url,
+            session_id=session_id,
+            prompt=goal,
+            headers=auth_headers(endpoint),
+        )
+    )
+
+
 @main.command()
 @click.option(
     "--task-packet",
