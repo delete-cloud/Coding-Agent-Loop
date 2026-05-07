@@ -477,33 +477,59 @@ def remote_repl(name: str, repo: str | None, empty_workspace: bool, goal: str) -
     from coding_agent.remote.client import (
         auth_headers,
         create_remote_session,
+        download_workspace_archive,
         get_remote,
         stream_prompt,
     )
+    from coding_agent.workspace_archive import (
+        create_workspace_archive_base64,
+        extract_workspace_archive_base64,
+    )
 
-    if repo is not None:
+    if repo is not None and empty_workspace:
         raise click.ClickException(
-            "--repo is not supported for remote Docker workspaces yet; "
-            "workspace upload/download is planned for the next slice. "
-            "Use --empty-workspace to create an empty server-side workspace."
+            "Pass either --repo to upload a workspace snapshot or --empty-workspace, not both."
         )
-    if not empty_workspace:
+    if repo is None and not empty_workspace:
         raise click.ClickException(
-            "Remote repl currently creates an empty server-side Docker workspace. "
-            "Pass --empty-workspace to acknowledge that no local files are uploaded."
+            "Pass --repo to upload a workspace snapshot or --empty-workspace to create a blank remote workspace."
         )
 
     endpoint = get_remote(name)
-    session_id = create_remote_session(endpoint)
+    headers = auth_headers(endpoint)
+    repo_path: Path | None = None
+    snapshot_archive_base64: str | None = None
+    if repo is not None:
+        repo_path = Path(repo).expanduser().resolve()
+        if not repo_path.is_dir():
+            raise click.ClickException(f"--repo must be an existing directory: {repo}")
+        try:
+            snapshot_archive_base64 = create_workspace_archive_base64(repo_path)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+
+    session_id = create_remote_session(
+        endpoint,
+        snapshot_archive_base64=snapshot_archive_base64,
+    )
     click.echo(f"Created remote session {session_id}")
-    raise SystemExit(
-        stream_prompt(
+    status = stream_prompt(
+        base_url=endpoint.url,
+        session_id=session_id,
+        prompt=goal,
+        headers=headers,
+    )
+    if repo_path is not None:
+        archive_base64 = download_workspace_archive(
             base_url=endpoint.url,
             session_id=session_id,
-            prompt=goal,
-            headers=auth_headers(endpoint),
+            headers=headers,
         )
-    )
+        try:
+            extract_workspace_archive_base64(repo_path, archive_base64)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+    raise SystemExit(status)
 
 
 @main.command()

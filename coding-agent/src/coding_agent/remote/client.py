@@ -119,9 +119,16 @@ def auth_headers(endpoint: RemoteEndpoint) -> dict[str, str]:
     return {"Authorization": f"Bearer {endpoint.token}"}
 
 
-def create_remote_session(endpoint: RemoteEndpoint) -> str:
+def create_remote_session(
+    endpoint: RemoteEndpoint,
+    *,
+    snapshot_archive_base64: str | None = None,
+) -> str:
+    workspace_source: dict[str, object] = {"kind": "docker"}
+    if snapshot_archive_base64 is not None:
+        workspace_source["snapshot_archive_base64"] = snapshot_archive_base64
     payload: dict[str, object] = {
-        "workspace_source": {"kind": "docker"},
+        "workspace_source": workspace_source,
         "approval_policy": "auto",
     }
     try:
@@ -144,6 +151,30 @@ def create_remote_session(endpoint: RemoteEndpoint) -> str:
     if not isinstance(session_id, str) or not session_id:
         raise click.ClickException("Remote session response missing session_id")
     return session_id
+
+
+def download_workspace_archive(
+    *,
+    base_url: str,
+    session_id: str,
+    headers: dict[str, str],
+) -> str:
+    try:
+        with httpx.Client(base_url=base_url, headers=headers, timeout=60.0) as client:
+            response = client.get(f"/sessions/{session_id}/workspace")
+            _raise_remote_http_error(response, "download remote workspace")
+            data = cast(object, response.json())
+    except httpx.RequestError as exc:
+        raise click.ClickException(
+            f"Failed to download remote workspace: {exc}"
+        ) from exc
+    if not isinstance(data, Mapping):
+        raise click.ClickException("Remote workspace response must be a JSON object")
+    payload = cast(Mapping[str, object], data)
+    archive_base64 = payload.get("archive_base64")
+    if not isinstance(archive_base64, str) or not archive_base64:
+        raise click.ClickException("Remote workspace response missing archive_base64")
+    return archive_base64
 
 
 def stream_prompt(
