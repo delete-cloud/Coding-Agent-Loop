@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from dataclasses import dataclass
 from collections.abc import Mapping
 from pathlib import Path
@@ -58,14 +59,26 @@ def load_remotes() -> dict[str, RemoteEndpoint]:
 def save_remotes(remotes: dict[str, RemoteEndpoint]) -> None:
     path = remotes_file_path()
     _ = path.parent.mkdir(parents=True, exist_ok=True)
+    _ = path.parent.chmod(0o700)
     payload = {
         "remotes": {
             name: _remote_payload(endpoint) for name, endpoint in sorted(remotes.items())
         }
     }
-    _ = path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    contents = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, text=True
     )
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as temp_file:
+            _ = temp_file.write(contents)
+        _ = temp_path.chmod(0o600)
+        _ = temp_path.replace(path)
+        _ = path.chmod(0o600)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
 
 
 def add_remote(name: str, url: str, token: str | None) -> RemoteEndpoint:
@@ -101,9 +114,8 @@ def auth_headers(endpoint: RemoteEndpoint) -> dict[str, str]:
     return {"Authorization": f"Bearer {endpoint.token}"}
 
 
-def create_remote_session(endpoint: RemoteEndpoint, *, repo: str) -> str:
+def create_remote_session(endpoint: RemoteEndpoint) -> str:
     payload: dict[str, object] = {
-        "repo_path": repo,
         "workspace_source": {"kind": "docker"},
         "approval_policy": "auto",
     }
@@ -135,7 +147,7 @@ def stream_prompt(
             json={"prompt": prompt},
         ) as event_source:
             for sse in event_source.iter_sse():
-                status = _handle_sse_event(
+                status = handle_sse_event_for_test(
                     base_url=base_url,
                     session_id=session_id,
                     headers=headers,
@@ -147,7 +159,7 @@ def stream_prompt(
     return 0
 
 
-def _handle_sse_event(
+def handle_sse_event_for_test(
     *, base_url: str, session_id: str, headers: dict[str, str], event: str, data: str
 ) -> int | None:
     payload = _parse_sse_payload(data)
@@ -174,10 +186,14 @@ def _handle_sse_event(
     if event == "ApprovalRequest":
         request_id = payload.get("request_id")
         if isinstance(request_id, str):
-            _approve_once(
+            decision = _prompt_for_approval(payload)
+            _submit_approval(
                 base_url=base_url,
                 session_id=session_id,
                 request_id=request_id,
+                approved=decision.approved,
+                feedback=decision.feedback,
+                scope=decision.scope,
                 headers=headers,
             )
         return None
@@ -190,13 +206,52 @@ def _handle_sse_event(
     return None
 
 
-def _approve_once(
-    *, base_url: str, session_id: str, request_id: str, headers: dict[str, str]
+@dataclass(frozen=True)
+class _ApprovalDecision:
+    approved: bool
+    feedback: str | None = None
+    scope: str = "once"
+
+
+def _prompt_for_approval(payload: dict[str, object]) -> _ApprovalDecision:
+    tool_call = payload.get("tool_call")
+    tool_name = "unknown"
+    if isinstance(tool_call, Mapping):
+        tool_call = cast(Mapping[str, object], tool_call)
+        raw_tool_name = tool_call.get("tool_name")
+        if isinstance(raw_tool_name, str) and raw_tool_name:
+            tool_name = raw_tool_name
+        arguments = tool_call.get("arguments")
+        if isinstance(arguments, Mapping):
+            click.echo(json.dumps(dict(arguments), indent=2, sort_keys=True))
+    approved = click.confirm(
+        f"Approve remote tool request {tool_name}?",
+        default=False,
+    )
+    return _ApprovalDecision(approved=approved)
+
+
+def _submit_approval(
+    *,
+    base_url: str,
+    session_id: str,
+    request_id: str,
+    approved: bool,
+    feedback: str | None,
+    scope: str,
+    headers: dict[str, str],
 ) -> None:
+    payload: dict[str, object] = {
+        "request_id": request_id,
+        "approved": approved,
+        "scope": scope,
+    }
+    if feedback is not None:
+        payload["feedback"] = feedback
     with httpx.Client(base_url=base_url, headers=headers, timeout=30.0) as client:
         response = client.post(
             f"/sessions/{session_id}/approve",
-            json={"request_id": request_id, "approved": True, "scope": "once"},
+            json=payload,
         )
         _raise_remote_http_error(response, "approve remote tool request")
 

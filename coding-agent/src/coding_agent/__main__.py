@@ -461,9 +461,18 @@ def remote_remove(name: str) -> None:
 
 @remote.command("repl")
 @click.argument("name")
-@click.option("--repo", default=".", help="Repository path to bind to the remote session")
+@click.option(
+    "--repo",
+    default=None,
+    help="Reserved for future workspace upload; currently unsupported.",
+)
+@click.option(
+    "--empty-workspace",
+    is_flag=True,
+    help="Create an empty server-side Docker workspace.",
+)
 @click.option("--goal", required=True, help="Initial prompt to send to the remote session")
-def remote_repl(name: str, repo: str, goal: str) -> None:
+def remote_repl(name: str, repo: str | None, empty_workspace: bool, goal: str) -> None:
     """Create a remote cloud session and stream one prompt."""
     from coding_agent.remote.client import (
         auth_headers,
@@ -472,8 +481,20 @@ def remote_repl(name: str, repo: str, goal: str) -> None:
         stream_prompt,
     )
 
+    if repo is not None:
+        raise click.ClickException(
+            "--repo is not supported for remote Docker workspaces yet; "
+            "workspace upload/download is planned for the next slice. "
+            "Use --empty-workspace to create an empty server-side workspace."
+        )
+    if not empty_workspace:
+        raise click.ClickException(
+            "Remote repl currently creates an empty server-side Docker workspace. "
+            "Pass --empty-workspace to acknowledge that no local files are uploaded."
+        )
+
     endpoint = get_remote(name)
-    session_id = create_remote_session(endpoint, repo=repo)
+    session_id = create_remote_session(endpoint)
     click.echo(f"Created remote session {session_id}")
     raise SystemExit(
         stream_prompt(
