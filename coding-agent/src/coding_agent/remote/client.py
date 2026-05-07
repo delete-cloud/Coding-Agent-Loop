@@ -177,6 +177,20 @@ def download_workspace_archive(
     return archive_base64
 
 
+def delete_remote_session(
+    *,
+    base_url: str,
+    session_id: str,
+    headers: dict[str, str],
+) -> None:
+    try:
+        with httpx.Client(base_url=base_url, headers=headers, timeout=30.0) as client:
+            response = client.delete(f"/sessions/{session_id}")
+            _raise_remote_http_error(response, "delete remote session")
+    except httpx.RequestError as exc:
+        raise click.ClickException(f"Failed to delete remote session: {exc}") from exc
+
+
 def stream_prompt(
     *, base_url: str, session_id: str, prompt: str, headers: dict[str, str]
 ) -> int:

@@ -464,7 +464,7 @@ def remote_remove(name: str) -> None:
 @click.option(
     "--repo",
     default=None,
-    help="Reserved for future workspace upload; currently unsupported.",
+    help="Upload a local workspace snapshot and download the final remote workspace into it.",
 )
 @click.option(
     "--empty-workspace",
@@ -477,6 +477,7 @@ def remote_repl(name: str, repo: str | None, empty_workspace: bool, goal: str) -
     from coding_agent.remote.client import (
         auth_headers,
         create_remote_session,
+        delete_remote_session,
         download_workspace_archive,
         get_remote,
         stream_prompt,
@@ -513,22 +514,45 @@ def remote_repl(name: str, repo: str | None, empty_workspace: bool, goal: str) -
         snapshot_archive_base64=snapshot_archive_base64,
     )
     click.echo(f"Created remote session {session_id}")
-    status = stream_prompt(
-        base_url=endpoint.url,
-        session_id=session_id,
-        prompt=goal,
-        headers=headers,
-    )
-    if repo_path is not None:
-        archive_base64 = download_workspace_archive(
+    status: int | None = None
+    stream_error: BaseException | None = None
+    try:
+        status = stream_prompt(
             base_url=endpoint.url,
             session_id=session_id,
+            prompt=goal,
             headers=headers,
         )
+    except BaseException as exc:
+        stream_error = exc
+    finally:
+        if repo_path is not None:
+            try:
+                archive_base64 = download_workspace_archive(
+                    base_url=endpoint.url,
+                    session_id=session_id,
+                    headers=headers,
+                )
+                extract_workspace_archive_base64(repo_path, archive_base64)
+            except (click.ClickException, ValueError) as exc:
+                if stream_error is not None:
+                    stream_error.add_note(f"Workspace download also failed: {exc}")
+                else:
+                    raise click.ClickException(str(exc)) from exc
         try:
-            extract_workspace_archive_base64(repo_path, archive_base64)
-        except ValueError as exc:
-            raise click.ClickException(str(exc)) from exc
+            delete_remote_session(
+                base_url=endpoint.url,
+                session_id=session_id,
+                headers=headers,
+            )
+        except click.ClickException as exc:
+            if stream_error is not None:
+                stream_error.add_note(f"Remote session cleanup also failed: {exc}")
+            else:
+                raise
+    if stream_error is not None:
+        raise stream_error
+    assert status is not None
     raise SystemExit(status)
 
 

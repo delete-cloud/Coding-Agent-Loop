@@ -107,6 +107,10 @@ def test_remote_repl_creates_cloud_session_and_streams_prompt_events(
                 return FakeResponse({"session_id": "sess-123"})
             raise AssertionError(f"unexpected post {path}")
 
+        def delete(self, path: str) -> FakeResponse:
+            calls.append(("delete", path, None, self.headers))
+            return FakeResponse({"status": "closed"})
+
     def fake_stream_prompt(
         *, base_url: str, session_id: str, prompt: str, headers: dict[str, str]
     ) -> int:
@@ -142,6 +146,12 @@ def test_remote_repl_creates_cloud_session_and_streams_prompt_events(
             "stream",
             "/sessions/sess-123/prompt",
             {"prompt": "hello", "base_url": "http://agent.example"},
+            {"Authorization": "Bearer secret-token"},
+        ),
+        (
+            "delete",
+            "/sessions/sess-123",
+            None,
             {"Authorization": "Bearer secret-token"},
         ),
     ]
@@ -301,6 +311,10 @@ def test_remote_repl_with_repo_uploads_snapshot_and_downloads_workspace(
                 return FakeResponse({"session_id": "sess-upload"})
             raise AssertionError(f"unexpected post {path}")
 
+        def delete(self, path: str) -> FakeResponse:
+            calls.append(("delete", path, None, self.headers))
+            return FakeResponse({"status": "closed"})
+
     def fake_stream_prompt(
         *, base_url: str, session_id: str, prompt: str, headers: dict[str, str]
     ) -> int:
@@ -358,8 +372,129 @@ def test_remote_repl_with_repo_uploads_snapshot_and_downloads_workspace(
             {"prompt": "hello", "base_url": "http://agent.example"},
             {"Authorization": "Bearer secret-token"},
         ),
+        (
+            "delete",
+            "/sessions/sess-upload",
+            None,
+            {"Authorization": "Bearer secret-token"},
+        ),
     ]
     assert applied == [(repo_path, "result-archive")]
+
+
+def test_remote_repl_with_repo_downloads_results_when_stream_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_path = tmp_path / "remotes.json"
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example", "--token", "secret-token"],
+        catch_exceptions=False,
+    )
+    calls: list[tuple[str, str, dict[str, object] | None, dict[str, str]]] = []
+    applied: list[tuple[Path, str]] = []
+
+    class FakeResponse:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self._payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            headers = kwargs.get("headers")
+            self.headers = headers if isinstance(headers, dict) else {}
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def post(
+            self, path: str, json: dict[str, object] | None = None
+        ) -> FakeResponse:
+            calls.append(("post", path, json, self.headers))
+            if path == "/sessions":
+                return FakeResponse({"session_id": "sess-upload"})
+            raise AssertionError(f"unexpected post {path}")
+
+        def delete(self, path: str) -> FakeResponse:
+            calls.append(("delete", path, None, self.headers))
+            return FakeResponse({"status": "closed"})
+
+    def failing_stream_prompt(
+        *, base_url: str, session_id: str, prompt: str, headers: dict[str, str]
+    ) -> int:
+        calls.append(
+            (
+                "stream",
+                f"/sessions/{session_id}/prompt",
+                {"prompt": prompt, "base_url": base_url},
+                headers,
+            )
+        )
+        raise click.ClickException("stream failed")
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+    monkeypatch.setattr("coding_agent.remote.client.stream_prompt", failing_stream_prompt)
+    monkeypatch.setattr(
+        "coding_agent.workspace_archive.create_workspace_archive_base64",
+        lambda path: "archive-encoded",
+    )
+    monkeypatch.setattr(
+        "coding_agent.remote.client.download_workspace_archive",
+        lambda *, base_url, session_id, headers: "result-archive",
+    )
+    monkeypatch.setattr(
+        "coding_agent.workspace_archive.extract_workspace_archive_base64",
+        lambda repo_path_arg, archive_base64: applied.append(
+            (repo_path_arg, archive_base64)
+        ),
+    )
+
+    result = runner.invoke(
+        main,
+        ["remote", "repl", "dev", "--repo", str(repo_path), "--goal", "hello"],
+    )
+
+    assert result.exit_code != 0
+    assert "stream failed" in result.output
+    assert applied == [(repo_path, "result-archive")]
+    assert calls == [
+        (
+            "post",
+            "/sessions",
+            {
+                "workspace_source": {
+                    "kind": "docker",
+                    "snapshot_archive_base64": "archive-encoded",
+                },
+                "approval_policy": "auto",
+            },
+            {"Authorization": "Bearer secret-token"},
+        ),
+        (
+            "stream",
+            "/sessions/sess-upload/prompt",
+            {"prompt": "hello", "base_url": "http://agent.example"},
+            {"Authorization": "Bearer secret-token"},
+        ),
+        (
+            "delete",
+            "/sessions/sess-upload",
+            None,
+            {"Authorization": "Bearer secret-token"},
+        ),
+    ]
 
 
 def test_remote_repl_can_explicitly_create_empty_docker_workspace(
@@ -399,6 +534,10 @@ def test_remote_repl_can_explicitly_create_empty_docker_workspace(
             calls.append(("post", path, json, self.headers))
             return FakeResponse()
 
+        def delete(self, path: str) -> FakeResponse:
+            calls.append(("delete", path, None, self.headers))
+            return FakeResponse()
+
     def fake_stream_prompt(
         *, base_url: str, session_id: str, prompt: str, headers: dict[str, str]
     ) -> int:
@@ -433,6 +572,12 @@ def test_remote_repl_can_explicitly_create_empty_docker_workspace(
             "stream",
             "/sessions/sess-empty/prompt",
             {"prompt": "hello", "base_url": "http://agent.example"},
+            {},
+        ),
+        (
+            "delete",
+            "/sessions/sess-empty",
+            None,
             {},
         ),
     ]
