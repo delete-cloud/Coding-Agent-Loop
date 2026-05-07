@@ -3,11 +3,13 @@ from __future__ import annotations
 import base64
 import io
 import tarfile
+from collections.abc import AsyncIterator
 from datetime import datetime
 from pathlib import Path
 
 from coding_agent.ui.execution_binding import CloudWorkspaceBinding
-from coding_agent.ui.http_server import app, session_manager, limiter
+from coding_agent.ui.http_server import app, session_manager
+from coding_agent.ui.rate_limit import limiter
 from coding_agent.ui.session_manager import Session
 from httpx import ASGITransport, AsyncClient
 import pytest
@@ -38,7 +40,7 @@ def _read_workspace_archive(archive_base64: str) -> dict[str, str]:
 
 
 @pytest.fixture(autouse=True)
-async def clear_sessions() -> None:
+async def clear_sessions() -> AsyncIterator[None]:
     session_manager.configure_owner_leases(
         owner_store=None,
         owner_id=None,
@@ -53,10 +55,11 @@ async def clear_sessions() -> None:
         fencing_token=None,
     )
     session_manager.clear_sessions()
+    limiter.reset()
 
 
 @pytest.fixture
-async def client() -> AsyncClient:
+async def client() -> AsyncIterator[AsyncClient]:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
