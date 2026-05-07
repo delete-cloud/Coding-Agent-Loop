@@ -33,7 +33,10 @@ def load_remotes() -> dict[str, RemoteEndpoint]:
     path = remotes_file_path()
     if not path.exists():
         return {}
-    raw = cast(object, json.loads(path.read_text(encoding="utf-8")))
+    try:
+        raw = cast(object, json.loads(path.read_text(encoding="utf-8")))
+    except json.JSONDecodeError as exc:
+        raise click.ClickException(f"Invalid remotes file: {path}: {exc}") from exc
     if not isinstance(raw, Mapping):
         raise click.ClickException(f"Invalid remotes file: {path}")
     raw = cast(Mapping[str, object], raw)
@@ -58,8 +61,10 @@ def load_remotes() -> dict[str, RemoteEndpoint]:
 
 def save_remotes(remotes: dict[str, RemoteEndpoint]) -> None:
     path = remotes_file_path()
+    parent_existed = path.parent.exists()
     _ = path.parent.mkdir(parents=True, exist_ok=True)
-    _ = path.parent.chmod(0o700)
+    if not parent_existed:
+        _ = path.parent.chmod(0o700)
     payload = {
         "remotes": {
             name: _remote_payload(endpoint) for name, endpoint in sorted(remotes.items())
@@ -119,14 +124,19 @@ def create_remote_session(endpoint: RemoteEndpoint) -> str:
         "workspace_source": {"kind": "docker"},
         "approval_policy": "auto",
     }
-    with httpx.Client(
-        base_url=endpoint.url,
-        headers=auth_headers(endpoint),
-        timeout=60.0,
-    ) as client:
-        response = client.post("/sessions", json=payload)
-        _raise_remote_http_error(response, "create remote session")
-        data = cast(object, response.json())
+    try:
+        with httpx.Client(
+            base_url=endpoint.url,
+            headers=auth_headers(endpoint),
+            timeout=60.0,
+        ) as client:
+            response = client.post("/sessions", json=payload)
+            _raise_remote_http_error(response, "create remote session")
+            data = cast(object, response.json())
+    except httpx.RequestError as exc:
+        raise click.ClickException(
+            f"Failed to create remote session: {exc}"
+        ) from exc
     if not isinstance(data, Mapping):
         raise click.ClickException("Remote session response must be a JSON object")
     data = cast(Mapping[str, object], data)
@@ -139,24 +149,31 @@ def create_remote_session(endpoint: RemoteEndpoint) -> str:
 def stream_prompt(
     *, base_url: str, session_id: str, prompt: str, headers: dict[str, str]
 ) -> int:
-    with httpx.Client(base_url=base_url, headers=headers, timeout=None) as client:
-        with connect_sse(
-            client,
-            "POST",
-            f"/sessions/{session_id}/prompt",
-            json={"prompt": prompt},
-        ) as event_source:
-            for sse in event_source.iter_sse():
-                status = handle_sse_event_for_test(
-                    base_url=base_url,
-                    session_id=session_id,
-                    headers=headers,
-                    event=sse.event,
-                    data=sse.data,
+    timeout = httpx.Timeout(connect=10.0, write=30.0, pool=30.0, read=None)
+    try:
+        with httpx.Client(base_url=base_url, headers=headers, timeout=timeout) as client:
+            with connect_sse(
+                client,
+                "POST",
+                f"/sessions/{session_id}/prompt",
+                json={"prompt": prompt},
+            ) as event_source:
+                _raise_remote_http_error(
+                    event_source.response, "stream remote prompt"
                 )
-                if status is not None:
-                    return status
-    return 0
+                for sse in event_source.iter_sse():
+                    status = handle_sse_event_for_test(
+                        base_url=base_url,
+                        session_id=session_id,
+                        headers=headers,
+                        event=sse.event,
+                        data=sse.data,
+                    )
+                    if status is not None:
+                        return status
+    except httpx.RequestError as exc:
+        raise click.ClickException(f"Failed to stream remote prompt: {exc}") from exc
+    raise click.ClickException("Remote prompt stream ended without TurnEnd")
 
 
 def handle_sse_event_for_test(
@@ -248,18 +265,28 @@ def _submit_approval(
     }
     if feedback is not None:
         payload["feedback"] = feedback
-    with httpx.Client(base_url=base_url, headers=headers, timeout=30.0) as client:
-        response = client.post(
-            f"/sessions/{session_id}/approve",
-            json=payload,
-        )
-        _raise_remote_http_error(response, "approve remote tool request")
+    try:
+        with httpx.Client(base_url=base_url, headers=headers, timeout=30.0) as client:
+            response = client.post(
+                f"/sessions/{session_id}/approve",
+                json=payload,
+            )
+            _raise_remote_http_error(response, "approve remote tool request")
+    except httpx.RequestError as exc:
+        raise click.ClickException(
+            f"Failed to approve remote tool request: {exc}"
+        ) from exc
 
 
 def _parse_sse_payload(data: str) -> dict[str, object]:
     if not data:
         return {}
-    payload = cast(object, json.loads(data))
+    try:
+        payload = cast(object, json.loads(data))
+    except json.JSONDecodeError as exc:
+        raise click.ClickException(
+            f"Remote SSE event payload must be valid JSON: {exc}"
+        ) from exc
     if not isinstance(payload, Mapping):
         raise click.ClickException("Remote SSE event payload must be a JSON object")
     return dict(cast(Mapping[str, object], payload))
@@ -274,6 +301,9 @@ def _raise_remote_http_error(response: httpx.Response, action: str) -> None:
 
 
 def _response_error_detail(response: httpx.Response) -> str:
+    if not hasattr(response, "json"):
+        status_code = getattr(response, "status_code", None)
+        return f"HTTP {status_code}" if isinstance(status_code, int) else "HTTP error"
     try:
         payload = cast(object, response.json())
     except ValueError:

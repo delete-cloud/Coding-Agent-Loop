@@ -4,6 +4,9 @@ import json
 import stat
 from pathlib import Path
 
+import httpx
+import click
+import pytest
 from click.testing import CliRunner
 
 from coding_agent.__main__ import main
@@ -403,3 +406,181 @@ def test_remote_config_file_is_written_private(tmp_path: Path, monkeypatch) -> N
 
     assert result.exit_code == 0
     assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
+
+
+def test_remote_add_reports_invalid_remotes_json(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "remotes.json"
+    _ = config_path.write_text("{not-json", encoding="utf-8")
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    runner = CliRunner()
+
+    result = runner.invoke(main, ["remote", "list"])
+
+    assert result.exit_code != 0
+    assert f"Invalid remotes file: {config_path}" in result.output
+
+
+def test_save_remotes_does_not_chmod_existing_override_parent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_path = tmp_path / "nested" / "remotes.json"
+    config_path.parent.mkdir(parents=True)
+    original_mode = stat.S_IMODE(config_path.parent.stat().st_mode)
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    runner = CliRunner()
+
+    result = runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example", "--token", "secret-token"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert stat.S_IMODE(config_path.parent.stat().st_mode) == original_mode
+
+
+def test_remote_repl_reports_request_error_on_session_create(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_path = tmp_path / "remotes.json"
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example"],
+        catch_exceptions=False,
+    )
+
+    class FailingClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def __enter__(self) -> FailingClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def post(
+            self, path: str, json: dict[str, object] | None = None
+        ) -> httpx.Response:
+            del path, json
+            request = httpx.Request("POST", "http://agent.example/sessions")
+            raise httpx.ConnectError("connection refused", request=request)
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FailingClient)
+
+    result = runner.invoke(
+        main,
+        ["remote", "repl", "dev", "--empty-workspace", "--goal", "hello"],
+    )
+
+    assert result.exit_code != 0
+    assert "Failed to create remote session" in result.output
+    assert "connection refused" in result.output
+
+
+def test_stream_prompt_reports_non_200_sse_response(monkeypatch) -> None:
+    class FakeResponse:
+        status_code = 503
+
+        def raise_for_status(self) -> None:
+            request = httpx.Request("POST", "http://agent.example/sessions/sess-1/prompt")
+            raise httpx.HTTPStatusError(
+                "bad status",
+                request=request,
+                response=httpx.Response(503, request=request, json={"detail": "server busy"}),
+            )
+
+        def json(self) -> dict[str, object]:
+            return {"detail": "server busy"}
+
+    class FakeEventSource:
+        response = FakeResponse()
+
+        def __enter__(self) -> FakeEventSource:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def iter_sse(self):
+            if False:
+                yield None
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            self.timeout = kwargs.get("timeout")
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+    monkeypatch.setattr("coding_agent.remote.client.connect_sse", lambda *args, **kwargs: FakeEventSource())
+
+    from coding_agent.remote.client import stream_prompt
+
+    with pytest.raises(click.ClickException, match="Failed to stream remote prompt: server busy"):
+        stream_prompt(
+            base_url="http://agent.example",
+            session_id="sess-1",
+            prompt="hello",
+            headers={},
+        )
+
+
+def test_stream_prompt_rejects_truncated_stream_without_turn_end(monkeypatch) -> None:
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+    class FakeEventSource:
+        response = FakeResponse()
+
+        def __enter__(self) -> FakeEventSource:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def iter_sse(self):
+            yield type("SSE", (), {"event": "StreamDelta", "data": json.dumps({"content": "partial"})})()
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            self.timeout = kwargs.get("timeout")
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+    monkeypatch.setattr("coding_agent.remote.client.connect_sse", lambda *args, **kwargs: FakeEventSource())
+
+    from coding_agent.remote.client import stream_prompt
+
+    with pytest.raises(click.ClickException, match="Remote prompt stream ended without TurnEnd"):
+        stream_prompt(
+            base_url="http://agent.example",
+            session_id="sess-1",
+            prompt="hello",
+            headers={},
+        )
+
+
+def test_handle_sse_event_reports_invalid_json(monkeypatch) -> None:
+    from coding_agent.remote.client import handle_sse_event_for_test
+
+    with pytest.raises(click.ClickException, match="Remote SSE event payload must be valid JSON"):
+        handle_sse_event_for_test(
+            base_url="http://agent.example",
+            session_id="sess-1",
+            headers={},
+            event="StreamDelta",
+            data="{not-json",
+        )
