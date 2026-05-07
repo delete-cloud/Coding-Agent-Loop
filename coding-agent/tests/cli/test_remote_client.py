@@ -367,9 +367,9 @@ def test_remote_approval_request_prompts_before_submitting_decision(monkeypatch)
     monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
     monkeypatch.setattr("coding_agent.remote.client.click.confirm", fake_confirm)
 
-    from coding_agent.remote.client import handle_sse_event_for_test
+    from coding_agent.remote.client import handle_sse_event
 
-    status = handle_sse_event_for_test(
+    status, line_open = handle_sse_event(
         base_url="http://agent.example",
         session_id="sess-approval",
         headers={},
@@ -387,10 +387,88 @@ def test_remote_approval_request_prompts_before_submitting_decision(monkeypatch)
     )
 
     assert status is None
+    assert line_open is False
     assert prompts == [("Approve remote tool request bash_run?", False)]
     assert approvals == [
         {"request_id": "req-1", "approved": False, "scope": "once"}
     ]
+
+
+def test_handle_sse_event_formats_approval_after_inline_stream_output(
+    monkeypatch, capsys
+) -> None:
+    approvals: list[dict[str, object] | None] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"status": "ok"}
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def post(
+            self, path: str, json: dict[str, object] | None = None
+        ) -> FakeResponse:
+            del path
+            approvals.append(json)
+            return FakeResponse()
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+    monkeypatch.setattr(
+        "coding_agent.remote.client.click.confirm", lambda text, default: False
+    )
+
+    from coding_agent.remote.client import handle_sse_event
+
+    status, line_open = handle_sse_event(
+        base_url="http://agent.example",
+        session_id="sess-approval",
+        headers={},
+        event="StreamDelta",
+        data=json.dumps({"content": "partial"}),
+    )
+
+    assert status is None
+    assert line_open is True
+
+    status, line_open = handle_sse_event(
+        base_url="http://agent.example",
+        session_id="sess-approval",
+        headers={},
+        event="ApprovalRequest",
+        data=json.dumps(
+            {
+                "request_id": "req-1",
+                "tool_call": {
+                    "tool_name": "bash_run",
+                    "arguments": {"command": "rm -rf scratch"},
+                    "call_id": "call-1",
+                },
+            }
+        ),
+        line_open=line_open,
+    )
+
+    assert status is None
+    assert line_open is False
+    assert approvals == [
+        {"request_id": "req-1", "approved": False, "scope": "once"}
+    ]
+    assert capsys.readouterr().out == (
+        "partial\n"
+        "[approval] Remote tool request bash_run\n"
+        '{\n  "command": "rm -rf scratch"\n}\n'
+    )
 
 
 def test_remote_config_file_is_written_private(tmp_path: Path, monkeypatch) -> None:
@@ -574,10 +652,10 @@ def test_stream_prompt_rejects_truncated_stream_without_turn_end(monkeypatch) ->
 
 
 def test_handle_sse_event_reports_invalid_json(monkeypatch) -> None:
-    from coding_agent.remote.client import handle_sse_event_for_test
+    from coding_agent.remote.client import handle_sse_event
 
     with pytest.raises(click.ClickException, match="Remote SSE event payload must be valid JSON"):
-        handle_sse_event_for_test(
+        handle_sse_event(
             base_url="http://agent.example",
             session_id="sess-1",
             headers={},

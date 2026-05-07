@@ -150,6 +150,7 @@ def stream_prompt(
     *, base_url: str, session_id: str, prompt: str, headers: dict[str, str]
 ) -> int:
     timeout = httpx.Timeout(connect=10.0, write=30.0, pool=30.0, read=None)
+    line_open = False
     try:
         with httpx.Client(base_url=base_url, headers=headers, timeout=timeout) as client:
             with connect_sse(
@@ -162,45 +163,68 @@ def stream_prompt(
                     event_source.response, "stream remote prompt"
                 )
                 for sse in event_source.iter_sse():
-                    status = handle_sse_event_for_test(
+                    status, line_open = handle_sse_event(
                         base_url=base_url,
                         session_id=session_id,
                         headers=headers,
                         event=sse.event,
                         data=sse.data,
+                        line_open=line_open,
                     )
                     if status is not None:
+                        if line_open:
+                            click.echo()
                         return status
     except httpx.RequestError as exc:
+        if line_open:
+            click.echo()
         raise click.ClickException(f"Failed to stream remote prompt: {exc}") from exc
+    if line_open:
+        click.echo()
     raise click.ClickException("Remote prompt stream ended without TurnEnd")
 
 
-def handle_sse_event_for_test(
-    *, base_url: str, session_id: str, headers: dict[str, str], event: str, data: str
-) -> int | None:
-    payload = _parse_sse_payload(data)
+def handle_sse_event(
+    *,
+    base_url: str,
+    session_id: str,
+    headers: dict[str, str],
+    event: str,
+    data: str,
+    line_open: bool = False,
+) -> tuple[int | None, bool]:
+    try:
+        payload = _parse_sse_payload(data)
+    except click.ClickException:
+        if line_open:
+            click.echo()
+        raise
     if event == "StreamDelta":
         content = payload.get("content")
-        if isinstance(content, str):
+        if isinstance(content, str) and content:
             click.echo(content, nl=False)
-        return None
+            line_open = True
+        return None, line_open
     if event == "ThinkingDelta":
         text = payload.get("text")
-        if isinstance(text, str):
+        if isinstance(text, str) and text:
             click.echo(text, nl=False)
-        return None
+            line_open = True
+        return None, line_open
     if event == "ToolCallDelta":
+        line_open = _end_inline_stream_line(line_open)
         tool_name = payload.get("tool_name")
         if isinstance(tool_name, str):
-            click.echo(f"\n[tool] {tool_name}")
-        return None
+            click.echo(f"[tool] {tool_name}")
+        return None, line_open
     if event == "ToolResultDelta":
+        line_open = _end_inline_stream_line(line_open)
         display_result = payload.get("display_result")
         if isinstance(display_result, str) and display_result:
             click.echo(display_result)
-        return None
+        return None, line_open
     if event == "ApprovalRequest":
+        line_open = _end_inline_stream_line(line_open)
         request_id = payload.get("request_id")
         if isinstance(request_id, str):
             decision = _prompt_for_approval(payload)
@@ -213,14 +237,15 @@ def handle_sse_event_for_test(
                 scope=decision.scope,
                 headers=headers,
             )
-        return None
+        return None, line_open
     if event == "Error":
+        line_open = _end_inline_stream_line(line_open)
         error = payload.get("error")
         raise click.ClickException(str(error) if error is not None else "Remote error")
     if event == "TurnEnd":
         status = payload.get("completion_status")
-        return 0 if status == "completed" else 1
-    return None
+        return (0 if status == "completed" else 1), line_open
+    return None, line_open
 
 
 @dataclass(frozen=True)
@@ -238,14 +263,29 @@ def _prompt_for_approval(payload: dict[str, object]) -> _ApprovalDecision:
         raw_tool_name = tool_call.get("tool_name")
         if isinstance(raw_tool_name, str) and raw_tool_name:
             tool_name = raw_tool_name
+        click.echo(f"[approval] Remote tool request {tool_name}")
         arguments = tool_call.get("arguments")
         if isinstance(arguments, Mapping):
-            click.echo(json.dumps(dict(arguments), indent=2, sort_keys=True))
+            click.echo(
+                json.dumps(
+                    dict(cast(Mapping[str, object], arguments)),
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+    # TODO(adr-0019): Extend the remote approval prompt to capture session-scope
+    # approvals and user feedback instead of the current yes/no confirmation.
     approved = click.confirm(
         f"Approve remote tool request {tool_name}?",
         default=False,
     )
     return _ApprovalDecision(approved=approved)
+
+
+def _end_inline_stream_line(line_open: bool) -> bool:
+    if line_open:
+        click.echo()
+    return False
 
 
 def _submit_approval(
