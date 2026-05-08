@@ -515,7 +515,8 @@ def remote_repl(name: str, repo: str | None, empty_workspace: bool, goal: str) -
     )
     click.echo(f"Created remote session {session_id}")
     status: int | None = None
-    stream_error: BaseException | None = None
+    stream_error: Exception | None = None
+    deferred_error: click.ClickException | None = None
     try:
         status = stream_prompt(
             base_url=endpoint.url,
@@ -523,7 +524,7 @@ def remote_repl(name: str, repo: str | None, empty_workspace: bool, goal: str) -
             prompt=goal,
             headers=headers,
         )
-    except BaseException as exc:
+    except Exception as exc:
         stream_error = exc
     finally:
         if repo_path is not None:
@@ -534,11 +535,11 @@ def remote_repl(name: str, repo: str | None, empty_workspace: bool, goal: str) -
                     headers=headers,
                 )
                 extract_workspace_archive_base64(repo_path, archive_base64)
-            except (click.ClickException, ValueError) as exc:
+            except Exception as exc:
                 if stream_error is not None:
                     stream_error.add_note(f"Workspace download also failed: {exc}")
                 else:
-                    raise click.ClickException(str(exc)) from exc
+                    deferred_error = click.ClickException(str(exc))
         try:
             delete_remote_session(
                 base_url=endpoint.url,
@@ -552,6 +553,8 @@ def remote_repl(name: str, repo: str | None, empty_workspace: bool, goal: str) -
                 raise
     if stream_error is not None:
         raise stream_error
+    if deferred_error is not None:
+        raise deferred_error
     assert status is not None
     raise SystemExit(status)
 
