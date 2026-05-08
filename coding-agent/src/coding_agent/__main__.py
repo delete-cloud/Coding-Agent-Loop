@@ -546,9 +546,11 @@ def remote_repl(name: str, repo: str | None, empty_workspace: bool, goal: str) -
                 session_id=session_id,
                 headers=headers,
             )
-        except click.ClickException as exc:
+        except Exception as exc:
             if stream_error is not None:
                 stream_error.add_note(f"Remote session cleanup also failed: {exc}")
+            elif deferred_error is not None:
+                deferred_error.add_note(f"Remote session cleanup also failed: {exc}")
             else:
                 raise
     if stream_error is not None:

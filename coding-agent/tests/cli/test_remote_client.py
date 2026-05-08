@@ -612,6 +612,83 @@ def test_remote_repl_with_repo_deletes_session_when_extract_fails(
     ]
 
 
+def test_remote_repl_preserves_extract_error_when_cleanup_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_path = tmp_path / "remotes.json"
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example", "--token", "secret-token"],
+        catch_exceptions=False,
+    )
+
+    class FakeResponse:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self._payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            headers = kwargs.get("headers")
+            self.headers = headers if isinstance(headers, dict) else {}
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def post(
+            self, path: str, json: dict[str, object] | None = None
+        ) -> FakeResponse:
+            if path == "/sessions":
+                return FakeResponse({"session_id": "sess-upload"})
+            raise AssertionError(f"unexpected post {path}")
+
+        def delete(self, path: str) -> FakeResponse:
+            del path
+            raise RuntimeError("cleanup failed")
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+    monkeypatch.setattr(
+        "coding_agent.remote.client.stream_prompt",
+        lambda *, base_url, session_id, prompt, headers: 0,
+    )
+    monkeypatch.setattr(
+        "coding_agent.workspace_archive.create_workspace_archive_base64",
+        lambda path: "archive-encoded",
+    )
+    monkeypatch.setattr(
+        "coding_agent.remote.client.download_workspace_archive",
+        lambda *, base_url, session_id, headers: "result-archive",
+    )
+    monkeypatch.setattr(
+        "coding_agent.workspace_archive.extract_workspace_archive_base64",
+        lambda repo_path_arg, archive_base64: (_ for _ in ()).throw(OSError("extract failed")),
+    )
+
+    result = runner.invoke(
+        main,
+        ["remote", "repl", "dev", "--repo", str(repo_path), "--goal", "hello"],
+    )
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, SystemExit)
+    assert result.output == (
+        "Created remote session sess-upload\n"
+        "Error: extract failed\n"
+    )
+
+
 def test_remote_repl_can_explicitly_create_empty_docker_workspace(
     tmp_path: Path, monkeypatch
 ) -> None:
