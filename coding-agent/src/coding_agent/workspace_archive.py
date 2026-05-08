@@ -53,7 +53,7 @@ def extract_workspace_archive_base64(workspace_root: Path, archive_base64: str) 
         with tarfile.open(fileobj=archive_buffer, mode="r:gz") as archive:
             for member in archive.getmembers():
                 _safe_archive_target(root, member.name)
-    except tarfile.ReadError as exc:
+    except tarfile.TarError as exc:
         raise ValueError("workspace archive is not a valid tar.gz") from exc
 
     _clear_extract_target(root)

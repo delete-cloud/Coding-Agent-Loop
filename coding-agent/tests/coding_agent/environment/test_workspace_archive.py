@@ -59,10 +59,43 @@ def test_workspace_archive_rejects_invalid_tar_without_clearing_target(tmp_path:
     target.mkdir()
     (target / "keep.txt").write_text("keep\n", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="valid tar.gz"):
+    with pytest.raises(ValueError, match=r"valid tar\.gz"):
         _ = extract_workspace_archive_base64(
             target,
             base64.b64encode(b"not a valid tar archive").decode("ascii"),
+        )
+
+    assert (target / "keep.txt").read_text(encoding="utf-8") == "keep\n"
+
+
+def test_workspace_archive_rejects_tar_header_error_without_clearing_target(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "repo"
+    target.mkdir()
+    (target / "keep.txt").write_text("keep\n", encoding="utf-8")
+
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        data = b"hello\n"
+        info = tarfile.TarInfo(name="plain.txt")
+        info.size = len(data)
+        archive.addfile(info, io.BytesIO(data))
+
+    archive_buffer = io.BytesIO(buffer.getvalue())
+    with tarfile.open(fileobj=archive_buffer, mode="r:gz") as archive:
+        members = archive.getmembers()
+        assert len(members) == 1
+        members[0].offset_data
+
+    archive_bytes = bytearray(buffer.getvalue())
+    header_offset = members[0].offset
+    archive_bytes[header_offset] = 0
+
+    with pytest.raises(ValueError, match=r"valid tar\.gz"):
+        _ = extract_workspace_archive_base64(
+            target,
+            base64.b64encode(bytes(archive_bytes)).decode("ascii"),
         )
 
     assert (target / "keep.txt").read_text(encoding="utf-8") == "keep\n"
