@@ -101,6 +101,29 @@ def test_workspace_archive_rejects_tar_header_error_without_clearing_target(
     assert (target / "keep.txt").read_text(encoding="utf-8") == "keep\n"
 
 
+def test_workspace_archive_rejects_symlink_without_clearing_target(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "repo"
+    target.mkdir()
+    (target / "keep.txt").write_text("keep\n", encoding="utf-8")
+
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        link = tarfile.TarInfo(name="link")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "keep.txt"
+        archive.addfile(link)
+
+    with pytest.raises(ValueError, match="only supports regular files and directories"):
+        _ = extract_workspace_archive_base64(
+            target,
+            base64.b64encode(buffer.getvalue()).decode("ascii"),
+        )
+
+    assert (target / "keep.txt").read_text(encoding="utf-8") == "keep\n"
+
+
 def test_workspace_archive_defaults_missing_member_mode_to_readable_file(
     tmp_path: Path,
 ) -> None:
