@@ -464,7 +464,7 @@ def remote_remove(name: str) -> None:
 @click.option(
     "--repo",
     default=None,
-    help="Reserved for future workspace upload; currently unsupported.",
+    help="Upload a local workspace snapshot and download the final remote workspace into it.",
 )
 @click.option(
     "--empty-workspace",
@@ -477,33 +477,98 @@ def remote_repl(name: str, repo: str | None, empty_workspace: bool, goal: str) -
     from coding_agent.remote.client import (
         auth_headers,
         create_remote_session,
+        delete_remote_session,
+        download_workspace_archive,
         get_remote,
         stream_prompt,
     )
+    from coding_agent.workspace_archive import (
+        create_workspace_archive_base64,
+        extract_workspace_archive_base64,
+    )
 
-    if repo is not None:
+    if repo is not None and empty_workspace:
         raise click.ClickException(
-            "--repo is not supported for remote Docker workspaces yet; "
-            "workspace upload/download is planned for the next slice. "
-            "Use --empty-workspace to create an empty server-side workspace."
+            "Pass either --repo to upload a workspace snapshot or --empty-workspace, not both."
         )
-    if not empty_workspace:
+    if repo is None and not empty_workspace:
         raise click.ClickException(
-            "Remote repl currently creates an empty server-side Docker workspace. "
-            "Pass --empty-workspace to acknowledge that no local files are uploaded."
+            "Pass --repo to upload a workspace snapshot or --empty-workspace to create a blank remote workspace."
         )
 
     endpoint = get_remote(name)
-    session_id = create_remote_session(endpoint)
+    headers = auth_headers(endpoint)
+    repo_path: Path | None = None
+    snapshot_archive_base64: str | None = None
+    if repo is not None:
+        repo_path = Path(repo).expanduser().resolve()
+        if not repo_path.is_dir():
+            raise click.ClickException(f"--repo must be an existing directory: {repo}")
+        try:
+            snapshot_archive_base64 = create_workspace_archive_base64(repo_path)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+
+    session_id = create_remote_session(
+        endpoint,
+        snapshot_archive_base64=snapshot_archive_base64,
+    )
     click.echo(f"Created remote session {session_id}")
-    raise SystemExit(
-        stream_prompt(
+    status: int | None = None
+    stream_error: Exception | None = None
+    deferred_error: click.ClickException | None = None
+    workspace_restore_failed = False
+    try:
+        status = stream_prompt(
             base_url=endpoint.url,
             session_id=session_id,
             prompt=goal,
-            headers=auth_headers(endpoint),
+            headers=headers,
         )
-    )
+    except Exception as exc:
+        stream_error = exc
+    finally:
+        if repo_path is not None:
+            try:
+                archive_base64 = download_workspace_archive(
+                    base_url=endpoint.url,
+                    session_id=session_id,
+                    headers=headers,
+                )
+                extract_workspace_archive_base64(repo_path, archive_base64)
+            except Exception as exc:
+                workspace_restore_failed = True
+                if stream_error is not None:
+                    stream_error.add_note(f"Workspace download also failed: {exc}")
+                else:
+                    deferred_error = click.ClickException(str(exc))
+        if workspace_restore_failed:
+            click.echo(
+                f"Remote session {session_id} left open; local workspace restore failed."
+            )
+            click.echo(
+                f'Retry with: python -m coding_agent attach {name} --session {session_id} --goal "<goal>"'
+            )
+        else:
+            try:
+                delete_remote_session(
+                    base_url=endpoint.url,
+                    session_id=session_id,
+                    headers=headers,
+                )
+            except Exception as exc:
+                if stream_error is not None:
+                    stream_error.add_note(f"Remote session cleanup also failed: {exc}")
+                elif deferred_error is not None:
+                    deferred_error.add_note(f"Remote session cleanup also failed: {exc}")
+                else:
+                    raise
+    if stream_error is not None:
+        raise stream_error
+    if deferred_error is not None:
+        raise deferred_error
+    assert status is not None
+    raise SystemExit(status)
 
 
 @main.command()

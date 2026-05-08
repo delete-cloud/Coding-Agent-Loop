@@ -11,6 +11,8 @@ from .workspace_provider import (
     CloudWorkspaceSource,
     WorkspaceProvider,
     cloud_client_factory_from_config,
+    export_workspace_archive_from_config,
+    import_workspace_archive_from_config,
     provision_cloud_binding_from_config,
     register_workspace_provider,
 )
@@ -26,6 +28,8 @@ __all__ = [
     "LocalEnvironment",
     "WorkspaceProvider",
     "cloud_client_factory_from_config",
+    "export_workspace_archive_from_config",
+    "import_workspace_archive_from_config",
     "provision_cloud_binding_from_config",
     "register_workspace_provider",
 ]

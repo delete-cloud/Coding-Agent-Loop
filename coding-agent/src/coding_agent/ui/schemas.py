@@ -21,6 +21,7 @@ class CloudWorkspaceBindingRequest(BaseModel):
 
 class DockerWorkspaceSourceRequest(BaseModel):
     kind: Literal["docker"]
+    snapshot_archive_base64: str | None = Field(None, min_length=1)
 
 
 ExecutionBindingRequest = LocalExecutionBindingRequest | CloudWorkspaceBindingRequest
@@ -120,3 +121,8 @@ class HealthResponse(BaseModel):
 class ReadinessResponse(BaseModel):
     status: str
     checks: dict[str, str]
+
+
+class WorkspaceArchiveResponse(BaseModel):
+    format: Literal["tar.gz"]
+    archive_base64: str

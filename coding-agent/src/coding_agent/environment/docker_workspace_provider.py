@@ -20,6 +20,10 @@ from .workspace_provider import (
     WorkspaceProvider,
     register_workspace_provider,
 )
+from ..workspace_archive import (
+    create_workspace_archive_base64,
+    extract_workspace_archive_base64,
+)
 
 if TYPE_CHECKING:
     from .cloud import CloudWorkspaceClient
@@ -115,7 +119,7 @@ class DockerCloudWorkspaceClient:
         return matches
 
     def apply_patch(self, path: str, patch: str) -> dict[str, object]:
-        from coding_agent.tools.file_patch_tool import build_file_patch_tool
+        from ..tools.file_patch_tool import build_file_patch_tool
 
         _, host_path = self._resolve_file_path(path)
         patch_tool = build_file_patch_tool(self._workspace_root)
@@ -381,6 +385,31 @@ class DockerWorkspaceProvider(WorkspaceProvider):
         )
         if workspace_root.exists():
             shutil.rmtree(workspace_root)
+
+    @override
+    def import_workspace_archive(
+        self,
+        config: dict[str, object],
+        binding: CloudWorkspaceBinding,
+        archive_base64: str,
+    ) -> None:
+        provider_config = _docker_workspace_provider_config(config)
+        workspace_root = _workspace_root_for_id(
+            provider_config.workspace_root, binding.workspace_id
+        )
+        extract_workspace_archive_base64(workspace_root, archive_base64)
+
+    @override
+    def export_workspace_archive(
+        self,
+        config: dict[str, object],
+        binding: CloudWorkspaceBinding,
+    ) -> str:
+        provider_config = _docker_workspace_provider_config(config)
+        workspace_root = _workspace_root_for_id(
+            provider_config.workspace_root, binding.workspace_id
+        )
+        return create_workspace_archive_base64(workspace_root)
 
 
 def _docker_workspace_provider_config(
