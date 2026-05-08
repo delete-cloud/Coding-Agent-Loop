@@ -517,6 +517,7 @@ def remote_repl(name: str, repo: str | None, empty_workspace: bool, goal: str) -
     status: int | None = None
     stream_error: Exception | None = None
     deferred_error: click.ClickException | None = None
+    workspace_restore_failed = False
     try:
         status = stream_prompt(
             base_url=endpoint.url,
@@ -536,23 +537,32 @@ def remote_repl(name: str, repo: str | None, empty_workspace: bool, goal: str) -
                 )
                 extract_workspace_archive_base64(repo_path, archive_base64)
             except Exception as exc:
+                workspace_restore_failed = True
                 if stream_error is not None:
                     stream_error.add_note(f"Workspace download also failed: {exc}")
                 else:
                     deferred_error = click.ClickException(str(exc))
-        try:
-            delete_remote_session(
-                base_url=endpoint.url,
-                session_id=session_id,
-                headers=headers,
+        if workspace_restore_failed:
+            click.echo(
+                f"Remote session {session_id} left open; local workspace restore failed."
             )
-        except Exception as exc:
-            if stream_error is not None:
-                stream_error.add_note(f"Remote session cleanup also failed: {exc}")
-            elif deferred_error is not None:
-                deferred_error.add_note(f"Remote session cleanup also failed: {exc}")
-            else:
-                raise
+            click.echo(
+                f'Retry with: python -m coding_agent attach {name} --session {session_id} --goal "<goal>"'
+            )
+        else:
+            try:
+                delete_remote_session(
+                    base_url=endpoint.url,
+                    session_id=session_id,
+                    headers=headers,
+                )
+            except Exception as exc:
+                if stream_error is not None:
+                    stream_error.add_note(f"Remote session cleanup also failed: {exc}")
+                elif deferred_error is not None:
+                    deferred_error.add_note(f"Remote session cleanup also failed: {exc}")
+                else:
+                    raise
     if stream_error is not None:
         raise stream_error
     if deferred_error is not None:

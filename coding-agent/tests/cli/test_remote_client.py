@@ -497,7 +497,7 @@ def test_remote_repl_with_repo_downloads_results_when_stream_fails(
     ]
 
 
-def test_remote_repl_with_repo_deletes_session_when_extract_fails(
+def test_remote_repl_with_repo_retains_session_when_extract_fails(
     tmp_path: Path, monkeypatch
 ) -> None:
     config_path = tmp_path / "remotes.json"
@@ -584,6 +584,8 @@ def test_remote_repl_with_repo_deletes_session_when_extract_fails(
 
     assert result.exit_code != 0
     assert "extract failed" in result.output
+    assert "Remote session sess-upload left open" in result.output
+    assert "python -m coding_agent attach dev --session sess-upload" in result.output
     assert calls == [
         (
             "post",
@@ -603,16 +605,10 @@ def test_remote_repl_with_repo_deletes_session_when_extract_fails(
             {"prompt": "hello", "base_url": "http://agent.example"},
             {"Authorization": "Bearer secret-token"},
         ),
-        (
-            "delete",
-            "/sessions/sess-upload",
-            None,
-            {"Authorization": "Bearer secret-token"},
-        ),
     ]
 
 
-def test_remote_repl_preserves_extract_error_when_cleanup_fails(
+def test_remote_repl_with_repo_retains_session_when_stream_and_extract_fail(
     tmp_path: Path, monkeypatch
 ) -> None:
     config_path = tmp_path / "remotes.json"
@@ -636,6 +632,8 @@ def test_remote_repl_preserves_extract_error_when_cleanup_fails(
         def json(self) -> dict[str, object]:
             return self._payload
 
+    calls: list[tuple[str, str, dict[str, object] | None, dict[str, str]]] = []
+
     class FakeClient:
         def __init__(self, **kwargs: object) -> None:
             headers = kwargs.get("headers")
@@ -650,18 +648,31 @@ def test_remote_repl_preserves_extract_error_when_cleanup_fails(
         def post(
             self, path: str, json: dict[str, object] | None = None
         ) -> FakeResponse:
+            calls.append(("post", path, json, self.headers))
             if path == "/sessions":
                 return FakeResponse({"session_id": "sess-upload"})
             raise AssertionError(f"unexpected post {path}")
 
         def delete(self, path: str) -> FakeResponse:
-            del path
-            raise RuntimeError("cleanup failed")
+            calls.append(("delete", path, None, self.headers))
+            return FakeResponse({"status": "closed"})
+
+    def failing_stream_prompt(
+        *, base_url: str, session_id: str, prompt: str, headers: dict[str, str]
+    ) -> int:
+        calls.append(
+            (
+                "stream",
+                f"/sessions/{session_id}/prompt",
+                {"prompt": prompt, "base_url": base_url},
+                headers,
+            )
+        )
+        raise click.ClickException("stream failed")
 
     monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
     monkeypatch.setattr(
-        "coding_agent.remote.client.stream_prompt",
-        lambda *, base_url, session_id, prompt, headers: 0,
+        "coding_agent.remote.client.stream_prompt", failing_stream_prompt
     )
     monkeypatch.setattr(
         "coding_agent.workspace_archive.create_workspace_archive_base64",
@@ -673,7 +684,9 @@ def test_remote_repl_preserves_extract_error_when_cleanup_fails(
     )
     monkeypatch.setattr(
         "coding_agent.workspace_archive.extract_workspace_archive_base64",
-        lambda repo_path_arg, archive_base64: (_ for _ in ()).throw(OSError("extract failed")),
+        lambda repo_path_arg, archive_base64: (_ for _ in ()).throw(
+            OSError("extract failed")
+        ),
     )
 
     result = runner.invoke(
@@ -682,11 +695,29 @@ def test_remote_repl_preserves_extract_error_when_cleanup_fails(
     )
 
     assert result.exit_code != 0
-    assert isinstance(result.exception, SystemExit)
-    assert result.output == (
-        "Created remote session sess-upload\n"
-        "Error: extract failed\n"
-    )
+    assert "stream failed" in result.output
+    assert "Remote session sess-upload left open" in result.output
+    assert "python -m coding_agent attach dev --session sess-upload" in result.output
+    assert calls == [
+        (
+            "post",
+            "/sessions",
+            {
+                "workspace_source": {
+                    "kind": "docker",
+                    "snapshot_archive_base64": "archive-encoded",
+                },
+                "approval_policy": "auto",
+            },
+            {"Authorization": "Bearer secret-token"},
+        ),
+        (
+            "stream",
+            "/sessions/sess-upload/prompt",
+            {"prompt": "hello", "base_url": "http://agent.example"},
+            {"Authorization": "Bearer secret-token"},
+        ),
+    ]
 
 
 def test_remote_repl_can_explicitly_create_empty_docker_workspace(
