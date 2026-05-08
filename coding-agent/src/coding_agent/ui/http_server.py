@@ -142,7 +142,11 @@ def _populate_provisioned_cloud_binding(
     archive_base64: str,
 ) -> None:
     cloud_workspace_config = _load_cloud_workspace_config()
-    import_workspace_archive_from_config(cloud_workspace_config, binding, archive_base64)
+    import_workspace_archive_from_config(
+        cloud_workspace_config,
+        binding,
+        archive_base64,
+    )
 
 
 def _storage_uses_pg_http_sessions(storage_config: dict[str, Any]) -> bool:
@@ -743,11 +747,16 @@ async def create_session(
             and isinstance(execution_binding, CloudWorkspaceBinding)
         ):
             provisioned_binding = execution_binding
-            if body.workspace_source.snapshot_archive_base64 is not None:
+            snapshot_archive_base64 = getattr(
+                body.workspace_source,
+                "snapshot_archive_base64",
+                None,
+            )
+            if isinstance(snapshot_archive_base64, str):
                 await asyncio.to_thread(
                     _populate_provisioned_cloud_binding,
                     provisioned_binding,
-                    body.workspace_source.snapshot_archive_base64,
+                    snapshot_archive_base64,
                 )
         session_id = await session_manager.create_session(
             repo_path=repo_path,
@@ -1017,23 +1026,23 @@ async def get_workspace_archive(
 ) -> WorkspaceArchiveResponse:
     del request, api_key
     try:
-        session = await session_manager.get_session_async(session_id)
+        archive_base64 = await session_manager.export_workspace_archive(
+            session_id,
+            lambda binding: export_workspace_archive_from_config(
+                _load_cloud_workspace_config(),
+                binding,
+            ),
+        )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
-
-    if not isinstance(session.execution_binding, CloudWorkspaceBinding):
-        raise HTTPException(status_code=400, detail="Workspace export requires cloud session")
-
-    try:
-        archive_base64 = await asyncio.to_thread(
-            export_workspace_archive_from_config,
-            _load_cloud_workspace_config(),
-            session.execution_binding,
-        )
+    except SessionOwnershipConflictError as exc:
+        raise _owner_conflict_http_exception(exc, session_id=session_id) from exc
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        if str(exc) == "turn already in progress":
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise
 
     return WorkspaceArchiveResponse(format="tar.gz", archive_base64=archive_base64)
 

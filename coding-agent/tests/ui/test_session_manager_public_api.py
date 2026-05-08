@@ -1558,6 +1558,45 @@ async def test_restore_checkpoint_rejects_when_turn_lock_is_held() -> None:
 
 
 @pytest.mark.asyncio
+async def test_export_workspace_archive_rejects_active_turn() -> None:
+    manager = SessionManager(store=InMemorySessionStore())
+    session_id = await manager.create_session(
+        execution_binding=CloudWorkspaceBinding(
+            workspace_url="docker://agent-ws-export/workspace",
+            workspace_id="ws-export",
+        )
+    )
+    session = manager.get_session(session_id)
+    session.turn_in_progress = True
+    manager.register_session(session)
+
+    with pytest.raises(RuntimeError, match="turn already in progress"):
+        await manager.export_workspace_archive(session_id, lambda binding: binding.workspace_id)
+
+
+@pytest.mark.asyncio
+async def test_export_workspace_archive_rejects_when_turn_lock_is_held() -> None:
+    manager = SessionManager(store=InMemorySessionStore())
+    session_id = await manager.create_session(
+        execution_binding=CloudWorkspaceBinding(
+            workspace_url="docker://agent-ws-export/workspace",
+            workspace_id="ws-export",
+        )
+    )
+
+    turn_lock = manager._turn_lock_for(session_id)
+    await turn_lock.acquire()
+    try:
+        with pytest.raises(RuntimeError, match="turn already in progress"):
+            await manager.export_workspace_archive(
+                session_id,
+                lambda binding: binding.workspace_id,
+            )
+    finally:
+        turn_lock.release()
+
+
+@pytest.mark.asyncio
 async def test_capture_checkpoint_uses_current_runtime_context() -> None:
     manager = SessionManager(store=InMemorySessionStore())
     session_id = await manager.create_session()

@@ -1,18 +1,75 @@
 from __future__ import annotations
-
 import base64
 import io
 import tarfile
 from collections.abc import AsyncIterator
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any, cast
 
 from coding_agent.ui.execution_binding import CloudWorkspaceBinding
 from coding_agent.ui.http_server import app, session_manager
 from coding_agent.ui.rate_limit import limiter
 from coding_agent.ui.session_manager import Session
+from coding_agent.ui.session_owner_store import SessionOwnerRecord
 from httpx import ASGITransport, AsyncClient
 import pytest
+
+
+class FakeOwnerStore:
+    def __init__(self) -> None:
+        self._owners: dict[str, SessionOwnerRecord] = {}
+
+    async def acquire(
+        self,
+        session_id: str,
+        owner_id: str,
+        lease_seconds: float = 30.0,
+        fencing_token: int = 1,
+    ) -> bool:
+        self._owners[session_id] = SessionOwnerRecord(
+            owner_id=owner_id,
+            lease_expires_at=datetime.now(UTC) + timedelta(seconds=lease_seconds),
+            fencing_token=fencing_token,
+        )
+        return True
+
+    async def get_owner(self, session_id: str) -> SessionOwnerRecord | None:
+        return self._owners.get(session_id)
+
+    async def renew(
+        self,
+        session_id: str,
+        owner_id: str,
+        lease_seconds: float = 30.0,
+        new_fencing_token: int = 2,
+        current_fencing_token: int = 1,
+    ) -> bool:
+        owner = self._owners.get(session_id)
+        if owner is None:
+            return False
+        if owner.owner_id != owner_id or owner.fencing_token != current_fencing_token:
+            return False
+        self._owners[session_id] = SessionOwnerRecord(
+            owner_id=owner_id,
+            lease_expires_at=datetime.now(UTC) + timedelta(seconds=lease_seconds),
+            fencing_token=new_fencing_token,
+        )
+        return True
+
+    async def release(
+        self,
+        session_id: str,
+        owner_id: str,
+        fencing_token: int,
+    ) -> bool:
+        owner = self._owners.get(session_id)
+        if owner is None:
+            return False
+        if owner.owner_id != owner_id or owner.fencing_token != fencing_token:
+            return False
+        del self._owners[session_id]
+        return True
 
 
 def _build_workspace_archive(files: dict[str, str]) -> str:
@@ -64,6 +121,24 @@ async def client() -> AsyncIterator[AsyncClient]:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
+
+
+@pytest.fixture
+async def client_500() -> AsyncIterator[AsyncClient]:
+    transport = cast(Any, ASGITransport)(app=app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+
+
+@pytest.fixture
+def owner_store() -> FakeOwnerStore:
+    fake_owner_store = FakeOwnerStore()
+    session_manager.configure_owner_leases(
+        owner_store=fake_owner_store,
+        owner_id="owner-a",
+        fencing_token=1,
+    )
+    return fake_owner_store
 
 
 def _register_cloud_session(session_id: str, binding: CloudWorkspaceBinding) -> None:
@@ -155,3 +230,161 @@ async def test_get_workspace_archive_returns_cloud_workspace_snapshot(
         "nested/data.json": '{"ok": true}\n',
         "result.txt": "remote result",
     }
+
+
+async def test_get_workspace_archive_returns_409_for_active_turn(
+    client: AsyncClient, monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        "coding_agent.environment.docker_workspace_provider._start_docker_workspace_container",
+        lambda provider_config, binding: None,
+    )
+    monkeypatch.setattr(
+        "coding_agent.ui.http_server._load_cloud_workspace_config",
+        lambda: {
+            "enabled": True,
+            "provider": "docker",
+            "workspace_root": str(tmp_path),
+            "container_name_prefix": "agent-",
+        },
+    )
+
+    binding = CloudWorkspaceBinding(
+        workspace_url="docker://agent-ws-busy/workspace",
+        workspace_id="ws-busy",
+    )
+    workspace_root = tmp_path / binding.workspace_id
+    workspace_root.mkdir(parents=True)
+    (workspace_root / "result.txt").write_text("remote result", encoding="utf-8")
+    _register_cloud_session("sess-busy", binding)
+    session = session_manager.get_session("sess-busy")
+    session.turn_in_progress = True
+
+    response = await client.get("/sessions/sess-busy/workspace")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "turn already in progress"
+
+
+async def test_get_workspace_archive_returns_409_for_stale_owner(
+    client: AsyncClient, owner_store: FakeOwnerStore, monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        "coding_agent.environment.docker_workspace_provider._start_docker_workspace_container",
+        lambda provider_config, binding: None,
+    )
+    monkeypatch.setattr(
+        "coding_agent.ui.http_server._load_cloud_workspace_config",
+        lambda: {
+            "enabled": True,
+            "provider": "docker",
+            "workspace_root": str(tmp_path),
+            "container_name_prefix": "agent-",
+        },
+    )
+
+    binding = CloudWorkspaceBinding(
+        workspace_url="docker://agent-ws-stale/workspace",
+        workspace_id="ws-stale",
+    )
+    workspace_root = tmp_path / binding.workspace_id
+    workspace_root.mkdir(parents=True)
+    (workspace_root / "result.txt").write_text("remote result", encoding="utf-8")
+    _register_cloud_session("sess-stale", binding)
+    owner_store._owners["sess-stale"] = SessionOwnerRecord(
+        owner_id="owner-b",
+        lease_expires_at=datetime.now(UTC) + timedelta(seconds=30),
+        fencing_token=2,
+    )
+
+    response = await client.get("/sessions/sess-stale/workspace")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "stale owner or fencing token rejected"
+
+
+async def test_get_workspace_archive_rejects_owner_change_during_export(
+    client: AsyncClient, owner_store: FakeOwnerStore, monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        "coding_agent.environment.docker_workspace_provider._start_docker_workspace_container",
+        lambda provider_config, binding: None,
+    )
+    monkeypatch.setattr(
+        "coding_agent.ui.http_server._load_cloud_workspace_config",
+        lambda: {
+            "enabled": True,
+            "provider": "docker",
+            "workspace_root": str(tmp_path),
+            "container_name_prefix": "agent-",
+        },
+    )
+
+    binding = CloudWorkspaceBinding(
+        workspace_url="docker://agent-ws-race/workspace",
+        workspace_id="ws-race",
+    )
+    workspace_root = tmp_path / binding.workspace_id
+    workspace_root.mkdir(parents=True)
+    (workspace_root / "result.txt").write_text("remote result", encoding="utf-8")
+    _register_cloud_session("sess-race", binding)
+    owner_store._owners["sess-race"] = SessionOwnerRecord(
+        owner_id="owner-a",
+        lease_expires_at=datetime.now(UTC) + timedelta(seconds=30),
+        fencing_token=1,
+    )
+
+    monkeypatch.setattr(
+        "coding_agent.ui.http_server.export_workspace_archive_from_config",
+        lambda config, binding: (
+            owner_store._owners.__setitem__(
+                "sess-race",
+                SessionOwnerRecord(
+                    owner_id="owner-b",
+                    lease_expires_at=datetime.now(UTC) + timedelta(seconds=30),
+                    fencing_token=2,
+                ),
+            )
+            or "archive-base64"
+        ),
+    )
+
+    response = await client.get("/sessions/sess-race/workspace")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "stale owner or fencing token rejected"
+
+
+async def test_get_workspace_archive_returns_500_for_unexpected_runtime_error(
+    client_500: AsyncClient, monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        "coding_agent.environment.docker_workspace_provider._start_docker_workspace_container",
+        lambda provider_config, binding: None,
+    )
+    monkeypatch.setattr(
+        "coding_agent.ui.http_server._load_cloud_workspace_config",
+        lambda: {
+            "enabled": True,
+            "provider": "docker",
+            "workspace_root": str(tmp_path),
+            "container_name_prefix": "agent-",
+        },
+    )
+
+    binding = CloudWorkspaceBinding(
+        workspace_url="docker://agent-ws-fail/workspace",
+        workspace_id="ws-fail",
+    )
+    workspace_root = tmp_path / binding.workspace_id
+    workspace_root.mkdir(parents=True)
+    _register_cloud_session("sess-fail", binding)
+
+    monkeypatch.setattr(
+        "coding_agent.ui.http_server.export_workspace_archive_from_config",
+        lambda config, binding: (_ for _ in ()).throw(RuntimeError("docker export failed")),
+    )
+
+    response = await client_500.get("/sessions/sess-fail/workspace")
+
+    assert response.status_code == 500
