@@ -1040,7 +1040,9 @@ async def get_workspace_archive(
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if str(exc) == "turn already in progress":
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise
 
     return WorkspaceArchiveResponse(format="tar.gz", archive_base64=archive_base64)
 

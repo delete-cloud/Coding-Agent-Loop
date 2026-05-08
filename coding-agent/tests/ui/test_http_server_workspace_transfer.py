@@ -5,6 +5,7 @@ import tarfile
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any, cast
 
 from coding_agent.ui.execution_binding import CloudWorkspaceBinding
 from coding_agent.ui.http_server import app, session_manager
@@ -118,6 +119,13 @@ async def clear_sessions() -> AsyncIterator[None]:
 @pytest.fixture
 async def client() -> AsyncIterator[AsyncClient]:
     transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+
+
+@pytest.fixture
+async def client_500() -> AsyncIterator[AsyncClient]:
+    transport = cast(Any, ASGITransport)(app=app, raise_app_exceptions=False)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
 
@@ -345,3 +353,38 @@ async def test_get_workspace_archive_rejects_owner_change_during_export(
 
     assert response.status_code == 409
     assert response.json()["detail"] == "stale owner or fencing token rejected"
+
+
+async def test_get_workspace_archive_returns_500_for_unexpected_runtime_error(
+    client_500: AsyncClient, monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        "coding_agent.environment.docker_workspace_provider._start_docker_workspace_container",
+        lambda provider_config, binding: None,
+    )
+    monkeypatch.setattr(
+        "coding_agent.ui.http_server._load_cloud_workspace_config",
+        lambda: {
+            "enabled": True,
+            "provider": "docker",
+            "workspace_root": str(tmp_path),
+            "container_name_prefix": "agent-",
+        },
+    )
+
+    binding = CloudWorkspaceBinding(
+        workspace_url="docker://agent-ws-fail/workspace",
+        workspace_id="ws-fail",
+    )
+    workspace_root = tmp_path / binding.workspace_id
+    workspace_root.mkdir(parents=True)
+    _register_cloud_session("sess-fail", binding)
+
+    monkeypatch.setattr(
+        "coding_agent.ui.http_server.export_workspace_archive_from_config",
+        lambda config, binding: (_ for _ in ()).throw(RuntimeError("docker export failed")),
+    )
+
+    response = await client_500.get("/sessions/sess-fail/workspace")
+
+    assert response.status_code == 500
