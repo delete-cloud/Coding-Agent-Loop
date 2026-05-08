@@ -334,9 +334,16 @@ def test_remote_repl_with_repo_uploads_snapshot_and_downloads_workspace(
         "coding_agent.workspace_archive.create_workspace_archive_base64",
         lambda path: "archive-encoded",
     )
+
+    def fake_download_workspace_archive(
+        *, base_url: str, session_id: str, headers: dict[str, str]
+    ) -> str:
+        calls.append(("download", session_id, {"base_url": base_url}, headers))
+        return "result-archive"
+
     monkeypatch.setattr(
         "coding_agent.remote.client.download_workspace_archive",
-        lambda *, base_url, session_id, headers: "result-archive",
+        fake_download_workspace_archive,
     )
     monkeypatch.setattr(
         "coding_agent.workspace_archive.extract_workspace_archive_base64",
@@ -370,6 +377,12 @@ def test_remote_repl_with_repo_uploads_snapshot_and_downloads_workspace(
             "stream",
             "/sessions/sess-upload/prompt",
             {"prompt": "hello", "base_url": "http://agent.example"},
+            {"Authorization": "Bearer secret-token"},
+        ),
+        (
+            "download",
+            "sess-upload",
+            {"base_url": "http://agent.example"},
             {"Authorization": "Bearer secret-token"},
         ),
         (

@@ -86,10 +86,9 @@ def test_workspace_archive_rejects_tar_header_error_without_clearing_target(
     with tarfile.open(fileobj=archive_buffer, mode="r:gz") as archive:
         members = archive.getmembers()
         assert len(members) == 1
-        members[0].offset_data
+        header_offset = members[0].offset_data - 512
 
     archive_bytes = bytearray(buffer.getvalue())
-    header_offset = members[0].offset
     archive_bytes[header_offset] = 0
 
     with pytest.raises(ValueError, match=r"valid tar\.gz"):
