@@ -54,6 +54,41 @@ def test_workspace_archive_rejects_path_traversal_members(tmp_path: Path) -> Non
         )
 
 
+def test_workspace_archive_rejects_invalid_tar_without_clearing_target(tmp_path: Path) -> None:
+    target = tmp_path / "repo"
+    target.mkdir()
+    (target / "keep.txt").write_text("keep\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="valid tar.gz"):
+        _ = extract_workspace_archive_base64(
+            target,
+            base64.b64encode(b"not a valid tar archive").decode("ascii"),
+        )
+
+    assert (target / "keep.txt").read_text(encoding="utf-8") == "keep\n"
+
+
+def test_workspace_archive_defaults_missing_member_mode_to_readable_file(
+    tmp_path: Path,
+) -> None:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        data = b"hello\n"
+        info = tarfile.TarInfo(name="plain.txt")
+        info.size = len(data)
+        archive.addfile(info, io.BytesIO(data))
+
+    target = tmp_path / "target"
+    extract_workspace_archive_base64(
+        target,
+        base64.b64encode(buffer.getvalue()).decode("ascii"),
+    )
+
+    extracted = target / "plain.txt"
+    assert extracted.read_text(encoding="utf-8") == "hello\n"
+    assert extracted.stat().st_mode & 0o777 == 0o644
+
+
 def test_workspace_archive_extract_reconciles_deletions_but_preserves_git(tmp_path: Path) -> None:
     target = tmp_path / "repo"
     (target / ".git").mkdir(parents=True)

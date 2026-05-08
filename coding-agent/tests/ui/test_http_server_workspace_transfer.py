@@ -22,6 +22,7 @@ def _build_workspace_archive(files: dict[str, str]) -> str:
             data = content.encode("utf-8")
             info = tarfile.TarInfo(name=path)
             info.size = len(data)
+            info.mode = 0o644
             archive.addfile(info, io.BytesIO(data))
     return base64.b64encode(buffer.getvalue()).decode("ascii")
 

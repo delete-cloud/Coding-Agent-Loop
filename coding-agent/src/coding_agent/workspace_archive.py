@@ -48,13 +48,23 @@ def extract_workspace_archive_base64(workspace_root: Path, archive_base64: str) 
     except ValueError as exc:
         raise ValueError("workspace archive must be valid base64") from exc
 
-    _clear_extract_target(root)
+    archive_buffer = io.BytesIO(archive_bytes)
+    try:
+        with tarfile.open(fileobj=archive_buffer, mode="r:gz") as archive:
+            for member in archive.getmembers():
+                _safe_archive_target(root, member.name)
+    except tarfile.ReadError as exc:
+        raise ValueError("workspace archive is not a valid tar.gz") from exc
 
-    with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as archive:
+    _clear_extract_target(root)
+    archive_buffer.seek(0)
+
+    with tarfile.open(fileobj=archive_buffer, mode="r:gz") as archive:
         for member in archive.getmembers():
             target_path = _safe_archive_target(root, member.name)
             if member.isdir():
                 target_path.mkdir(parents=True, exist_ok=True)
+                target_path.chmod(_member_mode(member))
                 continue
             if not member.isfile():
                 raise ValueError(
@@ -65,7 +75,7 @@ def extract_workspace_archive_base64(workspace_root: Path, archive_base64: str) 
                 raise ValueError(f"workspace archive member is unreadable: {member.name}")
             target_path.parent.mkdir(parents=True, exist_ok=True)
             _ = target_path.write_bytes(file_obj.read())
-            target_path.chmod(member.mode & 0o777)
+            target_path.chmod(_member_mode(member))
             os.utime(target_path, (member.mtime, member.mtime))
 
 
@@ -77,6 +87,15 @@ def _clear_extract_target(workspace_root: Path) -> None:
             shutil.rmtree(child)
             continue
         child.unlink()
+
+
+def _member_mode(member: tarfile.TarInfo) -> int:
+    mode = member.mode & 0o777
+    if mode != 0:
+        return mode
+    if member.isdir():
+        return 0o755
+    return 0o644
 
 
 def _safe_archive_target(workspace_root: Path, member_name: str) -> Path:
