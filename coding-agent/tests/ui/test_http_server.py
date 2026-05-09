@@ -252,6 +252,93 @@ class TestSessionCreation:
             "checks": {"session_store": "error", "rate_limiter": "ok"},
         }
 
+    async def test_readyz_reports_configured_cloud_workspace_provider_when_ready(
+        self, client, monkeypatch
+    ):
+        seen_configs: list[dict[str, object]] = []
+
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            lambda: {
+                "enabled": True,
+                "provider": "docker",
+                "workspace_root": "/srv/coding-agent/workspaces",
+            },
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.cloud_workspace_ready_from_config",
+            lambda config: seen_configs.append(dict(config)) or True,
+            raising=False,
+        )
+
+        ready = await client.get("/readyz")
+
+        assert ready.status_code == 200
+        assert ready.json() == {
+            "status": "ready",
+            "checks": {
+                "session_store": "ok",
+                "rate_limiter": "ok",
+                "cloud_workspace": "ok",
+            },
+        }
+        assert seen_configs == [
+            {
+                "enabled": True,
+                "provider": "docker",
+                "workspace_root": "/srv/coding-agent/workspaces",
+            }
+        ]
+
+    async def test_readyz_returns_503_when_cloud_workspace_provider_unhealthy(
+        self, client, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            lambda: {
+                "enabled": True,
+                "provider": "docker",
+                "workspace_root": "/srv/coding-agent/workspaces",
+            },
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.cloud_workspace_ready_from_config",
+            lambda config: False,
+            raising=False,
+        )
+
+        ready = await client.get("/readyz")
+
+        assert ready.status_code == 503
+        assert ready.json() == {
+            "status": "not_ready",
+            "checks": {
+                "session_store": "ok",
+                "rate_limiter": "ok",
+                "cloud_workspace": "error",
+            },
+        }
+
+    async def test_readyz_returns_503_when_enabled_cloud_workspace_config_is_invalid(
+        self, client, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            lambda: {"enabled": True},
+        )
+
+        ready = await client.get("/readyz")
+
+        assert ready.status_code == 503
+        assert ready.json() == {
+            "status": "not_ready",
+            "checks": {
+                "session_store": "ok",
+                "rate_limiter": "ok",
+                "cloud_workspace": "error",
+            },
+        }
+
     async def test_create_session_uses_real_provider_by_default(self, client):
         response = await client.post("/sessions", json={})
         session_id = response.json()["session_id"]
