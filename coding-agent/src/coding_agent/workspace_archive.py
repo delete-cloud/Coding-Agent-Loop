@@ -14,6 +14,7 @@ from typing import Protocol, override
 
 _PRESERVED_ROOT_NAMES = frozenset({".git"})
 _MAX_WORKSPACE_ARCHIVE_BYTES = 8 * 1024 * 1024
+_MAX_WORKSPACE_ARCHIVE_BASE64_CHARS = 4 * ((_MAX_WORKSPACE_ARCHIVE_BYTES + 2) // 3)
 _MAX_WORKSPACE_TAR_STREAM_BYTES = 16 * 1024 * 1024
 _MAX_WORKSPACE_ARCHIVE_MEMBERS = 4096
 
@@ -57,6 +58,7 @@ def extract_workspace_archive_base64(workspace_root: Path, archive_base64: str) 
     if not root.is_dir():
         raise ValueError(f"workspace root is not a directory: {root}")
 
+    _raise_if_archive_base64_too_large(archive_base64)
     try:
         archive_bytes = base64.b64decode(archive_base64.encode("ascii"), validate=True)
     except ValueError as exc:
@@ -189,6 +191,11 @@ def _reject_preserved_root_member(member_name: str) -> None:
 
 def _raise_if_archive_too_large(size_bytes: int) -> None:
     if size_bytes > _MAX_WORKSPACE_ARCHIVE_BYTES:
+        raise ValueError("workspace archive exceeds 8 MiB limit")
+
+
+def _raise_if_archive_base64_too_large(archive_base64: str) -> None:
+    if len(archive_base64) > _MAX_WORKSPACE_ARCHIVE_BASE64_CHARS:
         raise ValueError("workspace archive exceeds 8 MiB limit")
 
 

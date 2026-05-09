@@ -226,6 +226,20 @@ def test_workspace_archive_extract_rejects_decoded_archive_larger_than_limit(
         _ = extract_workspace_archive_base64(tmp_path / "target", archive_base64)
 
 
+def test_workspace_archive_extract_rejects_encoded_archive_larger_than_limit_before_decode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive_base64 = "A" * (4 * (((8 * 1024 * 1024) + 2) // 3) + 4)
+
+    def fail_if_decode_is_called(*_args: object, **_kwargs: object) -> bytes:
+        raise AssertionError("oversized base64 should be rejected before decode")
+
+    monkeypatch.setattr(base64, "b64decode", fail_if_decode_is_called)
+
+    with pytest.raises(ValueError, match="exceeds 8 MiB limit"):
+        _ = extract_workspace_archive_base64(tmp_path / "target", archive_base64)
+
+
 def test_workspace_archive_extract_rejects_member_payload_larger_than_limit(
     tmp_path: Path,
 ) -> None:
