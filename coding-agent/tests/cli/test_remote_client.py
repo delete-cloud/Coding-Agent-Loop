@@ -821,7 +821,7 @@ def test_remote_repl_can_explicitly_create_empty_docker_workspace(
 
 def test_remote_approval_request_prompts_before_submitting_decision(monkeypatch) -> None:
     approvals: list[dict[str, object] | None] = []
-    prompts: list[tuple[str, bool]] = []
+    prompts: list[str] = []
 
     class FakeResponse:
         def raise_for_status(self) -> None:
@@ -847,12 +847,13 @@ def test_remote_approval_request_prompts_before_submitting_decision(monkeypatch)
             approvals.append(json)
             return FakeResponse()
 
-    def fake_confirm(text: str, default: bool) -> bool:
-        prompts.append((text, default))
-        return False
+    def fake_prompt(text: str, default: str | None = None, show_default: bool = True) -> str:
+        del default, show_default
+        prompts.append(text)
+        return "a"
 
     monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
-    monkeypatch.setattr("coding_agent.remote.client.click.confirm", fake_confirm)
+    monkeypatch.setattr("coding_agent.remote.client.click.prompt", fake_prompt)
 
     from coding_agent.remote.client import handle_sse_event
 
@@ -875,9 +876,79 @@ def test_remote_approval_request_prompts_before_submitting_decision(monkeypatch)
 
     assert status is None
     assert line_open is False
-    assert prompts == [("Approve remote tool request bash_run?", False)]
+    assert prompts == ["→"]
     assert approvals == [
-        {"request_id": "req-1", "approved": False, "scope": "once"}
+        {"request_id": "req-1", "approved": True, "scope": "session"}
+    ]
+
+
+def test_remote_approval_request_can_reject_with_reason(monkeypatch) -> None:
+    approvals: list[dict[str, object] | None] = []
+    prompts: list[str] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"status": "ok"}
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def post(
+            self, path: str, json: dict[str, object] | None = None
+        ) -> FakeResponse:
+            del path
+            approvals.append(json)
+            return FakeResponse()
+
+    answers = iter(["r", "Need a safer command"])
+
+    def fake_prompt(text: str, default: str | None = None, show_default: bool = True) -> str:
+        del default, show_default
+        prompts.append(text)
+        return next(answers)
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+    monkeypatch.setattr("coding_agent.remote.client.click.prompt", fake_prompt)
+
+    from coding_agent.remote.client import handle_sse_event
+
+    status, line_open = handle_sse_event(
+        base_url="http://agent.example",
+        session_id="sess-approval",
+        headers={},
+        event="ApprovalRequest",
+        data=json.dumps(
+            {
+                "request_id": "req-1",
+                "tool_call": {
+                    "tool_name": "bash_run",
+                    "arguments": {"command": "rm -rf scratch"},
+                    "call_id": "call-1",
+                },
+            }
+        ),
+    )
+
+    assert status is None
+    assert line_open is False
+    assert prompts == ["→", "Reason"]
+    assert approvals == [
+        {
+            "request_id": "req-1",
+            "approved": False,
+            "scope": "once",
+            "feedback": "Need a safer command",
+        }
     ]
 
 
@@ -912,7 +983,8 @@ def test_handle_sse_event_formats_approval_after_inline_stream_output(
 
     monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
     monkeypatch.setattr(
-        "coding_agent.remote.client.click.confirm", lambda text, default: False
+        "coding_agent.remote.client.click.prompt",
+        lambda text, default=None, show_default=True: "n",
     )
 
     from coding_agent.remote.client import handle_sse_event
@@ -949,12 +1021,18 @@ def test_handle_sse_event_formats_approval_after_inline_stream_output(
     assert status is None
     assert line_open is False
     assert approvals == [
-        {"request_id": "req-1", "approved": False, "scope": "once"}
+        {
+            "request_id": "req-1",
+            "approved": False,
+            "scope": "once",
+            "feedback": "Rejected by user",
+        }
     ]
     assert capsys.readouterr().out == (
         "partial\n"
         "[approval] Remote tool request bash_run\n"
         '{\n  "command": "rm -rf scratch"\n}\n'
+        "[y]=approve  [a]=approve all (session)  [n]=reject  [r]=reject with reason\n"
     )
 
 
