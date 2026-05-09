@@ -507,17 +507,22 @@ def test_docker_workspace_provider_readiness_checks_docker_binary(
         captured_command[:] = command
         captured_kwargs.clear()
         captured_kwargs.update(kwargs)
-        return subprocess.CompletedProcess(command, 0, stdout="Docker version 1.0\n", stderr="")
+        return subprocess.CompletedProcess(
+            command, 0, stdout="Docker version 1.0\n", stderr=""
+        )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    assert cloud_workspace_ready_from_config(
-        {
-            "provider": "docker",
-            "workspace_root": "/srv/workspaces",
-            "docker_binary": "/usr/bin/docker",
-        }
-    ) is True
+    assert (
+        cloud_workspace_ready_from_config(
+            {
+                "provider": "docker",
+                "workspace_root": "/srv/workspaces",
+                "docker_binary": "/usr/bin/docker",
+            }
+        )
+        is True
+    )
     assert captured_command == ["/usr/bin/docker", "info", "--format", "{{json .}}"]
     assert captured_kwargs == {
         "shell": False,
@@ -536,7 +541,9 @@ def test_docker_workspace_provider_readiness_returns_false_when_docker_fails(
         command: list[str], **kwargs: object
     ) -> subprocess.CompletedProcess[str]:
         del kwargs
-        return subprocess.CompletedProcess(command, 1, stdout="", stderr="daemon unavailable")
+        return subprocess.CompletedProcess(
+            command, 1, stdout="", stderr="daemon unavailable"
+        )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
@@ -554,7 +561,9 @@ def test_docker_workspace_provider_readiness_returns_false_when_docker_fails(
 def test_docker_workspace_provider_readiness_returns_false_when_docker_binary_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
         del command, kwargs
         raise OSError("docker missing")
 
@@ -726,7 +735,7 @@ def test_docker_workspace_provider_rejects_image_outside_allowlist(
 ) -> None:
     with pytest.raises(
         ValueError,
-        match="cloud_workspace.image is not allowed by image_allowlist",
+        match=r"cloud_workspace\.image is not allowed by image_allowlist",
     ):
         _ = provision_cloud_binding_from_config(
             {
