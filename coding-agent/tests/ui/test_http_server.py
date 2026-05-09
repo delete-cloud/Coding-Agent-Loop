@@ -7,7 +7,7 @@ import importlib
 import json
 import sys
 import types
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -256,6 +256,15 @@ class TestSessionCreation:
         self, client, monkeypatch
     ):
         seen_configs: list[dict[str, object]] = []
+        to_thread_calls: list[tuple[Callable[..., bool], tuple[object, ...]]] = []
+
+        def fake_readiness(config: dict[str, object]) -> bool:
+            seen_configs.append(dict(config))
+            return True
+
+        async def fake_to_thread(func: Callable[..., bool], *args: object) -> bool:
+            to_thread_calls.append((func, args))
+            return func(*args)
 
         monkeypatch.setattr(
             "coding_agent.ui.http_server._load_cloud_workspace_config",
@@ -267,8 +276,12 @@ class TestSessionCreation:
         )
         monkeypatch.setattr(
             "coding_agent.ui.http_server.cloud_workspace_ready_from_config",
-            lambda config: seen_configs.append(dict(config)) or True,
+            fake_readiness,
             raising=False,
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.asyncio.to_thread",
+            fake_to_thread,
         )
 
         ready = await client.get("/readyz")
@@ -288,6 +301,18 @@ class TestSessionCreation:
                 "provider": "docker",
                 "workspace_root": "/srv/coding-agent/workspaces",
             }
+        ]
+        assert to_thread_calls == [
+            (
+                fake_readiness,
+                (
+                    {
+                        "enabled": True,
+                        "provider": "docker",
+                        "workspace_root": "/srv/coding-agent/workspaces",
+                    },
+                ),
+            )
         ]
 
     async def test_readyz_returns_503_when_cloud_workspace_provider_unhealthy(

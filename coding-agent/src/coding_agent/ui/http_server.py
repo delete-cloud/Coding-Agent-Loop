@@ -716,7 +716,10 @@ async def readiness_check(request: Request, response: Response) -> ReadinessResp
         cloud_workspace_config = _load_cloud_workspace_config()
         if cloud_workspace_config.get("enabled") is True:
             cloud_workspace_ok = bool(
-                cloud_workspace_ready_from_config(cloud_workspace_config)
+                await asyncio.to_thread(
+                    cloud_workspace_ready_from_config,
+                    cloud_workspace_config,
+                )
             )
             checks["cloud_workspace"] = "ok" if cloud_workspace_ok else "error"
             ready = ready and cloud_workspace_ok
