@@ -38,6 +38,11 @@ _DOCKER_TIMEOUT_CLEANUP_SECONDS = 3
 _DOCKER_TIMEOUT_SENTINEL_PREFIX = "__CODING_AGENT_DOCKER_TIMEOUT__:"
 _DOCKER_CONTAINER_REMOVAL_WAIT_SECONDS = 5.0
 _DOCKER_CONTAINER_REMOVAL_POLL_INTERVAL_SECONDS = 0.1
+_DEFAULT_DOCKER_IMAGE = "python:3.11-slim"
+_DEFAULT_DOCKER_CPUS = "1"
+_DEFAULT_DOCKER_MEMORY = "512m"
+_DEFAULT_DOCKER_PIDS_LIMIT = 256
+_DEFAULT_DOCKER_NETWORK = "none"
 
 
 @dataclass(frozen=True)
@@ -49,6 +54,11 @@ class _DockerWorkspaceProviderConfig:
     env_allowlist: tuple[str, ...]
     exec_user: str | None
     image: str
+    image_allowlist: tuple[str, ...]
+    network: str
+    cpus: str
+    memory: str
+    pids_limit: int
 
 
 class DockerCloudWorkspaceClient:
@@ -433,10 +443,32 @@ def _docker_workspace_provider_config(
     env_allowlist = tuple(
         _string_list(config.get("env_allowlist"), key="env_allowlist")
     )
-    image = _optional_string(config.get("image"), "python:3.11-slim")
+    image = _optional_string(config.get("image"), _DEFAULT_DOCKER_IMAGE)
+    image_allowlist = tuple(
+        _string_list(
+            config.get("image_allowlist"),
+            key="image_allowlist",
+            default=(_DEFAULT_DOCKER_IMAGE,),
+        )
+    )
+    network = _optional_string(config.get("network"), _DEFAULT_DOCKER_NETWORK)
+    cpus = _optional_string(config.get("cpus"), _DEFAULT_DOCKER_CPUS)
+    memory = _optional_string(config.get("memory"), _DEFAULT_DOCKER_MEMORY)
+    pids_limit = _positive_int(
+        config.get("pids_limit"),
+        key="pids_limit",
+        default=_DEFAULT_DOCKER_PIDS_LIMIT,
+    )
     assert container_name_prefix is not None
     assert docker_binary is not None
     assert image is not None
+    assert network is not None
+    assert cpus is not None
+    assert memory is not None
+    if image not in image_allowlist:
+        raise ValueError(
+            f"cloud_workspace.image is not allowed by image_allowlist: {image}"
+        )
 
     return _DockerWorkspaceProviderConfig(
         workspace_root=Path(workspace_root_raw).expanduser().resolve(),
@@ -446,6 +478,11 @@ def _docker_workspace_provider_config(
         env_allowlist=env_allowlist,
         exec_user=exec_user,
         image=image,
+        image_allowlist=image_allowlist,
+        network=network,
+        cpus=cpus,
+        memory=memory,
+        pids_limit=pids_limit,
     )
 
 
@@ -473,9 +510,11 @@ def _optional_string(value: object, default: str | None) -> str | None:
     return stripped
 
 
-def _string_list(value: object, *, key: str) -> Iterable[str]:
+def _string_list(
+    value: object, *, key: str, default: tuple[str, ...] = ()
+) -> Iterable[str]:
     if value is None:
-        return ()
+        return default
     if not isinstance(value, list):
         raise ValueError(f"cloud_workspace.{key} must be a list of strings")
     items: list[str] = []
@@ -484,6 +523,14 @@ def _string_list(value: object, *, key: str) -> Iterable[str]:
             raise ValueError(f"cloud_workspace.{key} must be a list of strings")
         items.append(item.strip())
     return items
+
+
+def _positive_int(value: object, *, key: str, default: int) -> int:
+    if value is None:
+        return default
+    if not isinstance(value, int) or value <= 0:
+        raise ValueError(f"cloud_workspace.{key} must be a positive integer")
+    return value
 
 
 def _json_object(payload: str) -> dict[str, object]:
@@ -561,14 +608,26 @@ def _start_docker_workspace_container(
         "-d",
         "--name",
         _container_name(provider_config, binding.workspace_id),
+        "--network",
+        provider_config.network,
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--pids-limit",
+        str(provider_config.pids_limit),
+        "--cpus",
+        provider_config.cpus,
+        "--memory",
+        provider_config.memory,
         "-v",
         f"{workspace_root}:{provider_config.container_workspace_root}",
         "-w",
         provider_config.container_workspace_root,
-        provider_config.image,
-        "sleep",
-        "infinity",
     ]
+    if provider_config.exec_user is not None:
+        command.extend(["--user", provider_config.exec_user])
+    command.extend([provider_config.image, "sleep", "infinity"])
     _ = subprocess.run(
         command,
         shell=False,
