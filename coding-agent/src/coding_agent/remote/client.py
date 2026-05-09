@@ -318,13 +318,27 @@ def _prompt_for_approval(payload: dict[str, object]) -> _ApprovalDecision:
                     sort_keys=True,
                 )
             )
-    # TODO(adr-0019): Extend the remote approval prompt to capture session-scope
-    # approvals and user feedback instead of the current yes/no confirmation.
-    approved = click.confirm(
-        f"Approve remote tool request {tool_name}?",
-        default=False,
+    click.echo(
+        "[y]=approve  [a]=approve all (session)  [n]=reject  [r]=reject with reason"
     )
-    return _ApprovalDecision(approved=approved)
+    choice = cast(
+        str, click.prompt("→", default="n", show_default=False)
+    ).strip().lower()
+    if choice in ("y", "yes"):
+        return _ApprovalDecision(approved=True, scope="once")
+    if choice in ("a", "all"):
+        return _ApprovalDecision(approved=True, scope="session")
+    if choice in ("r", "reason"):
+        feedback = cast(
+            str,
+            click.prompt("Reason", default="Rejected by user", show_default=False),
+        )
+        return _ApprovalDecision(
+            approved=False,
+            feedback=feedback.strip() or "Rejected by user",
+            scope="once",
+        )
+    return _ApprovalDecision(approved=False, feedback="Rejected by user", scope="once")
 
 
 def _end_inline_stream_line(line_open: bool) -> bool:
