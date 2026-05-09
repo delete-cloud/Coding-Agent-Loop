@@ -329,6 +329,11 @@ class DockerWorkspaceProvider(WorkspaceProvider):
         return build_client
 
     @override
+    def check_readiness(self, config: dict[str, object]) -> bool:
+        provider_config = _docker_workspace_provider_config(config)
+        return _docker_provider_ready(provider_config)
+
+    @override
     def provision_cloud_workspace_binding(
         self,
         config: dict[str, object],
@@ -519,6 +524,28 @@ def _container_name(
     provider_config: _DockerWorkspaceProviderConfig, workspace_id: str
 ) -> str:
     return f"{provider_config.container_name_prefix}{workspace_id}"
+
+
+def _docker_provider_ready(provider_config: _DockerWorkspaceProviderConfig) -> bool:
+    command = [
+        provider_config.docker_binary,
+        "info",
+        "--format",
+        "{{json .}}",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=None,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
 
 
 def _start_docker_workspace_container(
