@@ -23,6 +23,7 @@ from coding_agent.approval import ApprovalPolicy
 from coding_agent.environment import (
     cleanup_cloud_binding_from_config,
     cloud_client_factory_from_config,
+    cloud_workspace_ready_from_config,
     export_workspace_archive_from_config,
     import_workspace_archive_from_config,
     provision_cloud_binding_from_config,
@@ -710,6 +711,23 @@ async def readiness_check(request: Request, response: Response) -> ReadinessResp
         "rate_limiter": "ok" if rate_limiter_ok else "error",
     }
     ready = session_store_ok and rate_limiter_ok
+
+    try:
+        cloud_workspace_config = _load_cloud_workspace_config()
+        if cloud_workspace_config.get("enabled") is True:
+            cloud_workspace_ok = bool(
+                await asyncio.to_thread(
+                    cloud_workspace_ready_from_config,
+                    cloud_workspace_config,
+                )
+            )
+            checks["cloud_workspace"] = "ok" if cloud_workspace_ok else "error"
+            ready = ready and cloud_workspace_ok
+    except Exception:
+        logger.exception("Cloud workspace readiness check failed")
+        checks["cloud_workspace"] = "error"
+        ready = False
+
     if not ready:
         response.status_code = 503
     return ReadinessResponse(

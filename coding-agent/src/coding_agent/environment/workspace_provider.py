@@ -20,6 +20,8 @@ class WorkspaceProvider(Protocol):
         self, config: dict[str, object]
     ) -> CloudWorkspaceClientFactory: ...
 
+    def check_readiness(self, config: dict[str, object]) -> bool: ...
+
     def provision_cloud_workspace_binding(
         self,
         config: dict[str, object],
@@ -61,6 +63,11 @@ def cloud_client_factory_from_config(
 ) -> CloudWorkspaceClientFactory:
     provider = _provider_from_config(config)
     return provider.build_cloud_client_factory(config)
+
+
+def cloud_workspace_ready_from_config(config: dict[str, object]) -> bool:
+    provider = _provider_from_config(config)
+    return bool(provider.check_readiness(config))
 
 
 def provision_cloud_binding_from_config(

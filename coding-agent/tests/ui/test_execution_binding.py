@@ -14,6 +14,7 @@ from coding_agent.environment import workspace_provider as workspace_provider_mo
 from coding_agent.environment.workspace_provider import (
     CloudWorkspaceSource,
     cloud_client_factory_from_config,
+    cloud_workspace_ready_from_config,
     provision_cloud_binding_from_config,
     register_workspace_provider,
 )
@@ -232,6 +233,29 @@ class FakeWorkspaceProvider:
         self.seen_configs.append(dict(config))
         assert binding.workspace_id == "ws-123"
 
+    def import_workspace_archive(
+        self,
+        config: dict[str, object],
+        binding: CloudWorkspaceBinding,
+        archive_base64: str,
+    ) -> None:
+        self.seen_configs.append(dict(config))
+        assert binding.workspace_id == "ws-123"
+        assert archive_base64 == "archive"
+
+    def export_workspace_archive(
+        self,
+        config: dict[str, object],
+        binding: CloudWorkspaceBinding,
+    ) -> str:
+        self.seen_configs.append(dict(config))
+        assert binding.workspace_id == "ws-123"
+        return "archive"
+
+    def check_readiness(self, config: dict[str, object]) -> bool:
+        self.seen_configs.append(dict(config))
+        return True
+
 
 def test_cloud_workspace_provider_registry_builds_factory(
     monkeypatch: pytest.MonkeyPatch,
@@ -285,3 +309,23 @@ def test_workspace_provider_registry_provisions_binding(
 
     assert isinstance(binding, CloudWorkspaceBinding)
     assert binding.workspace_id == "ws-123"
+
+
+def test_workspace_provider_registry_checks_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(workspace_provider_module, "_WORKSPACE_PROVIDERS", {})
+    provider = FakeWorkspaceProvider()
+    register_workspace_provider("fake-provider", provider)
+
+    ready = cloud_workspace_ready_from_config(
+        {
+            "provider": "fake-provider",
+            "workspace_root": "/srv/workspaces",
+        }
+    )
+
+    assert ready is True
+    assert provider.seen_configs == [
+        {"provider": "fake-provider", "workspace_root": "/srv/workspaces"}
+    ]

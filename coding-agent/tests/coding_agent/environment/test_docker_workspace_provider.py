@@ -11,6 +11,7 @@ from coding_agent.environment import (
     DockerCloudWorkspaceClient,
     cleanup_cloud_binding_from_config,
     cloud_client_factory_from_config,
+    cloud_workspace_ready_from_config,
     provision_cloud_binding_from_config,
 )
 from coding_agent.ui.execution_binding import CloudWorkspaceBinding
@@ -492,6 +493,82 @@ def test_docker_workspace_provider_requires_workspace_root() -> None:
         match="cloud_workspace.workspace_root is required for provider=docker",
     ):
         _ = cloud_client_factory_from_config({"provider": "docker"})
+
+
+def test_docker_workspace_provider_readiness_checks_docker_binary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_command: list[str] = []
+    captured_kwargs: dict[str, object] = {}
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        captured_command[:] = command
+        captured_kwargs.clear()
+        captured_kwargs.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, stdout="Docker version 1.0\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert cloud_workspace_ready_from_config(
+        {
+            "provider": "docker",
+            "workspace_root": "/srv/workspaces",
+            "docker_binary": "/usr/bin/docker",
+        }
+    ) is True
+    assert captured_command == ["/usr/bin/docker", "info", "--format", "{{json .}}"]
+    assert captured_kwargs == {
+        "shell": False,
+        "capture_output": True,
+        "text": True,
+        "timeout": 5,
+        "env": None,
+        "check": False,
+    }
+
+
+def test_docker_workspace_provider_readiness_returns_false_when_docker_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="daemon unavailable")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert (
+        cloud_workspace_ready_from_config(
+            {
+                "provider": "docker",
+                "workspace_root": "/srv/workspaces",
+            }
+        )
+        is False
+    )
+
+
+def test_docker_workspace_provider_readiness_returns_false_when_docker_binary_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del command, kwargs
+        raise OSError("docker missing")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert (
+        cloud_workspace_ready_from_config(
+            {
+                "provider": "docker",
+                "workspace_root": "/srv/workspaces",
+            }
+        )
+        is False
+    )
 
 
 @pytest.mark.parametrize("root", ["/", "//", "/./", "/workspace/.."])
