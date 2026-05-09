@@ -158,3 +158,58 @@ def test_workspace_archive_extract_reconciles_deletions_but_preserves_git(tmp_pa
     assert not (target / "deleted.txt").exists()
     assert (target / "kept.txt").read_text(encoding="utf-8") == "fresh\n"
     assert (target / ".git" / "HEAD").read_text(encoding="utf-8") == "ref: refs/heads/main\n"
+
+
+def test_workspace_archive_create_rejects_input_larger_than_limit(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "large.bin").write_bytes(b"a" * (8 * 1024 * 1024 + 1))
+
+    with pytest.raises(ValueError, match="exceeds 8 MiB limit"):
+        _ = create_workspace_archive_base64(source)
+
+
+def test_workspace_archive_create_rejects_oversized_file_before_reading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    oversized = source / "large.bin"
+    oversized.write_bytes(b"a" * (8 * 1024 * 1024 + 1))
+
+    def fail_if_read(path: Path) -> bytes:
+        if path == oversized:
+            raise AssertionError("oversized file should be rejected before read")
+        return original_read_bytes(path)
+
+    original_read_bytes = Path.read_bytes
+    monkeypatch.setattr(Path, "read_bytes", fail_if_read)
+
+    with pytest.raises(ValueError, match="exceeds 8 MiB limit"):
+        _ = create_workspace_archive_base64(source)
+
+
+def test_workspace_archive_extract_rejects_decoded_archive_larger_than_limit(
+    tmp_path: Path,
+) -> None:
+    archive_base64 = base64.b64encode(b"a" * (8 * 1024 * 1024 + 1)).decode("ascii")
+
+    with pytest.raises(ValueError, match="exceeds 8 MiB limit"):
+        _ = extract_workspace_archive_base64(tmp_path / "target", archive_base64)
+
+
+def test_workspace_archive_extract_rejects_member_payload_larger_than_limit(
+    tmp_path: Path,
+) -> None:
+    buffer = io.BytesIO()
+    data = b"a" * (8 * 1024 * 1024 + 1)
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        info = tarfile.TarInfo(name="large.bin")
+        info.size = len(data)
+        archive.addfile(info, io.BytesIO(data))
+
+    with pytest.raises(ValueError, match="exceeds 8 MiB limit"):
+        _ = extract_workspace_archive_base64(
+            tmp_path / "target",
+            base64.b64encode(buffer.getvalue()).decode("ascii"),
+        )

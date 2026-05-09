@@ -9,6 +9,7 @@ from pathlib import Path
 
 
 _PRESERVED_ROOT_NAMES = frozenset({".git"})
+_MAX_WORKSPACE_ARCHIVE_BYTES = 8 * 1024 * 1024
 
 
 def create_workspace_archive_base64(workspace_root: Path) -> str:
@@ -17,6 +18,7 @@ def create_workspace_archive_base64(workspace_root: Path) -> str:
         raise ValueError(f"workspace root does not exist: {root}")
 
     buffer = io.BytesIO()
+    total_input_bytes = 0
     with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
         for path in sorted(root.rglob("*")):
             relative = path.relative_to(root)
@@ -27,13 +29,17 @@ def create_workspace_archive_base64(workspace_root: Path) -> str:
             if not path.is_file():
                 continue
             stat_result = path.stat()
+            total_input_bytes += stat_result.st_size
+            _raise_if_archive_too_large(total_input_bytes)
             data = path.read_bytes()
             info = tarfile.TarInfo(name=relative.as_posix())
             info.size = len(data)
             info.mode = stat_result.st_mode & 0o777
             info.mtime = int(stat_result.st_mtime)
             archive.addfile(info, io.BytesIO(data))
-    return base64.b64encode(buffer.getvalue()).decode("ascii")
+    archive_bytes = buffer.getvalue()
+    _raise_if_archive_too_large(len(archive_bytes))
+    return base64.b64encode(archive_bytes).decode("ascii")
 
 
 def extract_workspace_archive_base64(workspace_root: Path, archive_base64: str) -> None:
@@ -47,9 +53,11 @@ def extract_workspace_archive_base64(workspace_root: Path, archive_base64: str) 
         archive_bytes = base64.b64decode(archive_base64.encode("ascii"), validate=True)
     except ValueError as exc:
         raise ValueError("workspace archive must be valid base64") from exc
+    _raise_if_archive_too_large(len(archive_bytes))
 
     archive_buffer = io.BytesIO(archive_bytes)
     try:
+        extracted_bytes = 0
         with tarfile.open(fileobj=archive_buffer, mode="r:gz") as archive:
             for member in archive.getmembers():
                 _ = _safe_archive_target(root, member.name)
@@ -57,6 +65,9 @@ def extract_workspace_archive_base64(workspace_root: Path, archive_base64: str) 
                     raise ValueError(
                         f"workspace archive only supports regular files and directories: {member.name}"
                     )
+                if member.isfile():
+                    extracted_bytes += member.size
+                    _raise_if_archive_too_large(extracted_bytes)
     except tarfile.TarError as exc:
         raise ValueError("workspace archive is not a valid tar.gz") from exc
 
@@ -116,3 +127,8 @@ def _safe_archive_target(workspace_root: Path, member_name: str) -> Path:
             f"workspace archive member escapes workspace root: {member_name}"
         ) from exc
     return candidate
+
+
+def _raise_if_archive_too_large(size_bytes: int) -> None:
+    if size_bytes > _MAX_WORKSPACE_ARCHIVE_BYTES:
+        raise ValueError("workspace archive exceeds 8 MiB limit")

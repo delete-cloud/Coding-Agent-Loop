@@ -388,3 +388,68 @@ async def test_get_workspace_archive_returns_500_for_unexpected_runtime_error(
     response = await client_500.get("/sessions/sess-fail/workspace")
 
     assert response.status_code == 500
+
+
+async def test_create_session_rejects_snapshot_archive_larger_than_limit(
+    client: AsyncClient, monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        "coding_agent.environment.docker_workspace_provider._start_docker_workspace_container",
+        lambda provider_config, binding: None,
+    )
+    monkeypatch.setattr(
+        "coding_agent.ui.http_server._load_cloud_workspace_config",
+        lambda: {
+            "enabled": True,
+            "provider": "docker",
+            "workspace_root": str(tmp_path),
+            "container_name_prefix": "agent-",
+        },
+    )
+
+    response = await client.post(
+        "/sessions",
+        json={
+            "workspace_source": {
+                "kind": "docker",
+                "snapshot_archive_base64": base64.b64encode(
+                    b"a" * (8 * 1024 * 1024 + 1)
+                ).decode("ascii"),
+            }
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "workspace archive exceeds 8 MiB limit"
+
+
+async def test_get_workspace_archive_returns_400_for_oversized_workspace_export(
+    client: AsyncClient, monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        "coding_agent.environment.docker_workspace_provider._start_docker_workspace_container",
+        lambda provider_config, binding: None,
+    )
+    monkeypatch.setattr(
+        "coding_agent.ui.http_server._load_cloud_workspace_config",
+        lambda: {
+            "enabled": True,
+            "provider": "docker",
+            "workspace_root": str(tmp_path),
+            "container_name_prefix": "agent-",
+        },
+    )
+
+    binding = CloudWorkspaceBinding(
+        workspace_url="docker://agent-ws-large/workspace",
+        workspace_id="ws-large",
+    )
+    workspace_root = tmp_path / binding.workspace_id
+    workspace_root.mkdir(parents=True)
+    (workspace_root / "large.bin").write_bytes(b"a" * (8 * 1024 * 1024 + 1))
+    _register_cloud_session("sess-large", binding)
+
+    response = await client.get("/sessions/sess-large/workspace")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "workspace archive exceeds 8 MiB limit"
