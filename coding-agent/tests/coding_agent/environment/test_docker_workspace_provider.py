@@ -624,11 +624,25 @@ def test_docker_workspace_provider_provisions_runnable_container(
         "-d",
         "--name",
         f"agent-{binding.workspace_id}",
+        "--network",
+        "none",
+        "--cap-drop",
+    ]
+    assert captured_command[8:20] == [
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--pids-limit",
+        "256",
+        "--cpus",
+        "1",
+        "--memory",
+        "512m",
         "-v",
         f"{workspace_root / binding.workspace_id}:/workspace",
         "-w",
     ]
-    assert captured_command[8:] == [
+    assert captured_command[20:] == [
         "/workspace",
         "python:3.11-slim",
         "sleep",
@@ -642,6 +656,87 @@ def test_docker_workspace_provider_provisions_runnable_container(
         "env": None,
         "check": True,
     }
+
+
+def test_docker_workspace_provider_applies_configured_container_hardening(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_root.mkdir()
+    captured_command: list[str] = []
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        captured_command[:] = command
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    binding = provision_cloud_binding_from_config(
+        {
+            "provider": "docker",
+            "workspace_root": str(workspace_root),
+            "docker_binary": "/usr/bin/docker",
+            "image": "registry.example/agent:2026-05-10",
+            "image_allowlist": ["registry.example/agent:2026-05-10"],
+            "network": "none",
+            "cpus": "2",
+            "memory": "1g",
+            "pids_limit": 128,
+            "exec_user": "1000:1000",
+        },
+        {"kind": "docker"},
+    )
+
+    assert binding.workspace_id.startswith("ws-")
+    assert captured_command == [
+        "/usr/bin/docker",
+        "run",
+        "-d",
+        "--name",
+        binding.workspace_id,
+        "--network",
+        "none",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--pids-limit",
+        "128",
+        "--cpus",
+        "2",
+        "--memory",
+        "1g",
+        "-v",
+        f"{workspace_root / binding.workspace_id}:/workspace",
+        "-w",
+        "/workspace",
+        "--user",
+        "1000:1000",
+        "registry.example/agent:2026-05-10",
+        "sleep",
+        "infinity",
+    ]
+
+
+def test_docker_workspace_provider_rejects_image_outside_allowlist(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match="cloud_workspace.image is not allowed by image_allowlist",
+    ):
+        _ = provision_cloud_binding_from_config(
+            {
+                "provider": "docker",
+                "workspace_root": str(tmp_path),
+                "image": "registry.example/untrusted:latest",
+                "image_allowlist": ["python:3.11-slim"],
+            },
+            {"kind": "docker"},
+        )
 
 
 def test_docker_workspace_provider_provision_cleans_up_container_when_start_times_out(

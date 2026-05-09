@@ -1,6 +1,6 @@
 # ADR-0019: Deploy remote sessions with explicit cloud workspace providers
 
-**Status**: Proposed
+**Status**: Accepted / implemented through PR #121
 **Date**: 2026-05-05
 
 ## Context
@@ -143,6 +143,38 @@ allow distributed child workers.
   owner lease configuration, bearer-token authentication, TLS or private-network
   transport, and Docker workspace isolation.
 
+## Implementation Status
+
+Implemented on `main` through PR #121:
+
+- `coding_agent.environment.workspace_provider` defines the provider boundary for
+  cloud client factories, workspace provisioning/cleanup, readiness checks, and
+  workspace archive import/export.
+- `DockerWorkspaceProvider` is the first concrete provider. It provisions a
+  server-side workspace directory plus a Docker container, maps that directory
+  into the configured container workspace root, executes commands with
+  `docker exec`, and removes the container/workspace during cleanup.
+- The HTTP server can create sessions from a `workspace_source`, persist cloud
+  origin metadata, resolve provisioned cloud sessions into `CloudEnvironment`,
+  export workspace archives, and report cloud workspace readiness from `/readyz`.
+- The remote CLI supports `remote add/list/remove`, `remote repl` with either a
+  local workspace snapshot or an explicitly empty workspace, and `attach` for
+  submitting prompts to an existing remote session.
+- Workspace transfer uses bounded `tar.gz` archives encoded as base64. Archive
+  extraction rejects path traversal, symlinks, preserved root entries such as
+  `.git`, excessive decoded/compressed size, excessive decompressed stream size,
+  and excessive member count before replacing the local workspace contents.
+- Docker workspace containers are hardened by default with no network,
+  capability drop, `no-new-privileges`, PID/CPU/memory limits, and image
+  allowlist enforcement. When `exec_user` is configured, the same user is
+  applied to both the provisioned container and subsequent `docker exec` calls.
+
+Still out of scope for this ADR implementation:
+
+- Bidirectional live sync.
+- Distributed child workers.
+- Non-Docker cloud workspace providers such as SSH, Kubernetes, or microVMs.
+
 ## Alternatives Rejected
 
 - Treat `workspace_url` as enough and leave tool cwd unchanged — rejected because
@@ -166,18 +198,43 @@ allow distributed child workers.
 
 ## Acceptance Criteria
 
-- [ ] `test_build_session_manager_wires_cloud_client_factory_from_config`
-- [ ] `test_cloud_workspace_config_requires_provider_when_enabled`
-- [ ] `test_cloud_workspace_without_config_fails_fast_not_local_fallback`
-- [ ] `test_http_create_session_provisions_docker_cloud_workspace`
-- [ ] `test_send_prompt_uses_cloud_environment_from_provisioned_workspace`
-- [ ] `test_docker_cloud_client_maps_file_tools_to_remote_workspace`
-- [ ] `test_docker_cloud_client_runs_shell_in_workspace_cwd`
-- [ ] `test_remote_client_creates_cloud_session_streams_prompt_events`
-- [ ] `test_remote_client_submits_approval_to_owner_session`
-- [ ] `test_remote_session_records_origin_metadata`
-- [ ] `uv run pytest tests/coding_agent/environment/ tests/ui/test_execution_binding.py tests/ui/test_http_server.py tests/ui/test_session_manager_runtime.py -k "cloud or workspace or binding" -v`
-- [ ] `uv run pytest tests/cli/ -k "remote or attach" -v`
+- [x] Provider registry builds cloud client factories:
+  `tests/ui/test_execution_binding.py::test_cloud_workspace_provider_registry_builds_factory`
+- [x] Cloud workspace config requires an explicit provider:
+  `tests/ui/test_execution_binding.py::test_cloud_workspace_provider_config_requires_provider`
+- [x] Missing cloud client factory fails fast without local fallback:
+  `tests/coding_agent/environment/test_cloud_environment.py::test_cloud_environment_tool_errors_do_not_fallback_to_local_execution`
+- [x] HTTP session creation provisions Docker cloud workspaces:
+  `tests/ui/test_http_server.py::test_http_create_session_provisions_docker_cloud_workspace`
+- [x] Prompt execution uses the provisioned cloud environment:
+  `tests/ui/test_http_server.py::test_send_prompt_uses_cloud_environment_from_provisioned_workspace`
+- [x] Docker cloud client maps file tools into the remote workspace:
+  `tests/coding_agent/environment/test_docker_workspace_provider.py::test_docker_cloud_client_maps_file_tools_to_remote_workspace`
+- [x] Docker cloud client runs shell commands in the workspace cwd:
+  `tests/coding_agent/environment/test_docker_workspace_provider.py::test_docker_cloud_client_runs_shell_in_workspace_cwd`
+- [x] Remote client creates cloud sessions and streams prompt events:
+  `tests/cli/test_remote_client.py::test_remote_repl_creates_cloud_session_and_streams_prompt_events`
+- [x] Remote client submits approval decisions to the owner session:
+  `tests/cli/test_remote_client.py::test_remote_approval_request_prompts_before_submitting_decision`
+- [x] Remote session origin metadata is persisted and exposed:
+  `tests/ui/test_http_server.py::test_http_create_session_provisions_docker_cloud_workspace`
+  and `tests/ui/test_session_manager_public_api.py::test_session_metadata_round_trips_origin`
+- [x] Workspace snapshot upload and result download are implemented:
+  `tests/cli/test_remote_client.py::test_remote_repl_with_repo_uploads_snapshot_and_downloads_workspace`
+  and `tests/ui/test_http_server_workspace_transfer.py`
+- [x] Workspace archives are bounded and validated before extraction:
+  `tests/coding_agent/environment/test_workspace_archive.py`
+- [x] Cloud workspace readiness is reported from `/readyz`:
+  `tests/ui/test_http_server.py::test_readyz_reports_configured_cloud_workspace_provider_when_ready`
+- [x] Docker workspace containers use default network/capability/security/resource
+  hardening, configured execution user, and image allowlist policy:
+  `tests/coding_agent/environment/test_docker_workspace_provider.py::test_docker_workspace_provider_provisions_runnable_container`
+  and
+  `tests/coding_agent/environment/test_docker_workspace_provider.py::test_docker_workspace_provider_applies_configured_container_hardening`
+- [x] Focused cloud/workspace/binding suite:
+  `uv run pytest tests/coding_agent/environment/ tests/ui/test_execution_binding.py tests/ui/test_http_server.py tests/ui/test_session_manager_runtime.py -k "cloud or workspace or binding" -v`
+- [x] Remote/attach CLI suite:
+  `uv run pytest tests/cli/ -k "remote or attach" -v`
 
 ## References
 
