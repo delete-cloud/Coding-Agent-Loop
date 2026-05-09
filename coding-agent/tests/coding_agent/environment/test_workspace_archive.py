@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import gzip
 import io
 import os
 import tarfile
@@ -18,10 +19,10 @@ from coding_agent.workspace_archive import (
 def test_workspace_archive_round_trips_nested_files(tmp_path: Path) -> None:
     source = tmp_path / "source"
     (source / "nested").mkdir(parents=True)
-    (source / "README.md").write_text("hello\n", encoding="utf-8")
-    (source / "nested" / "data.txt").write_text("cloud\n", encoding="utf-8")
+    _ = (source / "README.md").write_text("hello\n", encoding="utf-8")
+    _ = (source / "nested" / "data.txt").write_text("cloud\n", encoding="utf-8")
     script = source / "nested" / "run.sh"
-    script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    _ = script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     script.chmod(0o755)
     timestamp = int(time.time()) - 120
     os.utime(script, (timestamp, timestamp))
@@ -54,10 +55,12 @@ def test_workspace_archive_rejects_path_traversal_members(tmp_path: Path) -> Non
         )
 
 
-def test_workspace_archive_rejects_invalid_tar_without_clearing_target(tmp_path: Path) -> None:
+def test_workspace_archive_rejects_invalid_tar_without_clearing_target(
+    tmp_path: Path,
+) -> None:
     target = tmp_path / "repo"
     target.mkdir()
-    (target / "keep.txt").write_text("keep\n", encoding="utf-8")
+    _ = (target / "keep.txt").write_text("keep\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match=r"valid tar\.gz"):
         _ = extract_workspace_archive_base64(
@@ -73,7 +76,7 @@ def test_workspace_archive_rejects_tar_header_error_without_clearing_target(
 ) -> None:
     target = tmp_path / "repo"
     target.mkdir()
-    (target / "keep.txt").write_text("keep\n", encoding="utf-8")
+    _ = (target / "keep.txt").write_text("keep\n", encoding="utf-8")
 
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
@@ -105,7 +108,7 @@ def test_workspace_archive_rejects_symlink_without_clearing_target(
 ) -> None:
     target = tmp_path / "repo"
     target.mkdir()
-    (target / "keep.txt").write_text("keep\n", encoding="utf-8")
+    _ = (target / "keep.txt").write_text("keep\n", encoding="utf-8")
 
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
@@ -144,29 +147,54 @@ def test_workspace_archive_defaults_missing_member_mode_to_readable_file(
     assert extracted.stat().st_mode & 0o777 == 0o644
 
 
-def test_workspace_archive_extract_reconciles_deletions_but_preserves_git(tmp_path: Path) -> None:
+def test_workspace_archive_extract_reconciles_deletions_but_preserves_git(
+    tmp_path: Path,
+) -> None:
     target = tmp_path / "repo"
     (target / ".git").mkdir(parents=True)
-    (target / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
-    (target / "deleted.txt").write_text("stale\n", encoding="utf-8")
+    _ = (target / ".git" / "HEAD").write_text(
+        "ref: refs/heads/main\n", encoding="utf-8"
+    )
+    _ = (target / "deleted.txt").write_text("stale\n", encoding="utf-8")
     source = tmp_path / "source"
     source.mkdir()
-    (source / "kept.txt").write_text("fresh\n", encoding="utf-8")
+    _ = (source / "kept.txt").write_text("fresh\n", encoding="utf-8")
 
     extract_workspace_archive_base64(target, create_workspace_archive_base64(source))
 
     assert not (target / "deleted.txt").exists()
     assert (target / "kept.txt").read_text(encoding="utf-8") == "fresh\n"
-    assert (target / ".git" / "HEAD").read_text(encoding="utf-8") == "ref: refs/heads/main\n"
+    assert (target / ".git" / "HEAD").read_text(
+        encoding="utf-8"
+    ) == "ref: refs/heads/main\n"
 
 
-def test_workspace_archive_create_rejects_input_larger_than_limit(tmp_path: Path) -> None:
+def test_workspace_archive_create_rejects_input_larger_than_limit(
+    tmp_path: Path,
+) -> None:
     source = tmp_path / "source"
     source.mkdir()
-    (source / "large.bin").write_bytes(b"a" * (8 * 1024 * 1024 + 1))
+    _ = (source / "large.bin").write_bytes(b"a" * (8 * 1024 * 1024 + 1))
 
     with pytest.raises(ValueError, match="exceeds 8 MiB limit"):
         _ = create_workspace_archive_base64(source)
+
+
+def test_workspace_archive_extract_accepts_payload_at_limit(tmp_path: Path) -> None:
+    buffer = io.BytesIO()
+    data = b"a" * (8 * 1024 * 1024)
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        info = tarfile.TarInfo(name="limit.bin")
+        info.size = len(data)
+        archive.addfile(info, io.BytesIO(data))
+
+    target = tmp_path / "target"
+    extract_workspace_archive_base64(
+        target,
+        base64.b64encode(buffer.getvalue()).decode("ascii"),
+    )
+
+    assert (target / "limit.bin").stat().st_size == 8 * 1024 * 1024
 
 
 def test_workspace_archive_create_rejects_oversized_file_before_reading(
@@ -175,7 +203,7 @@ def test_workspace_archive_create_rejects_oversized_file_before_reading(
     source = tmp_path / "source"
     source.mkdir()
     oversized = source / "large.bin"
-    oversized.write_bytes(b"a" * (8 * 1024 * 1024 + 1))
+    _ = oversized.write_bytes(b"a" * (8 * 1024 * 1024 + 1))
 
     def fail_if_read(path: Path) -> bytes:
         if path == oversized:
@@ -213,3 +241,75 @@ def test_workspace_archive_extract_rejects_member_payload_larger_than_limit(
             tmp_path / "target",
             base64.b64encode(buffer.getvalue()).decode("ascii"),
         )
+
+
+def test_workspace_archive_extract_rejects_tar_stream_larger_than_limit_without_clearing_target(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "repo"
+    target.mkdir()
+    _ = (target / "keep.txt").write_text("keep\n", encoding="utf-8")
+    tar_stream = io.BytesIO()
+    with tarfile.open(fileobj=tar_stream, mode="w:") as archive:
+        for index in range(4096):
+            info = tarfile.TarInfo(name=f"dir-{index}")
+            info.type = tarfile.DIRTYPE
+            info.pax_headers = {"comment": "x" * 4096}
+            archive.addfile(info)
+        file_data = b"ok\n"
+        file_info = tarfile.TarInfo(name="ok.txt")
+        file_info.size = len(file_data)
+        archive.addfile(file_info, io.BytesIO(file_data))
+    _ = tar_stream.write(b"\0" * (16 * 1024 * 1024))
+    archive_base64 = base64.b64encode(gzip.compress(tar_stream.getvalue())).decode(
+        "ascii"
+    )
+
+    with pytest.raises(ValueError, match="exceeds 8 MiB limit"):
+        _ = extract_workspace_archive_base64(target, archive_base64)
+
+    assert (target / "keep.txt").read_text(encoding="utf-8") == "keep\n"
+
+
+def test_workspace_archive_extract_rejects_too_many_members_without_clearing_target(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "repo"
+    target.mkdir()
+    _ = (target / "keep.txt").write_text("keep\n", encoding="utf-8")
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        for index in range(4097):
+            info = tarfile.TarInfo(name=f"dir-{index}")
+            info.type = tarfile.DIRTYPE
+            archive.addfile(info)
+
+    with pytest.raises(ValueError, match="too many members"):
+        _ = extract_workspace_archive_base64(
+            target,
+            base64.b64encode(buffer.getvalue()).decode("ascii"),
+        )
+
+    assert (target / "keep.txt").read_text(encoding="utf-8") == "keep\n"
+
+
+def test_workspace_archive_extract_rejects_git_members_without_clearing_target(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "repo"
+    target.mkdir()
+    _ = (target / "keep.txt").write_text("keep\n", encoding="utf-8")
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        data = b"ref: refs/heads/main\n"
+        info = tarfile.TarInfo(name=".git/HEAD")
+        info.size = len(data)
+        archive.addfile(info, io.BytesIO(data))
+
+    with pytest.raises(ValueError, match="preserved root entry"):
+        _ = extract_workspace_archive_base64(
+            target,
+            base64.b64encode(buffer.getvalue()).decode("ascii"),
+        )
+
+    assert (target / "keep.txt").read_text(encoding="utf-8") == "keep\n"
