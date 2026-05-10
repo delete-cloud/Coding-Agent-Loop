@@ -125,6 +125,54 @@ operation failure, and workspace archive upload/download failure.
 
 Metrics dashboards, per-user quota, and audit-log identity are P1 or later.
 
+## Remote Operations CLI
+
+Configure a normal user remote and, for operational commands, an admin remote:
+
+```bash
+coding-agent remote add team https://coding-agent.example.com --token "$CODING_AGENT_BEARER_TOKEN"
+coding-agent remote add team-admin https://coding-agent.example.com --token "$CODING_AGENT_ADMIN_BEARER_TOKEN"
+```
+
+Use `remote run` for the recommended one-shot remote workflow:
+
+```bash
+coding-agent remote run team --repo . --goal "fix the failing test"
+```
+
+`remote run --repo` uploads a local snapshot, streams one prompt, downloads the
+final workspace through the archive manifest/archive API, overwrites the local
+checkout while preserving `.git`, and then closes the remote session. Use
+`--yes` only when the local checkout is already recoverable and you want to skip
+the manifest confirmation prompt.
+
+`remote repl` is a compatibility alias for this one-shot workflow. It is not a
+persistent REPL/TUI. `attach` sends one prompt to an existing session; the HTTP
+events stream is the lower-level monitor primitive for future richer clients.
+
+Useful day-to-day operations:
+
+```bash
+coding-agent remote sessions list team
+coding-agent remote sessions status team <session-id>
+coding-agent remote sessions cancel team <session-id>
+coding-agent remote sessions close team <session-id>
+
+coding-agent remote download team --session <session-id> --repo .
+
+coding-agent remote workspaces list team-admin
+coding-agent remote workspaces cleanup team-admin --stale
+coding-agent remote workspaces rm team-admin <workspace-id>
+```
+
+Normal tokens are intended for creating, prompting, cancelling, closing, and
+downloading work owned by that token. Admin tokens are required for global
+workspace inspection and cleanup.
+
+For non-interactive automation, make approval behavior explicit. The current
+remote prompt stream can request approval for tools such as `bash_run`; provide
+stdin approval input or use a deployment policy that matches the workflow.
+
 ## Docker Security Boundary
 
 The P0 Docker provider uses these production requirements:
@@ -159,9 +207,33 @@ This is not live sync. P0 does not support incremental patch export, concurrent
 local edit merging, efficient large-repo delta sync, or automatic conflict
 resolution.
 
-Before using `remote repl --repo`, keep your local work recoverable with a
-commit, stash, or backup. The command name is historical: in P0 it performs a
-one-shot remote run, not a persistent REPL/TUI session.
+Before using `remote run --repo` or `remote repl --repo`, keep your local work
+recoverable with a commit, stash, or backup.
 
-`attach` sends one prompt to an existing remote session. A full interactive
-attach loop is P1.
+## Production Smoke
+
+A minimal production smoke should exercise the real HTTP boundary and Docker
+provider:
+
+1. Start `coding-agent serve --config /etc/coding-agent/config.toml` with
+   `server.production = true`, bearer token environment variables, Docker image
+   allowlist, non-root `exec_user`, quota, GC, and resource limits configured.
+2. Check readiness:
+
+   ```bash
+   curl -fsS -H "Authorization: Bearer $CODING_AGENT_BEARER_TOKEN" \
+     http://127.0.0.1:8080/readyz
+   ```
+
+3. Run a small repository through `remote run --repo`.
+4. Confirm the downloaded workspace contains the remote change.
+5. Confirm successful one-shot runs leave no active sessions or workspaces:
+
+   ```bash
+   coding-agent remote sessions list team
+   coding-agent remote workspaces list team-admin
+   ```
+
+This verifies production config loading, auth, Docker provider readiness,
+workspace execution, approval forwarding, archive manifest/download, local
+restore, and session/workspace cleanup.
