@@ -47,6 +47,11 @@ class WorkspaceProvider(Protocol):
         binding: "CloudWorkspaceBinding",
     ) -> str: ...
 
+    def cleanup_stale_cloud_workspaces(
+        self,
+        config: dict[str, object],
+    ) -> int: ...
+
 
 _WORKSPACE_PROVIDERS: dict[str, WorkspaceProvider] = {}
 
@@ -101,6 +106,11 @@ def export_workspace_archive_from_config(
 ) -> str:
     provider = _provider_from_config(config)
     return provider.export_workspace_archive(config, binding)
+
+
+def cleanup_stale_cloud_workspaces_from_config(config: dict[str, object]) -> int:
+    provider = _provider_from_config(config)
+    return provider.cleanup_stale_cloud_workspaces(config)
 
 
 def _provider_from_config(config: dict[str, object]) -> WorkspaceProvider:

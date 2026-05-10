@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -10,6 +12,7 @@ import pytest
 from coding_agent.environment import (
     DockerCloudWorkspaceClient,
     cleanup_cloud_binding_from_config,
+    cleanup_stale_cloud_workspaces_from_config,
     cloud_client_factory_from_config,
     cloud_workspace_ready_from_config,
     provision_cloud_binding_from_config,
@@ -743,6 +746,229 @@ def test_docker_workspace_provider_rejects_image_outside_allowlist(
                 "workspace_root": str(tmp_path),
                 "image": "registry.example/untrusted:latest",
                 "image_allowlist": ["python:3.11-slim"],
+            },
+            {"kind": "docker"},
+        )
+
+
+def test_docker_workspace_provider_rejects_provision_when_active_workspace_quota_is_reached(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    (workspace_root / "ws-existing").mkdir(parents=True)
+
+    def fail_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del command, kwargs
+        raise AssertionError("docker run must not be called when quota is full")
+
+    monkeypatch.setattr(subprocess, "run", fail_run)
+
+    with pytest.raises(
+        ValueError,
+        match=r"cloud workspace quota exceeded: max_active_workspaces=1",
+    ):
+        _ = provision_cloud_binding_from_config(
+            {
+                "provider": "docker",
+                "workspace_root": str(workspace_root),
+                "max_active_workspaces": 1,
+            },
+            {"kind": "docker"},
+        )
+
+
+def test_docker_workspace_provider_quota_ignores_unowned_workspace_directories(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    (workspace_root / "not-a-workspace").mkdir(parents=True)
+    (workspace_root / "ws-owned").mkdir()
+    captured_command: list[str] = []
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        captured_command[:] = command
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    binding = provision_cloud_binding_from_config(
+        {
+            "provider": "docker",
+            "workspace_root": str(workspace_root),
+            "max_active_workspaces": 2,
+        },
+        {"kind": "docker"},
+    )
+
+    assert binding.workspace_id.startswith("ws-")
+    assert captured_command[:3] == ["docker", "run", "-d"]
+
+
+def test_docker_workspace_provider_reserves_quota_slot_atomically(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    start_barrier = threading.Barrier(2)
+    release_first_run = threading.Event()
+    first_run_started = threading.Event()
+    run_count = 0
+    run_count_lock = threading.Lock()
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal run_count
+        del kwargs
+        with run_count_lock:
+            run_count += 1
+            current_run = run_count
+        if current_run == 1:
+            first_run_started.set()
+            _ = release_first_run.wait(timeout=5)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    def provision() -> CloudWorkspaceBinding:
+        start_barrier.wait(timeout=5)
+        return provision_cloud_binding_from_config(
+            {
+                "provider": "docker",
+                "workspace_root": str(workspace_root),
+                "max_active_workspaces": 1,
+            },
+            {"kind": "docker"},
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    results: list[CloudWorkspaceBinding] = []
+    errors: list[BaseException] = []
+
+    def worker() -> None:
+        try:
+            results.append(provision())
+        except BaseException as exc:
+            errors.append(exc)
+
+    first = threading.Thread(target=worker)
+    second = threading.Thread(target=worker)
+    first.start()
+    second.start()
+    assert first_run_started.wait(timeout=5)
+    release_first_run.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert len(results) == 1
+    assert run_count == 1
+    assert len(errors) == 1
+    assert isinstance(errors[0], ValueError)
+    assert "cloud workspace quota exceeded" in str(errors[0])
+
+
+def test_docker_workspace_provider_gc_removes_only_stale_owned_workspaces(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    stale_owned = workspace_root / "ws-stale"
+    fresh_owned = workspace_root / "ws-fresh"
+    unrelated = workspace_root / "project-not-owned"
+    stale_owned.mkdir(parents=True)
+    fresh_owned.mkdir()
+    unrelated.mkdir()
+    old_timestamp = time.time() - 7200
+    os.utime(stale_owned, (old_timestamp, old_timestamp))
+    removed_containers: list[str] = []
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if command[:3] == ["docker", "rm", "-f"]:
+            removed_containers.append(command[3])
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[:3] == ["docker", "container", "inspect"]:
+            return subprocess.CompletedProcess(
+                command, 1, stdout="", stderr="No such container"
+            )
+        raise AssertionError(f"unexpected docker command: {command}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    cleaned = cleanup_stale_cloud_workspaces_from_config(
+        {
+            "provider": "docker",
+            "workspace_root": str(workspace_root),
+            "max_workspace_age_seconds": 3600,
+        },
+    )
+
+    assert cleaned == 1
+    assert removed_containers == ["ws-stale"]
+    assert not stale_owned.exists()
+    assert fresh_owned.exists()
+    assert unrelated.exists()
+
+
+def test_docker_workspace_provider_gc_skips_active_workspace_ids(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    active_owned = workspace_root / "ws-active"
+    stale_owned = workspace_root / "ws-stale"
+    active_owned.mkdir(parents=True)
+    stale_owned.mkdir()
+    old_timestamp = time.time() - 7200
+    os.utime(active_owned, (old_timestamp, old_timestamp))
+    os.utime(stale_owned, (old_timestamp, old_timestamp))
+    removed_containers: list[str] = []
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if command[:3] == ["docker", "rm", "-f"]:
+            removed_containers.append(command[3])
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[:3] == ["docker", "container", "inspect"]:
+            return subprocess.CompletedProcess(
+                command, 1, stdout="", stderr="No such container"
+            )
+        raise AssertionError(f"unexpected docker command: {command}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    cleaned = cleanup_stale_cloud_workspaces_from_config(
+        {
+            "provider": "docker",
+            "workspace_root": str(workspace_root),
+            "max_workspace_age_seconds": 3600,
+            "_active_workspace_ids": ["ws-active"],
+        },
+    )
+
+    assert cleaned == 1
+    assert removed_containers == ["ws-stale"]
+    assert active_owned.exists()
+    assert not stale_owned.exists()
+
+
+def test_docker_workspace_provider_rejects_boolean_integer_config(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"cloud_workspace.max_active_workspaces must be a positive integer",
+    ):
+        _ = provision_cloud_binding_from_config(
+            {
+                "provider": "docker",
+                "workspace_root": str(tmp_path),
+                "max_active_workspaces": True,
             },
             {"kind": "docker"},
         )

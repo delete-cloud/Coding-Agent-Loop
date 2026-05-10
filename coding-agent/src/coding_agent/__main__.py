@@ -126,6 +126,43 @@ def _load_kb_cli_settings(
     return resolved_db, kb_cfg
 
 
+def _load_server_cli_settings(config_path: Path | None) -> dict[str, Any]:
+    if config_path is None:
+        return {}
+    from agentkit.config.loader import load_config
+
+    server_config = load_config(config_path).extra.get("server", {})
+    if not isinstance(server_config, dict):
+        raise click.ClickException("[server] config must be a table")
+    return cast(dict[str, Any], server_config)
+
+
+def _server_cli_host(server_config: dict[str, Any], host: str | None) -> str:
+    if host is not None:
+        return host
+    configured_host = server_config.get("host")
+    if configured_host is None:
+        return "127.0.0.1"
+    if not isinstance(configured_host, str) or not configured_host.strip():
+        raise click.ClickException("server.host must be a non-empty string")
+    return configured_host.strip()
+
+
+def _server_cli_port(server_config: dict[str, Any], port: int | None) -> int:
+    if port is not None:
+        return port
+    configured_port = server_config.get("port")
+    if configured_port is None:
+        return 8080
+    if (
+        isinstance(configured_port, bool)
+        or not isinstance(configured_port, int)
+        or configured_port <= 0
+    ):
+        raise click.ClickException("server.port must be a positive integer")
+    return configured_port
+
+
 @main.command()
 @click.option("--goal", required=True, help="Task goal for the agent")
 @click.option("--repo", default=".", help="Repository path")
@@ -407,15 +444,29 @@ def stats(session: str | None):
 
 
 @main.command()
-@click.option("--port", default=8080, help="Server port")
-@click.option("--host", default="127.0.0.1", help="Server host")
-def serve(port: int, host: str):
+@click.option("--port", default=None, type=int, help="Server port")
+@click.option("--host", default=None, help="Server host")
+@click.option(
+    "--config",
+    "config_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Explicit server config file.",
+)
+def serve(port: int | None, host: str | None, config_path: Path | None):
     """Start HTTP API server."""
     import uvicorn
+
+    if config_path is not None:
+        os.environ["CODING_AGENT_SERVER_CONFIG"] = str(config_path.resolve())
+    server_config = _load_server_cli_settings(config_path)
+    resolved_host = _server_cli_host(server_config, host)
+    resolved_port = _server_cli_port(server_config, port)
+
     from coding_agent.ui.http_server import app
 
-    click.echo(f"Starting Coding Agent HTTP server on {host}:{port}")
-    uvicorn.run(app, host=host, port=port)
+    click.echo(f"Starting Coding Agent HTTP server on {resolved_host}:{resolved_port}")
+    uvicorn.run(app, host=resolved_host, port=resolved_port)
 
 
 @main.group()
@@ -471,9 +522,11 @@ def remote_remove(name: str) -> None:
     is_flag=True,
     help="Create an empty server-side Docker workspace.",
 )
-@click.option("--goal", required=True, help="Initial prompt to send to the remote session")
+@click.option(
+    "--goal", required=True, help="Initial prompt to send to the remote session"
+)
 def remote_repl(name: str, repo: str | None, empty_workspace: bool, goal: str) -> None:
-    """Create a remote cloud session and stream one prompt."""
+    """Create a one-shot remote run and stream one prompt."""
     from coding_agent.remote.client import (
         auth_headers,
         create_remote_session,
@@ -513,7 +566,7 @@ def remote_repl(name: str, repo: str | None, empty_workspace: bool, goal: str) -
         endpoint,
         snapshot_archive_base64=snapshot_archive_base64,
     )
-    click.echo(f"Created remote session {session_id}")
+    click.echo(f"Created one-shot remote session {session_id} on remote {name}")
     status: int | None = None
     stream_error: Exception | None = None
     deferred_error: click.ClickException | None = None
@@ -536,6 +589,9 @@ def remote_repl(name: str, repo: str | None, empty_workspace: bool, goal: str) -
                     headers=headers,
                 )
                 extract_workspace_archive_base64(repo_path, archive_base64)
+                click.echo(
+                    f"Downloaded remote workspace snapshot and overwrote {repo_path} while preserving .git"
+                )
             except Exception as exc:
                 workspace_restore_failed = True
                 if stream_error is not None:
@@ -556,11 +612,14 @@ def remote_repl(name: str, repo: str | None, empty_workspace: bool, goal: str) -
                     session_id=session_id,
                     headers=headers,
                 )
+                click.echo(f"Cleaned up remote session {session_id}")
             except Exception as exc:
                 if stream_error is not None:
                     stream_error.add_note(f"Remote session cleanup also failed: {exc}")
                 elif deferred_error is not None:
-                    deferred_error.add_note(f"Remote session cleanup also failed: {exc}")
+                    deferred_error.add_note(
+                        f"Remote session cleanup also failed: {exc}"
+                    )
                 else:
                     raise
     if stream_error is not None:
@@ -576,7 +635,7 @@ def remote_repl(name: str, repo: str | None, empty_workspace: bool, goal: str) -
 @click.option("--session", "session_id", required=True, help="Remote session ID")
 @click.option("--goal", required=True, help="Prompt to send to the remote session")
 def attach(name: str, session_id: str, goal: str) -> None:
-    """Attach to an existing remote session and stream one prompt."""
+    """Send one prompt to an existing remote session."""
     from coding_agent.remote.client import auth_headers, get_remote, stream_prompt
 
     endpoint = get_remote(name)

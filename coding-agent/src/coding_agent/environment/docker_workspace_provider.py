@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import posixpath
 import re
 import secrets
 import shutil
 import subprocess
+import threading
 import time
 import uuid
 from collections.abc import Iterable
@@ -30,6 +32,9 @@ if TYPE_CHECKING:
     from ..ui.execution_binding import CloudWorkspaceBinding
 
 
+logger = logging.getLogger(__name__)
+_WORKSPACE_QUOTA_LOCKS: dict[Path, threading.Lock] = {}
+_WORKSPACE_QUOTA_LOCKS_GUARD = threading.Lock()
 _WORKSPACE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DOCKER_TIMEOUT_KILL_AFTER_SECONDS = 2
@@ -59,6 +64,8 @@ class _DockerWorkspaceProviderConfig:
     cpus: str
     memory: str
     pids_limit: int
+    max_active_workspaces: int | None
+    max_workspace_age_seconds: int | None
 
 
 class DockerCloudWorkspaceClient:
@@ -358,11 +365,13 @@ class DockerWorkspaceProvider(WorkspaceProvider):
             )
 
         provider_config = _docker_workspace_provider_config(config)
-        workspace_id = f"ws-{uuid.uuid4().hex}"
-        workspace_root = _workspace_root_for_id(
-            provider_config.workspace_root, workspace_id
-        )
-        workspace_root.mkdir(parents=True, exist_ok=False)
+        with _quota_lock_for_workspace_root(provider_config.workspace_root):
+            _enforce_active_workspace_quota(provider_config)
+            workspace_id = f"ws-{uuid.uuid4().hex}"
+            workspace_root = _workspace_root_for_id(
+                provider_config.workspace_root, workspace_id
+            )
+            workspace_root.mkdir(parents=True, exist_ok=False)
         binding = CloudWorkspaceBinding(
             workspace_url=(
                 f"docker://{_container_name(provider_config, workspace_id)}{provider_config.container_workspace_root}"
@@ -372,6 +381,10 @@ class DockerWorkspaceProvider(WorkspaceProvider):
         try:
             _start_docker_workspace_container(provider_config, binding)
         except Exception as exc:
+            logger.exception(
+                "Docker workspace creation failed for workspace_id=%s",
+                workspace_id,
+            )
             cleanup_failed = False
             try:
                 _remove_docker_workspace_container(provider_config, workspace_id)
@@ -385,6 +398,11 @@ class DockerWorkspaceProvider(WorkspaceProvider):
             if not cleanup_failed and workspace_root.exists():
                 shutil.rmtree(workspace_root)
             raise
+        logger.info(
+            "Docker workspace created workspace_id=%s container=%s",
+            workspace_id,
+            _container_name(provider_config, workspace_id),
+        )
         return binding
 
     @override
@@ -394,12 +412,18 @@ class DockerWorkspaceProvider(WorkspaceProvider):
         binding: CloudWorkspaceBinding,
     ) -> None:
         provider_config = _docker_workspace_provider_config(config)
+        logger.info(
+            "Cleaning Docker workspace workspace_id=%s container=%s",
+            binding.workspace_id,
+            _container_name(provider_config, binding.workspace_id),
+        )
         _remove_docker_workspace_container(provider_config, binding.workspace_id)
         workspace_root = _workspace_root_for_id(
             provider_config.workspace_root, binding.workspace_id
         )
         if workspace_root.exists():
             shutil.rmtree(workspace_root)
+        logger.info("Docker workspace cleaned workspace_id=%s", binding.workspace_id)
 
     @override
     def import_workspace_archive(
@@ -412,7 +436,14 @@ class DockerWorkspaceProvider(WorkspaceProvider):
         workspace_root = _workspace_root_for_id(
             provider_config.workspace_root, binding.workspace_id
         )
-        extract_workspace_archive_base64(workspace_root, archive_base64)
+        try:
+            extract_workspace_archive_base64(workspace_root, archive_base64)
+        except Exception:
+            logger.exception(
+                "Docker workspace archive import failed workspace_id=%s",
+                binding.workspace_id,
+            )
+            raise
 
     @override
     def export_workspace_archive(
@@ -424,7 +455,24 @@ class DockerWorkspaceProvider(WorkspaceProvider):
         workspace_root = _workspace_root_for_id(
             provider_config.workspace_root, binding.workspace_id
         )
-        return create_workspace_archive_base64(workspace_root)
+        try:
+            return create_workspace_archive_base64(workspace_root)
+        except Exception:
+            logger.exception(
+                "Docker workspace archive export failed workspace_id=%s",
+                binding.workspace_id,
+            )
+            raise
+
+    @override
+    def cleanup_stale_cloud_workspaces(self, config: dict[str, object]) -> int:
+        provider_config = _docker_workspace_provider_config(config)
+        if provider_config.max_workspace_age_seconds is None:
+            return 0
+        return _cleanup_stale_docker_workspaces(
+            provider_config,
+            active_workspace_ids=_active_workspace_ids_from_config(config),
+        )
 
 
 def _docker_workspace_provider_config(
@@ -459,6 +507,14 @@ def _docker_workspace_provider_config(
         key="pids_limit",
         default=_DEFAULT_DOCKER_PIDS_LIMIT,
     )
+    max_active_workspaces = _optional_positive_int(
+        config.get("max_active_workspaces"),
+        key="max_active_workspaces",
+    )
+    max_workspace_age_seconds = _optional_positive_int(
+        config.get("max_workspace_age_seconds"),
+        key="max_workspace_age_seconds",
+    )
     assert container_name_prefix is not None
     assert docker_binary is not None
     assert image is not None
@@ -483,6 +539,8 @@ def _docker_workspace_provider_config(
         cpus=cpus,
         memory=memory,
         pids_limit=pids_limit,
+        max_active_workspaces=max_active_workspaces,
+        max_workspace_age_seconds=max_workspace_age_seconds,
     )
 
 
@@ -528,7 +586,15 @@ def _string_list(
 def _positive_int(value: object, *, key: str, default: int) -> int:
     if value is None:
         return default
-    if not isinstance(value, int) or value <= 0:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"cloud_workspace.{key} must be a positive integer")
+    return value
+
+
+def _optional_positive_int(value: object, *, key: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"cloud_workspace.{key} must be a positive integer")
     return value
 
@@ -565,6 +631,91 @@ def _workspace_root_for_id(workspace_root: Path, workspace_id: str) -> Path:
             f"workspace id escapes configured workspace root: {workspace_id}"
         ) from exc
     return candidate
+
+
+def _is_provider_workspace_id(name: str) -> bool:
+    return name.startswith("ws-") and _WORKSPACE_ID_RE.fullmatch(name) is not None
+
+
+def _quota_lock_for_workspace_root(workspace_root: Path) -> threading.Lock:
+    with _WORKSPACE_QUOTA_LOCKS_GUARD:
+        lock = _WORKSPACE_QUOTA_LOCKS.get(workspace_root)
+        if lock is None:
+            lock = threading.Lock()
+            _WORKSPACE_QUOTA_LOCKS[workspace_root] = lock
+        return lock
+
+
+def _active_workspace_count(provider_config: _DockerWorkspaceProviderConfig) -> int:
+    if not provider_config.workspace_root.exists():
+        return 0
+    count = 0
+    for path in provider_config.workspace_root.iterdir():
+        if path.is_dir() and _is_provider_workspace_id(path.name):
+            count += 1
+    return count
+
+
+def _enforce_active_workspace_quota(
+    provider_config: _DockerWorkspaceProviderConfig,
+) -> None:
+    if provider_config.max_active_workspaces is None:
+        return
+    active_count = _active_workspace_count(provider_config)
+    if active_count >= provider_config.max_active_workspaces:
+        logger.warning(
+            "Docker workspace quota exceeded active=%s max_active_workspaces=%s",
+            active_count,
+            provider_config.max_active_workspaces,
+        )
+        raise ValueError(
+            "cloud workspace quota exceeded: "
+            f"max_active_workspaces={provider_config.max_active_workspaces}"
+        )
+
+
+def _cleanup_stale_docker_workspaces(
+    provider_config: _DockerWorkspaceProviderConfig,
+    *,
+    active_workspace_ids: set[str] | None = None,
+) -> int:
+    assert provider_config.max_workspace_age_seconds is not None
+    if not provider_config.workspace_root.exists():
+        return 0
+
+    active_workspace_ids = active_workspace_ids or set()
+    cutoff = time.time() - provider_config.max_workspace_age_seconds
+    cleaned = 0
+    for path in provider_config.workspace_root.iterdir():
+        if not path.is_dir() or not _is_provider_workspace_id(path.name):
+            continue
+        if path.name in active_workspace_ids:
+            logger.info("Docker workspace GC skipped active workspace_id=%s", path.name)
+            continue
+        if path.stat().st_mtime >= cutoff:
+            continue
+        logger.info("Docker workspace GC removing stale workspace_id=%s", path.name)
+        _remove_docker_workspace_container(provider_config, path.name)
+        if path.exists():
+            shutil.rmtree(path)
+        cleaned += 1
+    return cleaned
+
+
+def _active_workspace_ids_from_config(config: dict[str, object]) -> set[str]:
+    raw_ids = config.get("_active_workspace_ids")
+    if raw_ids is None:
+        return set()
+    if not isinstance(raw_ids, list):
+        raise ValueError("cloud_workspace._active_workspace_ids must be a list")
+    active_ids: set[str] = set()
+    for raw_id in cast(list[object], raw_ids):
+        if not isinstance(raw_id, str) or not _is_provider_workspace_id(raw_id):
+            raise ValueError(
+                "cloud_workspace._active_workspace_ids must contain workspace ids"
+            )
+        active_ids.add(raw_id)
+    return active_ids
 
 
 def _container_name(
@@ -661,11 +812,21 @@ def _remove_docker_workspace_container(
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
+        logger.exception(
+            "Docker workspace container removal failed container=%s",
+            container_name,
+        )
         raise RuntimeError(
             f"failed to remove docker workspace container: {container_name}"
         ) from exc
 
     if result.returncode != 0 and "No such container" not in result.stderr:
+        logger.error(
+            "Docker workspace container removal failed container=%s returncode=%s stderr=%s",
+            container_name,
+            result.returncode,
+            result.stderr,
+        )
         raise RuntimeError(
             f"failed to remove docker workspace container: {container_name}"
         )
@@ -702,6 +863,10 @@ def _docker_container_exists(
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
+        logger.exception(
+            "Docker workspace container inspect failed container=%s",
+            container_name,
+        )
         raise RuntimeError(
             f"failed to inspect docker workspace container: {container_name}"
         ) from exc
@@ -709,6 +874,12 @@ def _docker_container_exists(
         return True
     if "No such container" in result.stderr:
         return False
+    logger.error(
+        "Docker workspace container inspect failed container=%s returncode=%s stderr=%s",
+        container_name,
+        result.returncode,
+        result.stderr,
+    )
     raise RuntimeError(
         f"failed to inspect docker workspace container: {container_name}"
     )

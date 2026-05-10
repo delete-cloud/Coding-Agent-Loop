@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import re
 import sys
 import types
 from collections.abc import AsyncIterator, Callable
@@ -53,6 +54,7 @@ from coding_agent.ui.http_server import (
     session_manager,
     wait_for_approval,
 )
+import coding_agent.ui.http_server as http_server
 from coding_agent.wire.protocol import (
     ApprovalRequest,
     ApprovalResponse,
@@ -110,6 +112,175 @@ def register_session(
     )
     session_manager.register_session(session)
     return session
+
+
+def _minimal_agent_toml(extra: str = "") -> str:
+    return (
+        "[agent]\n"
+        'name = "test-agent"\n'
+        'model = "test-model"\n'
+        'provider = "openai"\n'
+        f"{extra}"
+    )
+
+
+def _safe_production_cloud_workspace_config() -> dict[str, object]:
+    return {
+        "enabled": True,
+        "provider": "docker",
+        "workspace_root": "/srv/coding-agent/workspaces",
+        "image": "coding-agent-runtime:2026-05-10",
+        "image_allowlist": ["coding-agent-runtime:2026-05-10"],
+        "exec_user": "1000:1000",
+        "max_active_workspaces": 8,
+        "max_workspace_age_seconds": 86400,
+        "gc_interval_seconds": 300,
+        "network": "none",
+        "cpus": "2",
+        "memory": "4g",
+        "pids_limit": 512,
+    }
+
+
+def test_http_server_loads_config_from_explicit_server_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "server.toml"
+    config_path.write_text(
+        _minimal_agent_toml(
+            """
+[server]
+production = false
+
+[cloud_workspace]
+enabled = true
+provider = "docker"
+workspace_root = "/srv/coding-agent/workspaces"
+"""
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODING_AGENT_SERVER_CONFIG", str(config_path))
+
+    assert http_server._server_config_path() == config_path
+    assert http_server._load_server_config() == {"production": False}
+    assert http_server._load_cloud_workspace_config()["workspace_root"] == (
+        "/srv/coding-agent/workspaces"
+    )
+
+
+def test_http_server_explicit_server_config_missing_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    missing_config_path = tmp_path / "missing.toml"
+    monkeypatch.setenv("CODING_AGENT_SERVER_CONFIG", str(missing_config_path))
+
+    with pytest.raises(ConfigError, match="config file not found"):
+        _ = http_server._load_server_config()
+
+
+def test_production_config_accepts_safe_docker_workspace_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CODING_AGENT_BEARER_TOKEN", "secret-token")
+
+    http_server._validate_production_config(
+        {
+            "production": True,
+            "bearer_token_env": "CODING_AGENT_BEARER_TOKEN",
+        },
+        _safe_production_cloud_workspace_config(),
+    )
+
+
+@pytest.mark.parametrize(
+    ("server_config", "cloud_workspace_overrides", "message"),
+    [
+        (
+            {"production": True},
+            {},
+            "server.bearer_token_env",
+        ),
+        (
+            {"production": True, "bearer_token": "secret-token"},
+            {"enabled": False},
+            "cloud_workspace.enabled=true",
+        ),
+        (
+            {"production": True, "bearer_token": "secret-token"},
+            {"image_allowlist": []},
+            "cloud_workspace.image_allowlist",
+        ),
+        (
+            {"production": True, "bearer_token": "secret-token"},
+            {"exec_user": "0:1000"},
+            "cloud_workspace.exec_user must not be root",
+        ),
+        (
+            {"production": True, "bearer_token": "secret-token"},
+            {"max_active_workspaces": 0},
+            "cloud_workspace.max_active_workspaces",
+        ),
+        (
+            {"production": True, "bearer_token": "secret-token"},
+            {"max_active_workspaces": True},
+            "cloud_workspace.max_active_workspaces",
+        ),
+        (
+            {"production": True, "bearer_token": "secret-token"},
+            {"max_workspace_age_seconds": 0},
+            "cloud_workspace.max_workspace_age_seconds",
+        ),
+        (
+            {"production": True, "bearer_token": "secret-token"},
+            {"gc_interval_seconds": 0},
+            "cloud_workspace.gc_interval_seconds",
+        ),
+        (
+            {"production": True, "bearer_token": "secret-token"},
+            {"cpus": ""},
+            "cloud_workspace.cpus",
+        ),
+        (
+            {"production": True, "bearer_token": "secret-token"},
+            {"memory": ""},
+            "cloud_workspace.memory",
+        ),
+        (
+            {"production": True, "bearer_token": "secret-token"},
+            {"pids_limit": 0},
+            "cloud_workspace.pids_limit",
+        ),
+        (
+            {"production": True, "bearer_token": "secret-token"},
+            {"network": "bridge"},
+            'cloud_workspace.network must be "none"',
+        ),
+    ],
+)
+def test_production_config_rejects_unsafe_remote_workspace_config(
+    server_config: dict[str, object],
+    cloud_workspace_overrides: dict[str, object],
+    message: str,
+) -> None:
+    cloud_workspace_config = _safe_production_cloud_workspace_config()
+    cloud_workspace_config.update(cloud_workspace_overrides)
+
+    with pytest.raises(ValueError, match=re.escape(message)):
+        http_server._validate_production_config(
+            server_config,
+            cloud_workspace_config,
+        )
+
+
+def test_development_mode_warning_logs_when_production_is_not_enabled(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    http_server._log_development_mode_warning({"production": False})
+
+    assert "not safe for team production use" in caplog.text
 
 
 def add_store_backed_approval_request(
@@ -2297,6 +2468,165 @@ class TestEventsFanOut:
 
 
 class TestLifespanShutdown:
+    async def test_lifespan_runs_startup_cloud_workspace_cleanup_when_configured(
+        self, monkeypatch
+    ):
+        events: list[str] = []
+        cloud_workspace_config = {
+            "enabled": True,
+            "provider": "docker",
+            "cleanup_on_startup": True,
+        }
+
+        async def fake_cleanup_idle_sessions() -> None:
+            try:
+                while True:
+                    await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                raise
+
+        async def fake_renew_owner_leases() -> None:
+            raise asyncio.CancelledError
+
+        def fake_cleanup_stale(config: dict[str, object]) -> int:
+            assert config == {**cloud_workspace_config, "_active_workspace_ids": []}
+            events.append("startup-gc")
+            return 2
+
+        async def fake_list_sessions_async() -> list[str]:
+            return []
+
+        async def fake_close() -> None:
+            events.append("close")
+
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            lambda: cloud_workspace_config,
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.cleanup_stale_cloud_workspaces_from_config",
+            fake_cleanup_stale,
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._cleanup_idle_sessions",
+            fake_cleanup_idle_sessions,
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._renew_owner_leases",
+            fake_renew_owner_leases,
+        )
+        monkeypatch.setattr(
+            session_manager, "list_sessions_async", fake_list_sessions_async
+        )
+        monkeypatch.setattr(session_manager, "close", fake_close)
+
+        cm = app.router.lifespan_context(app)
+        await cm.__aenter__()
+        await asyncio.sleep(0)
+        await cm.__aexit__(None, None, None)
+
+        assert events == ["startup-gc", "close"]
+
+    async def test_cloud_workspace_gc_excludes_active_cloud_sessions(self, monkeypatch):
+        active_binding = CloudWorkspaceBinding(
+            workspace_url="docker://agent-ws-active/workspace",
+            workspace_id="ws-active",
+        )
+        session_id = await session_manager.create_session(
+            origin={
+                "binding_kind": "cloud",
+                "workspace_source_kind": "docker",
+            },
+            execution_binding=active_binding,
+        )
+        seen_configs: list[dict[str, object]] = []
+
+        def fake_cleanup_stale(config: dict[str, object]) -> int:
+            seen_configs.append(dict(config))
+            return 0
+
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            lambda: {
+                "enabled": True,
+                "provider": "docker",
+                "cleanup_on_startup": True,
+            },
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.cleanup_stale_cloud_workspaces_from_config",
+            fake_cleanup_stale,
+        )
+
+        await http_server._cleanup_cloud_workspaces_on_startup()
+
+        assert seen_configs == [
+            {
+                "enabled": True,
+                "provider": "docker",
+                "cleanup_on_startup": True,
+                "_active_workspace_ids": ["ws-active"],
+            }
+        ]
+        await session_manager.close_session(session_id)
+
+    async def test_periodic_cloud_workspace_gc_runs_at_configured_interval(
+        self, monkeypatch
+    ):
+        events: list[str] = []
+        cloud_workspace_config = {
+            "enabled": True,
+            "provider": "docker",
+            "gc_interval_seconds": 300,
+            "max_workspace_age_seconds": 3600,
+        }
+
+        def fake_cleanup_stale(config: dict[str, object]) -> int:
+            assert config == {**cloud_workspace_config, "_active_workspace_ids": []}
+            events.append("periodic-gc")
+            return 1
+
+        async def fake_sleep(delay: float) -> None:
+            events.append(f"sleep:{delay}")
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            lambda: cloud_workspace_config,
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.cleanup_stale_cloud_workspaces_from_config",
+            fake_cleanup_stale,
+        )
+        monkeypatch.setattr("coding_agent.ui.http_server.asyncio.sleep", fake_sleep)
+
+        with pytest.raises(asyncio.CancelledError):
+            await http_server._cleanup_stale_cloud_workspaces_periodically()
+
+        assert events == ["periodic-gc", "sleep:300.0"]
+
+    def test_cloud_workspace_gc_interval_rejects_boolean_numeric_values(self):
+        assert (
+            http_server._cloud_workspace_gc_interval_seconds(
+                {
+                    "enabled": True,
+                    "gc_interval_seconds": True,
+                    "max_workspace_age_seconds": 3600,
+                }
+            )
+            is None
+        )
+        assert (
+            http_server._cloud_workspace_gc_interval_seconds(
+                {
+                    "enabled": True,
+                    "gc_interval_seconds": 300,
+                    "max_workspace_age_seconds": True,
+                }
+            )
+            is None
+        )
+
     async def test_lifespan_shutdown_continues_after_session_failure(self, monkeypatch):
         observed_shutdowns: list[str] = []
         close_calls: list[str] = []

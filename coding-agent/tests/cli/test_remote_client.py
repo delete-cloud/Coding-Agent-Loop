@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 from pathlib import Path
 
@@ -10,6 +11,144 @@ import pytest
 from click.testing import CliRunner
 
 from coding_agent.__main__ import main
+
+
+def test_serve_config_sets_explicit_server_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "server.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[agent]",
+                'name = "test-agent"',
+                'model = "test-model"',
+                'provider = "openai"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_uvicorn_run(app: object, *, host: str, port: int) -> None:
+        del app
+        captured["host"] = host
+        captured["port"] = port
+        captured["config"] = os.environ.get("CODING_AGENT_SERVER_CONFIG")
+
+    monkeypatch.setattr("uvicorn.run", fake_uvicorn_run)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        main,
+        [
+            "serve",
+            "--config",
+            str(config_path),
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "9000",
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert captured == {
+        "host": "0.0.0.0",
+        "port": 9000,
+        "config": str(config_path.resolve()),
+    }
+
+
+def test_serve_config_uses_server_host_and_port_when_cli_omits_them(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "server.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[agent]",
+                'name = "test-agent"',
+                'model = "test-model"',
+                'provider = "openai"',
+                "",
+                "[server]",
+                'host = "0.0.0.0"',
+                "port = 9000",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_uvicorn_run(app: object, *, host: str, port: int) -> None:
+        del app
+        captured["host"] = host
+        captured["port"] = port
+
+    monkeypatch.setattr("uvicorn.run", fake_uvicorn_run)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        main,
+        ["serve", "--config", str(config_path)],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert captured == {"host": "0.0.0.0", "port": 9000}
+
+
+def test_serve_config_rejects_boolean_port(tmp_path: Path) -> None:
+    config_path = tmp_path / "server.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[agent]",
+                'name = "test-agent"',
+                'model = "test-model"',
+                'provider = "openai"',
+                "",
+                "[server]",
+                "port = true",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        main,
+        ["serve", "--config", str(config_path)],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 1
+    assert "server.port must be a positive integer" in result.output
+
+
+def test_remote_repl_help_describes_one_shot_remote_run() -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(main, ["remote", "repl", "--help"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert "one-shot remote run" in result.output
+
+
+def test_attach_help_describes_single_prompt_attach() -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(main, ["attach", "--help"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert "Send one prompt to an existing remote session" in result.output
 
 
 def test_remote_add_list_remove_manage_named_endpoint(
@@ -134,7 +273,8 @@ def test_remote_repl_creates_cloud_session_and_streams_prompt_events(
     )
 
     assert result.exit_code == 0
-    assert "Created remote session sess-123" in result.output
+    assert "Created one-shot remote session sess-123 on remote dev" in result.output
+    assert "Cleaned up remote session sess-123" in result.output
     assert calls == [
         (
             "post",
@@ -157,9 +297,7 @@ def test_remote_repl_creates_cloud_session_and_streams_prompt_events(
     ]
 
 
-def test_attach_streams_prompt_to_existing_session(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_attach_streams_prompt_to_existing_session(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "remotes.json"
     monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
     runner = CliRunner()
@@ -231,7 +369,9 @@ def test_remote_repl_reports_http_session_create_error(
         ) -> httpx.Response:
             del path, json
             request = httpx.Request("POST", "http://agent.example/sessions")
-            return httpx.Response(400, json={"detail": "cloud workspace disabled"}, request=request)
+            return httpx.Response(
+                400, json={"detail": "cloud workspace disabled"}, request=request
+            )
 
     monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FailingClient)
 
@@ -263,7 +403,10 @@ def test_remote_repl_requires_repo_or_empty_workspace(
     )
 
     assert result.exit_code != 0
-    assert "Pass --repo to upload a workspace snapshot or --empty-workspace" in result.output
+    assert (
+        "Pass --repo to upload a workspace snapshot or --empty-workspace"
+        in result.output
+    )
 
 
 def test_remote_repl_with_repo_uploads_snapshot_and_downloads_workspace(
@@ -359,7 +502,10 @@ def test_remote_repl_with_repo_uploads_snapshot_and_downloads_workspace(
     )
 
     assert result.exit_code == 0
-    assert "Created remote session sess-upload" in result.output
+    assert "Created one-shot remote session sess-upload on remote dev" in result.output
+    assert "Downloaded remote workspace snapshot and overwrote" in result.output
+    assert "while preserving .git" in result.output
+    assert "Cleaned up remote session sess-upload" in result.output
     assert calls == [
         (
             "post",
@@ -458,7 +604,9 @@ def test_remote_repl_with_repo_downloads_results_when_stream_fails(
         raise click.ClickException("stream failed")
 
     monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
-    monkeypatch.setattr("coding_agent.remote.client.stream_prompt", failing_stream_prompt)
+    monkeypatch.setattr(
+        "coding_agent.remote.client.stream_prompt", failing_stream_prompt
+    )
     monkeypatch.setattr(
         "coding_agent.workspace_archive.create_workspace_archive_base64",
         lambda path: "archive-encoded",
@@ -819,7 +967,9 @@ def test_remote_repl_can_explicitly_create_empty_docker_workspace(
     ]
 
 
-def test_remote_approval_request_prompts_before_submitting_decision(monkeypatch) -> None:
+def test_remote_approval_request_prompts_before_submitting_decision(
+    monkeypatch,
+) -> None:
     approvals: list[dict[str, object] | None] = []
     prompts: list[str] = []
 
@@ -847,7 +997,9 @@ def test_remote_approval_request_prompts_before_submitting_decision(monkeypatch)
             approvals.append(json)
             return FakeResponse()
 
-    def fake_prompt(text: str, default: str | None = None, show_default: bool = True) -> str:
+    def fake_prompt(
+        text: str, default: str | None = None, show_default: bool = True
+    ) -> str:
         del default, show_default
         prompts.append(text)
         return "a"
@@ -877,9 +1029,7 @@ def test_remote_approval_request_prompts_before_submitting_decision(monkeypatch)
     assert status is None
     assert line_open is False
     assert prompts == ["→"]
-    assert approvals == [
-        {"request_id": "req-1", "approved": True, "scope": "session"}
-    ]
+    assert approvals == [{"request_id": "req-1", "approved": True, "scope": "session"}]
 
 
 def test_remote_approval_request_can_reject_with_reason(monkeypatch) -> None:
@@ -912,7 +1062,9 @@ def test_remote_approval_request_can_reject_with_reason(monkeypatch) -> None:
 
     answers = iter(["r", "Need a safer command"])
 
-    def fake_prompt(text: str, default: str | None = None, show_default: bool = True) -> str:
+    def fake_prompt(
+        text: str, default: str | None = None, show_default: bool = True
+    ) -> str:
         del default, show_default
         prompts.append(text)
         return next(answers)
@@ -1128,11 +1280,15 @@ def test_stream_prompt_reports_non_200_sse_response(monkeypatch) -> None:
         status_code = 503
 
         def raise_for_status(self) -> None:
-            request = httpx.Request("POST", "http://agent.example/sessions/sess-1/prompt")
+            request = httpx.Request(
+                "POST", "http://agent.example/sessions/sess-1/prompt"
+            )
             raise httpx.HTTPStatusError(
                 "bad status",
                 request=request,
-                response=httpx.Response(503, request=request, json={"detail": "server busy"}),
+                response=httpx.Response(
+                    503, request=request, json={"detail": "server busy"}
+                ),
             )
 
         def json(self) -> dict[str, object]:
@@ -1162,11 +1318,16 @@ def test_stream_prompt_reports_non_200_sse_response(monkeypatch) -> None:
             return None
 
     monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
-    monkeypatch.setattr("coding_agent.remote.client.connect_sse", lambda *args, **kwargs: FakeEventSource())
+    monkeypatch.setattr(
+        "coding_agent.remote.client.connect_sse",
+        lambda *args, **kwargs: FakeEventSource(),
+    )
 
     from coding_agent.remote.client import stream_prompt
 
-    with pytest.raises(click.ClickException, match="Failed to stream remote prompt: server busy"):
+    with pytest.raises(
+        click.ClickException, match="Failed to stream remote prompt: server busy"
+    ):
         stream_prompt(
             base_url="http://agent.example",
             session_id="sess-1",
@@ -1190,7 +1351,11 @@ def test_stream_prompt_rejects_truncated_stream_without_turn_end(monkeypatch) ->
             return None
 
         def iter_sse(self):
-            yield type("SSE", (), {"event": "StreamDelta", "data": json.dumps({"content": "partial"})})()
+            yield type(
+                "SSE",
+                (),
+                {"event": "StreamDelta", "data": json.dumps({"content": "partial"})},
+            )()
 
     class FakeClient:
         def __init__(self, **kwargs: object) -> None:
@@ -1203,11 +1368,16 @@ def test_stream_prompt_rejects_truncated_stream_without_turn_end(monkeypatch) ->
             return None
 
     monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
-    monkeypatch.setattr("coding_agent.remote.client.connect_sse", lambda *args, **kwargs: FakeEventSource())
+    monkeypatch.setattr(
+        "coding_agent.remote.client.connect_sse",
+        lambda *args, **kwargs: FakeEventSource(),
+    )
 
     from coding_agent.remote.client import stream_prompt
 
-    with pytest.raises(click.ClickException, match="Remote prompt stream ended without TurnEnd"):
+    with pytest.raises(
+        click.ClickException, match="Remote prompt stream ended without TurnEnd"
+    ):
         stream_prompt(
             base_url="http://agent.example",
             session_id="sess-1",
@@ -1219,7 +1389,9 @@ def test_stream_prompt_rejects_truncated_stream_without_turn_end(monkeypatch) ->
 def test_handle_sse_event_reports_invalid_json(monkeypatch) -> None:
     from coding_agent.remote.client import handle_sse_event
 
-    with pytest.raises(click.ClickException, match="Remote SSE event payload must be valid JSON"):
+    with pytest.raises(
+        click.ClickException, match="Remote SSE event payload must be valid JSON"
+    ):
         handle_sse_event(
             base_url="http://agent.example",
             session_id="sess-1",
