@@ -23,12 +23,19 @@ from agentkit.errors import ConfigError
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.environment import (
     cleanup_cloud_binding_from_config,
+    cleanup_cloud_workspace_from_config,
     cleanup_stale_cloud_workspaces_from_config,
     cloud_client_factory_from_config,
     cloud_workspace_ready_from_config,
+    WorkspaceArchiveManifest,
+    WorkspaceInventoryEntry,
+    export_workspace_archive_by_id_from_config,
     export_workspace_archive_from_config,
+    get_cloud_workspace_from_config,
     import_workspace_archive_from_config,
+    list_cloud_workspaces_from_config,
     provision_cloud_binding_from_config,
+    workspace_archive_manifest_from_config,
 )
 from coding_agent.ui.binding_resolver import DefaultBindingResolver
 from coding_agent.ui.session_manager import Session, SessionManager
@@ -54,6 +61,11 @@ from coding_agent.ui.schemas import (
     SessionListResponse,
     SessionSummaryResponse,
     WorkspaceArchiveResponse,
+    WorkspaceArchiveManifestResponse,
+    WorkspaceCleanupResponse,
+    WorkspaceGcResponse,
+    WorkspaceListResponse,
+    WorkspaceSummarySchema,
 )
 from coding_agent.ui.auth import AuthContext, auth_context_from_headers, verify_api_key
 from coding_agent.ui.execution_binding import (
@@ -526,6 +538,40 @@ def _auth_context_can_access_session(
     if auth_context.scope == "admin":
         return True
     return _session_owner_label(session) == auth_context.owner_label
+
+
+def _require_admin_context(auth_context: AuthContext | None) -> None:
+    if auth_context is None:
+        return
+    if auth_context.scope != "admin":
+        raise HTTPException(status_code=403, detail="Admin token required")
+
+
+def _workspace_summary_response(
+    entry: WorkspaceInventoryEntry,
+) -> WorkspaceSummarySchema:
+    return WorkspaceSummarySchema(
+        workspace_id=entry.workspace_id,
+        status=entry.status,
+        updated_at=entry.updated_at,
+    )
+
+
+def _workspace_archive_manifest_response(
+    manifest: WorkspaceArchiveManifest,
+) -> WorkspaceArchiveManifestResponse:
+    return WorkspaceArchiveManifestResponse(
+        workspace_id=manifest.workspace_id,
+        session_id=manifest.session_id,
+        format=manifest.format,
+        generated_at=manifest.generated_at,
+        file_count=manifest.file_count,
+        total_bytes=manifest.total_bytes,
+        changed_files=manifest.changed_files,
+        deleted_files=manifest.deleted_files,
+        excluded_files=manifest.excluded_files,
+        archive_sha256=manifest.archive_sha256,
+    )
 
 
 def _execution_binding_from_request(
@@ -1276,6 +1322,143 @@ async def cancel_session_turn(
     )
 
 
+@app.get("/workspaces", response_model=WorkspaceListResponse)
+@limiter.limit(RateLimits.GET_SESSION)
+async def list_workspaces(
+    request: Request,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> WorkspaceListResponse:
+    del request
+    _require_admin_context(auth_context)
+    config = _load_cloud_workspace_config()
+    entries = await asyncio.to_thread(
+        list_cloud_workspaces_from_config,
+        config,
+        active_workspace_ids=await _active_cloud_workspace_ids(),
+    )
+    return WorkspaceListResponse(
+        workspaces=[_workspace_summary_response(entry) for entry in entries]
+    )
+
+
+@app.post("/workspaces/gc", response_model=WorkspaceGcResponse)
+@limiter.limit(RateLimits.CLOSE_SESSION)
+async def run_workspace_gc(
+    request: Request,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> WorkspaceGcResponse:
+    del request
+    _require_admin_context(auth_context)
+    cleaned_count = await asyncio.to_thread(
+        cleanup_stale_cloud_workspaces_from_config,
+        await _cloud_workspace_gc_config(),
+    )
+    return WorkspaceGcResponse(cleaned_count=cleaned_count)
+
+
+@app.get("/workspaces/{workspace_id}", response_model=WorkspaceSummarySchema)
+@limiter.limit(RateLimits.GET_SESSION)
+async def get_workspace(
+    request: Request,
+    workspace_id: str,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> WorkspaceSummarySchema:
+    del request
+    _require_admin_context(auth_context)
+    try:
+        entry = await asyncio.to_thread(
+            get_cloud_workspace_from_config,
+            _load_cloud_workspace_config(),
+            workspace_id,
+            active_workspace_ids=await _active_cloud_workspace_ids(),
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _workspace_summary_response(entry)
+
+
+@app.delete("/workspaces/{workspace_id}", response_model=WorkspaceCleanupResponse)
+@limiter.limit(RateLimits.CLOSE_SESSION)
+async def cleanup_workspace(
+    request: Request,
+    response: Response,
+    workspace_id: str,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> WorkspaceCleanupResponse:
+    del request
+    _require_admin_context(auth_context)
+    try:
+        entry = await asyncio.to_thread(
+            cleanup_cloud_workspace_from_config,
+            _load_cloud_workspace_config(),
+            workspace_id,
+            active_workspace_ids=await _active_cloud_workspace_ids(),
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Cloud workspace cleanup failed workspace_id=%s", workspace_id)
+        response.status_code = 500
+        return WorkspaceCleanupResponse(
+            workspace_id=workspace_id,
+            status="cleanup_failed",
+            error=str(exc),
+        )
+    return WorkspaceCleanupResponse(workspace_id=entry.workspace_id, status="cleaned")
+
+
+@app.get(
+    "/workspaces/{workspace_id}/archive/manifest",
+    response_model=WorkspaceArchiveManifestResponse,
+)
+@limiter.limit(RateLimits.GET_SESSION)
+async def get_workspace_archive_manifest_by_id(
+    request: Request,
+    workspace_id: str,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> WorkspaceArchiveManifestResponse:
+    del request
+    _require_admin_context(auth_context)
+    try:
+        manifest = await asyncio.to_thread(
+            workspace_archive_manifest_from_config,
+            _load_cloud_workspace_config(),
+            workspace_id,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _workspace_archive_manifest_response(manifest)
+
+
+@app.get(
+    "/workspaces/{workspace_id}/archive",
+    response_model=WorkspaceArchiveResponse,
+)
+@limiter.limit(RateLimits.GET_SESSION)
+async def get_workspace_archive_by_id(
+    request: Request,
+    workspace_id: str,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> WorkspaceArchiveResponse:
+    del request
+    _require_admin_context(auth_context)
+    try:
+        archive_base64 = await asyncio.to_thread(
+            export_workspace_archive_by_id_from_config,
+            _load_cloud_workspace_config(),
+            workspace_id,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return WorkspaceArchiveResponse(format="tar.gz", archive_base64=archive_base64)
+
+
 @app.get("/sessions", response_model=SessionListResponse)
 @limiter.limit(RateLimits.GET_SESSION)
 async def list_sessions(
@@ -1315,17 +1498,9 @@ async def get_session(
     return SessionSummaryResponse(**session.as_dict())
 
 
-@app.get(
-    "/sessions/{session_id}/workspace",
-    response_model=WorkspaceArchiveResponse,
-)
-@limiter.limit(RateLimits.GET_SESSION)
-async def get_workspace_archive(
-    request: Request,
+async def _export_session_workspace_archive(
     session_id: str,
-    api_key: str | None = Depends(verify_api_key),
 ) -> WorkspaceArchiveResponse:
-    del request, api_key
     try:
         archive_base64 = await session_manager.export_workspace_archive(
             session_id,
@@ -1354,6 +1529,67 @@ async def get_workspace_archive(
         raise
 
     return WorkspaceArchiveResponse(format="tar.gz", archive_base64=archive_base64)
+
+
+@app.get(
+    "/sessions/{session_id}/workspace/archive/manifest",
+    response_model=WorkspaceArchiveManifestResponse,
+)
+@limiter.limit(RateLimits.GET_SESSION)
+async def get_session_workspace_archive_manifest(
+    request: Request,
+    session_id: str,
+    api_key: str | None = Depends(verify_api_key),
+) -> WorkspaceArchiveManifestResponse:
+    del request, api_key
+    try:
+        manifest = await session_manager.export_workspace_archive(
+            session_id,
+            lambda binding: workspace_archive_manifest_from_config(
+                _load_cloud_workspace_config(),
+                binding.workspace_id,
+                session_id=session_id,
+            ),
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
+    except SessionOwnershipConflictError as exc:
+        raise _owner_conflict_http_exception(exc, session_id=session_id) from exc
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        if str(exc) == "turn already in progress":
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise
+    return _workspace_archive_manifest_response(manifest)
+
+
+@app.get(
+    "/sessions/{session_id}/workspace/archive",
+    response_model=WorkspaceArchiveResponse,
+)
+@limiter.limit(RateLimits.GET_SESSION)
+async def get_session_workspace_archive(
+    request: Request,
+    session_id: str,
+    api_key: str | None = Depends(verify_api_key),
+) -> WorkspaceArchiveResponse:
+    del request, api_key
+    return await _export_session_workspace_archive(session_id)
+
+
+@app.get(
+    "/sessions/{session_id}/workspace",
+    response_model=WorkspaceArchiveResponse,
+)
+@limiter.limit(RateLimits.GET_SESSION)
+async def get_workspace_archive(
+    request: Request,
+    session_id: str,
+    api_key: str | None = Depends(verify_api_key),
+) -> WorkspaceArchiveResponse:
+    del request, api_key
+    return await _export_session_workspace_archive(session_id)
 
 
 @app.post(

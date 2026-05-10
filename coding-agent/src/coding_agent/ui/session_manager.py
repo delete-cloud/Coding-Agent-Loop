@@ -2160,8 +2160,8 @@ class SessionManager:
     async def export_workspace_archive(
         self,
         session_id: str,
-        export_archive: Callable[[CloudWorkspaceBinding], str],
-    ) -> str:
+        export_archive: Callable[[CloudWorkspaceBinding], T],
+    ) -> T:
         turn_lock = self._turn_lock_for(session_id)
         if turn_lock.locked():
             raise RuntimeError("turn already in progress")
@@ -2173,9 +2173,9 @@ class SessionManager:
                 raise RuntimeError("turn already in progress")
             if not isinstance(session.execution_binding, CloudWorkspaceBinding):
                 raise ValueError("Workspace export requires cloud session")
-            archive = await asyncio.to_thread(export_archive, session.execution_binding)
+            result = await asyncio.to_thread(export_archive, session.execution_binding)
             await self._assert_owner(session_id)
-            return archive
+            return result
 
     async def list_checkpoints(self, session_id: str) -> list[CheckpointMeta]:
         session = await self.get_session_async(session_id)

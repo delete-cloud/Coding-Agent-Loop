@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import logging
 import posixpath
@@ -12,6 +14,7 @@ import time
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast, override
 
@@ -20,6 +23,9 @@ from .workspace_provider import (
     CloudWorkspaceClientFactory,
     CloudWorkspaceSource,
     WorkspaceProvider,
+    WorkspaceArchiveManifest,
+    WorkspaceInventoryEntry,
+    WorkspaceStatus,
     register_workspace_provider,
 )
 from ..workspace_archive import (
@@ -474,6 +480,96 @@ class DockerWorkspaceProvider(WorkspaceProvider):
             active_workspace_ids=_active_workspace_ids_from_config(config),
         )
 
+    @override
+    def list_cloud_workspaces(
+        self,
+        config: dict[str, object],
+        *,
+        active_workspace_ids: set[str] | None = None,
+    ) -> list[WorkspaceInventoryEntry]:
+        provider_config = _docker_workspace_provider_config(config)
+        return _list_docker_workspaces(provider_config, active_workspace_ids or set())
+
+    @override
+    def get_cloud_workspace(
+        self,
+        config: dict[str, object],
+        workspace_id: str,
+        *,
+        active_workspace_ids: set[str] | None = None,
+    ) -> WorkspaceInventoryEntry:
+        provider_config = _docker_workspace_provider_config(config)
+        _validate_workspace_id(workspace_id)
+        workspace_root = _workspace_root_for_id(
+            provider_config.workspace_root,
+            workspace_id,
+        )
+        if not workspace_root.is_dir() or not _is_provider_workspace_id(workspace_id):
+            raise KeyError(f"workspace not found: {workspace_id}")
+        return _docker_workspace_entry(
+            provider_config,
+            workspace_root,
+            active_workspace_ids or set(),
+        )
+
+    @override
+    def cleanup_cloud_workspace(
+        self,
+        config: dict[str, object],
+        workspace_id: str,
+        *,
+        active_workspace_ids: set[str] | None = None,
+    ) -> WorkspaceInventoryEntry:
+        provider_config = _docker_workspace_provider_config(config)
+        _validate_workspace_id(workspace_id)
+        if not _is_provider_workspace_id(workspace_id):
+            raise KeyError(f"workspace not found: {workspace_id}")
+        if workspace_id in (active_workspace_ids or set()):
+            raise RuntimeError(f"workspace is active: {workspace_id}")
+        workspace_root = _workspace_root_for_id(
+            provider_config.workspace_root,
+            workspace_id,
+        )
+        if not workspace_root.exists():
+            raise KeyError(f"workspace not found: {workspace_id}")
+        logger.info("Docker workspace manual cleanup workspace_id=%s", workspace_id)
+        _remove_docker_workspace_container(provider_config, workspace_id)
+        if workspace_root.exists():
+            shutil.rmtree(workspace_root)
+        return WorkspaceInventoryEntry(
+            workspace_id=workspace_id,
+            status="cleaned",
+            updated_at=datetime.now(UTC),
+        )
+
+    @override
+    def export_workspace_archive_by_id(
+        self,
+        config: dict[str, object],
+        workspace_id: str,
+    ) -> str:
+        provider_config = _docker_workspace_provider_config(config)
+        return _export_workspace_archive_by_id(provider_config, workspace_id)
+
+    @override
+    def workspace_archive_manifest(
+        self,
+        config: dict[str, object],
+        workspace_id: str,
+        *,
+        session_id: str | None = None,
+    ) -> WorkspaceArchiveManifest:
+        provider_config = _docker_workspace_provider_config(config)
+        workspace_root = _workspace_root_for_id(
+            provider_config.workspace_root,
+            workspace_id,
+        )
+        return _docker_workspace_archive_manifest(
+            workspace_id=workspace_id,
+            session_id=session_id,
+            workspace_root=workspace_root,
+        )
+
 
 def _docker_workspace_provider_config(
     config: dict[str, object],
@@ -669,8 +765,7 @@ def _enforce_active_workspace_quota(
             provider_config.max_active_workspaces,
         )
         raise ValueError(
-            "cloud workspace quota exceeded: "
-            f"max_active_workspaces={provider_config.max_active_workspaces}"
+            f"cloud workspace quota exceeded: max_active_workspaces={provider_config.max_active_workspaces}"
         )
 
 
@@ -700,6 +795,105 @@ def _cleanup_stale_docker_workspaces(
             shutil.rmtree(path)
         cleaned += 1
     return cleaned
+
+
+def _list_docker_workspaces(
+    provider_config: _DockerWorkspaceProviderConfig,
+    active_workspace_ids: set[str],
+) -> list[WorkspaceInventoryEntry]:
+    if not provider_config.workspace_root.exists():
+        return []
+    entries: list[WorkspaceInventoryEntry] = []
+    for path in sorted(
+        provider_config.workspace_root.iterdir(), key=lambda item: item.name
+    ):
+        if not path.is_dir() or not _is_provider_workspace_id(path.name):
+            continue
+        entries.append(
+            _docker_workspace_entry(provider_config, path, active_workspace_ids)
+        )
+    return entries
+
+
+def _docker_workspace_entry(
+    provider_config: _DockerWorkspaceProviderConfig,
+    workspace_root: Path,
+    active_workspace_ids: set[str],
+) -> WorkspaceInventoryEntry:
+    workspace_id = workspace_root.name
+    status: WorkspaceStatus = "active"
+    if workspace_id not in active_workspace_ids:
+        max_age = provider_config.max_workspace_age_seconds
+        if (
+            max_age is not None
+            and workspace_root.stat().st_mtime < time.time() - max_age
+        ):
+            status = "stale"
+    return WorkspaceInventoryEntry(
+        workspace_id=workspace_id,
+        status=status,
+        updated_at=datetime.fromtimestamp(workspace_root.stat().st_mtime, UTC),
+    )
+
+
+def _export_workspace_archive_by_id(
+    provider_config: _DockerWorkspaceProviderConfig,
+    workspace_id: str,
+) -> str:
+    _validate_workspace_id(workspace_id)
+    if not _is_provider_workspace_id(workspace_id):
+        raise KeyError(f"workspace not found: {workspace_id}")
+    workspace_root = _workspace_root_for_id(
+        provider_config.workspace_root, workspace_id
+    )
+    if not workspace_root.is_dir():
+        raise KeyError(f"workspace not found: {workspace_id}")
+    return create_workspace_archive_base64(workspace_root)
+
+
+def _docker_workspace_archive_manifest(
+    *,
+    workspace_id: str,
+    session_id: str | None,
+    workspace_root: Path,
+) -> WorkspaceArchiveManifest:
+    _validate_workspace_id(workspace_id)
+    if not _is_provider_workspace_id(workspace_id) or not workspace_root.is_dir():
+        raise KeyError(f"workspace not found: {workspace_id}")
+
+    changed_files: list[str] = []
+    excluded_files: list[str] = []
+    total_bytes = 0
+    if (workspace_root / ".git").exists():
+        excluded_files.append(".git")
+
+    for path in sorted(workspace_root.rglob("*")):
+        relative = path.relative_to(workspace_root)
+        if not relative.parts:
+            continue
+        if relative.parts[0] == ".git":
+            continue
+        if path.is_symlink():
+            raise ValueError(f"workspace archive does not support symlinks: {relative}")
+        if not path.is_file():
+            continue
+        changed_files.append(relative.as_posix())
+        total_bytes += path.stat().st_size
+
+    archive_base64 = create_workspace_archive_base64(workspace_root)
+    archive_bytes = base64.b64decode(archive_base64.encode("ascii"), validate=True)
+    return WorkspaceArchiveManifest(
+        workspace_id=workspace_id,
+        session_id=session_id,
+        format="tar.gz",
+        generated_at=datetime.now(UTC),
+        file_count=len(changed_files),
+        total_bytes=total_bytes,
+        changed_files=changed_files,
+        deleted_files=[],
+        excluded_files=excluded_files,
+        archive_sha256=hashlib.sha256(archive_bytes).hexdigest(),
+    )
 
 
 def _active_workspace_ids_from_config(config: dict[str, object]) -> set[str]:
