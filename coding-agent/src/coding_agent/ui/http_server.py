@@ -47,6 +47,7 @@ from coding_agent.ui.schemas import (
     CheckpointMetadataResponse,
     CheckpointRestoreResponse,
     ApprovalResponseSchema,
+    CancelSessionResponse,
     CloseSessionResponse,
     HealthResponse,
     ReadinessResponse,
@@ -1232,6 +1233,47 @@ async def get_events(
             await _cleanup_event_queue_on_disconnect(session_id, queue)
 
     return EventSourceResponse(event_generator())
+
+
+@app.post("/sessions/{session_id}/cancel", response_model=CancelSessionResponse)
+@limiter.limit(RateLimits.CLOSE_SESSION)
+async def cancel_session_turn(
+    request: Request,
+    response: Response,
+    session_id: str,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> CancelSessionResponse:
+    del request
+    try:
+        session = await session_manager.get_session_async(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Session not found") from exc
+
+    if not _auth_context_can_access_session(auth_context, session):
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    try:
+        result = await session_manager.cancel_session_turn(session_id)
+    except SessionOwnershipConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    if result.status == "cancelling":
+        response.status_code = 202
+        await _broadcast_event(
+            session,
+            {
+                "event": "TurnCancelling",
+                "data": json.dumps(
+                    {"session_id": session_id, "turn_id": result.turn_id}
+                ),
+            },
+        )
+
+    return CancelSessionResponse(
+        session_id=result.session_id,
+        turn_id=result.turn_id,
+        status=result.status,
+    )
 
 
 @app.get("/sessions", response_model=SessionListResponse)
