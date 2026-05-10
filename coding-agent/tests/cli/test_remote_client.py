@@ -432,7 +432,10 @@ def test_remote_repl_with_repo_uploads_snapshot_and_downloads_workspace(
     )
 
     assert result.exit_code == 0
-    assert "Created remote session sess-upload" in result.output
+    assert "Created one-shot remote session sess-upload on remote dev" in result.output
+    assert "Downloaded remote workspace snapshot and overwrote" in result.output
+    assert "while preserving .git" in result.output
+    assert "Cleaned up remote session sess-upload" in result.output
     assert calls == [
         (
             "post",
