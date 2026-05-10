@@ -59,6 +59,7 @@ class _DockerWorkspaceProviderConfig:
     cpus: str
     memory: str
     pids_limit: int
+    max_active_workspaces: int | None
 
 
 class DockerCloudWorkspaceClient:
@@ -358,6 +359,7 @@ class DockerWorkspaceProvider(WorkspaceProvider):
             )
 
         provider_config = _docker_workspace_provider_config(config)
+        _enforce_active_workspace_quota(provider_config)
         workspace_id = f"ws-{uuid.uuid4().hex}"
         workspace_root = _workspace_root_for_id(
             provider_config.workspace_root, workspace_id
@@ -459,6 +461,10 @@ def _docker_workspace_provider_config(
         key="pids_limit",
         default=_DEFAULT_DOCKER_PIDS_LIMIT,
     )
+    max_active_workspaces = _optional_positive_int(
+        config.get("max_active_workspaces"),
+        key="max_active_workspaces",
+    )
     assert container_name_prefix is not None
     assert docker_binary is not None
     assert image is not None
@@ -483,6 +489,7 @@ def _docker_workspace_provider_config(
         cpus=cpus,
         memory=memory,
         pids_limit=pids_limit,
+        max_active_workspaces=max_active_workspaces,
     )
 
 
@@ -533,6 +540,14 @@ def _positive_int(value: object, *, key: str, default: int) -> int:
     return value
 
 
+def _optional_positive_int(value: object, *, key: str) -> int | None:
+    if value is None:
+        return None
+    if not isinstance(value, int) or value <= 0:
+        raise ValueError(f"cloud_workspace.{key} must be a positive integer")
+    return value
+
+
 def _json_object(payload: str) -> dict[str, object]:
     decoded = cast(object, json.loads(payload))
     if not isinstance(decoded, dict):
@@ -565,6 +580,33 @@ def _workspace_root_for_id(workspace_root: Path, workspace_id: str) -> Path:
             f"workspace id escapes configured workspace root: {workspace_id}"
         ) from exc
     return candidate
+
+
+def _is_provider_workspace_id(name: str) -> bool:
+    return name.startswith("ws-") and _WORKSPACE_ID_RE.fullmatch(name) is not None
+
+
+def _active_workspace_count(provider_config: _DockerWorkspaceProviderConfig) -> int:
+    if not provider_config.workspace_root.exists():
+        return 0
+    count = 0
+    for path in provider_config.workspace_root.iterdir():
+        if path.is_dir() and _is_provider_workspace_id(path.name):
+            count += 1
+    return count
+
+
+def _enforce_active_workspace_quota(
+    provider_config: _DockerWorkspaceProviderConfig,
+) -> None:
+    if provider_config.max_active_workspaces is None:
+        return
+    active_count = _active_workspace_count(provider_config)
+    if active_count >= provider_config.max_active_workspaces:
+        raise ValueError(
+            "cloud workspace quota exceeded: "
+            f"max_active_workspaces={provider_config.max_active_workspaces}"
+        )
 
 
 def _container_name(

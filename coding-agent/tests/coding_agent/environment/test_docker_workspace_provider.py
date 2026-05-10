@@ -748,6 +748,64 @@ def test_docker_workspace_provider_rejects_image_outside_allowlist(
         )
 
 
+def test_docker_workspace_provider_rejects_provision_when_active_workspace_quota_is_reached(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    (workspace_root / "ws-existing").mkdir(parents=True)
+
+    def fail_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del command, kwargs
+        raise AssertionError("docker run must not be called when quota is full")
+
+    monkeypatch.setattr(subprocess, "run", fail_run)
+
+    with pytest.raises(
+        ValueError,
+        match=r"cloud workspace quota exceeded: max_active_workspaces=1",
+    ):
+        _ = provision_cloud_binding_from_config(
+            {
+                "provider": "docker",
+                "workspace_root": str(workspace_root),
+                "max_active_workspaces": 1,
+            },
+            {"kind": "docker"},
+        )
+
+
+def test_docker_workspace_provider_quota_ignores_unowned_workspace_directories(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    (workspace_root / "not-a-workspace").mkdir(parents=True)
+    (workspace_root / "ws-owned").mkdir()
+    captured_command: list[str] = []
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        captured_command[:] = command
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    binding = provision_cloud_binding_from_config(
+        {
+            "provider": "docker",
+            "workspace_root": str(workspace_root),
+            "max_active_workspaces": 2,
+        },
+        {"kind": "docker"},
+    )
+
+    assert binding.workspace_id.startswith("ws-")
+    assert captured_command[:3] == ["docker", "run", "-d"]
+
+
 def test_docker_workspace_provider_provision_cleans_up_container_when_start_times_out(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
