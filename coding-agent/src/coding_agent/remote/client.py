@@ -67,7 +67,8 @@ def save_remotes(remotes: dict[str, RemoteEndpoint]) -> None:
         _ = path.parent.chmod(0o700)
     payload = {
         "remotes": {
-            name: _remote_payload(endpoint) for name, endpoint in sorted(remotes.items())
+            name: _remote_payload(endpoint)
+            for name, endpoint in sorted(remotes.items())
         }
     }
     contents = json.dumps(payload, indent=2, sort_keys=True) + "\n"
@@ -141,9 +142,7 @@ def create_remote_session(
             _raise_remote_http_error(response, "create remote session")
             data = cast(object, response.json())
     except httpx.RequestError as exc:
-        raise click.ClickException(
-            f"Failed to create remote session: {exc}"
-        ) from exc
+        raise click.ClickException(f"Failed to create remote session: {exc}") from exc
     if not isinstance(data, Mapping):
         raise click.ClickException("Remote session response must be a JSON object")
     data = cast(Mapping[str, object], data)
@@ -151,6 +150,91 @@ def create_remote_session(
     if not isinstance(session_id, str) or not session_id:
         raise click.ClickException("Remote session response missing session_id")
     return session_id
+
+
+def list_remote_sessions(endpoint: RemoteEndpoint) -> list[dict[str, object]]:
+    data = _get_remote_json(endpoint, "/sessions", "list remote sessions")
+    sessions = data.get("sessions")
+    if not isinstance(sessions, list):
+        raise click.ClickException("Remote sessions response missing sessions")
+    sessions = cast(list[object], sessions)
+    return [dict(_expect_mapping(item, "Remote session entry")) for item in sessions]
+
+
+def get_remote_session(endpoint: RemoteEndpoint, session_id: str) -> dict[str, object]:
+    data = _get_remote_json(
+        endpoint,
+        f"/sessions/{session_id}",
+        "get remote session",
+    )
+    return dict(data)
+
+
+def cancel_remote_session(
+    endpoint: RemoteEndpoint, session_id: str
+) -> dict[str, object]:
+    data = _post_remote_json(
+        endpoint,
+        f"/sessions/{session_id}/cancel",
+        "cancel remote session",
+    )
+    return dict(data)
+
+
+def list_remote_workspaces(endpoint: RemoteEndpoint) -> list[dict[str, object]]:
+    data = _get_remote_json(endpoint, "/workspaces", "list remote workspaces")
+    workspaces = data.get("workspaces")
+    if not isinstance(workspaces, list):
+        raise click.ClickException("Remote workspaces response missing workspaces")
+    workspaces = cast(list[object], workspaces)
+    return [
+        dict(_expect_mapping(item, "Remote workspace entry")) for item in workspaces
+    ]
+
+
+def cleanup_stale_remote_workspaces(endpoint: RemoteEndpoint) -> int:
+    data = _post_remote_json(endpoint, "/workspaces/gc", "cleanup stale workspaces")
+    cleaned_count = data.get("cleaned_count")
+    if not isinstance(cleaned_count, int):
+        raise click.ClickException("Remote workspace GC response missing cleaned_count")
+    return cleaned_count
+
+
+def cleanup_remote_workspace(
+    endpoint: RemoteEndpoint, workspace_id: str
+) -> dict[str, object]:
+    try:
+        with httpx.Client(
+            base_url=endpoint.url,
+            headers=auth_headers(endpoint),
+            timeout=30.0,
+        ) as client:
+            response = client.delete(f"/workspaces/{workspace_id}")
+            _raise_remote_http_error(response, "cleanup remote workspace")
+            data = cast(object, response.json())
+    except httpx.RequestError as exc:
+        raise click.ClickException(
+            f"Failed to cleanup remote workspace: {exc}"
+        ) from exc
+    return dict(_expect_mapping(data, "Remote workspace cleanup response"))
+
+
+def download_workspace_manifest(
+    *,
+    base_url: str,
+    session_id: str,
+    headers: dict[str, str],
+) -> dict[str, object]:
+    try:
+        with httpx.Client(base_url=base_url, headers=headers, timeout=60.0) as client:
+            response = client.get(f"/sessions/{session_id}/workspace/archive/manifest")
+            _raise_remote_http_error(response, "download remote workspace manifest")
+            data = cast(object, response.json())
+    except httpx.RequestError as exc:
+        raise click.ClickException(
+            f"Failed to download remote workspace manifest: {exc}"
+        ) from exc
+    return dict(_expect_mapping(data, "Remote workspace manifest response"))
 
 
 def download_workspace_archive(
@@ -161,7 +245,7 @@ def download_workspace_archive(
 ) -> str:
     try:
         with httpx.Client(base_url=base_url, headers=headers, timeout=60.0) as client:
-            response = client.get(f"/sessions/{session_id}/workspace")
+            response = client.get(f"/sessions/{session_id}/workspace/archive")
             _raise_remote_http_error(response, "download remote workspace")
             data = cast(object, response.json())
     except httpx.RequestError as exc:
@@ -175,6 +259,50 @@ def download_workspace_archive(
     if not isinstance(archive_base64, str) or not archive_base64:
         raise click.ClickException("Remote workspace response missing archive_base64")
     return archive_base64
+
+
+def _get_remote_json(
+    endpoint: RemoteEndpoint,
+    path: str,
+    action: str,
+) -> dict[str, object]:
+    try:
+        with httpx.Client(
+            base_url=endpoint.url,
+            headers=auth_headers(endpoint),
+            timeout=30.0,
+        ) as client:
+            response = client.get(path)
+            _raise_remote_http_error(response, action)
+            data = cast(object, response.json())
+    except httpx.RequestError as exc:
+        raise click.ClickException(f"Failed to {action}: {exc}") from exc
+    return dict(_expect_mapping(data, f"Remote {action} response"))
+
+
+def _post_remote_json(
+    endpoint: RemoteEndpoint,
+    path: str,
+    action: str,
+) -> dict[str, object]:
+    try:
+        with httpx.Client(
+            base_url=endpoint.url,
+            headers=auth_headers(endpoint),
+            timeout=30.0,
+        ) as client:
+            response = client.post(path)
+            _raise_remote_http_error(response, action)
+            data = cast(object, response.json())
+    except httpx.RequestError as exc:
+        raise click.ClickException(f"Failed to {action}: {exc}") from exc
+    return dict(_expect_mapping(data, f"Remote {action} response"))
+
+
+def _expect_mapping(value: object, description: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise click.ClickException(f"{description} must be a JSON object")
+    return cast(Mapping[str, object], value)
 
 
 def delete_remote_session(
@@ -197,16 +325,16 @@ def stream_prompt(
     timeout = httpx.Timeout(connect=10.0, write=30.0, pool=30.0, read=None)
     line_open = False
     try:
-        with httpx.Client(base_url=base_url, headers=headers, timeout=timeout) as client:
+        with httpx.Client(
+            base_url=base_url, headers=headers, timeout=timeout
+        ) as client:
             with connect_sse(
                 client,
                 "POST",
                 f"/sessions/{session_id}/prompt",
                 json={"prompt": prompt},
             ) as event_source:
-                _raise_remote_http_error(
-                    event_source.response, "stream remote prompt"
-                )
+                _raise_remote_http_error(event_source.response, "stream remote prompt")
                 for sse in event_source.iter_sse():
                     status, line_open = handle_sse_event(
                         base_url=base_url,
@@ -321,9 +449,9 @@ def _prompt_for_approval(payload: dict[str, object]) -> _ApprovalDecision:
     click.echo(
         "[y]=approve  [a]=approve all (session)  [n]=reject  [r]=reject with reason"
     )
-    choice = cast(
-        str, click.prompt("→", default="n", show_default=False)
-    ).strip().lower()
+    choice = (
+        cast(str, click.prompt("→", default="n", show_default=False)).strip().lower()
+    )
     if choice in ("y", "yes"):
         return _ApprovalDecision(approved=True, scope="once")
     if choice in ("a", "all"):
