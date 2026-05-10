@@ -60,6 +60,7 @@ class _DockerWorkspaceProviderConfig:
     memory: str
     pids_limit: int
     max_active_workspaces: int | None
+    max_workspace_age_seconds: int | None
 
 
 class DockerCloudWorkspaceClient:
@@ -428,6 +429,13 @@ class DockerWorkspaceProvider(WorkspaceProvider):
         )
         return create_workspace_archive_base64(workspace_root)
 
+    @override
+    def cleanup_stale_cloud_workspaces(self, config: dict[str, object]) -> int:
+        provider_config = _docker_workspace_provider_config(config)
+        if provider_config.max_workspace_age_seconds is None:
+            return 0
+        return _cleanup_stale_docker_workspaces(provider_config)
+
 
 def _docker_workspace_provider_config(
     config: dict[str, object],
@@ -465,6 +473,10 @@ def _docker_workspace_provider_config(
         config.get("max_active_workspaces"),
         key="max_active_workspaces",
     )
+    max_workspace_age_seconds = _optional_positive_int(
+        config.get("max_workspace_age_seconds"),
+        key="max_workspace_age_seconds",
+    )
     assert container_name_prefix is not None
     assert docker_binary is not None
     assert image is not None
@@ -490,6 +502,7 @@ def _docker_workspace_provider_config(
         memory=memory,
         pids_limit=pids_limit,
         max_active_workspaces=max_active_workspaces,
+        max_workspace_age_seconds=max_workspace_age_seconds,
     )
 
 
@@ -607,6 +620,27 @@ def _enforce_active_workspace_quota(
             "cloud workspace quota exceeded: "
             f"max_active_workspaces={provider_config.max_active_workspaces}"
         )
+
+
+def _cleanup_stale_docker_workspaces(
+    provider_config: _DockerWorkspaceProviderConfig,
+) -> int:
+    assert provider_config.max_workspace_age_seconds is not None
+    if not provider_config.workspace_root.exists():
+        return 0
+
+    cutoff = time.time() - provider_config.max_workspace_age_seconds
+    cleaned = 0
+    for path in provider_config.workspace_root.iterdir():
+        if not path.is_dir() or not _is_provider_workspace_id(path.name):
+            continue
+        if path.stat().st_mtime >= cutoff:
+            continue
+        _remove_docker_workspace_container(provider_config, path.name)
+        if path.exists():
+            shutil.rmtree(path)
+        cleaned += 1
+    return cleaned
 
 
 def _container_name(

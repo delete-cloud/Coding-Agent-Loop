@@ -2452,6 +2452,100 @@ class TestEventsFanOut:
 
 
 class TestLifespanShutdown:
+    async def test_lifespan_runs_startup_cloud_workspace_cleanup_when_configured(
+        self, monkeypatch
+    ):
+        events: list[str] = []
+        cloud_workspace_config = {
+            "enabled": True,
+            "provider": "docker",
+            "cleanup_on_startup": True,
+        }
+
+        async def fake_cleanup_idle_sessions() -> None:
+            try:
+                while True:
+                    await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                raise
+
+        async def fake_renew_owner_leases() -> None:
+            raise asyncio.CancelledError
+
+        def fake_cleanup_stale(config: dict[str, object]) -> int:
+            assert config is cloud_workspace_config
+            events.append("startup-gc")
+            return 2
+
+        async def fake_list_sessions_async() -> list[str]:
+            return []
+
+        async def fake_close() -> None:
+            events.append("close")
+
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            lambda: cloud_workspace_config,
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.cleanup_stale_cloud_workspaces_from_config",
+            fake_cleanup_stale,
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._cleanup_idle_sessions",
+            fake_cleanup_idle_sessions,
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._renew_owner_leases",
+            fake_renew_owner_leases,
+        )
+        monkeypatch.setattr(
+            session_manager, "list_sessions_async", fake_list_sessions_async
+        )
+        monkeypatch.setattr(session_manager, "close", fake_close)
+
+        cm = app.router.lifespan_context(app)
+        await cm.__aenter__()
+        await asyncio.sleep(0)
+        await cm.__aexit__(None, None, None)
+
+        assert events == ["startup-gc", "close"]
+
+    async def test_periodic_cloud_workspace_gc_runs_at_configured_interval(
+        self, monkeypatch
+    ):
+        events: list[str] = []
+        cloud_workspace_config = {
+            "enabled": True,
+            "provider": "docker",
+            "gc_interval_seconds": 300,
+            "max_workspace_age_seconds": 3600,
+        }
+
+        def fake_cleanup_stale(config: dict[str, object]) -> int:
+            assert config is cloud_workspace_config
+            events.append("periodic-gc")
+            return 1
+
+        async def fake_sleep(delay: float) -> None:
+            events.append(f"sleep:{delay}")
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            lambda: cloud_workspace_config,
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.cleanup_stale_cloud_workspaces_from_config",
+            fake_cleanup_stale,
+        )
+        monkeypatch.setattr("coding_agent.ui.http_server.asyncio.sleep", fake_sleep)
+
+        with pytest.raises(asyncio.CancelledError):
+            await http_server._cleanup_stale_cloud_workspaces_periodically()
+
+        assert events == ["periodic-gc", "sleep:300.0"]
+
     async def test_lifespan_shutdown_continues_after_session_failure(self, monkeypatch):
         observed_shutdowns: list[str] = []
         close_calls: list[str] = []

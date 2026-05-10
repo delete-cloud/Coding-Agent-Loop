@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -10,6 +12,7 @@ import pytest
 from coding_agent.environment import (
     DockerCloudWorkspaceClient,
     cleanup_cloud_binding_from_config,
+    cleanup_stale_cloud_workspaces_from_config,
     cloud_client_factory_from_config,
     cloud_workspace_ready_from_config,
     provision_cloud_binding_from_config,
@@ -804,6 +807,50 @@ def test_docker_workspace_provider_quota_ignores_unowned_workspace_directories(
 
     assert binding.workspace_id.startswith("ws-")
     assert captured_command[:3] == ["docker", "run", "-d"]
+
+
+def test_docker_workspace_provider_gc_removes_only_stale_owned_workspaces(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    stale_owned = workspace_root / "ws-stale"
+    fresh_owned = workspace_root / "ws-fresh"
+    unrelated = workspace_root / "project-not-owned"
+    stale_owned.mkdir(parents=True)
+    fresh_owned.mkdir()
+    unrelated.mkdir()
+    old_timestamp = time.time() - 7200
+    os.utime(stale_owned, (old_timestamp, old_timestamp))
+    removed_containers: list[str] = []
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if command[:3] == ["docker", "rm", "-f"]:
+            removed_containers.append(command[3])
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[:3] == ["docker", "container", "inspect"]:
+            return subprocess.CompletedProcess(
+                command, 1, stdout="", stderr="No such container"
+            )
+        raise AssertionError(f"unexpected docker command: {command}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    cleaned = cleanup_stale_cloud_workspaces_from_config(
+        {
+            "provider": "docker",
+            "workspace_root": str(workspace_root),
+            "max_workspace_age_seconds": 3600,
+        },
+    )
+
+    assert cleaned == 1
+    assert removed_containers == ["ws-stale"]
+    assert not stale_owned.exists()
+    assert fresh_owned.exists()
+    assert unrelated.exists()
 
 
 def test_docker_workspace_provider_provision_cleans_up_container_when_start_times_out(

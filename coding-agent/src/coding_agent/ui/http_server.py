@@ -23,6 +23,7 @@ from agentkit.errors import ConfigError
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.environment import (
     cleanup_cloud_binding_from_config,
+    cleanup_stale_cloud_workspaces_from_config,
     cloud_client_factory_from_config,
     cloud_workspace_ready_from_config,
     export_workspace_archive_from_config,
@@ -302,6 +303,53 @@ async def _renew_owner_leases() -> None:
         await asyncio.sleep(max(session_manager.owner_lease_seconds / 2.0, 1.0))
 
 
+def _cloud_workspace_gc_interval_seconds(
+    cloud_workspace_config: dict[str, Any],
+) -> float | None:
+    if cloud_workspace_config.get("enabled") is not True:
+        return None
+    interval = cloud_workspace_config.get("gc_interval_seconds")
+    max_age = cloud_workspace_config.get("max_workspace_age_seconds")
+    if not isinstance(interval, (int, float)) or interval <= 0:
+        return None
+    if not isinstance(max_age, int) or max_age <= 0:
+        return None
+    return float(interval)
+
+
+async def _cleanup_cloud_workspaces_on_startup() -> None:
+    cloud_workspace_config = _load_cloud_workspace_config()
+    if cloud_workspace_config.get("enabled") is not True:
+        return
+    if cloud_workspace_config.get("cleanup_on_startup") is not True:
+        return
+    try:
+        cleaned = await asyncio.to_thread(
+            cleanup_stale_cloud_workspaces_from_config,
+            cloud_workspace_config,
+        )
+        logger.info("Cloud workspace startup cleanup removed %s workspace(s)", cleaned)
+    except Exception:
+        logger.exception("Cloud workspace startup cleanup failed")
+
+
+async def _cleanup_stale_cloud_workspaces_periodically() -> None:
+    while True:
+        cloud_workspace_config = _load_cloud_workspace_config()
+        interval = _cloud_workspace_gc_interval_seconds(cloud_workspace_config)
+        if interval is None:
+            return
+        try:
+            cleaned = await asyncio.to_thread(
+                cleanup_stale_cloud_workspaces_from_config,
+                cloud_workspace_config,
+            )
+            logger.info("Cloud workspace periodic GC removed %s workspace(s)", cleaned)
+        except Exception:
+            logger.exception("Cloud workspace periodic GC failed")
+        await asyncio.sleep(interval)
+
+
 # Global session manager
 session_manager = _build_session_manager()
 
@@ -330,17 +378,28 @@ async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown."""
     # Startup
     _log_development_mode_warning(_load_server_config())
+    await _cleanup_cloud_workspaces_on_startup()
     try:
         await session_manager.backfill_owner_leases()
     except Exception:
         logger.exception("Failed to backfill owner leases during startup")
     cleanup_task = asyncio.create_task(_cleanup_idle_sessions())
     owner_renew_task = asyncio.create_task(_renew_owner_leases())
+    cloud_workspace_gc_task = asyncio.create_task(
+        _cleanup_stale_cloud_workspaces_periodically()
+    )
     logger.info("HTTP server starting up")
 
     try:
         yield  # Server runs here
     finally:
+        cloud_workspace_gc_task.cancel()
+        try:
+            await cloud_workspace_gc_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("Cloud workspace GC task failed during shutdown")
         owner_renew_task.cancel()
         try:
             await owner_renew_task
