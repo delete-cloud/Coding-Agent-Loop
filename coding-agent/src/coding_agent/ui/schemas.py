@@ -163,3 +163,36 @@ class ReadinessResponse(BaseModel):
 class WorkspaceArchiveResponse(BaseModel):
     format: Literal["tar.gz"]
     archive_base64: str
+
+
+class WorkspaceSummarySchema(BaseModel):
+    workspace_id: str
+    status: Literal["active", "stale", "cleaning", "cleaned", "cleanup_failed"]
+    updated_at: datetime
+
+
+class WorkspaceListResponse(BaseModel):
+    workspaces: list[WorkspaceSummarySchema]
+
+
+class WorkspaceCleanupResponse(BaseModel):
+    workspace_id: str
+    status: Literal["cleaned", "cleanup_failed"]
+    error: str | None = None
+
+
+class WorkspaceGcResponse(BaseModel):
+    cleaned_count: int
+
+
+class WorkspaceArchiveManifestResponse(BaseModel):
+    workspace_id: str
+    session_id: str | None = None
+    format: Literal["tar.gz"]
+    generated_at: datetime
+    file_count: int
+    total_bytes: int
+    changed_files: list[str]
+    deleted_files: list[str]
+    excluded_files: list[str]
+    archive_sha256: str | None = None

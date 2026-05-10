@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, Protocol, TypeAlias
+from dataclasses import dataclass
+from datetime import datetime
+from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias
 
 from .cloud import CloudWorkspaceClient
 
@@ -13,6 +15,30 @@ CloudWorkspaceClientFactory: TypeAlias = Callable[
     ["CloudWorkspaceBinding"], CloudWorkspaceClient
 ]
 CloudWorkspaceSource: TypeAlias = Mapping[str, object]
+WorkspaceStatus: TypeAlias = Literal[
+    "active", "stale", "cleaning", "cleaned", "cleanup_failed"
+]
+
+
+@dataclass(frozen=True)
+class WorkspaceInventoryEntry:
+    workspace_id: str
+    status: WorkspaceStatus
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class WorkspaceArchiveManifest:
+    workspace_id: str
+    session_id: str | None
+    format: Literal["tar.gz"]
+    generated_at: datetime
+    file_count: int
+    total_bytes: int
+    changed_files: list[str]
+    deleted_files: list[str]
+    excluded_files: list[str]
+    archive_sha256: str | None
 
 
 class WorkspaceProvider(Protocol):
@@ -51,6 +77,43 @@ class WorkspaceProvider(Protocol):
         self,
         config: dict[str, object],
     ) -> int: ...
+
+    def list_cloud_workspaces(
+        self,
+        config: dict[str, object],
+        *,
+        active_workspace_ids: set[str] | None = None,
+    ) -> list[WorkspaceInventoryEntry]: ...
+
+    def get_cloud_workspace(
+        self,
+        config: dict[str, object],
+        workspace_id: str,
+        *,
+        active_workspace_ids: set[str] | None = None,
+    ) -> WorkspaceInventoryEntry: ...
+
+    def cleanup_cloud_workspace(
+        self,
+        config: dict[str, object],
+        workspace_id: str,
+        *,
+        active_workspace_ids: set[str] | None = None,
+    ) -> WorkspaceInventoryEntry: ...
+
+    def export_workspace_archive_by_id(
+        self,
+        config: dict[str, object],
+        workspace_id: str,
+    ) -> str: ...
+
+    def workspace_archive_manifest(
+        self,
+        config: dict[str, object],
+        workspace_id: str,
+        *,
+        session_id: str | None = None,
+    ) -> WorkspaceArchiveManifest: ...
 
 
 _WORKSPACE_PROVIDERS: dict[str, WorkspaceProvider] = {}
@@ -111,6 +174,68 @@ def export_workspace_archive_from_config(
 def cleanup_stale_cloud_workspaces_from_config(config: dict[str, object]) -> int:
     provider = _provider_from_config(config)
     return provider.cleanup_stale_cloud_workspaces(config)
+
+
+def list_cloud_workspaces_from_config(
+    config: dict[str, object],
+    *,
+    active_workspace_ids: set[str] | None = None,
+) -> list[WorkspaceInventoryEntry]:
+    provider = _provider_from_config(config)
+    return provider.list_cloud_workspaces(
+        config,
+        active_workspace_ids=active_workspace_ids,
+    )
+
+
+def get_cloud_workspace_from_config(
+    config: dict[str, object],
+    workspace_id: str,
+    *,
+    active_workspace_ids: set[str] | None = None,
+) -> WorkspaceInventoryEntry:
+    provider = _provider_from_config(config)
+    return provider.get_cloud_workspace(
+        config,
+        workspace_id,
+        active_workspace_ids=active_workspace_ids,
+    )
+
+
+def cleanup_cloud_workspace_from_config(
+    config: dict[str, object],
+    workspace_id: str,
+    *,
+    active_workspace_ids: set[str] | None = None,
+) -> WorkspaceInventoryEntry:
+    provider = _provider_from_config(config)
+    return provider.cleanup_cloud_workspace(
+        config,
+        workspace_id,
+        active_workspace_ids=active_workspace_ids,
+    )
+
+
+def export_workspace_archive_by_id_from_config(
+    config: dict[str, object],
+    workspace_id: str,
+) -> str:
+    provider = _provider_from_config(config)
+    return provider.export_workspace_archive_by_id(config, workspace_id)
+
+
+def workspace_archive_manifest_from_config(
+    config: dict[str, object],
+    workspace_id: str,
+    *,
+    session_id: str | None = None,
+) -> WorkspaceArchiveManifest:
+    provider = _provider_from_config(config)
+    return provider.workspace_archive_manifest(
+        config,
+        workspace_id,
+        session_id=session_id,
+    )
 
 
 def _provider_from_config(config: dict[str, object]) -> WorkspaceProvider:

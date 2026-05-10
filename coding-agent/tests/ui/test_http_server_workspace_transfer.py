@@ -1,6 +1,7 @@
 from __future__ import annotations
 import base64
 import io
+import os
 import tarfile
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -12,6 +13,7 @@ from coding_agent.ui.http_server import app, session_manager
 from coding_agent.ui.rate_limit import limiter
 from coding_agent.ui.session_manager import Session
 from coding_agent.ui.session_owner_store import SessionOwnerRecord
+from coding_agent.core.config import settings
 from httpx import ASGITransport, AsyncClient
 import pytest
 
@@ -157,6 +159,55 @@ def _register_cloud_session(session_id: str, binding: CloudWorkspaceBinding) -> 
     )
 
 
+def _write_auth_config(tmp_path: Path) -> Path:
+    config_path = tmp_path / "server.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[agent]",
+                'name = "test-agent"',
+                'model = "test-model"',
+                'provider = "openai"',
+                "",
+                "[server]",
+                'bearer_token = "user-token"',
+                'admin_bearer_token = "admin-token"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def _configure_workspace_server(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    max_workspace_age_seconds: int | None = None,
+) -> None:
+    config: dict[str, object] = {
+        "enabled": True,
+        "provider": "docker",
+        "workspace_root": str(tmp_path),
+        "container_name_prefix": "agent-",
+    }
+    if max_workspace_age_seconds is not None:
+        config["max_workspace_age_seconds"] = max_workspace_age_seconds
+    monkeypatch.setattr(
+        "coding_agent.ui.http_server._load_cloud_workspace_config",
+        lambda: config,
+    )
+
+
+def _configure_admin_auth(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("CODING_AGENT_SERVER_CONFIG", str(_write_auth_config(tmp_path)))
+    monkeypatch.setattr(settings, "http_api_key", None)
+
+
 async def test_create_session_provisions_docker_workspace_from_snapshot(
     client: AsyncClient, monkeypatch, tmp_path: Path
 ) -> None:
@@ -191,7 +242,134 @@ async def test_create_session_provisions_docker_workspace_from_snapshot(
     assert isinstance(session.execution_binding, CloudWorkspaceBinding)
     workspace_root = tmp_path / session.execution_binding.workspace_id
     assert (workspace_root / "README.md").read_text(encoding="utf-8") == "uploaded"
-    assert (workspace_root / "src" / "app.py").read_text(encoding="utf-8") == "print('hi')\n"
+    assert (workspace_root / "src" / "app.py").read_text(
+        encoding="utf-8"
+    ) == "print('hi')\n"
+
+
+async def test_workspaces_list_requires_admin_scope(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _configure_admin_auth(monkeypatch, tmp_path)
+    _configure_workspace_server(monkeypatch, tmp_path)
+
+    response = await client.get(
+        "/workspaces",
+        headers={"Authorization": "Bearer user-token"},
+    )
+
+    assert response.status_code == 403
+
+
+async def test_workspaces_list_ignores_unrelated_directories(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _configure_admin_auth(monkeypatch, tmp_path)
+    _configure_workspace_server(monkeypatch, tmp_path)
+    (tmp_path / "ws-visible").mkdir()
+    (tmp_path / "not-a-workspace").mkdir()
+
+    response = await client.get(
+        "/workspaces",
+        headers={"Authorization": "Bearer admin-token"},
+    )
+
+    assert response.status_code == 200
+    assert [item["workspace_id"] for item in response.json()["workspaces"]] == [
+        "ws-visible"
+    ]
+
+
+async def test_workspace_cleanup_requires_admin_scope(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _configure_admin_auth(monkeypatch, tmp_path)
+    _configure_workspace_server(monkeypatch, tmp_path)
+    (tmp_path / "ws-cleanup").mkdir()
+
+    response = await client.delete(
+        "/workspaces/ws-cleanup",
+        headers={"Authorization": "Bearer user-token"},
+    )
+
+    assert response.status_code == 403
+
+
+async def test_workspace_cleanup_skips_active_cloud_sessions(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _configure_admin_auth(monkeypatch, tmp_path)
+    _configure_workspace_server(monkeypatch, tmp_path, max_workspace_age_seconds=1)
+    binding = CloudWorkspaceBinding(
+        workspace_url="docker://agent-ws-active/workspace",
+        workspace_id="ws-active",
+    )
+    workspace_root = tmp_path / binding.workspace_id
+    workspace_root.mkdir()
+    os.utime(workspace_root, (1, 1))
+    _register_cloud_session("sess-active", binding)
+
+    response = await client.post(
+        "/workspaces/gc",
+        headers={"Authorization": "Bearer admin-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["cleaned_count"] == 0
+    assert workspace_root.exists()
+
+
+async def test_workspace_archive_manifest_reports_counts_bytes_and_changes(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _configure_workspace_server(monkeypatch, tmp_path)
+    binding = CloudWorkspaceBinding(
+        workspace_url="docker://agent-ws-manifest/workspace",
+        workspace_id="ws-manifest",
+    )
+    workspace_root = tmp_path / binding.workspace_id
+    workspace_root.mkdir()
+    (workspace_root / "result.txt").write_text("remote result", encoding="utf-8")
+    (workspace_root / "nested").mkdir()
+    (workspace_root / "nested" / "data.json").write_text("{}\n", encoding="utf-8")
+    (workspace_root / ".git").mkdir()
+    (workspace_root / ".git" / "config").write_text("ignored", encoding="utf-8")
+    _register_cloud_session("sess-manifest", binding)
+
+    response = await client.get("/sessions/sess-manifest/workspace/archive/manifest")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["workspace_id"] == "ws-manifest"
+    assert data["session_id"] == "sess-manifest"
+    assert data["format"] == "tar.gz"
+    assert data["file_count"] == 2
+    assert data["total_bytes"] == len("remote result") + len("{}\n")
+    assert data["changed_files"] == ["nested/data.json", "result.txt"]
+    assert data["deleted_files"] == []
+    assert data["excluded_files"] == [".git"]
+    assert len(data["archive_sha256"]) == 64
+
+
+async def test_session_workspace_archive_endpoint_keeps_compatibility_alias(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _configure_workspace_server(monkeypatch, tmp_path)
+    binding = CloudWorkspaceBinding(
+        workspace_url="docker://agent-ws-alias/workspace",
+        workspace_id="ws-alias",
+    )
+    workspace_root = tmp_path / binding.workspace_id
+    workspace_root.mkdir()
+    (workspace_root / "result.txt").write_text("remote result", encoding="utf-8")
+    _register_cloud_session("sess-alias", binding)
+
+    canonical = await client.get("/sessions/sess-alias/workspace/archive")
+    alias = await client.get("/sessions/sess-alias/workspace")
+
+    assert canonical.status_code == 200
+    assert alias.status_code == 200
+    assert canonical.json() == alias.json()
 
 
 async def test_get_workspace_archive_returns_cloud_workspace_snapshot(
@@ -219,7 +397,9 @@ async def test_get_workspace_archive_returns_cloud_workspace_snapshot(
     workspace_root.mkdir(parents=True)
     (workspace_root / "result.txt").write_text("remote result", encoding="utf-8")
     (workspace_root / "nested").mkdir()
-    (workspace_root / "nested" / "data.json").write_text('{"ok": true}\n', encoding="utf-8")
+    (workspace_root / "nested" / "data.json").write_text(
+        '{"ok": true}\n', encoding="utf-8"
+    )
     _register_cloud_session("sess-transfer", binding)
 
     response = await client.get("/sessions/sess-transfer/workspace")
@@ -382,7 +562,9 @@ async def test_get_workspace_archive_returns_500_for_unexpected_runtime_error(
 
     monkeypatch.setattr(
         "coding_agent.ui.http_server.export_workspace_archive_from_config",
-        lambda config, binding: (_ for _ in ()).throw(RuntimeError("docker export failed")),
+        lambda config, binding: (_ for _ in ()).throw(
+            RuntimeError("docker export failed")
+        ),
     )
 
     response = await client_500.get("/sessions/sess-fail/workspace")
