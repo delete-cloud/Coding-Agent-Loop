@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import socket
 import uuid
 from contextlib import asynccontextmanager
@@ -80,33 +81,22 @@ logger = logging.getLogger(__name__)
 # Constants
 APPROVAL_TIMEOUT_SECONDS = 120
 SESSION_IDLE_TIMEOUT_MINUTES = 30
+_SERVER_CONFIG_ENV = "CODING_AGENT_SERVER_CONFIG"
 
 
-def _load_storage_config() -> dict[str, Any]:
-    config_path = Path(__file__).resolve().parent.parent / "agent.toml"
-    try:
-        return cast(
-            dict[str, Any], load_agent_toml(config_path).extra.get("storage", {})
-        )
-    except (ConfigError, OSError) as exc:
-        if isinstance(exc, ConfigError):
-            detail = exc.args[0] if exc.args and isinstance(exc.args[0], str) else ""
-            if not detail.startswith("config file not found:"):
-                raise
-        logger.warning(
-            "Unable to load storage config from %s; using defaults",
-            config_path,
-            exc_info=True,
-        )
-        return {}
+def _server_config_path() -> Path:
+    configured_path = os.environ.get(_SERVER_CONFIG_ENV)
+    if configured_path is not None and configured_path.strip():
+        return Path(configured_path).expanduser().resolve()
+    return Path(__file__).resolve().parent.parent / "agent.toml"
 
 
-def _load_cloud_workspace_config() -> dict[str, Any]:
-    config_path = Path(__file__).resolve().parent.parent / "agent.toml"
+def _load_agent_config_section(section: str) -> dict[str, Any]:
+    config_path = _server_config_path()
     try:
         return cast(
             dict[str, Any],
-            load_agent_toml(config_path).extra.get("cloud_workspace", {}),
+            load_agent_toml(config_path).extra.get(section, {}),
         )
     except (ConfigError, OSError) as exc:
         if isinstance(exc, ConfigError):
@@ -114,11 +104,99 @@ def _load_cloud_workspace_config() -> dict[str, Any]:
             if not detail.startswith("config file not found:"):
                 raise
         logger.warning(
-            "Unable to load cloud workspace config from %s; using defaults",
+            "Unable to load %s config from %s; using defaults",
+            section,
             config_path,
             exc_info=True,
         )
         return {}
+
+
+def _load_storage_config() -> dict[str, Any]:
+    return _load_agent_config_section("storage")
+
+
+def _load_cloud_workspace_config() -> dict[str, Any]:
+    return _load_agent_config_section("cloud_workspace")
+
+
+def _load_server_config() -> dict[str, Any]:
+    return _load_agent_config_section("server")
+
+
+def _require_positive_int(config: dict[str, Any], key: str) -> None:
+    value = config.get(key)
+    if not isinstance(value, int) or value <= 0:
+        raise ValueError(f"cloud_workspace.{key} must be a positive integer")
+
+
+def _require_non_empty_string(config: dict[str, Any], key: str) -> None:
+    value = config.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"cloud_workspace.{key} must be configured")
+
+
+def _is_root_exec_user(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized == "root":
+        return True
+    user = normalized.split(":", 1)[0]
+    return user in {"0", "root"}
+
+
+def _validate_production_config(
+    server_config: dict[str, Any],
+    cloud_workspace_config: dict[str, Any],
+) -> None:
+    if server_config.get("production") is not True:
+        return
+
+    bearer_token = server_config.get("bearer_token")
+    bearer_token_env = server_config.get("bearer_token_env")
+    if isinstance(bearer_token_env, str) and bearer_token_env.strip():
+        token = os.environ.get(bearer_token_env.strip())
+        if token is None or not token.strip():
+            raise ValueError(
+                "server.bearer_token_env must reference a non-empty environment variable"
+            )
+    elif not isinstance(bearer_token, str) or not bearer_token.strip():
+        raise ValueError("server.bearer_token_env or server.bearer_token is required")
+
+    if cloud_workspace_config.get("enabled") is not True:
+        raise ValueError("production requires cloud_workspace.enabled=true")
+    if cloud_workspace_config.get("provider") != "docker":
+        raise ValueError('production requires cloud_workspace.provider="docker"')
+
+    image_allowlist = cloud_workspace_config.get("image_allowlist")
+    if not isinstance(image_allowlist, list) or not image_allowlist:
+        raise ValueError("cloud_workspace.image_allowlist must be explicitly configured")
+    for image in image_allowlist:
+        if not isinstance(image, str) or not image.strip():
+            raise ValueError("cloud_workspace.image_allowlist must contain strings")
+
+    exec_user = cloud_workspace_config.get("exec_user")
+    if not isinstance(exec_user, str) or not exec_user.strip():
+        raise ValueError("cloud_workspace.exec_user must be explicitly configured")
+    if _is_root_exec_user(exec_user):
+        raise ValueError("cloud_workspace.exec_user must not be root")
+
+    _require_positive_int(cloud_workspace_config, "max_active_workspaces")
+    _require_positive_int(cloud_workspace_config, "max_workspace_age_seconds")
+    _require_positive_int(cloud_workspace_config, "gc_interval_seconds")
+    _require_non_empty_string(cloud_workspace_config, "cpus")
+    _require_non_empty_string(cloud_workspace_config, "memory")
+    _require_positive_int(cloud_workspace_config, "pids_limit")
+
+    if cloud_workspace_config.get("network") != "none":
+        raise ValueError('cloud_workspace.network must be "none"')
+
+
+def _log_development_mode_warning(server_config: dict[str, Any]) -> None:
+    if server_config.get("production") is True:
+        return
+    logger.warning(
+        "Running in development mode. This configuration is not safe for team production use."
+    )
 
 
 def _build_binding_resolver() -> DefaultBindingResolver:
@@ -191,6 +269,10 @@ def _configured_owner_lease_seconds(storage_config: dict[str, Any]) -> float:
 
 
 def _build_session_manager() -> SessionManager:
+    _validate_production_config(
+        _load_server_config(),
+        _load_cloud_workspace_config(),
+    )
     storage_config = _load_storage_config()
     manager = SessionManager(
         storage_config=storage_config,
@@ -247,6 +329,7 @@ def _owner_conflict_http_exception(
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown."""
     # Startup
+    _log_development_mode_warning(_load_server_config())
     try:
         await session_manager.backfill_owner_leases()
     except Exception:

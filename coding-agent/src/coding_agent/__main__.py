@@ -409,9 +409,20 @@ def stats(session: str | None):
 @main.command()
 @click.option("--port", default=8080, help="Server port")
 @click.option("--host", default="127.0.0.1", help="Server host")
-def serve(port: int, host: str):
+@click.option(
+    "--config",
+    "config_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Explicit server config file.",
+)
+def serve(port: int, host: str, config_path: Path | None):
     """Start HTTP API server."""
     import uvicorn
+
+    if config_path is not None:
+        os.environ["CODING_AGENT_SERVER_CONFIG"] = str(config_path.resolve())
+
     from coding_agent.ui.http_server import app
 
     click.echo(f"Starting Coding Agent HTTP server on {host}:{port}")

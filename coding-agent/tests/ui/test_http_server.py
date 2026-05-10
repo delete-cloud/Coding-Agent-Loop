@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import re
 import sys
 import types
 from collections.abc import AsyncIterator, Callable
@@ -53,6 +54,7 @@ from coding_agent.ui.http_server import (
     session_manager,
     wait_for_approval,
 )
+import coding_agent.ui.http_server as http_server
 from coding_agent.wire.protocol import (
     ApprovalRequest,
     ApprovalResponse,
@@ -110,6 +112,159 @@ def register_session(
     )
     session_manager.register_session(session)
     return session
+
+
+def _minimal_agent_toml(extra: str = "") -> str:
+    return (
+        '[agent]\n'
+        'name = "test-agent"\n'
+        'model = "test-model"\n'
+        'provider = "openai"\n'
+        f"{extra}"
+    )
+
+
+def _safe_production_cloud_workspace_config() -> dict[str, object]:
+    return {
+        "enabled": True,
+        "provider": "docker",
+        "workspace_root": "/srv/coding-agent/workspaces",
+        "image": "coding-agent-runtime:2026-05-10",
+        "image_allowlist": ["coding-agent-runtime:2026-05-10"],
+        "exec_user": "1000:1000",
+        "max_active_workspaces": 8,
+        "max_workspace_age_seconds": 86400,
+        "gc_interval_seconds": 300,
+        "network": "none",
+        "cpus": "2",
+        "memory": "4g",
+        "pids_limit": 512,
+    }
+
+
+def test_http_server_loads_config_from_explicit_server_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "server.toml"
+    config_path.write_text(
+        _minimal_agent_toml(
+            """
+[server]
+production = false
+
+[cloud_workspace]
+enabled = true
+provider = "docker"
+workspace_root = "/srv/coding-agent/workspaces"
+"""
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODING_AGENT_SERVER_CONFIG", str(config_path))
+
+    assert http_server._server_config_path() == config_path
+    assert http_server._load_server_config() == {"production": False}
+    assert http_server._load_cloud_workspace_config()["workspace_root"] == (
+        "/srv/coding-agent/workspaces"
+    )
+
+
+def test_production_config_accepts_safe_docker_workspace_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CODING_AGENT_BEARER_TOKEN", "secret-token")
+
+    http_server._validate_production_config(
+        {
+            "production": True,
+            "bearer_token_env": "CODING_AGENT_BEARER_TOKEN",
+        },
+        _safe_production_cloud_workspace_config(),
+    )
+
+
+@pytest.mark.parametrize(
+    ("server_config", "cloud_workspace_overrides", "message"),
+    [
+        (
+            {"production": True},
+            {},
+            "server.bearer_token_env",
+        ),
+        (
+            {"production": True, "bearer_token": "secret-token"},
+            {"enabled": False},
+            "cloud_workspace.enabled=true",
+        ),
+        (
+            {"production": True, "bearer_token": "secret-token"},
+            {"image_allowlist": []},
+            "cloud_workspace.image_allowlist",
+        ),
+        (
+            {"production": True, "bearer_token": "secret-token"},
+            {"exec_user": "0:1000"},
+            "cloud_workspace.exec_user must not be root",
+        ),
+        (
+            {"production": True, "bearer_token": "secret-token"},
+            {"max_active_workspaces": 0},
+            "cloud_workspace.max_active_workspaces",
+        ),
+        (
+            {"production": True, "bearer_token": "secret-token"},
+            {"max_workspace_age_seconds": 0},
+            "cloud_workspace.max_workspace_age_seconds",
+        ),
+        (
+            {"production": True, "bearer_token": "secret-token"},
+            {"gc_interval_seconds": 0},
+            "cloud_workspace.gc_interval_seconds",
+        ),
+        (
+            {"production": True, "bearer_token": "secret-token"},
+            {"cpus": ""},
+            "cloud_workspace.cpus",
+        ),
+        (
+            {"production": True, "bearer_token": "secret-token"},
+            {"memory": ""},
+            "cloud_workspace.memory",
+        ),
+        (
+            {"production": True, "bearer_token": "secret-token"},
+            {"pids_limit": 0},
+            "cloud_workspace.pids_limit",
+        ),
+        (
+            {"production": True, "bearer_token": "secret-token"},
+            {"network": "bridge"},
+            'cloud_workspace.network must be "none"',
+        ),
+    ],
+)
+def test_production_config_rejects_unsafe_remote_workspace_config(
+    server_config: dict[str, object],
+    cloud_workspace_overrides: dict[str, object],
+    message: str,
+) -> None:
+    cloud_workspace_config = _safe_production_cloud_workspace_config()
+    cloud_workspace_config.update(cloud_workspace_overrides)
+
+    with pytest.raises(ValueError, match=re.escape(message)):
+        http_server._validate_production_config(
+            server_config,
+            cloud_workspace_config,
+        )
+
+
+def test_development_mode_warning_logs_when_production_is_not_enabled(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    http_server._log_development_mode_warning({"production": False})
+
+    assert "not safe for team production use" in caplog.text
 
 
 def add_store_backed_approval_request(

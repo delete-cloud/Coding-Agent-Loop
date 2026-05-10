@@ -12,6 +12,7 @@ from httpx import AsyncClient, ASGITransport
 from httpx_sse import aconnect_sse
 
 from coding_agent.ui.http_server import app, session_manager
+from coding_agent.ui.auth import verify_api_key
 from coding_agent.ui.rate_limit import limiter
 from coding_agent.core.config import settings
 from tests.ui.test_http_server import add_store_backed_approval_request
@@ -156,6 +157,35 @@ class TestApiKeyAuth:
             "/sessions", headers={"X-API-Key": "test-secret-key"}
         )
         assert response.status_code == 200
+
+    async def test_bearer_token_from_server_config_env_is_accepted(
+        self,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        config_path = tmp_path / "server.toml"
+        config_path.write_text(
+            "\n".join(
+                [
+                    "[agent]",
+                    'name = "test-agent"',
+                    'model = "test-model"',
+                    'provider = "openai"',
+                    "",
+                    "[server]",
+                    'bearer_token_env = "CODING_AGENT_BEARER_TOKEN"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("CODING_AGENT_SERVER_CONFIG", str(config_path))
+        monkeypatch.setenv("CODING_AGENT_BEARER_TOKEN", "secret-token")
+        monkeypatch.setattr(settings, "http_api_key", None)
+
+        accepted = await verify_api_key(authorization="Bearer secret-token")
+
+        assert accepted == "secret-token"
 
     async def test_invalid_api_key_rejected(self, api_key_client):
         """Test that invalid API key is rejected."""

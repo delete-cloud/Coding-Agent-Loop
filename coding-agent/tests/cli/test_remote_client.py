@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 from pathlib import Path
 
@@ -10,6 +11,56 @@ import pytest
 from click.testing import CliRunner
 
 from coding_agent.__main__ import main
+
+
+def test_serve_config_sets_explicit_server_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "server.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[agent]",
+                'name = "test-agent"',
+                'model = "test-model"',
+                'provider = "openai"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_uvicorn_run(app: object, *, host: str, port: int) -> None:
+        del app
+        captured["host"] = host
+        captured["port"] = port
+        captured["config"] = os.environ.get("CODING_AGENT_SERVER_CONFIG")
+
+    monkeypatch.setattr("uvicorn.run", fake_uvicorn_run)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        main,
+        [
+            "serve",
+            "--config",
+            str(config_path),
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "9000",
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert captured == {
+        "host": "0.0.0.0",
+        "port": 9000,
+        "config": str(config_path.resolve()),
+    }
 
 
 def test_remote_add_list_remove_manage_named_endpoint(
