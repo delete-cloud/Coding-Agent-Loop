@@ -63,6 +63,47 @@ def test_serve_config_sets_explicit_server_config(
     }
 
 
+def test_serve_config_uses_server_host_and_port_when_cli_omits_them(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "server.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[agent]",
+                'name = "test-agent"',
+                'model = "test-model"',
+                'provider = "openai"',
+                "",
+                "[server]",
+                'host = "0.0.0.0"',
+                "port = 9000",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_uvicorn_run(app: object, *, host: str, port: int) -> None:
+        del app
+        captured["host"] = host
+        captured["port"] = port
+
+    monkeypatch.setattr("uvicorn.run", fake_uvicorn_run)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        main,
+        ["serve", "--config", str(config_path)],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert captured == {"host": "0.0.0.0", "port": 9000}
+
+
 def test_remote_repl_help_describes_one_shot_remote_run() -> None:
     runner = CliRunner()
 

@@ -253,6 +253,7 @@ their local work recoverable before running a remote snapshot workflow.
 ## Acceptance Criteria
 
 - [x] `tests/ui/test_http_server.py::test_http_server_loads_config_from_explicit_server_config`
+- [x] `tests/ui/test_http_server.py::test_http_server_explicit_server_config_missing_fails_closed`
 - [x] `tests/ui/test_http_server.py::test_production_config_accepts_safe_docker_workspace_config`
 - [x] `tests/ui/test_http_server.py::test_production_config_rejects_unsafe_remote_workspace_config`
 - [x] `tests/ui/test_http_server.py::test_lifespan_runs_startup_cloud_workspace_cleanup_when_configured`
@@ -262,9 +263,10 @@ their local work recoverable before running a remote snapshot workflow.
 - [x] `tests/coding_agent/environment/test_docker_workspace_provider.py::test_docker_workspace_provider_gc_removes_only_stale_owned_workspaces`
 - [x] `tests/cli/test_remote_client.py::test_remote_repl_help_describes_one_shot_remote_run`
 - [x] `tests/cli/test_remote_client.py::test_attach_help_describes_single_prompt_attach`
-- [x] `uv run pytest tests/ui/test_http_server.py -k "production or explicit_server_config or cloud_workspace_gc" -v`
+- [x] `tests/cli/test_remote_client.py::test_serve_config_uses_server_host_and_port_when_cli_omits_them`
+- [x] `uv run pytest tests/ui/test_http_server.py -k "production or explicit_server_config or cloud_workspace_gc or cloud_workspace_cleanup" -v`
 - [x] `uv run pytest tests/coding_agent/environment/test_docker_workspace_provider.py -k "quota or gc or provision" -v`
-- [x] `uv run pytest tests/cli/test_remote_client.py -k "remote_repl_help or attach_help" -v`
+- [x] `uv run pytest tests/cli/test_remote_client.py -k "serve_config or remote_repl_help or attach_help" -v`
 - [x] `uv run basedpyright --level error src/coding_agent/ui/http_server.py src/coding_agent/ui/auth.py src/coding_agent/environment/workspace_provider.py src/coding_agent/environment/docker_workspace_provider.py tests/ui/test_http_server.py tests/ui/test_security.py tests/coding_agent/environment/test_docker_workspace_provider.py tests/cli/test_remote_client.py`
 - [x] `uv run ruff format src/coding_agent/__main__.py src/coding_agent/ui/auth.py src/coding_agent/ui/http_server.py src/coding_agent/environment/__init__.py src/coding_agent/environment/workspace_provider.py src/coding_agent/environment/docker_workspace_provider.py tests/ui/test_http_server.py tests/ui/test_security.py tests/coding_agent/environment/test_docker_workspace_provider.py tests/cli/test_remote_client.py --check`
 - [x] `git diff --check`

@@ -170,6 +170,17 @@ workspace_root = "/srv/coding-agent/workspaces"
     )
 
 
+def test_http_server_explicit_server_config_missing_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    missing_config_path = tmp_path / "missing.toml"
+    monkeypatch.setenv("CODING_AGENT_SERVER_CONFIG", str(missing_config_path))
+
+    with pytest.raises(ConfigError, match="config file not found"):
+        _ = http_server._load_server_config()
+
+
 def test_production_config_accepts_safe_docker_workspace_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

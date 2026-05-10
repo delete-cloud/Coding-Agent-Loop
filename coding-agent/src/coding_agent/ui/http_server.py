@@ -92,6 +92,11 @@ def _server_config_path() -> Path:
     return Path(__file__).resolve().parent.parent / "agent.toml"
 
 
+def _has_explicit_server_config() -> bool:
+    configured_path = os.environ.get(_SERVER_CONFIG_ENV)
+    return configured_path is not None and bool(configured_path.strip())
+
+
 def _load_agent_config_section(section: str) -> dict[str, Any]:
     config_path = _server_config_path()
     try:
@@ -100,6 +105,8 @@ def _load_agent_config_section(section: str) -> dict[str, Any]:
             load_agent_toml(config_path).extra.get(section, {}),
         )
     except (ConfigError, OSError) as exc:
+        if _has_explicit_server_config():
+            raise
         if isinstance(exc, ConfigError):
             detail = exc.args[0] if exc.args and isinstance(exc.args[0], str) else ""
             if not detail.startswith("config file not found:"):
@@ -224,11 +231,18 @@ def _populate_provisioned_cloud_binding(
     archive_base64: str,
 ) -> None:
     cloud_workspace_config = _load_cloud_workspace_config()
-    import_workspace_archive_from_config(
-        cloud_workspace_config,
-        binding,
-        archive_base64,
-    )
+    try:
+        import_workspace_archive_from_config(
+            cloud_workspace_config,
+            binding,
+            archive_base64,
+        )
+    except Exception:
+        logger.exception(
+            "Cloud workspace archive upload/import failed workspace_id=%s",
+            binding.workspace_id,
+        )
+        raise
 
 
 def _storage_uses_pg_http_sessions(storage_config: dict[str, Any]) -> bool:
@@ -272,10 +286,14 @@ def _configured_owner_lease_seconds(storage_config: dict[str, Any]) -> float:
 
 
 def _build_session_manager() -> SessionManager:
-    _validate_production_config(
-        _load_server_config(),
-        _load_cloud_workspace_config(),
-    )
+    try:
+        _validate_production_config(
+            _load_server_config(),
+            _load_cloud_workspace_config(),
+        )
+    except Exception:
+        logger.exception("Production config validation failed")
+        raise
     storage_config = _load_storage_config()
     manager = SessionManager(
         storage_config=storage_config,
@@ -1200,10 +1218,18 @@ async def get_workspace_archive(
     except SessionOwnershipConflictError as exc:
         raise _owner_conflict_http_exception(exc, session_id=session_id) from exc
     except (ValueError, TypeError) as exc:
+        logger.exception(
+            "Cloud workspace archive download/export failed session_id=%s",
+            session_id,
+        )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
         if str(exc) == "turn already in progress":
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        logger.exception(
+            "Cloud workspace archive download/export failed session_id=%s",
+            session_id,
+        )
         raise
 
     return WorkspaceArchiveResponse(format="tar.gz", archive_base64=archive_base64)

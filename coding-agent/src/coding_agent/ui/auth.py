@@ -25,8 +25,10 @@ def _server_config_bearer_token() -> str | None:
         server_config = load_agent_toml(
             Path(configured_path).expanduser().resolve()
         ).extra.get("server", {})
-    except (ConfigError, OSError):
-        return None
+    except (ConfigError, OSError) as exc:
+        raise RuntimeError(
+            f"failed to load explicit server config: {configured_path}"
+        ) from exc
     if not isinstance(server_config, dict):
         return None
 

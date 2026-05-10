@@ -126,6 +126,39 @@ def _load_kb_cli_settings(
     return resolved_db, kb_cfg
 
 
+def _load_server_cli_settings(config_path: Path | None) -> dict[str, Any]:
+    if config_path is None:
+        return {}
+    from agentkit.config.loader import load_config
+
+    server_config = load_config(config_path).extra.get("server", {})
+    if not isinstance(server_config, dict):
+        raise click.ClickException("[server] config must be a table")
+    return cast(dict[str, Any], server_config)
+
+
+def _server_cli_host(server_config: dict[str, Any], host: str | None) -> str:
+    if host is not None:
+        return host
+    configured_host = server_config.get("host")
+    if configured_host is None:
+        return "127.0.0.1"
+    if not isinstance(configured_host, str) or not configured_host.strip():
+        raise click.ClickException("server.host must be a non-empty string")
+    return configured_host.strip()
+
+
+def _server_cli_port(server_config: dict[str, Any], port: int | None) -> int:
+    if port is not None:
+        return port
+    configured_port = server_config.get("port")
+    if configured_port is None:
+        return 8080
+    if not isinstance(configured_port, int) or configured_port <= 0:
+        raise click.ClickException("server.port must be a positive integer")
+    return configured_port
+
+
 @main.command()
 @click.option("--goal", required=True, help="Task goal for the agent")
 @click.option("--repo", default=".", help="Repository path")
@@ -407,8 +440,8 @@ def stats(session: str | None):
 
 
 @main.command()
-@click.option("--port", default=8080, help="Server port")
-@click.option("--host", default="127.0.0.1", help="Server host")
+@click.option("--port", default=None, type=int, help="Server port")
+@click.option("--host", default=None, help="Server host")
 @click.option(
     "--config",
     "config_path",
@@ -416,17 +449,20 @@ def stats(session: str | None):
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     help="Explicit server config file.",
 )
-def serve(port: int, host: str, config_path: Path | None):
+def serve(port: int | None, host: str | None, config_path: Path | None):
     """Start HTTP API server."""
     import uvicorn
 
     if config_path is not None:
         os.environ["CODING_AGENT_SERVER_CONFIG"] = str(config_path.resolve())
+    server_config = _load_server_cli_settings(config_path)
+    resolved_host = _server_cli_host(server_config, host)
+    resolved_port = _server_cli_port(server_config, port)
 
     from coding_agent.ui.http_server import app
 
-    click.echo(f"Starting Coding Agent HTTP server on {host}:{port}")
-    uvicorn.run(app, host=host, port=port)
+    click.echo(f"Starting Coding Agent HTTP server on {resolved_host}:{resolved_port}")
+    uvicorn.run(app, host=resolved_host, port=resolved_port)
 
 
 @main.group()
