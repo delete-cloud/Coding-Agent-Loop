@@ -41,14 +41,17 @@ class CreateSessionRequest(BaseModel):
     execution_binding: ExecutionBindingRequest | None = None
     workspace_source: WorkspaceSourceRequest | None = None
     approval_policy: str = Field("auto", pattern="^(yolo|interactive|auto)$")
-    provider: Literal[
-        "openai",
-        "anthropic",
-        "copilot",
-        "kimi",
-        "kimi-code",
-        "kimi-code-anthropic",
-    ] | None = None
+    provider: (
+        Literal[
+            "openai",
+            "anthropic",
+            "copilot",
+            "kimi",
+            "kimi-code",
+            "kimi-code-anthropic",
+        ]
+        | None
+    ) = None
     model: str | None = Field(None, min_length=1, max_length=200)
     base_url: str | None = Field(None, min_length=1, max_length=500)
     max_steps: int | None = Field(None, ge=0)
@@ -73,6 +76,31 @@ class SessionResponse(BaseModel):
     """Response schema for session creation."""
 
     session_id: str
+
+
+class SessionSummaryResponse(BaseModel):
+    session_id: str
+    id: str
+    status: Literal[
+        "created", "running", "waiting_approval", "completed", "failed", "closed"
+    ]
+    turn_status: Literal["idle", "running", "cancelling", "cancelled", "failed"]
+    created_at: datetime
+    updated_at: datetime
+    last_activity: datetime
+    turn_in_progress: bool
+    pending_approval: bool
+    provider_name: str | None = None
+    model_name: str | None = None
+    base_url: str | None = None
+    max_steps: int
+    origin: dict[str, str] | None = None
+    execution_binding: dict[str, object]
+    workspace_id: str | None = None
+
+
+class SessionListResponse(BaseModel):
+    sessions: list[SessionSummaryResponse]
 
 
 class ApprovalResponseSchema(BaseModel):

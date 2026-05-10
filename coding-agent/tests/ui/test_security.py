@@ -4,16 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-import json
 from unittest.mock import patch
 
 import pytest
 from fastapi import HTTPException
 from httpx import AsyncClient, ASGITransport
-from httpx_sse import aconnect_sse
 
 from coding_agent.ui.http_server import app, session_manager
-from coding_agent.ui.auth import verify_api_key
+from coding_agent.ui.auth import auth_context_from_headers, verify_api_key
 from coding_agent.ui.rate_limit import limiter
 from coding_agent.core.config import settings
 from tests.ui.test_http_server import add_store_backed_approval_request
@@ -200,6 +198,91 @@ class TestApiKeyAuth:
         )
 
         assert accepted == "secret-token"
+
+    async def test_auth_context_derives_stable_owner_label_from_bearer_token(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.setattr(settings, "http_api_key", "secret-token")
+
+        context = await auth_context_from_headers(
+            authorization="Bearer secret-token",
+        )
+
+        assert context is not None
+        assert context.scope == "user"
+        assert context.token_digest == (
+            "930bbdc51b6aed5c2a5678fd6e28dee7a05e8a4b643cfc0b4427c3efb86c0d94"
+        )
+        assert context.owner_label == (
+            "owner:930bbdc51b6aed5c2a5678fd6e28dee7a05e8a4b643cfc0b4427c3efb86c0d94"
+        )
+
+    async def test_auth_context_uses_configured_token_label_map(
+        self,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        config_path = tmp_path / "server.toml"
+        config_path.write_text(
+            "\n".join(
+                [
+                    "[agent]",
+                    'name = "test-agent"',
+                    'model = "test-model"',
+                    'provider = "openai"',
+                    "",
+                    "[server]",
+                    'bearer_token = "secret-token"',
+                    "",
+                    "[server.token_label_map]",
+                    '"930bbdc51b6aed5c2a5678fd6e28dee7a05e8a4b643cfc0b4427c3efb86c0d94" = "team-a"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("CODING_AGENT_SERVER_CONFIG", str(config_path))
+        monkeypatch.setattr(settings, "http_api_key", None)
+
+        context = await auth_context_from_headers(
+            authorization="Bearer secret-token",
+        )
+
+        assert context is not None
+        assert context.owner_label == "team-a"
+
+    async def test_auth_context_recognizes_admin_bearer_token(
+        self,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        config_path = tmp_path / "server.toml"
+        config_path.write_text(
+            "\n".join(
+                [
+                    "[agent]",
+                    'name = "test-agent"',
+                    'model = "test-model"',
+                    'provider = "openai"',
+                    "",
+                    "[server]",
+                    'bearer_token = "user-token"',
+                    'admin_bearer_token = "admin-token"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("CODING_AGENT_SERVER_CONFIG", str(config_path))
+        monkeypatch.setattr(settings, "http_api_key", None)
+
+        context = await auth_context_from_headers(
+            authorization="Bearer admin-token",
+        )
+
+        assert context is not None
+        assert context.scope == "admin"
 
     async def test_missing_explicit_server_config_denies_auth(
         self,

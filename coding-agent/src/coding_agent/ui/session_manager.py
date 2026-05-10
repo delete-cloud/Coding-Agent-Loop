@@ -195,17 +195,39 @@ class Session:
         self.approval_coordinator = ApprovalCoordinator(self.approval_store)
 
     def as_dict(self) -> dict[str, Any]:
+        workspace_id = (
+            self.execution_binding.workspace_id
+            if isinstance(self.execution_binding, CloudWorkspaceBinding)
+            else None
+        )
+        pending_approval = self.pending_approval is not None
+        turn_running = self.turn_in_progress or (
+            self.task is not None and not self.task.done()
+        )
+        turn_status = "running" if turn_running else "idle"
+        if pending_approval:
+            status = "waiting_approval"
+        elif turn_running:
+            status = "running"
+        else:
+            status = "created"
         return {
             "id": self.id,
+            "session_id": self.id,
             "created_at": self.created_at.isoformat(),
+            "updated_at": self.last_activity.isoformat(),
             "last_activity": self.last_activity.isoformat(),
             "turn_in_progress": self.turn_in_progress,
-            "pending_approval": self.pending_approval is not None,
+            "pending_approval": pending_approval,
+            "status": status,
+            "turn_status": turn_status,
             "provider_name": self.provider_name,
             "model_name": self.model_name,
             "base_url": self.base_url,
             "max_steps": self.max_steps,
             "origin": None if self.origin is None else dict(self.origin),
+            "execution_binding": self.execution_binding.to_dict(),
+            "workspace_id": workspace_id,
         }
 
     def to_store_data(self) -> dict[str, Any]:
