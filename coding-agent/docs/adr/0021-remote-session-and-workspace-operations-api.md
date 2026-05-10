@@ -154,6 +154,12 @@ Implementations must document which `archive_sha256` rule they follow. If the
 archive is not materialized and `total_bytes >= 100MB`, the field may be omitted
 to avoid a second export or full archive read.
 
+The Docker workspace provider follows the materialized-archive rule: manifest
+generation creates the same archive bytes used by archive download, computes
+`archive_sha256` from those bytes, and returns the digest in the manifest. This
+keeps the digest tied to the concrete archive format rather than to a separate
+file-tree hash.
+
 The CLI must fetch the manifest before downloading an archive into a local repo
 and must clearly state that the local working tree will be overwritten while
 `.git` is preserved. P1 can keep the current full archive overwrite behavior,
@@ -348,20 +354,20 @@ running the focused integration regression that previously failed.
 
 ## Acceptance Criteria
 
-- [ ] `test_list_sessions_returns_visible_session_summaries`
-- [ ] `test_list_sessions_requires_admin_scope_for_all_sessions`
-- [ ] `test_get_session_response_includes_status_and_workspace_summary`
-- [ ] `test_cancel_session_turn_returns_cancelling_for_active_turn`
-- [ ] `test_cancel_session_turn_exposes_cancelled_final_state`
-- [ ] `test_cancel_session_turn_rejects_non_owner`
-- [ ] `test_workspaces_list_requires_admin_scope`
-- [ ] `test_workspace_cleanup_requires_admin_scope`
-- [ ] `test_workspace_cleanup_skips_active_cloud_sessions`
-- [ ] `test_workspace_archive_manifest_reports_counts_bytes_and_changes`
-- [ ] `test_session_workspace_archive_endpoint_keeps_compatibility_alias`
-- [ ] `test_remote_run_uses_create_prompt_manifest_download_flow`
-- [ ] `test_remote_download_prompts_before_overwriting_local_workspace`
-- [ ] `uv run pytest tests/ui/test_http_server.py tests/ui/test_http_server_workspace_transfer.py tests/cli/test_remote_client.py tests/coding_agent/environment/ -k "session or workspace or remote or cancel or manifest or admin" -v`
+- [x] `test_list_sessions_returns_visible_session_summaries`
+- [x] `test_list_sessions_requires_admin_scope_for_all_sessions`
+- [x] `test_get_session_response_includes_status_and_workspace_summary`
+- [x] `test_cancel_session_turn_returns_cancelling_for_active_turn`
+- [x] `test_cancel_session_turn_exposes_cancelled_final_state`
+- [x] `test_cancel_session_turn_rejects_non_owner`
+- [x] `test_workspaces_list_requires_admin_scope`
+- [x] `test_workspace_cleanup_requires_admin_scope`
+- [x] `test_workspace_cleanup_skips_active_cloud_sessions`
+- [x] `test_workspace_archive_manifest_reports_counts_bytes_and_changes`
+- [x] `test_session_workspace_archive_endpoint_keeps_compatibility_alias`
+- [x] `test_remote_run_uses_create_prompt_manifest_download_flow`
+- [x] `test_remote_download_prompts_before_overwriting_local_workspace`
+- [x] `uv run pytest tests/ui/test_http_server.py tests/ui/test_http_server_workspace_transfer.py tests/cli/test_remote_client.py tests/coding_agent/environment/ -k "session or workspace or remote or cancel or manifest or admin" -v`
 
 ## References
 
