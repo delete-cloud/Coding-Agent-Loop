@@ -63,6 +63,24 @@ def test_serve_config_sets_explicit_server_config(
     }
 
 
+def test_remote_repl_help_describes_one_shot_remote_run() -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(main, ["remote", "repl", "--help"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert "one-shot remote run" in result.output
+
+
+def test_attach_help_describes_single_prompt_attach() -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(main, ["attach", "--help"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert "Send one prompt to an existing remote session" in result.output
+
+
 def test_remote_add_list_remove_manage_named_endpoint(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -185,7 +203,8 @@ def test_remote_repl_creates_cloud_session_and_streams_prompt_events(
     )
 
     assert result.exit_code == 0
-    assert "Created remote session sess-123" in result.output
+    assert "Created one-shot remote session sess-123 on remote dev" in result.output
+    assert "Cleaned up remote session sess-123" in result.output
     assert calls == [
         (
             "post",

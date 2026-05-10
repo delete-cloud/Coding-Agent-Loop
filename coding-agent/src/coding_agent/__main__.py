@@ -484,7 +484,7 @@ def remote_remove(name: str) -> None:
 )
 @click.option("--goal", required=True, help="Initial prompt to send to the remote session")
 def remote_repl(name: str, repo: str | None, empty_workspace: bool, goal: str) -> None:
-    """Create a remote cloud session and stream one prompt."""
+    """Create a one-shot remote run and stream one prompt."""
     from coding_agent.remote.client import (
         auth_headers,
         create_remote_session,
@@ -524,7 +524,7 @@ def remote_repl(name: str, repo: str | None, empty_workspace: bool, goal: str) -
         endpoint,
         snapshot_archive_base64=snapshot_archive_base64,
     )
-    click.echo(f"Created remote session {session_id}")
+    click.echo(f"Created one-shot remote session {session_id} on remote {name}")
     status: int | None = None
     stream_error: Exception | None = None
     deferred_error: click.ClickException | None = None
@@ -547,6 +547,9 @@ def remote_repl(name: str, repo: str | None, empty_workspace: bool, goal: str) -
                     headers=headers,
                 )
                 extract_workspace_archive_base64(repo_path, archive_base64)
+                click.echo(
+                    f"Downloaded remote workspace snapshot and overwrote {repo_path} while preserving .git"
+                )
             except Exception as exc:
                 workspace_restore_failed = True
                 if stream_error is not None:
@@ -567,6 +570,7 @@ def remote_repl(name: str, repo: str | None, empty_workspace: bool, goal: str) -
                     session_id=session_id,
                     headers=headers,
                 )
+                click.echo(f"Cleaned up remote session {session_id}")
             except Exception as exc:
                 if stream_error is not None:
                     stream_error.add_note(f"Remote session cleanup also failed: {exc}")
@@ -587,7 +591,7 @@ def remote_repl(name: str, repo: str | None, empty_workspace: bool, goal: str) -
 @click.option("--session", "session_id", required=True, help="Remote session ID")
 @click.option("--goal", required=True, help="Prompt to send to the remote session")
 def attach(name: str, session_id: str, goal: str) -> None:
-    """Attach to an existing remote session and stream one prompt."""
+    """Send one prompt to an existing remote session."""
     from coding_agent.remote.client import auth_headers, get_remote, stream_prompt
 
     endpoint = get_remote(name)
