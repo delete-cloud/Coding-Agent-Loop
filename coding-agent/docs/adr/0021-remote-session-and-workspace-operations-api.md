@@ -40,18 +40,17 @@ TUI.
 
 ### Session operations
 
-The canonical P1 session API is:
+The canonical P1 session API preserves the current session routes and adds the
+missing operations explicitly.
+
+New in P1:
 
 - `GET /sessions`
-- `GET /sessions/{session_id}`
-- `DELETE /sessions/{session_id}`
-- `POST /sessions/{session_id}/prompt`
 - `POST /sessions/{session_id}/cancel`
-- `GET /sessions/{session_id}/events`
 - `GET /sessions/{session_id}/workspace/archive/manifest`
 - `GET /sessions/{session_id}/workspace/archive`
 
-Existing endpoints remain compatible where they already exist:
+Existing preserved endpoints:
 
 - `POST /sessions`
 - `POST /sessions/{session_id}/prompt`
@@ -147,7 +146,13 @@ The manifest response must include:
 - `changed_files`
 - `deleted_files`
 - `excluded_files`
-- `archive_sha256` when cheap to compute without double-exporting
+- `archive_sha256` when the archive is already materialized or when
+  `total_bytes < 100MB` and the digest can be computed during the same archive
+  pass
+
+Implementations must document which `archive_sha256` rule they follow. If the
+archive is not materialized and `total_bytes >= 100MB`, the field may be omitted
+to avoid a second export or full archive read.
 
 The CLI must fetch the manifest before downloading an archive into a local repo
 and must clearly state that the local working tree will be overwritten while
@@ -198,10 +203,25 @@ The admin bearer token can:
 - clean up stale or failed workspaces
 - download workspace archives for operational recovery
 
-If the current implementation does not yet have user identity, P1 should derive
-a stable owner label from the authenticated token, such as a hash or configured
-token label. Do not silently expose admin operations to the normal token merely
-because there is only one configured token.
+If the current implementation does not yet have user identity, P1 derives a
+stable owner label from the authenticated token:
+
+1. Compute the SHA-256 hex digest of the full authenticated token.
+2. Consult a persistent `TokenLabelMap` keyed by token digest. The map may be
+   configuration-backed for static deployments or database-backed for future
+   dynamic token stores.
+3. If the digest has an explicit label in `TokenLabelMap`, use that label.
+4. Otherwise use `owner:<sha256-hex>` as the default derived label.
+5. If a label collision is detected for two different token digests, persist a
+   deterministic disambiguated label such as `owner:<sha256-hex>:<counter>`.
+   Config-only deployments that cannot persist the disambiguation must fail fast
+   and require an explicit `TokenLabelMap` entry. An implementation may instead
+   use HMAC-SHA256 with a per-deployment salt stored in configuration, but it
+   must document that choice and must not generate a new salt at startup.
+
+The system must consult `TokenLabelMap` whenever resolving owner labels. Do not
+silently expose admin operations to the normal token merely because there is only
+one configured token.
 
 Development mode may keep authentication disabled for local demos as permitted
 by ADR-0020. Production mode must fail closed if required tokens are missing.
@@ -361,4 +381,3 @@ running the focused integration regression that previously failed.
 - `tests/ui/test_http_server.py`
 - `tests/ui/test_http_server_workspace_transfer.py`
 - `tests/cli/test_remote_client.py`
-- `tests/coding_agent/environment/test_docker_workspace_provider.py`
