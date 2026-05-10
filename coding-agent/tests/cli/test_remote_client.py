@@ -227,9 +227,7 @@ def test_remote_repl_creates_cloud_session_and_streams_prompt_events(
     ]
 
 
-def test_attach_streams_prompt_to_existing_session(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_attach_streams_prompt_to_existing_session(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "remotes.json"
     monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
     runner = CliRunner()
@@ -301,7 +299,9 @@ def test_remote_repl_reports_http_session_create_error(
         ) -> httpx.Response:
             del path, json
             request = httpx.Request("POST", "http://agent.example/sessions")
-            return httpx.Response(400, json={"detail": "cloud workspace disabled"}, request=request)
+            return httpx.Response(
+                400, json={"detail": "cloud workspace disabled"}, request=request
+            )
 
     monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FailingClient)
 
@@ -333,7 +333,10 @@ def test_remote_repl_requires_repo_or_empty_workspace(
     )
 
     assert result.exit_code != 0
-    assert "Pass --repo to upload a workspace snapshot or --empty-workspace" in result.output
+    assert (
+        "Pass --repo to upload a workspace snapshot or --empty-workspace"
+        in result.output
+    )
 
 
 def test_remote_repl_with_repo_uploads_snapshot_and_downloads_workspace(
@@ -528,7 +531,9 @@ def test_remote_repl_with_repo_downloads_results_when_stream_fails(
         raise click.ClickException("stream failed")
 
     monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
-    monkeypatch.setattr("coding_agent.remote.client.stream_prompt", failing_stream_prompt)
+    monkeypatch.setattr(
+        "coding_agent.remote.client.stream_prompt", failing_stream_prompt
+    )
     monkeypatch.setattr(
         "coding_agent.workspace_archive.create_workspace_archive_base64",
         lambda path: "archive-encoded",
@@ -889,7 +894,9 @@ def test_remote_repl_can_explicitly_create_empty_docker_workspace(
     ]
 
 
-def test_remote_approval_request_prompts_before_submitting_decision(monkeypatch) -> None:
+def test_remote_approval_request_prompts_before_submitting_decision(
+    monkeypatch,
+) -> None:
     approvals: list[dict[str, object] | None] = []
     prompts: list[str] = []
 
@@ -917,7 +924,9 @@ def test_remote_approval_request_prompts_before_submitting_decision(monkeypatch)
             approvals.append(json)
             return FakeResponse()
 
-    def fake_prompt(text: str, default: str | None = None, show_default: bool = True) -> str:
+    def fake_prompt(
+        text: str, default: str | None = None, show_default: bool = True
+    ) -> str:
         del default, show_default
         prompts.append(text)
         return "a"
@@ -947,9 +956,7 @@ def test_remote_approval_request_prompts_before_submitting_decision(monkeypatch)
     assert status is None
     assert line_open is False
     assert prompts == ["→"]
-    assert approvals == [
-        {"request_id": "req-1", "approved": True, "scope": "session"}
-    ]
+    assert approvals == [{"request_id": "req-1", "approved": True, "scope": "session"}]
 
 
 def test_remote_approval_request_can_reject_with_reason(monkeypatch) -> None:
@@ -982,7 +989,9 @@ def test_remote_approval_request_can_reject_with_reason(monkeypatch) -> None:
 
     answers = iter(["r", "Need a safer command"])
 
-    def fake_prompt(text: str, default: str | None = None, show_default: bool = True) -> str:
+    def fake_prompt(
+        text: str, default: str | None = None, show_default: bool = True
+    ) -> str:
         del default, show_default
         prompts.append(text)
         return next(answers)
@@ -1198,11 +1207,15 @@ def test_stream_prompt_reports_non_200_sse_response(monkeypatch) -> None:
         status_code = 503
 
         def raise_for_status(self) -> None:
-            request = httpx.Request("POST", "http://agent.example/sessions/sess-1/prompt")
+            request = httpx.Request(
+                "POST", "http://agent.example/sessions/sess-1/prompt"
+            )
             raise httpx.HTTPStatusError(
                 "bad status",
                 request=request,
-                response=httpx.Response(503, request=request, json={"detail": "server busy"}),
+                response=httpx.Response(
+                    503, request=request, json={"detail": "server busy"}
+                ),
             )
 
         def json(self) -> dict[str, object]:
@@ -1232,11 +1245,16 @@ def test_stream_prompt_reports_non_200_sse_response(monkeypatch) -> None:
             return None
 
     monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
-    monkeypatch.setattr("coding_agent.remote.client.connect_sse", lambda *args, **kwargs: FakeEventSource())
+    monkeypatch.setattr(
+        "coding_agent.remote.client.connect_sse",
+        lambda *args, **kwargs: FakeEventSource(),
+    )
 
     from coding_agent.remote.client import stream_prompt
 
-    with pytest.raises(click.ClickException, match="Failed to stream remote prompt: server busy"):
+    with pytest.raises(
+        click.ClickException, match="Failed to stream remote prompt: server busy"
+    ):
         stream_prompt(
             base_url="http://agent.example",
             session_id="sess-1",
@@ -1260,7 +1278,11 @@ def test_stream_prompt_rejects_truncated_stream_without_turn_end(monkeypatch) ->
             return None
 
         def iter_sse(self):
-            yield type("SSE", (), {"event": "StreamDelta", "data": json.dumps({"content": "partial"})})()
+            yield type(
+                "SSE",
+                (),
+                {"event": "StreamDelta", "data": json.dumps({"content": "partial"})},
+            )()
 
     class FakeClient:
         def __init__(self, **kwargs: object) -> None:
@@ -1273,11 +1295,16 @@ def test_stream_prompt_rejects_truncated_stream_without_turn_end(monkeypatch) ->
             return None
 
     monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
-    monkeypatch.setattr("coding_agent.remote.client.connect_sse", lambda *args, **kwargs: FakeEventSource())
+    monkeypatch.setattr(
+        "coding_agent.remote.client.connect_sse",
+        lambda *args, **kwargs: FakeEventSource(),
+    )
 
     from coding_agent.remote.client import stream_prompt
 
-    with pytest.raises(click.ClickException, match="Remote prompt stream ended without TurnEnd"):
+    with pytest.raises(
+        click.ClickException, match="Remote prompt stream ended without TurnEnd"
+    ):
         stream_prompt(
             base_url="http://agent.example",
             session_id="sess-1",
@@ -1289,7 +1316,9 @@ def test_stream_prompt_rejects_truncated_stream_without_turn_end(monkeypatch) ->
 def test_handle_sse_event_reports_invalid_json(monkeypatch) -> None:
     from coding_agent.remote.client import handle_sse_event
 
-    with pytest.raises(click.ClickException, match="Remote SSE event payload must be valid JSON"):
+    with pytest.raises(
+        click.ClickException, match="Remote SSE event payload must be valid JSON"
+    ):
         handle_sse_event(
             base_url="http://agent.example",
             session_id="sess-1",

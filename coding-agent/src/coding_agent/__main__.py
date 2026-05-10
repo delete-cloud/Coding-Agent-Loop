@@ -482,7 +482,9 @@ def remote_remove(name: str) -> None:
     is_flag=True,
     help="Create an empty server-side Docker workspace.",
 )
-@click.option("--goal", required=True, help="Initial prompt to send to the remote session")
+@click.option(
+    "--goal", required=True, help="Initial prompt to send to the remote session"
+)
 def remote_repl(name: str, repo: str | None, empty_workspace: bool, goal: str) -> None:
     """Create a one-shot remote run and stream one prompt."""
     from coding_agent.remote.client import (
@@ -575,7 +577,9 @@ def remote_repl(name: str, repo: str | None, empty_workspace: bool, goal: str) -
                 if stream_error is not None:
                     stream_error.add_note(f"Remote session cleanup also failed: {exc}")
                 elif deferred_error is not None:
-                    deferred_error.add_note(f"Remote session cleanup also failed: {exc}")
+                    deferred_error.add_note(
+                        f"Remote session cleanup also failed: {exc}"
+                    )
                 else:
                     raise
     if stream_error is not None:

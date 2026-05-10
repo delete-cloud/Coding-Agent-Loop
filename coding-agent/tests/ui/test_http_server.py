@@ -116,7 +116,7 @@ def register_session(
 
 def _minimal_agent_toml(extra: str = "") -> str:
     return (
-        '[agent]\n'
+        "[agent]\n"
         'name = "test-agent"\n'
         'model = "test-model"\n'
         'provider = "openai"\n'

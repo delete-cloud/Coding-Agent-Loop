@@ -265,8 +265,8 @@ their local work recoverable before running a remote snapshot workflow.
 - [ ] `uv run pytest tests/ui/test_http_server.py -k "production or explicit_server_config or cloud_workspace_gc" -v`
 - [ ] `uv run pytest tests/coding_agent/environment/test_docker_workspace_provider.py -k "quota or gc or provision" -v`
 - [ ] `uv run pytest tests/cli/test_remote_client.py -k "remote_repl_help or attach_help" -v`
-- [ ] `uv run basedpyright src/coding_agent/ui/http_server.py src/coding_agent/environment/workspace_provider.py src/coding_agent/environment/docker_workspace_provider.py tests/ui/test_http_server.py tests/coding_agent/environment/test_docker_workspace_provider.py tests/cli/test_remote_client.py`
-- [ ] `uv run ruff format src/coding_agent tests/ui/test_http_server.py tests/coding_agent/environment/test_docker_workspace_provider.py tests/cli/test_remote_client.py --check`
+- [ ] `uv run basedpyright --level error src/coding_agent/ui/http_server.py src/coding_agent/ui/auth.py src/coding_agent/environment/workspace_provider.py src/coding_agent/environment/docker_workspace_provider.py tests/ui/test_http_server.py tests/ui/test_security.py tests/coding_agent/environment/test_docker_workspace_provider.py tests/cli/test_remote_client.py`
+- [ ] `uv run ruff format src/coding_agent/__main__.py src/coding_agent/ui/auth.py src/coding_agent/ui/http_server.py src/coding_agent/environment/__init__.py src/coding_agent/environment/workspace_provider.py src/coding_agent/environment/docker_workspace_provider.py tests/ui/test_http_server.py tests/ui/test_security.py tests/coding_agent/environment/test_docker_workspace_provider.py tests/cli/test_remote_client.py --check`
 - [ ] `git diff --check`
 
 ## References

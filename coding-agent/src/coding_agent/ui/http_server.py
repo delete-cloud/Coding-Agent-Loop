@@ -170,7 +170,9 @@ def _validate_production_config(
 
     image_allowlist = cloud_workspace_config.get("image_allowlist")
     if not isinstance(image_allowlist, list) or not image_allowlist:
-        raise ValueError("cloud_workspace.image_allowlist must be explicitly configured")
+        raise ValueError(
+            "cloud_workspace.image_allowlist must be explicitly configured"
+        )
     for image in image_allowlist:
         if not isinstance(image, str) or not image.strip():
             raise ValueError("cloud_workspace.image_allowlist must contain strings")

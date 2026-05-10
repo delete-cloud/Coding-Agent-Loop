@@ -60,7 +60,9 @@ async def verify_api_key(
         HTTPException: 401 if the API key is invalid.
     """
     # No auth required if no key configured
-    http_api_key = getattr(settings, "http_api_key", None) or _server_config_bearer_token()
+    http_api_key = (
+        getattr(settings, "http_api_key", None) or _server_config_bearer_token()
+    )
     if not http_api_key:
         return None
 
