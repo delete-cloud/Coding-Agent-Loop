@@ -525,19 +525,66 @@ def remote_remove(name: str) -> None:
 @click.option(
     "--goal", required=True, help="Initial prompt to send to the remote session"
 )
-def remote_repl(name: str, repo: str | None, empty_workspace: bool, goal: str) -> None:
+@click.option(
+    "--yes",
+    is_flag=True,
+    help="Download and overwrite the local workspace without confirmation.",
+)
+def remote_repl(
+    name: str, repo: str | None, empty_workspace: bool, goal: str, yes: bool
+) -> None:
+    """Compatibility alias for remote run; creates a one-shot remote run."""
+    _remote_run_once(
+        name=name, repo=repo, empty_workspace=empty_workspace, goal=goal, yes=yes
+    )
+
+
+@remote.command("run")
+@click.argument("name")
+@click.option(
+    "--repo",
+    default=None,
+    help="Upload a local workspace snapshot and download the final remote workspace into it.",
+)
+@click.option(
+    "--empty-workspace",
+    is_flag=True,
+    help="Create an empty server-side Docker workspace.",
+)
+@click.option(
+    "--goal", required=True, help="Initial prompt to send to the remote session"
+)
+@click.option(
+    "--yes",
+    is_flag=True,
+    help="Download and overwrite the local workspace without confirmation.",
+)
+def remote_run(
+    name: str, repo: str | None, empty_workspace: bool, goal: str, yes: bool
+) -> None:
     """Create a one-shot remote run and stream one prompt."""
+    _remote_run_once(
+        name=name, repo=repo, empty_workspace=empty_workspace, goal=goal, yes=yes
+    )
+
+
+def _remote_run_once(
+    *,
+    name: str,
+    repo: str | None,
+    empty_workspace: bool,
+    goal: str,
+    yes: bool,
+) -> None:
     from coding_agent.remote.client import (
         auth_headers,
         create_remote_session,
         delete_remote_session,
-        download_workspace_archive,
         get_remote,
         stream_prompt,
     )
     from coding_agent.workspace_archive import (
         create_workspace_archive_base64,
-        extract_workspace_archive_base64,
     )
 
     if repo is not None and empty_workspace:
@@ -583,14 +630,12 @@ def remote_repl(name: str, repo: str | None, empty_workspace: bool, goal: str) -
     finally:
         if repo_path is not None:
             try:
-                archive_base64 = download_workspace_archive(
+                _download_and_restore_workspace(
                     base_url=endpoint.url,
                     session_id=session_id,
                     headers=headers,
-                )
-                extract_workspace_archive_base64(repo_path, archive_base64)
-                click.echo(
-                    f"Downloaded remote workspace snapshot and overwrote {repo_path} while preserving .git"
+                    repo_path=repo_path,
+                    yes=yes,
                 )
             except Exception as exc:
                 workspace_restore_failed = True
@@ -628,6 +673,217 @@ def remote_repl(name: str, repo: str | None, empty_workspace: bool, goal: str) -
         raise deferred_error
     assert status is not None
     raise SystemExit(status)
+
+
+@remote.group("sessions")
+def remote_sessions() -> None:
+    """Inspect and control remote sessions."""
+
+
+@remote_sessions.command("list")
+@click.argument("name")
+def remote_sessions_list(name: str) -> None:
+    """List sessions visible to the remote token."""
+    from coding_agent.remote.client import get_remote, list_remote_sessions
+
+    endpoint = get_remote(name)
+    sessions = list_remote_sessions(endpoint)
+    if not sessions:
+        click.echo("No remote sessions found.")
+        return
+    for session in sessions:
+        click.echo(
+            "\t".join(
+                [
+                    str(session.get("session_id", "")),
+                    str(session.get("status", "")),
+                    str(session.get("turn_status", "")),
+                    str(session.get("workspace_id", "")),
+                ]
+            )
+        )
+
+
+@remote_sessions.command("status")
+@click.argument("name")
+@click.argument("session_id")
+def remote_sessions_status(name: str, session_id: str) -> None:
+    """Show one remote session."""
+    from coding_agent.remote.client import get_remote, get_remote_session
+
+    endpoint = get_remote(name)
+    session = get_remote_session(endpoint, session_id)
+    for key in sorted(session):
+        click.echo(f"{key}: {session[key]}")
+
+
+@remote_sessions.command("cancel")
+@click.argument("name")
+@click.argument("session_id")
+def remote_sessions_cancel(name: str, session_id: str) -> None:
+    """Cancel the active turn for a remote session."""
+    from coding_agent.remote.client import cancel_remote_session, get_remote
+
+    endpoint = get_remote(name)
+    result = cancel_remote_session(endpoint, session_id)
+    turn_id = result.get("turn_id")
+    if isinstance(turn_id, str) and turn_id:
+        click.echo(f"Cancelling remote session {session_id} turn {turn_id}")
+        return
+    click.echo(f"Cancelling remote session {session_id}")
+
+
+@remote_sessions.command("close")
+@click.argument("name")
+@click.argument("session_id")
+def remote_sessions_close(name: str, session_id: str) -> None:
+    """Close a remote session."""
+    from coding_agent.remote.client import (
+        auth_headers,
+        delete_remote_session,
+        get_remote,
+    )
+
+    endpoint = get_remote(name)
+    delete_remote_session(
+        base_url=endpoint.url,
+        session_id=session_id,
+        headers=auth_headers(endpoint),
+    )
+    click.echo(f"Closed remote session {session_id}")
+
+
+@remote.group("workspaces")
+def remote_workspaces() -> None:
+    """Inspect and clean remote workspaces."""
+
+
+@remote_workspaces.command("list")
+@click.argument("name")
+def remote_workspaces_list(name: str) -> None:
+    """List remote workspaces."""
+    from coding_agent.remote.client import get_remote, list_remote_workspaces
+
+    endpoint = get_remote(name)
+    workspaces = list_remote_workspaces(endpoint)
+    if not workspaces:
+        click.echo("No remote workspaces found.")
+        return
+    for workspace in workspaces:
+        click.echo(
+            "\t".join(
+                [
+                    str(workspace.get("workspace_id", "")),
+                    str(workspace.get("status", "")),
+                    str(workspace.get("updated_at", "")),
+                ]
+            )
+        )
+
+
+@remote_workspaces.command("cleanup")
+@click.argument("name")
+@click.option("--stale", is_flag=True, help="Run server-side stale workspace GC.")
+def remote_workspaces_cleanup(name: str, stale: bool) -> None:
+    """Clean stale remote workspaces."""
+    from coding_agent.remote.client import cleanup_stale_remote_workspaces, get_remote
+
+    if not stale:
+        raise click.ClickException("Pass --stale to run stale workspace cleanup.")
+    endpoint = get_remote(name)
+    cleaned_count = cleanup_stale_remote_workspaces(endpoint)
+    click.echo(f"Cleaned {cleaned_count} stale workspaces")
+
+
+@remote_workspaces.command("rm")
+@click.argument("name")
+@click.argument("workspace_id")
+def remote_workspaces_rm(name: str, workspace_id: str) -> None:
+    """Clean one remote workspace by id."""
+    from coding_agent.remote.client import cleanup_remote_workspace, get_remote
+
+    endpoint = get_remote(name)
+    _ = cleanup_remote_workspace(endpoint, workspace_id)
+    click.echo(f"Cleaned workspace {workspace_id}")
+
+
+@remote.command("download")
+@click.argument("name")
+@click.option("--session", "session_id", required=True, help="Remote session ID")
+@click.option(
+    "--repo",
+    default=".",
+    help="Local repo/workspace to overwrite with the remote snapshot.",
+)
+@click.option(
+    "--yes",
+    is_flag=True,
+    help="Download and overwrite the local workspace without confirmation.",
+)
+def remote_download(name: str, session_id: str, repo: str, yes: bool) -> None:
+    """Download a remote session workspace snapshot."""
+    from coding_agent.remote.client import auth_headers, get_remote
+
+    endpoint = get_remote(name)
+    repo_path = Path(repo).expanduser().resolve()
+    if not repo_path.is_dir():
+        raise click.ClickException(f"--repo must be an existing directory: {repo}")
+    _download_and_restore_workspace(
+        base_url=endpoint.url,
+        session_id=session_id,
+        headers=auth_headers(endpoint),
+        repo_path=repo_path,
+        yes=yes,
+    )
+
+
+def _download_and_restore_workspace(
+    *,
+    base_url: str,
+    session_id: str,
+    headers: dict[str, str],
+    repo_path: Path,
+    yes: bool,
+) -> None:
+    from coding_agent.remote.client import (
+        download_workspace_archive,
+        download_workspace_manifest,
+    )
+    from coding_agent.workspace_archive import extract_workspace_archive_base64
+
+    manifest = download_workspace_manifest(
+        base_url=base_url,
+        session_id=session_id,
+        headers=headers,
+    )
+    changed_count = _manifest_file_count(manifest, "changed_files")
+    deleted_count = _manifest_file_count(manifest, "deleted_files")
+    total = manifest.get("total_bytes")
+    if not isinstance(total, int):
+        raise click.ClickException("Remote workspace manifest missing total_bytes")
+    click.echo(
+        f"Remote result contains {changed_count} changed files, {deleted_count} deleted files, {total} bytes"
+    )
+    click.echo(f"This will overwrite {repo_path} while preserving .git.")
+    if not yes and not click.confirm("Continue?", default=False):
+        raise click.ClickException("Remote workspace download cancelled.")
+    archive_base64 = download_workspace_archive(
+        base_url=base_url,
+        session_id=session_id,
+        headers=headers,
+    )
+    extract_workspace_archive_base64(repo_path, archive_base64)
+    click.echo(
+        f"Downloaded remote workspace snapshot and overwrote {repo_path} while preserving .git"
+    )
+
+
+def _manifest_file_count(manifest: dict[str, object], field: str) -> int:
+    values = manifest.get(field)
+    if not isinstance(values, list):
+        raise click.ClickException(f"Remote workspace manifest missing {field}")
+    values = cast(list[object], values)
+    return len(values)
 
 
 @main.command()

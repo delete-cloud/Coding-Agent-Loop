@@ -13,6 +13,17 @@ from click.testing import CliRunner
 from coding_agent.__main__ import main
 
 
+class _RemoteFakeResponse:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self._payload = payload
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict[str, object]:
+        return self._payload
+
+
 def test_serve_config_sets_explicit_server_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -297,6 +308,94 @@ def test_remote_repl_creates_cloud_session_and_streams_prompt_events(
     ]
 
 
+def test_remote_run_creates_one_shot_remote_session(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_path = tmp_path / "remotes.json"
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example", "--token", "secret-token"],
+        catch_exceptions=False,
+    )
+    calls: list[tuple[str, str, dict[str, object] | None, dict[str, str]]] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"session_id": "sess-run"}
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            headers = kwargs.get("headers")
+            self.headers = headers if isinstance(headers, dict) else {}
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def post(
+            self, path: str, json: dict[str, object] | None = None
+        ) -> FakeResponse:
+            calls.append(("post", path, json, self.headers))
+            return FakeResponse()
+
+        def delete(self, path: str) -> FakeResponse:
+            calls.append(("delete", path, None, self.headers))
+            return FakeResponse()
+
+    def fake_stream_prompt(
+        *, base_url: str, session_id: str, prompt: str, headers: dict[str, str]
+    ) -> int:
+        calls.append(
+            (
+                "stream",
+                f"/sessions/{session_id}/prompt",
+                {"prompt": prompt, "base_url": base_url},
+                headers,
+            )
+        )
+        return 0
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+    monkeypatch.setattr("coding_agent.remote.client.stream_prompt", fake_stream_prompt)
+
+    result = runner.invoke(
+        main,
+        ["remote", "run", "dev", "--empty-workspace", "--goal", "hello"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "Created one-shot remote session sess-run on remote dev" in result.output
+    assert "Cleaned up remote session sess-run" in result.output
+    assert calls == [
+        (
+            "post",
+            "/sessions",
+            {"workspace_source": {"kind": "docker"}, "approval_policy": "auto"},
+            {"Authorization": "Bearer secret-token"},
+        ),
+        (
+            "stream",
+            "/sessions/sess-run/prompt",
+            {"prompt": "hello", "base_url": "http://agent.example"},
+            {"Authorization": "Bearer secret-token"},
+        ),
+        (
+            "delete",
+            "/sessions/sess-run",
+            None,
+            {"Authorization": "Bearer secret-token"},
+        ),
+    ]
+
+
 def test_attach_streams_prompt_to_existing_session(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "remotes.json"
     monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
@@ -338,6 +437,269 @@ def test_attach_streams_prompt_to_existing_session(tmp_path: Path, monkeypatch) 
             "headers": {},
         }
     ]
+
+
+def test_remote_sessions_commands_call_operations_api(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_path = tmp_path / "remotes.json"
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example", "--token", "secret-token"],
+        catch_exceptions=False,
+    )
+    calls: list[tuple[str, str, dict[str, str]]] = []
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            headers = kwargs.get("headers")
+            self.headers = headers if isinstance(headers, dict) else {}
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def get(self, path: str) -> _RemoteFakeResponse:
+            calls.append(("get", path, self.headers))
+            if path == "/sessions":
+                return _RemoteFakeResponse(
+                    {
+                        "sessions": [
+                            {
+                                "session_id": "sess-1",
+                                "status": "running",
+                                "turn_status": "running",
+                                "workspace_id": "ws-1",
+                            }
+                        ]
+                    }
+                )
+            if path == "/sessions/sess-1":
+                return _RemoteFakeResponse(
+                    {
+                        "session_id": "sess-1",
+                        "status": "running",
+                        "turn_status": "idle",
+                        "origin": "remote",
+                        "workspace_id": "ws-1",
+                    }
+                )
+            raise AssertionError(f"unexpected get {path}")
+
+        def post(self, path: str) -> _RemoteFakeResponse:
+            calls.append(("post", path, self.headers))
+            assert path == "/sessions/sess-1/cancel"
+            return _RemoteFakeResponse(
+                {"session_id": "sess-1", "turn_id": "turn-1", "status": "cancelling"}
+            )
+
+        def delete(self, path: str) -> _RemoteFakeResponse:
+            calls.append(("delete", path, self.headers))
+            assert path == "/sessions/sess-1"
+            return _RemoteFakeResponse({"status": "closed"})
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+
+    listed = runner.invoke(
+        main, ["remote", "sessions", "list", "dev"], catch_exceptions=False
+    )
+    status = runner.invoke(
+        main,
+        ["remote", "sessions", "status", "dev", "sess-1"],
+        catch_exceptions=False,
+    )
+    cancelled = runner.invoke(
+        main,
+        ["remote", "sessions", "cancel", "dev", "sess-1"],
+        catch_exceptions=False,
+    )
+    closed = runner.invoke(
+        main,
+        ["remote", "sessions", "close", "dev", "sess-1"],
+        catch_exceptions=False,
+    )
+
+    assert listed.exit_code == 0
+    assert "sess-1\trunning\trunning\tws-1" in listed.output
+    assert status.exit_code == 0
+    assert "session_id: sess-1" in status.output
+    assert "workspace_id: ws-1" in status.output
+    assert cancelled.exit_code == 0
+    assert "Cancelling remote session sess-1 turn turn-1" in cancelled.output
+    assert closed.exit_code == 0
+    assert "Closed remote session sess-1" in closed.output
+    assert calls == [
+        ("get", "/sessions", {"Authorization": "Bearer secret-token"}),
+        ("get", "/sessions/sess-1", {"Authorization": "Bearer secret-token"}),
+        ("post", "/sessions/sess-1/cancel", {"Authorization": "Bearer secret-token"}),
+        ("delete", "/sessions/sess-1", {"Authorization": "Bearer secret-token"}),
+    ]
+
+
+def test_remote_workspaces_commands_call_admin_operations_api(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_path = tmp_path / "remotes.json"
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "ops", "http://agent.example", "--token", "admin-token"],
+        catch_exceptions=False,
+    )
+    calls: list[tuple[str, str, dict[str, str]]] = []
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            headers = kwargs.get("headers")
+            self.headers = headers if isinstance(headers, dict) else {}
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def get(self, path: str) -> _RemoteFakeResponse:
+            calls.append(("get", path, self.headers))
+            assert path == "/workspaces"
+            return _RemoteFakeResponse(
+                {
+                    "workspaces": [
+                        {
+                            "workspace_id": "ws-1",
+                            "status": "stale",
+                            "updated_at": "2026-05-10T11:00:00Z",
+                        }
+                    ]
+                }
+            )
+
+        def post(self, path: str) -> _RemoteFakeResponse:
+            calls.append(("post", path, self.headers))
+            assert path == "/workspaces/gc"
+            return _RemoteFakeResponse({"cleaned_count": 2})
+
+        def delete(self, path: str) -> _RemoteFakeResponse:
+            calls.append(("delete", path, self.headers))
+            assert path == "/workspaces/ws-1"
+            return _RemoteFakeResponse({"workspace_id": "ws-1", "status": "cleaned"})
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+
+    listed = runner.invoke(
+        main, ["remote", "workspaces", "list", "ops"], catch_exceptions=False
+    )
+    cleaned_stale = runner.invoke(
+        main,
+        ["remote", "workspaces", "cleanup", "ops", "--stale"],
+        catch_exceptions=False,
+    )
+    removed = runner.invoke(
+        main,
+        ["remote", "workspaces", "rm", "ops", "ws-1"],
+        catch_exceptions=False,
+    )
+
+    assert listed.exit_code == 0
+    assert "ws-1\tstale\t2026-05-10T11:00:00Z" in listed.output
+    assert cleaned_stale.exit_code == 0
+    assert "Cleaned 2 stale workspaces" in cleaned_stale.output
+    assert removed.exit_code == 0
+    assert "Cleaned workspace ws-1" in removed.output
+    assert calls == [
+        ("get", "/workspaces", {"Authorization": "Bearer admin-token"}),
+        ("post", "/workspaces/gc", {"Authorization": "Bearer admin-token"}),
+        ("delete", "/workspaces/ws-1", {"Authorization": "Bearer admin-token"}),
+    ]
+
+
+def test_remote_download_fetches_manifest_and_confirms_before_overwrite(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_path = tmp_path / "remotes.json"
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example", "--token", "secret-token"],
+        catch_exceptions=False,
+    )
+    calls: list[tuple[str, str, dict[str, str]]] = []
+    applied: list[tuple[Path, str]] = []
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            headers = kwargs.get("headers")
+            self.headers = headers if isinstance(headers, dict) else {}
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def get(self, path: str) -> _RemoteFakeResponse:
+            calls.append(("get", path, self.headers))
+            if path == "/sessions/sess-1/workspace/archive/manifest":
+                return _RemoteFakeResponse(
+                    {
+                        "workspace_id": "ws-1",
+                        "session_id": "sess-1",
+                        "format": "tar.gz",
+                        "file_count": 2,
+                        "total_bytes": 19,
+                        "changed_files": ["a.txt", "src/app.py"],
+                        "deleted_files": [],
+                        "excluded_files": [".git"],
+                        "archive_sha256": "a" * 64,
+                    }
+                )
+            if path == "/sessions/sess-1/workspace/archive":
+                return _RemoteFakeResponse({"archive_base64": "result-archive"})
+            raise AssertionError(f"unexpected get {path}")
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+    monkeypatch.setattr(
+        "coding_agent.workspace_archive.extract_workspace_archive_base64",
+        lambda repo_path_arg, archive_base64: applied.append(
+            (repo_path_arg, archive_base64)
+        ),
+    )
+
+    result = runner.invoke(
+        main,
+        ["remote", "download", "dev", "--session", "sess-1", "--repo", str(repo_path)],
+        input="y\n",
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert (
+        "Remote result contains 2 changed files, 0 deleted files, 19 bytes"
+        in result.output
+    )
+    assert "This will overwrite" in result.output
+    assert "Downloaded remote workspace snapshot and overwrote" in result.output
+    assert calls == [
+        (
+            "get",
+            "/sessions/sess-1/workspace/archive/manifest",
+            {"Authorization": "Bearer secret-token"},
+        ),
+        (
+            "get",
+            "/sessions/sess-1/workspace/archive",
+            {"Authorization": "Bearer secret-token"},
+        ),
+    ]
+    assert applied == [(repo_path, "result-archive")]
 
 
 def test_remote_repl_reports_http_session_create_error(
@@ -488,6 +850,17 @@ def test_remote_repl_with_repo_uploads_snapshot_and_downloads_workspace(
         "coding_agent.remote.client.download_workspace_archive",
         fake_download_workspace_archive,
     )
+
+    def fake_download_workspace_manifest(
+        *, base_url: str, session_id: str, headers: dict[str, str]
+    ) -> dict[str, object]:
+        calls.append(("manifest", session_id, {"base_url": base_url}, headers))
+        return {"changed_files": ["result.txt"], "deleted_files": [], "total_bytes": 12}
+
+    monkeypatch.setattr(
+        "coding_agent.remote.client.download_workspace_manifest",
+        fake_download_workspace_manifest,
+    )
     monkeypatch.setattr(
         "coding_agent.workspace_archive.extract_workspace_archive_base64",
         lambda repo_path_arg, archive_base64: applied.append(
@@ -497,7 +870,16 @@ def test_remote_repl_with_repo_uploads_snapshot_and_downloads_workspace(
 
     result = runner.invoke(
         main,
-        ["remote", "repl", "dev", "--repo", str(repo_path), "--goal", "hello"],
+        [
+            "remote",
+            "repl",
+            "dev",
+            "--repo",
+            str(repo_path),
+            "--goal",
+            "hello",
+            "--yes",
+        ],
         catch_exceptions=False,
     )
 
@@ -523,6 +905,12 @@ def test_remote_repl_with_repo_uploads_snapshot_and_downloads_workspace(
             "stream",
             "/sessions/sess-upload/prompt",
             {"prompt": "hello", "base_url": "http://agent.example"},
+            {"Authorization": "Bearer secret-token"},
+        ),
+        (
+            "manifest",
+            "sess-upload",
+            {"base_url": "http://agent.example"},
             {"Authorization": "Bearer secret-token"},
         ),
         (
@@ -615,6 +1003,17 @@ def test_remote_repl_with_repo_downloads_results_when_stream_fails(
         "coding_agent.remote.client.download_workspace_archive",
         lambda *, base_url, session_id, headers: "result-archive",
     )
+
+    def fake_download_workspace_manifest(
+        *, base_url: str, session_id: str, headers: dict[str, str]
+    ) -> dict[str, object]:
+        calls.append(("manifest", session_id, {"base_url": base_url}, headers))
+        return {"changed_files": ["result.txt"], "deleted_files": [], "total_bytes": 12}
+
+    monkeypatch.setattr(
+        "coding_agent.remote.client.download_workspace_manifest",
+        fake_download_workspace_manifest,
+    )
     monkeypatch.setattr(
         "coding_agent.workspace_archive.extract_workspace_archive_base64",
         lambda repo_path_arg, archive_base64: applied.append(
@@ -624,7 +1023,16 @@ def test_remote_repl_with_repo_downloads_results_when_stream_fails(
 
     result = runner.invoke(
         main,
-        ["remote", "repl", "dev", "--repo", str(repo_path), "--goal", "hello"],
+        [
+            "remote",
+            "repl",
+            "dev",
+            "--repo",
+            str(repo_path),
+            "--goal",
+            "hello",
+            "--yes",
+        ],
     )
 
     assert result.exit_code != 0
@@ -647,6 +1055,12 @@ def test_remote_repl_with_repo_downloads_results_when_stream_fails(
             "stream",
             "/sessions/sess-upload/prompt",
             {"prompt": "hello", "base_url": "http://agent.example"},
+            {"Authorization": "Bearer secret-token"},
+        ),
+        (
+            "manifest",
+            "sess-upload",
+            {"base_url": "http://agent.example"},
             {"Authorization": "Bearer secret-token"},
         ),
         (
@@ -733,6 +1147,17 @@ def test_remote_repl_with_repo_retains_session_when_extract_fails(
         "coding_agent.remote.client.download_workspace_archive",
         lambda *, base_url, session_id, headers: "result-archive",
     )
+
+    def fake_download_workspace_manifest(
+        *, base_url: str, session_id: str, headers: dict[str, str]
+    ) -> dict[str, object]:
+        calls.append(("manifest", session_id, {"base_url": base_url}, headers))
+        return {"changed_files": ["result.txt"], "deleted_files": [], "total_bytes": 12}
+
+    monkeypatch.setattr(
+        "coding_agent.remote.client.download_workspace_manifest",
+        fake_download_workspace_manifest,
+    )
     monkeypatch.setattr(
         "coding_agent.workspace_archive.extract_workspace_archive_base64",
         failing_extract,
@@ -740,7 +1165,16 @@ def test_remote_repl_with_repo_retains_session_when_extract_fails(
 
     result = runner.invoke(
         main,
-        ["remote", "repl", "dev", "--repo", str(repo_path), "--goal", "hello"],
+        [
+            "remote",
+            "repl",
+            "dev",
+            "--repo",
+            str(repo_path),
+            "--goal",
+            "hello",
+            "--yes",
+        ],
     )
 
     assert result.exit_code != 0
@@ -766,7 +1200,17 @@ def test_remote_repl_with_repo_retains_session_when_extract_fails(
             {"prompt": "hello", "base_url": "http://agent.example"},
             {"Authorization": "Bearer secret-token"},
         ),
+        (
+            "manifest",
+            "sess-upload",
+            {"base_url": "http://agent.example"},
+            {"Authorization": "Bearer secret-token"},
+        ),
     ]
+
+
+def _workspace_manifest_payload() -> dict[str, object]:
+    return {"changed_files": ["result.txt"], "deleted_files": [], "total_bytes": 12}
 
 
 def test_remote_repl_with_repo_retains_session_when_stream_and_extract_fail(
@@ -831,6 +1275,12 @@ def test_remote_repl_with_repo_retains_session_when_stream_and_extract_fail(
         )
         raise click.ClickException("stream failed")
 
+    def fake_download_workspace_manifest(
+        *, base_url: str, session_id: str, headers: dict[str, str]
+    ) -> dict[str, object]:
+        calls.append(("manifest", session_id, {"base_url": base_url}, headers))
+        return _workspace_manifest_payload()
+
     monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
     monkeypatch.setattr(
         "coding_agent.remote.client.stream_prompt", failing_stream_prompt
@@ -844,6 +1294,10 @@ def test_remote_repl_with_repo_retains_session_when_stream_and_extract_fail(
         lambda *, base_url, session_id, headers: "result-archive",
     )
     monkeypatch.setattr(
+        "coding_agent.remote.client.download_workspace_manifest",
+        fake_download_workspace_manifest,
+    )
+    monkeypatch.setattr(
         "coding_agent.workspace_archive.extract_workspace_archive_base64",
         lambda repo_path_arg, archive_base64: (_ for _ in ()).throw(
             OSError("extract failed")
@@ -852,7 +1306,16 @@ def test_remote_repl_with_repo_retains_session_when_stream_and_extract_fail(
 
     result = runner.invoke(
         main,
-        ["remote", "repl", "dev", "--repo", str(repo_path), "--goal", "hello"],
+        [
+            "remote",
+            "repl",
+            "dev",
+            "--repo",
+            str(repo_path),
+            "--goal",
+            "hello",
+            "--yes",
+        ],
     )
 
     assert result.exit_code != 0
@@ -876,6 +1339,12 @@ def test_remote_repl_with_repo_retains_session_when_stream_and_extract_fail(
             "stream",
             "/sessions/sess-upload/prompt",
             {"prompt": "hello", "base_url": "http://agent.example"},
+            {"Authorization": "Bearer secret-token"},
+        ),
+        (
+            "manifest",
+            "sess-upload",
+            {"base_url": "http://agent.example"},
             {"Authorization": "Bearer secret-token"},
         ),
     ]
