@@ -45,19 +45,17 @@ from coding_agent.approval import (
 from coding_agent.approval.store import ApprovalStore
 from coding_agent.core import config as core_config
 from coding_agent.plugins.storage import JSONLTapeStore
-from coding_agent.providers.base import ChatProvider, ToolSchema
+from coding_agent.providers.base import ToolSchema
 from coding_agent.wire.local import LocalWire
 from coding_agent.wire.protocol import (
     ApprovalRequest,
     ApprovalResponse,
     CompletionStatus,
     StreamDelta,
-    ToolCallDelta,
     TurnEnd,
     WireMessage,
 )
 from coding_agent.ui.session_store import (
-    AsyncPGSessionPool,
     SessionStore,
     create_session_store,
 )
@@ -98,6 +96,17 @@ def _approval_response_projection(response: ApprovalResponse) -> dict[str, Any]:
 class _PublishedApprovalDecision:
     sequence: int
     response: ApprovalResponse
+
+
+TurnStatus = Literal["idle", "running", "cancelling", "cancelled", "failed"]
+CancelTurnStatus = Literal["idle", "cancelling", "cancelled", "failed"]
+
+
+@dataclass(frozen=True)
+class CancelTurnResult:
+    session_id: str
+    turn_id: str | None
+    status: CancelTurnStatus
 
 
 class MockProvider:
@@ -165,6 +174,8 @@ class Session:
     max_steps: int = 30
     task: asyncio.Task[Any] | None = None
     turn_in_progress: bool = False
+    turn_status: TurnStatus = "idle"
+    current_turn_id: str | None = None
     pending_approval: dict[str, Any] | None = None
     approval_event: asyncio.Event = field(default_factory=asyncio.Event)
     approval_response: dict[str, Any] | None = None
@@ -204,11 +215,18 @@ class Session:
         turn_running = self.turn_in_progress or (
             self.task is not None and not self.task.done()
         )
-        turn_status = "running" if turn_running else "idle"
+        if self.turn_status in {"cancelling", "cancelled", "failed"}:
+            turn_status = self.turn_status
+        elif turn_running:
+            turn_status = "running"
+        else:
+            turn_status = "idle"
         if pending_approval:
             status = "waiting_approval"
-        elif turn_running:
+        elif turn_status in {"running", "cancelling"}:
             status = "running"
+        elif turn_status == "failed":
+            status = "failed"
         else:
             status = "created"
         return {
@@ -221,6 +239,7 @@ class Session:
             "pending_approval": pending_approval,
             "status": status,
             "turn_status": turn_status,
+            "turn_id": self.current_turn_id,
             "provider_name": self.provider_name,
             "model_name": self.model_name,
             "base_url": self.base_url,
@@ -1415,6 +1434,74 @@ class SessionManager:
             session.turn_in_progress = False
             await self._persist_session_async(session)
 
+    async def cancel_session_turn(self, session_id: str) -> CancelTurnResult:
+        """Request cancellation for the active turn without closing the session."""
+        async with self._lock:
+            await self._assert_owner(session_id)
+            session = await self.get_session_async(session_id)
+            task = session.task
+            if task is None or task.done():
+                status: CancelTurnStatus
+                if session.turn_status == "cancelling":
+                    status = "cancelling"
+                elif session.turn_status in {"cancelled", "failed"}:
+                    status = cast(CancelTurnStatus, session.turn_status)
+                else:
+                    session.turn_status = "idle"
+                    status = "idle"
+                session.turn_in_progress = False
+                session.last_activity = datetime.now()
+                await self._persist_session_async(session)
+                return CancelTurnResult(
+                    session_id=session_id,
+                    turn_id=session.current_turn_id,
+                    status=status,
+                )
+
+            if session.current_turn_id is None:
+                session.current_turn_id = uuid.uuid4().hex
+            session.turn_status = "cancelling"
+            session.turn_in_progress = True
+            session.last_activity = datetime.now()
+            await self._persist_session_async(session)
+            task.cancel()
+            _ = asyncio.create_task(
+                self._observe_cancelled_turn(session_id=session_id, task=task)
+            )
+            return CancelTurnResult(
+                session_id=session_id,
+                turn_id=session.current_turn_id,
+                status="cancelling",
+            )
+
+    async def _observe_cancelled_turn(
+        self,
+        *,
+        session_id: str,
+        task: asyncio.Task[Any],
+    ) -> None:
+        final_status: TurnStatus = "cancelled"
+        try:
+            await task
+        except asyncio.CancelledError:
+            final_status = "cancelled"
+        except Exception:
+            logger.exception("Cancelled session turn failed during cleanup")
+            final_status = "failed"
+
+        async with self._lock:
+            try:
+                session = await self.get_session_async(session_id)
+            except KeyError:
+                return
+            if session.task is not task:
+                return
+            session.task = None
+            session.turn_in_progress = False
+            session.turn_status = final_status
+            session.last_activity = datetime.now()
+            await self._persist_session_async(session)
+
     async def close(self) -> None:
         await self._close_resource_async(self._store)
         if self._owns_pg_pool:
@@ -1434,6 +1521,8 @@ class SessionManager:
             session = await self.get_session_async(session_id)
             session.last_activity = datetime.now()
             session.turn_in_progress = True
+            session.turn_status = "running"
+            session.current_turn_id = uuid.uuid4().hex
             await self._persist_session_async(session)
 
             try:
@@ -1492,9 +1581,11 @@ class SessionManager:
                 session.tape_id = ctx.tape.tape_id
                 await self._persist_session_async(session)
             except FatalToolExecutionError:
+                session.turn_status = "failed"
                 await self._close_runtime(session)
                 raise
             except Exception as exc:
+                session.turn_status = "failed"
                 await self._close_runtime(session)
                 logger.exception("HTTP session turn failed")
                 await session.wire.send(
@@ -1516,6 +1607,8 @@ class SessionManager:
                 current_task = asyncio.current_task()
                 if session.task is None or session.task is not current_task:
                     session.turn_in_progress = False
+                    if session.turn_status == "running":
+                        session.turn_status = "idle"
                 session.last_activity = datetime.now()
                 await self._persist_session_async(session)
 
@@ -1573,7 +1666,9 @@ class SessionManager:
         request_id: str,
         decision: _PublishedApprovalDecision,
     ) -> ApprovalResponse | None:
-        already_consumed = decision.sequence <= session.approval_decision_cursor.sequence
+        already_consumed = (
+            decision.sequence <= session.approval_decision_cursor.sequence
+        )
         applied = False
         if session.approval_coordinator.get_request(request_id) is not None:
             applied = session.approval_coordinator.respond(decision.response)

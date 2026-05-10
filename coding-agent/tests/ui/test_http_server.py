@@ -2965,6 +2965,62 @@ class TestGetSession:
         assert "pending_approval" in data
 
 
+class TestCancelSession:
+    async def test_cancel_session_turn_returns_cancelling_for_active_turn(self, client):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+        session = session_manager.get_session(session_id)
+        task = asyncio.create_task(asyncio.sleep(60))
+        session.task = task
+        session.turn_in_progress = True
+        queue: asyncio.Queue[dict[str, str]] = asyncio.Queue()
+        session.event_queues = [queue]
+
+        response = await client.post(f"/sessions/{session_id}/cancel")
+
+        assert response.status_code == 202
+        data = response.json()
+        assert data["session_id"] == session_id
+        assert data["status"] == "cancelling"
+        event = await asyncio.wait_for(queue.get(), timeout=1)
+        assert event["event"] == "TurnCancelling"
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    async def test_cancel_session_turn_is_idempotent_for_idle_session(self, client):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        response = await client.post(f"/sessions/{session_id}/cancel")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["session_id"] == session_id
+        assert data["status"] == "idle"
+
+    async def test_cancel_session_turn_rejects_non_owner(
+        self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv(
+            "CODING_AGENT_SERVER_CONFIG", str(_write_auth_config(tmp_path))
+        )
+        monkeypatch.setattr(settings, "http_api_key", None)
+
+        created = await client.post(
+            "/sessions",
+            headers={"Authorization": "Bearer admin-token"},
+            json={},
+        )
+
+        response = await client.post(
+            f"/sessions/{created.json()['session_id']}/cancel",
+            headers={"Authorization": "Bearer user-token-a"},
+        )
+
+        assert response.status_code == 404
+
+
 class TestCloseSession:
     """Tests for close session endpoint."""
 

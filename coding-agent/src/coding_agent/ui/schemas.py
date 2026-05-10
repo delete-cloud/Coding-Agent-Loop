@@ -85,6 +85,7 @@ class SessionSummaryResponse(BaseModel):
         "created", "running", "waiting_approval", "completed", "failed", "closed"
     ]
     turn_status: Literal["idle", "running", "cancelling", "cancelled", "failed"]
+    turn_id: str | None = None
     created_at: datetime
     updated_at: datetime
     last_activity: datetime
@@ -116,6 +117,14 @@ class CloseSessionResponse(BaseModel):
 
     status: str
     session_id: str
+
+
+class CancelSessionResponse(BaseModel):
+    """Response schema for session turn cancellation."""
+
+    session_id: str
+    turn_id: str | None = None
+    status: Literal["idle", "cancelling", "cancelled", "failed"]
 
 
 class CheckpointMetadataResponse(BaseModel):

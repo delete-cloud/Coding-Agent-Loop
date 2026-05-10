@@ -12,9 +12,16 @@ from agentkit.tools import FatalToolExecutionError
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
 from coding_agent.approval import ApprovalPolicy
-from coding_agent.environment import CloudCommandResult, CloudEnvironment, LocalEnvironment
+from coding_agent.environment import (
+    CloudCommandResult,
+    CloudEnvironment,
+    LocalEnvironment,
+)
 from coding_agent.ui.binding_resolver import DefaultBindingResolver
-from coding_agent.ui.execution_binding import CloudWorkspaceBinding, LocalExecutionBinding
+from coding_agent.ui.execution_binding import (
+    CloudWorkspaceBinding,
+    LocalExecutionBinding,
+)
 from coding_agent.ui.session_owner_store import SessionOwnershipConflictError
 from coding_agent.wire.protocol import (
     ApprovalRequest,
@@ -358,7 +365,9 @@ async def test_run_agent_reraises_owner_conflict_without_sending_error_turn() ->
 
 
 @pytest.mark.asyncio
-async def test_run_agent_reraises_fatal_tool_execution_error_without_sending_error_turn() -> None:
+async def test_run_agent_reraises_fatal_tool_execution_error_without_sending_error_turn() -> (
+    None
+):
     manager = SessionManager(store=InMemorySessionStore())
     session_id = await manager.create_session()
     session = manager.get_session(session_id)
@@ -490,6 +499,58 @@ async def test_shutdown_session_runtime_raises_if_task_survives_cancellation() -
 
     assert manager.has_session(session_id) is True
     assert fake_task.cancel_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_cancel_session_turn_returns_cancelling_for_active_turn() -> None:
+    manager = SessionManager(store=InMemorySessionStore())
+    session_id = await manager.create_session()
+    session = manager.get_session(session_id)
+    task = asyncio.create_task(asyncio.sleep(60))
+    session.task = task
+    session.turn_in_progress = True
+
+    result = await manager.cancel_session_turn(session_id)
+
+    assert result.session_id == session_id
+    assert result.status == "cancelling"
+    assert session.as_dict()["turn_status"] == "cancelling"
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_cancel_session_turn_exposes_cancelled_final_state() -> None:
+    manager = SessionManager(store=InMemorySessionStore())
+    session_id = await manager.create_session()
+    session = manager.get_session(session_id)
+    task = asyncio.create_task(asyncio.sleep(60))
+    session.task = task
+    session.turn_in_progress = True
+
+    await manager.cancel_session_turn(session_id)
+
+    for _ in range(20):
+        if session.as_dict()["turn_status"] == "cancelled":
+            break
+        await asyncio.sleep(0.01)
+
+    assert session.as_dict()["turn_status"] == "cancelled"
+    assert session.turn_in_progress is False
+    assert session.task is None
+
+
+@pytest.mark.asyncio
+async def test_cancel_session_turn_is_idempotent_for_idle_session() -> None:
+    manager = SessionManager(store=InMemorySessionStore())
+    session_id = await manager.create_session()
+
+    result = await manager.cancel_session_turn(session_id)
+
+    assert result.session_id == session_id
+    assert result.status == "idle"
+    assert manager.get_session(session_id).as_dict()["turn_status"] == "idle"
 
 
 @pytest.mark.asyncio
@@ -1578,7 +1639,9 @@ async def test_close_session_offloads_provisioned_cloud_cleanup(
         to_thread_calls.append((func, args))
         return func(*args)
 
-    monkeypatch.setattr("coding_agent.ui.session_manager.asyncio.to_thread", fake_to_thread)
+    monkeypatch.setattr(
+        "coding_agent.ui.session_manager.asyncio.to_thread", fake_to_thread
+    )
 
     await manager.close_session(session_id)
 
