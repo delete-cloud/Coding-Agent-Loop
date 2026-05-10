@@ -50,9 +50,11 @@ from coding_agent.ui.schemas import (
     CloseSessionResponse,
     HealthResponse,
     ReadinessResponse,
+    SessionListResponse,
+    SessionSummaryResponse,
     WorkspaceArchiveResponse,
 )
-from coding_agent.ui.auth import verify_api_key
+from coding_agent.ui.auth import AuthContext, auth_context_from_headers, verify_api_key
 from coding_agent.ui.execution_binding import (
     CloudWorkspaceBinding,
     ExecutionBinding,
@@ -506,6 +508,25 @@ def _session_to_dict(session: Session) -> dict[str, Any]:
     return session.as_dict()
 
 
+def _session_owner_label(session: Session) -> str | None:
+    origin = session.origin
+    if origin is None:
+        return None
+    owner_label = origin.get("owner_label")
+    return owner_label if isinstance(owner_label, str) and owner_label else None
+
+
+def _auth_context_can_access_session(
+    auth_context: AuthContext | None,
+    session: Session,
+) -> bool:
+    if auth_context is None:
+        return True
+    if auth_context.scope == "admin":
+        return True
+    return _session_owner_label(session) == auth_context.owner_label
+
+
 def _execution_binding_from_request(
     body: CreateSessionRequest | None,
 ) -> ExecutionBinding | None:
@@ -549,6 +570,7 @@ def _provisioned_execution_binding_from_request(
 def _session_origin_from_request(
     body: CreateSessionRequest | None,
     binding: ExecutionBinding | None,
+    auth_context: AuthContext | None = None,
 ) -> dict[str, str]:
     origin = {
         "channel": "http",
@@ -556,6 +578,9 @@ def _session_origin_from_request(
     }
     if body is not None and body.workspace_source is not None:
         origin["workspace_source_kind"] = body.workspace_source.kind
+    if auth_context is not None:
+        origin["owner_label"] = auth_context.owner_label
+        origin["auth_scope"] = auth_context.scope
     return origin
 
 
@@ -928,7 +953,7 @@ async def readiness_check(request: Request, response: Response) -> ReadinessResp
 async def create_session(
     request: Request,
     body: CreateSessionRequest | None = None,
-    api_key: str | None = Depends(verify_api_key),
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
 ) -> SessionResponse:
     """Create new session with AgentLoop integration."""
     # Use defaults if no body provided
@@ -965,7 +990,11 @@ async def create_session(
                 )
         session_id = await session_manager.create_session(
             repo_path=repo_path,
-            origin=_session_origin_from_request(body, execution_binding),
+            origin=_session_origin_from_request(
+                body,
+                execution_binding,
+                auth_context,
+            ),
             execution_binding=execution_binding,
             approval_policy=approval_policy,
             provider_name=body.provider if body else None,
@@ -1205,18 +1234,43 @@ async def get_events(
     return EventSourceResponse(event_generator())
 
 
-@app.get("/sessions/{session_id}")
+@app.get("/sessions", response_model=SessionListResponse)
+@limiter.limit(RateLimits.GET_SESSION)
+async def list_sessions(
+    request: Request,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> SessionListResponse:
+    del request
+    summaries: list[SessionSummaryResponse] = []
+    for session_id in await session_manager.list_sessions_async():
+        try:
+            session = await session_manager.get_session_async(session_id)
+        except KeyError:
+            continue
+        if not _auth_context_can_access_session(auth_context, session):
+            continue
+        summaries.append(SessionSummaryResponse(**session.as_dict()))
+    return SessionListResponse(sessions=summaries)
+
+
+@app.get("/sessions/{session_id}", response_model=SessionSummaryResponse)
 @limiter.limit(RateLimits.GET_SESSION)
 async def get_session(
     request: Request,
     session_id: str,
-    api_key: str | None = Depends(verify_api_key),
-) -> dict[str, Any]:
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> SessionSummaryResponse:
     """Get session state."""
-    if await session_manager.has_session_async(session_id):
-        return await session_manager.get_session_info_async(session_id)
+    del request
+    try:
+        session = await session_manager.get_session_async(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Session not found") from exc
 
-    raise HTTPException(status_code=404, detail="Session not found")
+    if not _auth_context_can_access_session(auth_context, session):
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    return SessionSummaryResponse(**session.as_dict())
 
 
 @app.get(

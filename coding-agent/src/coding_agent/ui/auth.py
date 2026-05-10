@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import logging
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal, cast
 
 from fastapi import Header, HTTPException, Depends
 from fastapi.security import APIKeyHeader
@@ -19,12 +22,76 @@ _SERVER_CONFIG_ENV = "CODING_AGENT_SERVER_CONFIG"
 logger = logging.getLogger(__name__)
 
 
-def _server_config_bearer_token() -> str | None:
+@dataclass(frozen=True)
+class AuthContext:
+    scope: Literal["user", "admin"]
+    token: str
+    token_digest: str
+    owner_label: str
+
+
+@dataclass(frozen=True)
+class _ConfiguredAuth:
+    bearer_token: str | None
+    admin_bearer_token: str | None
+    token_label_map: dict[str, str]
+
+
+def _token_digest(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _owner_label_for_token(token: str, token_label_map: dict[str, str]) -> str:
+    digest = _token_digest(token)
+    configured_label = token_label_map.get(digest)
+    if configured_label is not None:
+        if not configured_label.strip():
+            raise RuntimeError("server.token_label_map labels must be non-empty")
+        return configured_label.strip()
+    return f"owner:{digest}"
+
+
+def _env_token(server_config: dict[str, object], key: str) -> str | None:
+    value = server_config.get(key)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    token = os.environ.get(value.strip())
+    return token.strip() if token is not None and token.strip() else None
+
+
+def _direct_token(server_config: dict[str, object], key: str) -> str | None:
+    value = server_config.get(key)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip()
+
+
+def _token_label_map(server_config: dict[str, object]) -> dict[str, str]:
+    raw_map = server_config.get("token_label_map", {})
+    if raw_map is None:
+        return {}
+    if not isinstance(raw_map, dict):
+        raise RuntimeError("server.token_label_map must be a mapping")
+    labels: dict[str, str] = {}
+    for raw_digest, raw_label in cast(dict[object, object], raw_map).items():
+        if not isinstance(raw_digest, str) or not raw_digest.strip():
+            raise RuntimeError("server.token_label_map keys must be token digests")
+        if not isinstance(raw_label, str) or not raw_label.strip():
+            raise RuntimeError("server.token_label_map labels must be non-empty")
+        labels[raw_digest.strip()] = raw_label.strip()
+    return labels
+
+
+def _server_config_auth() -> _ConfiguredAuth:
     configured_path = os.environ.get(_SERVER_CONFIG_ENV)
     if configured_path is None or not configured_path.strip():
-        return None
+        return _ConfiguredAuth(
+            bearer_token=None,
+            admin_bearer_token=None,
+            token_label_map={},
+        )
     try:
-        server_config = load_agent_toml(
+        raw_server_config = load_agent_toml(
             Path(configured_path).expanduser().resolve()
         ).extra.get("server", {})
     except (ConfigError, OSError) as exc:
@@ -36,18 +103,90 @@ def _server_config_bearer_token() -> str | None:
         raise RuntimeError(
             f"failed to load explicit server config: {configured_path}"
         ) from exc
-    if not isinstance(server_config, dict):
+    if not isinstance(raw_server_config, dict):
+        return _ConfiguredAuth(
+            bearer_token=None,
+            admin_bearer_token=None,
+            token_label_map={},
+        )
+
+    server_config = cast(dict[str, object], raw_server_config)
+    return _ConfiguredAuth(
+        bearer_token=(
+            _env_token(server_config, "bearer_token_env")
+            or _direct_token(server_config, "bearer_token")
+        ),
+        admin_bearer_token=(
+            _env_token(server_config, "admin_bearer_token_env")
+            or _direct_token(server_config, "admin_bearer_token")
+        ),
+        token_label_map=_token_label_map(server_config),
+    )
+
+
+def _provided_tokens(
+    x_api_key: str | None,
+    authorization: str | None,
+) -> list[str]:
+    bearer_token: str | None = None
+    if authorization is not None:
+        scheme, _, value = authorization.partition(" ")
+        if scheme.lower() == "bearer" and value.strip():
+            bearer_token = value.strip()
+
+    provided_tokens: list[str] = []
+    if isinstance(x_api_key, str) and x_api_key.strip():
+        provided_tokens.append(x_api_key.strip())
+    if bearer_token is not None:
+        provided_tokens.append(bearer_token)
+    return provided_tokens
+
+
+async def auth_context_from_headers(
+    x_api_key: str | None = Header(None, alias="X-API-Key"),
+    authorization: str | None = Header(None, alias="Authorization"),
+) -> AuthContext | None:
+    try:
+        configured_auth = _server_config_auth()
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Server auth configuration unavailable",
+        ) from exc
+
+    http_api_key = getattr(settings, "http_api_key", None)
+    user_token = http_api_key or configured_auth.bearer_token
+    admin_token = configured_auth.admin_bearer_token
+    if not user_token and not admin_token:
         return None
 
-    bearer_token_env = server_config.get("bearer_token_env")
-    if isinstance(bearer_token_env, str) and bearer_token_env.strip():
-        token = os.environ.get(bearer_token_env.strip())
-        return token.strip() if token is not None and token.strip() else None
+    provided_tokens = _provided_tokens(x_api_key, authorization)
+    if not provided_tokens:
+        raise HTTPException(status_code=401, detail="API key required")
 
-    bearer_token = server_config.get("bearer_token")
-    if isinstance(bearer_token, str) and bearer_token.strip():
-        return bearer_token.strip()
-    return None
+    for provided_token in provided_tokens:
+        if admin_token is not None and provided_token == admin_token:
+            return AuthContext(
+                scope="admin",
+                token=provided_token,
+                token_digest=_token_digest(provided_token),
+                owner_label=_owner_label_for_token(
+                    provided_token,
+                    configured_auth.token_label_map,
+                ),
+            )
+        if user_token is not None and provided_token == user_token:
+            return AuthContext(
+                scope="user",
+                token=provided_token,
+                token_digest=_token_digest(provided_token),
+                owner_label=_owner_label_for_token(
+                    provided_token,
+                    configured_auth.token_label_map,
+                ),
+            )
+
+    raise HTTPException(status_code=401, detail="Invalid API key")
 
 
 async def verify_api_key(
@@ -68,37 +207,11 @@ async def verify_api_key(
     Raises:
         HTTPException: 401 if the API key is invalid.
     """
-    # No auth required if no key configured
-    try:
-        http_api_key = (
-            getattr(settings, "http_api_key", None) or _server_config_bearer_token()
-        )
-    except RuntimeError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail="Server auth configuration unavailable",
-        ) from exc
-    if not http_api_key:
-        return None
-
-    bearer_token: str | None = None
-    if authorization is not None:
-        scheme, _, value = authorization.partition(" ")
-        if scheme.lower() == "bearer" and value.strip():
-            bearer_token = value.strip()
-
-    provided_tokens: list[str] = []
-    if isinstance(x_api_key, str) and x_api_key.strip():
-        provided_tokens.append(x_api_key.strip())
-    if bearer_token is not None:
-        provided_tokens.append(bearer_token)
-    if not provided_tokens:
-        raise HTTPException(status_code=401, detail="API key required")
-
-    if http_api_key not in provided_tokens:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-
-    return http_api_key
+    context = await auth_context_from_headers(
+        x_api_key=x_api_key,
+        authorization=authorization,
+    )
+    return None if context is None else context.token
 
 
 # Convenience dependency

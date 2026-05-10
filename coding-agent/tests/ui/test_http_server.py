@@ -27,8 +27,8 @@ from agentkit.tools import FatalToolExecutionError
 
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.approval.store import ApprovalStore
+from coding_agent.core.config import settings
 from coding_agent.environment import CloudCommandResult, CloudEnvironment
-from coding_agent.ui.binding_resolver import CloudBindingNotImplementedError
 from coding_agent.ui.execution_binding import (
     CloudWorkspaceBinding,
     LocalExecutionBinding,
@@ -38,7 +38,6 @@ from coding_agent.ui.session_manager import Session
 from coding_agent.ui.session_owner_store import SessionOwnerRecord
 from coding_agent.ui.session_owner_store import SessionOwnershipConflictError
 from coding_agent.ui.http_server import (
-    APPROVAL_TIMEOUT_SECONDS,
     SESSION_IDLE_TIMEOUT_MINUTES,
     _build_binding_resolver,
     _build_session_manager,
@@ -140,6 +139,21 @@ def _safe_production_cloud_workspace_config() -> dict[str, object]:
         "memory": "4g",
         "pids_limit": 512,
     }
+
+
+def _write_auth_config(tmp_path: Path) -> Path:
+    config_path = tmp_path / "server.toml"
+    config_path.write_text(
+        _minimal_agent_toml(
+            """
+[server]
+bearer_token = "user-token-a"
+admin_bearer_token = "admin-token"
+"""
+        ),
+        encoding="utf-8",
+    )
+    return config_path
 
 
 def test_http_server_loads_config_from_explicit_server_config(
@@ -2815,6 +2829,121 @@ class TestLifespanShutdown:
 
 class TestGetSession:
     """Tests for get session endpoint."""
+
+    async def test_list_sessions_returns_only_sessions_owned_by_user_token(
+        self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv(
+            "CODING_AGENT_SERVER_CONFIG", str(_write_auth_config(tmp_path))
+        )
+        monkeypatch.setattr(settings, "http_api_key", None)
+
+        first = await client.post(
+            "/sessions",
+            headers={"Authorization": "Bearer user-token-a"},
+            json={},
+        )
+        second = await client.post(
+            "/sessions",
+            headers={"Authorization": "Bearer admin-token"},
+            json={},
+        )
+
+        assert first.status_code == 200
+        assert second.status_code == 200
+
+        response = await client.get(
+            "/sessions",
+            headers={"Authorization": "Bearer user-token-a"},
+        )
+
+        assert response.status_code == 200
+        assert [item["session_id"] for item in response.json()["sessions"]] == [
+            first.json()["session_id"]
+        ]
+
+    async def test_list_sessions_returns_all_sessions_for_admin_token(
+        self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv(
+            "CODING_AGENT_SERVER_CONFIG", str(_write_auth_config(tmp_path))
+        )
+        monkeypatch.setattr(settings, "http_api_key", None)
+
+        first = await client.post(
+            "/sessions",
+            headers={"Authorization": "Bearer user-token-a"},
+            json={},
+        )
+        second = await client.post(
+            "/sessions",
+            headers={"Authorization": "Bearer admin-token"},
+            json={},
+        )
+
+        response = await client.get(
+            "/sessions",
+            headers={"Authorization": "Bearer admin-token"},
+        )
+
+        assert response.status_code == 200
+        assert {item["session_id"] for item in response.json()["sessions"]} == {
+            first.json()["session_id"],
+            second.json()["session_id"],
+        }
+
+    async def test_get_session_response_includes_status_and_workspace_summary(
+        self, client: AsyncClient
+    ):
+        create_resp = await client.post(
+            "/sessions",
+            json={
+                "execution_binding": {
+                    "kind": "cloud",
+                    "workspace_url": "docker://agent-ws-owned/workspace",
+                    "workspace_id": "ws-owned",
+                },
+                "provider": "openai",
+                "model": "test-model",
+                "max_steps": 7,
+            },
+        )
+        session_id = create_resp.json()["session_id"]
+
+        response = await client.get(f"/sessions/{session_id}")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["session_id"] == session_id
+        assert data["id"] == session_id
+        assert data["status"] == "created"
+        assert data["turn_status"] == "idle"
+        assert data["execution_binding"]["kind"] == "cloud"
+        assert data["workspace_id"] == "ws-owned"
+        assert data["provider_name"] == "openai"
+        assert data["model_name"] == "test-model"
+        assert data["max_steps"] == 7
+
+    async def test_get_session_hides_other_user_session(
+        self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv(
+            "CODING_AGENT_SERVER_CONFIG", str(_write_auth_config(tmp_path))
+        )
+        monkeypatch.setattr(settings, "http_api_key", None)
+
+        created = await client.post(
+            "/sessions",
+            headers={"Authorization": "Bearer admin-token"},
+            json={},
+        )
+
+        response = await client.get(
+            f"/sessions/{created.json()['session_id']}",
+            headers={"Authorization": "Bearer user-token-a"},
+        )
+
+        assert response.status_code == 404
 
     async def test_get_session_not_found(self, client):
         """Test 404 when session doesn't exist."""
