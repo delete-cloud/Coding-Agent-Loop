@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import logging
 from pathlib import Path
 
 from fastapi import Header, HTTPException, Depends
@@ -15,6 +16,7 @@ from coding_agent.core.config import settings
 # API key header scheme
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 _SERVER_CONFIG_ENV = "CODING_AGENT_SERVER_CONFIG"
+logger = logging.getLogger(__name__)
 
 
 def _server_config_bearer_token() -> str | None:
@@ -26,6 +28,11 @@ def _server_config_bearer_token() -> str | None:
             Path(configured_path).expanduser().resolve()
         ).extra.get("server", {})
     except (ConfigError, OSError) as exc:
+        logger.exception(
+            "Failed to load explicit server auth config env=%s path=%s",
+            _SERVER_CONFIG_ENV,
+            configured_path,
+        )
         raise RuntimeError(
             f"failed to load explicit server config: {configured_path}"
         ) from exc
@@ -62,9 +69,15 @@ async def verify_api_key(
         HTTPException: 401 if the API key is invalid.
     """
     # No auth required if no key configured
-    http_api_key = (
-        getattr(settings, "http_api_key", None) or _server_config_bearer_token()
-    )
+    try:
+        http_api_key = (
+            getattr(settings, "http_api_key", None) or _server_config_bearer_token()
+        )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Server auth configuration unavailable",
+        ) from exc
     if not http_api_key:
         return None
 
@@ -74,14 +87,18 @@ async def verify_api_key(
         if scheme.lower() == "bearer" and value.strip():
             bearer_token = value.strip()
 
-    provided_token = x_api_key if isinstance(x_api_key, str) else bearer_token
-    if not provided_token:
+    provided_tokens: list[str] = []
+    if isinstance(x_api_key, str) and x_api_key.strip():
+        provided_tokens.append(x_api_key.strip())
+    if bearer_token is not None:
+        provided_tokens.append(bearer_token)
+    if not provided_tokens:
         raise HTTPException(status_code=401, detail="API key required")
 
-    if provided_token != http_api_key:
+    if http_api_key not in provided_tokens:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
-    return provided_token
+    return http_api_key
 
 
 # Convenience dependency

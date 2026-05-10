@@ -225,6 +225,11 @@ def test_production_config_accepts_safe_docker_workspace_config(
         ),
         (
             {"production": True, "bearer_token": "secret-token"},
+            {"max_active_workspaces": True},
+            "cloud_workspace.max_active_workspaces",
+        ),
+        (
+            {"production": True, "bearer_token": "secret-token"},
             {"max_workspace_age_seconds": 0},
             "cloud_workspace.max_workspace_age_seconds",
         ),
@@ -2484,7 +2489,7 @@ class TestLifespanShutdown:
             raise asyncio.CancelledError
 
         def fake_cleanup_stale(config: dict[str, object]) -> int:
-            assert config is cloud_workspace_config
+            assert config == {**cloud_workspace_config, "_active_workspace_ids": []}
             events.append("startup-gc")
             return 2
 
@@ -2522,6 +2527,49 @@ class TestLifespanShutdown:
 
         assert events == ["startup-gc", "close"]
 
+    async def test_cloud_workspace_gc_excludes_active_cloud_sessions(self, monkeypatch):
+        active_binding = CloudWorkspaceBinding(
+            workspace_url="docker://agent-ws-active/workspace",
+            workspace_id="ws-active",
+        )
+        session_id = await session_manager.create_session(
+            origin={
+                "binding_kind": "cloud",
+                "workspace_source_kind": "docker",
+            },
+            execution_binding=active_binding,
+        )
+        seen_configs: list[dict[str, object]] = []
+
+        def fake_cleanup_stale(config: dict[str, object]) -> int:
+            seen_configs.append(dict(config))
+            return 0
+
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            lambda: {
+                "enabled": True,
+                "provider": "docker",
+                "cleanup_on_startup": True,
+            },
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.cleanup_stale_cloud_workspaces_from_config",
+            fake_cleanup_stale,
+        )
+
+        await http_server._cleanup_cloud_workspaces_on_startup()
+
+        assert seen_configs == [
+            {
+                "enabled": True,
+                "provider": "docker",
+                "cleanup_on_startup": True,
+                "_active_workspace_ids": ["ws-active"],
+            }
+        ]
+        await session_manager.close_session(session_id)
+
     async def test_periodic_cloud_workspace_gc_runs_at_configured_interval(
         self, monkeypatch
     ):
@@ -2534,7 +2582,7 @@ class TestLifespanShutdown:
         }
 
         def fake_cleanup_stale(config: dict[str, object]) -> int:
-            assert config is cloud_workspace_config
+            assert config == {**cloud_workspace_config, "_active_workspace_ids": []}
             events.append("periodic-gc")
             return 1
 
@@ -2556,6 +2604,28 @@ class TestLifespanShutdown:
             await http_server._cleanup_stale_cloud_workspaces_periodically()
 
         assert events == ["periodic-gc", "sleep:300.0"]
+
+    def test_cloud_workspace_gc_interval_rejects_boolean_numeric_values(self):
+        assert (
+            http_server._cloud_workspace_gc_interval_seconds(
+                {
+                    "enabled": True,
+                    "gc_interval_seconds": True,
+                    "max_workspace_age_seconds": 3600,
+                }
+            )
+            is None
+        )
+        assert (
+            http_server._cloud_workspace_gc_interval_seconds(
+                {
+                    "enabled": True,
+                    "gc_interval_seconds": 300,
+                    "max_workspace_age_seconds": True,
+                }
+            )
+            is None
+        )
 
     async def test_lifespan_shutdown_continues_after_session_failure(self, monkeypatch):
         observed_shutdowns: list[str] = []

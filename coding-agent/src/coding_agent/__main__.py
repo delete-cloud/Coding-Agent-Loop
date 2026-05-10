@@ -154,7 +154,11 @@ def _server_cli_port(server_config: dict[str, Any], port: int | None) -> int:
     configured_port = server_config.get("port")
     if configured_port is None:
         return 8080
-    if not isinstance(configured_port, int) or configured_port <= 0:
+    if (
+        isinstance(configured_port, bool)
+        or not isinstance(configured_port, int)
+        or configured_port <= 0
+    ):
         raise click.ClickException("server.port must be a positive integer")
     return configured_port
 

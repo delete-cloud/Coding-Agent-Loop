@@ -8,6 +8,7 @@ import json
 from unittest.mock import patch
 
 import pytest
+from fastapi import HTTPException
 from httpx import AsyncClient, ASGITransport
 from httpx_sse import aconnect_sse
 
@@ -186,6 +187,32 @@ class TestApiKeyAuth:
         accepted = await verify_api_key(authorization="Bearer secret-token")
 
         assert accepted == "secret-token"
+
+    async def test_valid_bearer_token_is_accepted_when_x_api_key_is_stale(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.setattr(settings, "http_api_key", "secret-token")
+
+        accepted = await verify_api_key(
+            x_api_key="old-token",
+            authorization="Bearer secret-token",
+        )
+
+        assert accepted == "secret-token"
+
+    async def test_missing_explicit_server_config_denies_auth(
+        self,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.setenv("CODING_AGENT_SERVER_CONFIG", str(tmp_path / "missing.toml"))
+        monkeypatch.setattr(settings, "http_api_key", None)
+
+        with pytest.raises(HTTPException) as exc_info:
+            _ = await verify_api_key(authorization="Bearer secret-token")
+
+        assert exc_info.value.status_code == 503
 
     async def test_invalid_api_key_rejected(self, api_key_client):
         """Test that invalid API key is rejected."""

@@ -7,6 +7,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import threading
 import time
 import uuid
 from collections.abc import Iterable
@@ -32,6 +33,8 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+_WORKSPACE_QUOTA_LOCKS: dict[Path, threading.Lock] = {}
+_WORKSPACE_QUOTA_LOCKS_GUARD = threading.Lock()
 _WORKSPACE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DOCKER_TIMEOUT_KILL_AFTER_SECONDS = 2
@@ -362,12 +365,13 @@ class DockerWorkspaceProvider(WorkspaceProvider):
             )
 
         provider_config = _docker_workspace_provider_config(config)
-        _enforce_active_workspace_quota(provider_config)
-        workspace_id = f"ws-{uuid.uuid4().hex}"
-        workspace_root = _workspace_root_for_id(
-            provider_config.workspace_root, workspace_id
-        )
-        workspace_root.mkdir(parents=True, exist_ok=False)
+        with _quota_lock_for_workspace_root(provider_config.workspace_root):
+            _enforce_active_workspace_quota(provider_config)
+            workspace_id = f"ws-{uuid.uuid4().hex}"
+            workspace_root = _workspace_root_for_id(
+                provider_config.workspace_root, workspace_id
+            )
+            workspace_root.mkdir(parents=True, exist_ok=False)
         binding = CloudWorkspaceBinding(
             workspace_url=(
                 f"docker://{_container_name(provider_config, workspace_id)}{provider_config.container_workspace_root}"
@@ -465,7 +469,10 @@ class DockerWorkspaceProvider(WorkspaceProvider):
         provider_config = _docker_workspace_provider_config(config)
         if provider_config.max_workspace_age_seconds is None:
             return 0
-        return _cleanup_stale_docker_workspaces(provider_config)
+        return _cleanup_stale_docker_workspaces(
+            provider_config,
+            active_workspace_ids=_active_workspace_ids_from_config(config),
+        )
 
 
 def _docker_workspace_provider_config(
@@ -579,7 +586,7 @@ def _string_list(
 def _positive_int(value: object, *, key: str, default: int) -> int:
     if value is None:
         return default
-    if not isinstance(value, int) or value <= 0:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"cloud_workspace.{key} must be a positive integer")
     return value
 
@@ -587,7 +594,7 @@ def _positive_int(value: object, *, key: str, default: int) -> int:
 def _optional_positive_int(value: object, *, key: str) -> int | None:
     if value is None:
         return None
-    if not isinstance(value, int) or value <= 0:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"cloud_workspace.{key} must be a positive integer")
     return value
 
@@ -630,6 +637,15 @@ def _is_provider_workspace_id(name: str) -> bool:
     return name.startswith("ws-") and _WORKSPACE_ID_RE.fullmatch(name) is not None
 
 
+def _quota_lock_for_workspace_root(workspace_root: Path) -> threading.Lock:
+    with _WORKSPACE_QUOTA_LOCKS_GUARD:
+        lock = _WORKSPACE_QUOTA_LOCKS.get(workspace_root)
+        if lock is None:
+            lock = threading.Lock()
+            _WORKSPACE_QUOTA_LOCKS[workspace_root] = lock
+        return lock
+
+
 def _active_workspace_count(provider_config: _DockerWorkspaceProviderConfig) -> int:
     if not provider_config.workspace_root.exists():
         return 0
@@ -660,15 +676,21 @@ def _enforce_active_workspace_quota(
 
 def _cleanup_stale_docker_workspaces(
     provider_config: _DockerWorkspaceProviderConfig,
+    *,
+    active_workspace_ids: set[str] | None = None,
 ) -> int:
     assert provider_config.max_workspace_age_seconds is not None
     if not provider_config.workspace_root.exists():
         return 0
 
+    active_workspace_ids = active_workspace_ids or set()
     cutoff = time.time() - provider_config.max_workspace_age_seconds
     cleaned = 0
     for path in provider_config.workspace_root.iterdir():
         if not path.is_dir() or not _is_provider_workspace_id(path.name):
+            continue
+        if path.name in active_workspace_ids:
+            logger.info("Docker workspace GC skipped active workspace_id=%s", path.name)
             continue
         if path.stat().st_mtime >= cutoff:
             continue
@@ -678,6 +700,22 @@ def _cleanup_stale_docker_workspaces(
             shutil.rmtree(path)
         cleaned += 1
     return cleaned
+
+
+def _active_workspace_ids_from_config(config: dict[str, object]) -> set[str]:
+    raw_ids = config.get("_active_workspace_ids")
+    if raw_ids is None:
+        return set()
+    if not isinstance(raw_ids, list):
+        raise ValueError("cloud_workspace._active_workspace_ids must be a list")
+    active_ids: set[str] = set()
+    for raw_id in cast(list[object], raw_ids):
+        if not isinstance(raw_id, str) or not _is_provider_workspace_id(raw_id):
+            raise ValueError(
+                "cloud_workspace._active_workspace_ids must contain workspace ids"
+            )
+        active_ids.add(raw_id)
+    return active_ids
 
 
 def _container_name(

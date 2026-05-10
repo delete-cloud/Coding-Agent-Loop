@@ -134,7 +134,7 @@ def _load_server_config() -> dict[str, Any]:
 
 def _require_positive_int(config: dict[str, Any], key: str) -> None:
     value = config.get(key)
-    if not isinstance(value, int) or value <= 0:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"cloud_workspace.{key} must be a positive integer")
 
 
@@ -330,15 +330,40 @@ def _cloud_workspace_gc_interval_seconds(
         return None
     interval = cloud_workspace_config.get("gc_interval_seconds")
     max_age = cloud_workspace_config.get("max_workspace_age_seconds")
-    if not isinstance(interval, (int, float)) or interval <= 0:
+    if (
+        isinstance(interval, bool)
+        or not isinstance(interval, (int, float))
+        or interval <= 0
+    ):
         return None
-    if not isinstance(max_age, int) or max_age <= 0:
+    if isinstance(max_age, bool) or not isinstance(max_age, int) or max_age <= 0:
         return None
     return float(interval)
 
 
+async def _active_cloud_workspace_ids() -> set[str]:
+    active_workspace_ids: set[str] = set()
+    for session_id in await session_manager.list_sessions_async():
+        try:
+            session = await session_manager.get_session_async(session_id)
+        except KeyError:
+            continue
+        binding = session.execution_binding
+        if isinstance(binding, CloudWorkspaceBinding):
+            active_workspace_ids.add(binding.workspace_id)
+    return active_workspace_ids
+
+
+async def _cloud_workspace_gc_config() -> dict[str, Any]:
+    cloud_workspace_config = dict(_load_cloud_workspace_config())
+    cloud_workspace_config["_active_workspace_ids"] = sorted(
+        await _active_cloud_workspace_ids()
+    )
+    return cloud_workspace_config
+
+
 async def _cleanup_cloud_workspaces_on_startup() -> None:
-    cloud_workspace_config = _load_cloud_workspace_config()
+    cloud_workspace_config = await _cloud_workspace_gc_config()
     if cloud_workspace_config.get("enabled") is not True:
         return
     if cloud_workspace_config.get("cleanup_on_startup") is not True:
@@ -355,7 +380,7 @@ async def _cleanup_cloud_workspaces_on_startup() -> None:
 
 async def _cleanup_stale_cloud_workspaces_periodically() -> None:
     while True:
-        cloud_workspace_config = _load_cloud_workspace_config()
+        cloud_workspace_config = await _cloud_workspace_gc_config()
         interval = _cloud_workspace_gc_interval_seconds(cloud_workspace_config)
         if interval is None:
             return

@@ -104,6 +104,35 @@ def test_serve_config_uses_server_host_and_port_when_cli_omits_them(
     assert captured == {"host": "0.0.0.0", "port": 9000}
 
 
+def test_serve_config_rejects_boolean_port(tmp_path: Path) -> None:
+    config_path = tmp_path / "server.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[agent]",
+                'name = "test-agent"',
+                'model = "test-model"',
+                'provider = "openai"',
+                "",
+                "[server]",
+                "port = true",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        main,
+        ["serve", "--config", str(config_path)],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 1
+    assert "server.port must be a positive integer" in result.output
+
+
 def test_remote_repl_help_describes_one_shot_remote_run() -> None:
     runner = CliRunner()
 
