@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import stat
 from pathlib import Path
 
@@ -1157,7 +1158,7 @@ def test_remote_repl_with_repo_retains_session_when_extract_fails(
     tmp_path: Path, monkeypatch
 ) -> None:
     config_path = tmp_path / "remotes.json"
-    repo_path = tmp_path / "repo"
+    repo_path = tmp_path / "repo with spaces"
     repo_path.mkdir()
     monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
     runner = CliRunner()
@@ -1261,6 +1262,11 @@ def test_remote_repl_with_repo_retains_session_when_extract_fails(
     assert result.exit_code != 0
     assert "extract failed" in result.output
     assert "Remote session sess-upload left open" in result.output
+    assert (
+        "python -m coding_agent remote download dev --session sess-upload --repo "
+        + shlex.quote(str(repo_path))
+        in result.output
+    )
     assert "python -m coding_agent attach dev --session sess-upload" in result.output
     assert calls == [
         (
@@ -1402,6 +1408,11 @@ def test_remote_repl_with_repo_retains_session_when_stream_and_extract_fail(
     assert result.exit_code != 0
     assert "stream failed" in result.output
     assert "Remote session sess-upload left open" in result.output
+    assert (
+        "python -m coding_agent remote download dev --session sess-upload --repo "
+        + shlex.quote(str(repo_path))
+        in result.output
+    )
     assert "python -m coding_agent attach dev --session sess-upload" in result.output
     assert calls == [
         (
