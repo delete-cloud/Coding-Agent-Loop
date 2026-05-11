@@ -955,6 +955,28 @@ class TestSessionCreation:
         assert info["base_url"] == "http://llm.local/v1"
         assert info["max_steps"] == 9
 
+    async def test_create_session_accepts_deepseek_runtime_provider(self, client):
+        response = await client.post(
+            "/sessions",
+            json={
+                "provider": "deepseek",
+                "model": "deepseek-v4-pro",
+            },
+        )
+        assert response.status_code == 200
+
+        session = session_manager.get_session(response.json()["session_id"])
+
+        assert session.provider is None
+        assert session.provider_name == "deepseek"
+        assert session.model_name == "deepseek-v4-pro"
+
+        info_response = await client.get(f"/sessions/{response.json()['session_id']}")
+        assert info_response.status_code == 200
+        info = info_response.json()
+        assert info["provider_name"] == "deepseek"
+        assert info["model_name"] == "deepseek-v4-pro"
+
     async def test_create_session_rejects_invalid_runtime_provider(self, client):
         response = await client.post(
             "/sessions",
