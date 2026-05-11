@@ -7,6 +7,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from coding_agent.core.config import ProviderName
+
 
 class LocalExecutionBindingRequest(BaseModel):
     kind: Literal["local"]
@@ -41,17 +43,7 @@ class CreateSessionRequest(BaseModel):
     execution_binding: ExecutionBindingRequest | None = None
     workspace_source: WorkspaceSourceRequest | None = None
     approval_policy: str = Field("auto", pattern="^(yolo|interactive|auto)$")
-    provider: (
-        Literal[
-            "openai",
-            "anthropic",
-            "copilot",
-            "kimi",
-            "kimi-code",
-            "kimi-code-anthropic",
-        ]
-        | None
-    ) = None
+    provider: ProviderName | None = None
     model: str | None = Field(None, min_length=1, max_length=200)
     base_url: str | None = Field(None, min_length=1, max_length=500)
     max_steps: int | None = Field(None, ge=0)

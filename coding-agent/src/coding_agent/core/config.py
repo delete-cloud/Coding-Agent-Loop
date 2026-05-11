@@ -8,20 +8,22 @@ from typing import Literal
 
 from pydantic import BaseModel, SecretStr
 
+ProviderName = Literal[
+    "openai",
+    "anthropic",
+    "copilot",
+    "kimi",
+    "kimi-code",
+    "kimi-code-anthropic",
+    "deepseek",
+]
+
 
 class Config(BaseModel):
     """Validated agent configuration."""
 
     # Provider
-    provider: Literal[
-        "openai",
-        "anthropic",
-        "copilot",
-        "kimi",
-        "kimi-code",
-        "kimi-code-anthropic",
-        "deepseek",
-    ] = "openai"
+    provider: ProviderName = "openai"
     model: str = "gpt-4o"
     api_key: SecretStr | None = None
     base_url: str | None = None

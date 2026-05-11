@@ -105,6 +105,7 @@ class LLMProviderPlugin:
                 model=self._model,
                 api_key=api_key,
                 base_url="https://api.deepseek.com/anthropic",
+                thinking={"type": "disabled"},
             )
         else:
             raise ValueError(f"unsupported provider: {self._provider_name}")
