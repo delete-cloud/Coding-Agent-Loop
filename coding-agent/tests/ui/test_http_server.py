@@ -6,6 +6,7 @@ import asyncio
 import importlib
 import json
 import re
+import subprocess
 import sys
 import types
 from collections.abc import AsyncIterator, Callable
@@ -3668,7 +3669,13 @@ def test_http_server_import_falls_back_when_agent_toml_is_unreadable(
     monkeypatch,
 ) -> None:
     original_module = sys.modules.get("coding_agent.ui.http_server")
+    ui_module = sys.modules.get("coding_agent.ui")
+    original_parent_attr = (
+        getattr(ui_module, "http_server", None) if ui_module is not None else None
+    )
     monkeypatch.delitem(sys.modules, "coding_agent.ui.http_server", raising=False)
+    if ui_module is not None:
+        monkeypatch.delattr(ui_module, "http_server", raising=False)
 
     try:
         with patch("agentkit.config.loader.load_config") as load_config:
@@ -3686,11 +3693,19 @@ def test_http_server_import_falls_back_when_agent_toml_is_unreadable(
             )
         else:
             sys.modules["coding_agent.ui.http_server"] = original_module
+        if ui_module is not None and original_parent_attr is not None:
+            setattr(ui_module, "http_server", original_parent_attr)
 
 
 def test_http_server_import_raises_on_invalid_agent_toml(monkeypatch) -> None:
     original_module = sys.modules.get("coding_agent.ui.http_server")
+    ui_module = sys.modules.get("coding_agent.ui")
+    original_parent_attr = (
+        getattr(ui_module, "http_server", None) if ui_module is not None else None
+    )
     monkeypatch.delitem(sys.modules, "coding_agent.ui.http_server", raising=False)
+    if ui_module is not None:
+        monkeypatch.delattr(ui_module, "http_server", raising=False)
 
     try:
         with patch("agentkit.config.loader.load_config") as load_config:
@@ -3704,6 +3719,25 @@ def test_http_server_import_raises_on_invalid_agent_toml(monkeypatch) -> None:
             )
         else:
             sys.modules["coding_agent.ui.http_server"] = original_module
+        if ui_module is not None and original_parent_attr is not None:
+            setattr(ui_module, "http_server", original_parent_attr)
+
+
+def test_cli_module_import_does_not_eagerly_import_http_server(monkeypatch) -> None:
+    del monkeypatch
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; import coding_agent.__main__; "
+            "print('coding_agent.ui.http_server' in sys.modules)",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout.strip() == "False"
 
 
 class TestIntegration:
