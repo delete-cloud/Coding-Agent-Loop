@@ -13,6 +13,7 @@ import click
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.core.config import Config, load_config
 from coding_agent.postmortem_phase1 import build_phase1_artifacts
+from coding_agent.remote.approval import APPROVAL_POLICIES
 from coding_agent.ui.headless import HeadlessConsumer
 from coding_agent.ui.rich_tui import CodingAgentTUI
 from coding_agent.verification import VerificationRunner, load_task_packet_contract
@@ -27,6 +28,7 @@ from coding_agent.app import create_agent, create_child_pipeline  # noqa: F401
 CLI_PROVIDER_CHOICES = click.Choice(
     [str(provider) for provider in get_args(Config.model_fields["provider"].annotation)]
 )
+REMOTE_APPROVAL_CHOICES = click.Choice(APPROVAL_POLICIES)
 
 
 def _collect_shared_cli_args(
@@ -526,16 +528,34 @@ def remote_remove(name: str) -> None:
     "--goal", required=True, help="Initial prompt to send to the remote session"
 )
 @click.option(
+    "--approval",
+    "approval_policy",
+    default="auto",
+    show_default=True,
+    type=REMOTE_APPROVAL_CHOICES,
+    help="Remote tool approval policy for the created session.",
+)
+@click.option(
     "--yes",
     is_flag=True,
     help="Download and overwrite the local workspace without confirmation.",
 )
 def remote_repl(
-    name: str, repo: str | None, empty_workspace: bool, goal: str, yes: bool
+    name: str,
+    repo: str | None,
+    empty_workspace: bool,
+    goal: str,
+    approval_policy: str,
+    yes: bool,
 ) -> None:
     """Compatibility alias for remote run; creates a one-shot remote run."""
     _remote_run_once(
-        name=name, repo=repo, empty_workspace=empty_workspace, goal=goal, yes=yes
+        name=name,
+        repo=repo,
+        empty_workspace=empty_workspace,
+        goal=goal,
+        approval_policy=approval_policy,
+        yes=yes,
     )
 
 
@@ -555,16 +575,34 @@ def remote_repl(
     "--goal", required=True, help="Initial prompt to send to the remote session"
 )
 @click.option(
+    "--approval",
+    "approval_policy",
+    default="auto",
+    show_default=True,
+    type=REMOTE_APPROVAL_CHOICES,
+    help="Remote tool approval policy for the created session.",
+)
+@click.option(
     "--yes",
     is_flag=True,
     help="Download and overwrite the local workspace without confirmation.",
 )
 def remote_run(
-    name: str, repo: str | None, empty_workspace: bool, goal: str, yes: bool
+    name: str,
+    repo: str | None,
+    empty_workspace: bool,
+    goal: str,
+    approval_policy: str,
+    yes: bool,
 ) -> None:
     """Create a one-shot remote run and stream one prompt."""
     _remote_run_once(
-        name=name, repo=repo, empty_workspace=empty_workspace, goal=goal, yes=yes
+        name=name,
+        repo=repo,
+        empty_workspace=empty_workspace,
+        goal=goal,
+        approval_policy=approval_policy,
+        yes=yes,
     )
 
 
@@ -574,6 +612,7 @@ def _remote_run_once(
     repo: str | None,
     empty_workspace: bool,
     goal: str,
+    approval_policy: str,
     yes: bool,
 ) -> None:
     from coding_agent.remote.client import (
@@ -612,6 +651,7 @@ def _remote_run_once(
     session_id = create_remote_session(
         endpoint,
         snapshot_archive_base64=snapshot_archive_base64,
+        approval_policy=approval_policy,
     )
     click.echo(f"Created one-shot remote session {session_id} on remote {name}")
     status: int | None = None
