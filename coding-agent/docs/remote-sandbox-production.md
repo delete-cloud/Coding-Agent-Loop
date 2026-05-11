@@ -42,8 +42,8 @@ enabled = true
 provider = "docker"
 workspace_root = "/var/lib/coding-agent/workspaces"
 
-image = "coding-agent-runtime:2026-05-10"
-image_allowlist = ["coding-agent-runtime:2026-05-10"]
+image = "python:3.11-slim"
+image_allowlist = ["python:3.11-slim"]
 exec_user = "1000:1000"
 
 max_active_workspaces = 8
@@ -64,6 +64,14 @@ or `network = "none"` are missing or unsafe.
 Development mode is any config without `server.production = true`. It is useful
 for local testing and demos, but the server logs that the configuration is not
 safe for team production use.
+
+The workspace image is a runtime container, not the coding-agent server image.
+The Docker provider starts it by appending `sleep infinity` and later runs agent
+tools with `docker exec`. Use an image whose `ENTRYPOINT`/`CMD` allows that
+long-running command, or build a dedicated runtime image that does. Do not use a
+server image whose entrypoint starts `coding-agent serve`, because that entrypoint
+can treat `sleep infinity` as unexpected application arguments and fail before
+the workspace is created.
 
 ## Deployment Shapes
 
