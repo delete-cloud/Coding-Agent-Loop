@@ -396,6 +396,87 @@ def test_remote_run_creates_one_shot_remote_session(
     ]
 
 
+def test_remote_run_sends_configured_approval_policy(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_path = tmp_path / "remotes.json"
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example", "--token", "secret-token"],
+        catch_exceptions=False,
+    )
+    calls: list[tuple[str, str, dict[str, object] | None, dict[str, str]]] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"session_id": "sess-run"}
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            headers = kwargs.get("headers")
+            self.headers = headers if isinstance(headers, dict) else {}
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def post(
+            self, path: str, json: dict[str, object] | None = None
+        ) -> FakeResponse:
+            calls.append(("post", path, json, self.headers))
+            return FakeResponse()
+
+        def delete(self, path: str) -> FakeResponse:
+            calls.append(("delete", path, None, self.headers))
+            return FakeResponse()
+
+    def fake_stream_prompt(
+        *, base_url: str, session_id: str, prompt: str, headers: dict[str, str]
+    ) -> int:
+        calls.append(
+            (
+                "stream",
+                f"/sessions/{session_id}/prompt",
+                {"prompt": prompt, "base_url": base_url},
+                headers,
+            )
+        )
+        return 0
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+    monkeypatch.setattr("coding_agent.remote.client.stream_prompt", fake_stream_prompt)
+
+    result = runner.invoke(
+        main,
+        [
+            "remote",
+            "run",
+            "dev",
+            "--empty-workspace",
+            "--goal",
+            "hello",
+            "--approval",
+            "yolo",
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert calls[0] == (
+        "post",
+        "/sessions",
+        {"workspace_source": {"kind": "docker"}, "approval_policy": "yolo"},
+        {"Authorization": "Bearer secret-token"},
+    )
+
+
 def test_attach_streams_prompt_to_existing_session(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "remotes.json"
     monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
@@ -1655,6 +1736,38 @@ def test_handle_sse_event_formats_approval_after_inline_stream_output(
         '{\n  "command": "rm -rf scratch"\n}\n'
         "[y]=approve  [a]=approve all (session)  [n]=reject  [r]=reject with reason\n"
     )
+
+
+def test_remote_approval_abort_reports_actionable_noninteractive_error(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "coding_agent.remote.client.click.prompt",
+        lambda *args, **kwargs: (_ for _ in ()).throw(click.Abort()),
+    )
+
+    from coding_agent.remote.client import handle_sse_event
+
+    with pytest.raises(
+        click.ClickException,
+        match="Remote approval requires input",
+    ):
+        handle_sse_event(
+            base_url="http://agent.example",
+            session_id="sess-approval",
+            headers={},
+            event="ApprovalRequest",
+            data=json.dumps(
+                {
+                    "request_id": "req-1",
+                    "tool_call": {
+                        "tool_name": "bash_run",
+                        "arguments": {"command": "echo hi"},
+                        "call_id": "call-1",
+                    },
+                }
+            ),
+        )
 
 
 def test_remote_config_file_is_written_private(tmp_path: Path, monkeypatch) -> None:

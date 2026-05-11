@@ -144,7 +144,19 @@ coding-agent remote run team --repo . --goal "fix the failing test"
 final workspace through the archive manifest/archive API, overwrites the local
 checkout while preserving `.git`, and then closes the remote session. Use
 `--yes` only when the local checkout is already recoverable and you want to skip
-the manifest confirmation prompt.
+the manifest confirmation prompt; it does not approve tools.
+
+Set the remote tool approval policy explicitly when automation cannot answer
+approval prompts:
+
+```bash
+coding-agent remote run team --repo . --goal "fix the failing test" --approval yolo --yes
+```
+
+`--approval auto` is the default and can still ask for approval for tools such
+as `bash_run`. `--approval interactive` asks for every tool. `--approval yolo`
+lets the server approve tool calls for that one remote session, so use it only
+with trusted prompts and a recoverable local checkout.
 
 `remote repl` is a compatibility alias for this one-shot workflow. It is not a
 persistent REPL/TUI. `attach` sends one prompt to an existing session; the HTTP
@@ -171,7 +183,7 @@ workspace inspection and cleanup.
 
 For non-interactive automation, make approval behavior explicit. The current
 remote prompt stream can request approval for tools such as `bash_run`; provide
-stdin approval input or use a deployment policy that matches the workflow.
+stdin approval input or pass `--approval yolo` when that matches the workflow.
 
 ## Docker Security Boundary
 

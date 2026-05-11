@@ -124,13 +124,16 @@ def create_remote_session(
     endpoint: RemoteEndpoint,
     *,
     snapshot_archive_base64: str | None = None,
+    approval_policy: str = "auto",
 ) -> str:
+    if approval_policy not in {"auto", "interactive", "yolo"}:
+        raise click.ClickException(f"Unsupported approval policy: {approval_policy}")
     workspace_source: dict[str, object] = {"kind": "docker"}
     if snapshot_archive_base64 is not None:
         workspace_source["snapshot_archive_base64"] = snapshot_archive_base64
     payload: dict[str, object] = {
         "workspace_source": workspace_source,
-        "approval_policy": "auto",
+        "approval_policy": approval_policy,
     }
     try:
         with httpx.Client(
@@ -449,24 +452,29 @@ def _prompt_for_approval(payload: dict[str, object]) -> _ApprovalDecision:
     click.echo(
         "[y]=approve  [a]=approve all (session)  [n]=reject  [r]=reject with reason"
     )
-    choice = (
-        cast(str, click.prompt("→", default="n", show_default=False)).strip().lower()
-    )
+    choice = _approval_prompt("→", default="n").strip().lower()
     if choice in ("y", "yes"):
         return _ApprovalDecision(approved=True, scope="once")
     if choice in ("a", "all"):
         return _ApprovalDecision(approved=True, scope="session")
     if choice in ("r", "reason"):
-        feedback = cast(
-            str,
-            click.prompt("Reason", default="Rejected by user", show_default=False),
-        )
+        feedback = _approval_prompt("Reason", default="Rejected by user")
         return _ApprovalDecision(
             approved=False,
             feedback=feedback.strip() or "Rejected by user",
             scope="once",
         )
     return _ApprovalDecision(approved=False, feedback="Rejected by user", scope="once")
+
+
+def _approval_prompt(text: str, *, default: str) -> str:
+    try:
+        return cast(str, click.prompt(text, default=default, show_default=False))
+    except click.Abort as exc:
+        raise click.ClickException(
+            "Remote approval requires input; rerun with --approval yolo to let "
+            + "the server approve tools, or provide approval input on stdin."
+        ) from exc
 
 
 def _end_inline_stream_line(line_open: bool) -> bool:
