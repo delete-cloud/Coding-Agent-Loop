@@ -57,6 +57,13 @@ memory = "4g"
 pids_limit = 512
 ```
 
+`python:3.11-slim` is enough for basic file operations and pure-Python tools,
+but it is intentionally minimal. Shell-heavy workflows may need common utilities
+such as `bash`, `git`, `curl`, `build-essential`, `ffmpeg`, `imagemagick`, or
+language-specific toolchains. Build a custom runtime image when sessions need
+non-Python system packages, compiled binaries, or faster startup with
+preinstalled tooling.
+
 When `server.production = true`, startup fails if bearer auth, Docker workspace
 enablement, image allowlist, non-root `exec_user`, quota, GC, resource limits,
 or `network = "none"` are missing or unsafe.
