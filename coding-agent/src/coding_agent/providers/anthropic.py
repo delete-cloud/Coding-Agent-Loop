@@ -44,6 +44,7 @@ class AnthropicProvider:
         max_retries: int = 3,
         retry_base_delay: float = 1.0,
         retry_max_delay: float = 60.0,
+        thinking: dict[str, Any] | None = None,
     ):
         api_key_str = api_key
         if not isinstance(api_key, str):
@@ -58,6 +59,7 @@ class AnthropicProvider:
         self._max_retries = max_retries
         self._retry_base_delay = retry_base_delay
         self._retry_max_delay = retry_max_delay
+        self._thinking = thinking
         self.__client: AsyncAnthropic | None = None
 
     @property
@@ -143,18 +145,28 @@ class AnthropicProvider:
 
             elif role == "tool":
                 # Tool results → user message with tool_result content block
-                anthropic_msgs.append(
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": msg["tool_call_id"],
-                                "content": msg.get("content", ""),
-                            }
-                        ],
-                    }
-                )
+                tool_result_block = {
+                    "type": "tool_result",
+                    "tool_use_id": msg["tool_call_id"],
+                    "content": msg.get("content", ""),
+                }
+                if (
+                    anthropic_msgs
+                    and anthropic_msgs[-1]["role"] == "user"
+                    and isinstance(anthropic_msgs[-1].get("content"), list)
+                    and all(
+                        isinstance(block, dict) and block.get("type") == "tool_result"
+                        for block in anthropic_msgs[-1]["content"]
+                    )
+                ):
+                    anthropic_msgs[-1]["content"].append(tool_result_block)
+                else:
+                    anthropic_msgs.append(
+                        {
+                            "role": "user",
+                            "content": [tool_result_block],
+                        }
+                    )
 
         return "\n\n".join(system_parts), anthropic_msgs
 
@@ -202,6 +214,8 @@ class AnthropicProvider:
             api_kwargs["system"] = system_prompt
         if tools:
             api_kwargs["tools"] = self._convert_tools(tools)
+        if self._thinking is not None:
+            api_kwargs["thinking"] = self._thinking
 
         last_exception: Exception | None = None
 

@@ -147,6 +147,40 @@ def _load_server_config() -> dict[str, Any]:
     return _load_agent_config_section("server")
 
 
+def _load_agent_runtime_defaults() -> dict[str, Any]:
+    config_path = _server_config_path()
+    try:
+        config = load_agent_toml(config_path)
+    except (ConfigError, OSError) as exc:
+        if _has_explicit_server_config():
+            raise
+        if isinstance(exc, ConfigError):
+            detail = exc.args[0] if exc.args and isinstance(exc.args[0], str) else ""
+            if not detail.startswith("config file not found:"):
+                raise
+        return {}
+    defaults: dict[str, Any] = {
+        "provider": config.provider,
+        "model": config.model,
+        "max_steps": config.max_turns,
+    }
+    return defaults
+
+
+def _optional_config_string(value: object) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value
+    return None
+
+
+def _config_int_or_default(value: object, default: int) -> int:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int) and value >= 0:
+        return value
+    return default
+
+
 def _require_positive_int(config: dict[str, Any], key: str) -> None:
     value = config.get(key)
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
@@ -1006,6 +1040,7 @@ async def create_session(
     # Use defaults if no body provided
     repo_path = None if body is None or body.repo_path is None else Path(body.repo_path)
     approval_policy_str = body.approval_policy if body else "auto"
+    agent_defaults = _load_agent_runtime_defaults()
 
     # Map string to ApprovalPolicy enum
     approval_policy_map = {
@@ -1044,10 +1079,22 @@ async def create_session(
             ),
             execution_binding=execution_binding,
             approval_policy=approval_policy,
-            provider_name=body.provider if body else None,
-            model_name=body.model if body else None,
+            provider_name=(
+                body.provider
+                if body and body.provider is not None
+                else _optional_config_string(agent_defaults.get("provider"))
+            ),
+            model_name=(
+                body.model
+                if body and body.model is not None
+                else _optional_config_string(agent_defaults.get("model"))
+            ),
             base_url=body.base_url if body else None,
-            max_steps=body.max_steps if body and body.max_steps is not None else 30,
+            max_steps=(
+                body.max_steps
+                if body and body.max_steps is not None
+                else _config_int_or_default(agent_defaults.get("max_steps"), 30)
+            ),
         )
     except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
         if provisioned_binding is not None:

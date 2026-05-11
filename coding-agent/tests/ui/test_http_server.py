@@ -977,6 +977,31 @@ class TestSessionCreation:
         assert info["provider_name"] == "deepseek"
         assert info["model_name"] == "deepseek-v4-pro"
 
+    async def test_create_session_uses_explicit_server_agent_defaults(
+        self, client, monkeypatch, tmp_path
+    ):
+        config_path = tmp_path / "server.toml"
+        config_path.write_text(
+            """
+[agent]
+name = "test-agent"
+model = "deepseek-v4-pro"
+provider = "deepseek"
+max_turns = 17
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("CODING_AGENT_SERVER_CONFIG", str(config_path))
+
+        response = await client.post("/sessions", json={})
+        assert response.status_code == 200
+
+        session = session_manager.get_session(response.json()["session_id"])
+
+        assert session.provider_name == "deepseek"
+        assert session.model_name == "deepseek-v4-pro"
+        assert session.max_steps == 17
+
     async def test_create_session_rejects_invalid_runtime_provider(self, client):
         response = await client.post(
             "/sessions",

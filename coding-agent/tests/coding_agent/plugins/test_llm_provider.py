@@ -247,6 +247,18 @@ class TestDeepSeekProvider:
         assert isinstance(result, AnthropicProvider)
         assert result._base_url == "https://api.deepseek.com/anthropic"
 
+    def test_deepseek_disables_anthropic_thinking_mode(self):
+        plugin = LLMProviderPlugin(
+            provider="deepseek",
+            model="deepseek-v4-pro",
+            api_key="sk-deepseek-test",
+        )
+
+        result = plugin.provide_llm()
+
+        assert isinstance(result, AnthropicProvider)
+        assert result._thinking == {"type": "disabled"}
+
     def test_deepseek_api_key_env_fallback(self, monkeypatch):
         monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek-from-env")
         plugin = LLMProviderPlugin(

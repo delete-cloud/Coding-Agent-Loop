@@ -12,6 +12,11 @@ from coding_agent.providers.base import ToolCall, ToolSchema
 from agentkit.providers.models import TextEvent, ToolCallEvent, DoneEvent, UsageEvent
 
 
+async def _empty_async_iter():
+    if False:
+        yield None
+
+
 class TestAnthropicProviderInit:
     def test_init_basic(self):
         p = AnthropicProvider(model="claude-sonnet-4-20250514", api_key="sk-test")
@@ -94,6 +99,62 @@ class TestMessageConversion:
         assert tool_msg["role"] == "user"
         assert tool_msg["content"][0]["type"] == "tool_result"
         assert tool_msg["content"][0]["tool_use_id"] == "call_1"
+
+    def test_convert_groups_adjacent_tool_results_in_single_user_message(self):
+        p = AnthropicProvider(model="claude-sonnet-4-20250514", api_key="sk-test")
+        messages = [
+            {"role": "user", "content": "Edit files"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "file_replace",
+                            "arguments": json.dumps({"path": "task.txt"}),
+                        },
+                    },
+                    {
+                        "id": "call_2",
+                        "type": "function",
+                        "function": {
+                            "name": "file_write",
+                            "arguments": json.dumps({"path": "result.txt"}),
+                        },
+                    },
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": "Replaced in task.txt",
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_2",
+                "content": "Written result.txt",
+            },
+        ]
+
+        _, converted = p._convert_messages(messages)
+
+        assert len(converted) == 3
+        tool_msg = converted[2]
+        assert tool_msg["role"] == "user"
+        assert tool_msg["content"] == [
+            {
+                "type": "tool_result",
+                "tool_use_id": "call_1",
+                "content": "Replaced in task.txt",
+            },
+            {
+                "type": "tool_result",
+                "tool_use_id": "call_2",
+                "content": "Written result.txt",
+            },
+        ]
 
     def test_convert_tool_schemas(self):
         p = AnthropicProvider(model="claude-sonnet-4-20250514", api_key="sk-test")
@@ -252,6 +313,30 @@ class TestAnthropicStreaming:
         assert tool_events[0].name == "bash"
         assert tool_events[0].arguments == {"command": "ls"}
         assert tool_events[0].tool_call_id == "toolu_1"
+
+    @pytest.mark.asyncio
+    async def test_stream_passes_configured_thinking_mode(self):
+        p = AnthropicProvider(
+            model="deepseek-v4-pro",
+            api_key="sk-test",
+            thinking={"type": "disabled"},
+        )
+
+        mock_stream = MagicMock()
+        mock_stream.__aenter__ = AsyncMock(return_value=mock_stream)
+        mock_stream.__aexit__ = AsyncMock(return_value=False)
+        mock_stream.__aiter__ = lambda _self: _empty_async_iter()
+        p._client.messages.stream = MagicMock(return_value=mock_stream)
+
+        events = []
+        async for event in p.stream(messages=[{"role": "user", "content": "hi"}]):
+            events.append(event)
+
+        assert isinstance(events[-1], DoneEvent)
+        p._client.messages.stream.assert_called_once()
+        assert p._client.messages.stream.call_args.kwargs["thinking"] == {
+            "type": "disabled"
+        }
 
 
 class TestAnthropicUsageExtraction:
