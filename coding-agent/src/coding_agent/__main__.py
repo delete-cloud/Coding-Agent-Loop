@@ -170,9 +170,7 @@ def _server_cli_port(server_config: dict[str, Any], port: int | None) -> int:
 @click.option("--goal", required=True, help="Task goal for the agent")
 @click.option("--repo", default=".", help="Repository path")
 @click.option("--max-steps", default=30, help="Max steps per turn")
-@click.option(
-    "--approval", default="yolo", type=click.Choice(["yolo", "interactive", "auto"])
-)
+@click.option("--approval", default="yolo", type=REMOTE_APPROVAL_CHOICES)
 @click.option(
     "--parallel/--no-parallel", default=True, help="Enable parallel tool execution"
 )
