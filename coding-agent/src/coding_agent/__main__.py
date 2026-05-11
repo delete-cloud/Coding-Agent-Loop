@@ -936,7 +936,7 @@ def _download_and_restore_workspace(
     if not isinstance(total, int):
         raise click.ClickException("Remote workspace manifest missing total_bytes")
     click.echo(
-        f"Remote result contains {changed_count} changed files, {deleted_count} deleted files, {total} bytes"
+        f"Remote snapshot contains {changed_count} archived files, {deleted_count} deleted entries, {total} bytes"
     )
     click.echo(f"This will overwrite {repo_path} while preserving .git.")
     if not yes and not click.confirm("Continue?", default=False):

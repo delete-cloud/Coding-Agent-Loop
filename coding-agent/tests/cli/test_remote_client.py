@@ -764,7 +764,7 @@ def test_remote_download_fetches_manifest_and_confirms_before_overwrite(
 
     assert result.exit_code == 0
     assert (
-        "Remote result contains 2 changed files, 0 deleted files, 19 bytes"
+        "Remote snapshot contains 2 archived files, 0 deleted entries, 19 bytes"
         in result.output
     )
     assert "This will overwrite" in result.output
