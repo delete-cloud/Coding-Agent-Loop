@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import sys
 from pathlib import Path
 from collections.abc import Mapping
@@ -687,8 +688,39 @@ def _remote_run_once(
             click.echo(
                 f"Remote session {session_id} left open; local workspace restore failed."
             )
+            if repo_path is not None:
+                click.echo(
+                    "Retry download with: "
+                    + _format_cli_command(
+                        [
+                            "python",
+                            "-m",
+                            "coding_agent",
+                            "remote",
+                            "download",
+                            name,
+                            "--session",
+                            session_id,
+                            "--repo",
+                            str(repo_path),
+                        ]
+                    )
+                )
             click.echo(
-                f'Retry with: python -m coding_agent attach {name} --session {session_id} --goal "<goal>"'
+                "Continue prompting with: "
+                + _format_cli_command(
+                    [
+                        "python",
+                        "-m",
+                        "coding_agent",
+                        "attach",
+                        name,
+                        "--session",
+                        session_id,
+                        "--goal",
+                        "<goal>",
+                    ]
+                )
             )
         else:
             try:
@@ -713,6 +745,10 @@ def _remote_run_once(
         raise deferred_error
     assert status is not None
     raise SystemExit(status)
+
+
+def _format_cli_command(args: list[str]) -> str:
+    return " ".join(shlex.quote(arg) for arg in args)
 
 
 @remote.group("sessions")
