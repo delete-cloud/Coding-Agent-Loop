@@ -733,6 +733,138 @@ def test_docker_workspace_provider_applies_configured_container_hardening(
     ]
 
 
+def test_docker_workspace_provider_applies_requested_runtime_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_root.mkdir()
+    captured_command: list[str] = []
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        captured_command[:] = command
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    binding = provision_cloud_binding_from_config(
+        {
+            "provider": "docker",
+            "workspace_root": str(workspace_root),
+            "image": "python:3.11-slim",
+            "image_allowlist": [
+                "python:3.11-slim",
+                "registry.example/universal:2026-05-11",
+            ],
+            "runtime_profiles": {
+                "universal": {
+                    "provider": "docker",
+                    "image": "registry.example/universal:2026-05-11",
+                    "network": "none",
+                    "cpus": "4",
+                    "memory": "8g",
+                    "pids_limit": 1024,
+                    "exec_user": "1000:1000",
+                }
+            },
+        },
+        {"kind": "docker", "runtime_profile": "universal"},
+    )
+
+    assert binding.workspace_id.startswith("ws-")
+    assert captured_command == [
+        "docker",
+        "run",
+        "-d",
+        "--name",
+        binding.workspace_id,
+        "--network",
+        "none",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--pids-limit",
+        "1024",
+        "--cpus",
+        "4",
+        "--memory",
+        "8g",
+        "-v",
+        f"{workspace_root / binding.workspace_id}:/workspace",
+        "-w",
+        "/workspace",
+        "--user",
+        "1000:1000",
+        "registry.example/universal:2026-05-11",
+        "sleep",
+        "infinity",
+    ]
+
+
+def test_docker_workspace_provider_rejects_unknown_runtime_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_root.mkdir()
+
+    def fail_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del command, kwargs
+        raise AssertionError("docker run should not be called")
+
+    monkeypatch.setattr(subprocess, "run", fail_run)
+
+    with pytest.raises(
+        ValueError,
+        match=r"cloud_workspace.runtime_profile is not configured: missing",
+    ):
+        _ = provision_cloud_binding_from_config(
+            {
+                "provider": "docker",
+                "workspace_root": str(workspace_root),
+                "runtime_profiles": {},
+            },
+            {"kind": "docker", "runtime_profile": "missing"},
+        )
+
+
+def test_docker_workspace_provider_rejects_non_docker_runtime_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_root.mkdir()
+
+    def fail_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del command, kwargs
+        raise AssertionError("docker run should not be called")
+
+    monkeypatch.setattr(subprocess, "run", fail_run)
+
+    with pytest.raises(
+        ValueError,
+        match=r'cloud_workspace.runtime_profiles.universal.provider must be "docker"',
+    ):
+        _ = provision_cloud_binding_from_config(
+            {
+                "provider": "docker",
+                "workspace_root": str(workspace_root),
+                "runtime_profiles": {
+                    "universal": {
+                        "provider": "kubernetes",
+                        "image": "registry.example/universal:2026-05-11",
+                    }
+                },
+            },
+            {"kind": "docker", "runtime_profile": "universal"},
+        )
+
+
 def test_docker_workspace_provider_rejects_image_outside_allowlist(
     tmp_path: Path,
 ) -> None:

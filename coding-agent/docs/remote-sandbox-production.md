@@ -43,7 +43,10 @@ provider = "docker"
 workspace_root = "/var/lib/coding-agent/workspaces"
 
 image = "python:3.11-slim"
-image_allowlist = ["python:3.11-slim"]
+image_allowlist = [
+  "python:3.11-slim",
+  "ghcr.io/delete-cloud/coding-agent-universal:2026-05-11",
+]
 exec_user = "1000:1000"
 
 max_active_workspaces = 8
@@ -55,6 +58,16 @@ network = "none"
 cpus = "2"
 memory = "4g"
 pids_limit = 512
+
+[runtime_profiles.universal]
+provider = "docker"
+image = "ghcr.io/delete-cloud/coding-agent-universal:2026-05-11"
+network = "none"
+cpus = "2"
+memory = "4g"
+pids_limit = 512
+exec_user = "1000:1000"
+tools = ["python", "pip", "uv", "git", "rg", "curl"]
 ```
 
 `python:3.11-slim` is enough for basic file operations and pure-Python tools,
@@ -62,7 +75,9 @@ but it is intentionally minimal. Shell-heavy workflows may need common utilities
 such as `bash`, `git`, `curl`, `build-essential`, `ffmpeg`, `imagemagick`, or
 language-specific toolchains. Build a custom runtime image when sessions need
 non-Python system packages, compiled binaries, or faster startup with
-preinstalled tooling.
+preinstalled tooling. Runtime profiles such as `universal` are server-side
+allowlisted toolchain profiles; clients select them by name and never send
+arbitrary Docker image names.
 
 When `server.production = true`, startup fails if bearer auth, Docker workspace
 enablement, image allowlist, non-root `exec_user`, quota, GC, resource limits,
@@ -167,6 +182,16 @@ approval prompts:
 ```bash
 coding-agent remote run team --repo . --goal "fix the failing test" --approval yolo --yes
 ```
+
+Select a configured runtime profile when the project needs more tooling than the
+default smoke-test image:
+
+```bash
+coding-agent remote run team --repo . --runtime universal --goal "fix the failing test"
+```
+
+`--runtime` selects a profile from the server's `[runtime_profiles]` config. It
+does not allow the client or agent to choose an arbitrary Docker image.
 
 `--approval auto` is the default and can still ask for approval for tools such
 as `bash_run`. `--approval interactive` asks for every tool. `--approval yolo`

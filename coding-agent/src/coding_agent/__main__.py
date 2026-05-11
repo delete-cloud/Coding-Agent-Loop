@@ -458,16 +458,26 @@ def serve(port: int | None, host: str | None, config_path: Path | None):
     """Start HTTP API server."""
     import uvicorn
 
+    previous_server_config = os.environ.get("CODING_AGENT_SERVER_CONFIG")
     if config_path is not None:
         os.environ["CODING_AGENT_SERVER_CONFIG"] = str(config_path.resolve())
-    server_config = _load_server_cli_settings(config_path)
-    resolved_host = _server_cli_host(server_config, host)
-    resolved_port = _server_cli_port(server_config, port)
+    try:
+        server_config = _load_server_cli_settings(config_path)
+        resolved_host = _server_cli_host(server_config, host)
+        resolved_port = _server_cli_port(server_config, port)
 
-    from coding_agent.ui.http_server import app
+        from coding_agent.ui.http_server import app
 
-    click.echo(f"Starting Coding Agent HTTP server on {resolved_host}:{resolved_port}")
-    uvicorn.run(app, host=resolved_host, port=resolved_port)
+        click.echo(
+            f"Starting Coding Agent HTTP server on {resolved_host}:{resolved_port}"
+        )
+        uvicorn.run(app, host=resolved_host, port=resolved_port)
+    finally:
+        if config_path is not None:
+            if previous_server_config is None:
+                os.environ.pop("CODING_AGENT_SERVER_CONFIG", None)
+            else:
+                os.environ["CODING_AGENT_SERVER_CONFIG"] = previous_server_config
 
 
 @main.group()
@@ -524,6 +534,12 @@ def remote_remove(name: str) -> None:
     help="Create an empty server-side Docker workspace.",
 )
 @click.option(
+    "--runtime",
+    "runtime_profile",
+    default=None,
+    help="Use a server allowlisted runtime profile for the remote workspace.",
+)
+@click.option(
     "--goal", required=True, help="Initial prompt to send to the remote session"
 )
 @click.option(
@@ -543,6 +559,7 @@ def remote_repl(
     name: str,
     repo: str | None,
     empty_workspace: bool,
+    runtime_profile: str | None,
     goal: str,
     approval_policy: str,
     yes: bool,
@@ -552,6 +569,7 @@ def remote_repl(
         name=name,
         repo=repo,
         empty_workspace=empty_workspace,
+        runtime_profile=runtime_profile,
         goal=goal,
         approval_policy=approval_policy,
         yes=yes,
@@ -569,6 +587,12 @@ def remote_repl(
     "--empty-workspace",
     is_flag=True,
     help="Create an empty server-side Docker workspace.",
+)
+@click.option(
+    "--runtime",
+    "runtime_profile",
+    default=None,
+    help="Use a server allowlisted runtime profile for the remote workspace.",
 )
 @click.option(
     "--goal", required=True, help="Initial prompt to send to the remote session"
@@ -590,6 +614,7 @@ def remote_run(
     name: str,
     repo: str | None,
     empty_workspace: bool,
+    runtime_profile: str | None,
     goal: str,
     approval_policy: str,
     yes: bool,
@@ -599,6 +624,7 @@ def remote_run(
         name=name,
         repo=repo,
         empty_workspace=empty_workspace,
+        runtime_profile=runtime_profile,
         goal=goal,
         approval_policy=approval_policy,
         yes=yes,
@@ -610,6 +636,7 @@ def _remote_run_once(
     name: str,
     repo: str | None,
     empty_workspace: bool,
+    runtime_profile: str | None,
     goal: str,
     approval_policy: str,
     yes: bool,
@@ -651,6 +678,7 @@ def _remote_run_once(
         endpoint,
         snapshot_archive_base64=snapshot_archive_base64,
         approval_policy=approval_policy,
+        runtime_profile=runtime_profile,
     )
     click.echo(f"Created one-shot remote session {session_id} on remote {name}")
     status: int | None = None

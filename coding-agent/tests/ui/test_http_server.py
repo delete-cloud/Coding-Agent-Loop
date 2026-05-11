@@ -185,6 +185,46 @@ workspace_root = "/srv/coding-agent/workspaces"
     )
 
 
+def test_http_server_loads_runtime_profiles_into_cloud_workspace_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "server.toml"
+    config_path.write_text(
+        _minimal_agent_toml(
+            """
+[cloud_workspace]
+enabled = true
+provider = "docker"
+workspace_root = "/srv/coding-agent/workspaces"
+
+[runtime_profiles.universal]
+provider = "docker"
+image = "registry.example/universal:2026-05-11"
+network = "none"
+cpus = "2"
+memory = "4g"
+pids_limit = 512
+exec_user = "1000:1000"
+"""
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODING_AGENT_SERVER_CONFIG", str(config_path))
+
+    assert http_server._load_cloud_workspace_config()["runtime_profiles"] == {
+        "universal": {
+            "provider": "docker",
+            "image": "registry.example/universal:2026-05-11",
+            "network": "none",
+            "cpus": "2",
+            "memory": "4g",
+            "pids_limit": 512,
+            "exec_user": "1000:1000",
+        }
+    }
+
+
 def test_http_server_explicit_server_config_missing_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

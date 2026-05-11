@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -9,7 +10,11 @@ from coding_agent.ui.binding_resolver import (
     CloudBindingNotImplementedError,
     DefaultBindingResolver,
 )
-from coding_agent.environment import CloudCommandResult, CloudEnvironment, LocalEnvironment
+from coding_agent.environment import (
+    CloudCommandResult,
+    CloudEnvironment,
+    LocalEnvironment,
+)
 from coding_agent.environment import workspace_provider as workspace_provider_module
 from coding_agent.environment.workspace_provider import (
     CloudWorkspaceSource,
@@ -17,6 +22,7 @@ from coding_agent.environment.workspace_provider import (
     cloud_workspace_ready_from_config,
     provision_cloud_binding_from_config,
     register_workspace_provider,
+    WorkspaceProvider,
 )
 from coding_agent.ui.execution_binding import (
     CloudWorkspaceBinding,
@@ -84,6 +90,19 @@ def test_cloud_binding_round_trip() -> None:
     assert isinstance(restored, CloudWorkspaceBinding)
     assert restored.workspace_url == "https://workspace.example.com"
     assert restored.workspace_id == "ws-123"
+
+
+def test_cloud_binding_round_trip_preserves_runtime_profile() -> None:
+    binding = CloudWorkspaceBinding(
+        workspace_url="https://workspace.example.com",
+        workspace_id="ws-123",
+        runtime_profile="universal",
+    )
+
+    restored = ExecutionBinding.from_dict(binding.to_dict())
+
+    assert isinstance(restored, CloudWorkspaceBinding)
+    assert restored.runtime_profile == "universal"
 
 
 def test_unknown_binding_kind_raises() -> None:
@@ -262,7 +281,9 @@ def test_cloud_workspace_provider_registry_builds_factory(
 ) -> None:
     monkeypatch.setattr(workspace_provider_module, "_WORKSPACE_PROVIDERS", {})
     provider = FakeWorkspaceProvider()
-    register_workspace_provider("fake-provider", provider)
+    register_workspace_provider(
+        "fake-provider", cast(WorkspaceProvider, cast(object, provider))
+    )
 
     factory = cloud_client_factory_from_config(
         {
@@ -297,7 +318,9 @@ def test_workspace_provider_registry_provisions_binding(
 ) -> None:
     monkeypatch.setattr(workspace_provider_module, "_WORKSPACE_PROVIDERS", {})
     provider = FakeWorkspaceProvider()
-    register_workspace_provider("fake-provider", provider)
+    register_workspace_provider(
+        "fake-provider", cast(WorkspaceProvider, cast(object, provider))
+    )
 
     binding = provision_cloud_binding_from_config(
         {
@@ -316,7 +339,9 @@ def test_workspace_provider_registry_checks_readiness(
 ) -> None:
     monkeypatch.setattr(workspace_provider_module, "_WORKSPACE_PROVIDERS", {})
     provider = FakeWorkspaceProvider()
-    register_workspace_provider("fake-provider", provider)
+    register_workspace_provider(
+        "fake-provider", cast(WorkspaceProvider, cast(object, provider))
+    )
 
     ready = cloud_workspace_ready_from_config(
         {
