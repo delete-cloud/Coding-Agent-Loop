@@ -1750,7 +1750,7 @@ def test_remote_approval_abort_reports_actionable_noninteractive_error(
 
     with pytest.raises(
         click.ClickException,
-        match="Remote approval requires input",
+        match=r"Remote approval requires input.*--approval yolo.*stdin",
     ):
         handle_sse_event(
             base_url="http://agent.example",

@@ -14,6 +14,8 @@ import click
 import httpx
 from httpx_sse import connect_sse
 
+from coding_agent.remote.approval import APPROVAL_POLICIES
+
 
 @dataclass(frozen=True)
 class RemoteEndpoint:
@@ -126,7 +128,7 @@ def create_remote_session(
     snapshot_archive_base64: str | None = None,
     approval_policy: str = "auto",
 ) -> str:
-    if approval_policy not in {"auto", "interactive", "yolo"}:
+    if approval_policy not in APPROVAL_POLICIES:
         raise click.ClickException(f"Unsupported approval policy: {approval_policy}")
     workspace_source: dict[str, object] = {"kind": "docker"}
     if snapshot_archive_base64 is not None:

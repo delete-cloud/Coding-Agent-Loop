@@ -13,6 +13,7 @@ import click
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.core.config import Config, load_config
 from coding_agent.postmortem_phase1 import build_phase1_artifacts
+from coding_agent.remote.approval import APPROVAL_POLICIES
 from coding_agent.ui.headless import HeadlessConsumer
 from coding_agent.ui.rich_tui import CodingAgentTUI
 from coding_agent.verification import VerificationRunner, load_task_packet_contract
@@ -27,7 +28,7 @@ from coding_agent.app import create_agent, create_child_pipeline  # noqa: F401
 CLI_PROVIDER_CHOICES = click.Choice(
     [str(provider) for provider in get_args(Config.model_fields["provider"].annotation)]
 )
-REMOTE_APPROVAL_CHOICES = click.Choice(["auto", "interactive", "yolo"])
+REMOTE_APPROVAL_CHOICES = click.Choice(APPROVAL_POLICIES)
 
 
 def _collect_shared_cli_args(
