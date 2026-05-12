@@ -258,6 +258,13 @@ def _validate_production_remote_phases(
     if setup_phase is not None:
         if not isinstance(setup_phase, dict):
             raise ValueError("remote_phases.setup must be a table")
+        allow_request_commands = setup_phase.get("allow_request_commands")
+        if allow_request_commands is not None and not isinstance(
+            allow_request_commands, bool
+        ):
+            raise ValueError(
+                "remote_phases.setup.allow_request_commands must be a boolean"
+            )
         if setup_phase.get("enabled") is True:
             if setup_phase.get("network") not in {"none", "bridge"}:
                 raise ValueError(
@@ -282,13 +289,13 @@ def _validate_production_remote_phases(
                 section="remote_phases.setup",
                 key="secret_env_allowlist",
             )
-        allow_request_commands = setup_phase.get("allow_request_commands")
-        if allow_request_commands is not None and not isinstance(
-            allow_request_commands, bool
-        ):
-            raise ValueError(
-                "remote_phases.setup.allow_request_commands must be a boolean"
-            )
+            commands = setup_phase.get("commands")
+            has_configured_commands = isinstance(commands, list) and len(commands) > 0
+            if not has_configured_commands and allow_request_commands is not True:
+                raise ValueError(
+                    "remote_phases.setup must provide non-empty 'commands' "
+                    "or set 'allow_request_commands' to true"
+                )
 
     agent_phase = remote_phases.get("agent")
     if agent_phase is not None:
@@ -792,6 +799,19 @@ def _validate_workspace_source_phase_policy(
     setup_commands = workspace_source.get("setup_commands")
     if setup_commands is None:
         return
+    remote_phases = cloud_workspace_config.get("remote_phases")
+    setup_phase = (
+        remote_phases.get("setup") if isinstance(remote_phases, dict) else None
+    )
+    allow_request_commands = (
+        isinstance(setup_phase, dict)
+        and setup_phase.get("allow_request_commands") is True
+    )
+    if not allow_request_commands:
+        raise ValueError(
+            "workspace_source.setup_commands requires "
+            "remote_phases.setup.allow_request_commands=true"
+        )
     raise ValueError("setup phase execution is not implemented yet")
 
 

@@ -66,10 +66,10 @@ memory = "4g"
 tools = ["python", "pip", "uv", "git", "rg", "curl"]
 
 [remote_phases.setup]
-enabled = true
+enabled = false
 network = "bridge"
 timeout_seconds = 600
-commands = [] # Minimal/no-setup baseline; replace with project bootstrap commands when needed.
+commands = [] # Enable setup and populate this with trusted bootstrap commands when needed.
 secret_env_allowlist = ["PIP_INDEX_URL", "GITHUB_TOKEN"]
 allow_request_commands = false
 
@@ -102,11 +102,13 @@ or `network = "none"` are missing or unsafe.
 setup phase may be configured for dependency bootstrap with explicit commands,
 limited network, and allowlisted setup secrets. The agent phase remains
 secret-free by default and must use `network = "none"` in production. The
-example above uses `commands = []` as a minimal no-setup baseline; populate it
-with project-specific bootstrap commands when dependency installation is
-required. Request-provided setup commands are not exposed by the current CLI and
-are rejected until setup phase execution lands in a later implementation slice.
-The agent cannot enable setup dynamically from a prompt.
+example above disables setup as a minimal no-setup baseline. To enable setup in
+production, set `enabled = true` and provide either non-empty trusted
+server-configured `commands` or explicitly opt in to request-provided commands
+with `allow_request_commands = true`. Request-provided setup commands are not
+exposed by the current CLI and are rejected until setup phase execution lands in
+a later implementation slice. The agent cannot enable setup dynamically from a
+prompt.
 
 Setup secrets are injected only into setup execution. This does not guarantee a
 setup command cannot write a secret into workspace files; keep setup commands

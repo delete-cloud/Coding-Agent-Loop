@@ -427,6 +427,23 @@ def test_production_config_accepts_safe_docker_workspace_config(
                         "enabled": True,
                         "network": "bridge",
                         "timeout_seconds": 600,
+                        "commands": [],
+                        "allow_request_commands": False,
+                    },
+                    "agent": {"network": "none"},
+                }
+            },
+            "remote_phases.setup must provide non-empty 'commands' or set 'allow_request_commands' to true",
+        ),
+        (
+            {"production": True, "bearer_token": "secret-token"},
+            {
+                "remote_phases": {
+                    "setup": {
+                        "enabled": True,
+                        "network": "bridge",
+                        "timeout_seconds": 600,
+                        "commands": ["uv sync"],
                     },
                     "agent": {"network": "bridge"},
                 }
@@ -485,6 +502,47 @@ async def test_http_create_session_rejects_request_setup_commands_until_executio
 
     assert response.status_code == 400
     assert response.json()["detail"] == ("setup phase execution is not implemented yet")
+
+
+@pytest.mark.asyncio
+async def test_http_create_session_rejects_request_setup_commands_when_policy_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cloud_workspace_config = _safe_production_cloud_workspace_config()
+    cloud_workspace_config["remote_phases"] = {
+        "setup": {
+            "enabled": True,
+            "network": "bridge",
+            "timeout_seconds": 600,
+            "commands": ["uv sync"],
+            "allow_request_commands": False,
+        },
+        "agent": {"network": "none"},
+    }
+    monkeypatch.setattr(
+        "coding_agent.ui.http_server._load_cloud_workspace_config",
+        lambda: cloud_workspace_config,
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/sessions",
+            json={
+                "workspace_source": {
+                    "kind": "docker",
+                    "setup_commands": ["uv sync"],
+                }
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "workspace_source.setup_commands requires "
+        "remote_phases.setup.allow_request_commands=true"
+    )
 
 
 @pytest.mark.asyncio
