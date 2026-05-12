@@ -874,18 +874,21 @@ def test_docker_workspace_provider_removes_workspace_when_snapshot_import_fails_
 ) -> None:
     workspace_root = tmp_path / "workspaces"
     workspace_root.mkdir()
+    docker_run_called = False
 
     def fake_run(
         command: list[str], **kwargs: object
     ) -> subprocess.CompletedProcess[str]:
+        nonlocal docker_run_called
         del kwargs
-        raise RuntimeError(
+        docker_run_called = True
+        raise AssertionError(
             f"docker cleanup should not run before containers: {command}"
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="workspace archive must be valid base64"):
         _ = provision_cloud_binding_from_config(
             _docker_config(
                 {
@@ -899,6 +902,59 @@ def test_docker_workspace_provider_removes_workspace_when_snapshot_import_fails_
             },
         )
 
+    assert docker_run_called is False
+    assert list(workspace_root.iterdir()) == []
+
+
+def test_docker_workspace_provider_removes_workspace_when_setup_validation_fails_before_containers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_root.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    _ = (source / "README.md").write_text("uploaded\n", encoding="utf-8")
+    docker_run_called = False
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal docker_run_called
+        del kwargs
+        docker_run_called = True
+        raise AssertionError(
+            f"docker cleanup should not run before containers: {command}"
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(
+        ValueError, match='remote_phases.setup.network must be "none" or "bridge"'
+    ):
+        _ = provision_cloud_binding_from_config(
+            _docker_config(
+                {
+                    "workspace_root": str(workspace_root),
+                    "docker_binary": "/usr/bin/docker",
+                    "remote_phases": {
+                        "setup": {
+                            "enabled": True,
+                            "network": "invalid",
+                            "timeout_seconds": 600,
+                            "commands": ["test -f README.md"],
+                            "secret_env_allowlist": [],
+                        },
+                        "agent": {"network": "none"},
+                    },
+                }
+            ),
+            {
+                "kind": "docker",
+                "snapshot_archive_base64": create_workspace_archive_base64(source),
+            },
+        )
+
+    assert docker_run_called is False
     assert list(workspace_root.iterdir()) == []
 
 
