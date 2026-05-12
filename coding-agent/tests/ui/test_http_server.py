@@ -240,6 +240,54 @@ memory = "4g"
     }
 
 
+def test_http_server_loads_remote_phases_into_cloud_workspace_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "server.toml"
+    config_path.write_text(
+        _minimal_agent_toml(
+            """
+[cloud_workspace]
+enabled = true
+provider = "docker"
+workspace_root = "/srv/coding-agent/workspaces"
+
+[remote_phases.setup]
+enabled = true
+network = "bridge"
+timeout_seconds = 600
+commands = ["uv sync"]
+secret_env_allowlist = ["PIP_INDEX_URL"]
+allow_request_commands = false
+
+[remote_phases.agent]
+network = "none"
+timeout_seconds = 3600
+secret_env_allowlist = []
+"""
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODING_AGENT_SERVER_CONFIG", str(config_path))
+
+    assert http_server._load_cloud_workspace_config()["remote_phases"] == {
+        "setup": {
+            "enabled": True,
+            "network": "bridge",
+            "timeout_seconds": 600,
+            "commands": ["uv sync"],
+            "secret_env_allowlist": ["PIP_INDEX_URL"],
+            "allow_request_commands": False,
+        },
+        "agent": {
+            "network": "none",
+            "timeout_seconds": 3600,
+            "secret_env_allowlist": [],
+        },
+    }
+
+
 def test_http_server_explicit_server_config_missing_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -343,6 +391,48 @@ def test_production_config_accepts_safe_docker_workspace_config(
             {"network": "bridge"},
             'cloud_workspace.network must be "none"',
         ),
+        (
+            {"production": True, "bearer_token": "secret-token"},
+            {
+                "remote_phases": {
+                    "setup": {
+                        "enabled": True,
+                        "network": "host",
+                        "timeout_seconds": 600,
+                    },
+                    "agent": {"network": "none"},
+                }
+            },
+            'remote_phases.setup.network must be "none" or "bridge"',
+        ),
+        (
+            {"production": True, "bearer_token": "secret-token"},
+            {
+                "remote_phases": {
+                    "setup": {
+                        "enabled": True,
+                        "network": "bridge",
+                        "timeout_seconds": 0,
+                    },
+                    "agent": {"network": "none"},
+                }
+            },
+            "remote_phases.setup.timeout_seconds",
+        ),
+        (
+            {"production": True, "bearer_token": "secret-token"},
+            {
+                "remote_phases": {
+                    "setup": {
+                        "enabled": True,
+                        "network": "bridge",
+                        "timeout_seconds": 600,
+                    },
+                    "agent": {"network": "bridge"},
+                }
+            },
+            'remote_phases.agent.network must be "none"',
+        ),
     ],
 )
 def test_production_config_rejects_unsafe_remote_workspace_config(
@@ -358,6 +448,137 @@ def test_production_config_rejects_unsafe_remote_workspace_config(
             server_config,
             cloud_workspace_config,
         )
+
+
+@pytest.mark.asyncio
+async def test_http_create_session_rejects_request_setup_commands_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cloud_workspace_config = _safe_production_cloud_workspace_config()
+    cloud_workspace_config["remote_phases"] = {
+        "setup": {
+            "enabled": True,
+            "network": "bridge",
+            "timeout_seconds": 600,
+            "allow_request_commands": False,
+        },
+        "agent": {"network": "none"},
+    }
+    monkeypatch.setattr(
+        "coding_agent.ui.http_server._load_cloud_workspace_config",
+        lambda: cloud_workspace_config,
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/sessions",
+            json={
+                "workspace_source": {
+                    "kind": "docker",
+                    "setup_commands": ["uv sync"],
+                }
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "request-provided setup commands are disabled by remote_phases.setup.allow_request_commands"
+    )
+
+
+@pytest.mark.asyncio
+async def test_http_create_session_accepts_request_setup_commands_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_source: dict[str, object] = {}
+    cloud_workspace_config = _safe_production_cloud_workspace_config()
+    cloud_workspace_config["remote_phases"] = {
+        "setup": {
+            "enabled": True,
+            "network": "bridge",
+            "timeout_seconds": 600,
+            "allow_request_commands": True,
+        },
+        "agent": {"network": "none"},
+    }
+
+    def fake_provision_binding(
+        config: dict[str, object],
+        source: dict[str, object],
+    ) -> CloudWorkspaceBinding:
+        del config
+        captured_source.update(source)
+        return CloudWorkspaceBinding(
+            workspace_url="docker://agent-ws-test/workspace",
+            workspace_id="ws-test",
+            runtime_profile="universal",
+        )
+
+    monkeypatch.setattr(
+        "coding_agent.ui.http_server._load_cloud_workspace_config",
+        lambda: cloud_workspace_config,
+    )
+    monkeypatch.setattr(
+        "coding_agent.ui.http_server.provision_cloud_binding_from_config",
+        fake_provision_binding,
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/sessions",
+            json={
+                "workspace_source": {
+                    "kind": "docker",
+                    "setup_commands": ["uv sync"],
+                }
+            },
+        )
+
+    assert response.status_code == 200
+    assert captured_source["setup_commands"] == ["uv sync"]
+
+
+@pytest.mark.asyncio
+async def test_http_create_session_rejects_invalid_request_setup_commands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cloud_workspace_config = _safe_production_cloud_workspace_config()
+    cloud_workspace_config["remote_phases"] = {
+        "setup": {
+            "enabled": True,
+            "network": "bridge",
+            "timeout_seconds": 600,
+            "allow_request_commands": True,
+        },
+        "agent": {"network": "none"},
+    }
+    monkeypatch.setattr(
+        "coding_agent.ui.http_server._load_cloud_workspace_config",
+        lambda: cloud_workspace_config,
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/sessions",
+            json={
+                "workspace_source": {
+                    "kind": "docker",
+                    "setup_commands": [""],
+                }
+            },
+        )
+
+    assert response.status_code == 422
+    assert "setup_commands" in response.text
 
 
 def test_development_mode_warning_logs_when_production_is_not_enabled(

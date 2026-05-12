@@ -64,6 +64,19 @@ image = "ghcr.io/delete-cloud/coding-agent-universal:2026-05-11"
 cpus = "2"
 memory = "4g"
 tools = ["python", "pip", "uv", "git", "rg", "curl"]
+
+[remote_phases.setup]
+enabled = true
+network = "bridge"
+timeout_seconds = 600
+commands = []
+secret_env_allowlist = ["PIP_INDEX_URL", "GITHUB_TOKEN"]
+allow_request_commands = false
+
+[remote_phases.agent]
+network = "none"
+timeout_seconds = 3600
+secret_env_allowlist = []
 ```
 
 `python:3.11-slim` is enough for basic file operations and pure-Python tools,
@@ -84,6 +97,18 @@ Docker workspace provisioning requires a runtime profile. If a request omits
 When `server.production = true`, startup fails if bearer auth, Docker workspace
 enablement, image allowlist, non-root `exec_user`, quota, GC, resource limits,
 or `network = "none"` are missing or unsafe.
+
+`remote_phases` is the setup/agent phase policy described in ADR-0023. The
+setup phase may be configured for dependency bootstrap with explicit commands,
+limited network, and allowlisted setup secrets. The agent phase remains
+secret-free by default and must use `network = "none"` in production. Request
+provided setup commands are rejected unless
+`remote_phases.setup.allow_request_commands = true`; the agent cannot enable
+setup dynamically from a prompt.
+
+Setup secrets are injected only into setup execution. This does not guarantee a
+setup command cannot write a secret into workspace files; keep setup commands
+trusted and scoped.
 
 Development mode is any config without `server.production = true`. It is useful
 for local testing and demos, but the server logs that the configuration is not
@@ -194,6 +219,18 @@ coding-agent remote run team --repo . --runtime universal --goal "fix the failin
 
 `--runtime` selects a profile from the server's `[runtime_profiles]` config. It
 does not allow the client or agent to choose an arbitrary Docker image.
+
+When server policy allows request-provided setup commands, pass them explicitly:
+
+```bash
+coding-agent remote run team --repo . --runtime universal \
+  --setup-command "uv sync --all-extras" \
+  --goal "fix the failing test"
+```
+
+If `remote_phases.setup.allow_request_commands = false`, the server rejects this
+request before provisioning the workspace. Prefer server-configured setup
+commands for production deployments that need repeatable bootstrap behavior.
 
 `--approval auto` is the default and can still ask for approval for tools such
 as `bash_run`. `--approval interactive` asks for every tool. `--approval yolo`

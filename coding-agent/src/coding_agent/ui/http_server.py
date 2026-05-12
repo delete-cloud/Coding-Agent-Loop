@@ -145,11 +145,19 @@ def _load_cloud_workspace_config() -> dict[str, Any]:
     if runtime_profiles:
         cloud_workspace_config = dict(cloud_workspace_config)
         cloud_workspace_config["runtime_profiles"] = runtime_profiles
+    remote_phases = _load_remote_phases_config()
+    if remote_phases:
+        cloud_workspace_config = dict(cloud_workspace_config)
+        cloud_workspace_config["remote_phases"] = remote_phases
     return cloud_workspace_config
 
 
 def _load_runtime_profiles_config() -> dict[str, Any]:
     return _load_agent_config_section("runtime_profiles")
+
+
+def _load_remote_phases_config() -> dict[str, Any]:
+    return _load_agent_config_section("remote_phases")
 
 
 def _load_server_config() -> dict[str, Any]:
@@ -202,12 +210,100 @@ def _require_non_empty_string(config: dict[str, Any], key: str) -> None:
         raise ValueError(f"cloud_workspace.{key} must be configured")
 
 
+def _require_positive_int_field(
+    config: dict[str, Any],
+    *,
+    section: str,
+    key: str,
+) -> None:
+    value = config.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{section}.{key} must be a positive integer")
+
+
+def _require_string_list_field(
+    config: dict[str, Any],
+    *,
+    section: str,
+    key: str,
+) -> None:
+    value = config.get(key)
+    if value is None:
+        return
+    if not isinstance(value, list):
+        raise ValueError(f"{section}.{key} must be a list of strings")
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"{section}.{key} must be a list of non-empty strings")
+
+
 def _is_root_exec_user(value: str) -> bool:
     normalized = value.strip().lower()
     if normalized == "root":
         return True
     user = normalized.split(":", 1)[0]
     return user in {"0", "root"}
+
+
+def _validate_production_remote_phases(
+    cloud_workspace_config: dict[str, Any],
+) -> None:
+    remote_phases = cloud_workspace_config.get("remote_phases")
+    if remote_phases is None:
+        return
+    if not isinstance(remote_phases, dict):
+        raise ValueError("remote_phases must be a table")
+
+    setup_phase = remote_phases.get("setup")
+    if setup_phase is not None:
+        if not isinstance(setup_phase, dict):
+            raise ValueError("remote_phases.setup must be a table")
+        if setup_phase.get("enabled") is True:
+            if setup_phase.get("network") not in {"none", "bridge"}:
+                raise ValueError(
+                    'remote_phases.setup.network must be "none" or "bridge"'
+                )
+            _require_positive_int_field(
+                setup_phase,
+                section="remote_phases.setup",
+                key="timeout_seconds",
+            )
+            _require_string_list_field(
+                setup_phase,
+                section="remote_phases.setup",
+                key="commands",
+            )
+            _require_string_list_field(
+                setup_phase,
+                section="remote_phases.setup",
+                key="secret_env_allowlist",
+            )
+        allow_request_commands = setup_phase.get("allow_request_commands")
+        if allow_request_commands is not None and not isinstance(
+            allow_request_commands, bool
+        ):
+            raise ValueError(
+                "remote_phases.setup.allow_request_commands must be a boolean"
+            )
+
+    agent_phase = remote_phases.get("agent")
+    if agent_phase is not None:
+        if not isinstance(agent_phase, dict):
+            raise ValueError("remote_phases.agent must be a table")
+        if agent_phase.get("network") != "none":
+            raise ValueError('remote_phases.agent.network must be "none"')
+        timeout_seconds = agent_phase.get("timeout_seconds")
+        if timeout_seconds is not None:
+            _require_positive_int_field(
+                agent_phase,
+                section="remote_phases.agent",
+                key="timeout_seconds",
+            )
+        _require_string_list_field(
+            agent_phase,
+            section="remote_phases.agent",
+            key="secret_env_allowlist",
+        )
 
 
 def _validate_production_config(
@@ -280,6 +376,7 @@ def _validate_production_config(
 
     if cloud_workspace_config.get("network") != "none":
         raise ValueError('cloud_workspace.network must be "none"')
+    _validate_production_remote_phases(cloud_workspace_config)
 
 
 def _log_development_mode_warning(server_config: dict[str, Any]) -> None:
@@ -674,10 +771,35 @@ def _provisioned_execution_binding_from_request(
         raise ValueError(
             "cloud workspace provisioning requires cloud_workspace.enabled=true"
         )
+    _validate_workspace_source_phase_policy(
+        body.workspace_source.model_dump(mode="python"),
+        cloud_workspace_config,
+    )
     return provision_cloud_binding_from_config(
         cloud_workspace_config,
         body.workspace_source.model_dump(mode="python"),
     )
+
+
+def _validate_workspace_source_phase_policy(
+    workspace_source: dict[str, object],
+    cloud_workspace_config: dict[str, Any],
+) -> None:
+    setup_commands = workspace_source.get("setup_commands")
+    if setup_commands is None:
+        return
+    remote_phases = cloud_workspace_config.get("remote_phases")
+    setup_phase: object | None = None
+    if isinstance(remote_phases, dict):
+        setup_phase = remote_phases.get("setup")
+    if not isinstance(setup_phase, dict) or setup_phase.get("enabled") is not True:
+        raise ValueError(
+            "request-provided setup commands require remote_phases.setup.enabled=true"
+        )
+    if setup_phase.get("allow_request_commands") is not True:
+        raise ValueError(
+            "request-provided setup commands are disabled by remote_phases.setup.allow_request_commands"
+        )
 
 
 def _session_origin_from_request(

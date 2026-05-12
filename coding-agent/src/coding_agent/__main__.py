@@ -540,6 +540,12 @@ def remote_remove(name: str) -> None:
     help="Use a server allowlisted runtime profile for the remote workspace.",
 )
 @click.option(
+    "--setup-command",
+    "setup_commands",
+    multiple=True,
+    help="Explicit setup command to run before the agent phase when server policy allows it.",
+)
+@click.option(
     "--goal", required=True, help="Initial prompt to send to the remote session"
 )
 @click.option(
@@ -560,6 +566,7 @@ def remote_repl(
     repo: str | None,
     empty_workspace: bool,
     runtime_profile: str | None,
+    setup_commands: tuple[str, ...],
     goal: str,
     approval_policy: str,
     yes: bool,
@@ -570,6 +577,7 @@ def remote_repl(
         repo=repo,
         empty_workspace=empty_workspace,
         runtime_profile=runtime_profile,
+        setup_commands=setup_commands,
         goal=goal,
         approval_policy=approval_policy,
         yes=yes,
@@ -595,6 +603,12 @@ def remote_repl(
     help="Use a server allowlisted runtime profile for the remote workspace.",
 )
 @click.option(
+    "--setup-command",
+    "setup_commands",
+    multiple=True,
+    help="Explicit setup command to run before the agent phase when server policy allows it.",
+)
+@click.option(
     "--goal", required=True, help="Initial prompt to send to the remote session"
 )
 @click.option(
@@ -615,6 +629,7 @@ def remote_run(
     repo: str | None,
     empty_workspace: bool,
     runtime_profile: str | None,
+    setup_commands: tuple[str, ...],
     goal: str,
     approval_policy: str,
     yes: bool,
@@ -625,6 +640,7 @@ def remote_run(
         repo=repo,
         empty_workspace=empty_workspace,
         runtime_profile=runtime_profile,
+        setup_commands=setup_commands,
         goal=goal,
         approval_policy=approval_policy,
         yes=yes,
@@ -637,6 +653,7 @@ def _remote_run_once(
     repo: str | None,
     empty_workspace: bool,
     runtime_profile: str | None,
+    setup_commands: tuple[str, ...],
     goal: str,
     approval_policy: str,
     yes: bool,
@@ -679,6 +696,7 @@ def _remote_run_once(
         snapshot_archive_base64=snapshot_archive_base64,
         approval_policy=approval_policy,
         runtime_profile=runtime_profile,
+        setup_commands=setup_commands,
     )
     click.echo(f"Created one-shot remote session {session_id} on remote {name}")
     status: int | None = None
