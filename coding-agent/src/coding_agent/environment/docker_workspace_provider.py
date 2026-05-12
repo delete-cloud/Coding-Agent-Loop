@@ -345,7 +345,7 @@ class DockerWorkspaceProvider(WorkspaceProvider):
     def build_cloud_client_factory(
         self, config: dict[str, object]
     ) -> CloudWorkspaceClientFactory:
-        _ = _docker_workspace_provider_config(config)
+        _validate_docker_workspace_base_config(config)
 
         def build_client(binding: CloudWorkspaceBinding) -> CloudWorkspaceClient:
             provider_config = _docker_workspace_provider_config(
@@ -429,7 +429,10 @@ class DockerWorkspaceProvider(WorkspaceProvider):
         config: dict[str, object],
         binding: CloudWorkspaceBinding,
     ) -> None:
-        provider_config = _docker_workspace_provider_config(config)
+        provider_config = _docker_workspace_provider_config(
+            config,
+            runtime_profile=binding.runtime_profile,
+        )
         logger.info(
             "Cleaning Docker workspace workspace_id=%s container=%s",
             binding.workspace_id,
@@ -450,7 +453,10 @@ class DockerWorkspaceProvider(WorkspaceProvider):
         binding: CloudWorkspaceBinding,
         archive_base64: str,
     ) -> None:
-        provider_config = _docker_workspace_provider_config(config)
+        provider_config = _docker_workspace_provider_config(
+            config,
+            runtime_profile=binding.runtime_profile,
+        )
         workspace_root = _workspace_root_for_id(
             provider_config.workspace_root, binding.workspace_id
         )
@@ -469,7 +475,10 @@ class DockerWorkspaceProvider(WorkspaceProvider):
         config: dict[str, object],
         binding: CloudWorkspaceBinding,
     ) -> str:
-        provider_config = _docker_workspace_provider_config(config)
+        provider_config = _docker_workspace_provider_config(
+            config,
+            runtime_profile=binding.runtime_profile,
+        )
         workspace_root = _workspace_root_for_id(
             provider_config.workspace_root, binding.workspace_id
         )
@@ -588,15 +597,12 @@ def _docker_workspace_provider_config(
     *,
     runtime_profile: str | None = None,
 ) -> _DockerWorkspaceProviderConfig:
+    resolved_runtime_profile = runtime_profile or _default_runtime_profile(config)
     effective_config = _effective_docker_workspace_config(
         config,
-        runtime_profile=runtime_profile,
+        runtime_profile=resolved_runtime_profile,
     )
-    workspace_root_raw = config.get("workspace_root")
-    if not isinstance(workspace_root_raw, str) or not workspace_root_raw.strip():
-        raise ValueError(
-            "cloud_workspace.workspace_root is required for provider=docker"
-        )
+    workspace_root_raw = _validate_docker_workspace_base_config(effective_config)
 
     container_workspace_root = _container_workspace_root(effective_config)
     container_name_prefix = _optional_string(
@@ -656,8 +662,18 @@ def _docker_workspace_provider_config(
         pids_limit=pids_limit,
         max_active_workspaces=max_active_workspaces,
         max_workspace_age_seconds=max_workspace_age_seconds,
-        runtime_profile=runtime_profile,
+        runtime_profile=resolved_runtime_profile,
     )
+
+
+def _validate_docker_workspace_base_config(config: dict[str, object]) -> str:
+    workspace_root_raw = config.get("workspace_root")
+    if not isinstance(workspace_root_raw, str) or not workspace_root_raw.strip():
+        raise ValueError(
+            "cloud_workspace.workspace_root is required for provider=docker"
+        )
+    _ = _container_workspace_root(config)
+    return workspace_root_raw
 
 
 def _default_runtime_profile(config: dict[str, object]) -> str:
@@ -675,8 +691,6 @@ def _effective_docker_workspace_config(
     *,
     runtime_profile: str | None,
 ) -> dict[str, object]:
-    if runtime_profile is None:
-        return config
     runtime_profiles = config.get("runtime_profiles")
     if not isinstance(runtime_profiles, dict):
         raise ValueError(
@@ -700,6 +714,8 @@ def _effective_docker_workspace_config(
             f"cloud_workspace.runtime_profiles.{runtime_profile}.image is required"
         )
     effective = dict(config)
+    # Runtime profiles select toolchain/resource defaults. Sandbox policy fields
+    # such as network, exec_user, and pids_limit remain controlled by base config.
     for key in ("image", "cpus", "memory"):
         if key in profile_config:
             effective[key] = profile_config[key]

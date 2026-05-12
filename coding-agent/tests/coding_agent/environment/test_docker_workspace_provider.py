@@ -54,13 +54,14 @@ def test_docker_workspace_provider_builds_client_from_config(tmp_path: Path) -> 
     (workspace_root / "ws-123").mkdir()
 
     factory = cloud_client_factory_from_config(
-        {
-            "provider": "docker",
-            "workspace_root": str(workspace_root),
-            "container_name_prefix": "agent-",
-            "docker_binary": "/usr/bin/docker",
-            "env_allowlist": ["SAFE_VAR"],
-        }
+        _docker_config(
+            {
+                "workspace_root": str(workspace_root),
+                "container_name_prefix": "agent-",
+                "docker_binary": "/usr/bin/docker",
+                "env_allowlist": ["SAFE_VAR"],
+            }
+        )
     )
 
     client = factory(
@@ -89,10 +90,7 @@ def test_docker_cloud_client_maps_file_tools_to_remote_workspace(
     _ = other.write_text("docker hello\n", encoding="utf-8")
 
     client = cloud_client_factory_from_config(
-        {
-            "provider": "docker",
-            "workspace_root": str(workspace_root),
-        }
+        _docker_config({"workspace_root": str(workspace_root)})
     )(
         CloudWorkspaceBinding(
             workspace_url="https://workspace.example.com",
@@ -123,10 +121,7 @@ def test_docker_cloud_client_applies_patch_with_workspace_root(tmp_path: Path) -
     _ = target.write_text("def greet():\n    return 'hello'\n", encoding="utf-8")
 
     client = cloud_client_factory_from_config(
-        {
-            "provider": "docker",
-            "workspace_root": str(workspace_root),
-        }
+        _docker_config({"workspace_root": str(workspace_root)})
     )(
         CloudWorkspaceBinding(
             workspace_url="https://workspace.example.com",
@@ -152,14 +147,15 @@ def test_docker_cloud_client_runs_shell_in_workspace_cwd(
     (target_root / "pkg").mkdir(parents=True)
 
     client = cloud_client_factory_from_config(
-        {
-            "provider": "docker",
-            "workspace_root": str(workspace_root),
-            "container_name_prefix": "agent-",
-            "docker_binary": "/usr/bin/docker",
-            "env_allowlist": ["SAFE_VAR"],
-            "exec_user": "1000:1000",
-        }
+        _docker_config(
+            {
+                "workspace_root": str(workspace_root),
+                "container_name_prefix": "agent-",
+                "docker_binary": "/usr/bin/docker",
+                "env_allowlist": ["SAFE_VAR"],
+                "exec_user": "1000:1000",
+            }
+        )
     )(
         CloudWorkspaceBinding(
             workspace_url="https://workspace.example.com",
@@ -234,10 +230,7 @@ def test_docker_cloud_client_raises_timeout_when_container_command_times_out(
     target_root.mkdir(parents=True)
 
     client = cloud_client_factory_from_config(
-        {
-            "provider": "docker",
-            "workspace_root": str(workspace_root),
-        }
+        _docker_config({"workspace_root": str(workspace_root)})
     )(
         CloudWorkspaceBinding(
             workspace_url="https://workspace.example.com",
@@ -271,10 +264,7 @@ def test_docker_cloud_client_preserves_stderr_with_nonmatching_timeout_prefix(
     target_root.mkdir(parents=True)
 
     client = cloud_client_factory_from_config(
-        {
-            "provider": "docker",
-            "workspace_root": str(workspace_root),
-        }
+        _docker_config({"workspace_root": str(workspace_root)})
     )(
         CloudWorkspaceBinding(
             workspace_url="https://workspace.example.com",
@@ -308,10 +298,7 @@ def test_docker_cloud_client_preserves_legitimate_exit_codes(
     target_root.mkdir(parents=True)
 
     client = cloud_client_factory_from_config(
-        {
-            "provider": "docker",
-            "workspace_root": str(workspace_root),
-        }
+        _docker_config({"workspace_root": str(workspace_root)})
     )(
         CloudWorkspaceBinding(
             workspace_url="https://workspace.example.com",
@@ -341,10 +328,7 @@ def test_docker_cloud_client_timeout_contract_blocks_post_timeout_mutation(
     marker = target_root / "late-write.txt"
 
     client = cloud_client_factory_from_config(
-        {
-            "provider": "docker",
-            "workspace_root": str(workspace_root),
-        }
+        _docker_config({"workspace_root": str(workspace_root)})
     )(
         CloudWorkspaceBinding(
             workspace_url="https://workspace.example.com",
@@ -391,11 +375,12 @@ def test_docker_cloud_client_rejects_disallowed_env_names(tmp_path: Path) -> Non
     target_root.mkdir(parents=True)
 
     client = cloud_client_factory_from_config(
-        {
-            "provider": "docker",
-            "workspace_root": str(workspace_root),
-            "env_allowlist": ["SAFE_VAR"],
-        }
+        _docker_config(
+            {
+                "workspace_root": str(workspace_root),
+                "env_allowlist": ["SAFE_VAR"],
+            }
+        )
     )(
         CloudWorkspaceBinding(
             workspace_url="https://workspace.example.com",
@@ -421,10 +406,7 @@ def test_docker_cloud_client_rejects_workspace_escape(tmp_path: Path) -> None:
     target_root.mkdir(parents=True)
 
     client = cloud_client_factory_from_config(
-        {
-            "provider": "docker",
-            "workspace_root": str(workspace_root),
-        }
+        _docker_config({"workspace_root": str(workspace_root)})
     )(
         CloudWorkspaceBinding(
             workspace_url="https://workspace.example.com",
@@ -448,10 +430,7 @@ def test_docker_cloud_client_rejects_symlink_escape_paths(tmp_path: Path) -> Non
     escape_dir.symlink_to(outside_root, target_is_directory=True)
 
     client = cloud_client_factory_from_config(
-        {
-            "provider": "docker",
-            "workspace_root": str(workspace_root),
-        }
+        _docker_config({"workspace_root": str(workspace_root)})
     )(
         CloudWorkspaceBinding(
             workspace_url="https://workspace.example.com",
@@ -512,7 +491,7 @@ def test_docker_workspace_provider_requires_workspace_root() -> None:
         ValueError,
         match="cloud_workspace.workspace_root is required for provider=docker",
     ):
-        _ = cloud_client_factory_from_config({"provider": "docker"})
+        _ = cloud_client_factory_from_config(_docker_config())
 
 
 def test_docker_workspace_provider_readiness_checks_docker_binary(
@@ -535,11 +514,12 @@ def test_docker_workspace_provider_readiness_checks_docker_binary(
 
     assert (
         cloud_workspace_ready_from_config(
-            {
-                "provider": "docker",
-                "workspace_root": "/srv/workspaces",
-                "docker_binary": "/usr/bin/docker",
-            }
+            _docker_config(
+                {
+                    "workspace_root": "/srv/workspaces",
+                    "docker_binary": "/usr/bin/docker",
+                }
+            )
         )
         is True
     )
@@ -569,10 +549,7 @@ def test_docker_workspace_provider_readiness_returns_false_when_docker_fails(
 
     assert (
         cloud_workspace_ready_from_config(
-            {
-                "provider": "docker",
-                "workspace_root": "/srv/workspaces",
-            }
+            _docker_config({"workspace_root": "/srv/workspaces"})
         )
         is False
     )
@@ -591,10 +568,7 @@ def test_docker_workspace_provider_readiness_returns_false_when_docker_binary_mi
 
     assert (
         cloud_workspace_ready_from_config(
-            {
-                "provider": "docker",
-                "workspace_root": "/srv/workspaces",
-            }
+            _docker_config({"workspace_root": "/srv/workspaces"})
         )
         is False
     )
@@ -609,11 +583,12 @@ def test_docker_workspace_provider_rejects_root_container_workspace_root(
         match=r"cloud_workspace\.container_workspace_root must not resolve to /",
     ):
         _ = cloud_client_factory_from_config(
-            {
-                "provider": "docker",
-                "workspace_root": "/srv/workspaces",
-                "container_workspace_root": root,
-            }
+            _docker_config(
+                {
+                    "workspace_root": "/srv/workspaces",
+                    "container_workspace_root": root,
+                }
+            )
         )
 
 
@@ -635,6 +610,8 @@ def test_docker_workspace_provider_provisions_runnable_container(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
+    # Runtime profiles only override image, cpus, and memory; sandbox policy
+    # fields such as network, pids_limit, and exec_user come from base config.
     binding = provision_cloud_binding_from_config(
         _docker_config(
             {
@@ -929,7 +906,7 @@ def test_docker_workspace_provider_rejects_unknown_runtime_profile(
             _docker_config(
                 {
                     "workspace_root": str(workspace_root),
-                    "default_runtime_profile": "missing",
+                    "default_runtime_profile": "python-basic",
                     "runtime_profiles": {},
                 }
             ),
@@ -1152,11 +1129,12 @@ def test_docker_workspace_provider_gc_removes_only_stale_owned_workspaces(
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     cleaned = cleanup_stale_cloud_workspaces_from_config(
-        {
-            "provider": "docker",
-            "workspace_root": str(workspace_root),
-            "max_workspace_age_seconds": 3600,
-        },
+        _docker_config(
+            {
+                "workspace_root": str(workspace_root),
+                "max_workspace_age_seconds": 3600,
+            }
+        ),
     )
 
     assert cleaned == 1
@@ -1195,12 +1173,13 @@ def test_docker_workspace_provider_gc_skips_active_workspace_ids(
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     cleaned = cleanup_stale_cloud_workspaces_from_config(
-        {
-            "provider": "docker",
-            "workspace_root": str(workspace_root),
-            "max_workspace_age_seconds": 3600,
-            "_active_workspace_ids": ["ws-active"],
-        },
+        _docker_config(
+            {
+                "workspace_root": str(workspace_root),
+                "max_workspace_age_seconds": 3600,
+                "_active_workspace_ids": ["ws-active"],
+            }
+        ),
     )
 
     assert cleaned == 1
@@ -1310,12 +1289,13 @@ def test_docker_workspace_provider_cleanup_removes_nonempty_workspace(
     _ = proof_file.write_text("qa-from-cloud\n", encoding="utf-8")
 
     cleanup_cloud_binding_from_config(
-        {
-            "provider": "docker",
-            "workspace_root": str(workspace_root),
-            "container_name_prefix": "agent-",
-            "docker_binary": "/usr/bin/docker",
-        },
+        _docker_config(
+            {
+                "workspace_root": str(workspace_root),
+                "container_name_prefix": "agent-",
+                "docker_binary": "/usr/bin/docker",
+            }
+        ),
         binding,
     )
 
@@ -1373,12 +1353,13 @@ def test_docker_workspace_provider_cleanup_waits_for_container_removal(
     )
 
     cleanup_cloud_binding_from_config(
-        {
-            "provider": "docker",
-            "workspace_root": str(workspace_root),
-            "container_name_prefix": "agent-",
-            "docker_binary": "/usr/bin/docker",
-        },
+        _docker_config(
+            {
+                "workspace_root": str(workspace_root),
+                "container_name_prefix": "agent-",
+                "docker_binary": "/usr/bin/docker",
+            }
+        ),
         binding,
     )
 
@@ -1431,12 +1412,13 @@ def test_docker_workspace_provider_cleanup_preserves_workspace_when_container_re
         RuntimeError, match="failed to remove docker workspace container"
     ):
         cleanup_cloud_binding_from_config(
-            {
-                "provider": "docker",
-                "workspace_root": str(workspace_root),
-                "container_name_prefix": "agent-",
-                "docker_binary": "/usr/bin/docker",
-            },
+            _docker_config(
+                {
+                    "workspace_root": str(workspace_root),
+                    "container_name_prefix": "agent-",
+                    "docker_binary": "/usr/bin/docker",
+                }
+            ),
             binding,
         )
 
@@ -1496,12 +1478,13 @@ def test_docker_workspace_provider_cleanup_preserves_workspace_when_container_in
         RuntimeError, match="failed to inspect docker workspace container"
     ):
         cleanup_cloud_binding_from_config(
-            {
-                "provider": "docker",
-                "workspace_root": str(workspace_root),
-                "container_name_prefix": "agent-",
-                "docker_binary": "/usr/bin/docker",
-            },
+            _docker_config(
+                {
+                    "workspace_root": str(workspace_root),
+                    "container_name_prefix": "agent-",
+                    "docker_binary": "/usr/bin/docker",
+                }
+            ),
             binding,
         )
 
@@ -1550,12 +1533,13 @@ def test_docker_workspace_provider_cleanup_preserves_workspace_when_container_re
 
     with pytest.raises(TimeoutError, match="docker workspace container still exists"):
         cleanup_cloud_binding_from_config(
-            {
-                "provider": "docker",
-                "workspace_root": str(workspace_root),
-                "container_name_prefix": "agent-",
-                "docker_binary": "/usr/bin/docker",
-            },
+            _docker_config(
+                {
+                    "workspace_root": str(workspace_root),
+                    "container_name_prefix": "agent-",
+                    "docker_binary": "/usr/bin/docker",
+                }
+            ),
             binding,
         )
 
