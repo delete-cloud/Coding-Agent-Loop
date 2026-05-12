@@ -42,21 +42,15 @@ Production deployments may define profiles under:
 [runtime_profiles.python-basic]
 provider = "docker"
 image = "python:3.11-slim@sha256:..."
-network = "none"
 cpus = "1"
 memory = "1g"
-pids_limit = 256
-exec_user = "1000:1000"
 tools = ["python", "pip"]
 
 [runtime_profiles.universal]
 provider = "docker"
 image = "ghcr.io/delete-cloud/coding-agent-universal:2026-05-11"
-network = "none"
 cpus = "2"
 memory = "4g"
-pids_limit = 512
-exec_user = "1000:1000"
 tools = ["python", "node", "go", "git", "rg", "curl"]
 ```
 
@@ -86,15 +80,17 @@ The server resolves that name against its configured `runtime_profiles` map.
 Unknown profiles fail fast before container creation. The agent and client never
 send arbitrary image names.
 
-Compatibility is preserved:
+This is an intentional configuration break for Docker remote provisioning:
 
-- Existing `[cloud_workspace].image`, `image_allowlist`, `network`, `cpus`,
-  `memory`, `pids_limit`, and `exec_user` continue to work as the default Docker
-  runtime when no runtime profile is requested.
-- Production validation still requires explicit image allowlist and sandbox
-  controls for the default Docker workspace path.
-- Runtime profiles are an additive selection layer. They do not remove the
-  existing Docker provider config in this ADR.
+- `[cloud_workspace].default_runtime_profile` is required for Docker workspace
+  creation when the request does not name a runtime profile.
+- Runtime profile definitions own the Docker runtime image. The old
+  `[cloud_workspace].image` field is not a provisioning fallback.
+- Runtime profiles may override `image`, `cpus`, and `memory`. They do not
+  override sandbox policy fields such as `network`, `exec_user`, or
+  `pids_limit`; those remain controlled by base `[cloud_workspace]`.
+- Production validation requires an explicit image allowlist, a configured
+  default runtime profile, and sandbox controls for the Docker workspace path.
 
 The recommended dogfood path should use a `universal` runtime profile rather
 than `python:3.11-slim` once a universal image exists. `python:3.11-slim`
@@ -151,7 +147,8 @@ remains appropriate for minimal smoke tests and pure file operations.
 - Add `_load_runtime_profiles_config()` in `src/coding_agent/ui/http_server.py`
   and merge it into the cloud workspace config passed to
   `provision_cloud_binding_from_config`.
-- Keep existing clients compatible when no runtime profile is present.
+- Require `[cloud_workspace].default_runtime_profile` when no runtime profile is
+  present in the request.
 
 ### PR 2: Docker provider profile resolution
 
@@ -160,12 +157,14 @@ remains appropriate for minimal smoke tests and pure file operations.
 - When `source.runtime_profile` is set:
   - require that profile to exist;
   - require `provider = "docker"`;
-  - use the profile's `image`, `network`, `cpus`, `memory`, `pids_limit`, and
-    `exec_user` values for that provisioned workspace;
+  - use the profile's `image`, `cpus`, and `memory` values for that provisioned
+    workspace;
   - reject the profile image if it is not in the effective image allowlist.
 - Do not let source payloads override image, network, user, or resource fields
   directly.
-- Preserve old `[cloud_workspace].image` behavior when no profile is requested.
+- Do not let runtime profiles override sandbox policy fields such as `network`,
+  `exec_user`, or `pids_limit`.
+- Use `[cloud_workspace].default_runtime_profile` when no profile is requested.
 
 ### PR 3: Documentation and dogfood guidance
 
@@ -185,7 +184,8 @@ remains appropriate for minimal smoke tests and pure file operations.
   and resource flags.
 - [x] Docker provider tests prove unknown profiles and non-Docker profiles fail
   before `docker run`.
-- [x] Existing tests for no-profile Docker workspaces continue to pass unchanged.
+- [x] Docker provider tests prove no-profile Docker workspaces use
+  `[cloud_workspace].default_runtime_profile`.
 - [x] `uv run pytest tests/coding_agent/environment/ tests/ui/test_http_server.py tests/cli/test_remote_client.py -q`
   passes.
 - [x] `uv run basedpyright --level error` on changed Python files reports no errors.

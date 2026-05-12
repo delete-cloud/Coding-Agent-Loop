@@ -23,6 +23,23 @@ from coding_agent.ui.execution_binding import CloudWorkspaceBinding
 TIMEOUT_SENTINEL_PREFIX = "__CODING_AGENT_DOCKER_TIMEOUT__:"
 
 
+def _docker_config(overrides: dict[str, object] | None = None) -> dict[str, object]:
+    config: dict[str, object] = {
+        "provider": "docker",
+        "default_runtime_profile": "python-basic",
+        "image_allowlist": ["python:3.11-slim"],
+        "runtime_profiles": {
+            "python-basic": {
+                "provider": "docker",
+                "image": "python:3.11-slim",
+            }
+        },
+    }
+    if overrides is not None:
+        config.update(overrides)
+    return config
+
+
 def _extract_timeout_sentinel(command: list[str]) -> str:
     for arg in command:
         match = re.search(r"__CODING_AGENT_DOCKER_TIMEOUT__:[0-9a-f]+", arg)
@@ -619,12 +636,13 @@ def test_docker_workspace_provider_provisions_runnable_container(
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     binding = provision_cloud_binding_from_config(
-        {
-            "provider": "docker",
-            "workspace_root": str(workspace_root),
-            "container_name_prefix": "agent-",
-            "docker_binary": "/usr/bin/docker",
-        },
+        _docker_config(
+            {
+                "workspace_root": str(workspace_root),
+                "container_name_prefix": "agent-",
+                "docker_binary": "/usr/bin/docker",
+            }
+        ),
         {"kind": "docker"},
     )
 
@@ -687,18 +705,25 @@ def test_docker_workspace_provider_applies_configured_container_hardening(
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     binding = provision_cloud_binding_from_config(
-        {
-            "provider": "docker",
-            "workspace_root": str(workspace_root),
-            "docker_binary": "/usr/bin/docker",
-            "image": "registry.example/agent:2026-05-10",
-            "image_allowlist": ["registry.example/agent:2026-05-10"],
-            "network": "none",
-            "cpus": "2",
-            "memory": "1g",
-            "pids_limit": 128,
-            "exec_user": "1000:1000",
-        },
+        _docker_config(
+            {
+                "workspace_root": str(workspace_root),
+                "docker_binary": "/usr/bin/docker",
+                "image_allowlist": ["registry.example/agent:2026-05-10"],
+                "network": "none",
+                "cpus": "2",
+                "memory": "1g",
+                "pids_limit": 128,
+                "exec_user": "1000:1000",
+                "default_runtime_profile": "agent",
+                "runtime_profiles": {
+                    "agent": {
+                        "provider": "docker",
+                        "image": "registry.example/agent:2026-05-10",
+                    }
+                },
+            }
+        ),
         {"kind": "docker"},
     )
 
@@ -750,26 +775,30 @@ def test_docker_workspace_provider_applies_requested_runtime_profile(
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     binding = provision_cloud_binding_from_config(
-        {
-            "provider": "docker",
-            "workspace_root": str(workspace_root),
-            "image": "python:3.11-slim",
-            "image_allowlist": [
-                "python:3.11-slim",
-                "registry.example/universal:2026-05-11",
-            ],
-            "runtime_profiles": {
-                "universal": {
-                    "provider": "docker",
-                    "image": "registry.example/universal:2026-05-11",
-                    "network": "none",
-                    "cpus": "4",
-                    "memory": "8g",
-                    "pids_limit": 1024,
-                    "exec_user": "1000:1000",
-                }
-            },
-        },
+        _docker_config(
+            {
+                "workspace_root": str(workspace_root),
+                "image_allowlist": [
+                    "python:3.11-slim",
+                    "registry.example/universal:2026-05-11",
+                ],
+                "network": "none",
+                "pids_limit": 256,
+                "exec_user": "1000:1000",
+                "default_runtime_profile": "universal",
+                "runtime_profiles": {
+                    "universal": {
+                        "provider": "docker",
+                        "image": "registry.example/universal:2026-05-11",
+                        "cpus": "4",
+                        "memory": "8g",
+                        "network": "bridge",
+                        "pids_limit": 4096,
+                        "exec_user": "0:0",
+                    }
+                },
+            }
+        ),
         {"kind": "docker", "runtime_profile": "universal"},
     )
 
@@ -787,7 +816,7 @@ def test_docker_workspace_provider_applies_requested_runtime_profile(
         "--security-opt",
         "no-new-privileges",
         "--pids-limit",
-        "1024",
+        "256",
         "--cpus",
         "4",
         "--memory",
@@ -802,6 +831,80 @@ def test_docker_workspace_provider_applies_requested_runtime_profile(
         "sleep",
         "infinity",
     ]
+
+
+def test_docker_workspace_provider_uses_default_runtime_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_root.mkdir()
+    captured_command: list[str] = []
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        captured_command[:] = command
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    binding = provision_cloud_binding_from_config(
+        _docker_config(
+            {
+                "workspace_root": str(workspace_root),
+                "image_allowlist": [
+                    "python:3.11-slim",
+                    "registry.example/universal:2026-05-11",
+                ],
+                "default_runtime_profile": "universal",
+                "runtime_profiles": {
+                    "universal": {
+                        "provider": "docker",
+                        "image": "registry.example/universal:2026-05-11",
+                    }
+                },
+            }
+        ),
+        {"kind": "docker"},
+    )
+
+    assert binding.runtime_profile == "universal"
+    assert "registry.example/universal:2026-05-11" in captured_command
+
+
+def test_docker_workspace_provider_requires_default_runtime_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_root.mkdir()
+
+    def fail_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del command, kwargs
+        raise AssertionError("docker run should not be called")
+
+    monkeypatch.setattr(subprocess, "run", fail_run)
+
+    with pytest.raises(
+        ValueError,
+        match=r"cloud_workspace.default_runtime_profile is required",
+    ):
+        _ = provision_cloud_binding_from_config(
+            {
+                "provider": "docker",
+                "workspace_root": str(workspace_root),
+                "image_allowlist": ["python:3.11-slim"],
+                "runtime_profiles": {
+                    "python-basic": {
+                        "provider": "docker",
+                        "image": "python:3.11-slim",
+                    }
+                },
+            },
+            {"kind": "docker"},
+        )
 
 
 def test_docker_workspace_provider_rejects_unknown_runtime_profile(
@@ -823,11 +926,13 @@ def test_docker_workspace_provider_rejects_unknown_runtime_profile(
         match=r"cloud_workspace.runtime_profile is not configured: missing",
     ):
         _ = provision_cloud_binding_from_config(
-            {
-                "provider": "docker",
-                "workspace_root": str(workspace_root),
-                "runtime_profiles": {},
-            },
+            _docker_config(
+                {
+                    "workspace_root": str(workspace_root),
+                    "default_runtime_profile": "missing",
+                    "runtime_profiles": {},
+                }
+            ),
             {"kind": "docker", "runtime_profile": "missing"},
         )
 
@@ -851,16 +956,18 @@ def test_docker_workspace_provider_rejects_non_docker_runtime_profile(
         match=r'cloud_workspace.runtime_profiles.universal.provider must be "docker"',
     ):
         _ = provision_cloud_binding_from_config(
-            {
-                "provider": "docker",
-                "workspace_root": str(workspace_root),
-                "runtime_profiles": {
-                    "universal": {
-                        "provider": "kubernetes",
-                        "image": "registry.example/universal:2026-05-11",
-                    }
-                },
-            },
+            _docker_config(
+                {
+                    "workspace_root": str(workspace_root),
+                    "default_runtime_profile": "universal",
+                    "runtime_profiles": {
+                        "universal": {
+                            "provider": "kubernetes",
+                            "image": "registry.example/universal:2026-05-11",
+                        }
+                    },
+                }
+            ),
             {"kind": "docker", "runtime_profile": "universal"},
         )
 
@@ -873,12 +980,19 @@ def test_docker_workspace_provider_rejects_image_outside_allowlist(
         match=r"cloud_workspace\.image is not allowed by image_allowlist",
     ):
         _ = provision_cloud_binding_from_config(
-            {
-                "provider": "docker",
-                "workspace_root": str(tmp_path),
-                "image": "registry.example/untrusted:latest",
-                "image_allowlist": ["python:3.11-slim"],
-            },
+            _docker_config(
+                {
+                    "workspace_root": str(tmp_path),
+                    "image_allowlist": ["python:3.11-slim"],
+                    "default_runtime_profile": "untrusted",
+                    "runtime_profiles": {
+                        "untrusted": {
+                            "provider": "docker",
+                            "image": "registry.example/untrusted:latest",
+                        }
+                    },
+                }
+            ),
             {"kind": "docker"},
         )
 
@@ -902,11 +1016,13 @@ def test_docker_workspace_provider_rejects_provision_when_active_workspace_quota
         match=r"cloud workspace quota exceeded: max_active_workspaces=1",
     ):
         _ = provision_cloud_binding_from_config(
-            {
-                "provider": "docker",
-                "workspace_root": str(workspace_root),
-                "max_active_workspaces": 1,
-            },
+            _docker_config(
+                {
+                    "workspace_root": str(workspace_root),
+                    "default_runtime_profile": "python-basic",
+                    "max_active_workspaces": 1,
+                }
+            ),
             {"kind": "docker"},
         )
 
@@ -929,11 +1045,13 @@ def test_docker_workspace_provider_quota_ignores_unowned_workspace_directories(
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     binding = provision_cloud_binding_from_config(
-        {
-            "provider": "docker",
-            "workspace_root": str(workspace_root),
-            "max_active_workspaces": 2,
-        },
+        _docker_config(
+            {
+                "workspace_root": str(workspace_root),
+                "default_runtime_profile": "python-basic",
+                "max_active_workspaces": 2,
+            }
+        ),
         {"kind": "docker"},
     )
 
@@ -967,11 +1085,13 @@ def test_docker_workspace_provider_reserves_quota_slot_atomically(
     def provision() -> CloudWorkspaceBinding:
         start_barrier.wait(timeout=5)
         return provision_cloud_binding_from_config(
-            {
-                "provider": "docker",
-                "workspace_root": str(workspace_root),
-                "max_active_workspaces": 1,
-            },
+            _docker_config(
+                {
+                    "workspace_root": str(workspace_root),
+                    "default_runtime_profile": "python-basic",
+                    "max_active_workspaces": 1,
+                }
+            ),
             {"kind": "docker"},
         )
 
@@ -1097,11 +1217,12 @@ def test_docker_workspace_provider_rejects_boolean_integer_config(
         match=r"cloud_workspace.max_active_workspaces must be a positive integer",
     ):
         _ = provision_cloud_binding_from_config(
-            {
-                "provider": "docker",
-                "workspace_root": str(tmp_path),
-                "max_active_workspaces": True,
-            },
+            _docker_config(
+                {
+                    "workspace_root": str(tmp_path),
+                    "max_active_workspaces": True,
+                }
+            ),
             {"kind": "docker"},
         )
 
@@ -1136,12 +1257,13 @@ def test_docker_workspace_provider_provision_cleans_up_container_when_start_time
 
     with pytest.raises(subprocess.TimeoutExpired):
         _ = provision_cloud_binding_from_config(
-            {
-                "provider": "docker",
-                "workspace_root": str(workspace_root),
-                "container_name_prefix": "agent-",
-                "docker_binary": "/usr/bin/docker",
-            },
+            _docker_config(
+                {
+                    "workspace_root": str(workspace_root),
+                    "container_name_prefix": "agent-",
+                    "docker_binary": "/usr/bin/docker",
+                }
+            ),
             {"kind": "docker"},
         )
 
@@ -1175,12 +1297,13 @@ def test_docker_workspace_provider_cleanup_removes_nonempty_workspace(
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     binding = provision_cloud_binding_from_config(
-        {
-            "provider": "docker",
-            "workspace_root": str(workspace_root),
-            "container_name_prefix": "agent-",
-            "docker_binary": "/usr/bin/docker",
-        },
+        _docker_config(
+            {
+                "workspace_root": str(workspace_root),
+                "container_name_prefix": "agent-",
+                "docker_binary": "/usr/bin/docker",
+            }
+        ),
         {"kind": "docker"},
     )
     proof_file = workspace_root / binding.workspace_id / "qa-proof.txt"
@@ -1239,12 +1362,13 @@ def test_docker_workspace_provider_cleanup_waits_for_container_removal(
     )
 
     binding = provision_cloud_binding_from_config(
-        {
-            "provider": "docker",
-            "workspace_root": str(workspace_root),
-            "container_name_prefix": "agent-",
-            "docker_binary": "/usr/bin/docker",
-        },
+        _docker_config(
+            {
+                "workspace_root": str(workspace_root),
+                "container_name_prefix": "agent-",
+                "docker_binary": "/usr/bin/docker",
+            }
+        ),
         {"kind": "docker"},
     )
 
@@ -1291,12 +1415,13 @@ def test_docker_workspace_provider_cleanup_preserves_workspace_when_container_re
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     binding = provision_cloud_binding_from_config(
-        {
-            "provider": "docker",
-            "workspace_root": str(workspace_root),
-            "container_name_prefix": "agent-",
-            "docker_binary": "/usr/bin/docker",
-        },
+        _docker_config(
+            {
+                "workspace_root": str(workspace_root),
+                "container_name_prefix": "agent-",
+                "docker_binary": "/usr/bin/docker",
+            }
+        ),
         {"kind": "docker"},
     )
     proof_file = workspace_root / binding.workspace_id / "qa-proof.txt"
@@ -1355,12 +1480,13 @@ def test_docker_workspace_provider_cleanup_preserves_workspace_when_container_in
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     binding = provision_cloud_binding_from_config(
-        {
-            "provider": "docker",
-            "workspace_root": str(workspace_root),
-            "container_name_prefix": "agent-",
-            "docker_binary": "/usr/bin/docker",
-        },
+        _docker_config(
+            {
+                "workspace_root": str(workspace_root),
+                "container_name_prefix": "agent-",
+                "docker_binary": "/usr/bin/docker",
+            }
+        ),
         {"kind": "docker"},
     )
     proof_file = workspace_root / binding.workspace_id / "qa-proof.txt"
@@ -1410,12 +1536,13 @@ def test_docker_workspace_provider_cleanup_preserves_workspace_when_container_re
     )
 
     binding = provision_cloud_binding_from_config(
-        {
-            "provider": "docker",
-            "workspace_root": str(workspace_root),
-            "container_name_prefix": "agent-",
-            "docker_binary": "/usr/bin/docker",
-        },
+        _docker_config(
+            {
+                "workspace_root": str(workspace_root),
+                "container_name_prefix": "agent-",
+                "docker_binary": "/usr/bin/docker",
+            }
+        ),
         {"kind": "docker"},
     )
     proof_file = workspace_root / binding.workspace_id / "qa-proof.txt"

@@ -68,6 +68,19 @@ from coding_agent.wire.protocol import (
 )
 
 
+def _test_runtime_profile_config(image: str = "python:3.11-slim") -> dict[str, object]:
+    return {
+        "default_runtime_profile": "universal",
+        "image_allowlist": [image],
+        "runtime_profiles": {
+            "universal": {
+                "provider": "docker",
+                "image": image,
+            }
+        },
+    }
+
+
 @pytest.fixture(autouse=True)
 async def clear_sessions():
     """Clear sessions before each test."""
@@ -129,8 +142,16 @@ def _safe_production_cloud_workspace_config() -> dict[str, object]:
         "enabled": True,
         "provider": "docker",
         "workspace_root": "/srv/coding-agent/workspaces",
-        "image": "coding-agent-runtime:2026-05-10",
+        "default_runtime_profile": "universal",
         "image_allowlist": ["coding-agent-runtime:2026-05-10"],
+        "runtime_profiles": {
+            "universal": {
+                "provider": "docker",
+                "image": "coding-agent-runtime:2026-05-10",
+                "cpus": "2",
+                "memory": "4g",
+            }
+        },
         "exec_user": "1000:1000",
         "max_active_workspaces": 8,
         "max_workspace_age_seconds": 86400,
@@ -201,11 +222,8 @@ workspace_root = "/srv/coding-agent/workspaces"
 [runtime_profiles.universal]
 provider = "docker"
 image = "registry.example/universal:2026-05-11"
-network = "none"
 cpus = "2"
 memory = "4g"
-pids_limit = 512
-exec_user = "1000:1000"
 """
         ),
         encoding="utf-8",
@@ -216,11 +234,8 @@ exec_user = "1000:1000"
         "universal": {
             "provider": "docker",
             "image": "registry.example/universal:2026-05-11",
-            "network": "none",
             "cpus": "2",
             "memory": "4g",
-            "pids_limit": 512,
-            "exec_user": "1000:1000",
         }
     }
 
@@ -267,6 +282,21 @@ def test_production_config_accepts_safe_docker_workspace_config(
             {"production": True, "bearer_token": "secret-token"},
             {"image_allowlist": []},
             "cloud_workspace.image_allowlist",
+        ),
+        (
+            {"production": True, "bearer_token": "secret-token"},
+            {"default_runtime_profile": ""},
+            "cloud_workspace.default_runtime_profile",
+        ),
+        (
+            {"production": True, "bearer_token": "secret-token"},
+            {"runtime_profiles": {}},
+            "runtime_profiles must be explicitly configured",
+        ),
+        (
+            {"production": True, "bearer_token": "secret-token"},
+            {"default_runtime_profile": "missing"},
+            "cloud_workspace.default_runtime_profile must refer to a configured runtime profile",
         ),
         (
             {"production": True, "bearer_token": "secret-token"},
@@ -654,6 +684,7 @@ class TestSessionCreation:
                 "provider": "docker",
                 "workspace_root": str(tmp_path),
                 "container_name_prefix": "agent-",
+                **_test_runtime_profile_config(),
             },
         )
 
@@ -897,6 +928,7 @@ class TestSessionCreation:
                 "provider": "docker",
                 "workspace_root": str(tmp_path),
                 "container_name_prefix": "agent-",
+                **_test_runtime_profile_config(),
             },
         )
         monkeypatch.setattr(
@@ -939,6 +971,7 @@ class TestSessionCreation:
                 "provider": "docker",
                 "workspace_root": str(tmp_path),
                 "container_name_prefix": "agent-",
+                **_test_runtime_profile_config(),
             }
 
         monkeypatch.setattr(
@@ -1071,6 +1104,7 @@ max_turns = 17
                 "provider": "docker",
                 "workspace_root": str(tmp_path),
                 "container_name_prefix": "agent-",
+                **_test_runtime_profile_config(),
             },
         )
         monkeypatch.setattr(

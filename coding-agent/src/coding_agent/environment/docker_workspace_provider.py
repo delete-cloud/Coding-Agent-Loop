@@ -375,7 +375,9 @@ class DockerWorkspaceProvider(WorkspaceProvider):
                 "cloud workspace source kind is not supported for provider=docker"
             )
 
-        runtime_profile = _runtime_profile_from_source(source)
+        runtime_profile = _runtime_profile_from_source(
+            source
+        ) or _default_runtime_profile(config)
         provider_config = _docker_workspace_provider_config(
             config,
             runtime_profile=runtime_profile,
@@ -631,7 +633,6 @@ def _docker_workspace_provider_config(
     )
     assert container_name_prefix is not None
     assert docker_binary is not None
-    assert image is not None
     assert network is not None
     assert cpus is not None
     assert memory is not None
@@ -659,6 +660,16 @@ def _docker_workspace_provider_config(
     )
 
 
+def _default_runtime_profile(config: dict[str, object]) -> str:
+    default_runtime_profile = config.get("default_runtime_profile")
+    if (
+        not isinstance(default_runtime_profile, str)
+        or not default_runtime_profile.strip()
+    ):
+        raise ValueError("cloud_workspace.default_runtime_profile is required")
+    return default_runtime_profile.strip()
+
+
 def _effective_docker_workspace_config(
     config: dict[str, object],
     *,
@@ -683,8 +694,13 @@ def _effective_docker_workspace_config(
         raise ValueError(
             f'cloud_workspace.runtime_profiles.{runtime_profile}.provider must be "docker"'
         )
+    image = profile_config.get("image")
+    if not isinstance(image, str) or not image.strip():
+        raise ValueError(
+            f"cloud_workspace.runtime_profiles.{runtime_profile}.image is required"
+        )
     effective = dict(config)
-    for key in ("image", "network", "cpus", "memory", "pids_limit", "exec_user"):
+    for key in ("image", "cpus", "memory"):
         if key in profile_config:
             effective[key] = profile_config[key]
     return effective
