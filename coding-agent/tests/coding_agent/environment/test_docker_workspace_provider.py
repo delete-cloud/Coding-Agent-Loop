@@ -954,6 +954,102 @@ def test_docker_workspace_provider_rejects_invalid_setup_secret_allowlist(
         )
 
 
+def test_docker_workspace_provider_rejects_invalid_setup_secret_env_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_root.mkdir()
+
+    def fail_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del command, kwargs
+        raise AssertionError("docker run should not be called")
+
+    monkeypatch.setattr(subprocess, "run", fail_run)
+
+    with pytest.raises(
+        ValueError,
+        match=r"remote_phases\.setup\.secret_env_allowlist entries must be valid environment variable names",
+    ):
+        _ = provision_cloud_binding_from_config(
+            _docker_config(
+                {
+                    "workspace_root": str(workspace_root),
+                    "remote_phases": {
+                        "setup": {
+                            "enabled": True,
+                            "network": "bridge",
+                            "timeout_seconds": 600,
+                            "commands": ["uv sync"],
+                            "secret_env_allowlist": ["PIP-INDEX-URL"],
+                        },
+                        "agent": {"network": "none"},
+                    },
+                }
+            ),
+            {"kind": "docker"},
+        )
+
+
+def test_docker_workspace_provider_setup_failure_surfaces_redacted_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_root.mkdir()
+    monkeypatch.setenv("PIP_INDEX_URL", "https://token@example.test/simple")
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if command[1:3] == ["run", "--rm"]:
+            raise subprocess.CalledProcessError(
+                returncode=1,
+                cmd=command,
+                output="using https://token@example.test/simple",
+                stderr="setup failed",
+            )
+        if command[1:3] == ["rm", "-f"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[1:3] == ["container", "inspect"]:
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                stdout="",
+                stderr=f"Error: No such container: {command[-1]}\n",
+            )
+        raise AssertionError(f"unexpected docker command: {command}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(subprocess.CalledProcessError) as exc_info:
+        _ = provision_cloud_binding_from_config(
+            _docker_config(
+                {
+                    "workspace_root": str(workspace_root),
+                    "remote_phases": {
+                        "setup": {
+                            "enabled": True,
+                            "network": "bridge",
+                            "timeout_seconds": 600,
+                            "commands": ["uv sync"],
+                            "secret_env_allowlist": ["PIP_INDEX_URL"],
+                        },
+                        "agent": {"network": "none"},
+                    },
+                }
+            ),
+            {"kind": "docker"},
+        )
+
+    notes = "\n".join(exc_info.value.__notes__)
+    assert "setup phase stdout:" in notes
+    assert "using [REDACTED]" in notes
+    assert "https://token@example.test/simple" not in notes
+    assert "setup phase stderr:\nsetup failed" in notes
+
+
 def test_docker_workspace_provider_applies_requested_runtime_profile(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

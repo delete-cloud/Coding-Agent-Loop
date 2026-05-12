@@ -1105,15 +1105,22 @@ def _run_docker_setup_phase_if_configured(
     for key, value in env.items():
         setup_command.extend(["-e", f"{key}={value}"])
     setup_command.extend([provider_config.image, "/bin/sh", "-c", command])
-    _ = subprocess.run(
-        setup_command,
-        shell=False,
-        capture_output=True,
-        text=True,
-        timeout=setup_timeout,
-        env=None,
-        check=True,
-    )
+    try:
+        _ = subprocess.run(
+            setup_command,
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=setup_timeout,
+            env=None,
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        _add_setup_failure_output_notes(exc, exc.stdout, exc.stderr, env)
+        raise
+    except subprocess.TimeoutExpired as exc:
+        _add_setup_failure_output_notes(exc, exc.stdout, exc.stderr, env)
+        raise
 
 
 def _setup_phase_env(secret_env_allowlist: list[object]) -> dict[str, str]:
@@ -1121,13 +1128,45 @@ def _setup_phase_env(secret_env_allowlist: list[object]) -> dict[str, str]:
     for item in secret_env_allowlist:
         if not isinstance(item, str) or not item.strip():
             raise ValueError("remote_phases.setup.secret_env_allowlist must be strings")
-        value = os.environ.get(item.strip())
+        key = item.strip()
+        if _ENV_NAME_RE.fullmatch(key) is None:
+            raise ValueError(
+                "remote_phases.setup.secret_env_allowlist entries must be valid environment variable names"
+            )
+        value = os.environ.get(key)
         if value is None:
             raise ValueError(
-                f"remote_phases.setup.secret_env_allowlist environment variable is missing: {item.strip()}"
+                f"remote_phases.setup.secret_env_allowlist environment variable is missing: {key}"
             )
-        env[item.strip()] = value
+        env[key] = value
     return env
+
+
+def _add_setup_failure_output_notes(
+    exc: BaseException,
+    stdout: object,
+    stderr: object,
+    secret_env: dict[str, str],
+) -> None:
+    stdout_text = _redact_setup_output(stdout, secret_env)
+    stderr_text = _redact_setup_output(stderr, secret_env)
+    if stdout_text:
+        exc.add_note(f"setup phase stdout:\n{stdout_text}")
+    if stderr_text:
+        exc.add_note(f"setup phase stderr:\n{stderr_text}")
+
+
+def _redact_setup_output(value: object, secret_env: dict[str, str]) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        text = value.decode(errors="replace")
+    else:
+        text = str(value)
+    for secret in secret_env.values():
+        if secret:
+            text = text.replace(secret, "[REDACTED]")
+    return text
 
 
 def _setup_phase_commands(value: object) -> list[str]:
