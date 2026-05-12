@@ -398,6 +398,7 @@ class DockerWorkspaceProvider(WorkspaceProvider):
             workspace_id=workspace_id,
             runtime_profile=runtime_profile,
         )
+        docker_cleanup_needed = False
         try:
             snapshot_archive_base64 = source.get("snapshot_archive_base64")
             if snapshot_archive_base64 is not None:
@@ -409,6 +410,7 @@ class DockerWorkspaceProvider(WorkspaceProvider):
                     workspace_root,
                     snapshot_archive_base64,
                 )
+            docker_cleanup_needed = True
             _run_docker_setup_phase_if_configured(provider_config, config, binding)
             _start_docker_workspace_container(provider_config, binding)
         except Exception as exc:
@@ -417,17 +419,18 @@ class DockerWorkspaceProvider(WorkspaceProvider):
                 workspace_id,
             )
             cleanup_failed = False
-            try:
-                _remove_docker_workspace_container(provider_config, workspace_id)
-            except Exception as cleanup_exc:
-                cleanup_failed = True
-                note = (
-                    "failed to clean up docker workspace container after start failure: "
-                    + str(cleanup_exc)
-                )
-                exc.add_note(note)
+            if docker_cleanup_needed:
+                try:
+                    _remove_docker_workspace_container(provider_config, workspace_id)
+                except Exception as cleanup_exc:
+                    cleanup_failed = True
+                    note = (
+                        "failed to clean up docker workspace container after start failure: "
+                        + str(cleanup_exc)
+                    )
+                    exc.add_note(note)
             if not cleanup_failed and workspace_root.exists():
-                shutil.rmtree(workspace_root)
+                shutil.rmtree(workspace_root, ignore_errors=not docker_cleanup_needed)
             raise
         logger.info(
             "Docker workspace created workspace_id=%s container=%s",

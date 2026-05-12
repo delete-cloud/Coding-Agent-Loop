@@ -869,6 +869,39 @@ def test_docker_workspace_provider_imports_snapshot_before_setup_phase(
     ) == "uploaded\n"
 
 
+def test_docker_workspace_provider_removes_workspace_when_snapshot_import_fails_before_containers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_root.mkdir()
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        raise RuntimeError(
+            f"docker cleanup should not run before containers: {command}"
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(Exception):
+        _ = provision_cloud_binding_from_config(
+            _docker_config(
+                {
+                    "workspace_root": str(workspace_root),
+                    "docker_binary": "/usr/bin/docker",
+                }
+            ),
+            {
+                "kind": "docker",
+                "snapshot_archive_base64": "not a valid workspace archive",
+            },
+        )
+
+    assert list(workspace_root.iterdir()) == []
+
+
 def test_docker_workspace_provider_setup_failure_does_not_start_agent_container(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
