@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
@@ -25,6 +25,9 @@ class DockerWorkspaceSourceRequest(BaseModel):
     kind: Literal["docker"]
     snapshot_archive_base64: str | None = Field(None, min_length=1)
     runtime_profile: str | None = Field(None, min_length=1, max_length=100)
+    setup_commands: (
+        list[Annotated[str, Field(min_length=1, max_length=1000)]] | None
+    ) = Field(None, min_length=1, max_length=20)
 
 
 ExecutionBindingRequest = LocalExecutionBindingRequest | CloudWorkspaceBindingRequest

@@ -64,6 +64,19 @@ image = "ghcr.io/delete-cloud/coding-agent-universal:2026-05-11"
 cpus = "2"
 memory = "4g"
 tools = ["python", "pip", "uv", "git", "rg", "curl"]
+
+[remote_phases.setup]
+enabled = false
+network = "bridge"
+timeout_seconds = 600
+commands = [] # Enable setup and populate this with trusted bootstrap commands when needed.
+secret_env_allowlist = ["PIP_INDEX_URL", "GITHUB_TOKEN"]
+allow_request_commands = false
+
+[remote_phases.agent]
+network = "none"
+timeout_seconds = 3600
+secret_env_allowlist = []
 ```
 
 `python:3.11-slim` is enough for basic file operations and pure-Python tools,
@@ -84,6 +97,19 @@ Docker workspace provisioning requires a runtime profile. If a request omits
 When `server.production = true`, startup fails if bearer auth, Docker workspace
 enablement, image allowlist, non-root `exec_user`, quota, GC, resource limits,
 or `network = "none"` are missing or unsafe.
+
+`remote_phases` is the setup/agent phase policy described in ADR-0023. The
+setup phase block is reserved for a later implementation slice; production
+validation currently requires `remote_phases.setup.enabled = false` and rejects
+any attempt to turn it on. The agent phase remains secret-free by default and
+must use `network = "none"` in production. Request-provided setup commands are
+not exposed by the current CLI and are rejected until setup phase execution
+lands in a later implementation slice. The agent cannot enable setup
+dynamically from a prompt.
+
+Setup secrets are injected only into setup execution. This does not guarantee a
+setup command cannot write a secret into workspace files; keep setup commands
+trusted and scoped.
 
 Development mode is any config without `server.production = true`. It is useful
 for local testing and demos, but the server logs that the configuration is not
@@ -194,6 +220,11 @@ coding-agent remote run team --repo . --runtime universal --goal "fix the failin
 
 `--runtime` selects a profile from the server's `[runtime_profiles]` config. It
 does not allow the client or agent to choose an arbitrary Docker image.
+
+Prefer server-configured setup commands for production deployments that need
+repeatable bootstrap behavior. Request-provided setup commands remain reserved
+for the later setup execution slice and currently fail closed instead of being
+accepted as a silent no-op.
 
 `--approval auto` is the default and can still ask for approval for tools such
 as `bash_run`. `--approval interactive` asks for every tool. `--approval yolo`
