@@ -28,6 +28,14 @@ def test_docker_workspace_provider_imports_and_exports_workspace_archive(
         "provider": "docker",
         "workspace_root": str(workspace_root),
         "container_name_prefix": "agent-",
+        "default_runtime_profile": "python-basic",
+        "image_allowlist": ["python:3.11-slim"],
+        "runtime_profiles": {
+            "python-basic": {
+                "provider": "docker",
+                "image": "python:3.11-slim",
+            }
+        },
     }
     binding = provision_cloud_binding_from_config(config, {"kind": "docker"})
 
@@ -44,9 +52,9 @@ def test_docker_workspace_provider_imports_and_exports_workspace_archive(
 
     workspace_path = workspace_root / binding.workspace_id
     assert (workspace_path / "README.md").read_text(encoding="utf-8") == "uploaded\n"
-    assert (
-        workspace_path / "nested" / "data.txt"
-    ).read_text(encoding="utf-8") == "from client\n"
+    assert (workspace_path / "nested" / "data.txt").read_text(
+        encoding="utf-8"
+    ) == "from client\n"
 
     export_target = tmp_path / "export"
     extract_workspace_archive_base64(
@@ -55,8 +63,8 @@ def test_docker_workspace_provider_imports_and_exports_workspace_archive(
     )
 
     assert (export_target / "README.md").read_text(encoding="utf-8") == "uploaded\n"
-    assert (
-        export_target / "nested" / "data.txt"
-    ).read_text(encoding="utf-8") == "from client\n"
+    assert (export_target / "nested" / "data.txt").read_text(
+        encoding="utf-8"
+    ) == "from client\n"
 
     cleanup_cloud_binding_from_config(config, binding)

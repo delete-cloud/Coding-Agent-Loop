@@ -72,6 +72,7 @@ class _DockerWorkspaceProviderConfig:
     pids_limit: int
     max_active_workspaces: int | None
     max_workspace_age_seconds: int | None
+    runtime_profile: str | None = None
 
 
 class DockerCloudWorkspaceClient:
@@ -344,9 +345,13 @@ class DockerWorkspaceProvider(WorkspaceProvider):
     def build_cloud_client_factory(
         self, config: dict[str, object]
     ) -> CloudWorkspaceClientFactory:
-        provider_config = _docker_workspace_provider_config(config)
+        _validate_docker_workspace_base_config(config)
 
         def build_client(binding: CloudWorkspaceBinding) -> CloudWorkspaceClient:
+            provider_config = _docker_workspace_provider_config(
+                config,
+                runtime_profile=binding.runtime_profile,
+            )
             return DockerCloudWorkspaceClient(binding=binding, config=provider_config)
 
         return build_client
@@ -370,7 +375,13 @@ class DockerWorkspaceProvider(WorkspaceProvider):
                 "cloud workspace source kind is not supported for provider=docker"
             )
 
-        provider_config = _docker_workspace_provider_config(config)
+        runtime_profile = _runtime_profile_from_source(
+            source
+        ) or _default_runtime_profile(config)
+        provider_config = _docker_workspace_provider_config(
+            config,
+            runtime_profile=runtime_profile,
+        )
         with _quota_lock_for_workspace_root(provider_config.workspace_root):
             _enforce_active_workspace_quota(provider_config)
             workspace_id = f"ws-{uuid.uuid4().hex}"
@@ -383,6 +394,7 @@ class DockerWorkspaceProvider(WorkspaceProvider):
                 f"docker://{_container_name(provider_config, workspace_id)}{provider_config.container_workspace_root}"
             ),
             workspace_id=workspace_id,
+            runtime_profile=runtime_profile,
         )
         try:
             _start_docker_workspace_container(provider_config, binding)
@@ -417,7 +429,10 @@ class DockerWorkspaceProvider(WorkspaceProvider):
         config: dict[str, object],
         binding: CloudWorkspaceBinding,
     ) -> None:
-        provider_config = _docker_workspace_provider_config(config)
+        provider_config = _docker_workspace_provider_config(
+            config,
+            runtime_profile=binding.runtime_profile,
+        )
         logger.info(
             "Cleaning Docker workspace workspace_id=%s container=%s",
             binding.workspace_id,
@@ -438,7 +453,10 @@ class DockerWorkspaceProvider(WorkspaceProvider):
         binding: CloudWorkspaceBinding,
         archive_base64: str,
     ) -> None:
-        provider_config = _docker_workspace_provider_config(config)
+        provider_config = _docker_workspace_provider_config(
+            config,
+            runtime_profile=binding.runtime_profile,
+        )
         workspace_root = _workspace_root_for_id(
             provider_config.workspace_root, binding.workspace_id
         )
@@ -457,7 +475,10 @@ class DockerWorkspaceProvider(WorkspaceProvider):
         config: dict[str, object],
         binding: CloudWorkspaceBinding,
     ) -> str:
-        provider_config = _docker_workspace_provider_config(config)
+        provider_config = _docker_workspace_provider_config(
+            config,
+            runtime_profile=binding.runtime_profile,
+        )
         workspace_root = _workspace_root_for_id(
             provider_config.workspace_root, binding.workspace_id
         )
@@ -573,21 +594,26 @@ class DockerWorkspaceProvider(WorkspaceProvider):
 
 def _docker_workspace_provider_config(
     config: dict[str, object],
+    *,
+    runtime_profile: str | None = None,
 ) -> _DockerWorkspaceProviderConfig:
-    workspace_root_raw = config.get("workspace_root")
-    if not isinstance(workspace_root_raw, str) or not workspace_root_raw.strip():
-        raise ValueError(
-            "cloud_workspace.workspace_root is required for provider=docker"
-        )
-
-    container_workspace_root = _container_workspace_root(config)
-    container_name_prefix = _optional_string(config.get("container_name_prefix"), "")
-    docker_binary = _optional_string(config.get("docker_binary"), "docker")
-    exec_user = _optional_string(config.get("exec_user"), None)
-    env_allowlist = tuple(
-        _string_list(config.get("env_allowlist"), key="env_allowlist")
+    resolved_runtime_profile = runtime_profile or _default_runtime_profile(config)
+    effective_config = _effective_docker_workspace_config(
+        config,
+        runtime_profile=resolved_runtime_profile,
     )
-    image = _optional_string(config.get("image"), _DEFAULT_DOCKER_IMAGE)
+    workspace_root_raw = _validate_docker_workspace_base_config(effective_config)
+
+    container_workspace_root = _container_workspace_root(effective_config)
+    container_name_prefix = _optional_string(
+        effective_config.get("container_name_prefix"), ""
+    )
+    docker_binary = _optional_string(effective_config.get("docker_binary"), "docker")
+    exec_user = _optional_string(effective_config.get("exec_user"), None)
+    env_allowlist = tuple(
+        _string_list(effective_config.get("env_allowlist"), key="env_allowlist")
+    )
+    image = _optional_string(effective_config.get("image"), _DEFAULT_DOCKER_IMAGE)
     image_allowlist = tuple(
         _string_list(
             config.get("image_allowlist"),
@@ -595,11 +621,11 @@ def _docker_workspace_provider_config(
             default=(_DEFAULT_DOCKER_IMAGE,),
         )
     )
-    network = _optional_string(config.get("network"), _DEFAULT_DOCKER_NETWORK)
-    cpus = _optional_string(config.get("cpus"), _DEFAULT_DOCKER_CPUS)
-    memory = _optional_string(config.get("memory"), _DEFAULT_DOCKER_MEMORY)
+    network = _optional_string(effective_config.get("network"), _DEFAULT_DOCKER_NETWORK)
+    cpus = _optional_string(effective_config.get("cpus"), _DEFAULT_DOCKER_CPUS)
+    memory = _optional_string(effective_config.get("memory"), _DEFAULT_DOCKER_MEMORY)
     pids_limit = _positive_int(
-        config.get("pids_limit"),
+        effective_config.get("pids_limit"),
         key="pids_limit",
         default=_DEFAULT_DOCKER_PIDS_LIMIT,
     )
@@ -613,7 +639,6 @@ def _docker_workspace_provider_config(
     )
     assert container_name_prefix is not None
     assert docker_binary is not None
-    assert image is not None
     assert network is not None
     assert cpus is not None
     assert memory is not None
@@ -637,7 +662,73 @@ def _docker_workspace_provider_config(
         pids_limit=pids_limit,
         max_active_workspaces=max_active_workspaces,
         max_workspace_age_seconds=max_workspace_age_seconds,
+        runtime_profile=resolved_runtime_profile,
     )
+
+
+def _validate_docker_workspace_base_config(config: dict[str, object]) -> str:
+    workspace_root_raw = config.get("workspace_root")
+    if not isinstance(workspace_root_raw, str) or not workspace_root_raw.strip():
+        raise ValueError(
+            "cloud_workspace.workspace_root is required for provider=docker"
+        )
+    _ = _container_workspace_root(config)
+    return workspace_root_raw
+
+
+def _default_runtime_profile(config: dict[str, object]) -> str:
+    default_runtime_profile = config.get("default_runtime_profile")
+    if (
+        not isinstance(default_runtime_profile, str)
+        or not default_runtime_profile.strip()
+    ):
+        raise ValueError("cloud_workspace.default_runtime_profile is required")
+    return default_runtime_profile.strip()
+
+
+def _effective_docker_workspace_config(
+    config: dict[str, object],
+    *,
+    runtime_profile: str | None,
+) -> dict[str, object]:
+    runtime_profiles = config.get("runtime_profiles")
+    if not isinstance(runtime_profiles, dict):
+        raise ValueError(
+            f"cloud_workspace.runtime_profile is not configured: {runtime_profile}"
+        )
+    profiles = cast(dict[object, object], runtime_profiles)
+    profile = profiles.get(runtime_profile)
+    if not isinstance(profile, dict):
+        raise ValueError(
+            f"cloud_workspace.runtime_profile is not configured: {runtime_profile}"
+        )
+    profile_config = cast(dict[object, object], profile)
+    provider = profile_config.get("provider")
+    if provider != "docker":
+        raise ValueError(
+            f'cloud_workspace.runtime_profiles.{runtime_profile}.provider must be "docker"'
+        )
+    image = profile_config.get("image")
+    if not isinstance(image, str) or not image.strip():
+        raise ValueError(
+            f"cloud_workspace.runtime_profiles.{runtime_profile}.image is required"
+        )
+    effective = dict(config)
+    # Runtime profiles select toolchain/resource defaults. Sandbox policy fields
+    # such as network, exec_user, and pids_limit remain controlled by base config.
+    for key in ("image", "cpus", "memory"):
+        if key in profile_config:
+            effective[key] = profile_config[key]
+    return effective
+
+
+def _runtime_profile_from_source(source: CloudWorkspaceSource) -> str | None:
+    runtime_profile = source.get("runtime_profile")
+    if runtime_profile is None:
+        return None
+    if not isinstance(runtime_profile, str) or not runtime_profile.strip():
+        raise ValueError("cloud workspace runtime_profile must be a non-empty string")
+    return runtime_profile.strip()
 
 
 def _container_workspace_root(config: dict[str, object]) -> str:

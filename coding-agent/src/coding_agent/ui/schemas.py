@@ -24,6 +24,7 @@ class CloudWorkspaceBindingRequest(BaseModel):
 class DockerWorkspaceSourceRequest(BaseModel):
     kind: Literal["docker"]
     snapshot_archive_base64: str | None = Field(None, min_length=1)
+    runtime_profile: str | None = Field(None, min_length=1, max_length=100)
 
 
 ExecutionBindingRequest = LocalExecutionBindingRequest | CloudWorkspaceBindingRequest

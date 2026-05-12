@@ -140,7 +140,16 @@ def _load_storage_config() -> dict[str, Any]:
 
 
 def _load_cloud_workspace_config() -> dict[str, Any]:
-    return _load_agent_config_section("cloud_workspace")
+    cloud_workspace_config = _load_agent_config_section("cloud_workspace")
+    runtime_profiles = _load_runtime_profiles_config()
+    if runtime_profiles:
+        cloud_workspace_config = dict(cloud_workspace_config)
+        cloud_workspace_config["runtime_profiles"] = runtime_profiles
+    return cloud_workspace_config
+
+
+def _load_runtime_profiles_config() -> dict[str, Any]:
+    return _load_agent_config_section("runtime_profiles")
 
 
 def _load_server_config() -> dict[str, Any]:
@@ -232,6 +241,29 @@ def _validate_production_config(
     for image in image_allowlist:
         if not isinstance(image, str) or not image.strip():
             raise ValueError("cloud_workspace.image_allowlist must contain strings")
+    default_runtime_profile = cloud_workspace_config.get("default_runtime_profile")
+    runtime_profiles = cloud_workspace_config.get("runtime_profiles")
+    if (
+        not isinstance(default_runtime_profile, str)
+        or not default_runtime_profile.strip()
+    ):
+        raise ValueError("cloud_workspace.default_runtime_profile is required")
+    if not isinstance(runtime_profiles, dict) or not runtime_profiles:
+        raise ValueError("runtime_profiles must be explicitly configured")
+    default_profile = runtime_profiles.get(default_runtime_profile.strip())
+    if not isinstance(default_profile, dict):
+        raise ValueError(
+            "cloud_workspace.default_runtime_profile must refer to a configured runtime profile"
+        )
+    default_profile_image = default_profile.get("image")
+    if not isinstance(default_profile_image, str) or not default_profile_image.strip():
+        raise ValueError(
+            f"runtime_profiles.{default_runtime_profile.strip()}.image is required"
+        )
+    if default_profile_image.strip() not in image_allowlist:
+        raise ValueError(
+            "cloud_workspace.default_runtime_profile image must be in image_allowlist"
+        )
 
     exec_user = cloud_workspace_config.get("exec_user")
     if not isinstance(exec_user, str) or not exec_user.strip():

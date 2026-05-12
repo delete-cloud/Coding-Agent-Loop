@@ -41,21 +41,32 @@ class LocalExecutionBinding(ExecutionBinding):
 class CloudWorkspaceBinding(ExecutionBinding):
     workspace_url: str
     workspace_id: str
+    runtime_profile: str | None = None
     kind: ClassVar[Literal["cloud"]] = "cloud"
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "kind": self.kind,
             "workspace_url": self.workspace_url,
             "workspace_id": self.workspace_id,
         }
+        if self.runtime_profile is not None:
+            payload["runtime_profile"] = self.runtime_profile
+        return payload
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> CloudWorkspaceBinding:
         workspace_url = data.get("workspace_url")
         workspace_id = data.get("workspace_id")
+        runtime_profile = data.get("runtime_profile")
         if not isinstance(workspace_url, str) or not isinstance(workspace_id, str):
             raise TypeError(
                 "cloud binding requires string workspace_url and workspace_id"
             )
-        return cls(workspace_url=workspace_url, workspace_id=workspace_id)
+        if runtime_profile is not None and not isinstance(runtime_profile, str):
+            raise TypeError("cloud binding runtime_profile must be a string")
+        return cls(
+            workspace_url=workspace_url,
+            workspace_id=workspace_id,
+            runtime_profile=runtime_profile,
+        )
