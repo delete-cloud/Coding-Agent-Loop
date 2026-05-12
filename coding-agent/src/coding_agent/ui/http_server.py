@@ -263,6 +263,10 @@ def _validate_production_remote_phases(
                 raise ValueError(
                     'remote_phases.setup.network must be "none" or "bridge"'
                 )
+            # ADR-0023: setup/bootstrap is a bounded pre-agent operation, so an
+            # enabled setup phase must have its own timeout. The agent phase
+            # timeout stays optional because turn/tool limits are enforced
+            # elsewhere until phase execution is implemented.
             _require_positive_int_field(
                 setup_phase,
                 section="remote_phases.setup",
@@ -788,18 +792,7 @@ def _validate_workspace_source_phase_policy(
     setup_commands = workspace_source.get("setup_commands")
     if setup_commands is None:
         return
-    remote_phases = cloud_workspace_config.get("remote_phases")
-    setup_phase: object | None = None
-    if isinstance(remote_phases, dict):
-        setup_phase = remote_phases.get("setup")
-    if not isinstance(setup_phase, dict) or setup_phase.get("enabled") is not True:
-        raise ValueError(
-            "request-provided setup commands require remote_phases.setup.enabled=true"
-        )
-    if setup_phase.get("allow_request_commands") is not True:
-        raise ValueError(
-            "request-provided setup commands are disabled by remote_phases.setup.allow_request_commands"
-        )
+    raise ValueError("setup phase execution is not implemented yet")
 
 
 def _session_origin_from_request(

@@ -451,7 +451,7 @@ def test_production_config_rejects_unsafe_remote_workspace_config(
 
 
 @pytest.mark.asyncio
-async def test_http_create_session_rejects_request_setup_commands_by_default(
+async def test_http_create_session_rejects_request_setup_commands_until_execution_exists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cloud_workspace_config = _safe_production_cloud_workspace_config()
@@ -460,7 +460,7 @@ async def test_http_create_session_rejects_request_setup_commands_by_default(
             "enabled": True,
             "network": "bridge",
             "timeout_seconds": 600,
-            "allow_request_commands": False,
+            "allow_request_commands": True,
         },
         "agent": {"network": "none"},
     }
@@ -484,64 +484,7 @@ async def test_http_create_session_rejects_request_setup_commands_by_default(
         )
 
     assert response.status_code == 400
-    assert response.json()["detail"] == (
-        "request-provided setup commands are disabled by remote_phases.setup.allow_request_commands"
-    )
-
-
-@pytest.mark.asyncio
-async def test_http_create_session_accepts_request_setup_commands_when_enabled(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured_source: dict[str, object] = {}
-    cloud_workspace_config = _safe_production_cloud_workspace_config()
-    cloud_workspace_config["remote_phases"] = {
-        "setup": {
-            "enabled": True,
-            "network": "bridge",
-            "timeout_seconds": 600,
-            "allow_request_commands": True,
-        },
-        "agent": {"network": "none"},
-    }
-
-    def fake_provision_binding(
-        config: dict[str, object],
-        source: dict[str, object],
-    ) -> CloudWorkspaceBinding:
-        del config
-        captured_source.update(source)
-        return CloudWorkspaceBinding(
-            workspace_url="docker://agent-ws-test/workspace",
-            workspace_id="ws-test",
-            runtime_profile="universal",
-        )
-
-    monkeypatch.setattr(
-        "coding_agent.ui.http_server._load_cloud_workspace_config",
-        lambda: cloud_workspace_config,
-    )
-    monkeypatch.setattr(
-        "coding_agent.ui.http_server.provision_cloud_binding_from_config",
-        fake_provision_binding,
-    )
-
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test",
-    ) as client:
-        response = await client.post(
-            "/sessions",
-            json={
-                "workspace_source": {
-                    "kind": "docker",
-                    "setup_commands": ["uv sync"],
-                }
-            },
-        )
-
-    assert response.status_code == 200
-    assert captured_source["setup_commands"] == ["uv sync"]
+    assert response.json()["detail"] == ("setup phase execution is not implemented yet")
 
 
 @pytest.mark.asyncio
