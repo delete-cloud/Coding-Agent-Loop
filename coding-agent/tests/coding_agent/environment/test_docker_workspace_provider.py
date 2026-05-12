@@ -18,6 +18,7 @@ from coding_agent.environment import (
     provision_cloud_binding_from_config,
 )
 from coding_agent.ui.execution_binding import CloudWorkspaceBinding
+from coding_agent.workspace_archive import create_workspace_archive_base64
 
 
 TIMEOUT_SENTINEL_PREFIX = "__CODING_AGENT_DOCKER_TIMEOUT__:"
@@ -808,6 +809,64 @@ def test_docker_workspace_provider_runs_configured_setup_before_agent_container(
         "--network",
     ]
     assert commands[1][6] == "none"
+
+
+def test_docker_workspace_provider_imports_snapshot_before_setup_phase(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_root.mkdir()
+    source = tmp_path / "source"
+    source.mkdir()
+    _ = (source / "README.md").write_text("uploaded\n", encoding="utf-8")
+    events: list[str] = []
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if command[1:3] == ["run", "--rm"]:
+            workspace_mount = command[command.index("-v") + 1]
+            host_workspace = Path(workspace_mount.split(":", 1)[0])
+            assert (host_workspace / "README.md").read_text(
+                encoding="utf-8"
+            ) == "uploaded\n"
+            events.append("setup")
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[1:3] == ["run", "-d"]:
+            events.append("agent")
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        raise AssertionError(f"unexpected docker command: {command}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    binding = provision_cloud_binding_from_config(
+        _docker_config(
+            {
+                "workspace_root": str(workspace_root),
+                "docker_binary": "/usr/bin/docker",
+                "remote_phases": {
+                    "setup": {
+                        "enabled": True,
+                        "network": "bridge",
+                        "timeout_seconds": 600,
+                        "commands": ["test -f README.md"],
+                        "secret_env_allowlist": [],
+                    },
+                    "agent": {"network": "none"},
+                },
+            }
+        ),
+        {
+            "kind": "docker",
+            "snapshot_archive_base64": create_workspace_archive_base64(source),
+        },
+    )
+
+    assert events == ["setup", "agent"]
+    assert (workspace_root / binding.workspace_id / "README.md").read_text(
+        encoding="utf-8"
+    ) == "uploaded\n"
 
 
 def test_docker_workspace_provider_setup_failure_does_not_start_agent_container(

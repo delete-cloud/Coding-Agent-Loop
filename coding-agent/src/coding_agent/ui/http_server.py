@@ -32,7 +32,6 @@ from coding_agent.environment import (
     export_workspace_archive_by_id_from_config,
     export_workspace_archive_from_config,
     get_cloud_workspace_from_config,
-    import_workspace_archive_from_config,
     list_cloud_workspaces_from_config,
     provision_cloud_binding_from_config,
     workspace_archive_manifest_from_config,
@@ -414,25 +413,6 @@ def _cleanup_provisioned_cloud_binding(binding: CloudWorkspaceBinding) -> None:
     if not isinstance(provider, str) or not provider.strip():
         return
     cleanup_cloud_binding_from_config(cloud_workspace_config, binding)
-
-
-def _populate_provisioned_cloud_binding(
-    binding: CloudWorkspaceBinding,
-    archive_base64: str,
-) -> None:
-    cloud_workspace_config = _load_cloud_workspace_config()
-    try:
-        import_workspace_archive_from_config(
-            cloud_workspace_config,
-            binding,
-            archive_base64,
-        )
-    except Exception:
-        logger.exception(
-            "Cloud workspace archive upload/import failed workspace_id=%s",
-            binding.workspace_id,
-        )
-        raise
 
 
 def _storage_uses_pg_http_sessions(storage_config: dict[str, Any]) -> bool:
@@ -1227,17 +1207,6 @@ async def create_session(
             and isinstance(execution_binding, CloudWorkspaceBinding)
         ):
             provisioned_binding = execution_binding
-            snapshot_archive_base64 = getattr(
-                body.workspace_source,
-                "snapshot_archive_base64",
-                None,
-            )
-            if isinstance(snapshot_archive_base64, str):
-                await asyncio.to_thread(
-                    _populate_provisioned_cloud_binding,
-                    provisioned_binding,
-                    snapshot_archive_base64,
-                )
         session_id = await session_manager.create_session(
             repo_path=repo_path,
             origin=_session_origin_from_request(
