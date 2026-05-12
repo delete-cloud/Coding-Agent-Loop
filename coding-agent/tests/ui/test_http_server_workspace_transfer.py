@@ -99,6 +99,19 @@ def _read_workspace_archive(archive_base64: str) -> dict[str, str]:
     return extracted
 
 
+def _test_runtime_profile_config() -> dict[str, object]:
+    return {
+        "default_runtime_profile": "python-basic",
+        "image_allowlist": ["python:3.11-slim"],
+        "runtime_profiles": {
+            "python-basic": {
+                "provider": "docker",
+                "image": "python:3.11-slim",
+            }
+        },
+    }
+
+
 @pytest.fixture(autouse=True)
 async def clear_sessions() -> AsyncIterator[None]:
     session_manager.configure_owner_leases(
@@ -191,6 +204,7 @@ def _configure_workspace_server(
         "provider": "docker",
         "workspace_root": str(tmp_path),
         "container_name_prefix": "agent-",
+        **_test_runtime_profile_config(),
     }
     if max_workspace_age_seconds is not None:
         config["max_workspace_age_seconds"] = max_workspace_age_seconds
@@ -222,6 +236,7 @@ async def test_create_session_provisions_docker_workspace_from_snapshot(
             "provider": "docker",
             "workspace_root": str(tmp_path),
             "container_name_prefix": "agent-",
+            **_test_runtime_profile_config(),
         },
     )
 
@@ -386,6 +401,7 @@ async def test_get_workspace_archive_returns_cloud_workspace_snapshot(
             "provider": "docker",
             "workspace_root": str(tmp_path),
             "container_name_prefix": "agent-",
+            **_test_runtime_profile_config(),
         },
     )
 
@@ -426,6 +442,7 @@ async def test_get_workspace_archive_returns_409_for_active_turn(
             "provider": "docker",
             "workspace_root": str(tmp_path),
             "container_name_prefix": "agent-",
+            **_test_runtime_profile_config(),
         },
     )
 
@@ -460,6 +477,7 @@ async def test_get_workspace_archive_returns_409_for_stale_owner(
             "provider": "docker",
             "workspace_root": str(tmp_path),
             "container_name_prefix": "agent-",
+            **_test_runtime_profile_config(),
         },
     )
 
@@ -497,6 +515,7 @@ async def test_get_workspace_archive_rejects_owner_change_during_export(
             "provider": "docker",
             "workspace_root": str(tmp_path),
             "container_name_prefix": "agent-",
+            **_test_runtime_profile_config(),
         },
     )
 
@@ -549,6 +568,7 @@ async def test_get_workspace_archive_returns_500_for_unexpected_runtime_error(
             "provider": "docker",
             "workspace_root": str(tmp_path),
             "container_name_prefix": "agent-",
+            **_test_runtime_profile_config(),
         },
     )
 
@@ -586,6 +606,7 @@ async def test_create_session_rejects_snapshot_archive_larger_than_limit(
             "provider": "docker",
             "workspace_root": str(tmp_path),
             "container_name_prefix": "agent-",
+            **_test_runtime_profile_config(),
         },
     )
 
@@ -619,6 +640,7 @@ async def test_get_workspace_archive_returns_400_for_oversized_workspace_export(
             "provider": "docker",
             "workspace_root": str(tmp_path),
             "container_name_prefix": "agent-",
+            **_test_runtime_profile_config(),
         },
     )
 

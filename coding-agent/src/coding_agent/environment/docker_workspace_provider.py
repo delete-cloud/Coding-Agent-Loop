@@ -399,6 +399,16 @@ class DockerWorkspaceProvider(WorkspaceProvider):
             runtime_profile=runtime_profile,
         )
         try:
+            snapshot_archive_base64 = source.get("snapshot_archive_base64")
+            if snapshot_archive_base64 is not None:
+                if not isinstance(snapshot_archive_base64, str):
+                    raise ValueError(
+                        "workspace_source.snapshot_archive_base64 must be a string"
+                    )
+                extract_workspace_archive_base64(
+                    workspace_root,
+                    snapshot_archive_base64,
+                )
             _run_docker_setup_phase_if_configured(provider_config, config, binding)
             _start_docker_workspace_container(provider_config, binding)
         except Exception as exc:
