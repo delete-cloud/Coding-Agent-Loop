@@ -1102,8 +1102,8 @@ def _run_docker_setup_phase_if_configured(
     ]
     if provider_config.exec_user is not None:
         setup_command.extend(["--user", provider_config.exec_user])
-    for key, value in env.items():
-        setup_command.extend(["-e", f"{key}={value}"])
+    for key in env:
+        setup_command.extend(["-e", key])
     setup_command.extend([provider_config.image, "/bin/sh", "-c", command])
     try:
         _ = subprocess.run(

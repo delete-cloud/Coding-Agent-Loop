@@ -912,7 +912,8 @@ def test_docker_workspace_provider_injects_setup_secrets_only_into_setup_contain
     )
 
     assert "-e" in commands[0]
-    assert "PIP_INDEX_URL=https://token@example.test/simple" in commands[0]
+    assert "PIP_INDEX_URL" in commands[0]
+    assert "PIP_INDEX_URL=https://token@example.test/simple" not in commands[0]
     assert "PIP_INDEX_URL=https://token@example.test/simple" not in commands[1]
 
 
