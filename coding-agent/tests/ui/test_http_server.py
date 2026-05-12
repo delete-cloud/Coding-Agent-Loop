@@ -313,6 +313,32 @@ def test_production_config_accepts_safe_docker_workspace_config(
     )
 
 
+def test_production_config_accepts_server_configured_setup_commands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CODING_AGENT_BEARER_TOKEN", "secret-token")
+    cloud_workspace_config = _safe_production_cloud_workspace_config()
+    cloud_workspace_config["remote_phases"] = {
+        "setup": {
+            "enabled": True,
+            "network": "bridge",
+            "timeout_seconds": 600,
+            "commands": ["uv sync"],
+            "secret_env_allowlist": [],
+            "allow_request_commands": False,
+        },
+        "agent": {"network": "none"},
+    }
+
+    http_server._validate_production_config(
+        {
+            "production": True,
+            "bearer_token_env": "CODING_AGENT_BEARER_TOKEN",
+        },
+        cloud_workspace_config,
+    )
+
+
 @pytest.mark.parametrize(
     ("server_config", "cloud_workspace_overrides", "message"),
     [
@@ -403,7 +429,7 @@ def test_production_config_accepts_safe_docker_workspace_config(
                     "agent": {"network": "none"},
                 }
             },
-            "remote_phases.setup.enabled=true requires setup phase execution support",
+            'remote_phases.setup.network must be "none" or "bridge"',
         ),
         (
             {"production": True, "bearer_token": "secret-token"},
@@ -417,7 +443,7 @@ def test_production_config_accepts_safe_docker_workspace_config(
                     "agent": {"network": "none"},
                 }
             },
-            "remote_phases.setup.enabled=true requires setup phase execution support",
+            "remote_phases.setup.timeout_seconds",
         ),
         (
             {"production": True, "bearer_token": "secret-token"},
@@ -433,7 +459,7 @@ def test_production_config_accepts_safe_docker_workspace_config(
                     "agent": {"network": "none"},
                 }
             },
-            "remote_phases.setup.enabled=true requires setup phase execution support",
+            "remote_phases.setup.enabled=true requires non-empty server-configured commands",
         ),
         (
             {"production": True, "bearer_token": "secret-token"},

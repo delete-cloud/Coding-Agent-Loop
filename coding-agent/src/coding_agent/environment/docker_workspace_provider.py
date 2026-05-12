@@ -16,6 +16,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+import os
 from typing import TYPE_CHECKING, cast, override
 
 from .cloud import CloudCommandResult
@@ -54,6 +55,7 @@ _DEFAULT_DOCKER_CPUS = "1"
 _DEFAULT_DOCKER_MEMORY = "512m"
 _DEFAULT_DOCKER_PIDS_LIMIT = 256
 _DEFAULT_DOCKER_NETWORK = "none"
+_REMOTE_PHASE_SETUP_KEY = "setup"
 
 
 @dataclass(frozen=True)
@@ -397,6 +399,7 @@ class DockerWorkspaceProvider(WorkspaceProvider):
             runtime_profile=runtime_profile,
         )
         try:
+            _run_docker_setup_phase_if_configured(provider_config, config, binding)
             _start_docker_workspace_container(provider_config, binding)
         except Exception as exc:
             logger.exception(
@@ -1009,6 +1012,12 @@ def _container_name(
     return f"{provider_config.container_name_prefix}{workspace_id}"
 
 
+def _setup_container_name(
+    provider_config: _DockerWorkspaceProviderConfig, workspace_id: str
+) -> str:
+    return f"{_container_name(provider_config, workspace_id)}-setup"
+
+
 def _docker_provider_ready(provider_config: _DockerWorkspaceProviderConfig) -> bool:
     command = [
         provider_config.docker_binary,
@@ -1029,6 +1038,102 @@ def _docker_provider_ready(provider_config: _DockerWorkspaceProviderConfig) -> b
     except (OSError, subprocess.SubprocessError):
         return False
     return result.returncode == 0
+
+
+def _run_docker_setup_phase_if_configured(
+    provider_config: _DockerWorkspaceProviderConfig,
+    config: dict[str, object],
+    binding: "CloudWorkspaceBinding",
+) -> None:
+    remote_phases = config.get("remote_phases")
+    if not isinstance(remote_phases, dict):
+        return
+    setup_phase = remote_phases.get(_REMOTE_PHASE_SETUP_KEY)
+    if not isinstance(setup_phase, dict):
+        return
+    if setup_phase.get("enabled") is not True:
+        return
+
+    command = " && ".join(_setup_phase_commands(setup_phase.get("commands")))
+    setup_network = setup_phase.get("network")
+    if setup_network not in {"none", "bridge"}:
+        raise ValueError('remote_phases.setup.network must be "none" or "bridge"')
+    setup_timeout = setup_phase.get("timeout_seconds")
+    if (
+        not isinstance(setup_timeout, int)
+        or isinstance(setup_timeout, bool)
+        or setup_timeout <= 0
+    ):
+        raise ValueError(
+            "remote_phases.setup.timeout_seconds must be a positive integer"
+        )
+
+    secret_env_allowlist = setup_phase.get("secret_env_allowlist")
+    env = _setup_phase_env(
+        secret_env_allowlist if isinstance(secret_env_allowlist, list) else [],
+    )
+    setup_command = [
+        provider_config.docker_binary,
+        "run",
+        "--rm",
+        "--name",
+        _setup_container_name(provider_config, binding.workspace_id),
+        "--network",
+        str(setup_network),
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--pids-limit",
+        str(provider_config.pids_limit),
+        "--cpus",
+        provider_config.cpus,
+        "--memory",
+        provider_config.memory,
+        "-v",
+        f"{_workspace_root_for_id(provider_config.workspace_root, binding.workspace_id)}:{provider_config.container_workspace_root}",
+        "-w",
+        provider_config.container_workspace_root,
+    ]
+    if provider_config.exec_user is not None:
+        setup_command.extend(["--user", provider_config.exec_user])
+    for key, value in env.items():
+        setup_command.extend(["-e", f"{key}={value}"])
+    setup_command.extend([provider_config.image, "/bin/sh", "-c", command])
+    _ = subprocess.run(
+        setup_command,
+        shell=False,
+        capture_output=True,
+        text=True,
+        timeout=setup_timeout,
+        env=None,
+        check=True,
+    )
+
+
+def _setup_phase_env(secret_env_allowlist: list[object]) -> dict[str, str]:
+    env: dict[str, str] = {}
+    for item in secret_env_allowlist:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError("remote_phases.setup.secret_env_allowlist must be strings")
+        value = os.environ.get(item.strip())
+        if value is None:
+            raise ValueError(
+                f"remote_phases.setup.secret_env_allowlist environment variable is missing: {item.strip()}"
+            )
+        env[item.strip()] = value
+    return env
+
+
+def _setup_phase_commands(value: object) -> list[str]:
+    if not isinstance(value, list) or not value:
+        raise ValueError("remote_phases.setup.enabled=true requires non-empty commands")
+    commands: list[str] = []
+    for item in cast(list[object], value):
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError("remote_phases.setup.commands must be non-empty strings")
+        commands.append(item.strip())
+    return commands
 
 
 def _start_docker_workspace_container(
@@ -1079,7 +1184,28 @@ def _remove_docker_workspace_container(
     provider_config: _DockerWorkspaceProviderConfig,
     workspace_id: str,
 ) -> None:
-    container_name = _container_name(provider_config, workspace_id)
+    cleanup_error: BaseException | None = None
+    for container_name in (
+        _setup_container_name(provider_config, workspace_id),
+        _container_name(provider_config, workspace_id),
+    ):
+        try:
+            _remove_docker_container(provider_config, container_name)
+        except BaseException as exc:
+            if cleanup_error is None:
+                cleanup_error = exc
+            logger.exception(
+                "Docker workspace container cleanup failed container=%s",
+                container_name,
+            )
+    if cleanup_error is not None:
+        raise cleanup_error
+
+
+def _remove_docker_container(
+    provider_config: _DockerWorkspaceProviderConfig,
+    container_name: str,
+) -> None:
     command = [
         provider_config.docker_binary,
         "rm",

@@ -99,13 +99,12 @@ enablement, image allowlist, non-root `exec_user`, quota, GC, resource limits,
 or `network = "none"` are missing or unsafe.
 
 `remote_phases` is the setup/agent phase policy described in ADR-0023. The
-setup phase block is reserved for a later implementation slice; production
-validation currently requires `remote_phases.setup.enabled = false` and rejects
-any attempt to turn it on. The agent phase remains secret-free by default and
-must use `network = "none"` in production. Request-provided setup commands are
-not exposed by the current CLI and are rejected until setup phase execution
-lands in a later implementation slice. The agent cannot enable setup
-dynamically from a prompt.
+setup phase now executes only server-configured commands. Production
+validation requires `remote_phases.setup.enabled = true` to include a non-empty
+server-configured `commands` list; request-provided setup commands remain
+disabled and are rejected by the CLI and HTTP request policy. The agent phase
+remains secret-free by default and must use `network = "none"` in production.
+The agent cannot enable setup dynamically from a prompt.
 
 Setup secrets are injected only into setup execution. This does not guarantee a
 setup command cannot write a secret into workspace files; keep setup commands
