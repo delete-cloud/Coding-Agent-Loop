@@ -265,6 +265,11 @@ def _validate_production_remote_phases(
             raise ValueError(
                 "remote_phases.setup.allow_request_commands must be a boolean"
             )
+        if allow_request_commands is True:
+            raise ValueError(
+                "remote_phases.setup.allow_request_commands=true requires "
+                "request-provided setup command execution support"
+            )
         if setup_phase.get("enabled") is True:
             if setup_phase.get("network") not in {"none", "bridge"}:
                 raise ValueError(

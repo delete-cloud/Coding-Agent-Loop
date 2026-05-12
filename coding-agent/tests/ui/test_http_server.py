@@ -466,6 +466,22 @@ def test_production_config_accepts_server_configured_setup_commands(
             {
                 "remote_phases": {
                     "setup": {
+                        "enabled": True,
+                        "network": "bridge",
+                        "timeout_seconds": 600,
+                        "commands": ["uv sync"],
+                        "allow_request_commands": True,
+                    },
+                    "agent": {"network": "none"},
+                }
+            },
+            "remote_phases.setup.allow_request_commands=true requires request-provided setup command execution support",
+        ),
+        (
+            {"production": True, "bearer_token": "secret-token"},
+            {
+                "remote_phases": {
+                    "setup": {
                         "enabled": False,
                         "network": "bridge",
                         "timeout_seconds": 600,
