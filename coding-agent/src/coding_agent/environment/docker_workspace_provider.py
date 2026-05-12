@@ -12,7 +12,7 @@ import subprocess
 import threading
 import time
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -410,8 +410,18 @@ class DockerWorkspaceProvider(WorkspaceProvider):
                     workspace_root,
                     snapshot_archive_base64,
                 )
+
+            def mark_docker_cleanup_needed() -> None:
+                nonlocal docker_cleanup_needed
+                docker_cleanup_needed = True
+
+            _run_docker_setup_phase_if_configured(
+                provider_config,
+                config,
+                binding,
+                on_docker_invoked=mark_docker_cleanup_needed,
+            )
             docker_cleanup_needed = True
-            _run_docker_setup_phase_if_configured(provider_config, config, binding)
             _start_docker_workspace_container(provider_config, binding)
         except Exception as exc:
             logger.exception(
@@ -1057,6 +1067,8 @@ def _run_docker_setup_phase_if_configured(
     provider_config: _DockerWorkspaceProviderConfig,
     config: dict[str, object],
     binding: "CloudWorkspaceBinding",
+    *,
+    on_docker_invoked: Callable[[], None] | None = None,
 ) -> None:
     remote_phases = config.get("remote_phases")
     if not isinstance(remote_phases, dict):
@@ -1119,6 +1131,8 @@ def _run_docker_setup_phase_if_configured(
         setup_command.extend(["-e", key])
     setup_command.extend([provider_config.image, "/bin/sh", "-c", command])
     try:
+        if on_docker_invoked is not None:
+            on_docker_invoked()
         _ = subprocess.run(
             setup_command,
             shell=False,
