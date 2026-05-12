@@ -266,36 +266,10 @@ def _validate_production_remote_phases(
                 "remote_phases.setup.allow_request_commands must be a boolean"
             )
         if setup_phase.get("enabled") is True:
-            if setup_phase.get("network") not in {"none", "bridge"}:
-                raise ValueError(
-                    'remote_phases.setup.network must be "none" or "bridge"'
-                )
-            # ADR-0023: setup/bootstrap is a bounded pre-agent operation, so an
-            # enabled setup phase must have its own timeout. The agent phase
-            # timeout stays optional because turn/tool limits are enforced
-            # elsewhere until phase execution is implemented.
-            _require_positive_int_field(
-                setup_phase,
-                section="remote_phases.setup",
-                key="timeout_seconds",
+            raise ValueError(
+                "remote_phases.setup.enabled=true requires setup phase "
+                "execution support"
             )
-            _require_string_list_field(
-                setup_phase,
-                section="remote_phases.setup",
-                key="commands",
-            )
-            _require_string_list_field(
-                setup_phase,
-                section="remote_phases.setup",
-                key="secret_env_allowlist",
-            )
-            commands = setup_phase.get("commands")
-            has_configured_commands = isinstance(commands, list) and len(commands) > 0
-            if not has_configured_commands and allow_request_commands is not True:
-                raise ValueError(
-                    "remote_phases.setup must provide non-empty 'commands' "
-                    "or set 'allow_request_commands' to true"
-                )
 
     agent_phase = remote_phases.get("agent")
     if agent_phase is not None:

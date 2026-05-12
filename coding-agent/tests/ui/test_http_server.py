@@ -403,7 +403,7 @@ def test_production_config_accepts_safe_docker_workspace_config(
                     "agent": {"network": "none"},
                 }
             },
-            'remote_phases.setup.network must be "none" or "bridge"',
+            "remote_phases.setup.enabled=true requires setup phase execution support",
         ),
         (
             {"production": True, "bearer_token": "secret-token"},
@@ -417,7 +417,7 @@ def test_production_config_accepts_safe_docker_workspace_config(
                     "agent": {"network": "none"},
                 }
             },
-            "remote_phases.setup.timeout_seconds",
+            "remote_phases.setup.enabled=true requires setup phase execution support",
         ),
         (
             {"production": True, "bearer_token": "secret-token"},
@@ -433,14 +433,14 @@ def test_production_config_accepts_safe_docker_workspace_config(
                     "agent": {"network": "none"},
                 }
             },
-            "remote_phases.setup must provide non-empty 'commands' or set 'allow_request_commands' to true",
+            "remote_phases.setup.enabled=true requires setup phase execution support",
         ),
         (
             {"production": True, "bearer_token": "secret-token"},
             {
                 "remote_phases": {
                     "setup": {
-                        "enabled": True,
+                        "enabled": False,
                         "network": "bridge",
                         "timeout_seconds": 600,
                         "commands": ["uv sync"],
