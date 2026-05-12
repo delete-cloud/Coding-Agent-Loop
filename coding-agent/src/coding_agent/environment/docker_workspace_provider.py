@@ -1069,9 +1069,14 @@ def _run_docker_setup_phase_if_configured(
         )
 
     secret_env_allowlist = setup_phase.get("secret_env_allowlist")
-    env = _setup_phase_env(
-        secret_env_allowlist if isinstance(secret_env_allowlist, list) else [],
-    )
+    if secret_env_allowlist is None:
+        env = {}
+    elif isinstance(secret_env_allowlist, list):
+        env = _setup_phase_env(secret_env_allowlist)
+    else:
+        raise ValueError(
+            "remote_phases.setup.secret_env_allowlist must be a list of strings"
+        )
     setup_command = [
         provider_config.docker_binary,
         "run",

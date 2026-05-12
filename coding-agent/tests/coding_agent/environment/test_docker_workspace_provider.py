@@ -865,7 +865,12 @@ def test_docker_workspace_provider_setup_failure_does_not_start_agent_container(
         )
 
     assert [command[1:3] for command in commands].count(["run", "-d"]) == 0
-    assert [command[1:3] for command in commands].count(["rm", "-f"]) == 2
+    setup_container_name = commands[0][4]
+    agent_container_name = setup_container_name.removesuffix("-setup")
+    removed_containers = [
+        command[3] for command in commands if command[1:3] == ["rm", "-f"]
+    ]
+    assert removed_containers == [setup_container_name, agent_container_name]
     assert not any(workspace_root.iterdir())
 
 
@@ -909,6 +914,44 @@ def test_docker_workspace_provider_injects_setup_secrets_only_into_setup_contain
     assert "-e" in commands[0]
     assert "PIP_INDEX_URL=https://token@example.test/simple" in commands[0]
     assert "PIP_INDEX_URL=https://token@example.test/simple" not in commands[1]
+
+
+def test_docker_workspace_provider_rejects_invalid_setup_secret_allowlist(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_root.mkdir()
+
+    def fail_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del command, kwargs
+        raise AssertionError("docker run should not be called")
+
+    monkeypatch.setattr(subprocess, "run", fail_run)
+
+    with pytest.raises(
+        ValueError,
+        match=r"remote_phases\.setup\.secret_env_allowlist must be a list of strings",
+    ):
+        _ = provision_cloud_binding_from_config(
+            _docker_config(
+                {
+                    "workspace_root": str(workspace_root),
+                    "remote_phases": {
+                        "setup": {
+                            "enabled": True,
+                            "network": "bridge",
+                            "timeout_seconds": 600,
+                            "commands": ["uv sync"],
+                            "secret_env_allowlist": "PIP_INDEX_URL",
+                        },
+                        "agent": {"network": "none"},
+                    },
+                }
+            ),
+            {"kind": "docker"},
+        )
 
 
 def test_docker_workspace_provider_applies_requested_runtime_profile(
