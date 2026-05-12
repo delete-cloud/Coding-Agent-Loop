@@ -735,6 +735,322 @@ def test_docker_workspace_provider_applies_configured_container_hardening(
     ]
 
 
+def test_docker_workspace_provider_runs_configured_setup_before_agent_container(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_root.mkdir()
+    commands: list[list[str]] = []
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    binding = provision_cloud_binding_from_config(
+        _docker_config(
+            {
+                "workspace_root": str(workspace_root),
+                "docker_binary": "/usr/bin/docker",
+                "network": "none",
+                "remote_phases": {
+                    "setup": {
+                        "enabled": True,
+                        "network": "bridge",
+                        "timeout_seconds": 600,
+                        "commands": ["uv sync"],
+                        "secret_env_allowlist": [],
+                    },
+                    "agent": {"network": "none"},
+                },
+            }
+        ),
+        {"kind": "docker"},
+    )
+
+    assert commands[0] == [
+        "/usr/bin/docker",
+        "run",
+        "--rm",
+        "--name",
+        f"{binding.workspace_id}-setup",
+        "--network",
+        "bridge",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--pids-limit",
+        "256",
+        "--cpus",
+        "1",
+        "--memory",
+        "512m",
+        "-v",
+        f"{workspace_root / binding.workspace_id}:/workspace",
+        "-w",
+        "/workspace",
+        "python:3.11-slim",
+        "/bin/sh",
+        "-c",
+        "uv sync",
+    ]
+    assert commands[1][:6] == [
+        "/usr/bin/docker",
+        "run",
+        "-d",
+        "--name",
+        binding.workspace_id,
+        "--network",
+    ]
+    assert commands[1][6] == "none"
+
+
+def test_docker_workspace_provider_setup_failure_does_not_start_agent_container(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_root.mkdir()
+    commands: list[list[str]] = []
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        commands.append(command)
+        if command[1:3] == ["run", "--rm"]:
+            raise subprocess.CalledProcessError(
+                returncode=1,
+                cmd=command,
+                output="",
+                stderr="setup failed",
+            )
+        if command[1:3] == ["rm", "-f"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[1:3] == ["container", "inspect"]:
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                stdout="",
+                stderr=f"Error: No such container: {command[-1]}\n",
+            )
+        raise AssertionError(f"unexpected docker command: {command}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        _ = provision_cloud_binding_from_config(
+            _docker_config(
+                {
+                    "workspace_root": str(workspace_root),
+                    "container_name_prefix": "agent-",
+                    "docker_binary": "/usr/bin/docker",
+                    "remote_phases": {
+                        "setup": {
+                            "enabled": True,
+                            "network": "bridge",
+                            "timeout_seconds": 600,
+                            "commands": ["uv sync"],
+                            "secret_env_allowlist": [],
+                        },
+                        "agent": {"network": "none"},
+                    },
+                }
+            ),
+            {"kind": "docker"},
+        )
+
+    assert [command[1:3] for command in commands].count(["run", "-d"]) == 0
+    setup_container_name = commands[0][4]
+    agent_container_name = setup_container_name.removesuffix("-setup")
+    removed_containers = [
+        command[3] for command in commands if command[1:3] == ["rm", "-f"]
+    ]
+    assert removed_containers == [setup_container_name, agent_container_name]
+    assert not any(workspace_root.iterdir())
+
+
+def test_docker_workspace_provider_injects_setup_secrets_only_into_setup_container(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_root.mkdir()
+    commands: list[list[str]] = []
+    monkeypatch.setenv("PIP_INDEX_URL", "https://token@example.test/simple")
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    _ = provision_cloud_binding_from_config(
+        _docker_config(
+            {
+                "workspace_root": str(workspace_root),
+                "docker_binary": "/usr/bin/docker",
+                "remote_phases": {
+                    "setup": {
+                        "enabled": True,
+                        "network": "bridge",
+                        "timeout_seconds": 600,
+                        "commands": ["uv sync"],
+                        "secret_env_allowlist": ["PIP_INDEX_URL"],
+                    },
+                    "agent": {"network": "none"},
+                },
+            }
+        ),
+        {"kind": "docker"},
+    )
+
+    assert "-e" in commands[0]
+    assert "PIP_INDEX_URL" in commands[0]
+    assert "PIP_INDEX_URL=https://token@example.test/simple" not in commands[0]
+    assert "PIP_INDEX_URL=https://token@example.test/simple" not in commands[1]
+
+
+def test_docker_workspace_provider_rejects_invalid_setup_secret_allowlist(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_root.mkdir()
+
+    def fail_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del command, kwargs
+        raise AssertionError("docker run should not be called")
+
+    monkeypatch.setattr(subprocess, "run", fail_run)
+
+    with pytest.raises(
+        ValueError,
+        match=r"remote_phases\.setup\.secret_env_allowlist must be a list of strings",
+    ):
+        _ = provision_cloud_binding_from_config(
+            _docker_config(
+                {
+                    "workspace_root": str(workspace_root),
+                    "remote_phases": {
+                        "setup": {
+                            "enabled": True,
+                            "network": "bridge",
+                            "timeout_seconds": 600,
+                            "commands": ["uv sync"],
+                            "secret_env_allowlist": "PIP_INDEX_URL",
+                        },
+                        "agent": {"network": "none"},
+                    },
+                }
+            ),
+            {"kind": "docker"},
+        )
+
+
+def test_docker_workspace_provider_rejects_invalid_setup_secret_env_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_root.mkdir()
+
+    def fail_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del command, kwargs
+        raise AssertionError("docker run should not be called")
+
+    monkeypatch.setattr(subprocess, "run", fail_run)
+
+    with pytest.raises(
+        ValueError,
+        match=r"remote_phases\.setup\.secret_env_allowlist entries must be valid environment variable names",
+    ):
+        _ = provision_cloud_binding_from_config(
+            _docker_config(
+                {
+                    "workspace_root": str(workspace_root),
+                    "remote_phases": {
+                        "setup": {
+                            "enabled": True,
+                            "network": "bridge",
+                            "timeout_seconds": 600,
+                            "commands": ["uv sync"],
+                            "secret_env_allowlist": ["PIP-INDEX-URL"],
+                        },
+                        "agent": {"network": "none"},
+                    },
+                }
+            ),
+            {"kind": "docker"},
+        )
+
+
+def test_docker_workspace_provider_setup_failure_surfaces_redacted_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_root.mkdir()
+    monkeypatch.setenv("PIP_INDEX_URL", "https://token@example.test/simple")
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if command[1:3] == ["run", "--rm"]:
+            raise subprocess.CalledProcessError(
+                returncode=1,
+                cmd=command,
+                output="using https://token@example.test/simple",
+                stderr="setup failed",
+            )
+        if command[1:3] == ["rm", "-f"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[1:3] == ["container", "inspect"]:
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                stdout="",
+                stderr=f"Error: No such container: {command[-1]}\n",
+            )
+        raise AssertionError(f"unexpected docker command: {command}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(subprocess.CalledProcessError) as exc_info:
+        _ = provision_cloud_binding_from_config(
+            _docker_config(
+                {
+                    "workspace_root": str(workspace_root),
+                    "remote_phases": {
+                        "setup": {
+                            "enabled": True,
+                            "network": "bridge",
+                            "timeout_seconds": 600,
+                            "commands": ["uv sync"],
+                            "secret_env_allowlist": ["PIP_INDEX_URL"],
+                        },
+                        "agent": {"network": "none"},
+                    },
+                }
+            ),
+            {"kind": "docker"},
+        )
+
+    notes = "\n".join(exc_info.value.__notes__)
+    assert "setup phase stdout:" in notes
+    assert "using [REDACTED]" in notes
+    assert "https://token@example.test/simple" not in notes
+    assert "setup phase stderr:\nsetup failed" in notes
+
+
 def test_docker_workspace_provider_applies_requested_runtime_profile(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1138,7 +1454,7 @@ def test_docker_workspace_provider_gc_removes_only_stale_owned_workspaces(
     )
 
     assert cleaned == 1
-    assert removed_containers == ["ws-stale"]
+    assert removed_containers == ["ws-stale-setup", "ws-stale"]
     assert not stale_owned.exists()
     assert fresh_owned.exists()
     assert unrelated.exists()
@@ -1183,7 +1499,7 @@ def test_docker_workspace_provider_gc_skips_active_workspace_ids(
     )
 
     assert cleaned == 1
-    assert removed_containers == ["ws-stale"]
+    assert removed_containers == ["ws-stale-setup", "ws-stale"]
     assert active_owned.exists()
     assert not stale_owned.exists()
 
@@ -1247,8 +1563,15 @@ def test_docker_workspace_provider_provision_cleans_up_container_when_start_time
         )
 
     container_name = commands[0][4]
-    assert commands[1] == ["/usr/bin/docker", "rm", "-f", container_name]
-    assert commands[2] == ["/usr/bin/docker", "container", "inspect", container_name]
+    assert commands[1] == ["/usr/bin/docker", "rm", "-f", f"{container_name}-setup"]
+    assert commands[2] == [
+        "/usr/bin/docker",
+        "container",
+        "inspect",
+        f"{container_name}-setup",
+    ]
+    assert commands[3] == ["/usr/bin/docker", "rm", "-f", container_name]
+    assert commands[4] == ["/usr/bin/docker", "container", "inspect", container_name]
     assert not any(workspace_root.iterdir())
 
 
@@ -1303,6 +1626,76 @@ def test_docker_workspace_provider_cleanup_removes_nonempty_workspace(
         "/usr/bin/docker",
         "rm",
         "-f",
+        f"agent-{binding.workspace_id}-setup",
+    ]
+    assert removed_commands[3] == [
+        "/usr/bin/docker",
+        "rm",
+        "-f",
+        f"agent-{binding.workspace_id}",
+    ]
+    assert not (workspace_root / binding.workspace_id).exists()
+
+
+def test_docker_workspace_provider_cleanup_removes_setup_and_agent_containers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_root.mkdir()
+    removed_containers: list[str] = []
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if command[1:3] == ["rm", "-f"]:
+            removed_containers.append(command[3])
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[1:3] == ["container", "inspect"]:
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                stdout="",
+                stderr=f"Error: No such container: {command[-1]}\n",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    binding = provision_cloud_binding_from_config(
+        _docker_config(
+            {
+                "workspace_root": str(workspace_root),
+                "container_name_prefix": "agent-",
+                "docker_binary": "/usr/bin/docker",
+                "remote_phases": {
+                    "setup": {
+                        "enabled": True,
+                        "network": "bridge",
+                        "timeout_seconds": 600,
+                        "commands": ["uv sync"],
+                        "secret_env_allowlist": [],
+                    },
+                    "agent": {"network": "none"},
+                },
+            }
+        ),
+        {"kind": "docker"},
+    )
+
+    cleanup_cloud_binding_from_config(
+        _docker_config(
+            {
+                "workspace_root": str(workspace_root),
+                "container_name_prefix": "agent-",
+                "docker_binary": "/usr/bin/docker",
+            }
+        ),
+        binding,
+    )
+
+    assert removed_containers == [
+        f"agent-{binding.workspace_id}-setup",
         f"agent-{binding.workspace_id}",
     ]
     assert not (workspace_root / binding.workspace_id).exists()
@@ -1363,7 +1756,7 @@ def test_docker_workspace_provider_cleanup_waits_for_container_removal(
         binding,
     )
 
-    assert [command[1:3] for command in commands].count(["container", "inspect"]) == 2
+    assert [command[1:3] for command in commands].count(["container", "inspect"]) == 3
     assert sleep_calls == [0.1]
 
 

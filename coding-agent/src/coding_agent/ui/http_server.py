@@ -265,11 +265,38 @@ def _validate_production_remote_phases(
             raise ValueError(
                 "remote_phases.setup.allow_request_commands must be a boolean"
             )
-        if setup_phase.get("enabled") is True:
+        if allow_request_commands is True:
             raise ValueError(
-                "remote_phases.setup.enabled=true requires setup phase "
-                "execution support"
+                "remote_phases.setup.allow_request_commands=true requires "
+                "request-provided setup command execution support"
             )
+        if setup_phase.get("enabled") is True:
+            if setup_phase.get("network") not in {"none", "bridge"}:
+                raise ValueError(
+                    'remote_phases.setup.network must be "none" or "bridge"'
+                )
+            _require_positive_int_field(
+                setup_phase,
+                section="remote_phases.setup",
+                key="timeout_seconds",
+            )
+            _require_string_list_field(
+                setup_phase,
+                section="remote_phases.setup",
+                key="commands",
+            )
+            _require_string_list_field(
+                setup_phase,
+                section="remote_phases.setup",
+                key="secret_env_allowlist",
+            )
+            commands = setup_phase.get("commands")
+            has_configured_commands = isinstance(commands, list) and len(commands) > 0
+            if not has_configured_commands:
+                raise ValueError(
+                    "remote_phases.setup.enabled=true requires non-empty "
+                    "server-configured commands"
+                )
 
     agent_phase = remote_phases.get("agent")
     if agent_phase is not None:
