@@ -302,6 +302,22 @@ def download_workspace_patch(endpoint: RemoteEndpoint, session_id: str) -> str:
     return patch
 
 
+def publish_remote_branch(
+    endpoint: RemoteEndpoint,
+    session_id: str,
+    branch_name: str,
+) -> dict[str, object]:
+    data = _post_remote_json(
+        endpoint,
+        f"/sessions/{session_id}/publish",
+        "publish remote workspace branch",
+        json={"mode": "branch", "branch_name": branch_name},
+    )
+    if data.get("status") != "published":
+        raise click.ClickException("Remote branch publication did not complete")
+    return dict(data)
+
+
 def _get_remote_json(
     endpoint: RemoteEndpoint,
     path: str,
@@ -325,6 +341,8 @@ def _post_remote_json(
     endpoint: RemoteEndpoint,
     path: str,
     action: str,
+    *,
+    json: dict[str, object] | None = None,
 ) -> dict[str, object]:
     try:
         with httpx.Client(
@@ -332,7 +350,9 @@ def _post_remote_json(
             headers=auth_headers(endpoint),
             timeout=30.0,
         ) as client:
-            response = client.post(path)
+            response = (
+                client.post(path, json=json) if json is not None else client.post(path)
+            )
             _raise_remote_http_error(response, action)
             data = cast(object, response.json())
     except httpx.RequestError as exc:

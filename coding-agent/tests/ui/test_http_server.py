@@ -31,6 +31,7 @@ from coding_agent.approval.store import ApprovalStore
 from coding_agent.core.config import settings
 from coding_agent.environment import CloudCommandResult, CloudEnvironment
 from coding_agent.environment.workspace_provider import (
+    WorkspaceBranchPublication,
     WorkspaceDiff,
     WorkspaceDiffFile,
     WorkspacePatch,
@@ -3610,7 +3611,79 @@ class TestRemoteResultPublicationContract:
             "patch": "diff --git a/README.md b/README.md\n",
         }
 
-    async def test_publish_operation_fails_closed(
+    async def test_publish_branch_returns_provider_result(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        create_resp = await client.post(
+            "/sessions",
+            json={
+                "execution_binding": {
+                    "kind": "cloud",
+                    "workspace_url": "docker://agent-ws-publish/workspace",
+                    "workspace_id": "ws-publish",
+                },
+            },
+        )
+        session_id = create_resp.json()["session_id"]
+
+        def fake_publish(
+            cloud_config: dict[str, object],
+            publication_config: dict[str, object],
+            workspace_id: str,
+            branch_name: str,
+            commit_message: str,
+        ) -> WorkspaceBranchPublication:
+            assert cloud_config["provider"] == "docker"
+            assert publication_config["git_author_name"] == "coding-agent"
+            assert workspace_id == "ws-publish"
+            assert branch_name == "coding-agent/result"
+            assert commit_message == (
+                f"Apply coding-agent remote session {session_id} changes"
+            )
+            return WorkspaceBranchPublication(
+                workspace_id=workspace_id,
+                branch_name=branch_name,
+                pushed_ref="refs/heads/coding-agent/result",
+                commit_sha="abc123",
+                remote_url="https://github.com/org/repo.git",
+            )
+
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.publish_workspace_branch_from_config",
+            fake_publish,
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            lambda: {"provider": "docker"},
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_remote_publication_config",
+            lambda: {
+                "enabled": True,
+                "git_author_name": "coding-agent",
+                "git_author_email": "coding-agent@example.com",
+            },
+        )
+
+        response = await client.post(
+            f"/sessions/{session_id}/publish",
+            json={"mode": "branch", "branch_name": "coding-agent/result"},
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "session_id": session_id,
+            "mode": "branch",
+            "status": "published",
+            "branch_name": "coding-agent/result",
+            "pushed_ref": "refs/heads/coding-agent/result",
+            "commit_sha": "abc123",
+            "remote_url": "https://github.com/org/repo.git",
+            "pr_url": None,
+            "error": None,
+        }
+
+    async def test_publish_pr_fails_closed(
         self,
         client: AsyncClient,
     ) -> None:
@@ -3619,14 +3692,44 @@ class TestRemoteResultPublicationContract:
 
         response = await client.post(
             f"/sessions/{session_id}/publish",
-            json={"mode": "branch"},
+            json={"mode": "pr"},
         )
 
         assert response.status_code == 501
         assert (
-            response.json()["detail"]
-            == "remote result publication is not implemented yet"
+            response.json()["detail"] == "remote PR publication is not implemented yet"
         )
+
+    async def test_publish_branch_requires_publication_config(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        create_resp = await client.post(
+            "/sessions",
+            json={
+                "execution_binding": {
+                    "kind": "cloud",
+                    "workspace_url": "docker://agent-ws-publish/workspace",
+                    "workspace_id": "ws-publish",
+                },
+            },
+        )
+        session_id = create_resp.json()["session_id"]
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            lambda: {"provider": "docker"},
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_remote_publication_config",
+            lambda: {},
+        )
+
+        response = await client.post(
+            f"/sessions/{session_id}/publish",
+            json={"mode": "branch", "branch_name": "coding-agent/result"},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == "remote_publication.enabled must be true"
 
     async def test_remote_result_publication_operations_return_404_for_missing_session(
         self, client: AsyncClient

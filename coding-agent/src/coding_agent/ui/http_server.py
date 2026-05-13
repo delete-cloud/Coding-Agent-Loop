@@ -33,6 +33,7 @@ from coding_agent.environment import (
     export_workspace_archive_from_config,
     get_cloud_workspace_from_config,
     list_cloud_workspaces_from_config,
+    publish_workspace_branch_from_config,
     provision_cloud_binding_from_config,
     workspace_archive_manifest_from_config,
     workspace_diff_from_config,
@@ -161,6 +162,10 @@ def _load_cloud_workspace_config() -> dict[str, Any]:
 
 def _load_runtime_profiles_config() -> dict[str, Any]:
     return _load_agent_config_section("runtime_profiles")
+
+
+def _load_remote_publication_config() -> dict[str, Any]:
+    return _load_agent_config_section("remote_publication")
 
 
 def _load_remote_phases_config() -> dict[str, Any]:
@@ -1828,11 +1833,47 @@ async def publish_session_result(
     body: PublishSessionRequest,
     auth_context: AuthContext | None = Depends(auth_context_from_headers),
 ) -> PublishSessionResponse:
-    del request, body
+    del request
     _ = await _get_visible_session(session_id, auth_context)
-    raise HTTPException(
-        status_code=501,
-        detail="remote result publication is not implemented yet",
+    if body.mode == "pr":
+        raise HTTPException(
+            status_code=501,
+            detail="remote PR publication is not implemented yet",
+        )
+    branch_name = body.branch_name or f"coding-agent/session-{session_id}"
+    commit_message = f"Apply coding-agent remote session {session_id} changes"
+    try:
+        publication = await session_manager.export_workspace_archive(
+            session_id,
+            lambda binding: publish_workspace_branch_from_config(
+                _load_cloud_workspace_config(),
+                _load_remote_publication_config(),
+                binding.workspace_id,
+                branch_name,
+                commit_message,
+            ),
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
+    except SessionOwnershipConflictError as exc:
+        raise _owner_conflict_http_exception(exc, session_id=session_id) from exc
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        if str(exc) == "turn already in progress":
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise
+
+    return PublishSessionResponse(
+        session_id=session_id,
+        mode="branch",
+        status="published",
+        branch_name=publication.branch_name,
+        pushed_ref=publication.pushed_ref,
+        commit_sha=publication.commit_sha,
+        remote_url=publication.remote_url,
+        pr_url=None,
+        error=None,
     )
 
 
