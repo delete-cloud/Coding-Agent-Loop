@@ -1028,6 +1028,7 @@ class TestSessionCreation:
             workspace_id="ws-git",
         )
         captured_sources: list[dict[str, object]] = []
+        captured_configs: list[dict[str, object]] = []
 
         monkeypatch.setattr(
             "coding_agent.ui.http_server._load_cloud_workspace_config",
@@ -1037,11 +1038,16 @@ class TestSessionCreation:
                 "workspace_root": str(tmp_path),
                 "container_name_prefix": "agent-",
                 **_test_runtime_profile_config(),
+                "remote_sources": {"git": {"allowed_hosts": ["github.com"]}},
             },
         )
         monkeypatch.setattr(
             "coding_agent.ui.http_server.provision_cloud_binding_from_config",
-            lambda config, source: captured_sources.append(dict(source)) or binding,
+            lambda config, source: (
+                captured_configs.append(dict(config))
+                or captured_sources.append(dict(source))
+                or binding
+            ),
         )
 
         response = await client.post(
@@ -1067,6 +1073,9 @@ class TestSessionCreation:
                 "runtime_profile": "universal",
             }
         ]
+        assert captured_configs[0]["remote_sources"] == {
+            "git": {"allowed_hosts": ["github.com"]}
+        }
         session = session_manager.get_session(response.json()["session_id"])
         assert session.execution_binding == binding
         assert session.origin == {

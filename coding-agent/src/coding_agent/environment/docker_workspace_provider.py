@@ -9,6 +9,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -412,6 +413,7 @@ class DockerWorkspaceProvider(WorkspaceProvider):
             if kind == "git":
                 _clone_git_workspace_source(
                     provider_config,
+                    config,
                     source,
                     workspace_root,
                 )
@@ -659,12 +661,7 @@ class DockerWorkspaceProvider(WorkspaceProvider):
             workspace_id,
             "patch",
         )
-        patch = _run_git_workspace_command(
-            provider_config,
-            workspace_root,
-            ["diff", "--binary", "HEAD", "--"],
-            "git diff",
-        )
+        patch = _git_workspace_patch(provider_config, workspace_root)
         return WorkspacePatch(
             workspace_id=workspace_id,
             format="unified_diff",
@@ -1120,18 +1117,24 @@ def _git_workspace_diff(
     workspace_id: str,
     workspace_root: Path,
 ) -> WorkspaceDiff:
-    name_status_output = _run_git_workspace_command(
-        provider_config,
-        workspace_root,
-        ["diff", "--name-status", "--find-renames", "-z", "HEAD", "--"],
-        "git diff --name-status",
-    )
-    numstat_output = _run_git_workspace_command(
-        provider_config,
-        workspace_root,
-        ["diff", "--numstat", "HEAD", "--"],
-        "git diff --numstat",
-    )
+    index_env = _prepare_git_result_index(provider_config, workspace_root)
+    try:
+        name_status_output = _run_git_workspace_command(
+            provider_config,
+            workspace_root,
+            ["diff", "--cached", "--name-status", "--find-renames", "-z", "HEAD", "--"],
+            "git diff --cached --name-status",
+            extra_env=index_env,
+        )
+        numstat_output = _run_git_workspace_command(
+            provider_config,
+            workspace_root,
+            ["diff", "--cached", "--numstat", "HEAD", "--"],
+            "git diff --cached --numstat",
+            extra_env=index_env,
+        )
+    finally:
+        _remove_git_result_index(index_env)
     numstat = _parse_git_numstat(numstat_output)
     files = _parse_git_name_status(name_status_output, numstat)
     additions = sum(item[0] for item in numstat.values() if item[0] is not None)
@@ -1142,6 +1145,65 @@ def _git_workspace_diff(
         additions=additions,
         deletions=deletions,
     )
+
+
+def _git_workspace_patch(
+    provider_config: _DockerWorkspaceProviderConfig,
+    workspace_root: Path,
+) -> str:
+    index_env = _prepare_git_result_index(provider_config, workspace_root)
+    try:
+        return _run_git_workspace_command(
+            provider_config,
+            workspace_root,
+            ["diff", "--cached", "--binary", "HEAD", "--"],
+            "git diff --cached",
+            extra_env=index_env,
+        )
+    finally:
+        _remove_git_result_index(index_env)
+
+
+def _prepare_git_result_index(
+    provider_config: _DockerWorkspaceProviderConfig,
+    workspace_root: Path,
+) -> dict[str, str]:
+    git_dir = workspace_root / ".git"
+    with tempfile.NamedTemporaryFile(
+        prefix="coding-agent-result-index-",
+        dir=git_dir if git_dir.is_dir() else None,
+        delete=False,
+    ) as temp_index:
+        temp_index_path = Path(temp_index.name)
+
+    existing_index = git_dir / "index"
+    if existing_index.is_file():
+        shutil.copy2(existing_index, temp_index_path)
+    index_env = {"GIT_INDEX_FILE": str(temp_index_path)}
+    if not existing_index.is_file():
+        _run_git_workspace_command(
+            provider_config,
+            workspace_root,
+            ["read-tree", "HEAD"],
+            "git read-tree",
+            extra_env=index_env,
+        )
+    _run_git_workspace_command(
+        provider_config,
+        workspace_root,
+        ["add", "-A"],
+        "git add",
+        extra_env=index_env,
+    )
+    return index_env
+
+
+def _remove_git_result_index(index_env: dict[str, str]) -> None:
+    index_path = Path(index_env["GIT_INDEX_FILE"])
+    try:
+        index_path.unlink()
+    except FileNotFoundError:
+        return
 
 
 def _publish_git_workspace_branch(
@@ -1182,6 +1244,14 @@ def _publish_git_workspace_branch(
         ["check-ref-format", "--branch", branch_name],
         "git check-ref-format",
     )
+    remote_url = _run_git_publish_command(
+        provider_config,
+        workspace_root,
+        ["config", "--get", "remote.origin.url"],
+        "git config remote.origin.url",
+    ).strip()
+    _validate_publication_remote_url(publication_config, remote_url)
+    push_env = _git_publication_push_env(publication_config)
     _run_git_publish_command(
         provider_config,
         workspace_root,
@@ -1212,15 +1282,7 @@ def _publish_git_workspace_branch(
         ["rev-parse", "HEAD"],
         "git rev-parse",
     ).strip()
-    remote_url = _run_git_publish_command(
-        provider_config,
-        workspace_root,
-        ["config", "--get", "remote.origin.url"],
-        "git config remote.origin.url",
-    ).strip()
-    _validate_publication_remote_url(publication_config, remote_url)
     pushed_ref = f"refs/heads/{branch_name}"
-    push_env = _git_publication_push_env(publication_config)
     _run_git_publish_command(
         provider_config,
         workspace_root,
@@ -1281,8 +1343,6 @@ def _git_publication_push_env(
 
 def _redact_git_remote_url(remote_url: str) -> str:
     parsed = urlsplit(remote_url)
-    if parsed.username is None and parsed.password is None:
-        return remote_url
     if parsed.hostname is None:
         return remote_url
     netloc = parsed.hostname
@@ -1293,8 +1353,8 @@ def _redact_git_remote_url(remote_url: str) -> str:
             parsed.scheme,
             netloc,
             parsed.path,
-            parsed.query,
-            parsed.fragment,
+            "",
+            "",
         )
     )
 
@@ -1385,9 +1445,14 @@ def _parse_git_name_status(
         status_and_path = tokens[index]
         index += 1
         status_parts = status_and_path.split("\t", 1)
-        if len(status_parts) != 2:
-            raise ValueError("git diff name-status output is malformed")
-        status_token, first_path = status_parts
+        if len(status_parts) == 2:
+            status_token, first_path = status_parts
+        else:
+            status_token = status_and_path
+            if index >= len(tokens):
+                raise ValueError("git diff name-status output is malformed")
+            first_path = tokens[index]
+            index += 1
         status_code = status_token[:1]
         old_path: str | None = None
         if status_code in {"R", "C"}:
@@ -1493,6 +1558,7 @@ def _docker_provider_ready(provider_config: _DockerWorkspaceProviderConfig) -> b
 
 def _clone_git_workspace_source(
     provider_config: _DockerWorkspaceProviderConfig,
+    config: dict[str, object],
     source: CloudWorkspaceSource,
     workspace_root: Path,
 ) -> None:
@@ -1510,6 +1576,7 @@ def _clone_git_workspace_source(
     base_sha = base_sha.strip()
     if _GIT_SHA_RE.fullmatch(base_sha) is None:
         raise ValueError("workspace_source.base_sha must be a hex git commit SHA")
+    _validate_git_source_remote_url(config, remote_url)
 
     clone_command = [
         provider_config.git_binary,
@@ -1558,6 +1625,49 @@ def _clone_git_workspace_source(
     except subprocess.CalledProcessError as exc:
         _add_git_failure_output_notes(exc, "git checkout", exc.stdout, exc.stderr)
         raise
+
+
+def _validate_git_source_remote_url(config: dict[str, object], remote_url: str) -> None:
+    parsed = urlsplit(remote_url)
+    if parsed.scheme not in {"https", "git+https"}:
+        raise ValueError("workspace_source.remote_url must use https")
+    if parsed.hostname is None:
+        raise ValueError("workspace_source.remote_url must include a host")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("workspace_source.remote_url must not include credentials")
+    if parsed.query or parsed.fragment:
+        raise ValueError(
+            "workspace_source.remote_url must not include query or fragment"
+        )
+
+    remote_sources = config.get("remote_sources")
+    git_sources = (
+        remote_sources.get("git") if isinstance(remote_sources, dict) else None
+    )
+    if not isinstance(git_sources, dict):
+        raise ValueError("remote_sources.git.allowed_hosts must be configured")
+    allowed_hosts_raw = git_sources.get("allowed_hosts")
+    allowed_hosts = _remote_source_string_list(
+        allowed_hosts_raw,
+        key="allowed_hosts",
+    )
+    if not allowed_hosts:
+        raise ValueError("remote_sources.git.allowed_hosts must be configured")
+    if parsed.hostname.lower() not in allowed_hosts:
+        raise ValueError(
+            "workspace_source.remote_url host is not in remote_sources.git.allowed_hosts"
+        )
+
+
+def _remote_source_string_list(value: object, *, key: str) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise ValueError(f"remote_sources.git.{key} must be a list of strings")
+    result: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"remote_sources.git.{key} must be a list of strings")
+        result.append(item.strip().lower())
+    return tuple(result)
 
 
 def _add_git_failure_output_notes(
