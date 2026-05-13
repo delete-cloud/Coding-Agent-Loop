@@ -12,7 +12,10 @@ from .workspace_provider import (
     CloudWorkspaceClientFactory,
     CloudWorkspaceSource,
     WorkspaceArchiveManifest,
+    WorkspaceDiff,
+    WorkspaceDiffFile,
     WorkspaceInventoryEntry,
+    WorkspacePatch,
     WorkspaceProvider,
     cloud_client_factory_from_config,
     cloud_workspace_ready_from_config,
@@ -24,6 +27,8 @@ from .workspace_provider import (
     provision_cloud_binding_from_config,
     register_workspace_provider,
     workspace_archive_manifest_from_config,
+    workspace_diff_from_config,
+    workspace_patch_from_config,
 )
 
 __all__ = [
@@ -38,7 +43,10 @@ __all__ = [
     "cleanup_stale_cloud_workspaces_from_config",
     "LocalEnvironment",
     "WorkspaceArchiveManifest",
+    "WorkspaceDiff",
+    "WorkspaceDiffFile",
     "WorkspaceInventoryEntry",
+    "WorkspacePatch",
     "WorkspaceProvider",
     "cloud_client_factory_from_config",
     "cloud_workspace_ready_from_config",
@@ -50,4 +58,6 @@ __all__ = [
     "provision_cloud_binding_from_config",
     "register_workspace_provider",
     "workspace_archive_manifest_from_config",
+    "workspace_diff_from_config",
+    "workspace_patch_from_config",
 ]

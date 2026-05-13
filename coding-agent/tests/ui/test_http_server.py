@@ -30,6 +30,11 @@ from coding_agent.approval import ApprovalPolicy
 from coding_agent.approval.store import ApprovalStore
 from coding_agent.core.config import settings
 from coding_agent.environment import CloudCommandResult, CloudEnvironment
+from coding_agent.environment.workspace_provider import (
+    WorkspaceDiff,
+    WorkspaceDiffFile,
+    WorkspacePatch,
+)
 from coding_agent.ui.execution_binding import (
     CloudWorkspaceBinding,
     LocalExecutionBinding,
@@ -3464,48 +3469,131 @@ class TestRemoteResultPublicationContract:
 
         assert response.status_code == 404
 
-    @pytest.mark.parametrize(
-        ("method", "path_suffix", "json_body", "detail"),
-        [
-            (
-                "GET",
-                "/workspace/diff",
-                None,
-                "workspace diff is not implemented yet",
-            ),
-            (
-                "GET",
-                "/workspace/patch",
-                None,
-                "workspace patch export is not implemented yet",
-            ),
-            (
-                "POST",
-                "/publish",
-                {"mode": "branch"},
-                "remote result publication is not implemented yet",
-            ),
-        ],
-    )
-    async def test_remote_result_publication_operations_fail_closed(
+    async def test_workspace_diff_returns_provider_result(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        create_resp = await client.post(
+            "/sessions",
+            json={
+                "execution_binding": {
+                    "kind": "cloud",
+                    "workspace_url": "docker://agent-ws-diff/workspace",
+                    "workspace_id": "ws-diff",
+                },
+            },
+        )
+        session_id = create_resp.json()["session_id"]
+
+        def fake_workspace_diff(
+            config: dict[str, object], workspace_id: str
+        ) -> WorkspaceDiff:
+            assert config["provider"] == "docker"
+            assert workspace_id == "ws-diff"
+            return WorkspaceDiff(
+                workspace_id=workspace_id,
+                files=[
+                    WorkspaceDiffFile(
+                        path="src/app.py",
+                        status="modified",
+                        additions=2,
+                        deletions=1,
+                    )
+                ],
+                additions=2,
+                deletions=1,
+            )
+
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.workspace_diff_from_config",
+            fake_workspace_diff,
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            lambda: {"provider": "docker"},
+        )
+
+        response = await client.get(f"/sessions/{session_id}/workspace/diff")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "session_id": session_id,
+            "workspace_id": "ws-diff",
+            "files": [
+                {
+                    "path": "src/app.py",
+                    "status": "modified",
+                    "old_path": None,
+                    "additions": 2,
+                    "deletions": 1,
+                    "binary": False,
+                }
+            ],
+            "additions": 2,
+            "deletions": 1,
+        }
+
+    async def test_workspace_patch_returns_provider_result(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        create_resp = await client.post(
+            "/sessions",
+            json={
+                "execution_binding": {
+                    "kind": "cloud",
+                    "workspace_url": "docker://agent-ws-patch/workspace",
+                    "workspace_id": "ws-patch",
+                },
+            },
+        )
+        session_id = create_resp.json()["session_id"]
+
+        def fake_workspace_patch(
+            config: dict[str, object], workspace_id: str
+        ) -> WorkspacePatch:
+            assert config["provider"] == "docker"
+            assert workspace_id == "ws-patch"
+            return WorkspacePatch(
+                workspace_id=workspace_id,
+                format="unified_diff",
+                patch="diff --git a/README.md b/README.md\n",
+            )
+
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.workspace_patch_from_config",
+            fake_workspace_patch,
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            lambda: {"provider": "docker"},
+        )
+
+        response = await client.get(f"/sessions/{session_id}/workspace/patch")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "session_id": session_id,
+            "workspace_id": "ws-patch",
+            "format": "unified_diff",
+            "patch": "diff --git a/README.md b/README.md\n",
+        }
+
+    async def test_publish_operation_fails_closed(
         self,
         client: AsyncClient,
-        method: str,
-        path_suffix: str,
-        json_body: dict[str, object] | None,
-        detail: str,
     ) -> None:
         create_resp = await client.post("/sessions", json={})
         session_id = create_resp.json()["session_id"]
 
-        response = await client.request(
-            method,
-            f"/sessions/{session_id}{path_suffix}",
-            json=json_body,
+        response = await client.post(
+            f"/sessions/{session_id}/publish",
+            json={"mode": "branch"},
         )
 
         assert response.status_code == 501
-        assert response.json()["detail"] == detail
+        assert (
+            response.json()["detail"]
+            == "remote result publication is not implemented yet"
+        )
 
     async def test_remote_result_publication_operations_return_404_for_missing_session(
         self, client: AsyncClient

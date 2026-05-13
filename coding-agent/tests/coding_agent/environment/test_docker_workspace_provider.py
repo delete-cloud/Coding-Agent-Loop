@@ -15,6 +15,8 @@ from coding_agent.environment import (
     cleanup_stale_cloud_workspaces_from_config,
     cloud_client_factory_from_config,
     cloud_workspace_ready_from_config,
+    workspace_diff_from_config,
+    workspace_patch_from_config,
     provision_cloud_binding_from_config,
 )
 from coding_agent.ui.execution_binding import CloudWorkspaceBinding
@@ -1033,6 +1035,123 @@ def test_docker_workspace_provider_adds_git_output_notes_on_clone_failure(
     assert "git clone stdout:\nclone out" in notes
     assert "git clone stderr:\nclone err" in notes
     assert list(workspace_root.iterdir()) == []
+
+
+def test_docker_workspace_provider_reports_git_workspace_diff(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_dir = workspace_root / "ws-123"
+    (workspace_dir / ".git").mkdir(parents=True)
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        assert kwargs["stdin"] is subprocess.DEVNULL
+        assert command[0:3] == ["git", "-C", str(workspace_dir)]
+        if command[3:6] == ["diff", "--name-status", "--find-renames"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    "M\tsrc/app.py\0"
+                    "A\tnew.txt\0"
+                    "D\told.txt\0"
+                    "R100\toldname.txt\0newname.txt\0"
+                    "M\tbin.dat\0"
+                ),
+                stderr="",
+            )
+        if command[3:5] == ["diff", "--numstat"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    "2\t1\tsrc/app.py\n"
+                    "5\t0\tnew.txt\n"
+                    "0\t3\told.txt\n"
+                    "1\t1\tnewname.txt\n"
+                    "-\t-\tbin.dat\n"
+                ),
+                stderr="",
+            )
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    diff = workspace_diff_from_config(
+        _docker_config({"workspace_root": str(workspace_root)}),
+        "ws-123",
+    )
+
+    assert diff.workspace_id == "ws-123"
+    assert diff.additions == 8
+    assert diff.deletions == 5
+    assert [
+        (
+            file.path,
+            file.status,
+            file.old_path,
+            file.additions,
+            file.deletions,
+            file.binary,
+        )
+        for file in diff.files
+    ] == [
+        ("src/app.py", "modified", None, 2, 1, False),
+        ("new.txt", "added", None, 5, 0, False),
+        ("old.txt", "deleted", None, 0, 3, False),
+        ("newname.txt", "renamed", "oldname.txt", 1, 1, False),
+        ("bin.dat", "modified", None, None, None, True),
+    ]
+
+
+def test_docker_workspace_provider_exports_git_workspace_patch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_dir = workspace_root / "ws-123"
+    (workspace_dir / ".git").mkdir(parents=True)
+    patch_text = "diff --git a/README.md b/README.md\n"
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        assert kwargs["stdin"] is subprocess.DEVNULL
+        assert command == [
+            "git",
+            "-C",
+            str(workspace_dir),
+            "diff",
+            "--binary",
+            "HEAD",
+            "--",
+        ]
+        return subprocess.CompletedProcess(command, 0, stdout=patch_text, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    patch = workspace_patch_from_config(
+        _docker_config({"workspace_root": str(workspace_root)}),
+        "ws-123",
+    )
+
+    assert patch.workspace_id == "ws-123"
+    assert patch.format == "unified_diff"
+    assert patch.patch == patch_text
+
+
+def test_docker_workspace_provider_rejects_patch_for_snapshot_workspace_without_git(
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    (workspace_root / "ws-123").mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="workspace patch requires a Git workspace"):
+        _ = workspace_patch_from_config(
+            _docker_config({"workspace_root": str(workspace_root)}),
+            "ws-123",
+        )
 
 
 def test_docker_workspace_provider_removes_workspace_when_snapshot_import_fails_before_containers(

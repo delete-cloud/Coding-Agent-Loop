@@ -35,6 +35,8 @@ from coding_agent.environment import (
     list_cloud_workspaces_from_config,
     provision_cloud_binding_from_config,
     workspace_archive_manifest_from_config,
+    workspace_diff_from_config,
+    workspace_patch_from_config,
 )
 from coding_agent.ui.binding_resolver import DefaultBindingResolver
 from coding_agent.ui.session_manager import Session, SessionManager
@@ -66,6 +68,7 @@ from coding_agent.ui.schemas import (
     WorkspaceArchiveManifestResponse,
     WorkspaceCleanupResponse,
     WorkspaceDiffResponse,
+    WorkspaceDiffFileSchema,
     WorkspaceGcResponse,
     WorkspaceListResponse,
     WorkspacePatchResponse,
@@ -1739,10 +1742,41 @@ async def get_session_workspace_diff(
     auth_context: AuthContext | None = Depends(auth_context_from_headers),
 ) -> WorkspaceDiffResponse:
     del request
-    _ = await _get_visible_session(session_id, auth_context)
-    raise HTTPException(
-        status_code=501,
-        detail="workspace diff is not implemented yet",
+    try:
+        diff = await session_manager.export_workspace_archive(
+            session_id,
+            lambda binding: workspace_diff_from_config(
+                _load_cloud_workspace_config(),
+                binding.workspace_id,
+            ),
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
+    except SessionOwnershipConflictError as exc:
+        raise _owner_conflict_http_exception(exc, session_id=session_id) from exc
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        if str(exc) == "turn already in progress":
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise
+
+    return WorkspaceDiffResponse(
+        session_id=session_id,
+        workspace_id=diff.workspace_id,
+        files=[
+            WorkspaceDiffFileSchema(
+                path=file.path,
+                status=file.status,
+                old_path=file.old_path,
+                additions=file.additions,
+                deletions=file.deletions,
+                binary=file.binary,
+            )
+            for file in diff.files
+        ],
+        additions=diff.additions,
+        deletions=diff.deletions,
     )
 
 
@@ -1757,10 +1791,30 @@ async def get_session_workspace_patch(
     auth_context: AuthContext | None = Depends(auth_context_from_headers),
 ) -> WorkspacePatchResponse:
     del request
-    _ = await _get_visible_session(session_id, auth_context)
-    raise HTTPException(
-        status_code=501,
-        detail="workspace patch export is not implemented yet",
+    try:
+        patch = await session_manager.export_workspace_archive(
+            session_id,
+            lambda binding: workspace_patch_from_config(
+                _load_cloud_workspace_config(),
+                binding.workspace_id,
+            ),
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
+    except SessionOwnershipConflictError as exc:
+        raise _owner_conflict_http_exception(exc, session_id=session_id) from exc
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        if str(exc) == "turn already in progress":
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise
+
+    return WorkspacePatchResponse(
+        session_id=session_id,
+        workspace_id=patch.workspace_id,
+        format=patch.format,
+        patch=patch.patch,
     )
 
 
