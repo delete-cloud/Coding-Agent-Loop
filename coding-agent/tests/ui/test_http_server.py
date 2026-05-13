@@ -1013,9 +1013,15 @@ class TestSessionCreation:
             "cloud workspace provisioning requires cloud_workspace.enabled=true"
         )
 
-    async def test_create_session_rejects_git_workspace_source_until_supported(
+    async def test_create_session_provisions_git_workspace_source(
         self, client, monkeypatch, tmp_path
     ):
+        binding = CloudWorkspaceBinding(
+            workspace_url="docker://agent-ws-git/workspace",
+            workspace_id="ws-git",
+        )
+        captured_sources: list[dict[str, object]] = []
+
         monkeypatch.setattr(
             "coding_agent.ui.http_server._load_cloud_workspace_config",
             lambda: {
@@ -1028,9 +1034,7 @@ class TestSessionCreation:
         )
         monkeypatch.setattr(
             "coding_agent.ui.http_server.provision_cloud_binding_from_config",
-            lambda config, source: pytest.fail(
-                "git workspace source should fail before provider provisioning"
-            ),
+            lambda config, source: captured_sources.append(dict(source)) or binding,
         )
 
         response = await client.post(
@@ -1046,10 +1050,23 @@ class TestSessionCreation:
             },
         )
 
-        assert response.status_code == 501
-        assert response.json()["detail"] == (
-            "git workspace source is not implemented yet"
-        )
+        assert response.status_code == 200
+        assert captured_sources == [
+            {
+                "kind": "git",
+                "remote_url": "https://github.com/org/repo.git",
+                "base_ref": "main",
+                "base_sha": "abc123",
+                "runtime_profile": "universal",
+            }
+        ]
+        session = session_manager.get_session(response.json()["session_id"])
+        assert session.execution_binding == binding
+        assert session.origin == {
+            "channel": "http",
+            "binding_kind": "cloud",
+            "workspace_source_kind": "git",
+        }
 
     async def test_create_session_rolls_back_provisioned_workspace_on_failure(
         self, client, monkeypatch
