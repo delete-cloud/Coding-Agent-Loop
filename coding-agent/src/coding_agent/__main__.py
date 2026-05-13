@@ -876,15 +876,20 @@ def _git_workspace_source_for_remote_run(
 
 
 def _run_git_for_remote_source(repo_path: Path, args: list[str]) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(repo_path), *args],
-        shell=False,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=True,
-        stdin=subprocess.DEVNULL,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_path), *args],
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+            stdin=subprocess.DEVNULL,
+        )
+    except FileNotFoundError as exc:
+        raise click.ClickException(
+            "git not found; please install git or adjust PATH."
+        ) from exc
     return result.stdout.strip()
 
 

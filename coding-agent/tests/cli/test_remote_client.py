@@ -1687,6 +1687,51 @@ def test_remote_run_dirty_git_repo_requires_explicit_snapshot_fallback(
     assert "--snapshot-fallback" in result.output
 
 
+def test_remote_run_reports_missing_git_for_git_backed_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "remotes.json"
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example", "--token", "secret-token"],
+        catch_exceptions=False,
+    )
+
+    class FailingClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+            raise AssertionError("remote run should fail before creating a session")
+
+    def raise_missing_git(
+        *args: object, **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del args, kwargs
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FailingClient)
+    monkeypatch.setattr(subprocess, "run", raise_missing_git)
+
+    result = runner.invoke(
+        main,
+        [
+            "remote",
+            "run",
+            "dev",
+            "--repo",
+            str(repo_path),
+            "--goal",
+            "hello",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "git not found" in result.output
+
+
 def test_remote_run_snapshot_fallback_uploads_archive_for_local_only_repo(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
