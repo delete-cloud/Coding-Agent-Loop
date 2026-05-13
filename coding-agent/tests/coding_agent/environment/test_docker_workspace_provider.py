@@ -869,6 +869,82 @@ def test_docker_workspace_provider_imports_snapshot_before_setup_phase(
     ) == "uploaded\n"
 
 
+def test_docker_workspace_provider_clones_git_source_before_setup_phase(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_root.mkdir()
+    events: list[str] = []
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        if command[:4] == ["/usr/bin/git", "clone", "--no-checkout", "--branch"]:
+            assert command[4:6] == ["main", "https://github.com/org/repo.git"]
+            target = Path(command[-1])
+            _ = (target / ".git").mkdir()
+            _ = (target / "README.md").write_text("cloned\n", encoding="utf-8")
+            events.append("clone")
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[0:2] == ["/usr/bin/git", "-C"] and command[3:5] == [
+            "checkout",
+            "--detach",
+        ]:
+            assert command[5] == "abc123"
+            checkout_root = Path(command[2])
+            assert (checkout_root / ".git").is_dir()
+            assert (checkout_root / "README.md").read_text(
+                encoding="utf-8"
+            ) == "cloned\n"
+            events.append("checkout")
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[1:3] == ["run", "--rm"]:
+            workspace_mount = command[command.index("-v") + 1]
+            host_workspace = Path(workspace_mount.split(":", 1)[0])
+            assert (host_workspace / ".git").is_dir()
+            assert (host_workspace / "README.md").read_text(
+                encoding="utf-8"
+            ) == "cloned\n"
+            events.append("setup")
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[1:3] == ["run", "-d"]:
+            events.append("agent")
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    binding = provision_cloud_binding_from_config(
+        _docker_config(
+            {
+                "workspace_root": str(workspace_root),
+                "docker_binary": "/usr/bin/docker",
+                "git_binary": "/usr/bin/git",
+                "remote_phases": {
+                    "setup": {
+                        "enabled": True,
+                        "network": "bridge",
+                        "timeout_seconds": 600,
+                        "commands": ["test -d .git"],
+                        "secret_env_allowlist": [],
+                    },
+                    "agent": {"network": "none"},
+                },
+            }
+        ),
+        {
+            "kind": "git",
+            "remote_url": "https://github.com/org/repo.git",
+            "base_ref": "main",
+            "base_sha": "abc123",
+        },
+    )
+
+    assert binding.workspace_id.startswith("ws-")
+    assert events == ["clone", "checkout", "setup", "agent"]
+
+
 def test_docker_workspace_provider_removes_workspace_when_snapshot_import_fails_before_containers(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

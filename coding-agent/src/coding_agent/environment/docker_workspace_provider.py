@@ -50,6 +50,7 @@ _DOCKER_TIMEOUT_CLEANUP_SECONDS = 3
 _DOCKER_TIMEOUT_SENTINEL_PREFIX = "__CODING_AGENT_DOCKER_TIMEOUT__:"
 _DOCKER_CONTAINER_REMOVAL_WAIT_SECONDS = 5.0
 _DOCKER_CONTAINER_REMOVAL_POLL_INTERVAL_SECONDS = 0.1
+_GIT_OPERATION_TIMEOUT_SECONDS = 300
 _DEFAULT_DOCKER_IMAGE = "python:3.11-slim"
 _DEFAULT_DOCKER_CPUS = "1"
 _DEFAULT_DOCKER_MEMORY = "512m"
@@ -64,6 +65,7 @@ class _DockerWorkspaceProviderConfig:
     container_workspace_root: str
     container_name_prefix: str
     docker_binary: str
+    git_binary: str
     env_allowlist: tuple[str, ...]
     exec_user: str | None
     image: str
@@ -372,7 +374,7 @@ class DockerWorkspaceProvider(WorkspaceProvider):
         from ..ui.execution_binding import CloudWorkspaceBinding
 
         kind = source.get("kind")
-        if kind != "docker":
+        if kind not in {"docker", "git"}:
             raise ValueError(
                 "cloud workspace source kind is not supported for provider=docker"
             )
@@ -400,16 +402,23 @@ class DockerWorkspaceProvider(WorkspaceProvider):
         )
         docker_cleanup_needed = False
         try:
-            snapshot_archive_base64 = source.get("snapshot_archive_base64")
-            if snapshot_archive_base64 is not None:
-                if not isinstance(snapshot_archive_base64, str):
-                    raise ValueError(
-                        "workspace_source.snapshot_archive_base64 must be a string"
-                    )
-                extract_workspace_archive_base64(
+            if kind == "git":
+                _clone_git_workspace_source(
+                    provider_config,
+                    source,
                     workspace_root,
-                    snapshot_archive_base64,
                 )
+            else:
+                snapshot_archive_base64 = source.get("snapshot_archive_base64")
+                if snapshot_archive_base64 is not None:
+                    if not isinstance(snapshot_archive_base64, str):
+                        raise ValueError(
+                            "workspace_source.snapshot_archive_base64 must be a string"
+                        )
+                    extract_workspace_archive_base64(
+                        workspace_root,
+                        snapshot_archive_base64,
+                    )
 
             def mark_docker_cleanup_needed() -> None:
                 nonlocal docker_cleanup_needed
@@ -635,6 +644,7 @@ def _docker_workspace_provider_config(
         effective_config.get("container_name_prefix"), ""
     )
     docker_binary = _optional_string(effective_config.get("docker_binary"), "docker")
+    git_binary = _optional_string(effective_config.get("git_binary"), "git")
     exec_user = _optional_string(effective_config.get("exec_user"), None)
     env_allowlist = tuple(
         _string_list(effective_config.get("env_allowlist"), key="env_allowlist")
@@ -665,6 +675,7 @@ def _docker_workspace_provider_config(
     )
     assert container_name_prefix is not None
     assert docker_binary is not None
+    assert git_binary is not None
     assert network is not None
     assert cpus is not None
     assert memory is not None
@@ -678,6 +689,7 @@ def _docker_workspace_provider_config(
         container_workspace_root=container_workspace_root,
         container_name_prefix=container_name_prefix,
         docker_binary=docker_binary,
+        git_binary=git_binary,
         env_allowlist=env_allowlist,
         exec_user=exec_user,
         image=image,
@@ -1061,6 +1073,58 @@ def _docker_provider_ready(provider_config: _DockerWorkspaceProviderConfig) -> b
     except (OSError, subprocess.SubprocessError):
         return False
     return result.returncode == 0
+
+
+def _clone_git_workspace_source(
+    provider_config: _DockerWorkspaceProviderConfig,
+    source: CloudWorkspaceSource,
+    workspace_root: Path,
+) -> None:
+    remote_url = source.get("remote_url")
+    base_ref = source.get("base_ref")
+    base_sha = source.get("base_sha")
+    if not isinstance(remote_url, str) or not remote_url.strip():
+        raise ValueError("workspace_source.remote_url is required for kind=git")
+    if not isinstance(base_ref, str) or not base_ref.strip():
+        raise ValueError("workspace_source.base_ref is required for kind=git")
+    if not isinstance(base_sha, str) or not base_sha.strip():
+        raise ValueError("workspace_source.base_sha is required for kind=git")
+
+    clone_command = [
+        provider_config.git_binary,
+        "clone",
+        "--no-checkout",
+        "--branch",
+        base_ref,
+        remote_url,
+        str(workspace_root),
+    ]
+    _ = subprocess.run(
+        clone_command,
+        shell=False,
+        capture_output=True,
+        text=True,
+        timeout=_GIT_OPERATION_TIMEOUT_SECONDS,
+        env=None,
+        check=True,
+    )
+    checkout_command = [
+        provider_config.git_binary,
+        "-C",
+        str(workspace_root),
+        "checkout",
+        "--detach",
+        base_sha,
+    ]
+    _ = subprocess.run(
+        checkout_command,
+        shell=False,
+        capture_output=True,
+        text=True,
+        timeout=_GIT_OPERATION_TIMEOUT_SECONDS,
+        env=None,
+        check=True,
+    )
 
 
 def _run_docker_setup_phase_if_configured(
