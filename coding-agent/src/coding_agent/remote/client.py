@@ -175,7 +175,7 @@ def get_remote_session(endpoint: RemoteEndpoint, session_id: str) -> dict[str, o
         f"/sessions/{session_id}",
         "get remote session",
     )
-    return dict(data)
+    return data
 
 
 def cancel_remote_session(
