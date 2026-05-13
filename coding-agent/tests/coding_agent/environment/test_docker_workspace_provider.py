@@ -1203,6 +1203,7 @@ def test_docker_workspace_provider_publishes_git_workspace_branch(
             "git_author_name": "coding-agent",
             "git_author_email": "coding-agent@example.com",
             "git_token_env": "CODING_AGENT_GIT_TOKEN",
+            "allowed_git_hosts": ["github.com"],
         },
         "ws-123",
         "coding-agent/test",
@@ -1276,6 +1277,120 @@ def test_docker_workspace_provider_rejects_unsafe_git_remote_before_push(
                 "enabled": True,
                 "git_author_name": "coding-agent",
                 "git_author_email": "coding-agent@example.com",
+                "allowed_git_hosts": ["github.com"],
+            },
+            "ws-123",
+            "coding-agent/test",
+            "Apply coding-agent remote session sess-123 changes",
+        )
+
+
+def test_docker_workspace_provider_requires_git_remote_host_allowlist_before_push(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_dir = workspace_root / "ws-123"
+    (workspace_dir / ".git").mkdir(parents=True)
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        args = command[3:]
+        if args == ["status", "--porcelain=v1", "-z"]:
+            return subprocess.CompletedProcess(command, 0, stdout=" M README.md\0")
+        if args == ["check-ref-format", "--branch", "coding-agent/test"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if args == ["config", "user.name", "coding-agent"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if args == ["config", "user.email", "coding-agent@example.com"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if args == ["add", "-A"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if args == [
+            "commit",
+            "-m",
+            "Apply coding-agent remote session sess-123 changes",
+        ]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if args == ["rev-parse", "HEAD"]:
+            return subprocess.CompletedProcess(command, 0, stdout="abc123\n", stderr="")
+        if args == ["config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout="https://github.com/org/repo.git\n",
+                stderr="",
+            )
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(
+        ValueError, match="remote_publication.allowed_git_hosts must be configured"
+    ):
+        _ = publish_workspace_branch_from_config(
+            _docker_config({"workspace_root": str(workspace_root)}),
+            {
+                "enabled": True,
+                "git_author_name": "coding-agent",
+                "git_author_email": "coding-agent@example.com",
+            },
+            "ws-123",
+            "coding-agent/test",
+            "Apply coding-agent remote session sess-123 changes",
+        )
+
+
+def test_docker_workspace_provider_rejects_unallowlisted_git_remote_host_before_push(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_dir = workspace_root / "ws-123"
+    (workspace_dir / ".git").mkdir(parents=True)
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        args = command[3:]
+        if args == ["status", "--porcelain=v1", "-z"]:
+            return subprocess.CompletedProcess(command, 0, stdout=" M README.md\0")
+        if args == ["check-ref-format", "--branch", "coding-agent/test"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if args == ["config", "user.name", "coding-agent"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if args == ["config", "user.email", "coding-agent@example.com"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if args == ["add", "-A"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if args == [
+            "commit",
+            "-m",
+            "Apply coding-agent remote session sess-123 changes",
+        ]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if args == ["rev-parse", "HEAD"]:
+            return subprocess.CompletedProcess(command, 0, stdout="abc123\n", stderr="")
+        if args == ["config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout="https://gitlab.example.com/org/repo.git\n",
+                stderr="",
+            )
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(ValueError, match="host is not in"):
+        _ = publish_workspace_branch_from_config(
+            _docker_config({"workspace_root": str(workspace_root)}),
+            {
+                "enabled": True,
+                "git_author_name": "coding-agent",
+                "git_author_email": "coding-agent@example.com",
+                "allowed_git_hosts": ["github.com"],
             },
             "ws-123",
             "coding-agent/test",

@@ -3663,6 +3663,7 @@ class TestRemoteResultPublicationContract:
                 "enabled": True,
                 "git_author_name": "coding-agent",
                 "git_author_email": "coding-agent@example.com",
+                "allowed_git_hosts": ["github.com"],
             },
         )
 
@@ -3678,6 +3679,7 @@ class TestRemoteResultPublicationContract:
                 "enabled": True,
                 "git_author_name": "coding-agent",
                 "git_author_email": "coding-agent@example.com",
+                "allowed_git_hosts": ["github.com"],
             },
             "ws-publish",
             "coding-agent/result",

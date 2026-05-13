@@ -1310,14 +1310,27 @@ def _validate_publication_remote_url(
         raise ValueError("Git workspace remote.origin.url must use https")
     if parsed.hostname is None:
         raise ValueError("Git workspace remote.origin.url must include a host")
-    allowed_hosts = _string_list(
-        publication_config.get("allowed_git_hosts"),
-        key="remote_publication.allowed_git_hosts",
-    )
-    if allowed_hosts and parsed.hostname not in allowed_hosts:
+    allowed_git_hosts = publication_config.get("allowed_git_hosts")
+    if allowed_git_hosts is None:
+        raise ValueError("remote_publication.allowed_git_hosts must be configured")
+    allowed_hosts = _publication_string_list(allowed_git_hosts, key="allowed_git_hosts")
+    if not allowed_hosts:
+        raise ValueError("remote_publication.allowed_git_hosts must be configured")
+    if parsed.hostname not in allowed_hosts:
         raise ValueError(
             "Git workspace remote.origin.url host is not in remote_publication.allowed_git_hosts"
         )
+
+
+def _publication_string_list(value: object, *, key: str) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise ValueError(f"remote_publication.{key} must be a list of strings")
+    result: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"remote_publication.{key} must be a list of strings")
+        result.append(item.strip().lower())
+    return tuple(result)
 
 
 def _required_publication_string(

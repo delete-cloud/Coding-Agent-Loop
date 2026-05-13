@@ -176,6 +176,7 @@ Suggested production configuration shape:
 enabled = true
 git_author_name = "coding-agent"
 git_author_email = "coding-agent@example.com"
+allowed_git_hosts = ["github.com"]
 git_token_env = "CODING_AGENT_GIT_TOKEN"
 
 [remote_publication.github]
