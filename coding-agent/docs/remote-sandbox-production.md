@@ -84,6 +84,11 @@ git_author_name = "coding-agent"
 git_author_email = "coding-agent@example.com"
 allowed_git_hosts = ["github.com"]
 git_token_env = "CODING_AGENT_GIT_TOKEN"
+
+[remote_publication.github]
+enabled = true
+token_env = "CODING_AGENT_GITHUB_TOKEN"
+base_branch = "main"
 ```
 
 `python:3.11-slim` is enough for basic file operations and pure-Python tools,
@@ -239,6 +244,13 @@ For Git-backed sessions, publish remote changes to a review branch explicitly:
 coding-agent remote publish team --session <session-id> --branch coding-agent/session-<session-id>
 ```
 
+To open a GitHub pull request after publishing the branch, enable
+`[remote_publication.github]` and request PR publication explicitly:
+
+```bash
+coding-agent remote publish team --session <session-id> --branch coding-agent/session-<session-id> --pr
+```
+
 Branch publication requires `[remote_publication]` to be enabled, Git author
 identity to be configured, the workspace `remote.origin.url` host to match
 `allowed_git_hosts`, and server-side Git credentials. The host allowlist is
@@ -246,8 +258,16 @@ checked before token injection or `git push`. When `git_token_env` is set, the
 named environment variable must contain a Git token; the server injects it into
 the `git push` environment without placing the token in command arguments or
 publication responses. If `git_token_env` is omitted, the workspace must rely
-on existing Git credential helper state. GitHub PR creation is not part of this
-slice.
+on existing Git credential helper state.
+
+GitHub PR publication currently supports `github.com` remotes. It requires
+`remote_publication.github.enabled = true`, a non-empty `token_env`, and
+`base_branch`. The token is used only for the GitHub Pulls API request. If PR
+creation is requested but GitHub configuration is missing, the server still
+returns the published branch metadata with `status = "unsupported"` so the PR can
+be opened manually. If the GitHub API fails after the branch push succeeds, the
+server returns `status = "failed"` with the branch metadata and error detail;
+the CLI prints that branch metadata before exiting with an error.
 
 Snapshot sessions can still be inspected and exported, but they are not branch
 publication inputs because snapshots intentionally exclude `.git`. Use
