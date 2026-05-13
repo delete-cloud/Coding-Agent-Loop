@@ -768,6 +768,11 @@ def _provisioned_execution_binding_from_request(
         raise ValueError(
             "cloud workspace provisioning requires cloud_workspace.enabled=true"
         )
+    if body.workspace_source.kind == "git":
+        raise HTTPException(
+            status_code=501,
+            detail="git workspace source is not implemented yet",
+        )
     _validate_workspace_source_phase_policy(
         body.workspace_source.model_dump(mode="python"),
         cloud_workspace_config,
@@ -1255,6 +1260,8 @@ async def create_session(
                 )
             except Exception:
                 logger.exception("Failed to roll back provisioned cloud workspace")
+        if isinstance(exc, HTTPException):
+            raise exc
         if isinstance(exc, RuntimeError):
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         if isinstance(exc, (ValueError, TypeError)):
