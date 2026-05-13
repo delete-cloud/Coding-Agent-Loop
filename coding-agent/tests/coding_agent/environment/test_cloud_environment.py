@@ -71,7 +71,9 @@ class FakeCloudWorkspaceClient:
 def test_cloud_environment_file_tools_use_client_without_local_filesystem() -> None:
     client = FakeCloudWorkspaceClient()
     env = CloudEnvironment(client)
-    file_read, file_write, file_replace, glob_files, grep_search = env.build_file_tools()
+    file_read, file_write, file_replace, glob_files, grep_search = (
+        env.build_file_tools()
+    )
     file_patch = env.build_file_patch_tool()
 
     assert env.kind == "cloud"

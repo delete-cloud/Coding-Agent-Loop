@@ -1,6 +1,6 @@
 # ADR-0024: Publish remote session results as Git-backed review artifacts
 
-**Status**: Proposed
+**Status**: Accepted / implemented through PRs #143-#151
 **Date**: 2026-05-13
 **Decision owner**: repository maintainer / current product owner
 
@@ -319,20 +319,20 @@ are at least two implemented providers or a concrete integration need.
 
 ## Acceptance Criteria
 
-- [ ] `test_create_session_accepts_git_workspace_source_with_base_sha`
-- [ ] `test_remote_run_clean_git_repo_uses_git_workspace_source`
-- [ ] `test_remote_run_dirty_git_repo_requires_explicit_snapshot_fallback`
-- [ ] `test_session_result_returns_status_answer_workspace_and_verification_summary`
-- [ ] `test_workspace_diff_reports_added_modified_deleted_and_binary_files`
-- [ ] `test_workspace_patch_returns_unified_diff_for_git_workspace`
-- [ ] `test_workspace_patch_rejects_snapshot_without_baseline_with_clear_error`
-- [ ] `test_remote_run_prints_result_summary_without_downloading_by_default`
-- [ ] `test_remote_download_keeps_manifest_confirmation_for_archive_overwrite`
-- [ ] `test_publish_branch_commits_and_pushes_git_workspace_changes`
-- [ ] `test_publish_pr_returns_branch_metadata_when_pr_provider_is_not_configured`
-- [ ] `uv run pytest tests/ui/test_http_server.py tests/ui/test_http_server_workspace_transfer.py tests/cli/test_remote_client.py tests/coding_agent/environment/ -k "git_workspace or session_result or workspace_diff or workspace_patch or publish or remote_run" -v`
-- [ ] `uv run basedpyright --level error src/coding_agent/ui/schemas.py src/coding_agent/ui/http_server.py src/coding_agent/remote/client.py src/coding_agent/__main__.py src/coding_agent/environment/docker_workspace_provider.py`
-- [ ] `uv run ruff format --check src/coding_agent/ui/schemas.py src/coding_agent/ui/http_server.py src/coding_agent/remote/client.py src/coding_agent/__main__.py src/coding_agent/environment/docker_workspace_provider.py tests/ui/test_http_server.py tests/ui/test_http_server_workspace_transfer.py tests/cli/test_remote_client.py tests/coding_agent/environment/`
+- [x] `test_create_session_provisions_git_workspace_source`
+- [x] `test_remote_run_clean_git_repo_uses_git_workspace_source`
+- [x] `test_remote_run_dirty_git_repo_requires_explicit_snapshot_fallback`
+- [x] `test_session_result_returns_stable_contract_for_existing_session`
+- [x] `test_docker_workspace_provider_reports_git_workspace_diff`
+- [x] `test_docker_workspace_provider_exports_git_workspace_patch`
+- [x] `test_workspace_patch_returns_provider_result`
+- [x] `test_remote_run_with_repo_does_not_download_or_cleanup_by_default`
+- [x] `test_remote_run_with_download_keeps_explicit_archive_overwrite`
+- [x] `test_docker_workspace_provider_publishes_git_workspace_branch`
+- [x] `test_publish_pr_returns_branch_metadata_when_github_not_configured`
+- [x] `uv run pytest tests/ui/test_http_server.py tests/ui/test_http_server_workspace_transfer.py tests/cli/test_remote_client.py tests/coding_agent/environment/ -k "git_workspace or session_result or workspace_diff or workspace_patch or publish or remote_run" -v`
+- [x] `uv run basedpyright --level error src/coding_agent/ui/schemas.py src/coding_agent/ui/http_server.py src/coding_agent/remote/client.py src/coding_agent/__main__.py src/coding_agent/environment/docker_workspace_provider.py`
+- [x] `uv run ruff format --check src/coding_agent/ui/schemas.py src/coding_agent/ui/http_server.py src/coding_agent/remote/client.py src/coding_agent/__main__.py src/coding_agent/environment/docker_workspace_provider.py tests/ui/test_http_server.py tests/ui/test_http_server_workspace_transfer.py tests/cli/test_remote_client.py tests/coding_agent/environment/`
 
 ## References
 
