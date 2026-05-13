@@ -58,12 +58,17 @@ from coding_agent.ui.schemas import (
     HealthResponse,
     ReadinessResponse,
     SessionListResponse,
+    SessionResultResponse,
     SessionSummaryResponse,
+    PublishSessionRequest,
+    PublishSessionResponse,
     WorkspaceArchiveResponse,
     WorkspaceArchiveManifestResponse,
     WorkspaceCleanupResponse,
+    WorkspaceDiffResponse,
     WorkspaceGcResponse,
     WorkspaceListResponse,
+    WorkspacePatchResponse,
     WorkspaceSummarySchema,
 )
 from coding_agent.ui.auth import AuthContext, auth_context_from_headers, verify_api_key
@@ -1680,6 +1685,97 @@ async def get_session(
         raise HTTPException(status_code=404, detail="Session not found")
 
     return SessionSummaryResponse(**session.as_dict())
+
+
+async def _get_visible_session(
+    session_id: str,
+    auth_context: AuthContext | None,
+) -> Session:
+    try:
+        session = await session_manager.get_session_async(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Session not found") from exc
+
+    if not _auth_context_can_access_session(auth_context, session):
+        raise HTTPException(status_code=404, detail="Session not found")
+    return session
+
+
+@app.get("/sessions/{session_id}/result", response_model=SessionResultResponse)
+@limiter.limit(RateLimits.GET_SESSION)
+async def get_session_result(
+    request: Request,
+    session_id: str,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> SessionResultResponse:
+    del request
+    session = await _get_visible_session(session_id, auth_context)
+    summary = session.as_dict()
+    return SessionResultResponse(
+        session_id=session.id,
+        status=summary["status"],
+        turn_status=summary["turn_status"],
+        turn_id=session.current_turn_id,
+        workspace_id=summary["workspace_id"],
+        origin=session.origin,
+        provider_name=session.provider_name,
+        model_name=session.model_name,
+        final_answer=None,
+        verification_summary=None,
+        failure_details=None,
+    )
+
+
+@app.get(
+    "/sessions/{session_id}/workspace/diff",
+    response_model=WorkspaceDiffResponse,
+)
+@limiter.limit(RateLimits.GET_SESSION)
+async def get_session_workspace_diff(
+    request: Request,
+    session_id: str,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> WorkspaceDiffResponse:
+    del request
+    _ = await _get_visible_session(session_id, auth_context)
+    raise HTTPException(
+        status_code=501,
+        detail="workspace diff is not implemented yet",
+    )
+
+
+@app.get(
+    "/sessions/{session_id}/workspace/patch",
+    response_model=WorkspacePatchResponse,
+)
+@limiter.limit(RateLimits.GET_SESSION)
+async def get_session_workspace_patch(
+    request: Request,
+    session_id: str,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> WorkspacePatchResponse:
+    del request
+    _ = await _get_visible_session(session_id, auth_context)
+    raise HTTPException(
+        status_code=501,
+        detail="workspace patch export is not implemented yet",
+    )
+
+
+@app.post("/sessions/{session_id}/publish", response_model=PublishSessionResponse)
+@limiter.limit(RateLimits.CLOSE_SESSION)
+async def publish_session_result(
+    request: Request,
+    session_id: str,
+    body: PublishSessionRequest,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> PublishSessionResponse:
+    del request, body
+    _ = await _get_visible_session(session_id, auth_context)
+    raise HTTPException(
+        status_code=501,
+        detail="remote result publication is not implemented yet",
+    )
 
 
 async def _export_session_workspace_archive(
