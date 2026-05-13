@@ -123,6 +123,62 @@ class CancelSessionResponse(BaseModel):
     status: Literal["idle", "cancelling", "cancelled", "failed"]
 
 
+class SessionResultResponse(BaseModel):
+    session_id: str
+    status: Literal[
+        "created", "running", "waiting_approval", "completed", "failed", "closed"
+    ]
+    turn_status: Literal["idle", "running", "cancelling", "cancelled", "failed"]
+    turn_id: str | None = None
+    workspace_id: str | None = None
+    origin: dict[str, str] | None = None
+    provider_name: str | None = None
+    model_name: str | None = None
+    final_answer: str | None = None
+    verification_summary: str | None = None
+    failure_details: str | None = None
+
+
+class WorkspaceDiffFileSchema(BaseModel):
+    path: str
+    status: Literal["added", "modified", "deleted", "renamed", "binary", "unknown"]
+    old_path: str | None = None
+    additions: int | None = None
+    deletions: int | None = None
+    binary: bool = False
+
+
+class WorkspaceDiffResponse(BaseModel):
+    session_id: str
+    workspace_id: str | None = None
+    files: list[WorkspaceDiffFileSchema]
+    additions: int
+    deletions: int
+
+
+class WorkspacePatchResponse(BaseModel):
+    session_id: str
+    workspace_id: str | None = None
+    format: Literal["unified_diff"]
+    patch: str
+
+
+class PublishSessionRequest(BaseModel):
+    mode: Literal["branch", "pr"]
+    branch_name: str | None = Field(None, min_length=1, max_length=200)
+
+
+class PublishSessionResponse(BaseModel):
+    session_id: str
+    mode: Literal["branch", "pr"]
+    status: Literal["published", "unsupported", "failed"]
+    branch_name: str | None = None
+    commit_sha: str | None = None
+    remote_url: str | None = None
+    pr_url: str | None = None
+    error: str | None = None
+
+
 class CheckpointMetadataResponse(BaseModel):
     checkpoint_id: str
     tape_id: str

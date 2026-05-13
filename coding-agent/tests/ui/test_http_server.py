@@ -3351,6 +3351,121 @@ class TestGetSession:
         assert "pending_approval" in data
 
 
+class TestRemoteResultPublicationContract:
+    async def test_session_result_returns_stable_contract_for_existing_session(
+        self, client: AsyncClient
+    ) -> None:
+        create_resp = await client.post(
+            "/sessions",
+            json={
+                "execution_binding": {
+                    "kind": "cloud",
+                    "workspace_url": "docker://agent-ws-result/workspace",
+                    "workspace_id": "ws-result",
+                },
+                "provider": "openai",
+                "model": "result-model",
+                "max_steps": 5,
+            },
+        )
+        session_id = create_resp.json()["session_id"]
+
+        response = await client.get(f"/sessions/{session_id}/result")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data == {
+            "session_id": session_id,
+            "status": "created",
+            "turn_status": "idle",
+            "turn_id": None,
+            "workspace_id": "ws-result",
+            "origin": {"channel": "http", "binding_kind": "cloud"},
+            "provider_name": "openai",
+            "model_name": "result-model",
+            "final_answer": None,
+            "verification_summary": None,
+            "failure_details": None,
+        }
+
+    async def test_session_result_hides_other_user_session(
+        self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(
+            "CODING_AGENT_SERVER_CONFIG", str(_write_auth_config(tmp_path))
+        )
+        monkeypatch.setattr(settings, "http_api_key", None)
+
+        created = await client.post(
+            "/sessions",
+            headers={"Authorization": "Bearer admin-token"},
+            json={},
+        )
+
+        response = await client.get(
+            f"/sessions/{created.json()['session_id']}/result",
+            headers={"Authorization": "Bearer user-token-a"},
+        )
+
+        assert response.status_code == 404
+
+    @pytest.mark.parametrize(
+        ("method", "path_suffix", "json_body", "detail"),
+        [
+            (
+                "GET",
+                "/workspace/diff",
+                None,
+                "workspace diff is not implemented yet",
+            ),
+            (
+                "GET",
+                "/workspace/patch",
+                None,
+                "workspace patch export is not implemented yet",
+            ),
+            (
+                "POST",
+                "/publish",
+                {"mode": "branch"},
+                "remote result publication is not implemented yet",
+            ),
+        ],
+    )
+    async def test_remote_result_publication_operations_fail_closed(
+        self,
+        client: AsyncClient,
+        method: str,
+        path_suffix: str,
+        json_body: dict[str, object] | None,
+        detail: str,
+    ) -> None:
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        response = await client.request(
+            method,
+            f"/sessions/{session_id}{path_suffix}",
+            json=json_body,
+        )
+
+        assert response.status_code == 501
+        assert response.json()["detail"] == detail
+
+    async def test_remote_result_publication_operations_return_404_for_missing_session(
+        self, client: AsyncClient
+    ) -> None:
+        result = await client.get("/sessions/missing/result")
+        diff = await client.get("/sessions/missing/workspace/diff")
+        patch = await client.get("/sessions/missing/workspace/patch")
+        publish = await client.post("/sessions/missing/publish", json={"mode": "pr"})
+
+        assert result.status_code == 404
+        assert diff.status_code == 404
+        assert patch.status_code == 404
+        assert publish.status_code == 404
+
+
 class TestCancelSession:
     async def test_cancel_session_turn_returns_cancelling_for_active_turn(self, client):
         create_resp = await client.post("/sessions", json={})
