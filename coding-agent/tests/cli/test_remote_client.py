@@ -149,9 +149,12 @@ def test_remote_repl_help_describes_one_shot_remote_run() -> None:
     runner = CliRunner()
 
     result = runner.invoke(main, ["remote", "repl", "--help"], catch_exceptions=False)
+    normalized_output = " ".join(result.output.split())
 
     assert result.exit_code == 0
     assert "one-shot remote run" in result.output
+    assert "download the final remote workspace into it" in normalized_output
+    assert "--download" not in result.output
 
 
 def test_attach_help_describes_single_prompt_attach() -> None:

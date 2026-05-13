@@ -526,7 +526,7 @@ def remote_remove(name: str) -> None:
 @click.option(
     "--repo",
     default=None,
-    help="Upload a local workspace snapshot. Results stay remote unless --download is passed.",
+    help="Upload a local workspace snapshot and download the final remote workspace into it.",
 )
 @click.option(
     "--empty-workspace",
