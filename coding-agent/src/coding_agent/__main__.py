@@ -573,6 +573,8 @@ def remote_repl(
         goal=goal,
         approval_policy=approval_policy,
         yes=yes,
+        download_results=repo is not None,
+        cleanup_on_success=True,
     )
 
 
@@ -581,7 +583,7 @@ def remote_repl(
 @click.option(
     "--repo",
     default=None,
-    help="Upload a local workspace snapshot and download the final remote workspace into it.",
+    help="Upload a local workspace snapshot. Results stay remote unless --download is passed.",
 )
 @click.option(
     "--empty-workspace",
@@ -608,7 +610,13 @@ def remote_repl(
 @click.option(
     "--yes",
     is_flag=True,
-    help="Download and overwrite the local workspace without confirmation.",
+    help="When used with --download, overwrite the local workspace without confirmation.",
+)
+@click.option(
+    "--download",
+    "download_results",
+    is_flag=True,
+    help="Download and overwrite --repo after the remote run completes.",
 )
 def remote_run(
     name: str,
@@ -618,6 +626,7 @@ def remote_run(
     goal: str,
     approval_policy: str,
     yes: bool,
+    download_results: bool,
 ) -> None:
     """Create a one-shot remote run and stream one prompt."""
     _remote_run_once(
@@ -628,6 +637,8 @@ def remote_run(
         goal=goal,
         approval_policy=approval_policy,
         yes=yes,
+        download_results=download_results,
+        cleanup_on_success=download_results,
     )
 
 
@@ -640,6 +651,8 @@ def _remote_run_once(
     goal: str,
     approval_policy: str,
     yes: bool,
+    download_results: bool,
+    cleanup_on_success: bool,
 ) -> None:
     from coding_agent.remote.client import (
         auth_headers,
@@ -660,6 +673,8 @@ def _remote_run_once(
         raise click.ClickException(
             "Pass --repo to upload a workspace snapshot or --empty-workspace to create a blank remote workspace."
         )
+    if download_results and repo is None:
+        raise click.ClickException("Pass --repo with --download.")
 
     endpoint = get_remote(name)
     headers = auth_headers(endpoint)
@@ -695,7 +710,7 @@ def _remote_run_once(
     except Exception as exc:
         stream_error = exc
     finally:
-        if repo_path is not None:
+        if repo_path is not None and download_results:
             try:
                 _download_and_restore_workspace(
                     base_url=endpoint.url,
@@ -748,7 +763,7 @@ def _remote_run_once(
                     ]
                 )
             )
-        else:
+        elif cleanup_on_success:
             try:
                 delete_remote_session(
                     base_url=endpoint.url,
@@ -765,6 +780,12 @@ def _remote_run_once(
                     )
                 else:
                     raise
+        else:
+            _print_remote_result_next_steps(
+                remote_name=name,
+                session_id=session_id,
+                repo_path=repo_path,
+            )
     if stream_error is not None:
         raise stream_error
     if deferred_error is not None:
@@ -775,6 +796,78 @@ def _remote_run_once(
 
 def _format_cli_command(args: list[str]) -> str:
     return " ".join(shlex.quote(arg) for arg in args)
+
+
+def _print_remote_result_next_steps(
+    *,
+    remote_name: str,
+    session_id: str,
+    repo_path: Path | None,
+) -> None:
+    click.echo(f"Remote session {session_id} left open for result inspection.")
+    click.echo(
+        "Show changed files: "
+        + _format_cli_command(
+            [
+                "python",
+                "-m",
+                "coding_agent",
+                "remote",
+                "diff",
+                remote_name,
+                "--session",
+                session_id,
+            ]
+        )
+    )
+    click.echo(
+        "Export patch: "
+        + _format_cli_command(
+            [
+                "python",
+                "-m",
+                "coding_agent",
+                "remote",
+                "patch",
+                remote_name,
+                "--session",
+                session_id,
+            ]
+        )
+    )
+    if repo_path is not None:
+        click.echo(
+            "Fallback archive download: "
+            + _format_cli_command(
+                [
+                    "python",
+                    "-m",
+                    "coding_agent",
+                    "remote",
+                    "download",
+                    remote_name,
+                    "--session",
+                    session_id,
+                    "--repo",
+                    str(repo_path),
+                ]
+            )
+        )
+    click.echo(
+        "Close session: "
+        + _format_cli_command(
+            [
+                "python",
+                "-m",
+                "coding_agent",
+                "remote",
+                "sessions",
+                "close",
+                remote_name,
+                session_id,
+            ]
+        )
+    )
 
 
 @remote.group("sessions")
