@@ -940,6 +940,136 @@ def test_remote_repl_requires_repo_or_empty_workspace(
     )
 
 
+def test_remote_diff_prints_changed_files(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "remotes.json"
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example", "--token", "secret-token"],
+        catch_exceptions=False,
+    )
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "workspace_id": "ws-123",
+                "additions": 7,
+                "deletions": 2,
+                "files": [
+                    {
+                        "path": "src/app.py",
+                        "status": "modified",
+                        "old_path": None,
+                        "additions": 2,
+                        "deletions": 1,
+                        "binary": False,
+                    },
+                    {
+                        "path": "new.bin",
+                        "status": "added",
+                        "old_path": None,
+                        "additions": None,
+                        "deletions": None,
+                        "binary": True,
+                    },
+                ],
+            }
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            headers = kwargs.get("headers")
+            self.headers = headers if isinstance(headers, dict) else {}
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def get(self, path: str) -> FakeResponse:
+            calls.append((path, self.headers))
+            return FakeResponse()
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+
+    result = runner.invoke(
+        main,
+        ["remote", "diff", "dev", "--session", "sess-123"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "Remote workspace ws-123: 2 files changed, +7/-2" in result.output
+    assert "modified  src/app.py  +2/-1" in result.output
+    assert "added     new.bin  binary" in result.output
+    assert calls == [
+        (
+            "/sessions/sess-123/workspace/diff",
+            {"Authorization": "Bearer secret-token"},
+        )
+    ]
+
+
+def test_remote_patch_prints_unified_diff(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "remotes.json"
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example", "--token", "secret-token"],
+        catch_exceptions=False,
+    )
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "workspace_id": "ws-123",
+                "format": "unified_diff",
+                "patch": "diff --git a/README.md b/README.md\n+hello\n",
+            }
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            headers = kwargs.get("headers")
+            self.headers = headers if isinstance(headers, dict) else {}
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def get(self, path: str) -> FakeResponse:
+            calls.append((path, self.headers))
+            return FakeResponse()
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+
+    result = runner.invoke(
+        main,
+        ["remote", "patch", "dev", "--session", "sess-123"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert result.output == "diff --git a/README.md b/README.md\n+hello\n"
+    assert calls == [
+        (
+            "/sessions/sess-123/workspace/patch",
+            {"Authorization": "Bearer secret-token"},
+        )
+    ]
+
+
 def test_remote_repl_with_repo_uploads_snapshot_and_downloads_workspace(
     tmp_path: Path, monkeypatch
 ) -> None:

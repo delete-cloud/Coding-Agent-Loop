@@ -909,6 +909,63 @@ def remote_workspaces_rm(name: str, workspace_id: str) -> None:
     click.echo(f"Cleaned workspace {workspace_id}")
 
 
+@remote.command("diff")
+@click.argument("name")
+@click.option("--session", "session_id", required=True, help="Remote session ID")
+def remote_diff(name: str, session_id: str) -> None:
+    """Show changed files for a remote session workspace."""
+    from coding_agent.remote.client import download_workspace_diff, get_remote
+
+    endpoint = get_remote(name)
+    diff = download_workspace_diff(endpoint, session_id)
+    files = diff.get("files")
+    if not isinstance(files, list):
+        raise click.ClickException("Remote workspace diff response missing files")
+    workspace_id = diff.get("workspace_id")
+    workspace_label = workspace_id if isinstance(workspace_id, str) else "unknown"
+    additions = diff.get("additions")
+    deletions = diff.get("deletions")
+    if not isinstance(additions, int) or not isinstance(deletions, int):
+        raise click.ClickException("Remote workspace diff response missing totals")
+
+    click.echo(
+        f"Remote workspace {workspace_label}: {len(files)} files changed, +{additions}/-{deletions}"
+    )
+    for raw_file in files:
+        if not isinstance(raw_file, dict):
+            raise click.ClickException("Remote workspace diff file entry is invalid")
+        path = raw_file.get("path")
+        status = raw_file.get("status")
+        if not isinstance(path, str) or not isinstance(status, str):
+            raise click.ClickException("Remote workspace diff file entry is invalid")
+        old_path = raw_file.get("old_path")
+        display_path = (
+            f"{old_path} -> {path}" if isinstance(old_path, str) and old_path else path
+        )
+        if raw_file.get("binary") is True:
+            change_summary = "binary"
+        else:
+            file_additions = raw_file.get("additions")
+            file_deletions = raw_file.get("deletions")
+            if isinstance(file_additions, int) and isinstance(file_deletions, int):
+                change_summary = f"+{file_additions}/-{file_deletions}"
+            else:
+                change_summary = "+?/-?"
+        click.echo(f"{status.ljust(9)} {display_path}  {change_summary}")
+
+
+@remote.command("patch")
+@click.argument("name")
+@click.option("--session", "session_id", required=True, help="Remote session ID")
+def remote_patch(name: str, session_id: str) -> None:
+    """Print a unified patch for a remote session workspace."""
+    from coding_agent.remote.client import download_workspace_patch, get_remote
+
+    endpoint = get_remote(name)
+    patch = download_workspace_patch(endpoint, session_id)
+    click.echo(patch, nl=False)
+
+
 @remote.command("download")
 @click.argument("name")
 @click.option("--session", "session_id", required=True, help="Remote session ID")

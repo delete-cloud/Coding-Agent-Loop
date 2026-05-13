@@ -175,7 +175,7 @@ def get_remote_session(endpoint: RemoteEndpoint, session_id: str) -> dict[str, o
         f"/sessions/{session_id}",
         "get remote session",
     )
-    return dict(data)
+    return data
 
 
 def cancel_remote_session(
@@ -267,6 +267,39 @@ def download_workspace_archive(
     if not isinstance(archive_base64, str) or not archive_base64:
         raise click.ClickException("Remote workspace response missing archive_base64")
     return archive_base64
+
+
+def download_workspace_diff(
+    endpoint: RemoteEndpoint, session_id: str
+) -> dict[str, object]:
+    data = _get_remote_json(
+        endpoint,
+        f"/sessions/{session_id}/workspace/diff",
+        "download remote workspace diff",
+    )
+    files = data.get("files")
+    additions = data.get("additions")
+    deletions = data.get("deletions")
+    if not isinstance(files, list):
+        raise click.ClickException("Remote workspace diff response missing files")
+    if not isinstance(additions, int) or not isinstance(deletions, int):
+        raise click.ClickException("Remote workspace diff response missing totals")
+    return dict(data)
+
+
+def download_workspace_patch(endpoint: RemoteEndpoint, session_id: str) -> str:
+    data = _get_remote_json(
+        endpoint,
+        f"/sessions/{session_id}/workspace/patch",
+        "download remote workspace patch",
+    )
+    patch_format = data.get("format")
+    patch = data.get("patch")
+    if patch_format != "unified_diff":
+        raise click.ClickException("Remote workspace patch response has invalid format")
+    if not isinstance(patch, str):
+        raise click.ClickException("Remote workspace patch response missing patch")
+    return patch
 
 
 def _get_remote_json(
