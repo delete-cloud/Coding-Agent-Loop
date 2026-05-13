@@ -1013,6 +1013,44 @@ class TestSessionCreation:
             "cloud workspace provisioning requires cloud_workspace.enabled=true"
         )
 
+    async def test_create_session_rejects_git_workspace_source_until_supported(
+        self, client, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            lambda: {
+                "enabled": True,
+                "provider": "docker",
+                "workspace_root": str(tmp_path),
+                "container_name_prefix": "agent-",
+                **_test_runtime_profile_config(),
+            },
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.provision_cloud_binding_from_config",
+            lambda config, source: pytest.fail(
+                "git workspace source should fail before provider provisioning"
+            ),
+        )
+
+        response = await client.post(
+            "/sessions",
+            json={
+                "workspace_source": {
+                    "kind": "git",
+                    "remote_url": "https://github.com/org/repo.git",
+                    "base_ref": "main",
+                    "base_sha": "abc123",
+                    "runtime_profile": "universal",
+                }
+            },
+        )
+
+        assert response.status_code == 501
+        assert response.json()["detail"] == (
+            "git workspace source is not implemented yet"
+        )
+
     async def test_create_session_rolls_back_provisioned_workspace_on_failure(
         self, client, monkeypatch
     ):

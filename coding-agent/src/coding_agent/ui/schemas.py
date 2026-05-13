@@ -30,8 +30,16 @@ class DockerWorkspaceSourceRequest(BaseModel):
     ) = Field(None, min_length=1, max_length=20)
 
 
+class GitWorkspaceSourceRequest(BaseModel):
+    kind: Literal["git"]
+    remote_url: str = Field(..., min_length=1, max_length=1000)
+    base_ref: str = Field(..., min_length=1, max_length=200)
+    base_sha: str = Field(..., min_length=1, max_length=100)
+    runtime_profile: str | None = Field(None, min_length=1, max_length=100)
+
+
 ExecutionBindingRequest = LocalExecutionBindingRequest | CloudWorkspaceBindingRequest
-WorkspaceSourceRequest = DockerWorkspaceSourceRequest
+WorkspaceSourceRequest = DockerWorkspaceSourceRequest | GitWorkspaceSourceRequest
 
 
 class PromptRequest(BaseModel):
