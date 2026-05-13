@@ -3469,6 +3469,39 @@ class TestRemoteResultPublicationContract:
 
         assert response.status_code == 404
 
+    async def test_workspace_diff_and_patch_hide_other_user_session(
+        self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(
+            "CODING_AGENT_SERVER_CONFIG", str(_write_auth_config(tmp_path))
+        )
+        monkeypatch.setattr(settings, "http_api_key", None)
+
+        created = await client.post(
+            "/sessions",
+            headers={"Authorization": "Bearer admin-token"},
+            json={
+                "execution_binding": {
+                    "kind": "cloud",
+                    "workspace_url": "docker://agent-ws-private/workspace",
+                    "workspace_id": "ws-private",
+                },
+            },
+        )
+        session_id = created.json()["session_id"]
+
+        diff = await client.get(
+            f"/sessions/{session_id}/workspace/diff",
+            headers={"Authorization": "Bearer user-token-a"},
+        )
+        patch = await client.get(
+            f"/sessions/{session_id}/workspace/patch",
+            headers={"Authorization": "Bearer user-token-a"},
+        )
+
+        assert diff.status_code == 404
+        assert patch.status_code == 404
+
     async def test_workspace_diff_returns_provider_result(
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:

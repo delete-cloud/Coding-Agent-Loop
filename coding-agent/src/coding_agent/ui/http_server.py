@@ -1742,6 +1742,7 @@ async def get_session_workspace_diff(
     auth_context: AuthContext | None = Depends(auth_context_from_headers),
 ) -> WorkspaceDiffResponse:
     del request
+    _ = await _get_visible_session(session_id, auth_context)
     try:
         diff = await session_manager.export_workspace_archive(
             session_id,
@@ -1791,6 +1792,7 @@ async def get_session_workspace_patch(
     auth_context: AuthContext | None = Depends(auth_context_from_headers),
 ) -> WorkspacePatchResponse:
     del request
+    _ = await _get_visible_session(session_id, auth_context)
     try:
         patch = await session_manager.export_workspace_archive(
             session_id,
