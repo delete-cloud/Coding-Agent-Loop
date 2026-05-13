@@ -315,14 +315,28 @@ def publish_remote_branch(
     session_id: str,
     branch_name: str,
 ) -> dict[str, object]:
+    return publish_remote_result(
+        endpoint, session_id, mode="branch", branch_name=branch_name
+    )
+
+
+def publish_remote_result(
+    endpoint: RemoteEndpoint,
+    session_id: str,
+    *,
+    mode: str,
+    branch_name: str,
+) -> dict[str, object]:
     data = _post_remote_json(
         endpoint,
         f"/sessions/{session_id}/publish",
-        "publish remote workspace branch",
-        json={"mode": "branch", "branch_name": branch_name},
+        "publish remote workspace result",
+        json={"mode": mode, "branch_name": branch_name},
     )
-    if data.get("status") != "published":
-        raise click.ClickException("Remote branch publication did not complete")
+    if data.get("status") not in {"published", "unsupported", "failed"}:
+        raise click.ClickException(
+            "Remote result publication response has invalid status"
+        )
     return dict(data)
 
 

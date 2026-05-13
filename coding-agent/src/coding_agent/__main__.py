@@ -1197,30 +1197,72 @@ def remote_patch(name: str, session_id: str) -> None:
 @click.option(
     "--branch",
     "branch_name",
-    required=True,
     help="Publish the remote session changes to this Git branch.",
 )
-def remote_publish(name: str, session_id: str, branch_name: str) -> None:
-    """Publish remote session results as a Git branch."""
-    from coding_agent.remote.client import get_remote, publish_remote_branch
+@click.option(
+    "--pr",
+    "publish_mode",
+    flag_value="pr",
+    help="Create a GitHub pull request after publishing the branch.",
+)
+@click.option(
+    "--branch-only",
+    "publish_mode",
+    flag_value="branch",
+    default="branch",
+    help="Publish the remote session changes as a Git branch only.",
+)
+def remote_publish(
+    name: str,
+    session_id: str,
+    branch_name: str | None,
+    publish_mode: str,
+) -> None:
+    """Publish remote session results as a Git branch or PR."""
+    from coding_agent.remote.client import get_remote, publish_remote_result
 
     endpoint = get_remote(name)
-    publication = publish_remote_branch(endpoint, session_id, branch_name)
+    if branch_name is None:
+        branch_name = f"coding-agent/session-{session_id}"
+    publication = publish_remote_result(
+        endpoint,
+        session_id,
+        mode=publish_mode,
+        branch_name=branch_name,
+    )
     published_branch = publication.get("branch_name")
     pushed_ref = publication.get("pushed_ref")
     commit_sha = publication.get("commit_sha")
     remote_url = publication.get("remote_url")
+    pr_url = publication.get("pr_url")
+    status = publication.get("status")
     if not isinstance(published_branch, str) or not published_branch:
         raise click.ClickException("Remote publish response missing branch_name")
     if not isinstance(commit_sha, str) or not commit_sha:
         raise click.ClickException("Remote publish response missing commit_sha")
     if not isinstance(remote_url, str) or not remote_url:
         raise click.ClickException("Remote publish response missing remote_url")
-    click.echo(f"Published branch {published_branch}")
+    if publish_mode == "pr":
+        if isinstance(pr_url, str) and pr_url:
+            click.echo(f"Published PR {pr_url}")
+            click.echo(f"Branch: {published_branch}")
+        elif status in {"unsupported", "failed"}:
+            error = publication.get("error")
+            if isinstance(error, str) and error:
+                click.echo(error)
+            click.echo(f"Branch: {published_branch}")
+        else:
+            raise click.ClickException("Remote PR publication did not complete")
+    else:
+        if status != "published":
+            raise click.ClickException("Remote branch publication did not complete")
+        click.echo(f"Published branch {published_branch}")
     if isinstance(pushed_ref, str) and pushed_ref:
         click.echo(f"Ref: {pushed_ref}")
     click.echo(f"Commit: {commit_sha}")
     click.echo(f"Remote: {remote_url}")
+    if publish_mode == "pr" and status == "failed":
+        raise click.ClickException("Remote PR publication did not complete")
 
 
 @remote.command("download")

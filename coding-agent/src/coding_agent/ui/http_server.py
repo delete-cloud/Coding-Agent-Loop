@@ -13,7 +13,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 from collections.abc import AsyncIterator
+from urllib.parse import urlsplit
 
+import httpx
 from fastapi import FastAPI, HTTPException, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
@@ -28,6 +30,7 @@ from coding_agent.environment import (
     cloud_client_factory_from_config,
     cloud_workspace_ready_from_config,
     WorkspaceArchiveManifest,
+    WorkspaceBranchPublication,
     WorkspaceInventoryEntry,
     export_workspace_archive_by_id_from_config,
     export_workspace_archive_from_config,
@@ -106,6 +109,16 @@ logger = logging.getLogger(__name__)
 APPROVAL_TIMEOUT_SECONDS = 120
 SESSION_IDLE_TIMEOUT_MINUTES = 30
 _SERVER_CONFIG_ENV = "CODING_AGENT_SERVER_CONFIG"
+_GITHUB_API_BASE_URL = "https://api.github.com"
+_GITHUB_API_VERSION = "2022-11-28"
+
+
+class GitHubPrUnsupportedError(ValueError):
+    pass
+
+
+class GitHubPrPublicationError(Exception):
+    pass
 
 
 def _server_config_path() -> Path:
@@ -1835,19 +1848,15 @@ async def publish_session_result(
 ) -> PublishSessionResponse:
     del request
     _ = await _get_visible_session(session_id, auth_context)
-    if body.mode == "pr":
-        raise HTTPException(
-            status_code=501,
-            detail="remote PR publication is not implemented yet",
-        )
     branch_name = body.branch_name or f"coding-agent/session-{session_id}"
     commit_message = f"Apply coding-agent remote session {session_id} changes"
+    publication_config = _load_remote_publication_config()
     try:
         publication = await session_manager.export_workspace_archive(
             session_id,
             lambda binding: publish_workspace_branch_from_config(
                 _load_cloud_workspace_config(),
-                _load_remote_publication_config(),
+                publication_config,
                 binding.workspace_id,
                 branch_name,
                 commit_message,
@@ -1864,6 +1873,13 @@ async def publish_session_result(
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         raise
 
+    if body.mode == "pr":
+        return _publish_session_pr_response(
+            session_id,
+            publication,
+            publication_config,
+        )
+
     return PublishSessionResponse(
         session_id=session_id,
         mode="branch",
@@ -1875,6 +1891,139 @@ async def publish_session_result(
         pr_url=None,
         error=None,
     )
+
+
+def _publish_session_pr_response(
+    session_id: str,
+    publication: WorkspaceBranchPublication,
+    publication_config: dict[str, Any],
+) -> PublishSessionResponse:
+    try:
+        pr_url = _create_github_pull_request(
+            session_id,
+            publication,
+            publication_config,
+        )
+    except GitHubPrUnsupportedError as exc:
+        return PublishSessionResponse(
+            session_id=session_id,
+            mode="pr",
+            status="unsupported",
+            branch_name=publication.branch_name,
+            pushed_ref=publication.pushed_ref,
+            commit_sha=publication.commit_sha,
+            remote_url=publication.remote_url,
+            pr_url=None,
+            error=str(exc),
+        )
+    except GitHubPrPublicationError as exc:
+        return PublishSessionResponse(
+            session_id=session_id,
+            mode="pr",
+            status="failed",
+            branch_name=publication.branch_name,
+            pushed_ref=publication.pushed_ref,
+            commit_sha=publication.commit_sha,
+            remote_url=publication.remote_url,
+            pr_url=None,
+            error=str(exc),
+        )
+    return PublishSessionResponse(
+        session_id=session_id,
+        mode="pr",
+        status="published",
+        branch_name=publication.branch_name,
+        pushed_ref=publication.pushed_ref,
+        commit_sha=publication.commit_sha,
+        remote_url=publication.remote_url,
+        pr_url=pr_url,
+        error=None,
+    )
+
+
+def _create_github_pull_request(
+    session_id: str,
+    publication: WorkspaceBranchPublication,
+    publication_config: dict[str, Any],
+) -> str:
+    github_config = publication_config.get("github")
+    if not isinstance(github_config, dict) or github_config.get("enabled") is not True:
+        raise GitHubPrUnsupportedError(
+            "remote_publication.github.enabled=true is required for GitHub PR "
+            "publication; branch was published and can be opened manually"
+        )
+    github_config = cast(dict[str, object], github_config)
+    token_env = github_config.get("token_env")
+    if not isinstance(token_env, str) or not token_env.strip():
+        raise GitHubPrUnsupportedError(
+            "remote_publication.github.token_env is required for GitHub PR "
+            "publication; branch was published and can be opened manually"
+        )
+    token = os.environ.get(token_env.strip())
+    if token is None or not token.strip():
+        raise GitHubPrUnsupportedError(
+            f"remote_publication.github.token_env is not set: {token_env.strip()}; "
+            "branch was published and can be opened manually"
+        )
+    base_branch = github_config.get("base_branch")
+    if not isinstance(base_branch, str) or not base_branch.strip():
+        raise GitHubPrUnsupportedError(
+            "remote_publication.github.base_branch is required for GitHub PR "
+            "publication; branch was published and can be opened manually"
+        )
+    owner, repo = _github_repo_from_remote_url(publication.remote_url)
+    try:
+        response = httpx.post(
+            f"{_GITHUB_API_BASE_URL}/repos/{owner}/{repo}/pulls",
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {token.strip()}",
+                "X-GitHub-Api-Version": _GITHUB_API_VERSION,
+            },
+            json={
+                "title": f"Coding agent remote session {session_id}",
+                "head": publication.branch_name,
+                "base": base_branch.strip(),
+                "body": (
+                    f"Remote coding-agent session `{session_id}` published commit "
+                    f"`{publication.commit_sha}`."
+                ),
+            },
+            timeout=30.0,
+        )
+        response.raise_for_status()
+    except Exception as exc:
+        raise GitHubPrPublicationError(f"GitHub PR publication failed: {exc}") from exc
+    payload = cast(object, response.json())
+    if not isinstance(payload, dict):
+        raise GitHubPrPublicationError(
+            "GitHub PR publication failed: response must be a JSON object"
+        )
+    pr_url = payload.get("html_url")
+    if not isinstance(pr_url, str) or not pr_url.strip():
+        raise GitHubPrPublicationError(
+            "GitHub PR publication failed: response missing html_url"
+        )
+    return pr_url
+
+
+def _github_repo_from_remote_url(remote_url: str) -> tuple[str, str]:
+    parsed = urlsplit(remote_url)
+    if parsed.hostname != "github.com":
+        raise GitHubPrUnsupportedError(
+            "GitHub PR publication requires a github.com remote; branch was "
+            "published and can be opened manually"
+        )
+    path = parsed.path.strip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    parts = path.split("/")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise GitHubPrUnsupportedError(
+            "GitHub PR publication could not derive owner/repo from remote URL; "
+            "branch was published and can be opened manually"
+        )
+    return parts[0], parts[1]
 
 
 async def _export_session_workspace_archive(
