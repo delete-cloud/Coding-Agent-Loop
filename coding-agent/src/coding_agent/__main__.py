@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import subprocess
 import sys
 from pathlib import Path
 from collections.abc import Mapping
@@ -583,7 +584,7 @@ def remote_repl(
 @click.option(
     "--repo",
     default=None,
-    help="Upload a local workspace snapshot. Results stay remote unless --download is passed.",
+    help="Use a clean Git repo as the remote workspace source. Results stay remote unless --download is passed.",
 )
 @click.option(
     "--empty-workspace",
@@ -618,6 +619,11 @@ def remote_repl(
     is_flag=True,
     help="Download and overwrite --repo after the remote run completes.",
 )
+@click.option(
+    "--snapshot-fallback",
+    is_flag=True,
+    help="Use archive upload for local-only or dirty repos instead of Git-backed publication input.",
+)
 def remote_run(
     name: str,
     repo: str | None,
@@ -627,6 +633,7 @@ def remote_run(
     approval_policy: str,
     yes: bool,
     download_results: bool,
+    snapshot_fallback: bool,
 ) -> None:
     """Create a one-shot remote run and stream one prompt."""
     _remote_run_once(
@@ -639,6 +646,7 @@ def remote_run(
         yes=yes,
         download_results=download_results,
         cleanup_on_success=download_results,
+        snapshot_fallback=snapshot_fallback,
     )
 
 
@@ -653,6 +661,7 @@ def _remote_run_once(
     yes: bool,
     download_results: bool,
     cleanup_on_success: bool,
+    snapshot_fallback: bool = True,
 ) -> None:
     from coding_agent.remote.client import (
         auth_headers,
@@ -667,11 +676,11 @@ def _remote_run_once(
 
     if repo is not None and empty_workspace:
         raise click.ClickException(
-            "Pass either --repo to upload a workspace snapshot or --empty-workspace, not both."
+            "Pass either --repo to use a local repo or --empty-workspace, not both."
         )
     if repo is None and not empty_workspace:
         raise click.ClickException(
-            "Pass --repo to upload a workspace snapshot or --empty-workspace to create a blank remote workspace."
+            "Pass --repo to use a local repo or --empty-workspace to create a blank remote workspace."
         )
     if download_results and repo is None:
         raise click.ClickException("Pass --repo with --download.")
@@ -680,20 +689,28 @@ def _remote_run_once(
     headers = auth_headers(endpoint)
     repo_path: Path | None = None
     snapshot_archive_base64: str | None = None
+    workspace_source: dict[str, object] | None = None
     if repo is not None:
         repo_path = Path(repo).expanduser().resolve()
         if not repo_path.is_dir():
             raise click.ClickException(f"--repo must be an existing directory: {repo}")
-        try:
-            snapshot_archive_base64 = create_workspace_archive_base64(repo_path)
-        except ValueError as exc:
-            raise click.ClickException(str(exc)) from exc
+        if snapshot_fallback:
+            try:
+                snapshot_archive_base64 = create_workspace_archive_base64(repo_path)
+            except ValueError as exc:
+                raise click.ClickException(str(exc)) from exc
+        else:
+            workspace_source = _git_workspace_source_for_remote_run(
+                repo_path,
+                runtime_profile=runtime_profile,
+            )
 
     session_id = create_remote_session(
         endpoint,
         snapshot_archive_base64=snapshot_archive_base64,
+        workspace_source=workspace_source,
         approval_policy=approval_policy,
-        runtime_profile=runtime_profile,
+        runtime_profile=None if workspace_source is not None else runtime_profile,
     )
     click.echo(f"Created one-shot remote session {session_id} on remote {name}")
     status: int | None = None
@@ -785,6 +802,10 @@ def _remote_run_once(
                 remote_name=name,
                 session_id=session_id,
                 repo_path=repo_path,
+                can_publish_branch=(
+                    workspace_source is not None
+                    and workspace_source.get("kind") == "git"
+                ),
             )
     if stream_error is not None:
         raise stream_error
@@ -798,11 +819,104 @@ def _format_cli_command(args: list[str]) -> str:
     return " ".join(shlex.quote(arg) for arg in args)
 
 
+def _git_workspace_source_for_remote_run(
+    repo_path: Path,
+    *,
+    runtime_profile: str | None,
+) -> dict[str, object]:
+    try:
+        top_level = _run_git_for_remote_source(
+            repo_path, ["rev-parse", "--show-toplevel"]
+        )
+        if Path(top_level).resolve() != repo_path:
+            raise click.ClickException(
+                "--repo must point at the Git worktree root for Git-backed remote runs."
+            )
+        status = _run_git_for_remote_source(repo_path, ["status", "--porcelain=v1"])
+        if status:
+            raise click.ClickException(
+                "remote run --repo requires a clean Git working tree. "
+                "Commit, stash, or pass --snapshot-fallback to upload an archive instead."
+            )
+        remote_url = _run_git_for_remote_source(
+            repo_path, ["config", "--get", "remote.origin.url"]
+        )
+        if not remote_url:
+            raise click.ClickException(
+                "remote run --repo requires remote.origin.url. "
+                "Pass --snapshot-fallback for local-only repositories."
+            )
+        base_ref = _run_git_for_remote_source(
+            repo_path, ["rev-parse", "--abbrev-ref", "HEAD"]
+        )
+        if base_ref == "HEAD":
+            raise click.ClickException(
+                "remote run --repo requires a named Git branch. "
+                "Pass --snapshot-fallback for detached HEAD worktrees."
+            )
+        base_sha = _run_git_for_remote_source(repo_path, ["rev-parse", "HEAD"])
+        _run_git_for_remote_source(
+            repo_path,
+            ["merge-base", "--is-ancestor", "HEAD", f"refs/remotes/origin/{base_ref}"],
+        )
+    except click.ClickException:
+        raise
+    except subprocess.CalledProcessError as exc:
+        message = _git_remote_source_error_message(exc)
+        raise click.ClickException(message) from exc
+    workspace_source: dict[str, object] = {
+        "kind": "git",
+        "remote_url": remote_url,
+        "base_ref": base_ref,
+        "base_sha": base_sha,
+    }
+    if runtime_profile is not None:
+        workspace_source["runtime_profile"] = runtime_profile
+    return workspace_source
+
+
+def _run_git_for_remote_source(repo_path: Path, args: list[str]) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_path), *args],
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+            stdin=subprocess.DEVNULL,
+        )
+    except FileNotFoundError as exc:
+        raise click.ClickException(
+            "git not found; please install git or adjust PATH."
+        ) from exc
+    return result.stdout.strip()
+
+
+def _git_remote_source_error_message(exc: subprocess.CalledProcessError) -> str:
+    stderr = exc.stderr.strip() if isinstance(exc.stderr, str) else ""
+    command = " ".join(str(part) for part in exc.cmd)
+    if "config --get remote.origin.url" in command:
+        return (
+            "remote run --repo requires remote.origin.url. "
+            "Pass --snapshot-fallback for local-only repositories."
+        )
+    if "merge-base" in command:
+        return (
+            "remote run --repo requires HEAD to be available from origin. "
+            "Push the branch or pass --snapshot-fallback to upload an archive instead."
+        )
+    if stderr:
+        return f"Git-backed remote run setup failed: {stderr}"
+    return "Git-backed remote run setup failed. Pass --snapshot-fallback to upload an archive instead."
+
+
 def _print_remote_result_next_steps(
     *,
     remote_name: str,
     session_id: str,
     repo_path: Path | None,
+    can_publish_branch: bool,
 ) -> None:
     click.echo(f"Remote session {session_id} left open for result inspection.")
     click.echo(
@@ -835,6 +949,24 @@ def _print_remote_result_next_steps(
             ]
         )
     )
+    if can_publish_branch:
+        click.echo(
+            "Publish review branch: "
+            + _format_cli_command(
+                [
+                    "python",
+                    "-m",
+                    "coding_agent",
+                    "remote",
+                    "publish",
+                    remote_name,
+                    "--session",
+                    session_id,
+                    "--branch",
+                    f"coding-agent/session-{session_id}",
+                ]
+            )
+        )
     if repo_path is not None:
         click.echo(
             "Fallback archive download: "

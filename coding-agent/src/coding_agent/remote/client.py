@@ -126,16 +126,24 @@ def create_remote_session(
     endpoint: RemoteEndpoint,
     *,
     snapshot_archive_base64: str | None = None,
+    workspace_source: dict[str, object] | None = None,
     approval_policy: str = "auto",
     runtime_profile: str | None = None,
 ) -> str:
     if approval_policy not in APPROVAL_POLICIES:
         raise click.ClickException(f"Unsupported approval policy: {approval_policy}")
-    workspace_source: dict[str, object] = {"kind": "docker"}
+    if workspace_source is not None and snapshot_archive_base64 is not None:
+        raise click.ClickException(
+            "Pass either workspace_source or snapshot_archive_base64, not both."
+        )
+    if workspace_source is None:
+        workspace_source = {"kind": "docker"}
+        if snapshot_archive_base64 is not None:
+            workspace_source["snapshot_archive_base64"] = snapshot_archive_base64
+    else:
+        workspace_source = dict(workspace_source)
     if runtime_profile is not None:
         workspace_source["runtime_profile"] = runtime_profile
-    if snapshot_archive_base64 is not None:
-        workspace_source["snapshot_archive_base64"] = snapshot_archive_base64
     payload: dict[str, object] = {
         "workspace_source": workspace_source,
         "approval_policy": approval_policy,
