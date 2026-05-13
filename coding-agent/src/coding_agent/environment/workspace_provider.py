@@ -69,6 +69,15 @@ class WorkspacePatch:
     patch: str
 
 
+@dataclass(frozen=True)
+class WorkspaceBranchPublication:
+    workspace_id: str
+    branch_name: str
+    pushed_ref: str
+    commit_sha: str
+    remote_url: str
+
+
 class WorkspaceProvider(Protocol):
     def build_cloud_client_factory(
         self, config: dict[str, object]
@@ -154,6 +163,15 @@ class WorkspaceProvider(Protocol):
         config: dict[str, object],
         workspace_id: str,
     ) -> WorkspacePatch: ...
+
+    def publish_workspace_branch(
+        self,
+        config: dict[str, object],
+        publication_config: dict[str, object],
+        workspace_id: str,
+        branch_name: str,
+        commit_message: str,
+    ) -> WorkspaceBranchPublication: ...
 
 
 _WORKSPACE_PROVIDERS: dict[str, WorkspaceProvider] = {}
@@ -292,6 +310,23 @@ def workspace_patch_from_config(
 ) -> WorkspacePatch:
     provider = _provider_from_config(config)
     return provider.workspace_patch(config, workspace_id)
+
+
+def publish_workspace_branch_from_config(
+    config: dict[str, object],
+    publication_config: dict[str, object],
+    workspace_id: str,
+    branch_name: str,
+    commit_message: str,
+) -> WorkspaceBranchPublication:
+    provider = _provider_from_config(config)
+    return provider.publish_workspace_branch(
+        config,
+        publication_config,
+        workspace_id,
+        branch_name,
+        commit_message,
+    )
 
 
 def _provider_from_config(config: dict[str, object]) -> WorkspaceProvider:

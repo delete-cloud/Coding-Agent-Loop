@@ -77,6 +77,13 @@ allow_request_commands = false
 network = "none"
 timeout_seconds = 3600
 secret_env_allowlist = []
+
+[remote_publication]
+enabled = true
+git_author_name = "coding-agent"
+git_author_email = "coding-agent@example.com"
+allowed_git_hosts = ["github.com"]
+git_token_env = "CODING_AGENT_GIT_TOKEN"
 ```
 
 `python:3.11-slim` is enough for basic file operations and pure-Python tools,
@@ -148,6 +155,7 @@ Run the service on loopback and place TLS/authenticated ingress in front of it:
 User=coding-agent
 Group=coding-agent
 Environment=CODING_AGENT_BEARER_TOKEN=replace-with-secret
+Environment=CODING_AGENT_GIT_TOKEN=replace-with-secret
 ExecStart=/usr/local/bin/coding-agent serve --config /etc/coding-agent/config.toml
 Restart=on-failure
 ```
@@ -197,17 +205,15 @@ Use `remote run` for the recommended one-shot remote workflow:
 coding-agent remote run team --repo . --goal "fix the failing test"
 ```
 
-`remote run --repo` uploads a local snapshot, streams one prompt, downloads the
-final workspace through the archive manifest/archive API, overwrites the local
-checkout while preserving `.git`, and then closes the remote session. Use
-`--yes` only when the local checkout is already recoverable and you want to skip
-the manifest confirmation prompt; it does not approve tools.
+`remote run --repo` uploads a local snapshot, streams one prompt, leaves the
+remote session open, and prints follow-up commands for inspecting or exporting
+the result. It does not overwrite the local checkout by default.
 
 Set the remote tool approval policy explicitly when automation cannot answer
 approval prompts:
 
 ```bash
-coding-agent remote run team --repo . --goal "fix the failing test" --approval yolo --yes
+coding-agent remote run team --repo . --goal "fix the failing test" --approval yolo
 ```
 
 Select a configured runtime profile when the project needs more tooling than the
@@ -224,6 +230,37 @@ Prefer server-configured setup commands for production deployments that need
 repeatable bootstrap behavior. Request-provided setup commands remain reserved
 for the later setup execution slice and currently fail closed instead of being
 accepted as a silent no-op.
+
+For Git-backed sessions, publish remote changes to a review branch explicitly:
+
+```bash
+coding-agent remote publish team --session <session-id> --branch coding-agent/session-<session-id>
+```
+
+Branch publication requires `[remote_publication]` to be enabled, Git author
+identity to be configured, the workspace `remote.origin.url` host to match
+`allowed_git_hosts`, and server-side Git credentials. The host allowlist is
+checked before token injection or `git push`. When `git_token_env` is set, the
+named environment variable must contain a Git token; the server injects it into
+the `git push` environment without placing the token in command arguments or
+publication responses. If `git_token_env` is omitted, the workspace must rely
+on existing Git credential helper state. GitHub PR creation is not part of this
+slice.
+
+Snapshot sessions can still be inspected and exported, but they are not branch
+publication inputs because snapshots intentionally exclude `.git`.
+
+Use `--download` only when you want the old archive-overwrite fallback:
+
+```bash
+coding-agent remote run team --repo . --goal "fix the failing test" --download
+```
+
+`--download` fetches the final workspace through the archive manifest/archive
+API, overwrites the local checkout while preserving `.git`, and then closes the
+remote session. Use `--yes` with `--download` only when the local checkout is
+already recoverable and you want to skip the manifest confirmation prompt; it
+does not approve tools.
 
 `--approval auto` is the default and can still ask for approval for tools such
 as `bash_run`. `--approval interactive` asks for every tool. `--approval yolo`
@@ -242,6 +279,9 @@ coding-agent remote sessions status team <session-id>
 coding-agent remote sessions cancel team <session-id>
 coding-agent remote sessions close team <session-id>
 
+coding-agent remote diff team --session <session-id>
+coding-agent remote patch team --session <session-id>
+coding-agent remote publish team --session <session-id> --branch coding-agent/session-<session-id>
 coding-agent remote download team --session <session-id> --repo .
 
 coding-agent remote workspaces list team-admin
@@ -279,20 +319,20 @@ providers, or microVM providers.
 
 ## Snapshot Transfer Semantics
 
-Remote runs use snapshot round-trip transfer:
+Snapshot fallback runs use archive round-trip transfer:
 
 1. The local repo is packed as a bounded `tar.gz` archive encoded as base64.
 2. The server extracts that archive into a Docker workspace.
 3. The agent executes in the remote workspace.
-4. The final remote workspace is downloaded.
-5. The local checkout is overwritten while local `.git` is preserved.
+4. The final remote workspace remains remote unless explicitly downloaded.
+5. Explicit archive download overwrites the local checkout while local `.git`
+   is preserved.
 
-This is not live sync. P0 does not support incremental patch export, concurrent
-local edit merging, efficient large-repo delta sync, or automatic conflict
-resolution.
+This is not live sync. P0 does not support concurrent local edit merging,
+efficient large-repo delta sync, or automatic conflict resolution.
 
-Before using `remote run --repo` or `remote repl --repo`, keep your local work
-recoverable with a commit, stash, or backup.
+Before using `remote download`, `remote run --download`, or `remote repl
+--repo`, keep your local work recoverable with a commit, stash, or backup.
 
 ## Production Smoke
 
@@ -310,8 +350,9 @@ provider:
    ```
 
 3. Run a small repository through `remote run --repo`.
-4. Confirm the downloaded workspace contains the remote change.
-5. Confirm successful one-shot runs leave no active sessions or workspaces:
+4. Inspect the remote result with `remote diff` and `remote patch`.
+5. Export the result explicitly with `remote download` or close the session.
+6. Confirm closed sessions leave no active workspaces:
 
    ```bash
    coding-agent remote sessions list team
@@ -319,5 +360,5 @@ provider:
    ```
 
 This verifies production config loading, auth, Docker provider readiness,
-workspace execution, approval forwarding, archive manifest/download, local
-restore, and session/workspace cleanup.
+workspace execution, approval forwarding, result inspection, explicit archive
+download, and session/workspace cleanup.

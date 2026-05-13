@@ -181,6 +181,7 @@ class PublishSessionResponse(BaseModel):
     mode: Literal["branch", "pr"]
     status: Literal["published", "unsupported", "failed"]
     branch_name: str | None = None
+    pushed_ref: str | None = None
     commit_sha: str | None = None
     remote_url: str | None = None
     pr_url: str | None = None

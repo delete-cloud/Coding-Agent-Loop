@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 import os
 from typing import TYPE_CHECKING, cast, override
+from urllib.parse import urlsplit, urlunsplit
 
 from .cloud import CloudCommandResult
 from .workspace_provider import (
@@ -25,6 +26,7 @@ from .workspace_provider import (
     CloudWorkspaceSource,
     WorkspaceProvider,
     WorkspaceArchiveManifest,
+    WorkspaceBranchPublication,
     WorkspaceDiff,
     WorkspaceDiffFile,
     WorkspaceDiffStatus,
@@ -669,6 +671,32 @@ class DockerWorkspaceProvider(WorkspaceProvider):
             patch=patch,
         )
 
+    @override
+    def publish_workspace_branch(
+        self,
+        config: dict[str, object],
+        publication_config: dict[str, object],
+        workspace_id: str,
+        branch_name: str,
+        commit_message: str,
+    ) -> WorkspaceBranchPublication:
+        if publication_config.get("enabled") is not True:
+            raise ValueError("remote_publication.enabled must be true")
+        provider_config = _docker_workspace_provider_config(config)
+        workspace_root = _git_workspace_root_for_operation(
+            provider_config,
+            workspace_id,
+            "publication",
+        )
+        return _publish_git_workspace_branch(
+            provider_config,
+            publication_config,
+            workspace_id,
+            workspace_root,
+            branch_name,
+            commit_message,
+        )
+
 
 def _docker_workspace_provider_config(
     config: dict[str, object],
@@ -1116,11 +1144,212 @@ def _git_workspace_diff(
     )
 
 
+def _publish_git_workspace_branch(
+    provider_config: _DockerWorkspaceProviderConfig,
+    publication_config: dict[str, object],
+    workspace_id: str,
+    workspace_root: Path,
+    branch_name: str,
+    commit_message: str,
+) -> WorkspaceBranchPublication:
+    author_name = _required_publication_string(
+        publication_config,
+        "git_author_name",
+    )
+    author_email = _required_publication_string(
+        publication_config,
+        "git_author_email",
+    )
+    branch_name = branch_name.strip()
+    if not branch_name:
+        raise ValueError("branch_name must be non-empty")
+    commit_message = commit_message.strip()
+    if not commit_message:
+        raise ValueError("commit_message must be non-empty")
+
+    status = _run_git_publish_command(
+        provider_config,
+        workspace_root,
+        ["status", "--porcelain=v1", "-z"],
+        "git status",
+    )
+    if not status:
+        raise ValueError("workspace publication requires uncommitted changes")
+
+    _run_git_publish_command(
+        provider_config,
+        workspace_root,
+        ["check-ref-format", "--branch", branch_name],
+        "git check-ref-format",
+    )
+    _run_git_publish_command(
+        provider_config,
+        workspace_root,
+        ["config", "user.name", author_name],
+        "git config user.name",
+    )
+    _run_git_publish_command(
+        provider_config,
+        workspace_root,
+        ["config", "user.email", author_email],
+        "git config user.email",
+    )
+    _run_git_publish_command(
+        provider_config,
+        workspace_root,
+        ["add", "-A"],
+        "git add",
+    )
+    _run_git_publish_command(
+        provider_config,
+        workspace_root,
+        ["commit", "-m", commit_message],
+        "git commit",
+    )
+    commit_sha = _run_git_publish_command(
+        provider_config,
+        workspace_root,
+        ["rev-parse", "HEAD"],
+        "git rev-parse",
+    ).strip()
+    remote_url = _run_git_publish_command(
+        provider_config,
+        workspace_root,
+        ["config", "--get", "remote.origin.url"],
+        "git config remote.origin.url",
+    ).strip()
+    _validate_publication_remote_url(publication_config, remote_url)
+    pushed_ref = f"refs/heads/{branch_name}"
+    push_env = _git_publication_push_env(publication_config)
+    _run_git_publish_command(
+        provider_config,
+        workspace_root,
+        ["push", "origin", f"HEAD:{pushed_ref}"],
+        "git push",
+        extra_env=push_env,
+    )
+    return WorkspaceBranchPublication(
+        workspace_id=workspace_id,
+        branch_name=branch_name,
+        pushed_ref=pushed_ref,
+        commit_sha=commit_sha,
+        remote_url=_redact_git_remote_url(remote_url),
+    )
+
+
+def _run_git_publish_command(
+    provider_config: _DockerWorkspaceProviderConfig,
+    workspace_root: Path,
+    args: list[str],
+    operation: str,
+    *,
+    extra_env: dict[str, str] | None = None,
+) -> str:
+    try:
+        return _run_git_workspace_command(
+            provider_config,
+            workspace_root,
+            args,
+            operation,
+            extra_env=extra_env,
+        )
+    except subprocess.CalledProcessError as exc:
+        error = ValueError(f"{operation} failed")
+        for note in getattr(exc, "__notes__", ()):
+            error.add_note(note)
+        raise error from exc
+
+
+def _git_publication_push_env(
+    publication_config: dict[str, object],
+) -> dict[str, str]:
+    token_env = _optional_string(publication_config.get("git_token_env"), None)
+    if token_env is None:
+        return {}
+    token = os.environ.get(token_env)
+    if token is None or not token.strip():
+        raise ValueError(f"remote_publication.git_token_env is not set: {token_env}")
+    credential = base64.b64encode(
+        f"x-access-token:{token.strip()}".encode("utf-8")
+    ).decode("ascii")
+    return {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.extraheader",
+        "GIT_CONFIG_VALUE_0": f"Authorization: Basic {credential}",
+    }
+
+
+def _redact_git_remote_url(remote_url: str) -> str:
+    parsed = urlsplit(remote_url)
+    if parsed.username is None and parsed.password is None:
+        return remote_url
+    if parsed.hostname is None:
+        return remote_url
+    netloc = parsed.hostname
+    if parsed.port is not None:
+        netloc = f"{netloc}:{parsed.port}"
+    return urlunsplit(
+        (
+            parsed.scheme,
+            netloc,
+            parsed.path,
+            parsed.query,
+            parsed.fragment,
+        )
+    )
+
+
+def _validate_publication_remote_url(
+    publication_config: dict[str, object],
+    remote_url: str,
+) -> None:
+    if not remote_url:
+        raise ValueError("Git workspace has no remote.origin.url")
+    parsed = urlsplit(remote_url)
+    if parsed.scheme not in {"https", "git+https"}:
+        raise ValueError("Git workspace remote.origin.url must use https")
+    if parsed.hostname is None:
+        raise ValueError("Git workspace remote.origin.url must include a host")
+    allowed_git_hosts = publication_config.get("allowed_git_hosts")
+    if allowed_git_hosts is None:
+        raise ValueError("remote_publication.allowed_git_hosts must be configured")
+    allowed_hosts = _publication_string_list(allowed_git_hosts, key="allowed_git_hosts")
+    if not allowed_hosts:
+        raise ValueError("remote_publication.allowed_git_hosts must be configured")
+    if parsed.hostname not in allowed_hosts:
+        raise ValueError(
+            "Git workspace remote.origin.url host is not in remote_publication.allowed_git_hosts"
+        )
+
+
+def _publication_string_list(value: object, *, key: str) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise ValueError(f"remote_publication.{key} must be a list of strings")
+    result: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"remote_publication.{key} must be a list of strings")
+        result.append(item.strip().lower())
+    return tuple(result)
+
+
+def _required_publication_string(
+    config: dict[str, object],
+    key: str,
+) -> str:
+    value = config.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"remote_publication.{key} must be configured")
+    return value.strip()
+
+
 def _run_git_workspace_command(
     provider_config: _DockerWorkspaceProviderConfig,
     workspace_root: Path,
     args: list[str],
     operation: str,
+    *,
+    extra_env: dict[str, str] | None = None,
 ) -> str:
     command = [
         provider_config.git_binary,
@@ -1136,7 +1365,7 @@ def _run_git_workspace_command(
             text=True,
             timeout=_GIT_OPERATION_TIMEOUT_SECONDS,
             stdin=subprocess.DEVNULL,
-            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0", **(extra_env or {})},
             check=True,
         )
     except subprocess.CalledProcessError as exc:
