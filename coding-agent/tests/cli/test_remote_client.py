@@ -4,6 +4,7 @@ import json
 import os
 import shlex
 import stat
+import subprocess
 from pathlib import Path
 
 import httpx
@@ -12,6 +13,117 @@ import pytest
 from click.testing import CliRunner
 
 from coding_agent.__main__ import main
+
+
+def test_create_remote_session_sends_git_workspace_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from coding_agent.remote.client import RemoteEndpoint, create_remote_session
+
+    calls: list[tuple[str, dict[str, object] | None, dict[str, str]]] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"session_id": "sess-git"}
+
+    class FakeClient:
+        def __init__(
+            self,
+            *,
+            base_url: str,
+            headers: dict[str, str] | None = None,
+            timeout: float,
+        ) -> None:
+            assert base_url == "http://agent.example"
+            assert timeout == 60.0
+            self.headers = headers or {}
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def post(
+            self, path: str, json: dict[str, object] | None = None
+        ) -> FakeResponse:
+            calls.append((path, json, self.headers))
+            return FakeResponse()
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+
+    session_id = create_remote_session(
+        RemoteEndpoint("dev", "http://agent.example", "secret-token"),
+        workspace_source={
+            "kind": "git",
+            "remote_url": "https://github.com/org/repo.git",
+            "base_ref": "main",
+            "base_sha": "abc123",
+        },
+        approval_policy="auto",
+        runtime_profile="universal",
+    )
+
+    assert session_id == "sess-git"
+    assert calls == [
+        (
+            "/sessions",
+            {
+                "workspace_source": {
+                    "kind": "git",
+                    "remote_url": "https://github.com/org/repo.git",
+                    "base_ref": "main",
+                    "base_sha": "abc123",
+                    "runtime_profile": "universal",
+                },
+                "approval_policy": "auto",
+            },
+            {"Authorization": "Bearer secret-token"},
+        )
+    ]
+
+
+def _run_git(repo_path: Path, args: list[str]) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(repo_path), *args],
+        shell=False,
+        capture_output=True,
+        text=True,
+        check=True,
+        stdin=subprocess.DEVNULL,
+    )
+    return result.stdout.strip()
+
+
+def _init_clean_git_repo_with_origin(tmp_path: Path) -> tuple[Path, str]:
+    repo_path = tmp_path / "repo"
+    remote_path = tmp_path / "remote.git"
+    remote_path.mkdir()
+    _ = subprocess.run(
+        ["git", "init", "--bare", str(remote_path)],
+        shell=False,
+        capture_output=True,
+        text=True,
+        check=True,
+        stdin=subprocess.DEVNULL,
+    )
+    repo_path.mkdir()
+    _run_git(repo_path, ["init", "-b", "main"])
+    _run_git(repo_path, ["config", "user.name", "Test User"])
+    _run_git(repo_path, ["config", "user.email", "test@example.com"])
+    (repo_path / "README.md").write_text("# repo\n", encoding="utf-8")
+    _run_git(repo_path, ["add", "README.md"])
+    _run_git(repo_path, ["commit", "-m", "initial"])
+    _run_git(repo_path, ["remote", "add", "origin", remote_path.as_uri()])
+    _run_git(repo_path, ["push", "-u", "origin", "main"])
+    _run_git(
+        repo_path, ["remote", "set-url", "origin", "https://github.com/org/repo.git"]
+    )
+    head_sha = _run_git(repo_path, ["rev-parse", "HEAD"])
+    return repo_path, head_sha
 
 
 class _RemoteFakeResponse:
@@ -380,6 +492,7 @@ def test_remote_run_creates_one_shot_remote_session(
     assert "Remote session sess-run left open for result inspection." in result.output
     assert "coding_agent remote diff dev --session sess-run" in result.output
     assert "coding_agent remote patch dev --session sess-run" in result.output
+    assert "coding_agent remote publish dev" not in result.output
     assert "coding_agent remote sessions close dev sess-run" in result.output
     assert calls == [
         (
@@ -934,10 +1047,7 @@ def test_remote_repl_requires_repo_or_empty_workspace(
     )
 
     assert result.exit_code != 0
-    assert (
-        "Pass --repo to upload a workspace snapshot or --empty-workspace"
-        in result.output
-    )
+    assert "Pass --repo to use a local repo or --empty-workspace" in result.output
 
 
 def test_remote_diff_prints_changed_files(tmp_path: Path, monkeypatch) -> None:
@@ -1388,6 +1498,7 @@ def test_remote_run_with_repo_does_not_download_or_cleanup_by_default(
             "dev",
             "--repo",
             str(repo_path),
+            "--snapshot-fallback",
             "--goal",
             "hello",
         ],
@@ -1398,6 +1509,7 @@ def test_remote_run_with_repo_does_not_download_or_cleanup_by_default(
     assert "Remote session sess-run left open for result inspection." in result.output
     assert "coding_agent remote diff dev --session sess-run" in result.output
     assert "coding_agent remote patch dev --session sess-run" in result.output
+    assert "coding_agent remote publish dev" not in result.output
     assert "coding_agent remote download dev --session sess-run --repo" in result.output
     assert "Downloaded remote workspace snapshot" not in result.output
     assert calls == [
@@ -1421,6 +1533,252 @@ def test_remote_run_with_repo_does_not_download_or_cleanup_by_default(
         ),
     ]
     assert applied == []
+
+
+def test_remote_run_clean_git_repo_uses_git_workspace_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "remotes.json"
+    repo_path, head_sha = _init_clean_git_repo_with_origin(tmp_path)
+    remote_url = _run_git(repo_path, ["config", "--get", "remote.origin.url"])
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example", "--token", "secret-token"],
+        catch_exceptions=False,
+    )
+    calls: list[tuple[str, str, dict[str, object] | None, dict[str, str]]] = []
+
+    class FakeResponse:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self._payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            headers = kwargs.get("headers")
+            self.headers = headers if isinstance(headers, dict) else {}
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def post(
+            self, path: str, json: dict[str, object] | None = None
+        ) -> FakeResponse:
+            calls.append(("post", path, json, self.headers))
+            if path == "/sessions":
+                return FakeResponse({"session_id": "sess-git"})
+            raise AssertionError(f"unexpected post {path}")
+
+    def fake_stream_prompt(
+        *, base_url: str, session_id: str, prompt: str, headers: dict[str, str]
+    ) -> int:
+        calls.append(
+            (
+                "stream",
+                f"/sessions/{session_id}/prompt",
+                {"prompt": prompt, "base_url": base_url},
+                headers,
+            )
+        )
+        return 0
+
+    def fail_archive(path: Path) -> str:
+        raise AssertionError(f"unexpected snapshot archive for {path}")
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+    monkeypatch.setattr("coding_agent.remote.client.stream_prompt", fake_stream_prompt)
+    monkeypatch.setattr(
+        "coding_agent.workspace_archive.create_workspace_archive_base64",
+        fail_archive,
+    )
+
+    result = runner.invoke(
+        main,
+        [
+            "remote",
+            "run",
+            "dev",
+            "--repo",
+            str(repo_path),
+            "--runtime",
+            "universal",
+            "--goal",
+            "hello",
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert (
+        "coding_agent remote publish dev --session sess-git --branch coding-agent/session-sess-git"
+        in result.output
+    )
+    assert calls == [
+        (
+            "post",
+            "/sessions",
+            {
+                "workspace_source": {
+                    "kind": "git",
+                    "remote_url": remote_url,
+                    "base_ref": "main",
+                    "base_sha": head_sha,
+                    "runtime_profile": "universal",
+                },
+                "approval_policy": "auto",
+            },
+            {"Authorization": "Bearer secret-token"},
+        ),
+        (
+            "stream",
+            "/sessions/sess-git/prompt",
+            {"prompt": "hello", "base_url": "http://agent.example"},
+            {"Authorization": "Bearer secret-token"},
+        ),
+    ]
+
+
+def test_remote_run_dirty_git_repo_requires_explicit_snapshot_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "remotes.json"
+    repo_path, _ = _init_clean_git_repo_with_origin(tmp_path)
+    (repo_path / "README.md").write_text("# changed\n", encoding="utf-8")
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example", "--token", "secret-token"],
+        catch_exceptions=False,
+    )
+
+    class FailingClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+            raise AssertionError("remote run should fail before creating a session")
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FailingClient)
+
+    result = runner.invoke(
+        main,
+        [
+            "remote",
+            "run",
+            "dev",
+            "--repo",
+            str(repo_path),
+            "--goal",
+            "hello",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "remote run --repo requires a clean Git working tree" in result.output
+    assert "--snapshot-fallback" in result.output
+
+
+def test_remote_run_snapshot_fallback_uploads_archive_for_local_only_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "remotes.json"
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example", "--token", "secret-token"],
+        catch_exceptions=False,
+    )
+    calls: list[tuple[str, str, dict[str, object] | None, dict[str, str]]] = []
+
+    class FakeResponse:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self._payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            headers = kwargs.get("headers")
+            self.headers = headers if isinstance(headers, dict) else {}
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def post(
+            self, path: str, json: dict[str, object] | None = None
+        ) -> FakeResponse:
+            calls.append(("post", path, json, self.headers))
+            if path == "/sessions":
+                return FakeResponse({"session_id": "sess-snapshot"})
+            raise AssertionError(f"unexpected post {path}")
+
+    def fake_stream_prompt(
+        *, base_url: str, session_id: str, prompt: str, headers: dict[str, str]
+    ) -> int:
+        calls.append(
+            (
+                "stream",
+                f"/sessions/{session_id}/prompt",
+                {"prompt": prompt, "base_url": base_url},
+                headers,
+            )
+        )
+        return 0
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+    monkeypatch.setattr("coding_agent.remote.client.stream_prompt", fake_stream_prompt)
+    monkeypatch.setattr(
+        "coding_agent.workspace_archive.create_workspace_archive_base64",
+        lambda path: "archive-encoded",
+    )
+
+    result = runner.invoke(
+        main,
+        [
+            "remote",
+            "run",
+            "dev",
+            "--repo",
+            str(repo_path),
+            "--snapshot-fallback",
+            "--goal",
+            "hello",
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert calls[0] == (
+        "post",
+        "/sessions",
+        {
+            "workspace_source": {
+                "kind": "docker",
+                "snapshot_archive_base64": "archive-encoded",
+            },
+            "approval_policy": "auto",
+        },
+        {"Authorization": "Bearer secret-token"},
+    )
 
 
 def test_remote_run_with_download_keeps_explicit_archive_overwrite(
@@ -1526,6 +1884,7 @@ def test_remote_run_with_download_keeps_explicit_archive_overwrite(
             "dev",
             "--repo",
             str(repo_path),
+            "--snapshot-fallback",
             "--goal",
             "hello",
             "--download",

@@ -205,9 +205,11 @@ Use `remote run` for the recommended one-shot remote workflow:
 coding-agent remote run team --repo . --goal "fix the failing test"
 ```
 
-`remote run --repo` uploads a local snapshot, streams one prompt, leaves the
-remote session open, and prints follow-up commands for inspecting or exporting
-the result. It does not overwrite the local checkout by default.
+`remote run --repo` uses a Git-backed workspace when the local checkout is
+clean, has `remote.origin.url`, is on a named branch, and `HEAD` is available
+from `origin`. It streams one prompt, leaves the remote session open, and prints
+follow-up commands for inspecting, exporting, or publishing the result. It does
+not overwrite the local checkout by default.
 
 Set the remote tool approval policy explicitly when automation cannot answer
 approval prompts:
@@ -248,12 +250,18 @@ on existing Git credential helper state. GitHub PR creation is not part of this
 slice.
 
 Snapshot sessions can still be inspected and exported, but they are not branch
-publication inputs because snapshots intentionally exclude `.git`.
+publication inputs because snapshots intentionally exclude `.git`. Use
+`--snapshot-fallback` for local-only repos, dirty worktrees, detached HEADs, or
+unpublished local commits:
+
+```bash
+coding-agent remote run team --repo . --snapshot-fallback --goal "try this local tree"
+```
 
 Use `--download` only when you want the old archive-overwrite fallback:
 
 ```bash
-coding-agent remote run team --repo . --goal "fix the failing test" --download
+coding-agent remote run team --repo . --snapshot-fallback --goal "fix the failing test" --download
 ```
 
 `--download` fetches the final workspace through the archive manifest/archive
