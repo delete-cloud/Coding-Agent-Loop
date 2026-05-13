@@ -1218,6 +1218,8 @@ def test_docker_workspace_provider_publishes_git_workspace_branch(
     assert push_env is not None
     assert push_env["GIT_CONFIG_COUNT"] == "1"
     assert push_env["GIT_CONFIG_KEY_0"] == "http.extraheader"
+    assert push_env["GIT_CONFIG_VALUE_0"].startswith("Authorization: Basic ")
+    assert push_env["GIT_CONFIG_VALUE_0"] != "Authorization: Basic "
     assert "secret-token" not in push_env["GIT_CONFIG_VALUE_0"]
     assert commands[-1] == [
         "git",
@@ -1327,7 +1329,7 @@ def test_docker_workspace_provider_requires_git_remote_host_allowlist_before_pus
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     with pytest.raises(
-        ValueError, match="remote_publication.allowed_git_hosts must be configured"
+        ValueError, match=r"remote_publication\.allowed_git_hosts must be configured"
     ):
         _ = publish_workspace_branch_from_config(
             _docker_config({"workspace_root": str(workspace_root)}),
