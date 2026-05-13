@@ -3744,16 +3744,27 @@ class TestRemoteResultPublicationContract:
             def json(self) -> dict[str, object]:
                 return {"html_url": "https://github.com/org/repo/pull/12"}
 
-        def fake_post(
-            url: str,
-            *,
-            headers: dict[str, str],
-            json: dict[str, object],
-            timeout: float,
-        ) -> FakeGitHubResponse:
-            assert timeout == 30.0
-            github_calls.append((url, headers, json))
-            return FakeGitHubResponse()
+        class FakeAsyncClient:
+            def __init__(self, *, timeout: float) -> None:
+                assert timeout == 30.0
+
+            async def __aenter__(self) -> FakeAsyncClient:
+                return self
+
+            async def __aexit__(
+                self, exc_type: object, exc: object, tb: object
+            ) -> None:
+                return None
+
+            async def post(
+                self,
+                url: str,
+                *,
+                headers: dict[str, str],
+                json: dict[str, object],
+            ) -> FakeGitHubResponse:
+                github_calls.append((url, headers, json))
+                return FakeGitHubResponse()
 
         monkeypatch.setattr(
             "coding_agent.ui.http_server.publish_workspace_branch_from_config",
@@ -3780,7 +3791,7 @@ class TestRemoteResultPublicationContract:
         monkeypatch.setattr(
             http_server,
             "httpx",
-            SimpleNamespace(post=fake_post),
+            SimpleNamespace(AsyncClient=FakeAsyncClient),
             raising=False,
         )
 
@@ -3933,15 +3944,27 @@ class TestRemoteResultPublicationContract:
             def raise_for_status(self) -> None:
                 raise RuntimeError("github unavailable")
 
-        def fake_post(
-            url: str,
-            *,
-            headers: dict[str, str],
-            json: dict[str, object],
-            timeout: float,
-        ) -> FakeGitHubResponse:
-            del url, headers, json, timeout
-            return FakeGitHubResponse()
+        class FakeAsyncClient:
+            def __init__(self, *, timeout: float) -> None:
+                assert timeout == 30.0
+
+            async def __aenter__(self) -> FakeAsyncClient:
+                return self
+
+            async def __aexit__(
+                self, exc_type: object, exc: object, tb: object
+            ) -> None:
+                return None
+
+            async def post(
+                self,
+                url: str,
+                *,
+                headers: dict[str, str],
+                json: dict[str, object],
+            ) -> FakeGitHubResponse:
+                del url, headers, json
+                return FakeGitHubResponse()
 
         monkeypatch.setattr(
             "coding_agent.ui.http_server.publish_workspace_branch_from_config",
@@ -3968,7 +3991,7 @@ class TestRemoteResultPublicationContract:
         monkeypatch.setattr(
             http_server,
             "httpx",
-            SimpleNamespace(post=fake_post),
+            SimpleNamespace(AsyncClient=FakeAsyncClient),
             raising=False,
         )
 
@@ -3989,6 +4012,11 @@ class TestRemoteResultPublicationContract:
             "pr_url": None,
             "error": "GitHub PR publication failed: github unavailable",
         }
+
+    def test_github_repo_from_remote_url_accepts_scp_style_remote(self) -> None:
+        assert http_server._github_repo_from_remote_url(
+            "git@github.com:org/repo.git"
+        ) == ("org", "repo")
 
     async def test_publish_branch_requires_publication_config(
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch

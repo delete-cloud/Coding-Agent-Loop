@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import socket
 import uuid
 from contextlib import asynccontextmanager
@@ -111,6 +112,7 @@ SESSION_IDLE_TIMEOUT_MINUTES = 30
 _SERVER_CONFIG_ENV = "CODING_AGENT_SERVER_CONFIG"
 _GITHUB_API_BASE_URL = "https://api.github.com"
 _GITHUB_API_VERSION = "2022-11-28"
+_GITHUB_SCP_REMOTE_RE = re.compile(r"^git@github\.com:(?P<path>[^:]+)$")
 
 
 class GitHubPrUnsupportedError(ValueError):
@@ -1874,7 +1876,7 @@ async def publish_session_result(
         raise
 
     if body.mode == "pr":
-        return _publish_session_pr_response(
+        return await _publish_session_pr_response(
             session_id,
             publication,
             publication_config,
@@ -1893,13 +1895,13 @@ async def publish_session_result(
     )
 
 
-def _publish_session_pr_response(
+async def _publish_session_pr_response(
     session_id: str,
     publication: WorkspaceBranchPublication,
     publication_config: dict[str, Any],
 ) -> PublishSessionResponse:
     try:
-        pr_url = _create_github_pull_request(
+        pr_url = await _create_github_pull_request(
             session_id,
             publication,
             publication_config,
@@ -1941,7 +1943,7 @@ def _publish_session_pr_response(
     )
 
 
-def _create_github_pull_request(
+async def _create_github_pull_request(
     session_id: str,
     publication: WorkspaceBranchPublication,
     publication_config: dict[str, Any],
@@ -1973,25 +1975,25 @@ def _create_github_pull_request(
         )
     owner, repo = _github_repo_from_remote_url(publication.remote_url)
     try:
-        response = httpx.post(
-            f"{_GITHUB_API_BASE_URL}/repos/{owner}/{repo}/pulls",
-            headers={
-                "Accept": "application/vnd.github+json",
-                "Authorization": f"Bearer {token.strip()}",
-                "X-GitHub-Api-Version": _GITHUB_API_VERSION,
-            },
-            json={
-                "title": f"Coding agent remote session {session_id}",
-                "head": publication.branch_name,
-                "base": base_branch.strip(),
-                "body": (
-                    f"Remote coding-agent session `{session_id}` published commit "
-                    f"`{publication.commit_sha}`."
-                ),
-            },
-            timeout=30.0,
-        )
-        response.raise_for_status()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{_GITHUB_API_BASE_URL}/repos/{owner}/{repo}/pulls",
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "Authorization": f"Bearer {token.strip()}",
+                    "X-GitHub-Api-Version": _GITHUB_API_VERSION,
+                },
+                json={
+                    "title": f"Coding agent remote session {session_id}",
+                    "head": publication.branch_name,
+                    "base": base_branch.strip(),
+                    "body": (
+                        f"Remote coding-agent session `{session_id}` published "
+                        f"commit `{publication.commit_sha}`."
+                    ),
+                },
+            )
+            response.raise_for_status()
     except Exception as exc:
         raise GitHubPrPublicationError(f"GitHub PR publication failed: {exc}") from exc
     payload = cast(object, response.json())
@@ -2008,13 +2010,21 @@ def _create_github_pull_request(
 
 
 def _github_repo_from_remote_url(remote_url: str) -> tuple[str, str]:
+    scp_match = _GITHUB_SCP_REMOTE_RE.fullmatch(remote_url.strip())
+    if scp_match is not None:
+        return _github_owner_repo_from_path(scp_match.group("path"))
+
     parsed = urlsplit(remote_url)
     if parsed.hostname != "github.com":
         raise GitHubPrUnsupportedError(
             "GitHub PR publication requires a github.com remote; branch was "
             "published and can be opened manually"
         )
-    path = parsed.path.strip("/")
+    return _github_owner_repo_from_path(parsed.path)
+
+
+def _github_owner_repo_from_path(path: str) -> tuple[str, str]:
+    path = path.strip("/")
     if path.endswith(".git"):
         path = path[:-4]
     parts = path.split("/")
