@@ -25,7 +25,11 @@ from .workspace_provider import (
     CloudWorkspaceSource,
     WorkspaceProvider,
     WorkspaceArchiveManifest,
+    WorkspaceDiff,
+    WorkspaceDiffFile,
+    WorkspaceDiffStatus,
     WorkspaceInventoryEntry,
+    WorkspacePatch,
     WorkspaceStatus,
     register_workspace_provider,
 )
@@ -627,6 +631,44 @@ class DockerWorkspaceProvider(WorkspaceProvider):
             workspace_root=workspace_root,
         )
 
+    @override
+    def workspace_diff(
+        self,
+        config: dict[str, object],
+        workspace_id: str,
+    ) -> WorkspaceDiff:
+        provider_config = _docker_workspace_provider_config(config)
+        workspace_root = _git_workspace_root_for_operation(
+            provider_config,
+            workspace_id,
+            "diff",
+        )
+        return _git_workspace_diff(provider_config, workspace_id, workspace_root)
+
+    @override
+    def workspace_patch(
+        self,
+        config: dict[str, object],
+        workspace_id: str,
+    ) -> WorkspacePatch:
+        provider_config = _docker_workspace_provider_config(config)
+        workspace_root = _git_workspace_root_for_operation(
+            provider_config,
+            workspace_id,
+            "patch",
+        )
+        patch = _run_git_workspace_command(
+            provider_config,
+            workspace_root,
+            ["diff", "--binary", "HEAD", "--"],
+            "git diff",
+        )
+        return WorkspacePatch(
+            workspace_id=workspace_id,
+            format="unified_diff",
+            patch=patch,
+        )
+
 
 def _docker_workspace_provider_config(
     config: dict[str, object],
@@ -1024,6 +1066,150 @@ def _docker_workspace_archive_manifest(
         excluded_files=excluded_files,
         archive_sha256=hashlib.sha256(archive_bytes).hexdigest(),
     )
+
+
+def _git_workspace_root_for_operation(
+    provider_config: _DockerWorkspaceProviderConfig,
+    workspace_id: str,
+    operation: str,
+) -> Path:
+    _validate_workspace_id(workspace_id)
+    if not _is_provider_workspace_id(workspace_id):
+        raise KeyError(f"workspace not found: {workspace_id}")
+    workspace_root = _workspace_root_for_id(
+        provider_config.workspace_root,
+        workspace_id,
+    )
+    if not workspace_root.is_dir():
+        raise KeyError(f"workspace not found: {workspace_id}")
+    if not (workspace_root / ".git").exists():
+        raise ValueError(f"workspace {operation} requires a Git workspace")
+    return workspace_root
+
+
+def _git_workspace_diff(
+    provider_config: _DockerWorkspaceProviderConfig,
+    workspace_id: str,
+    workspace_root: Path,
+) -> WorkspaceDiff:
+    name_status_output = _run_git_workspace_command(
+        provider_config,
+        workspace_root,
+        ["diff", "--name-status", "--find-renames", "-z", "HEAD", "--"],
+        "git diff --name-status",
+    )
+    numstat_output = _run_git_workspace_command(
+        provider_config,
+        workspace_root,
+        ["diff", "--numstat", "HEAD", "--"],
+        "git diff --numstat",
+    )
+    numstat = _parse_git_numstat(numstat_output)
+    files = _parse_git_name_status(name_status_output, numstat)
+    additions = sum(item[0] for item in numstat.values() if item[0] is not None)
+    deletions = sum(item[1] for item in numstat.values() if item[1] is not None)
+    return WorkspaceDiff(
+        workspace_id=workspace_id,
+        files=files,
+        additions=additions,
+        deletions=deletions,
+    )
+
+
+def _run_git_workspace_command(
+    provider_config: _DockerWorkspaceProviderConfig,
+    workspace_root: Path,
+    args: list[str],
+    operation: str,
+) -> str:
+    command = [
+        provider_config.git_binary,
+        "-C",
+        str(workspace_root),
+        *args,
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=_GIT_OPERATION_TIMEOUT_SECONDS,
+            stdin=subprocess.DEVNULL,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        _add_git_failure_output_notes(exc, operation, exc.stdout, exc.stderr)
+        raise
+    return result.stdout
+
+
+def _parse_git_name_status(
+    output: str,
+    numstat: dict[str, tuple[int | None, int | None, bool]],
+) -> list[WorkspaceDiffFile]:
+    tokens = [token for token in output.split("\0") if token]
+    files: list[WorkspaceDiffFile] = []
+    index = 0
+    while index < len(tokens):
+        status_and_path = tokens[index]
+        index += 1
+        status_parts = status_and_path.split("\t", 1)
+        if len(status_parts) != 2:
+            raise ValueError("git diff name-status output is malformed")
+        status_token, first_path = status_parts
+        status_code = status_token[:1]
+        old_path: str | None = None
+        if status_code in {"R", "C"}:
+            if index >= len(tokens):
+                raise ValueError("git diff name-status output is malformed")
+            old_path = first_path
+            path = tokens[index]
+            index += 1
+            status: WorkspaceDiffStatus = "renamed"
+        else:
+            path = first_path
+            status = _workspace_diff_status_from_git_status(status_code)
+
+        additions, deletions, binary = numstat.get(path, (None, None, False))
+        files.append(
+            WorkspaceDiffFile(
+                path=path,
+                status=status,
+                old_path=old_path,
+                additions=additions,
+                deletions=deletions,
+                binary=binary,
+            )
+        )
+    return files
+
+
+def _workspace_diff_status_from_git_status(status_code: str) -> WorkspaceDiffStatus:
+    if status_code == "A":
+        return "added"
+    if status_code == "M":
+        return "modified"
+    if status_code == "D":
+        return "deleted"
+    return "unknown"
+
+
+def _parse_git_numstat(output: str) -> dict[str, tuple[int | None, int | None, bool]]:
+    result: dict[str, tuple[int | None, int | None, bool]] = {}
+    for line in output.splitlines():
+        if not line:
+            continue
+        parts = line.split("\t", 2)
+        if len(parts) != 3:
+            raise ValueError("git diff numstat output is malformed")
+        raw_additions, raw_deletions, path = parts
+        if raw_additions == "-" or raw_deletions == "-":
+            result[path] = (None, None, True)
+            continue
+        result[path] = (int(raw_additions), int(raw_deletions), False)
+    return result
 
 
 def _active_workspace_ids_from_config(config: dict[str, object]) -> set[str]:

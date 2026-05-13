@@ -18,6 +18,9 @@ CloudWorkspaceSource: TypeAlias = Mapping[str, object]
 WorkspaceStatus: TypeAlias = Literal[
     "active", "stale", "cleaning", "cleaned", "cleanup_failed"
 ]
+WorkspaceDiffStatus: TypeAlias = Literal[
+    "added", "modified", "deleted", "renamed", "binary", "unknown"
+]
 
 
 @dataclass(frozen=True)
@@ -39,6 +42,31 @@ class WorkspaceArchiveManifest:
     deleted_files: list[str]
     excluded_files: list[str]
     archive_sha256: str | None
+
+
+@dataclass(frozen=True)
+class WorkspaceDiffFile:
+    path: str
+    status: WorkspaceDiffStatus
+    old_path: str | None = None
+    additions: int | None = None
+    deletions: int | None = None
+    binary: bool = False
+
+
+@dataclass(frozen=True)
+class WorkspaceDiff:
+    workspace_id: str
+    files: list[WorkspaceDiffFile]
+    additions: int
+    deletions: int
+
+
+@dataclass(frozen=True)
+class WorkspacePatch:
+    workspace_id: str
+    format: Literal["unified_diff"]
+    patch: str
 
 
 class WorkspaceProvider(Protocol):
@@ -114,6 +142,18 @@ class WorkspaceProvider(Protocol):
         *,
         session_id: str | None = None,
     ) -> WorkspaceArchiveManifest: ...
+
+    def workspace_diff(
+        self,
+        config: dict[str, object],
+        workspace_id: str,
+    ) -> WorkspaceDiff: ...
+
+    def workspace_patch(
+        self,
+        config: dict[str, object],
+        workspace_id: str,
+    ) -> WorkspacePatch: ...
 
 
 _WORKSPACE_PROVIDERS: dict[str, WorkspaceProvider] = {}
@@ -236,6 +276,22 @@ def workspace_archive_manifest_from_config(
         workspace_id,
         session_id=session_id,
     )
+
+
+def workspace_diff_from_config(
+    config: dict[str, object],
+    workspace_id: str,
+) -> WorkspaceDiff:
+    provider = _provider_from_config(config)
+    return provider.workspace_diff(config, workspace_id)
+
+
+def workspace_patch_from_config(
+    config: dict[str, object],
+    workspace_id: str,
+) -> WorkspacePatch:
+    provider = _provider_from_config(config)
+    return provider.workspace_patch(config, workspace_id)
 
 
 def _provider_from_config(config: dict[str, object]) -> WorkspaceProvider:
