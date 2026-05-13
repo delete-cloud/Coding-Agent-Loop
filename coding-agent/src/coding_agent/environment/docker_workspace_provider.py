@@ -51,6 +51,7 @@ _DOCKER_TIMEOUT_SENTINEL_PREFIX = "__CODING_AGENT_DOCKER_TIMEOUT__:"
 _DOCKER_CONTAINER_REMOVAL_WAIT_SECONDS = 5.0
 _DOCKER_CONTAINER_REMOVAL_POLL_INTERVAL_SECONDS = 0.1
 _GIT_OPERATION_TIMEOUT_SECONDS = 300
+_GIT_SHA_RE = re.compile(r"^[0-9a-fA-F]{4,64}$")
 _DEFAULT_DOCKER_IMAGE = "python:3.11-slim"
 _DEFAULT_DOCKER_CPUS = "1"
 _DEFAULT_DOCKER_MEMORY = "512m"
@@ -1089,6 +1090,11 @@ def _clone_git_workspace_source(
         raise ValueError("workspace_source.base_ref is required for kind=git")
     if not isinstance(base_sha, str) or not base_sha.strip():
         raise ValueError("workspace_source.base_sha is required for kind=git")
+    remote_url = remote_url.strip()
+    base_ref = base_ref.strip()
+    base_sha = base_sha.strip()
+    if _GIT_SHA_RE.fullmatch(base_sha) is None:
+        raise ValueError("workspace_source.base_sha must be a hex git commit SHA")
 
     clone_command = [
         provider_config.git_binary,
@@ -1096,18 +1102,25 @@ def _clone_git_workspace_source(
         "--no-checkout",
         "--branch",
         base_ref,
+        "--",
         remote_url,
         str(workspace_root),
     ]
-    _ = subprocess.run(
-        clone_command,
-        shell=False,
-        capture_output=True,
-        text=True,
-        timeout=_GIT_OPERATION_TIMEOUT_SECONDS,
-        env=None,
-        check=True,
-    )
+    git_env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    try:
+        _ = subprocess.run(
+            clone_command,
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=_GIT_OPERATION_TIMEOUT_SECONDS,
+            stdin=subprocess.DEVNULL,
+            env=git_env,
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        _add_git_failure_output_notes(exc, "git clone", exc.stdout, exc.stderr)
+        raise
     checkout_command = [
         provider_config.git_binary,
         "-C",
@@ -1116,15 +1129,34 @@ def _clone_git_workspace_source(
         "--detach",
         base_sha,
     ]
-    _ = subprocess.run(
-        checkout_command,
-        shell=False,
-        capture_output=True,
-        text=True,
-        timeout=_GIT_OPERATION_TIMEOUT_SECONDS,
-        env=None,
-        check=True,
-    )
+    try:
+        _ = subprocess.run(
+            checkout_command,
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=_GIT_OPERATION_TIMEOUT_SECONDS,
+            stdin=subprocess.DEVNULL,
+            env=git_env,
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        _add_git_failure_output_notes(exc, "git checkout", exc.stdout, exc.stderr)
+        raise
+
+
+def _add_git_failure_output_notes(
+    exc: BaseException,
+    operation: str,
+    stdout: object,
+    stderr: object,
+) -> None:
+    stdout_text = _redact_setup_output(stdout, {})
+    stderr_text = _redact_setup_output(stderr, {})
+    if stdout_text:
+        exc.add_note(f"{operation} stdout:\n{stdout_text}")
+    if stderr_text:
+        exc.add_note(f"{operation} stderr:\n{stderr_text}")
 
 
 def _run_docker_setup_phase_if_configured(
