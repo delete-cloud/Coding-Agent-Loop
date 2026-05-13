@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from httpx import AsyncClient, ASGITransport
@@ -3648,9 +3648,10 @@ class TestRemoteResultPublicationContract:
                 remote_url="https://github.com/org/repo.git",
             )
 
+        mock_publish = MagicMock(side_effect=fake_publish)
         monkeypatch.setattr(
             "coding_agent.ui.http_server.publish_workspace_branch_from_config",
-            fake_publish,
+            mock_publish,
         )
         monkeypatch.setattr(
             "coding_agent.ui.http_server._load_cloud_workspace_config",
@@ -3671,6 +3672,17 @@ class TestRemoteResultPublicationContract:
         )
 
         assert response.status_code == 200
+        mock_publish.assert_called_once_with(
+            {"provider": "docker"},
+            {
+                "enabled": True,
+                "git_author_name": "coding-agent",
+                "git_author_email": "coding-agent@example.com",
+            },
+            "ws-publish",
+            "coding-agent/result",
+            f"Apply coding-agent remote session {session_id} changes",
+        )
         assert response.json() == {
             "session_id": session_id,
             "mode": "branch",
@@ -3730,6 +3742,29 @@ class TestRemoteResultPublicationContract:
 
         assert response.status_code == 400
         assert response.json()["detail"] == "remote_publication.enabled must be true"
+
+    async def test_publish_hides_other_user_session(
+        self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(
+            "CODING_AGENT_SERVER_CONFIG", str(_write_auth_config(tmp_path))
+        )
+        monkeypatch.setattr(settings, "http_api_key", None)
+
+        created = await client.post(
+            "/sessions",
+            headers={"Authorization": "Bearer admin-token"},
+            json={},
+        )
+        session_id = created.json()["session_id"]
+
+        response = await client.post(
+            f"/sessions/{session_id}/publish",
+            headers={"Authorization": "Bearer user-token-a"},
+            json={"mode": "branch", "branch_name": "test"},
+        )
+
+        assert response.status_code == 404
 
     async def test_remote_result_publication_operations_return_404_for_missing_session(
         self, client: AsyncClient

@@ -154,6 +154,7 @@ Run the service on loopback and place TLS/authenticated ingress in front of it:
 User=coding-agent
 Group=coding-agent
 Environment=CODING_AGENT_BEARER_TOKEN=replace-with-secret
+Environment=CODING_AGENT_GIT_TOKEN=replace-with-secret
 ExecStart=/usr/local/bin/coding-agent serve --config /etc/coding-agent/config.toml
 Restart=on-failure
 ```

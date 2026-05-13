@@ -1218,8 +1218,7 @@ def _publish_git_workspace_branch(
         ["config", "--get", "remote.origin.url"],
         "git config remote.origin.url",
     ).strip()
-    if not remote_url:
-        raise ValueError("Git workspace has no remote.origin.url")
+    _validate_publication_remote_url(publication_config, remote_url)
     pushed_ref = f"refs/heads/{branch_name}"
     push_env = _git_publication_push_env(publication_config)
     _run_git_publish_command(
@@ -1298,6 +1297,27 @@ def _redact_git_remote_url(remote_url: str) -> str:
             parsed.fragment,
         )
     )
+
+
+def _validate_publication_remote_url(
+    publication_config: dict[str, object],
+    remote_url: str,
+) -> None:
+    if not remote_url:
+        raise ValueError("Git workspace has no remote.origin.url")
+    parsed = urlsplit(remote_url)
+    if parsed.scheme not in {"https", "git+https"}:
+        raise ValueError("Git workspace remote.origin.url must use https")
+    if parsed.hostname is None:
+        raise ValueError("Git workspace remote.origin.url must include a host")
+    allowed_hosts = _string_list(
+        publication_config.get("allowed_git_hosts"),
+        key="remote_publication.allowed_git_hosts",
+    )
+    if allowed_hosts and parsed.hostname not in allowed_hosts:
+        raise ValueError(
+            "Git workspace remote.origin.url host is not in remote_publication.allowed_git_hosts"
+        )
 
 
 def _required_publication_string(
