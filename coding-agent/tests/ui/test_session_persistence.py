@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from dataclasses import replace
+from datetime import UTC, datetime
 from typing import Callable, cast
 from unittest.mock import MagicMock, call
 from unittest.mock import patch
@@ -14,8 +15,13 @@ from coding_agent.ui.session_manager import Session, SessionManager
 from coding_agent.ui.session_store import (
     InMemorySessionStore,
     PGSessionMetadataStore,
+    RedisClient,
     RedisSessionStore,
     create_session_store,
+)
+from coding_agent.ui.workspace_store import (
+    PGWorkspaceMetadataStore,
+    WorkspaceRecord,
 )
 
 
@@ -273,7 +279,9 @@ def test_redis_session_store_accepts_client_without_scard_method() -> None:
             return set(self._index)
 
     client = FakeRedisClient()
-    store = RedisSessionStore(client=cast(object, client), redis_url="redis://test")
+    store = RedisSessionStore(
+        client=cast(RedisClient, client), redis_url="redis://test"
+    )
 
     store.save("session-a", {"id": "session-a"})
     store.save("session-b", {"id": "session-b"})
@@ -379,6 +387,157 @@ def test_pg_session_metadata_store_round_trips_session_metadata() -> None:
         assert isinstance(insert_calls[0][1], dict)
     finally:
         store.close()
+
+
+@pytest.mark.asyncio
+async def test_pg_workspace_store_round_trips_remote_workspace_record() -> None:
+    class FakeRecord:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self._payload = payload
+
+        def __iter__(self):
+            return iter(self._payload.items())
+
+    class FakeAsyncPGPool:
+        def __init__(self) -> None:
+            self.workspaces: dict[str, dict[str, object]] = {}
+            self.executed: list[tuple[str, tuple[object, ...]]] = []
+
+        async def execute(self, query: str, *args: object) -> str:
+            self.executed.append((query, args))
+            if "CREATE TABLE IF NOT EXISTS agent_remote_workspaces" in query:
+                return "CREATE TABLE"
+            if "INSERT INTO agent_remote_workspaces" in query:
+                workspace_record_id = args[0]
+                assert isinstance(workspace_record_id, str)
+                self.workspaces[workspace_record_id] = {
+                    "workspace_record_id": workspace_record_id,
+                    "workspace_id": args[1],
+                    "session_id": args[2],
+                    "provider": args[3],
+                    "provider_instance_id": args[4],
+                    "workspace_root_ref": args[5],
+                    "workspace_host_label": args[6],
+                    "owner_label": args[7],
+                    "source_kind": args[8],
+                    "source_ref": args[9],
+                    "status": args[10],
+                    "retention_policy": args[11],
+                    "last_used_at": args[12],
+                    "expires_at": args[13],
+                    "cleanup_error": args[14],
+                    "result_refs": args[15],
+                    "resource_refs": args[16],
+                    "created_at": datetime(2026, 5, 14, tzinfo=UTC),
+                    "updated_at": datetime(2026, 5, 14, tzinfo=UTC),
+                }
+                return "INSERT 0 1"
+            if "UPDATE agent_remote_workspaces" in query:
+                status, cleanup_error, workspace_record_id = args
+                assert isinstance(workspace_record_id, str)
+                if workspace_record_id not in self.workspaces:
+                    return "UPDATE 0"
+                self.workspaces[workspace_record_id]["status"] = status
+                self.workspaces[workspace_record_id]["cleanup_error"] = cleanup_error
+                return "UPDATE 1"
+            raise AssertionError(f"unexpected execute query: {query}")
+
+        async def fetchrow(self, query: str, *args: object) -> object | None:
+            self.executed.append((query, args))
+            if "SELECT * FROM agent_remote_workspaces" in query:
+                (workspace_record_id,) = args
+                assert isinstance(workspace_record_id, str)
+                row = self.workspaces.get(workspace_record_id)
+                return None if row is None else FakeRecord(row)
+            raise AssertionError(f"unexpected fetchrow query: {query}")
+
+        async def fetch(self, query: str, *args: object) -> list[object]:
+            self.executed.append((query, args))
+            if "SELECT * FROM agent_remote_workspaces" in query:
+                return [
+                    FakeRecord(row)
+                    for row in sorted(
+                        self.workspaces.values(),
+                        key=lambda item: str(item["workspace_record_id"]),
+                    )
+                ]
+            raise AssertionError(f"unexpected fetch query: {query}")
+
+    class FakePGPool:
+        def __init__(self) -> None:
+            self.pool = FakeAsyncPGPool()
+
+        async def get_pool(self) -> FakeAsyncPGPool:
+            return self.pool
+
+        async def close(self) -> None:
+            raise AssertionError("store must not close injected pool")
+
+    pg_pool = FakePGPool()
+    store = PGWorkspaceMetadataStore(pool=pg_pool)
+    record = WorkspaceRecord(
+        workspace_record_id="wr-1",
+        workspace_id="ws-1",
+        session_id="session-1",
+        provider="docker",
+        provider_instance_id="docker-host-a",
+        workspace_root_ref="/var/lib/coding-agent/workspaces",
+        workspace_host_label="docker-host-a.internal",
+        owner_label="owner:abc",
+        source_kind="git",
+        source_ref={"remote_url": "https://github.com/org/repo.git"},
+        status="active",
+        retention_policy="ttl",
+        last_used_at=datetime(2026, 5, 14, tzinfo=UTC),
+        expires_at=datetime(2026, 5, 15, tzinfo=UTC),
+        result_refs={"branch": "coding-agent/session-1"},
+        resource_refs={"agent_container_id": "container-1"},
+    )
+
+    await store.save(record)
+    loaded = await store.load("wr-1")
+    listed = await store.list()
+    await store.update_status(
+        "wr-1",
+        status="cleanup_failed",
+        cleanup_error="docker unavailable",
+    )
+    failed = await store.load("wr-1")
+
+    expected_record = replace(
+        record,
+        created_at=datetime(2026, 5, 14, tzinfo=UTC),
+        updated_at=datetime(2026, 5, 14, tzinfo=UTC),
+    )
+    assert loaded == expected_record
+    assert listed == [expected_record]
+    assert failed is not None
+    assert failed.status == "cleanup_failed"
+    assert failed.cleanup_error == "docker unavailable"
+    assert any(
+        "CREATE TABLE IF NOT EXISTS agent_remote_workspaces" in query
+        for query, _args in pg_pool.pool.executed
+    )
+
+
+@pytest.mark.asyncio
+async def test_pg_workspace_store_update_status_rejects_missing_workspace() -> None:
+    class FakeAsyncPGPool:
+        async def execute(self, query: str, *args: object) -> str:
+            if "CREATE TABLE IF NOT EXISTS agent_remote_workspaces" in query:
+                return "CREATE TABLE"
+            if "UPDATE agent_remote_workspaces" in query:
+                return "UPDATE 0"
+            raise AssertionError(f"unexpected execute query: {query}")
+
+    class FakePGPool:
+        async def get_pool(self) -> FakeAsyncPGPool:
+            return FakeAsyncPGPool()
+
+    store = PGWorkspaceMetadataStore(pool=FakePGPool())
+
+    with pytest.raises(KeyError, match="missing-workspace"):
+        await store.update_status("missing-workspace", status="cleaned")
 
 
 def test_pg_session_metadata_store_count_sessions_uses_count_query() -> None:
