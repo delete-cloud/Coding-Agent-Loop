@@ -3695,6 +3695,54 @@ class TestRemoteResultPublicationContract:
         assert diff.status_code == 404
         assert patch.status_code == 404
 
+
+class TestRemoteWorkspaceRetentionContract:
+    async def test_workspace_retain_fails_fast_until_durable_store_exists(
+        self, client: AsyncClient
+    ) -> None:
+        response = await client.post(
+            "/workspaces/ws-retain/retain",
+            json={"retention_policy": "ttl", "ttl_seconds": 3600},
+        )
+
+        assert response.status_code == 501
+        assert response.json() == {
+            "detail": "Durable remote workspace retention is not implemented yet."
+        }
+
+    async def test_workspace_pin_fails_fast_until_durable_store_exists(
+        self, client: AsyncClient
+    ) -> None:
+        response = await client.post("/workspaces/ws-retain/pin")
+
+        assert response.status_code == 501
+        assert response.json() == {
+            "detail": "Durable remote workspace retention is not implemented yet."
+        }
+
+    async def test_workspace_unpin_uses_explicit_contract_shape(
+        self, client: AsyncClient
+    ) -> None:
+        response = await client.post(
+            "/workspaces/ws-retain/unpin",
+            json={"retention_policy": "delete_on_close"},
+        )
+
+        assert response.status_code == 501
+        assert response.json() == {
+            "detail": "Durable remote workspace retention is not implemented yet."
+        }
+
+    async def test_workspace_retention_rejects_invalid_policy_before_stub(
+        self, client: AsyncClient
+    ) -> None:
+        response = await client.post(
+            "/workspaces/ws-retain/retain",
+            json={"retention_policy": "forever"},
+        )
+
+        assert response.status_code == 422
+
     async def test_workspace_diff_returns_provider_result(
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:

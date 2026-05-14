@@ -232,6 +232,26 @@ class WorkspaceSummarySchema(BaseModel):
     updated_at: datetime
 
 
+WorkspaceRetentionPolicy = Literal["delete_on_close", "ttl", "pinned", "manual"]
+
+
+class WorkspaceRetentionRequest(BaseModel):
+    retention_policy: WorkspaceRetentionPolicy
+    ttl_seconds: int | None = Field(None, gt=0)
+
+
+class WorkspaceUnpinRequest(BaseModel):
+    retention_policy: Literal["delete_on_close", "ttl"] | None = None
+    ttl_seconds: int | None = Field(None, gt=0)
+
+
+class WorkspaceRetentionResponse(BaseModel):
+    workspace_id: str
+    retention_policy: WorkspaceRetentionPolicy
+    ttl_seconds: int | None = None
+    status: Literal["retained", "unsupported"]
+
+
 class WorkspaceListResponse(BaseModel):
     workspaces: list[WorkspaceSummarySchema]
 
