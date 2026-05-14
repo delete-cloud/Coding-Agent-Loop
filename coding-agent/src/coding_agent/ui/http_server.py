@@ -168,6 +168,10 @@ def _load_cloud_workspace_config() -> dict[str, Any]:
     if runtime_profiles:
         cloud_workspace_config = dict(cloud_workspace_config)
         cloud_workspace_config["runtime_profiles"] = runtime_profiles
+    remote_sources = _load_remote_sources_config()
+    if remote_sources:
+        cloud_workspace_config = dict(cloud_workspace_config)
+        cloud_workspace_config["remote_sources"] = remote_sources
     remote_phases = _load_remote_phases_config()
     if remote_phases:
         cloud_workspace_config = dict(cloud_workspace_config)
@@ -181,6 +185,10 @@ def _load_runtime_profiles_config() -> dict[str, Any]:
 
 def _load_remote_publication_config() -> dict[str, Any]:
     return _load_agent_config_section("remote_publication")
+
+
+def _load_remote_sources_config() -> dict[str, Any]:
+    return _load_agent_config_section("remote_sources")
 
 
 def _load_remote_phases_config() -> dict[str, Any]:

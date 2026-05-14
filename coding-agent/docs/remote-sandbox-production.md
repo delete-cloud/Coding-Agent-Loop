@@ -85,6 +85,9 @@ git_author_email = "coding-agent@example.com"
 allowed_git_hosts = ["github.com"]
 git_token_env = "CODING_AGENT_GIT_TOKEN"
 
+[remote_sources.git]
+allowed_hosts = ["github.com"]
+
 [remote_publication.github]
 enabled = true
 token_env = "CODING_AGENT_GITHUB_TOKEN"
@@ -254,11 +257,13 @@ coding-agent remote publish team --session <session-id> --branch coding-agent/se
 Branch publication requires `[remote_publication]` to be enabled, Git author
 identity to be configured, the workspace `remote.origin.url` host to match
 `allowed_git_hosts`, and server-side Git credentials. The host allowlist is
-checked before token injection or `git push`. When `git_token_env` is set, the
-named environment variable must contain a Git token; the server injects it into
-the `git push` environment without placing the token in command arguments or
-publication responses. If `git_token_env` is omitted, the workspace must rely
-on existing Git credential helper state.
+checked before token injection or `git push`. Git workspace cloning uses
+`[remote_sources.git].allowed_hosts` and rejects disallowed source URLs before
+`git clone`. When `git_token_env` is set, the named environment variable must
+contain a Git token; the server injects it into the `git push` environment
+without placing the token in command arguments or publication responses. If
+`git_token_env` is omitted, the workspace must rely on existing Git credential
+helper state.
 
 GitHub PR publication currently supports `github.com` remotes. It requires
 `remote_publication.github.enabled = true`, a non-empty `token_env`, and

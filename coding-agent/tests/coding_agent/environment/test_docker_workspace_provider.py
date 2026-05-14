@@ -932,6 +932,9 @@ def test_docker_workspace_provider_clones_git_source_before_setup_phase(
                 "workspace_root": str(workspace_root),
                 "docker_binary": "/usr/bin/docker",
                 "git_binary": "/usr/bin/git",
+                "remote_sources": {
+                    "git": {"allowed_hosts": ["github.com"]},
+                },
                 "remote_phases": {
                     "setup": {
                         "enabled": True,
@@ -954,6 +957,90 @@ def test_docker_workspace_provider_clones_git_source_before_setup_phase(
 
     assert binding.workspace_id.startswith("ws-")
     assert events == ["clone", "checkout", "setup", "agent"]
+
+
+def test_docker_workspace_provider_rejects_unallowlisted_git_source_before_clone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_root.mkdir()
+    subprocess_called = False
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal subprocess_called
+        del command, kwargs
+        subprocess_called = True
+        raise AssertionError("git clone should not run")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(
+        ValueError, match=r"host is not in remote_sources\.git\.allowed_hosts"
+    ):
+        _ = provision_cloud_binding_from_config(
+            _docker_config(
+                {
+                    "workspace_root": str(workspace_root),
+                    "docker_binary": "/usr/bin/docker",
+                    "git_binary": "/usr/bin/git",
+                    "remote_sources": {
+                        "git": {"allowed_hosts": ["github.com"]},
+                    },
+                }
+            ),
+            {
+                "kind": "git",
+                "remote_url": "https://internal.example.com/org/repo.git",
+                "base_ref": "main",
+                "base_sha": "abc123",
+            },
+        )
+
+    assert subprocess_called is False
+    assert list(workspace_root.iterdir()) == []
+
+
+def test_docker_workspace_provider_rejects_unsafe_git_source_transport_before_clone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_root.mkdir()
+    subprocess_called = False
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal subprocess_called
+        del command, kwargs
+        subprocess_called = True
+        raise AssertionError("git clone should not run")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(ValueError, match="workspace_source.remote_url must use https"):
+        _ = provision_cloud_binding_from_config(
+            _docker_config(
+                {
+                    "workspace_root": str(workspace_root),
+                    "docker_binary": "/usr/bin/docker",
+                    "git_binary": "/usr/bin/git",
+                    "remote_sources": {
+                        "git": {"allowed_hosts": ["github.com"]},
+                    },
+                }
+            ),
+            {
+                "kind": "git",
+                "remote_url": "file:///private/repo.git",
+                "base_ref": "main",
+                "base_sha": "abc123",
+            },
+        )
+
+    assert subprocess_called is False
+    assert list(workspace_root.iterdir()) == []
 
 
 def test_docker_workspace_provider_rejects_invalid_git_base_sha_before_subprocess(
@@ -982,6 +1069,9 @@ def test_docker_workspace_provider_rejects_invalid_git_base_sha_before_subproces
                     "workspace_root": str(workspace_root),
                     "docker_binary": "/usr/bin/docker",
                     "git_binary": "/usr/bin/git",
+                    "remote_sources": {
+                        "git": {"allowed_hosts": ["github.com"]},
+                    },
                 }
             ),
             {
@@ -1022,6 +1112,9 @@ def test_docker_workspace_provider_adds_git_output_notes_on_clone_failure(
                     "workspace_root": str(workspace_root),
                     "docker_binary": "/usr/bin/docker",
                     "git_binary": "/usr/bin/git",
+                    "remote_sources": {
+                        "git": {"allowed_hosts": ["github.com"]},
+                    },
                 }
             ),
             {
@@ -1050,7 +1143,9 @@ def test_docker_workspace_provider_reports_git_workspace_diff(
     ) -> subprocess.CompletedProcess[str]:
         assert kwargs["stdin"] is subprocess.DEVNULL
         assert command[0:3] == ["git", "-C", str(workspace_dir)]
-        if command[3:6] == ["diff", "--name-status", "--find-renames"]:
+        if command[3:] in (["read-tree", "HEAD"], ["add", "-A"]):
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[3:7] == ["diff", "--cached", "--name-status", "--find-renames"]:
             return subprocess.CompletedProcess(
                 command,
                 0,
@@ -1063,7 +1158,7 @@ def test_docker_workspace_provider_reports_git_workspace_diff(
                 ),
                 stderr="",
             )
-        if command[3:5] == ["diff", "--numstat"]:
+        if command[3:6] == ["diff", "--cached", "--numstat"]:
             return subprocess.CompletedProcess(
                 command,
                 0,
@@ -1119,16 +1214,12 @@ def test_docker_workspace_provider_exports_git_workspace_patch(
         command: list[str], **kwargs: object
     ) -> subprocess.CompletedProcess[str]:
         assert kwargs["stdin"] is subprocess.DEVNULL
-        assert command == [
-            "git",
-            "-C",
-            str(workspace_dir),
-            "diff",
-            "--binary",
-            "HEAD",
-            "--",
-        ]
-        return subprocess.CompletedProcess(command, 0, stdout=patch_text, stderr="")
+        assert command[0:3] == ["git", "-C", str(workspace_dir)]
+        if command[3:] in (["read-tree", "HEAD"], ["add", "-A"]):
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[3:] == ["diff", "--cached", "--binary", "HEAD", "--"]:
+            return subprocess.CompletedProcess(command, 0, stdout=patch_text, stderr="")
+        raise AssertionError(f"unexpected command: {command}")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
@@ -1140,6 +1231,47 @@ def test_docker_workspace_provider_exports_git_workspace_patch(
     assert patch.workspace_id == "ws-123"
     assert patch.format == "unified_diff"
     assert patch.patch == patch_text
+
+
+def test_docker_workspace_provider_diff_and_patch_include_untracked_files(
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_dir = workspace_root / "ws-123"
+    workspace_dir.mkdir(parents=True)
+    subprocess.run(["git", "init"], cwd=workspace_dir, check=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test Agent"],
+        cwd=workspace_dir,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "agent@example.com"],
+        cwd=workspace_dir,
+        check=True,
+    )
+    (workspace_dir / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=workspace_dir, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=workspace_dir, check=True)
+    (workspace_dir / "new.txt").write_text("new file\n", encoding="utf-8")
+
+    config = _docker_config({"workspace_root": str(workspace_root)})
+    diff = workspace_diff_from_config(config, "ws-123")
+    patch = workspace_patch_from_config(config, "ws-123")
+    status = subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=workspace_dir,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert [
+        (file.path, file.status, file.additions, file.deletions) for file in diff.files
+    ] == [("new.txt", "added", 1, 0)]
+    assert "diff --git a/new.txt b/new.txt" in patch.patch
+    assert "+new file" in patch.patch
+    assert status.stdout == "?? new.txt\n"
 
 
 def test_docker_workspace_provider_publishes_git_workspace_branch(
@@ -1184,7 +1316,7 @@ def test_docker_workspace_provider_publishes_git_workspace_branch(
             return subprocess.CompletedProcess(
                 command,
                 0,
-                stdout="https://user:secret@github.com/org/repo.git\n",
+                stdout="https://user:secret@github.com/org/repo.git?token=secret#frag\n",
                 stderr="",
             )
         if args == ["push", "origin", "HEAD:refs/heads/coding-agent/test"]:
@@ -1238,29 +1370,18 @@ def test_docker_workspace_provider_rejects_unsafe_git_remote_before_push(
     workspace_dir = workspace_root / "ws-123"
     (workspace_dir / ".git").mkdir(parents=True)
 
+    commands: list[list[str]] = []
+
     def fake_run(
         command: list[str], **kwargs: object
     ) -> subprocess.CompletedProcess[str]:
         del kwargs
+        commands.append(command)
         args = command[3:]
         if args == ["status", "--porcelain=v1", "-z"]:
             return subprocess.CompletedProcess(command, 0, stdout=" M README.md\0")
         if args == ["check-ref-format", "--branch", "coding-agent/test"]:
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-        if args == ["config", "user.name", "coding-agent"]:
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-        if args == ["config", "user.email", "coding-agent@example.com"]:
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-        if args == ["add", "-A"]:
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-        if args == [
-            "commit",
-            "-m",
-            "Apply coding-agent remote session sess-123 changes",
-        ]:
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-        if args == ["rev-parse", "HEAD"]:
-            return subprocess.CompletedProcess(command, 0, stdout="abc123\n", stderr="")
         if args == ["config", "--get", "remote.origin.url"]:
             return subprocess.CompletedProcess(
                 command,
@@ -1286,6 +1407,10 @@ def test_docker_workspace_provider_rejects_unsafe_git_remote_before_push(
             "Apply coding-agent remote session sess-123 changes",
         )
 
+    mutating_args = [command[3:] for command in commands]
+    assert ["add", "-A"] not in mutating_args
+    assert not any(args[:1] == ["commit"] for args in mutating_args)
+
 
 def test_docker_workspace_provider_requires_git_remote_host_allowlist_before_push(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1294,29 +1419,18 @@ def test_docker_workspace_provider_requires_git_remote_host_allowlist_before_pus
     workspace_dir = workspace_root / "ws-123"
     (workspace_dir / ".git").mkdir(parents=True)
 
+    commands: list[list[str]] = []
+
     def fake_run(
         command: list[str], **kwargs: object
     ) -> subprocess.CompletedProcess[str]:
         del kwargs
+        commands.append(command)
         args = command[3:]
         if args == ["status", "--porcelain=v1", "-z"]:
             return subprocess.CompletedProcess(command, 0, stdout=" M README.md\0")
         if args == ["check-ref-format", "--branch", "coding-agent/test"]:
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-        if args == ["config", "user.name", "coding-agent"]:
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-        if args == ["config", "user.email", "coding-agent@example.com"]:
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-        if args == ["add", "-A"]:
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-        if args == [
-            "commit",
-            "-m",
-            "Apply coding-agent remote session sess-123 changes",
-        ]:
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-        if args == ["rev-parse", "HEAD"]:
-            return subprocess.CompletedProcess(command, 0, stdout="abc123\n", stderr="")
         if args == ["config", "--get", "remote.origin.url"]:
             return subprocess.CompletedProcess(
                 command,
@@ -1342,6 +1456,59 @@ def test_docker_workspace_provider_requires_git_remote_host_allowlist_before_pus
             "coding-agent/test",
             "Apply coding-agent remote session sess-123 changes",
         )
+
+    mutating_args = [command[3:] for command in commands]
+    assert ["add", "-A"] not in mutating_args
+    assert not any(args[:1] == ["commit"] for args in mutating_args)
+
+
+def test_docker_workspace_provider_requires_git_token_before_commit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_dir = workspace_root / "ws-123"
+    (workspace_dir / ".git").mkdir(parents=True)
+    commands: list[list[str]] = []
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        commands.append(command)
+        args = command[3:]
+        if args == ["status", "--porcelain=v1", "-z"]:
+            return subprocess.CompletedProcess(command, 0, stdout=" M README.md\0")
+        if args == ["check-ref-format", "--branch", "coding-agent/test"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if args == ["config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout="https://github.com/org/repo.git\n",
+                stderr="",
+            )
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(ValueError, match="remote_publication.git_token_env is not set"):
+        _ = publish_workspace_branch_from_config(
+            _docker_config({"workspace_root": str(workspace_root)}),
+            {
+                "enabled": True,
+                "git_author_name": "coding-agent",
+                "git_author_email": "coding-agent@example.com",
+                "git_token_env": "MISSING_CODING_AGENT_GIT_TOKEN",
+                "allowed_git_hosts": ["github.com"],
+            },
+            "ws-123",
+            "coding-agent/test",
+            "Apply coding-agent remote session sess-123 changes",
+        )
+
+    mutating_args = [command[3:] for command in commands]
+    assert ["add", "-A"] not in mutating_args
+    assert not any(args[:1] == ["commit"] for args in mutating_args)
 
 
 def test_docker_workspace_provider_rejects_unallowlisted_git_remote_host_before_push(
