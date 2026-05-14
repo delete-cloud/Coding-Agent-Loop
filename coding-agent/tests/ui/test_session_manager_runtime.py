@@ -1772,6 +1772,15 @@ class FakeWorkspaceMetadataStore:
         self.records = records
         self.status_updates: list[tuple[str, WorkspaceStatus, str | None]] = []
 
+    async def list(self) -> list[WorkspaceRecord]:
+        return self.records
+
+    async def load_by_workspace_id(self, workspace_id: str) -> WorkspaceRecord | None:
+        for record in self.records:
+            if record.workspace_id == workspace_id:
+                return record
+        return None
+
     async def load_for_session_workspace(
         self,
         *,
