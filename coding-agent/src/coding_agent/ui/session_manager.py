@@ -114,6 +114,12 @@ class CancelTurnResult:
 
 
 class WorkspaceMetadataStoreProtocol(Protocol):
+    async def list(self) -> list[WorkspaceRecord]: ...
+
+    async def load_by_workspace_id(
+        self, workspace_id: str
+    ) -> WorkspaceRecord | None: ...
+
     async def load_for_session_workspace(
         self,
         *,
@@ -587,6 +593,18 @@ class SessionManager:
         workspace_metadata_store: WorkspaceMetadataStoreProtocol | None,
     ) -> None:
         self._workspace_metadata_store = workspace_metadata_store
+
+    async def list_workspace_records(self) -> list[WorkspaceRecord]:
+        if self._workspace_metadata_store is None:
+            raise RuntimeError("workspace metadata store is not configured")
+        return await self._workspace_metadata_store.list()
+
+    async def load_workspace_record_by_workspace_id(
+        self, workspace_id: str
+    ) -> WorkspaceRecord | None:
+        if self._workspace_metadata_store is None:
+            raise RuntimeError("workspace metadata store is not configured")
+        return await self._workspace_metadata_store.load_by_workspace_id(workspace_id)
 
     def _get_pg_pool(self) -> PGPool:
         if self._pg_pool is not None:
