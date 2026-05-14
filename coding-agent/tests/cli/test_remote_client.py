@@ -1125,6 +1125,64 @@ def test_remote_diff_prints_changed_files(tmp_path: Path, monkeypatch) -> None:
     ]
 
 
+def test_remote_diff_guides_snapshot_workspace_users(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_path = tmp_path / "remotes.json"
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example", "--token", "secret-token"],
+        catch_exceptions=False,
+    )
+
+    class FakeResponse:
+        status_code = 400
+        text = ""
+
+        def raise_for_status(self) -> None:
+            request = httpx.Request(
+                "GET", "http://agent.example/sessions/sess-123/workspace/diff"
+            )
+            raise httpx.HTTPStatusError(
+                "bad status",
+                request=request,
+                response=httpx.Response(
+                    400,
+                    request=request,
+                    json={"detail": "workspace diff requires a Git workspace"},
+                ),
+            )
+
+        def json(self) -> dict[str, object]:
+            return {"detail": "workspace diff requires a Git workspace"}
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def get(self, path: str) -> FakeResponse:
+            assert path == "/sessions/sess-123/workspace/diff"
+            return FakeResponse()
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+
+    result = runner.invoke(main, ["remote", "diff", "dev", "--session", "sess-123"])
+
+    assert result.exit_code != 0
+    assert "workspace diff requires a Git workspace" in result.output
+    assert "snapshot fallback sessions do not support remote diff" in result.output
+    assert "Use 'coding_agent remote result dev --session sess-123'" in result.output
+    assert "Use 'coding_agent remote download dev --session sess-123'" in result.output
+
+
 def test_remote_patch_prints_unified_diff(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "remotes.json"
     monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
@@ -1178,6 +1236,64 @@ def test_remote_patch_prints_unified_diff(tmp_path: Path, monkeypatch) -> None:
             {"Authorization": "Bearer secret-token"},
         )
     ]
+
+
+def test_remote_patch_guides_snapshot_workspace_users(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_path = tmp_path / "remotes.json"
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example", "--token", "secret-token"],
+        catch_exceptions=False,
+    )
+
+    class FakeResponse:
+        status_code = 400
+        text = ""
+
+        def raise_for_status(self) -> None:
+            request = httpx.Request(
+                "GET", "http://agent.example/sessions/sess-123/workspace/patch"
+            )
+            raise httpx.HTTPStatusError(
+                "bad status",
+                request=request,
+                response=httpx.Response(
+                    400,
+                    request=request,
+                    json={"detail": "workspace patch requires a Git workspace"},
+                ),
+            )
+
+        def json(self) -> dict[str, object]:
+            return {"detail": "workspace patch requires a Git workspace"}
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def get(self, path: str) -> FakeResponse:
+            assert path == "/sessions/sess-123/workspace/patch"
+            return FakeResponse()
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+
+    result = runner.invoke(main, ["remote", "patch", "dev", "--session", "sess-123"])
+
+    assert result.exit_code != 0
+    assert "workspace patch requires a Git workspace" in result.output
+    assert "snapshot fallback sessions do not support remote patch" in result.output
+    assert "Use 'coding_agent remote result dev --session sess-123'" in result.output
+    assert "Use 'coding_agent remote download dev --session sess-123'" in result.output
 
 
 def test_remote_result_prints_session_result_summary(

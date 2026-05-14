@@ -8,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 from collections.abc import Mapping
-from typing import Any, cast, get_args
+from typing import Any, NoReturn, cast, get_args
 
 import click
 
@@ -1210,7 +1210,15 @@ def remote_diff(name: str, session_id: str) -> None:
     from coding_agent.remote.client import download_workspace_diff, get_remote
 
     endpoint = get_remote(name)
-    diff = download_workspace_diff(endpoint, session_id)
+    try:
+        diff = download_workspace_diff(endpoint, session_id)
+    except click.ClickException as exc:
+        _raise_snapshot_workspace_result_guidance(
+            exc,
+            remote_name=name,
+            session_id=session_id,
+            command_name="diff",
+        )
     files = diff.get("files")
     if not isinstance(files, list):
         raise click.ClickException("Remote workspace diff response missing files")
@@ -1255,8 +1263,37 @@ def remote_patch(name: str, session_id: str) -> None:
     from coding_agent.remote.client import download_workspace_patch, get_remote
 
     endpoint = get_remote(name)
-    patch = download_workspace_patch(endpoint, session_id)
+    try:
+        patch = download_workspace_patch(endpoint, session_id)
+    except click.ClickException as exc:
+        _raise_snapshot_workspace_result_guidance(
+            exc,
+            remote_name=name,
+            session_id=session_id,
+            command_name="patch",
+        )
     click.echo(patch, nl=False)
+
+
+def _raise_snapshot_workspace_result_guidance(
+    exc: click.ClickException,
+    *,
+    remote_name: str,
+    session_id: str,
+    command_name: str,
+) -> NoReturn:
+    message = exc.format_message()
+    if "requires a Git workspace" not in message:
+        raise exc
+    raise click.ClickException(
+        message
+        + "\n"
+        + f"snapshot fallback sessions do not support remote {command_name}. "
+        + "Use a Git-backed remote run for diff/patch/publish, or inspect this "
+        + "snapshot result with:\n"
+        + f"  Use 'coding_agent remote result {remote_name} --session {session_id}'\n"
+        + f"  Use 'coding_agent remote download {remote_name} --session {session_id}'"
+    ) from exc
 
 
 @remote.command("publish")
