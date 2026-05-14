@@ -54,8 +54,9 @@ The new model has four durable concepts:
    inspection after restart: `workspace_id`, `workspace_record_id`,
    workspace source kind, result refs, publication refs, owner label, and phase
    status.
-2. **Workspace record** — a new provider-neutral record tracks the logical
-   workspace lifecycle independently from session status.
+2. **Workspace record** — a new provider-agnostic schema tracks the logical
+   workspace lifecycle independently from session status. Each record still
+   names its concrete provider, such as `docker`.
 3. **Workspace resource record** — provider-owned resources such as Docker
    agent/setup containers are tracked as child records or structured resource
    metadata so cleanup/GC can operate deterministically.
@@ -70,6 +71,9 @@ opaque until resolved by the matching provider on a compatible workspace host.
 
 Required workspace identity fields:
 
+- `workspace_record_id`, a durable database primary key for the workspace
+  record; session records reference this value to resume the exact workspace
+  record after restart
 - `workspace_id`
 - `provider`, initially `docker`
 - `provider_instance_id`, a stable deployment-local id for the workspace host or
@@ -105,6 +109,14 @@ Workspace status is separate from session status. Use these initial statuses:
 - `cleaned`
 - `cleanup_failed`
 - `lost`
+
+`lost` means a durable workspace record exists but the provider resources cannot
+be found or verified. Examples include missing Docker containers, missing
+workspace directories, inconsistent resource ids, provider API 404s, repeated
+health-check timeouts, or credentials that no longer permit verification. The
+server should mark the workspace `lost`, keep the durable record for operator
+inspection, and require explicit recovery or cleanup rather than silently
+recreating or deleting unrelated resources.
 
 Use these initial retention policies:
 
@@ -166,8 +178,10 @@ Extend the remote operations API from ADR-0021 with retention-aware operations:
 - `POST /workspaces/{workspace_id}/retain` changes retention policy or expiry.
 - `POST /workspaces/{workspace_id}/pin` is a convenience for
   `retention_policy = "pinned"`.
-- `POST /workspaces/{workspace_id}/unpin` restores a bounded policy, usually
-  `ttl` or `delete_on_close`.
+- `POST /workspaces/{workspace_id}/unpin` applies an explicit requested bounded
+  policy when provided; otherwise it falls back to the configured
+  `remote_retention.default_policy`. The implementation does not need a
+  `previous_retention_policy` field in P0.
 - `DELETE /workspaces/{workspace_id}` performs explicit cleanup and marks the
   durable record with the result.
 
@@ -213,6 +227,14 @@ default_ttl_seconds = 86400
 allow_user_pin = false
 ```
 
+`[remote_retention]` is the canonical section name for this ADR. When
+`cloud_workspace.enabled = true` and `remote_retention.enabled = false`, the
+server keeps the legacy provider-local behavior from ADR-0020: session close,
+startup cleanup, periodic GC, quota, and workspace listing rely on the Docker
+provider's filesystem/container discovery rather than durable workspace records.
+That fallback remains acceptable for development and compatibility, but it does
+not provide restart-safe retention or cross-host workspace ownership.
+
 `provider_instance_id` must be stable across restarts of the same workspace
 host. If it changes, existing workspace records become non-local to that server
 until an operator migrates or reconciles them. This is intentional: guessing
@@ -221,7 +243,11 @@ that a path on one host means the same thing on another host is unsafe.
 Development mode may continue using in-memory session metadata and filesystem
 workspace scanning. Production mode must fail fast if durable retention is
 enabled without PostgreSQL session storage or without a configured
-`provider_instance_id`.
+`provider_instance_id`. When `remote_retention.enabled = true`,
+`remote_retention.default_policy` must be one of `delete_on_close`, `ttl`,
+`pinned`, or `manual`; `default_ttl_seconds` must be positive when the default
+policy is `ttl`; and `allow_user_pin` must be explicit so deployments choose
+whether non-admin tokens may create unbounded retention.
 
 ### Relationship to result publication
 
