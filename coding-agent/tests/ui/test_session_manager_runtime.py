@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import types
 from pathlib import Path
 from typing import cast
@@ -657,6 +658,68 @@ async def test_run_agent_rejects_concurrent_turn_for_same_session() -> None:
 
         release.set()
         await first
+
+
+@pytest.mark.asyncio
+async def test_prepare_session_turn_rejects_active_workspace_export() -> None:
+    store = InMemorySessionStore()
+    manager = SessionManager(store=store)
+    session_id = await manager.create_session(
+        execution_binding=CloudWorkspaceBinding(
+            workspace_url="docker://agent-ws-export/workspace",
+            workspace_id="ws-export",
+        )
+    )
+    export_started = asyncio.Event()
+    release_export = threading.Event()
+
+    def blocking_export(binding: CloudWorkspaceBinding) -> str:
+        export_started.set()
+        assert release_export.wait(timeout=10)
+        return binding.workspace_id
+
+    export_task = asyncio.create_task(
+        manager.export_workspace_archive(session_id, blocking_export)
+    )
+    await asyncio.wait_for(export_started.wait(), timeout=1)
+
+    try:
+        with pytest.raises(RuntimeError, match="turn already in progress"):
+            await manager.prepare_session_turn(session_id)
+    finally:
+        release_export.set()
+        await export_task
+
+
+@pytest.mark.asyncio
+async def test_run_agent_rejects_active_workspace_export() -> None:
+    store = InMemorySessionStore()
+    manager = SessionManager(store=store)
+    session_id = await manager.create_session(
+        execution_binding=CloudWorkspaceBinding(
+            workspace_url="docker://agent-ws-export/workspace",
+            workspace_id="ws-export",
+        )
+    )
+    export_started = asyncio.Event()
+    release_export = threading.Event()
+
+    def blocking_export(binding: CloudWorkspaceBinding) -> str:
+        export_started.set()
+        assert release_export.wait(timeout=10)
+        return binding.workspace_id
+
+    export_task = asyncio.create_task(
+        manager.export_workspace_archive(session_id, blocking_export)
+    )
+    await asyncio.wait_for(export_started.wait(), timeout=1)
+
+    try:
+        with pytest.raises(RuntimeError, match="turn already in progress"):
+            await manager.run_agent(session_id, "do work")
+    finally:
+        release_export.set()
+        await export_task
 
 
 @pytest.mark.asyncio
