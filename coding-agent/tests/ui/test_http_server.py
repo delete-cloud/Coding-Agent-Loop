@@ -3536,6 +3536,30 @@ class TestRemoteResultPublicationContract:
         assert data["turn_status"] == "failed"
         assert data["failure_details"] == "HTTP session turn failed: model timeout"
 
+    async def test_session_result_uses_default_failure_details_when_missing(
+        self, client: AsyncClient
+    ) -> None:
+        session = register_session(
+            "result-failed-default-details",
+            execution_binding=CloudWorkspaceBinding(
+                workspace_url="docker://agent-ws-result/workspace",
+                workspace_id="ws-failed-default-result",
+            ),
+        )
+        session.turn_status = "failed"
+        session.last_failure_details = None
+
+        response = await client.get(f"/sessions/{session.id}/result")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "failed"
+        assert data["turn_status"] == "failed"
+        assert (
+            data["failure_details"]
+            == "Session turn failed; no failure details were recorded."
+        )
+
     async def test_session_result_returns_stable_contract_for_existing_session(
         self, client: AsyncClient
     ) -> None:
