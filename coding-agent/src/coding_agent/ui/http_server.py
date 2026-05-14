@@ -860,6 +860,30 @@ def _session_origin_from_request(
     return origin
 
 
+def _setup_phase_exception_detail(exc: BaseException) -> str | None:
+    notes = [
+        note
+        for note in getattr(exc, "__notes__", ())
+        if isinstance(note, str) and note.startswith("setup phase ")
+    ]
+    if not notes:
+        return None
+
+    returncode = getattr(exc, "returncode", None)
+    if isinstance(returncode, int):
+        prefix = f"setup phase failed with exit code {returncode}"
+    else:
+        prefix = "setup phase failed"
+    return "\n".join([prefix, *notes])
+
+
+def _http_exception_detail(exc: BaseException) -> str:
+    setup_detail = _setup_phase_exception_detail(exc)
+    if setup_detail is not None:
+        return setup_detail
+    return str(exc)
+
+
 def _http_safe_tool_result_payload(msg: ToolResultDelta) -> dict[str, Any]:
     return {
         "session_id": msg.session_id,
@@ -1300,10 +1324,16 @@ async def create_session(
         if isinstance(exc, HTTPException):
             raise exc
         if isinstance(exc, RuntimeError):
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
+            raise HTTPException(
+                status_code=500, detail=_http_exception_detail(exc)
+            ) from exc
         if isinstance(exc, (ValueError, TypeError)):
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+            raise HTTPException(
+                status_code=400, detail=_http_exception_detail(exc)
+            ) from exc
+        raise HTTPException(
+            status_code=500, detail=_http_exception_detail(exc)
+        ) from exc
 
     logger.info(f"Created session: {session_id}")
     return SessionResponse(session_id=session_id)

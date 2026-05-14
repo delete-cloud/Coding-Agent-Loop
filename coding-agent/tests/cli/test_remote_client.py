@@ -3154,6 +3154,57 @@ def test_remote_repl_reports_request_error_on_session_create(
     assert "connection refused" in result.output
 
 
+def test_remote_repl_reports_setup_failure_without_docker_command(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_path = tmp_path / "remotes.json"
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example"],
+        catch_exceptions=False,
+    )
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def post(
+            self, path: str, json: dict[str, object] | None = None
+        ) -> httpx.Response:
+            del path, json
+            request = httpx.Request("POST", "http://agent.example/sessions")
+            return httpx.Response(
+                500,
+                request=request,
+                json={
+                    "detail": (
+                        "setup phase failed with exit code 42\n"
+                        "setup phase stderr:\nsetup failed intentionally\n"
+                    )
+                },
+            )
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+
+    result = runner.invoke(
+        main,
+        ["remote", "repl", "dev", "--empty-workspace", "--goal", "hello"],
+    )
+
+    assert result.exit_code != 0
+    assert "setup phase failed with exit code 42" in result.output
+    assert "setup failed intentionally" in result.output
+    assert "docker run" not in result.output
+
+
 def test_stream_prompt_reports_non_200_sse_response(monkeypatch) -> None:
     class FakeResponse:
         status_code = 503

@@ -1021,6 +1021,51 @@ class TestSessionCreation:
             "cloud workspace provisioning requires cloud_workspace.enabled=true"
         )
 
+    async def test_create_session_surfaces_redacted_setup_failure_detail(
+        self, client, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            lambda: {
+                "enabled": True,
+                "provider": "docker",
+                "workspace_root": str(tmp_path),
+                "container_name_prefix": "agent-",
+                **_test_runtime_profile_config(),
+            },
+        )
+
+        def fail_setup(config: dict[str, object], source: dict[str, object]):
+            del config, source
+            exc = subprocess.CalledProcessError(
+                returncode=42,
+                cmd=["docker", "run", "--name", "secret-container"],
+            )
+            exc.add_note("setup phase stdout:\n[REDACTED]\n")
+            exc.add_note("setup phase stderr:\nsetup failed intentionally\n")
+            raise exc
+
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.provision_cloud_binding_from_config",
+            fail_setup,
+        )
+
+        response = await client.post(
+            "/sessions",
+            json={"workspace_source": {"kind": "docker"}},
+        )
+
+        assert response.status_code == 500
+        detail = response.json()["detail"]
+        assert detail == (
+            "setup phase failed with exit code 42\n"
+            "setup phase stdout:\n[REDACTED]\n"
+            "\n"
+            "setup phase stderr:\nsetup failed intentionally\n"
+        )
+        assert "docker run" not in detail
+        assert "secret-container" not in detail
+
     async def test_create_session_provisions_git_workspace_source(
         self, client, monkeypatch, tmp_path
     ):
