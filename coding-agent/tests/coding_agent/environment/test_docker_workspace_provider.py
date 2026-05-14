@@ -977,7 +977,7 @@ def test_docker_workspace_provider_rejects_unallowlisted_git_source_before_clone
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     with pytest.raises(
-        ValueError, match="host is not in remote_sources.git.allowed_hosts"
+        ValueError, match=r"host is not in remote_sources\.git\.allowed_hosts"
     ):
         _ = provision_cloud_binding_from_config(
             _docker_config(
