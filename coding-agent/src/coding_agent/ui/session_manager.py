@@ -606,6 +606,21 @@ class SessionManager:
             raise RuntimeError("workspace metadata store is not configured")
         return await self._workspace_metadata_store.load_by_workspace_id(workspace_id)
 
+    async def update_workspace_record_status(
+        self,
+        workspace_record_id: str,
+        *,
+        status: WorkspaceStatus,
+        cleanup_error: str | None = None,
+    ) -> None:
+        if self._workspace_metadata_store is None:
+            raise RuntimeError("workspace metadata store is not configured")
+        await self._workspace_metadata_store.update_status(
+            workspace_record_id,
+            status=status,
+            cleanup_error=cleanup_error,
+        )
+
     def _get_pg_pool(self) -> PGPool:
         if self._pg_pool is not None:
             return cast(PGPool, self._pg_pool)
