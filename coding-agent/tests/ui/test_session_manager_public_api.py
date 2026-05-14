@@ -21,7 +21,10 @@ from agentkit.tape.tape import Tape
 from coding_agent.approval.store import ApprovalStore
 from coding_agent.approval import ApprovalPolicy
 from agentkit.config.loader import ConfigError
-from coding_agent.ui.execution_binding import CloudWorkspaceBinding, LocalExecutionBinding
+from coding_agent.ui.execution_binding import (
+    CloudWorkspaceBinding,
+    LocalExecutionBinding,
+)
 from coding_agent.wire.protocol import (
     ApprovalRequest,
     CompletionStatus,
@@ -1571,11 +1574,13 @@ async def test_export_workspace_archive_rejects_active_turn() -> None:
     manager.register_session(session)
 
     with pytest.raises(RuntimeError, match="turn already in progress"):
-        await manager.export_workspace_archive(session_id, lambda binding: binding.workspace_id)
+        await manager.export_workspace_archive(
+            session_id, lambda binding: binding.workspace_id
+        )
 
 
 @pytest.mark.asyncio
-async def test_export_workspace_archive_rejects_when_turn_lock_is_held() -> None:
+async def test_export_workspace_archive_allows_concurrent_idle_exports() -> None:
     manager = SessionManager(store=InMemorySessionStore())
     session_id = await manager.create_session(
         execution_binding=CloudWorkspaceBinding(
@@ -1584,16 +1589,29 @@ async def test_export_workspace_archive_rejects_when_turn_lock_is_held() -> None
         )
     )
 
-    turn_lock = manager._turn_lock_for(session_id)
-    await turn_lock.acquire()
-    try:
-        with pytest.raises(RuntimeError, match="turn already in progress"):
-            await manager.export_workspace_archive(
-                session_id,
-                lambda binding: binding.workspace_id,
-            )
-    finally:
-        turn_lock.release()
+    first_export_started = asyncio.Event()
+    release_first_export = threading.Event()
+
+    def first_export(binding: CloudWorkspaceBinding) -> str:
+        first_export_started.set()
+        assert release_first_export.wait(timeout=10)
+        return binding.workspace_id
+
+    async def run_first_export() -> str:
+        return await manager.export_workspace_archive(session_id, first_export)
+
+    first_task = asyncio.create_task(run_first_export())
+    await asyncio.wait_for(first_export_started.wait(), timeout=1)
+
+    second_result = await manager.export_workspace_archive(
+        session_id,
+        lambda binding: f"{binding.workspace_id}-second",
+    )
+    release_first_export.set()
+    first_result = await first_task
+
+    assert first_result == "ws-export"
+    assert second_result == "ws-export-second"
 
 
 @pytest.mark.asyncio

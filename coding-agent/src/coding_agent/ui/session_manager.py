@@ -505,6 +505,7 @@ class SessionManager:
         self._lock = asyncio.Lock()
         self._store_io_guard = asyncio.Lock()
         self._session_turn_locks: dict[str, asyncio.Lock] = {}
+        self._session_workspace_export_counts: dict[str, int] = {}
         data_dir = Path(os.environ.get("AGENT_DATA_DIR", "./data"))
         self._tape_store = tape_store or self._create_tape_store(data_dir)
         resolved_checkpoint_store = checkpoint_store or self._create_checkpoint_store(
@@ -689,9 +690,26 @@ class SessionManager:
             self._session_turn_locks[session_id] = lock
         return lock
 
+    def _workspace_export_in_progress(self, session_id: str) -> bool:
+        return self._session_workspace_export_counts.get(session_id, 0) > 0
+
+    def _begin_workspace_export(self, session_id: str) -> None:
+        self._session_workspace_export_counts[session_id] = (
+            self._session_workspace_export_counts.get(session_id, 0) + 1
+        )
+
+    def _end_workspace_export(self, session_id: str) -> None:
+        count = self._session_workspace_export_counts.get(session_id, 0)
+        if count <= 1:
+            self._session_workspace_export_counts.pop(session_id, None)
+            return
+        self._session_workspace_export_counts[session_id] = count - 1
+
     async def prepare_session_turn(self, session_id: str) -> Session:
         turn_lock = self._turn_lock_for(session_id)
         if turn_lock.locked():
+            raise RuntimeError("turn already in progress")
+        if self._workspace_export_in_progress(session_id):
             raise RuntimeError("turn already in progress")
 
         session = await self.get_session_async(session_id)
@@ -1525,6 +1543,8 @@ class SessionManager:
             raise RuntimeError("turn already in progress")
 
         async with turn_lock:
+            if self._workspace_export_in_progress(session_id):
+                raise RuntimeError("turn already in progress")
             await self._assert_owner(session_id)
             session = await self.get_session_async(session_id)
             session.last_activity = datetime.now()
@@ -2178,16 +2198,19 @@ class SessionManager:
         if turn_lock.locked():
             raise RuntimeError("turn already in progress")
 
-        async with turn_lock:
-            await self._assert_owner(session_id)
-            session = await self.get_session_async(session_id)
-            if session.turn_in_progress or (session.task and not session.task.done()):
-                raise RuntimeError("turn already in progress")
-            if not isinstance(session.execution_binding, CloudWorkspaceBinding):
-                raise ValueError("Workspace export requires cloud session")
+        await self._assert_owner(session_id)
+        session = await self.get_session_async(session_id)
+        if session.turn_in_progress or (session.task and not session.task.done()):
+            raise RuntimeError("turn already in progress")
+        if not isinstance(session.execution_binding, CloudWorkspaceBinding):
+            raise ValueError("Workspace export requires cloud session")
+        self._begin_workspace_export(session_id)
+        try:
             result = await asyncio.to_thread(export_archive, session.execution_binding)
             await self._assert_owner(session_id)
             return result
+        finally:
+            self._end_workspace_export(session_id)
 
     async def list_checkpoints(self, session_id: str) -> list[CheckpointMeta]:
         session = await self.get_session_async(session_id)
