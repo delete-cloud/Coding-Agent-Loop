@@ -39,6 +39,7 @@ from .workspace_provider import (
 from ..workspace_archive import (
     create_workspace_archive_base64,
     extract_workspace_archive_base64,
+    should_exclude_workspace_archive_path,
 )
 
 if TYPE_CHECKING:
@@ -1066,9 +1067,17 @@ def _docker_workspace_archive_manifest(
 
     for path in sorted(workspace_root.rglob("*")):
         relative = path.relative_to(workspace_root)
-        if not relative.parts:
-            continue
-        if relative.parts[0] == ".git":
+        if should_exclude_workspace_archive_path(relative):
+            if relative.parts and relative.parts[0] != ".git":
+                if "__pycache__" in relative.parts:
+                    excluded_path = Path(
+                        *relative.parts[: relative.parts.index("__pycache__") + 1]
+                    )
+                else:
+                    excluded_path = relative
+                excluded = excluded_path.as_posix()
+                if excluded not in excluded_files:
+                    excluded_files.append(excluded)
             continue
         if path.is_symlink():
             raise ValueError(f"workspace archive does not support symlinks: {relative}")

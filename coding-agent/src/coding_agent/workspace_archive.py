@@ -13,6 +13,8 @@ from typing import Protocol, override
 
 
 _PRESERVED_ROOT_NAMES = frozenset({".git"})
+_EXCLUDED_DIRECTORY_NAMES = frozenset({"__pycache__"})
+_EXCLUDED_FILE_SUFFIXES = (".pyc", ".pyo")
 _MAX_WORKSPACE_ARCHIVE_BYTES = 8 * 1024 * 1024
 _MAX_WORKSPACE_ARCHIVE_BASE64_CHARS = 4 * ((_MAX_WORKSPACE_ARCHIVE_BYTES + 2) // 3)
 _MAX_WORKSPACE_TAR_STREAM_BYTES = 16 * 1024 * 1024
@@ -29,7 +31,7 @@ def create_workspace_archive_base64(workspace_root: Path) -> str:
     with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
         for path in sorted(root.rglob("*")):
             relative = path.relative_to(root)
-            if not relative.parts or relative.parts[0] == ".git":
+            if should_exclude_workspace_archive_path(relative):
                 continue
             if path.is_symlink():
                 raise ValueError(
@@ -49,6 +51,16 @@ def create_workspace_archive_base64(workspace_root: Path) -> str:
     archive_bytes = buffer.getvalue()
     _raise_if_archive_too_large(len(archive_bytes))
     return base64.b64encode(archive_bytes).decode("ascii")
+
+
+def should_exclude_workspace_archive_path(relative: Path) -> bool:
+    if not relative.parts:
+        return True
+    if relative.parts[0] in _PRESERVED_ROOT_NAMES:
+        return True
+    if any(part in _EXCLUDED_DIRECTORY_NAMES for part in relative.parts):
+        return True
+    return relative.name.endswith(_EXCLUDED_FILE_SUFFIXES)
 
 
 def extract_workspace_archive_base64(workspace_root: Path, archive_base64: str) -> None:

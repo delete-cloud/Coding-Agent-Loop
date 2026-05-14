@@ -40,6 +40,29 @@ def test_workspace_archive_round_trips_nested_files(tmp_path: Path) -> None:
     assert int(extracted_script.stat().st_mtime) == timestamp
 
 
+def test_workspace_archive_excludes_python_cache_artifacts(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _ = (source / "app.py").write_text("print('ok')\n", encoding="utf-8")
+    (source / "__pycache__").mkdir()
+    _ = (source / "__pycache__" / "app.cpython-314.pyc").write_bytes(b"cache")
+    (source / "pkg" / "__pycache__").mkdir(parents=True)
+    _ = (source / "pkg" / "__pycache__" / "mod.cpython-314.pyc").write_bytes(
+        b"nested cache"
+    )
+    _ = (source / "module.pyc").write_bytes(b"root cache")
+
+    archive_base64 = create_workspace_archive_base64(source)
+
+    target = tmp_path / "target"
+    extract_workspace_archive_base64(target, archive_base64)
+
+    assert (target / "app.py").read_text(encoding="utf-8") == "print('ok')\n"
+    assert not (target / "__pycache__").exists()
+    assert not (target / "pkg").exists()
+    assert not (target / "module.pyc").exists()
+
+
 def test_workspace_archive_rejects_path_traversal_members(tmp_path: Path) -> None:
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as archive:

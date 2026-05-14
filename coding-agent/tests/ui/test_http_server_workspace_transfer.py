@@ -349,6 +349,8 @@ async def test_workspace_archive_manifest_reports_counts_bytes_and_changes(
     (workspace_root / "nested" / "data.json").write_text("{}\n", encoding="utf-8")
     (workspace_root / ".git").mkdir()
     (workspace_root / ".git" / "config").write_text("ignored", encoding="utf-8")
+    (workspace_root / "__pycache__").mkdir()
+    (workspace_root / "__pycache__" / "app.cpython-314.pyc").write_bytes(b"cache")
     _register_cloud_session("sess-manifest", binding)
 
     response = await client.get("/sessions/sess-manifest/workspace/archive/manifest")
@@ -362,7 +364,7 @@ async def test_workspace_archive_manifest_reports_counts_bytes_and_changes(
     assert data["total_bytes"] == len("remote result") + len("{}\n")
     assert data["changed_files"] == ["nested/data.json", "result.txt"]
     assert data["deleted_files"] == []
-    assert data["excluded_files"] == [".git"]
+    assert data["excluded_files"] == [".git", "__pycache__"]
     assert len(data["archive_sha256"]) == 64
 
 
