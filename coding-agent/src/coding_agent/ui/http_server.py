@@ -52,6 +52,7 @@ from coding_agent.ui.session_owner_store import (
     SessionOwnershipConflictError,
     SessionOwnershipConflictReason,
 )
+from coding_agent.ui.workspace_store import PGWorkspaceMetadataStore
 from coding_agent.ui.schemas import (
     PromptRequest,
     CreateSessionRequest,
@@ -566,12 +567,13 @@ def _configured_owner_lease_seconds(storage_config: dict[str, Any]) -> float:
 
 def _build_session_manager() -> SessionManager:
     storage_config = _load_storage_config()
+    remote_retention_config = _load_remote_retention_config()
     try:
         _validate_production_config(
             _load_server_config(),
             _load_cloud_workspace_config(),
             storage_config=storage_config,
-            remote_retention_config=_load_remote_retention_config(),
+            remote_retention_config=remote_retention_config,
         )
     except Exception:
         logger.exception("Production config validation failed")
@@ -581,6 +583,10 @@ def _build_session_manager() -> SessionManager:
         binding_resolver=_build_binding_resolver(),
         provisioned_cloud_binding_cleanup=_cleanup_provisioned_cloud_binding,
     )
+    if remote_retention_config.get("enabled") is True:
+        manager.configure_workspace_metadata_store(
+            PGWorkspaceMetadataStore(pool=manager.pg_pool)
+        )
     if not _storage_uses_pg_http_sessions(storage_config):
         return manager
     owner_store = SessionOwnerStore(pg_pool=manager.pg_pool)

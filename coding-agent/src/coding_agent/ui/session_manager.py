@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from inspect import isawaitable
 from pathlib import Path
-from typing import Any, Literal, TypeVar, cast
+from typing import Any, Literal, Protocol, TypeVar, cast
 
 from agentkit.environment import Environment
 from agentkit.storage.checkpoint_fs import FSCheckpointStore
@@ -68,6 +68,10 @@ from coding_agent.ui.execution_binding import (
     ExecutionBinding,
     LocalExecutionBinding,
 )
+from coding_agent.ui.workspace_store import (
+    WorkspaceRecord,
+    WorkspaceStatus,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +111,23 @@ class CancelTurnResult:
     session_id: str
     turn_id: str | None
     status: CancelTurnStatus
+
+
+class WorkspaceMetadataStoreProtocol(Protocol):
+    async def load_for_session_workspace(
+        self,
+        *,
+        session_id: str,
+        workspace_id: str,
+    ) -> WorkspaceRecord | None: ...
+
+    async def update_status(
+        self,
+        workspace_record_id: str,
+        *,
+        status: WorkspaceStatus,
+        cleanup_error: str | None = None,
+    ) -> None: ...
 
 
 class MockProvider:
@@ -491,6 +512,7 @@ class SessionManager:
         provisioned_cloud_binding_cleanup: (
             Callable[[CloudWorkspaceBinding], None] | None
         ) = None,
+        workspace_metadata_store: WorkspaceMetadataStoreProtocol | None = None,
         owner_store: SessionOwnerStoreProtocol | None = None,
         owner_id: str | None = None,
         fencing_token: int | None = None,
@@ -517,6 +539,7 @@ class SessionManager:
         self._create_agent = create_agent_fn
         self._binding_resolver = binding_resolver or DefaultBindingResolver()
         self._provisioned_cloud_binding_cleanup = provisioned_cloud_binding_cleanup
+        self._workspace_metadata_store = workspace_metadata_store
         self.configure_owner_leases(
             owner_store=owner_store,
             owner_id=owner_id,
@@ -558,6 +581,12 @@ class SessionManager:
         self._owner_id = owner_id
         self._fencing_token = fencing_token
         self._owner_lease_seconds = owner_lease_seconds
+
+    def configure_workspace_metadata_store(
+        self,
+        workspace_metadata_store: WorkspaceMetadataStoreProtocol | None,
+    ) -> None:
+        self._workspace_metadata_store = workspace_metadata_store
 
     def _get_pg_pool(self) -> PGPool:
         if self._pg_pool is not None:
@@ -665,14 +694,60 @@ class SessionManager:
             return
         self._provisioned_cloud_binding_cleanup(binding)
 
-    async def _cleanup_provisioned_cloud_binding_async(self, session: Session) -> None:
+    async def _cleanup_provisioned_cloud_binding_async(
+        self, session: Session
+    ) -> str | None:
         try:
             await asyncio.to_thread(self._cleanup_provisioned_cloud_binding, session)
-        except Exception:
+            return None
+        except Exception as exc:
             logger.exception(
                 "Failed to clean up provisioned cloud workspace for session %s",
                 session.id,
             )
+            return str(exc) or "provisioned cloud workspace cleanup failed"
+
+    async def _workspace_record_for_session(
+        self, session: Session
+    ) -> WorkspaceRecord | None:
+        if self._workspace_metadata_store is None:
+            return None
+        binding = session.execution_binding
+        if not isinstance(binding, CloudWorkspaceBinding):
+            return None
+        return await self._workspace_metadata_store.load_for_session_workspace(
+            session_id=session.id,
+            workspace_id=binding.workspace_id,
+        )
+
+    async def _finalize_provisioned_cloud_workspace_on_close(
+        self, session: Session
+    ) -> None:
+        if not self._session_uses_provisioned_cloud_workspace(session):
+            return
+
+        record = await self._workspace_record_for_session(session)
+        store = self._workspace_metadata_store
+        if record is not None and record.retention_policy != "delete_on_close":
+            if store is None:
+                raise RuntimeError("workspace metadata store is not configured")
+            await store.update_status(
+                record.workspace_record_id,
+                status="retained",
+                cleanup_error=None,
+            )
+            return
+
+        cleanup_error = await self._cleanup_provisioned_cloud_binding_async(session)
+        if record is None:
+            return
+        if store is None:
+            raise RuntimeError("workspace metadata store is not configured")
+        await store.update_status(
+            record.workspace_record_id,
+            status="cleanup_failed" if cleanup_error is not None else "cleaned",
+            cleanup_error=cleanup_error,
+        )
 
     def _create_agent_for_session(self, **kwargs: Any) -> tuple[Any, Any]:
         factory = self._create_agent
@@ -986,7 +1061,7 @@ class SessionManager:
     async def _remove_session_async_no_lock(self, session_id: str) -> None:
         session = await self.get_session_async(session_id)
         await self._close_runtime(session)
-        await self._cleanup_provisioned_cloud_binding_async(session)
+        await self._finalize_provisioned_cloud_workspace_on_close(session)
         self._session_cache.pop(session_id, None)
         await self._run_store_io(self._store.delete, session_id)
         await self._release_owner_lease_for_session(session_id)

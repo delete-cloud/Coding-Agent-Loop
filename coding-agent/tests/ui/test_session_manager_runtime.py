@@ -37,6 +37,11 @@ from coding_agent.ui.session_manager import (
     _load_pg_storage_types,
 )
 from coding_agent.ui.session_store import InMemorySessionStore
+from coding_agent.ui.workspace_store import (
+    WorkspaceRecord,
+    WorkspaceRetentionPolicy,
+    WorkspaceStatus,
+)
 
 
 @pytest.mark.asyncio
@@ -1760,6 +1765,202 @@ async def test_close_session_keeps_explicit_cloud_binding_untouched() -> None:
     await manager.close_session(session_id)
 
     assert cleaned == []
+
+
+class FakeWorkspaceMetadataStore:
+    def __init__(self, records: list[WorkspaceRecord]) -> None:
+        self.records = records
+        self.status_updates: list[tuple[str, WorkspaceStatus, str | None]] = []
+
+    async def load_for_session_workspace(
+        self,
+        *,
+        session_id: str,
+        workspace_id: str,
+    ) -> WorkspaceRecord | None:
+        for record in self.records:
+            if record.session_id == session_id and record.workspace_id == workspace_id:
+                return record
+        return None
+
+    async def update_status(
+        self,
+        workspace_record_id: str,
+        *,
+        status: WorkspaceStatus,
+        cleanup_error: str | None = None,
+    ) -> None:
+        self.status_updates.append((workspace_record_id, status, cleanup_error))
+
+
+def _workspace_record(
+    *,
+    session_id: str,
+    workspace_id: str,
+    retention_policy: WorkspaceRetentionPolicy,
+) -> WorkspaceRecord:
+    return WorkspaceRecord(
+        workspace_record_id=f"record-{workspace_id}",
+        workspace_id=workspace_id,
+        session_id=session_id,
+        provider="docker",
+        provider_instance_id="docker-host-a",
+        workspace_root_ref="/workspaces",
+        workspace_host_label="docker-host-a",
+        owner_label="owner:test",
+        source_kind="git",
+        status="active",
+        retention_policy=retention_policy,
+    )
+
+
+@pytest.mark.asyncio
+async def test_close_session_retains_workspace_when_policy_is_pinned() -> None:
+    cleaned: list[CloudWorkspaceBinding] = []
+    binding = CloudWorkspaceBinding(
+        workspace_url="docker://agent-ws-pinned/workspace",
+        workspace_id="ws-pinned",
+    )
+    store = FakeWorkspaceMetadataStore([])
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        provisioned_cloud_binding_cleanup=cleaned.append,
+        workspace_metadata_store=store,
+    )
+    session_id = await manager.create_session(
+        execution_binding=binding,
+        origin={
+            "channel": "http",
+            "binding_kind": "cloud",
+            "workspace_source_kind": "git",
+        },
+    )
+    store.records.append(
+        _workspace_record(
+            session_id=session_id,
+            workspace_id=binding.workspace_id,
+            retention_policy="pinned",
+        )
+    )
+
+    await manager.close_session(session_id)
+
+    assert cleaned == []
+    assert store.status_updates == [("record-ws-pinned", "retained", None)]
+
+
+@pytest.mark.asyncio
+async def test_close_session_deletes_workspace_when_policy_is_delete_on_close() -> None:
+    cleaned: list[CloudWorkspaceBinding] = []
+    binding = CloudWorkspaceBinding(
+        workspace_url="docker://agent-ws-delete/workspace",
+        workspace_id="ws-delete",
+    )
+    store = FakeWorkspaceMetadataStore([])
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        provisioned_cloud_binding_cleanup=cleaned.append,
+        workspace_metadata_store=store,
+    )
+    session_id = await manager.create_session(
+        execution_binding=binding,
+        origin={
+            "channel": "http",
+            "binding_kind": "cloud",
+            "workspace_source_kind": "git",
+        },
+    )
+    store.records.append(
+        _workspace_record(
+            session_id=session_id,
+            workspace_id=binding.workspace_id,
+            retention_policy="delete_on_close",
+        )
+    )
+
+    await manager.close_session(session_id)
+
+    assert cleaned == [binding]
+    assert store.status_updates == [("record-ws-delete", "cleaned", None)]
+
+
+@pytest.mark.asyncio
+async def test_close_session_marks_workspace_cleanup_failed() -> None:
+    def fail_cleanup(binding: CloudWorkspaceBinding) -> None:
+        del binding
+        raise RuntimeError("cleanup failed")
+
+    binding = CloudWorkspaceBinding(
+        workspace_url="docker://agent-ws-cleanup-failed/workspace",
+        workspace_id="ws-cleanup-failed",
+    )
+    store = FakeWorkspaceMetadataStore([])
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        provisioned_cloud_binding_cleanup=fail_cleanup,
+        workspace_metadata_store=store,
+    )
+    session_id = await manager.create_session(
+        execution_binding=binding,
+        origin={
+            "channel": "http",
+            "binding_kind": "cloud",
+            "workspace_source_kind": "git",
+        },
+    )
+    store.records.append(
+        _workspace_record(
+            session_id=session_id,
+            workspace_id=binding.workspace_id,
+            retention_policy="delete_on_close",
+        )
+    )
+
+    await manager.close_session(session_id)
+
+    assert store.status_updates == [
+        (
+            "record-ws-cleanup-failed",
+            "cleanup_failed",
+            "cleanup failed",
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_shutdown_session_runtime_does_not_apply_workspace_retention() -> None:
+    cleaned: list[CloudWorkspaceBinding] = []
+    binding = CloudWorkspaceBinding(
+        workspace_url="docker://agent-ws-shutdown/workspace",
+        workspace_id="ws-shutdown",
+    )
+    store = FakeWorkspaceMetadataStore([])
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        provisioned_cloud_binding_cleanup=cleaned.append,
+        workspace_metadata_store=store,
+    )
+    session_id = await manager.create_session(
+        execution_binding=binding,
+        origin={
+            "channel": "http",
+            "binding_kind": "cloud",
+            "workspace_source_kind": "git",
+        },
+    )
+    store.records.append(
+        _workspace_record(
+            session_id=session_id,
+            workspace_id=binding.workspace_id,
+            retention_policy="delete_on_close",
+        )
+    )
+
+    await manager.shutdown_session_runtime(session_id)
+
+    assert cleaned == []
+    assert store.status_updates == []
+    assert manager.has_session(session_id)
 
 
 @pytest.mark.asyncio

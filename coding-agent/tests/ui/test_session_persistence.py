@@ -444,6 +444,20 @@ async def test_pg_workspace_store_round_trips_remote_workspace_record() -> None:
 
         async def fetchrow(self, query: str, *args: object) -> object | None:
             self.executed.append((query, args))
+            if (
+                "WHERE session_id = $1 AND workspace_id = $2" in query
+                and len(args) == 2
+            ):
+                session_id, workspace_id = args
+                assert isinstance(session_id, str)
+                assert isinstance(workspace_id, str)
+                for row in self.workspaces.values():
+                    if (
+                        row["session_id"] == session_id
+                        and row["workspace_id"] == workspace_id
+                    ):
+                        return FakeRecord(row)
+                return None
             if "SELECT * FROM agent_remote_workspaces" in query:
                 (workspace_record_id,) = args
                 assert isinstance(workspace_record_id, str)
@@ -496,6 +510,10 @@ async def test_pg_workspace_store_round_trips_remote_workspace_record() -> None:
 
     await store.save(record)
     loaded = await store.load("wr-1")
+    loaded_by_session_workspace = await store.load_for_session_workspace(
+        session_id="session-1",
+        workspace_id="ws-1",
+    )
     listed = await store.list()
     await store.update_status(
         "wr-1",
@@ -510,6 +528,7 @@ async def test_pg_workspace_store_round_trips_remote_workspace_record() -> None:
         updated_at=datetime(2026, 5, 14, tzinfo=UTC),
     )
     assert loaded == expected_record
+    assert loaded_by_session_workspace == expected_record
     assert listed == [expected_record]
     assert failed is not None
     assert failed.status == "cleanup_failed"
