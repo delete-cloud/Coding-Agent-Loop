@@ -226,13 +226,32 @@ class WorkspaceArchiveResponse(BaseModel):
     archive_base64: str
 
 
+WorkspaceRetentionPolicy = Literal["delete_on_close", "ttl", "pinned", "manual"]
+
+
 class WorkspaceSummarySchema(BaseModel):
     workspace_id: str
-    status: Literal["active", "stale", "cleaning", "cleaned", "cleanup_failed"]
+    status: Literal[
+        "provisioning",
+        "active",
+        "idle",
+        "retained",
+        "stale",
+        "cleaning",
+        "cleaned",
+        "cleanup_failed",
+        "lost",
+    ]
     updated_at: datetime
-
-
-WorkspaceRetentionPolicy = Literal["delete_on_close", "ttl", "pinned", "manual"]
+    session_id: str | None = None
+    provider: str | None = None
+    provider_instance_id: str | None = None
+    workspace_host_label: str | None = None
+    source_kind: str | None = None
+    retention_policy: WorkspaceRetentionPolicy | None = None
+    expires_at: datetime | None = None
+    cleanup_error: str | None = None
+    is_local: bool | None = None
 
 
 class WorkspaceRetentionRequest(BaseModel):

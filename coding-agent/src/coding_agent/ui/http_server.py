@@ -10,7 +10,7 @@ import re
 import socket
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 from collections.abc import AsyncIterator
@@ -53,6 +53,7 @@ from coding_agent.ui.session_owner_store import (
     SessionOwnershipConflictReason,
 )
 from coding_agent.ui.workspace_store import PGWorkspaceMetadataStore
+from coding_agent.ui.workspace_store import WorkspaceRecord
 from coding_agent.ui.schemas import (
     PromptRequest,
     CreateSessionRequest,
@@ -826,6 +827,41 @@ def _workspace_summary_response(
         workspace_id=entry.workspace_id,
         status=entry.status,
         updated_at=entry.updated_at,
+    )
+
+
+def _remote_retention_enabled() -> bool:
+    return _load_remote_retention_config().get("enabled") is True
+
+
+def _configured_provider_instance_id() -> str | None:
+    provider_instance_id = _load_cloud_workspace_config().get("provider_instance_id")
+    if isinstance(provider_instance_id, str) and provider_instance_id.strip():
+        return provider_instance_id.strip()
+    return None
+
+
+def _workspace_record_summary_response(
+    record: WorkspaceRecord,
+) -> WorkspaceSummarySchema:
+    updated_at = record.updated_at or record.created_at or datetime.now(UTC)
+    local_provider_instance_id = _configured_provider_instance_id()
+    return WorkspaceSummarySchema(
+        workspace_id=record.workspace_id,
+        status=record.status,
+        updated_at=updated_at,
+        session_id=record.session_id,
+        provider=record.provider,
+        provider_instance_id=record.provider_instance_id,
+        workspace_host_label=record.workspace_host_label,
+        source_kind=record.source_kind,
+        retention_policy=record.retention_policy,
+        expires_at=record.expires_at,
+        cleanup_error=record.cleanup_error,
+        is_local=(
+            local_provider_instance_id is not None
+            and record.provider_instance_id == local_provider_instance_id
+        ),
     )
 
 
@@ -1670,6 +1706,13 @@ async def list_workspaces(
 ) -> WorkspaceListResponse:
     del request
     _require_admin_context(auth_context)
+    if _remote_retention_enabled():
+        records = await session_manager.list_workspace_records()
+        return WorkspaceListResponse(
+            workspaces=[
+                _workspace_record_summary_response(record) for record in records
+            ]
+        )
     config = _load_cloud_workspace_config()
     entries = await asyncio.to_thread(
         list_cloud_workspaces_from_config,
@@ -1705,6 +1748,15 @@ async def get_workspace(
 ) -> WorkspaceSummarySchema:
     del request
     _require_admin_context(auth_context)
+    if _remote_retention_enabled():
+        record = await session_manager.load_workspace_record_by_workspace_id(
+            workspace_id
+        )
+        if record is None:
+            raise HTTPException(
+                status_code=404, detail=f"Workspace not found: {workspace_id}"
+            )
+        return _workspace_record_summary_response(record)
     try:
         entry = await asyncio.to_thread(
             get_cloud_workspace_from_config,

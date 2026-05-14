@@ -44,6 +44,7 @@ from coding_agent.ui.execution_binding import (
 )
 from coding_agent.wire.local import LocalWire
 from coding_agent.ui.session_manager import Session
+from coding_agent.ui.workspace_store import WorkspaceRecord
 from coding_agent.ui.session_owner_store import SessionOwnerRecord
 from coding_agent.ui.session_owner_store import SessionOwnershipConflictError
 from coding_agent.ui.http_server import (
@@ -97,6 +98,7 @@ async def clear_sessions():
         owner_id=None,
         fencing_token=None,
     )
+    session_manager.configure_workspace_metadata_store(None)
     session_manager.clear_sessions()
     # Clear rate limit storage to prevent 429 errors
     limiter.reset()
@@ -112,6 +114,7 @@ async def clear_sessions():
         owner_id=None,
         fencing_token=None,
     )
+    session_manager.configure_workspace_metadata_store(None)
     session_manager.clear_sessions()
     # Cleanup session_manager
     for session_id in list(session_manager.list_sessions()):
@@ -3841,6 +3844,40 @@ class TestRemoteResultPublicationContract:
         assert patch.status_code == 404
 
 
+class FakeWorkspaceMetadataStore:
+    def __init__(self, records: list[WorkspaceRecord]) -> None:
+        self.records = records
+
+    async def list(self) -> list[WorkspaceRecord]:
+        return self.records
+
+    async def load_by_workspace_id(self, workspace_id: str) -> WorkspaceRecord | None:
+        for record in self.records:
+            if record.workspace_id == workspace_id:
+                return record
+        return None
+
+    async def load_for_session_workspace(
+        self,
+        *,
+        session_id: str,
+        workspace_id: str,
+    ) -> WorkspaceRecord | None:
+        for record in self.records:
+            if record.session_id == session_id and record.workspace_id == workspace_id:
+                return record
+        return None
+
+    async def update_status(
+        self,
+        workspace_record_id: str,
+        *,
+        status: str,
+        cleanup_error: str | None = None,
+    ) -> None:
+        del workspace_record_id, status, cleanup_error
+
+
 class TestRemoteWorkspaceRetentionContract:
     async def test_workspace_retain_fails_fast_until_durable_store_exists(
         self, client: AsyncClient
@@ -3887,6 +3924,145 @@ class TestRemoteWorkspaceRetentionContract:
         )
 
         assert response.status_code == 422
+
+    async def test_list_workspaces_uses_durable_records_when_retention_enabled(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_remote_retention_config",
+            lambda: {"enabled": True},
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            lambda: {"provider_instance_id": "docker-local"},
+        )
+        session_manager.configure_workspace_metadata_store(
+            FakeWorkspaceMetadataStore(
+                [
+                    WorkspaceRecord(
+                        workspace_record_id="wr-local",
+                        workspace_id="ws-local",
+                        session_id="session-local",
+                        provider="docker",
+                        provider_instance_id="docker-local",
+                        workspace_root_ref="/workspaces",
+                        workspace_host_label="local-host",
+                        owner_label="owner:test",
+                        source_kind="git",
+                        status="retained",
+                        retention_policy="pinned",
+                        updated_at=datetime(2026, 5, 14, tzinfo=UTC),
+                    ),
+                    WorkspaceRecord(
+                        workspace_record_id="wr-remote",
+                        workspace_id="ws-remote",
+                        session_id="session-remote",
+                        provider="docker",
+                        provider_instance_id="docker-remote",
+                        workspace_root_ref="/workspaces",
+                        workspace_host_label="remote-host",
+                        owner_label="owner:test",
+                        source_kind="git",
+                        status="active",
+                        retention_policy="ttl",
+                        updated_at=datetime(2026, 5, 14, tzinfo=UTC),
+                    ),
+                ]
+            )
+        )
+
+        response = await client.get("/workspaces")
+
+        assert response.status_code == 200
+        assert response.json()["workspaces"] == [
+            {
+                "workspace_id": "ws-local",
+                "status": "retained",
+                "updated_at": "2026-05-14T00:00:00Z",
+                "session_id": "session-local",
+                "provider": "docker",
+                "provider_instance_id": "docker-local",
+                "workspace_host_label": "local-host",
+                "source_kind": "git",
+                "retention_policy": "pinned",
+                "expires_at": None,
+                "cleanup_error": None,
+                "is_local": True,
+            },
+            {
+                "workspace_id": "ws-remote",
+                "status": "active",
+                "updated_at": "2026-05-14T00:00:00Z",
+                "session_id": "session-remote",
+                "provider": "docker",
+                "provider_instance_id": "docker-remote",
+                "workspace_host_label": "remote-host",
+                "source_kind": "git",
+                "retention_policy": "ttl",
+                "expires_at": None,
+                "cleanup_error": None,
+                "is_local": False,
+            },
+        ]
+
+    async def test_get_workspace_uses_durable_record_when_retention_enabled(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_remote_retention_config",
+            lambda: {"enabled": True},
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            lambda: {"provider_instance_id": "docker-local"},
+        )
+        session_manager.configure_workspace_metadata_store(
+            FakeWorkspaceMetadataStore(
+                [
+                    WorkspaceRecord(
+                        workspace_record_id="wr-1",
+                        workspace_id="ws-1",
+                        session_id="session-1",
+                        provider="docker",
+                        provider_instance_id="docker-local",
+                        workspace_root_ref="/workspaces",
+                        workspace_host_label="local-host",
+                        owner_label="owner:test",
+                        source_kind="snapshot",
+                        status="cleanup_failed",
+                        retention_policy="manual",
+                        cleanup_error="docker unavailable",
+                        updated_at=datetime(2026, 5, 14, tzinfo=UTC),
+                    )
+                ]
+            )
+        )
+
+        response = await client.get("/workspaces/ws-1")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["workspace_id"] == "ws-1"
+        assert data["status"] == "cleanup_failed"
+        assert data["retention_policy"] == "manual"
+        assert data["cleanup_error"] == "docker unavailable"
+        assert data["is_local"] is True
+
+    async def test_get_workspace_returns_404_for_missing_durable_record(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_remote_retention_config",
+            lambda: {"enabled": True},
+        )
+        session_manager.configure_workspace_metadata_store(
+            FakeWorkspaceMetadataStore([])
+        )
+
+        response = await client.get("/workspaces/missing")
+
+        assert response.status_code == 404
+        assert response.json() == {"detail": "Workspace not found: missing"}
 
     async def test_workspace_diff_returns_provider_result(
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
