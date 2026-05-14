@@ -441,6 +441,27 @@ def test_production_config_accepts_server_configured_setup_commands(
             {"http_session_backend": "pg", "dsn": "postgresql://example"},
             {
                 "enabled": True,
+                "default_policy": "ttl",
+                "default_ttl_seconds": -3600,
+                "allow_user_pin": False,
+            },
+            "remote_retention.default_ttl_seconds",
+        ),
+        (
+            {"provider_instance_id": "docker-host-a"},
+            {"http_session_backend": "pg", "dsn": "postgresql://example"},
+            {
+                "enabled": True,
+                "default_policy": "forever",
+                "allow_user_pin": False,
+            },
+            "remote_retention.default_policy",
+        ),
+        (
+            {"provider_instance_id": "docker-host-a"},
+            {"http_session_backend": "pg", "dsn": "postgresql://example"},
+            {
+                "enabled": True,
                 "default_policy": "delete_on_close",
                 "allow_user_pin": "no",
             },

@@ -371,17 +371,6 @@ def _validate_production_remote_phases(
         )
 
 
-def _storage_uses_pg_http_sessions(storage_config: dict[str, Any]) -> bool:
-    http_backend = storage_config.get("http_session_backend")
-    if isinstance(http_backend, str):
-        return http_backend.strip().lower() == "pg"
-    legacy_backend = storage_config.get("session_backend")
-    if isinstance(legacy_backend, str) and legacy_backend.strip().lower() == "pg":
-        return True
-    tape_backend = storage_config.get("tape_backend")
-    return isinstance(tape_backend, str) and tape_backend.strip().lower() == "pg"
-
-
 def _validate_production_remote_retention(
     cloud_workspace_config: dict[str, Any],
     storage_config: dict[str, Any],
@@ -423,7 +412,10 @@ def _validate_production_remote_retention(
 
     allow_user_pin = remote_retention_config.get("allow_user_pin")
     if not isinstance(allow_user_pin, bool):
-        raise ValueError("remote_retention.allow_user_pin must be a boolean")
+        raise ValueError(
+            "remote_retention.allow_user_pin is required when remote retention "
+            "is enabled and must be a boolean"
+        )
 
 
 def _validate_production_config(
