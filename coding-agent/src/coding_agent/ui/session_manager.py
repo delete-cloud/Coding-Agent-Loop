@@ -176,6 +176,7 @@ class Session:
     turn_in_progress: bool = False
     turn_status: TurnStatus = "idle"
     current_turn_id: str | None = None
+    last_failure_details: str | None = None
     pending_approval: dict[str, Any] | None = None
     approval_event: asyncio.Event = field(default_factory=asyncio.Event)
     approval_response: dict[str, Any] | None = None
@@ -265,6 +266,7 @@ class Session:
             "base_url": self.base_url,
             "max_steps": self.max_steps,
             "tape_id": self.tape_id,
+            "last_failure_details": self.last_failure_details,
         }
 
     @classmethod
@@ -297,6 +299,11 @@ class Session:
         tape_id_raw = data.get("tape_id")
         if tape_id_raw is not None and not isinstance(tape_id_raw, str):
             raise TypeError("session metadata has invalid tape_id")
+        last_failure_details_raw = data.get("last_failure_details")
+        if last_failure_details_raw is not None and not isinstance(
+            last_failure_details_raw, str
+        ):
+            raise TypeError("session metadata has invalid last_failure_details")
         binding_raw = data.get("execution_binding")
         if binding_raw is not None:
             if not isinstance(binding_raw, dict):
@@ -327,6 +334,7 @@ class Session:
             base_url=base_url_raw,
             max_steps=_required_session_int(data, "max_steps"),
             tape_id=tape_id_raw,
+            last_failure_details=last_failure_details_raw,
         )
         session.turn_in_progress = False
         session.pending_approval = None
@@ -1523,6 +1531,7 @@ class SessionManager:
             session.turn_in_progress = True
             session.turn_status = "running"
             session.current_turn_id = uuid.uuid4().hex
+            session.last_failure_details = None
             await self._persist_session_async(session)
 
             try:
@@ -1579,13 +1588,16 @@ class SessionManager:
                 self._bind_subagent_message_publisher(ctx)
                 await adapter.run_turn(prompt)
                 session.tape_id = ctx.tape.tape_id
+                session.last_failure_details = None
                 await self._persist_session_async(session)
-            except FatalToolExecutionError:
+            except FatalToolExecutionError as exc:
                 session.turn_status = "failed"
+                session.last_failure_details = f"Fatal tool execution failed: {exc}"
                 await self._close_runtime(session)
                 raise
             except Exception as exc:
                 session.turn_status = "failed"
+                session.last_failure_details = f"HTTP session turn failed: {exc}"
                 await self._close_runtime(session)
                 logger.exception("HTTP session turn failed")
                 await session.wire.send(
