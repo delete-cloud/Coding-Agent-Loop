@@ -650,6 +650,86 @@ async def _cloud_workspace_gc_config() -> dict[str, Any]:
     return cloud_workspace_config
 
 
+def _workspace_record_is_gc_eligible(
+    record: WorkspaceRecord,
+    *,
+    now: datetime,
+    active_workspace_ids: set[str],
+) -> bool:
+    if record.workspace_id in active_workspace_ids:
+        return False
+    if record.status in {"cleaned", "cleaning", "cleanup_failed", "provisioning"}:
+        return False
+    if record.retention_policy in {"pinned", "manual"}:
+        return False
+    if record.retention_policy == "ttl":
+        return record.expires_at is not None and record.expires_at <= now
+    return record.status == "stale"
+
+
+async def _cleanup_durable_cloud_workspaces(
+    cloud_workspace_config: dict[str, Any],
+) -> int:
+    provider_instance_id = cloud_workspace_config.get("provider_instance_id")
+    if not isinstance(provider_instance_id, str) or not provider_instance_id.strip():
+        raise ValueError(
+            "cloud_workspace.provider_instance_id is required for durable workspace GC"
+        )
+    active_workspace_ids = set(cloud_workspace_config.get("_active_workspace_ids", []))
+    now = datetime.now(UTC)
+    cleaned_count = 0
+    for record in await session_manager.list_workspace_records():
+        if record.provider_instance_id != provider_instance_id.strip():
+            continue
+        if not _workspace_record_is_gc_eligible(
+            record,
+            now=now,
+            active_workspace_ids=active_workspace_ids,
+        ):
+            continue
+        await session_manager.update_workspace_record_status(
+            record.workspace_record_id,
+            status="cleaning",
+            cleanup_error=None,
+        )
+        try:
+            _ = await asyncio.to_thread(
+                cleanup_cloud_workspace_from_config,
+                cloud_workspace_config,
+                record.workspace_id,
+                active_workspace_ids=active_workspace_ids,
+            )
+        except Exception as exc:
+            await session_manager.update_workspace_record_status(
+                record.workspace_record_id,
+                status="cleanup_failed",
+                cleanup_error=str(exc) or "workspace cleanup failed",
+            )
+            logger.exception(
+                "Durable workspace GC failed workspace_id=%s",
+                record.workspace_id,
+            )
+            continue
+        await session_manager.update_workspace_record_status(
+            record.workspace_record_id,
+            status="cleaned",
+            cleanup_error=None,
+        )
+        cleaned_count += 1
+    return cleaned_count
+
+
+async def _cleanup_cloud_workspaces_from_config(
+    cloud_workspace_config: dict[str, Any],
+) -> int:
+    if _remote_retention_enabled():
+        return await _cleanup_durable_cloud_workspaces(cloud_workspace_config)
+    return await asyncio.to_thread(
+        cleanup_stale_cloud_workspaces_from_config,
+        cloud_workspace_config,
+    )
+
+
 async def _cleanup_cloud_workspaces_on_startup() -> None:
     cloud_workspace_config = await _cloud_workspace_gc_config()
     if cloud_workspace_config.get("enabled") is not True:
@@ -657,10 +737,7 @@ async def _cleanup_cloud_workspaces_on_startup() -> None:
     if cloud_workspace_config.get("cleanup_on_startup") is not True:
         return
     try:
-        cleaned = await asyncio.to_thread(
-            cleanup_stale_cloud_workspaces_from_config,
-            cloud_workspace_config,
-        )
+        cleaned = await _cleanup_cloud_workspaces_from_config(cloud_workspace_config)
         logger.info("Cloud workspace startup cleanup removed %s workspace(s)", cleaned)
     except Exception:
         logger.exception("Cloud workspace startup cleanup failed")
@@ -673,9 +750,8 @@ async def _cleanup_stale_cloud_workspaces_periodically() -> None:
         if interval is None:
             return
         try:
-            cleaned = await asyncio.to_thread(
-                cleanup_stale_cloud_workspaces_from_config,
-                cloud_workspace_config,
+            cleaned = await _cleanup_cloud_workspaces_from_config(
+                cloud_workspace_config
             )
             logger.info("Cloud workspace periodic GC removed %s workspace(s)", cleaned)
         except Exception:
@@ -1732,9 +1808,8 @@ async def run_workspace_gc(
 ) -> WorkspaceGcResponse:
     del request
     _require_admin_context(auth_context)
-    cleaned_count = await asyncio.to_thread(
-        cleanup_stale_cloud_workspaces_from_config,
-        await _cloud_workspace_gc_config(),
+    cleaned_count = await _cleanup_cloud_workspaces_from_config(
+        await _cloud_workspace_gc_config()
     )
     return WorkspaceGcResponse(cleaned_count=cleaned_count)
 

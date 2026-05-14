@@ -3235,6 +3235,158 @@ class TestLifespanShutdown:
         ]
         await session_manager.close_session(session_id)
 
+    async def test_durable_cloud_workspace_gc_cleans_expired_local_ttl_records(
+        self, monkeypatch
+    ) -> None:
+        cleaned: list[tuple[str, set[str]]] = []
+        store = FakeWorkspaceMetadataStore(
+            [
+                WorkspaceRecord(
+                    workspace_record_id="wr-expired",
+                    workspace_id="ws-expired",
+                    session_id="session-expired",
+                    provider="docker",
+                    provider_instance_id="docker-local",
+                    workspace_root_ref="/workspaces",
+                    workspace_host_label="local-host",
+                    owner_label="owner:test",
+                    source_kind="git",
+                    status="retained",
+                    retention_policy="ttl",
+                    expires_at=datetime.now(UTC) - timedelta(seconds=60),
+                ),
+                WorkspaceRecord(
+                    workspace_record_id="wr-remote",
+                    workspace_id="ws-remote",
+                    session_id="session-remote",
+                    provider="docker",
+                    provider_instance_id="docker-remote",
+                    workspace_root_ref="/workspaces",
+                    workspace_host_label="remote-host",
+                    owner_label="owner:test",
+                    source_kind="git",
+                    status="retained",
+                    retention_policy="ttl",
+                    expires_at=datetime.now(UTC) - timedelta(seconds=60),
+                ),
+                WorkspaceRecord(
+                    workspace_record_id="wr-active",
+                    workspace_id="ws-active",
+                    session_id="session-active",
+                    provider="docker",
+                    provider_instance_id="docker-local",
+                    workspace_root_ref="/workspaces",
+                    workspace_host_label="local-host",
+                    owner_label="owner:test",
+                    source_kind="git",
+                    status="active",
+                    retention_policy="ttl",
+                    expires_at=datetime.now(UTC) - timedelta(seconds=60),
+                ),
+                WorkspaceRecord(
+                    workspace_record_id="wr-pinned",
+                    workspace_id="ws-pinned",
+                    session_id="session-pinned",
+                    provider="docker",
+                    provider_instance_id="docker-local",
+                    workspace_root_ref="/workspaces",
+                    workspace_host_label="local-host",
+                    owner_label="owner:test",
+                    source_kind="git",
+                    status="retained",
+                    retention_policy="pinned",
+                    expires_at=datetime.now(UTC) - timedelta(seconds=60),
+                ),
+            ]
+        )
+        session_manager.configure_workspace_metadata_store(store)
+
+        def fake_cleanup(
+            config: dict[str, object],
+            workspace_id: str,
+            *,
+            active_workspace_ids: set[str] | None = None,
+        ) -> object:
+            del config
+            cleaned.append((workspace_id, set(active_workspace_ids or set())))
+            return SimpleNamespace(workspace_id=workspace_id, status="cleaned")
+
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_remote_retention_config",
+            lambda: {"enabled": True},
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.cleanup_cloud_workspace_from_config",
+            fake_cleanup,
+        )
+
+        cleaned_count = await http_server._cleanup_durable_cloud_workspaces(
+            {
+                "enabled": True,
+                "provider": "docker",
+                "provider_instance_id": "docker-local",
+                "_active_workspace_ids": ["ws-active"],
+            }
+        )
+
+        assert cleaned_count == 1
+        assert cleaned == [("ws-expired", {"ws-active"})]
+        assert store.status_updates == [
+            ("wr-expired", "cleaning", None),
+            ("wr-expired", "cleaned", None),
+        ]
+
+    async def test_durable_cloud_workspace_gc_marks_cleanup_failure(
+        self, monkeypatch
+    ) -> None:
+        store = FakeWorkspaceMetadataStore(
+            [
+                WorkspaceRecord(
+                    workspace_record_id="wr-fails",
+                    workspace_id="ws-fails",
+                    session_id="session-fails",
+                    provider="docker",
+                    provider_instance_id="docker-local",
+                    workspace_root_ref="/workspaces",
+                    workspace_host_label="local-host",
+                    owner_label="owner:test",
+                    source_kind="git",
+                    status="stale",
+                    retention_policy="delete_on_close",
+                )
+            ]
+        )
+        session_manager.configure_workspace_metadata_store(store)
+
+        def fake_cleanup(
+            config: dict[str, object],
+            workspace_id: str,
+            *,
+            active_workspace_ids: set[str] | None = None,
+        ) -> object:
+            del config, workspace_id, active_workspace_ids
+            raise RuntimeError("docker unavailable")
+
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.cleanup_cloud_workspace_from_config",
+            fake_cleanup,
+        )
+
+        cleaned_count = await http_server._cleanup_durable_cloud_workspaces(
+            {
+                "enabled": True,
+                "provider": "docker",
+                "provider_instance_id": "docker-local",
+                "_active_workspace_ids": [],
+            }
+        )
+
+        assert cleaned_count == 0
+        assert store.status_updates == [
+            ("wr-fails", "cleaning", None),
+            ("wr-fails", "cleanup_failed", "docker unavailable"),
+        ]
+
     async def test_periodic_cloud_workspace_gc_runs_at_configured_interval(
         self, monkeypatch
     ):
@@ -3847,6 +3999,7 @@ class TestRemoteResultPublicationContract:
 class FakeWorkspaceMetadataStore:
     def __init__(self, records: list[WorkspaceRecord]) -> None:
         self.records = records
+        self.status_updates: list[tuple[str, str, str | None]] = []
 
     async def list(self) -> list[WorkspaceRecord]:
         return self.records
@@ -3875,7 +4028,7 @@ class FakeWorkspaceMetadataStore:
         status: str,
         cleanup_error: str | None = None,
     ) -> None:
-        del workspace_record_id, status, cleanup_error
+        self.status_updates.append((workspace_record_id, status, cleanup_error))
 
 
 class TestRemoteWorkspaceRetentionContract:
