@@ -201,6 +201,10 @@ def _load_remote_publication_config() -> dict[str, Any]:
     return _load_agent_config_section("remote_publication")
 
 
+def _load_remote_retention_config() -> dict[str, Any]:
+    return _load_agent_config_section("remote_retention")
+
+
 def _load_remote_sources_config() -> dict[str, Any]:
     return _load_agent_config_section("remote_sources")
 
@@ -367,9 +371,67 @@ def _validate_production_remote_phases(
         )
 
 
+def _storage_uses_pg_http_sessions(storage_config: dict[str, Any]) -> bool:
+    http_backend = storage_config.get("http_session_backend")
+    if isinstance(http_backend, str):
+        return http_backend.strip().lower() == "pg"
+    legacy_backend = storage_config.get("session_backend")
+    if isinstance(legacy_backend, str) and legacy_backend.strip().lower() == "pg":
+        return True
+    tape_backend = storage_config.get("tape_backend")
+    return isinstance(tape_backend, str) and tape_backend.strip().lower() == "pg"
+
+
+def _validate_production_remote_retention(
+    cloud_workspace_config: dict[str, Any],
+    storage_config: dict[str, Any],
+    remote_retention_config: dict[str, Any],
+) -> None:
+    enabled = remote_retention_config.get("enabled")
+    if enabled is None or enabled is False:
+        return
+    if enabled is not True:
+        raise ValueError("remote_retention.enabled must be a boolean")
+
+    provider_instance_id = cloud_workspace_config.get("provider_instance_id")
+    if not isinstance(provider_instance_id, str) or not provider_instance_id.strip():
+        raise ValueError(
+            "cloud_workspace.provider_instance_id is required when "
+            "remote_retention.enabled=true"
+        )
+
+    workspace_host_label = cloud_workspace_config.get("workspace_host_label")
+    if workspace_host_label is not None and (
+        not isinstance(workspace_host_label, str) or not workspace_host_label.strip()
+    ):
+        raise ValueError("cloud_workspace.workspace_host_label must be a string")
+
+    if not _storage_uses_pg_http_sessions(storage_config):
+        raise ValueError(
+            "remote_retention.enabled=true requires PostgreSQL HTTP session storage"
+        )
+
+    default_policy = remote_retention_config.get("default_policy")
+    if default_policy not in {"delete_on_close", "ttl", "pinned", "manual"}:
+        raise ValueError("remote_retention.default_policy is required")
+    if default_policy == "ttl":
+        _require_positive_int_field(
+            remote_retention_config,
+            section="remote_retention",
+            key="default_ttl_seconds",
+        )
+
+    allow_user_pin = remote_retention_config.get("allow_user_pin")
+    if not isinstance(allow_user_pin, bool):
+        raise ValueError("remote_retention.allow_user_pin must be a boolean")
+
+
 def _validate_production_config(
     server_config: dict[str, Any],
     cloud_workspace_config: dict[str, Any],
+    *,
+    storage_config: dict[str, Any] | None = None,
+    remote_retention_config: dict[str, Any] | None = None,
 ) -> None:
     if server_config.get("production") is not True:
         return
@@ -438,6 +500,11 @@ def _validate_production_config(
     if cloud_workspace_config.get("network") != "none":
         raise ValueError('cloud_workspace.network must be "none"')
     _validate_production_remote_phases(cloud_workspace_config)
+    _validate_production_remote_retention(
+        cloud_workspace_config,
+        storage_config or {},
+        remote_retention_config or {},
+    )
 
 
 def _log_development_mode_warning(server_config: dict[str, Any]) -> None:
@@ -506,15 +573,17 @@ def _configured_owner_lease_seconds(storage_config: dict[str, Any]) -> float:
 
 
 def _build_session_manager() -> SessionManager:
+    storage_config = _load_storage_config()
     try:
         _validate_production_config(
             _load_server_config(),
             _load_cloud_workspace_config(),
+            storage_config=storage_config,
+            remote_retention_config=_load_remote_retention_config(),
         )
     except Exception:
         logger.exception("Production config validation failed")
         raise
-    storage_config = _load_storage_config()
     manager = SessionManager(
         storage_config=storage_config,
         binding_resolver=_build_binding_resolver(),

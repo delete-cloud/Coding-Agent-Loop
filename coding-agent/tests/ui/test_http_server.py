@@ -296,6 +296,33 @@ secret_env_allowlist = []
     }
 
 
+def test_http_server_loads_remote_retention_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "server.toml"
+    config_path.write_text(
+        _minimal_agent_toml(
+            """
+[remote_retention]
+enabled = true
+default_policy = "ttl"
+default_ttl_seconds = 86400
+allow_user_pin = false
+"""
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODING_AGENT_SERVER_CONFIG", str(config_path))
+
+    assert http_server._load_remote_retention_config() == {
+        "enabled": True,
+        "default_policy": "ttl",
+        "default_ttl_seconds": 86400,
+        "allow_user_pin": False,
+    }
+
+
 def test_http_server_explicit_server_config_missing_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -318,6 +345,29 @@ def test_production_config_accepts_safe_docker_workspace_config(
             "bearer_token_env": "CODING_AGENT_BEARER_TOKEN",
         },
         _safe_production_cloud_workspace_config(),
+    )
+
+
+def test_production_config_accepts_durable_remote_retention(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CODING_AGENT_BEARER_TOKEN", "secret-token")
+    cloud_workspace_config = _safe_production_cloud_workspace_config()
+    cloud_workspace_config["provider_instance_id"] = "docker-host-a"
+
+    http_server._validate_production_config(
+        {
+            "production": True,
+            "bearer_token_env": "CODING_AGENT_BEARER_TOKEN",
+        },
+        cloud_workspace_config,
+        storage_config={"http_session_backend": "pg", "dsn": "postgresql://example"},
+        remote_retention_config={
+            "enabled": True,
+            "default_policy": "ttl",
+            "default_ttl_seconds": 86400,
+            "allow_user_pin": False,
+        },
     )
 
 
@@ -345,6 +395,80 @@ def test_production_config_accepts_server_configured_setup_commands(
         },
         cloud_workspace_config,
     )
+
+
+@pytest.mark.parametrize(
+    (
+        "cloud_workspace_overrides",
+        "storage_config",
+        "remote_retention_config",
+        "message",
+    ),
+    [
+        (
+            {},
+            {"http_session_backend": "pg", "dsn": "postgresql://example"},
+            {
+                "enabled": True,
+                "default_policy": "delete_on_close",
+                "allow_user_pin": False,
+            },
+            "cloud_workspace.provider_instance_id",
+        ),
+        (
+            {"provider_instance_id": "docker-host-a"},
+            {"http_session_backend": "memory"},
+            {
+                "enabled": True,
+                "default_policy": "delete_on_close",
+                "allow_user_pin": False,
+            },
+            "remote_retention.enabled=true requires PostgreSQL HTTP session storage",
+        ),
+        (
+            {"provider_instance_id": "docker-host-a"},
+            {"http_session_backend": "pg", "dsn": "postgresql://example"},
+            {
+                "enabled": True,
+                "default_policy": "ttl",
+                "default_ttl_seconds": 0,
+                "allow_user_pin": False,
+            },
+            "remote_retention.default_ttl_seconds",
+        ),
+        (
+            {"provider_instance_id": "docker-host-a"},
+            {"http_session_backend": "pg", "dsn": "postgresql://example"},
+            {
+                "enabled": True,
+                "default_policy": "delete_on_close",
+                "allow_user_pin": "no",
+            },
+            "remote_retention.allow_user_pin",
+        ),
+    ],
+)
+def test_production_config_rejects_unsafe_remote_retention_config(
+    monkeypatch: pytest.MonkeyPatch,
+    cloud_workspace_overrides: dict[str, object],
+    storage_config: dict[str, object],
+    remote_retention_config: dict[str, object],
+    message: str,
+) -> None:
+    monkeypatch.setenv("CODING_AGENT_BEARER_TOKEN", "secret-token")
+    cloud_workspace_config = _safe_production_cloud_workspace_config()
+    cloud_workspace_config.update(cloud_workspace_overrides)
+
+    with pytest.raises(ValueError, match=re.escape(message)):
+        http_server._validate_production_config(
+            {
+                "production": True,
+                "bearer_token_env": "CODING_AGENT_BEARER_TOKEN",
+            },
+            cloud_workspace_config,
+            storage_config=storage_config,
+            remote_retention_config=remote_retention_config,
+        )
 
 
 @pytest.mark.parametrize(

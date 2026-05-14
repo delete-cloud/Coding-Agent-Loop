@@ -40,6 +40,8 @@ owner_lease_seconds = 30
 [cloud_workspace]
 enabled = true
 provider = "docker"
+provider_instance_id = "docker-host-a"
+workspace_host_label = "docker-host-a.internal"
 workspace_root = "/var/lib/coding-agent/workspaces"
 
 default_runtime_profile = "universal"
@@ -92,6 +94,12 @@ allowed_hosts = ["github.com"]
 enabled = true
 token_env = "CODING_AGENT_GITHUB_TOKEN"
 base_branch = "main"
+
+[remote_retention]
+enabled = false
+default_policy = "delete_on_close"
+default_ttl_seconds = 86400
+allow_user_pin = false
 ```
 
 `python:3.11-slim` is enough for basic file operations and pure-Python tools,
@@ -112,6 +120,22 @@ Docker workspace provisioning requires a runtime profile. If a request omits
 When `server.production = true`, startup fails if bearer auth, Docker workspace
 enablement, image allowlist, non-root `exec_user`, quota, GC, resource limits,
 or `network = "none"` are missing or unsafe.
+
+`[remote_retention]` is the durable remote session/workspace retention control
+plane described in ADR-0025. When `remote_retention.enabled = false`, the server
+uses the legacy provider-local Docker cleanup model from ADR-0020: session
+close, startup cleanup, periodic GC, quota, and workspace listing are based on
+the configured Docker provider's filesystem/container discovery. When
+`remote_retention.enabled = true`, production validation requires
+`storage.http_session_backend = "pg"` and a non-empty
+`cloud_workspace.provider_instance_id`.
+
+PostgreSQL and the workspace host do not need to be the same machine.
+PostgreSQL stores control-plane metadata and recoverable references; workspace
+files and Docker containers remain on the provider host identified by
+`cloud_workspace.provider_instance_id`. A server should only perform local
+filesystem or Docker cleanup for workspace records whose provider instance id
+matches its own configuration.
 
 `remote_phases` is the setup/agent phase policy described in ADR-0023. The
 setup phase now executes only server-configured commands. Production
