@@ -490,8 +490,9 @@ def test_remote_run_creates_one_shot_remote_session(
     assert result.exit_code == 0
     assert "Created one-shot remote session sess-run on remote dev" in result.output
     assert "Remote session sess-run left open for result inspection." in result.output
-    assert "coding_agent remote diff dev --session sess-run" in result.output
-    assert "coding_agent remote patch dev --session sess-run" in result.output
+    assert "coding_agent remote result dev --session sess-run" in result.output
+    assert "coding_agent remote diff dev --session sess-run" not in result.output
+    assert "coding_agent remote patch dev --session sess-run" not in result.output
     assert "coding_agent remote publish dev" not in result.output
     assert "coding_agent remote sessions close dev sess-run" in result.output
     assert calls == [
@@ -1840,8 +1841,9 @@ def test_remote_run_with_repo_does_not_download_or_cleanup_by_default(
 
     assert result.exit_code == 0
     assert "Remote session sess-run left open for result inspection." in result.output
-    assert "coding_agent remote diff dev --session sess-run" in result.output
-    assert "coding_agent remote patch dev --session sess-run" in result.output
+    assert "coding_agent remote result dev --session sess-run" in result.output
+    assert "coding_agent remote diff dev --session sess-run" not in result.output
+    assert "coding_agent remote patch dev --session sess-run" not in result.output
     assert "coding_agent remote publish dev" not in result.output
     assert "coding_agent remote download dev --session sess-run --repo" in result.output
     assert "Downloaded remote workspace snapshot" not in result.output
