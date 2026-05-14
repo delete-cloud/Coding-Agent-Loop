@@ -920,6 +920,21 @@ def _print_remote_result_next_steps(
 ) -> None:
     click.echo(f"Remote session {session_id} left open for result inspection.")
     click.echo(
+        "Show session result: "
+        + _format_cli_command(
+            [
+                "python",
+                "-m",
+                "coding_agent",
+                "remote",
+                "result",
+                remote_name,
+                "--session",
+                session_id,
+            ]
+        )
+    )
+    click.echo(
         "Show changed files: "
         + _format_cli_command(
             [
@@ -1132,6 +1147,59 @@ def remote_workspaces_rm(name: str, workspace_id: str) -> None:
     endpoint = get_remote(name)
     _ = cleanup_remote_workspace(endpoint, workspace_id)
     click.echo(f"Cleaned workspace {workspace_id}")
+
+
+@remote.command("result")
+@click.argument("name")
+@click.option("--session", "session_id", required=True, help="Remote session ID")
+def remote_result(name: str, session_id: str) -> None:
+    """Show the result summary for a remote session."""
+    from coding_agent.remote.client import get_remote, get_remote_session_result
+
+    endpoint = get_remote(name)
+    result = get_remote_session_result(endpoint, session_id)
+    _print_remote_session_result(result)
+
+
+def _print_remote_session_result(result: dict[str, object]) -> None:
+    session_id = result.get("session_id")
+    status = result.get("status")
+    turn_status = result.get("turn_status")
+    workspace_id = result.get("workspace_id")
+    provider_name = result.get("provider_name")
+    model_name = result.get("model_name")
+    final_answer = result.get("final_answer")
+    verification_summary = result.get("verification_summary")
+    failure_details = result.get("failure_details")
+
+    if not isinstance(session_id, str) or not session_id:
+        raise click.ClickException("Remote result response missing session_id")
+    if not isinstance(status, str) or not status:
+        raise click.ClickException("Remote result response missing status")
+    if not isinstance(turn_status, str) or not turn_status:
+        raise click.ClickException("Remote result response missing turn_status")
+
+    click.echo(f"Session: {session_id}")
+    click.echo(f"Status: {status}")
+    click.echo(f"Turn: {turn_status}")
+    if isinstance(workspace_id, str) and workspace_id:
+        click.echo(f"Workspace: {workspace_id}")
+    if isinstance(provider_name, str) and provider_name:
+        click.echo(f"Provider: {provider_name}")
+    if isinstance(model_name, str) and model_name:
+        click.echo(f"Model: {model_name}")
+    if isinstance(final_answer, str) and final_answer:
+        click.echo()
+        click.echo("Final answer:")
+        click.echo(final_answer)
+    if isinstance(verification_summary, str) and verification_summary:
+        click.echo()
+        click.echo("Verification:")
+        click.echo(verification_summary)
+    if isinstance(failure_details, str) and failure_details:
+        click.echo()
+        click.echo("Failure:")
+        click.echo(failure_details)
 
 
 @remote.command("diff")

@@ -186,6 +186,17 @@ def get_remote_session(endpoint: RemoteEndpoint, session_id: str) -> dict[str, o
     return data
 
 
+def get_remote_session_result(
+    endpoint: RemoteEndpoint, session_id: str
+) -> dict[str, object]:
+    data = _get_remote_json(
+        endpoint,
+        f"/sessions/{session_id}/result",
+        "get remote session result",
+    )
+    return data
+
+
 def cancel_remote_session(
     endpoint: RemoteEndpoint, session_id: str
 ) -> dict[str, object]:
