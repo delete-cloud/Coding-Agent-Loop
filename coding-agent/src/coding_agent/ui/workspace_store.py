@@ -120,6 +120,12 @@ class PGWorkspaceMetadataStore:
         updated_at = NOW()
     """
     _SELECT_SQL = "SELECT * FROM agent_remote_workspaces WHERE workspace_record_id = $1"
+    _SELECT_BY_SESSION_WORKSPACE_SQL = """
+    SELECT * FROM agent_remote_workspaces
+    WHERE session_id = $1 AND workspace_id = $2
+    ORDER BY updated_at DESC
+    LIMIT 1
+    """
     _LIST_SQL = "SELECT * FROM agent_remote_workspaces ORDER BY workspace_record_id"
     _UPDATE_STATUS_SQL = """
     UPDATE agent_remote_workspaces
@@ -179,6 +185,27 @@ class PGWorkspaceMetadataStore:
         )(
             self._SELECT_SQL,
             workspace_record_id,
+        )
+        if row_obj is None:
+            return None
+        return _workspace_record_from_row(row_obj)
+
+    async def load_for_session_workspace(
+        self,
+        *,
+        session_id: str,
+        workspace_id: str,
+    ) -> WorkspaceRecord | None:
+        pool = await self._ensure_schema()
+        fetchrow = getattr(pool, "fetchrow", None)
+        if not callable(fetchrow):
+            raise TypeError("postgres workspace metadata pool must expose fetchrow")
+        row_obj = await cast(
+            Callable[..., Coroutine[object, object, object]], fetchrow
+        )(
+            self._SELECT_BY_SESSION_WORKSPACE_SQL,
+            session_id,
+            workspace_id,
         )
         if row_obj is None:
             return None
