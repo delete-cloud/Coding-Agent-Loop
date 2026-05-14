@@ -79,7 +79,10 @@ from coding_agent.ui.schemas import (
     WorkspaceGcResponse,
     WorkspaceListResponse,
     WorkspacePatchResponse,
+    WorkspaceRetentionRequest,
+    WorkspaceRetentionResponse,
     WorkspaceSummarySchema,
+    WorkspaceUnpinRequest,
 )
 from coding_agent.ui.auth import AuthContext, auth_context_from_headers, verify_api_key
 from coding_agent.ui.execution_binding import (
@@ -773,6 +776,13 @@ def _workspace_archive_manifest_response(
         deleted_files=manifest.deleted_files,
         excluded_files=manifest.excluded_files,
         archive_sha256=manifest.archive_sha256,
+    )
+
+
+def _durable_workspace_retention_not_implemented() -> HTTPException:
+    return HTTPException(
+        status_code=501,
+        detail="Durable remote workspace retention is not implemented yet.",
     )
 
 
@@ -1638,6 +1648,46 @@ async def get_workspace(
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return _workspace_summary_response(entry)
+
+
+@app.post(
+    "/workspaces/{workspace_id}/retain", response_model=WorkspaceRetentionResponse
+)
+@limiter.limit(RateLimits.CLOSE_SESSION)
+async def retain_workspace(
+    request: Request,
+    workspace_id: str,
+    body: WorkspaceRetentionRequest,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> WorkspaceRetentionResponse:
+    del request, workspace_id, body
+    _require_admin_context(auth_context)
+    raise _durable_workspace_retention_not_implemented()
+
+
+@app.post("/workspaces/{workspace_id}/pin", response_model=WorkspaceRetentionResponse)
+@limiter.limit(RateLimits.CLOSE_SESSION)
+async def pin_workspace(
+    request: Request,
+    workspace_id: str,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> WorkspaceRetentionResponse:
+    del request, workspace_id
+    _require_admin_context(auth_context)
+    raise _durable_workspace_retention_not_implemented()
+
+
+@app.post("/workspaces/{workspace_id}/unpin", response_model=WorkspaceRetentionResponse)
+@limiter.limit(RateLimits.CLOSE_SESSION)
+async def unpin_workspace(
+    request: Request,
+    workspace_id: str,
+    body: WorkspaceUnpinRequest | None = None,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> WorkspaceRetentionResponse:
+    del request, workspace_id, body
+    _require_admin_context(auth_context)
+    raise _durable_workspace_retention_not_implemented()
 
 
 @app.delete("/workspaces/{workspace_id}", response_model=WorkspaceCleanupResponse)
