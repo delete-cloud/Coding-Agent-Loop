@@ -23,6 +23,8 @@ from sse_starlette.sse import EventSourceResponse
 
 from agentkit.config.loader import load_config as load_agent_toml
 from agentkit.errors import ConfigError
+from agentkit.tape.extract import ToolCallRecord, TurnTrace, extract_turns
+from agentkit.tape.tape import Tape
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.environment import (
     cleanup_cloud_binding_from_config,
@@ -108,6 +110,15 @@ logger = logging.getLogger(__name__)
 
 # Constants
 APPROVAL_TIMEOUT_SECONDS = 120
+
+_SESSION_RESULT_TOOL_DETAIL_KEYS = (
+    "command",
+    "path",
+    "file_path",
+    "pattern",
+)
+_SESSION_RESULT_MAX_TOOL_ITEMS = 5
+_SESSION_RESULT_MAX_TOOL_DETAIL_CHARS = 160
 SESSION_IDLE_TIMEOUT_MINUTES = 30
 _SERVER_CONFIG_ENV = "CODING_AGENT_SERVER_CONFIG"
 _GITHUB_API_BASE_URL = "https://api.github.com"
@@ -1734,6 +1745,82 @@ async def _get_visible_session(
     return session
 
 
+def _compact_session_result_text(text: str, *, max_chars: int) -> str:
+    compact = " ".join(text.split())
+    if len(compact) <= max_chars:
+        return compact
+    return compact[: max_chars - 3].rstrip() + "..."
+
+
+def _session_result_tool_detail(call: ToolCallRecord) -> str | None:
+    for key in _SESSION_RESULT_TOOL_DETAIL_KEYS:
+        value = call.arguments.get(key)
+        if not isinstance(value, str) or value.strip() == "":
+            continue
+        return _compact_session_result_text(
+            value,
+            max_chars=_SESSION_RESULT_MAX_TOOL_DETAIL_CHARS,
+        )
+    return None
+
+
+def _session_result_verification_summary(turn: TurnTrace | None) -> str | None:
+    if turn is None or not turn.tool_calls:
+        return None
+
+    items: list[str] = []
+    for call in turn.tool_calls[:_SESSION_RESULT_MAX_TOOL_ITEMS]:
+        name = call.name.strip() or "unnamed_tool"
+        detail = _session_result_tool_detail(call)
+        if detail is None:
+            items.append(name)
+        else:
+            items.append(f"{name}: {detail}")
+
+    remaining = len(turn.tool_calls) - len(items)
+    if remaining > 0:
+        items.append(f"+{remaining} more")
+    return "Tool activity: " + "; ".join(items)
+
+
+def _session_runtime_tape(session: Session) -> Tape | None:
+    runtime_ctx = session.runtime_ctx
+    if runtime_ctx is None:
+        return None
+    tape = getattr(runtime_ctx, "tape", None)
+    if tape is None:
+        return None
+    if not isinstance(tape, Tape):
+        raise TypeError("session runtime context has invalid tape")
+    return tape
+
+
+async def _session_result_tape(session: Session) -> Tape | None:
+    runtime_tape = _session_runtime_tape(session)
+    if runtime_tape is not None:
+        return runtime_tape
+    return await session_manager._restore_tape(session.tape_id)
+
+
+async def _session_result_latest_turn(session: Session) -> TurnTrace | None:
+    tape = await _session_result_tape(session)
+    if tape is None:
+        return None
+    turns = extract_turns(tape.snapshot())
+    if not turns:
+        return None
+    return turns[-1]
+
+
+def _session_result_failure_details(session: Session) -> str | None:
+    details = session.last_failure_details
+    if details is not None:
+        return details
+    if session.turn_status == "failed":
+        return "Session turn failed; no failure details were recorded."
+    return None
+
+
 @app.get("/sessions/{session_id}/result", response_model=SessionResultResponse)
 @limiter.limit(RateLimits.GET_SESSION)
 async def get_session_result(
@@ -1744,6 +1831,7 @@ async def get_session_result(
     del request
     session = await _get_visible_session(session_id, auth_context)
     summary = session.as_dict()
+    latest_turn = await _session_result_latest_turn(session)
     return SessionResultResponse(
         session_id=session.id,
         status=summary["status"],
@@ -1753,9 +1841,9 @@ async def get_session_result(
         origin=session.origin,
         provider_name=session.provider_name,
         model_name=session.model_name,
-        final_answer=None,
-        verification_summary=None,
-        failure_details=None,
+        final_answer=None if latest_turn is None else latest_turn.final_output,
+        verification_summary=_session_result_verification_summary(latest_turn),
+        failure_details=_session_result_failure_details(session),
     )
 
 

@@ -24,6 +24,7 @@ from starlette.requests import Request
 from agentkit.errors import ConfigError
 from agentkit.checkpoint.models import CheckpointMeta
 from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
+from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
 from agentkit.tools import FatalToolExecutionError
 
@@ -3423,6 +3424,118 @@ class TestGetSession:
 
 
 class TestRemoteResultPublicationContract:
+    async def test_session_result_includes_final_answer_and_tool_activity_from_runtime_tape(
+        self, client: AsyncClient
+    ) -> None:
+        session = register_session(
+            "result-runtime-tape",
+            execution_binding=CloudWorkspaceBinding(
+                workspace_url="docker://agent-ws-result/workspace",
+                workspace_id="ws-runtime-result",
+            ),
+            provider_name="openai",
+            model_name="result-model",
+        )
+        tape = Tape(tape_id="runtime-tape")
+        tape.append(
+            Entry(kind="message", payload={"role": "user", "content": "fix it"})
+        )
+        tape.append(
+            Entry(
+                kind="tool_call",
+                payload={
+                    "id": "tool-1",
+                    "name": "shell_command",
+                    "arguments": {"command": "uv run pytest tests/foo.py -q"},
+                },
+            )
+        )
+        tape.append(
+            Entry(
+                kind="tool_result",
+                payload={"tool_call_id": "tool-1", "content": "1 passed"},
+            )
+        )
+        tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "assistant", "content": "Fixed and verified."},
+            )
+        )
+        session.runtime_ctx = SimpleNamespace(tape=tape)
+        session.tape_id = tape.tape_id
+
+        response = await client.get(f"/sessions/{session.id}/result")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["final_answer"] == "Fixed and verified."
+        assert (
+            data["verification_summary"]
+            == "Tool activity: shell_command: uv run pytest tests/foo.py -q"
+        )
+        assert data["failure_details"] is None
+
+    async def test_session_result_restores_persisted_tape_when_runtime_is_unloaded(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = register_session(
+            "result-persisted-tape",
+            execution_binding=CloudWorkspaceBinding(
+                workspace_url="docker://agent-ws-result/workspace",
+                workspace_id="ws-persisted-result",
+            ),
+            provider_name="openai",
+            model_name="result-model",
+            tape_id="persisted-tape",
+        )
+        tape = Tape(tape_id="persisted-tape")
+        tape.append(
+            Entry(kind="message", payload={"role": "user", "content": "try again"})
+        )
+        tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "assistant", "content": "Persisted answer."},
+            )
+        )
+        restored_tape_ids: list[str | None] = []
+
+        async def fake_restore_tape(tape_id: str | None) -> Tape | None:
+            restored_tape_ids.append(tape_id)
+            return tape
+
+        monkeypatch.setattr(session_manager, "_restore_tape", fake_restore_tape)
+
+        response = await client.get(f"/sessions/{session.id}/result")
+
+        assert response.status_code == 200
+        assert restored_tape_ids == ["persisted-tape"]
+        data = response.json()
+        assert data["final_answer"] == "Persisted answer."
+        assert data["verification_summary"] is None
+
+    async def test_session_result_includes_recorded_failure_details(
+        self, client: AsyncClient
+    ) -> None:
+        session = register_session(
+            "result-failed-session",
+            execution_binding=CloudWorkspaceBinding(
+                workspace_url="docker://agent-ws-result/workspace",
+                workspace_id="ws-failed-result",
+            ),
+        )
+        session.turn_status = "failed"
+        session.last_failure_details = "HTTP session turn failed: model timeout"
+
+        response = await client.get(f"/sessions/{session.id}/result")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "failed"
+        assert data["turn_status"] == "failed"
+        assert data["failure_details"] == "HTTP session turn failed: model timeout"
+
     async def test_session_result_returns_stable_contract_for_existing_session(
         self, client: AsyncClient
     ) -> None:
