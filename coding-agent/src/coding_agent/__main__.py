@@ -798,14 +798,15 @@ def _remote_run_once(
                 else:
                     raise
         else:
+            has_git_workspace_source = (
+                workspace_source is not None and workspace_source.get("kind") == "git"
+            )
             _print_remote_result_next_steps(
                 remote_name=name,
                 session_id=session_id,
                 repo_path=repo_path,
-                can_publish_branch=(
-                    workspace_source is not None
-                    and workspace_source.get("kind") == "git"
-                ),
+                can_diff_patch=has_git_workspace_source,
+                can_publish_branch=has_git_workspace_source,
             )
     if stream_error is not None:
         raise stream_error
@@ -916,6 +917,7 @@ def _print_remote_result_next_steps(
     remote_name: str,
     session_id: str,
     repo_path: Path | None,
+    can_diff_patch: bool,
     can_publish_branch: bool,
 ) -> None:
     click.echo(f"Remote session {session_id} left open for result inspection.")
@@ -934,36 +936,37 @@ def _print_remote_result_next_steps(
             ]
         )
     )
-    click.echo(
-        "Show changed files: "
-        + _format_cli_command(
-            [
-                "python",
-                "-m",
-                "coding_agent",
-                "remote",
-                "diff",
-                remote_name,
-                "--session",
-                session_id,
-            ]
+    if can_diff_patch:
+        click.echo(
+            "Show changed files: "
+            + _format_cli_command(
+                [
+                    "python",
+                    "-m",
+                    "coding_agent",
+                    "remote",
+                    "diff",
+                    remote_name,
+                    "--session",
+                    session_id,
+                ]
+            )
         )
-    )
-    click.echo(
-        "Export patch: "
-        + _format_cli_command(
-            [
-                "python",
-                "-m",
-                "coding_agent",
-                "remote",
-                "patch",
-                remote_name,
-                "--session",
-                session_id,
-            ]
+        click.echo(
+            "Export patch: "
+            + _format_cli_command(
+                [
+                    "python",
+                    "-m",
+                    "coding_agent",
+                    "remote",
+                    "patch",
+                    remote_name,
+                    "--session",
+                    session_id,
+                ]
+            )
         )
-    )
     if can_publish_branch:
         click.echo(
             "Publish review branch: "
