@@ -1126,6 +1126,113 @@ def remote_workspaces_list(name: str) -> None:
         )
 
 
+@remote_workspaces.command("status")
+@click.argument("name")
+@click.argument("workspace_id")
+def remote_workspaces_status(name: str, workspace_id: str) -> None:
+    """Show one remote workspace."""
+    from coding_agent.remote.client import get_remote, get_remote_workspace
+
+    endpoint = get_remote(name)
+    workspace = get_remote_workspace(endpoint, workspace_id)
+    for key in [
+        "workspace_id",
+        "status",
+        "session_id",
+        "provider",
+        "provider_instance_id",
+        "workspace_host_label",
+        "retention_policy",
+        "expires_at",
+        "is_local",
+        "updated_at",
+        "cleanup_error",
+    ]:
+        value = workspace.get(key)
+        if value is not None:
+            click.echo(f"{key}: {value}")
+
+
+@remote_workspaces.command("retain")
+@click.argument("name")
+@click.argument("workspace_id")
+@click.option(
+    "--policy",
+    "retention_policy",
+    default="ttl",
+    type=click.Choice(["delete_on_close", "ttl", "pinned", "manual"]),
+    show_default=True,
+)
+@click.option("--ttl", "ttl_seconds", type=int, default=None, help="TTL in seconds.")
+def remote_workspaces_retain(
+    name: str,
+    workspace_id: str,
+    retention_policy: str,
+    ttl_seconds: int | None,
+) -> None:
+    """Update remote workspace retention policy."""
+    from coding_agent.remote.client import get_remote, retain_remote_workspace
+
+    endpoint = get_remote(name)
+    result = retain_remote_workspace(
+        endpoint,
+        workspace_id,
+        retention_policy=retention_policy,
+        ttl_seconds=ttl_seconds,
+    )
+    click.echo(
+        "Workspace "
+        f"{result.get('workspace_id', workspace_id)} retained as "
+        f"{result.get('retention_policy', retention_policy)}"
+    )
+
+
+@remote_workspaces.command("pin")
+@click.argument("name")
+@click.argument("workspace_id")
+def remote_workspaces_pin(name: str, workspace_id: str) -> None:
+    """Pin a remote workspace."""
+    from coding_agent.remote.client import get_remote, pin_remote_workspace
+
+    endpoint = get_remote(name)
+    result = pin_remote_workspace(endpoint, workspace_id)
+    click.echo(f"Workspace {result.get('workspace_id', workspace_id)} pinned")
+
+
+@remote_workspaces.command("unpin")
+@click.argument("name")
+@click.argument("workspace_id")
+@click.option(
+    "--policy",
+    "retention_policy",
+    default=None,
+    type=click.Choice(["delete_on_close", "ttl"]),
+    help="Policy to apply after unpinning.",
+)
+@click.option("--ttl", "ttl_seconds", type=int, default=None, help="TTL in seconds.")
+def remote_workspaces_unpin(
+    name: str,
+    workspace_id: str,
+    retention_policy: str | None,
+    ttl_seconds: int | None,
+) -> None:
+    """Unpin a remote workspace."""
+    from coding_agent.remote.client import get_remote, unpin_remote_workspace
+
+    endpoint = get_remote(name)
+    result = unpin_remote_workspace(
+        endpoint,
+        workspace_id,
+        retention_policy=retention_policy,
+        ttl_seconds=ttl_seconds,
+    )
+    click.echo(
+        "Workspace "
+        f"{result.get('workspace_id', workspace_id)} unpinned to "
+        f"{result.get('retention_policy', retention_policy or 'default policy')}"
+    )
+
+
 @remote_workspaces.command("cleanup")
 @click.argument("name")
 @click.option("--stale", is_flag=True, help="Run server-side stale workspace GC.")

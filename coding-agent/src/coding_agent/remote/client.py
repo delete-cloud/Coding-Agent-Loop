@@ -219,6 +219,64 @@ def list_remote_workspaces(endpoint: RemoteEndpoint) -> list[dict[str, object]]:
     ]
 
 
+def get_remote_workspace(
+    endpoint: RemoteEndpoint, workspace_id: str
+) -> dict[str, object]:
+    return _get_remote_json(
+        endpoint,
+        f"/workspaces/{workspace_id}",
+        "get remote workspace",
+    )
+
+
+def retain_remote_workspace(
+    endpoint: RemoteEndpoint,
+    workspace_id: str,
+    *,
+    retention_policy: str,
+    ttl_seconds: int | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {"retention_policy": retention_policy}
+    if ttl_seconds is not None:
+        payload["ttl_seconds"] = ttl_seconds
+    return _post_remote_json(
+        endpoint,
+        f"/workspaces/{workspace_id}/retain",
+        "retain remote workspace",
+        json=payload,
+    )
+
+
+def pin_remote_workspace(
+    endpoint: RemoteEndpoint, workspace_id: str
+) -> dict[str, object]:
+    return _post_remote_json(
+        endpoint,
+        f"/workspaces/{workspace_id}/pin",
+        "pin remote workspace",
+    )
+
+
+def unpin_remote_workspace(
+    endpoint: RemoteEndpoint,
+    workspace_id: str,
+    *,
+    retention_policy: str | None = None,
+    ttl_seconds: int | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {}
+    if retention_policy is not None:
+        payload["retention_policy"] = retention_policy
+    if ttl_seconds is not None:
+        payload["ttl_seconds"] = ttl_seconds
+    return _post_remote_json(
+        endpoint,
+        f"/workspaces/{workspace_id}/unpin",
+        "unpin remote workspace",
+        json=payload if payload else None,
+    )
+
+
 def cleanup_stale_remote_workspaces(endpoint: RemoteEndpoint) -> int:
     data = _post_remote_json(endpoint, "/workspaces/gc", "cleanup stale workspaces")
     cleaned_count = data.get("cleaned_count")

@@ -834,7 +834,7 @@ def test_remote_workspaces_commands_call_admin_operations_api(
         ["remote", "add", "ops", "http://agent.example", "--token", "admin-token"],
         catch_exceptions=False,
     )
-    calls: list[tuple[str, str, dict[str, str]]] = []
+    calls: list[tuple[str, str, dict[str, str], dict[str, object] | None]] = []
 
     class FakeClient:
         def __init__(self, **kwargs: object) -> None:
@@ -848,27 +848,75 @@ def test_remote_workspaces_commands_call_admin_operations_api(
             return None
 
         def get(self, path: str) -> _RemoteFakeResponse:
-            calls.append(("get", path, self.headers))
-            assert path == "/workspaces"
+            calls.append(("get", path, self.headers, None))
+            if path == "/workspaces":
+                return _RemoteFakeResponse(
+                    {
+                        "workspaces": [
+                            {
+                                "workspace_id": "ws-1",
+                                "status": "stale",
+                                "updated_at": "2026-05-10T11:00:00Z",
+                            }
+                        ]
+                    }
+                )
+            assert path == "/workspaces/ws-1"
             return _RemoteFakeResponse(
                 {
-                    "workspaces": [
-                        {
-                            "workspace_id": "ws-1",
-                            "status": "stale",
-                            "updated_at": "2026-05-10T11:00:00Z",
-                        }
-                    ]
+                    "workspace_id": "ws-1",
+                    "status": "retained",
+                    "session_id": "sess-1",
+                    "provider": "docker",
+                    "provider_instance_id": "docker-a",
+                    "workspace_host_label": "docker-a.local",
+                    "retention_policy": "pinned",
+                    "is_local": True,
+                    "updated_at": "2026-05-10T11:00:00Z",
                 }
             )
 
-        def post(self, path: str) -> _RemoteFakeResponse:
-            calls.append(("post", path, self.headers))
-            assert path == "/workspaces/gc"
-            return _RemoteFakeResponse({"cleaned_count": 2})
+        def post(
+            self,
+            path: str,
+            json: dict[str, object] | None = None,
+        ) -> _RemoteFakeResponse:
+            calls.append(("post", path, self.headers, json))
+            if path == "/workspaces/gc":
+                return _RemoteFakeResponse({"cleaned_count": 2})
+            if path == "/workspaces/ws-1/retain":
+                assert json == {"retention_policy": "ttl", "ttl_seconds": 3600}
+                return _RemoteFakeResponse(
+                    {
+                        "workspace_id": "ws-1",
+                        "retention_policy": "ttl",
+                        "ttl_seconds": 3600,
+                        "status": "retained",
+                    }
+                )
+            if path == "/workspaces/ws-1/pin":
+                assert json is None
+                return _RemoteFakeResponse(
+                    {
+                        "workspace_id": "ws-1",
+                        "retention_policy": "pinned",
+                        "ttl_seconds": None,
+                        "status": "retained",
+                    }
+                )
+            assert path == "/workspaces/ws-1/unpin"
+            assert json == {"retention_policy": "delete_on_close"}
+            return _RemoteFakeResponse(
+                {
+                    "workspace_id": "ws-1",
+                    "retention_policy": "delete_on_close",
+                    "ttl_seconds": None,
+                    "status": "retained",
+                }
+            )
 
         def delete(self, path: str) -> _RemoteFakeResponse:
-            calls.append(("delete", path, self.headers))
+            calls.append(("delete", path, self.headers, None))
             assert path == "/workspaces/ws-1"
             return _RemoteFakeResponse({"workspace_id": "ws-1", "status": "cleaned"})
 
@@ -876,6 +924,22 @@ def test_remote_workspaces_commands_call_admin_operations_api(
 
     listed = runner.invoke(
         main, ["remote", "workspaces", "list", "ops"], catch_exceptions=False
+    )
+    status = runner.invoke(
+        main, ["remote", "workspaces", "status", "ops", "ws-1"], catch_exceptions=False
+    )
+    retained = runner.invoke(
+        main,
+        ["remote", "workspaces", "retain", "ops", "ws-1", "--ttl", "3600"],
+        catch_exceptions=False,
+    )
+    pinned = runner.invoke(
+        main, ["remote", "workspaces", "pin", "ops", "ws-1"], catch_exceptions=False
+    )
+    unpinned = runner.invoke(
+        main,
+        ["remote", "workspaces", "unpin", "ops", "ws-1", "--policy", "delete_on_close"],
+        catch_exceptions=False,
     )
     cleaned_stale = runner.invoke(
         main,
@@ -890,14 +954,42 @@ def test_remote_workspaces_commands_call_admin_operations_api(
 
     assert listed.exit_code == 0
     assert "ws-1\tstale\t2026-05-10T11:00:00Z" in listed.output
+    assert status.exit_code == 0
+    assert "workspace_id: ws-1" in status.output
+    assert "retention_policy: pinned" in status.output
+    assert retained.exit_code == 0
+    assert "Workspace ws-1 retained as ttl" in retained.output
+    assert pinned.exit_code == 0
+    assert "Workspace ws-1 pinned" in pinned.output
+    assert unpinned.exit_code == 0
+    assert "Workspace ws-1 unpinned to delete_on_close" in unpinned.output
     assert cleaned_stale.exit_code == 0
     assert "Cleaned 2 stale workspaces" in cleaned_stale.output
     assert removed.exit_code == 0
     assert "Cleaned workspace ws-1" in removed.output
     assert calls == [
-        ("get", "/workspaces", {"Authorization": "Bearer admin-token"}),
-        ("post", "/workspaces/gc", {"Authorization": "Bearer admin-token"}),
-        ("delete", "/workspaces/ws-1", {"Authorization": "Bearer admin-token"}),
+        ("get", "/workspaces", {"Authorization": "Bearer admin-token"}, None),
+        ("get", "/workspaces/ws-1", {"Authorization": "Bearer admin-token"}, None),
+        (
+            "post",
+            "/workspaces/ws-1/retain",
+            {"Authorization": "Bearer admin-token"},
+            {"retention_policy": "ttl", "ttl_seconds": 3600},
+        ),
+        (
+            "post",
+            "/workspaces/ws-1/pin",
+            {"Authorization": "Bearer admin-token"},
+            None,
+        ),
+        (
+            "post",
+            "/workspaces/ws-1/unpin",
+            {"Authorization": "Bearer admin-token"},
+            {"retention_policy": "delete_on_close"},
+        ),
+        ("post", "/workspaces/gc", {"Authorization": "Bearer admin-token"}, None),
+        ("delete", "/workspaces/ws-1", {"Authorization": "Bearer admin-token"}, None),
     ]
 
 
