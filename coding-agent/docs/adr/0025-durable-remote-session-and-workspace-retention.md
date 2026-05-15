@@ -1,6 +1,6 @@
 # ADR-0025: Persist remote session and workspace retention state
 
-**Status**: Proposed
+**Status**: Accepted / implemented through PRs #161-#171
 **Date**: 2026-05-14
 **Decision owner**: repository maintainer / current product owner
 
@@ -288,19 +288,25 @@ retention complements that model:
 
 ## Acceptance Criteria
 
-- [ ] `test_pg_workspace_store_round_trips_remote_workspace_record`
-- [ ] `test_workspace_record_requires_provider_instance_id_in_production`
-- [ ] `test_close_session_retains_workspace_when_policy_is_pinned`
-- [ ] `test_close_session_deletes_workspace_when_policy_is_delete_on_close`
-- [ ] `test_workspace_gc_skips_non_local_provider_instance`
-- [ ] `test_workspace_gc_marks_cleanup_failed_with_error_summary`
-- [ ] `test_workspace_list_reports_durable_remote_unavailable_state`
-- [ ] `test_remote_workspace_pin_and_unpin_update_retention_policy`
-- [ ] `test_cleaned_workspace_keeps_result_publication_metadata`
-- [ ] `uv run pytest tests/ui tests/coding_agent/environment -k "workspace_record or retention or provider_instance or pin or cleanup_failed" -v`
-- [ ] `uv run basedpyright --level error src/coding_agent/ui src/coding_agent/environment`
+- [x] `test_pg_workspace_store_round_trips_remote_workspace_record`
+- [x] `test_workspace_record_requires_provider_instance_id_in_production`
+- [x] `test_close_session_retains_workspace_when_policy_is_pinned`
+- [x] `test_close_session_deletes_workspace_when_policy_is_delete_on_close`
+- [x] `test_workspace_gc_skips_non_local_provider_instance`
+- [x] `test_workspace_gc_marks_cleanup_failed_with_error_summary`
+- [x] `test_workspace_list_reports_durable_remote_unavailable_state`
+- [x] `test_remote_workspace_pin_and_unpin_update_retention_policy`
+- [x] `test_cleaned_workspace_keeps_result_publication_metadata`
+- [x] `uv run pytest tests/ui tests/coding_agent/environment tests/cli/test_remote_client.py -k "workspace_record or retention or provider_instance or pin or cleanup_failed or result_refs or workspaces" -q`
+- [x] `uv run basedpyright --level error src/coding_agent/ui src/coding_agent/environment`
 
 ## Implementation Plan
+
+Implemented in PRs #161 through #171. PRs #161-#170 landed the ADR, HTTP
+contracts, PostgreSQL workspace metadata store, production validation, retention
+policy behavior on close, durable workspace list/status, durable GC, admin
+retention operations, and result/publication refs. PR #171 added the CLI
+thin-client commands for workspace status, retain, pin, and unpin.
 
 ### PR 1: ADR and schema contracts
 
