@@ -1461,7 +1461,7 @@ def remote_publish(
         if isinstance(pr_url, str) and pr_url:
             click.echo(f"Published PR {pr_url}")
             click.echo(f"Branch: {published_branch}")
-        elif status in {"unsupported", "failed"}:
+        elif status in {"partial", "unsupported", "failed"}:
             error = publication.get("error")
             if isinstance(error, str) and error:
                 click.echo(error)
@@ -1469,9 +1469,15 @@ def remote_publish(
         else:
             raise click.ClickException("Remote PR publication did not complete")
     else:
-        if status != "published":
+        if status == "partial":
+            error = publication.get("error")
+            if isinstance(error, str) and error:
+                click.echo(error)
+            click.echo(f"Partial branch publication {published_branch}")
+        elif status != "published":
             raise click.ClickException("Remote branch publication did not complete")
-        click.echo(f"Published branch {published_branch}")
+        else:
+            click.echo(f"Published branch {published_branch}")
     if isinstance(pushed_ref, str) and pushed_ref:
         click.echo(f"Ref: {pushed_ref}")
     click.echo(f"Commit: {commit_sha}")

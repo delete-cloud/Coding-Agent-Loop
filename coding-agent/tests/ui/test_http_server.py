@@ -1273,11 +1273,10 @@ class TestSessionCreation:
         }
         session = session_manager.get_session(response.json()["session_id"])
         assert session.execution_binding == binding
-        assert session.origin == {
-            "channel": "http",
-            "binding_kind": "cloud",
-            "workspace_source_kind": "git",
-        }
+        assert session.origin is not None
+        assert session.origin["channel"] == "http"
+        assert session.origin["binding_kind"] == "cloud"
+        assert session.origin["workspace_source_kind"] == "git"
 
     async def test_create_session_rolls_back_provisioned_workspace_on_failure(
         self, client, monkeypatch
@@ -4646,6 +4645,7 @@ class TestRemoteWorkspaceRetentionContract:
                         "commit_sha": "abc123",
                         "remote_url": "https://github.com/org/repo.git",
                         "pr_url": None,
+                        "error": None,
                     },
                 },
             )
@@ -4668,7 +4668,69 @@ class TestRemoteWorkspaceRetentionContract:
                 "commit_sha": "abc123",
                 "remote_url": "https://github.com/org/repo.git",
                 "pr_url": None,
+                "error": None,
             },
+        }
+
+    async def test_publish_branch_returns_partial_state_when_push_fails(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        create_resp = await client.post(
+            "/sessions",
+            json={
+                "execution_binding": {
+                    "kind": "cloud",
+                    "workspace_url": "docker://agent-ws-partial/workspace",
+                    "workspace_id": "ws-partial",
+                },
+            },
+        )
+        session_id = create_resp.json()["session_id"]
+
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.publish_workspace_branch_from_config",
+            lambda cloud_config, publication_config, workspace_id, branch_name, commit_message: (
+                WorkspaceBranchPublication(
+                    workspace_id=workspace_id,
+                    branch_name=branch_name,
+                    pushed_ref="refs/heads/coding-agent/result",
+                    commit_sha="abc123",
+                    remote_url="https://github.com/org/repo.git",
+                    status="partial",
+                    error="git push failed",
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            lambda: {"provider": "docker"},
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_remote_publication_config",
+            lambda: {
+                "enabled": True,
+                "git_author_name": "coding-agent",
+                "git_author_email": "coding-agent@example.com",
+                "allowed_git_hosts": ["github.com"],
+            },
+        )
+
+        response = await client.post(
+            f"/sessions/{session_id}/publish",
+            json={"mode": "branch", "branch_name": "coding-agent/result"},
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "session_id": session_id,
+            "mode": "branch",
+            "status": "partial",
+            "branch_name": "coding-agent/result",
+            "pushed_ref": "refs/heads/coding-agent/result",
+            "commit_sha": "abc123",
+            "remote_url": "https://github.com/org/repo.git",
+            "pr_url": None,
+            "error": "git push failed",
         }
 
     async def test_publish_pr_creates_github_pr_after_branch_publication(

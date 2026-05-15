@@ -1014,12 +1014,13 @@ async def _persist_workspace_publication_refs(
     result_refs = dict(record.result_refs)
     result_refs["publication"] = {
         "mode": mode,
-        "status": "published",
+        "status": publication.status,
         "branch_name": publication.branch_name,
         "pushed_ref": publication.pushed_ref,
         "commit_sha": publication.commit_sha,
         "remote_url": publication.remote_url,
         "pr_url": pr_url,
+        "error": publication.error,
     }
     await session_manager.update_workspace_record_result_refs(
         record.workspace_record_id,
@@ -2394,13 +2395,13 @@ async def publish_session_result(
     return PublishSessionResponse(
         session_id=session_id,
         mode="branch",
-        status="published",
+        status=publication.status,
         branch_name=publication.branch_name,
         pushed_ref=publication.pushed_ref,
         commit_sha=publication.commit_sha,
         remote_url=publication.remote_url,
         pr_url=None,
-        error=None,
+        error=publication.error,
     )
 
 
@@ -2409,6 +2410,24 @@ async def _publish_session_pr_response(
     publication: WorkspaceBranchPublication,
     publication_config: dict[str, Any],
 ) -> PublishSessionResponse:
+    if publication.status == "partial":
+        await _persist_workspace_publication_refs(
+            session_id,
+            publication=publication,
+            mode="branch",
+            pr_url=None,
+        )
+        return PublishSessionResponse(
+            session_id=session_id,
+            mode="pr",
+            status="partial",
+            branch_name=publication.branch_name,
+            pushed_ref=publication.pushed_ref,
+            commit_sha=publication.commit_sha,
+            remote_url=publication.remote_url,
+            pr_url=None,
+            error=publication.error,
+        )
     try:
         pr_url = await _create_github_pull_request(
             session_id,

@@ -21,6 +21,7 @@ WorkspaceStatus: TypeAlias = Literal[
 WorkspaceDiffStatus: TypeAlias = Literal[
     "added", "modified", "deleted", "renamed", "binary", "unknown"
 ]
+WorkspacePublicationStatus: TypeAlias = Literal["published", "partial"]
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,8 @@ class WorkspaceBranchPublication:
     pushed_ref: str
     commit_sha: str
     remote_url: str
+    status: WorkspacePublicationStatus = "published"
+    error: str | None = None
 
 
 class WorkspaceProvider(Protocol):

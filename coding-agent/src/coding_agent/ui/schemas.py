@@ -179,7 +179,7 @@ class PublishSessionRequest(BaseModel):
 class PublishSessionResponse(BaseModel):
     session_id: str
     mode: Literal["branch", "pr"]
-    status: Literal["published", "unsupported", "failed"]
+    status: Literal["published", "partial", "unsupported", "failed"]
     branch_name: str | None = None
     pushed_ref: str | None = None
     commit_sha: str | None = None
