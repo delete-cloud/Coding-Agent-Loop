@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import types
+from datetime import datetime
 from pathlib import Path
 from typing import cast
 from unittest.mock import patch
@@ -1800,6 +1801,16 @@ class FakeWorkspaceMetadataStore:
         cleanup_error: str | None = None,
     ) -> None:
         self.status_updates.append((workspace_record_id, status, cleanup_error))
+
+    async def update_retention(
+        self,
+        workspace_record_id: str,
+        *,
+        retention_policy: WorkspaceRetentionPolicy,
+        expires_at: datetime | None,
+        status: WorkspaceStatus,
+    ) -> None:
+        del workspace_record_id, retention_policy, expires_at, status
 
 
 def _workspace_record(

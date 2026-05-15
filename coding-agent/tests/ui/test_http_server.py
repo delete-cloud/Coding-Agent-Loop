@@ -4000,6 +4000,7 @@ class FakeWorkspaceMetadataStore:
     def __init__(self, records: list[WorkspaceRecord]) -> None:
         self.records = records
         self.status_updates: list[tuple[str, str, str | None]] = []
+        self.retention_updates: list[tuple[str, str, datetime | None, str]] = []
 
     async def list(self) -> list[WorkspaceRecord]:
         return self.records
@@ -4029,6 +4030,18 @@ class FakeWorkspaceMetadataStore:
         cleanup_error: str | None = None,
     ) -> None:
         self.status_updates.append((workspace_record_id, status, cleanup_error))
+
+    async def update_retention(
+        self,
+        workspace_record_id: str,
+        *,
+        retention_policy: str,
+        expires_at: datetime | None,
+        status: str,
+    ) -> None:
+        self.retention_updates.append(
+            (workspace_record_id, retention_policy, expires_at, status)
+        )
 
 
 class TestRemoteWorkspaceRetentionContract:
@@ -4216,6 +4229,130 @@ class TestRemoteWorkspaceRetentionContract:
 
         assert response.status_code == 404
         assert response.json() == {"detail": "Workspace not found: missing"}
+
+    async def test_workspace_pin_updates_durable_retention_policy(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_remote_retention_config",
+            lambda: {"enabled": True, "default_policy": "delete_on_close"},
+        )
+        store = FakeWorkspaceMetadataStore(
+            [
+                WorkspaceRecord(
+                    workspace_record_id="wr-pin",
+                    workspace_id="ws-pin",
+                    session_id="session-pin",
+                    provider="docker",
+                    provider_instance_id="docker-local",
+                    workspace_root_ref="/workspaces",
+                    workspace_host_label="local-host",
+                    owner_label="owner:test",
+                    source_kind="git",
+                    status="active",
+                    retention_policy="delete_on_close",
+                )
+            ]
+        )
+        session_manager.configure_workspace_metadata_store(store)
+
+        response = await client.post("/workspaces/ws-pin/pin")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "workspace_id": "ws-pin",
+            "retention_policy": "pinned",
+            "ttl_seconds": None,
+            "status": "retained",
+        }
+        assert store.retention_updates == [("wr-pin", "pinned", None, "retained")]
+
+    async def test_workspace_retain_ttl_uses_request_ttl(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_remote_retention_config",
+            lambda: {"enabled": True, "default_policy": "delete_on_close"},
+        )
+        store = FakeWorkspaceMetadataStore(
+            [
+                WorkspaceRecord(
+                    workspace_record_id="wr-retain",
+                    workspace_id="ws-retain",
+                    session_id="session-retain",
+                    provider="docker",
+                    provider_instance_id="docker-local",
+                    workspace_root_ref="/workspaces",
+                    workspace_host_label="local-host",
+                    owner_label="owner:test",
+                    source_kind="git",
+                    status="active",
+                    retention_policy="delete_on_close",
+                )
+            ]
+        )
+        session_manager.configure_workspace_metadata_store(store)
+
+        response = await client.post(
+            "/workspaces/ws-retain/retain",
+            json={"retention_policy": "ttl", "ttl_seconds": 3600},
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "workspace_id": "ws-retain",
+            "retention_policy": "ttl",
+            "ttl_seconds": 3600,
+            "status": "retained",
+        }
+        assert len(store.retention_updates) == 1
+        workspace_record_id, retention_policy, expires_at, status = (
+            store.retention_updates[0]
+        )
+        assert workspace_record_id == "wr-retain"
+        assert retention_policy == "ttl"
+        assert expires_at is not None
+        assert expires_at > datetime.now(UTC)
+        assert status == "retained"
+
+    async def test_workspace_unpin_uses_configured_default_policy(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_remote_retention_config",
+            lambda: {"enabled": True, "default_policy": "delete_on_close"},
+        )
+        store = FakeWorkspaceMetadataStore(
+            [
+                WorkspaceRecord(
+                    workspace_record_id="wr-unpin",
+                    workspace_id="ws-unpin",
+                    session_id="session-unpin",
+                    provider="docker",
+                    provider_instance_id="docker-local",
+                    workspace_root_ref="/workspaces",
+                    workspace_host_label="local-host",
+                    owner_label="owner:test",
+                    source_kind="git",
+                    status="retained",
+                    retention_policy="pinned",
+                )
+            ]
+        )
+        session_manager.configure_workspace_metadata_store(store)
+
+        response = await client.post("/workspaces/ws-unpin/unpin")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "workspace_id": "ws-unpin",
+            "retention_policy": "delete_on_close",
+            "ttl_seconds": None,
+            "status": "retained",
+        }
+        assert store.retention_updates == [
+            ("wr-unpin", "delete_on_close", None, "retained")
+        ]
 
     async def test_workspace_diff_returns_provider_result(
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch

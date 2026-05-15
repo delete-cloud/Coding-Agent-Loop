@@ -10,7 +10,7 @@ import re
 import socket
 import uuid
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, cast
 from collections.abc import AsyncIterator
@@ -83,6 +83,7 @@ from coding_agent.ui.schemas import (
     WorkspacePatchResponse,
     WorkspaceRetentionRequest,
     WorkspaceRetentionResponse,
+    WorkspaceRetentionPolicy,
     WorkspaceSummarySchema,
     WorkspaceUnpinRequest,
 )
@@ -938,6 +939,56 @@ def _workspace_record_summary_response(
             local_provider_instance_id is not None
             and record.provider_instance_id == local_provider_instance_id
         ),
+    )
+
+
+def _retention_expires_at(
+    *,
+    retention_policy: WorkspaceRetentionPolicy,
+    ttl_seconds: int | None,
+) -> datetime | None:
+    if retention_policy != "ttl":
+        return None
+    if ttl_seconds is None:
+        configured_ttl = _load_remote_retention_config().get("default_ttl_seconds")
+        if not isinstance(configured_ttl, int) or configured_ttl <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "ttl_seconds is required when retention_policy=ttl and "
+                    "remote_retention.default_ttl_seconds is not configured"
+                ),
+            )
+        ttl_seconds = configured_ttl
+    return datetime.now(UTC) + timedelta(seconds=ttl_seconds)
+
+
+async def _update_workspace_retention(
+    workspace_id: str,
+    *,
+    retention_policy: WorkspaceRetentionPolicy,
+    ttl_seconds: int | None,
+) -> WorkspaceRetentionResponse:
+    record = await session_manager.load_workspace_record_by_workspace_id(workspace_id)
+    if record is None:
+        raise HTTPException(
+            status_code=404, detail=f"Workspace not found: {workspace_id}"
+        )
+    expires_at = _retention_expires_at(
+        retention_policy=retention_policy,
+        ttl_seconds=ttl_seconds,
+    )
+    await session_manager.update_workspace_record_retention(
+        record.workspace_record_id,
+        retention_policy=retention_policy,
+        expires_at=expires_at,
+        status="retained",
+    )
+    return WorkspaceRetentionResponse(
+        workspace_id=record.workspace_id,
+        retention_policy=retention_policy,
+        ttl_seconds=ttl_seconds,
+        status="retained",
     )
 
 
@@ -1854,9 +1905,15 @@ async def retain_workspace(
     body: WorkspaceRetentionRequest,
     auth_context: AuthContext | None = Depends(auth_context_from_headers),
 ) -> WorkspaceRetentionResponse:
-    del request, workspace_id, body
+    del request
     _require_admin_context(auth_context)
-    raise _durable_workspace_retention_not_implemented()
+    if not _remote_retention_enabled():
+        raise _durable_workspace_retention_not_implemented()
+    return await _update_workspace_retention(
+        workspace_id,
+        retention_policy=body.retention_policy,
+        ttl_seconds=body.ttl_seconds,
+    )
 
 
 @app.post("/workspaces/{workspace_id}/pin", response_model=WorkspaceRetentionResponse)
@@ -1866,9 +1923,15 @@ async def pin_workspace(
     workspace_id: str,
     auth_context: AuthContext | None = Depends(auth_context_from_headers),
 ) -> WorkspaceRetentionResponse:
-    del request, workspace_id
+    del request
     _require_admin_context(auth_context)
-    raise _durable_workspace_retention_not_implemented()
+    if not _remote_retention_enabled():
+        raise _durable_workspace_retention_not_implemented()
+    return await _update_workspace_retention(
+        workspace_id,
+        retention_policy="pinned",
+        ttl_seconds=None,
+    )
 
 
 @app.post("/workspaces/{workspace_id}/unpin", response_model=WorkspaceRetentionResponse)
@@ -1879,9 +1942,28 @@ async def unpin_workspace(
     body: WorkspaceUnpinRequest | None = None,
     auth_context: AuthContext | None = Depends(auth_context_from_headers),
 ) -> WorkspaceRetentionResponse:
-    del request, workspace_id, body
+    del request
     _require_admin_context(auth_context)
-    raise _durable_workspace_retention_not_implemented()
+    if not _remote_retention_enabled():
+        raise _durable_workspace_retention_not_implemented()
+    retention_policy: Literal["delete_on_close", "ttl"]
+    ttl_seconds: int | None
+    if body is not None and body.retention_policy is not None:
+        retention_policy = body.retention_policy
+        ttl_seconds = body.ttl_seconds
+    else:
+        default_policy = _load_remote_retention_config().get("default_policy")
+        if default_policy == "ttl":
+            retention_policy = "ttl"
+            ttl_seconds = None if body is None else body.ttl_seconds
+        else:
+            retention_policy = "delete_on_close"
+            ttl_seconds = None
+    return await _update_workspace_retention(
+        workspace_id,
+        retention_policy=retention_policy,
+        ttl_seconds=ttl_seconds,
+    )
 
 
 @app.delete("/workspaces/{workspace_id}", response_model=WorkspaceCleanupResponse)

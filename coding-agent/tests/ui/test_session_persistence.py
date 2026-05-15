@@ -433,6 +433,17 @@ async def test_pg_workspace_store_round_trips_remote_workspace_record() -> None:
                 }
                 return "INSERT 0 1"
             if "UPDATE agent_remote_workspaces" in query:
+                if "retention_policy = $1" in query:
+                    retention_policy, expires_at, status, workspace_record_id = args
+                    assert isinstance(workspace_record_id, str)
+                    if workspace_record_id not in self.workspaces:
+                        return "UPDATE 0"
+                    self.workspaces[workspace_record_id]["retention_policy"] = (
+                        retention_policy
+                    )
+                    self.workspaces[workspace_record_id]["expires_at"] = expires_at
+                    self.workspaces[workspace_record_id]["status"] = status
+                    return "UPDATE 1"
                 status, cleanup_error, workspace_record_id = args
                 assert isinstance(workspace_record_id, str)
                 if workspace_record_id not in self.workspaces:
@@ -529,6 +540,13 @@ async def test_pg_workspace_store_round_trips_remote_workspace_record() -> None:
         cleanup_error="docker unavailable",
     )
     failed = await store.load("wr-1")
+    await store.update_retention(
+        "wr-1",
+        retention_policy="pinned",
+        expires_at=None,
+        status="retained",
+    )
+    retained = await store.load("wr-1")
 
     expected_record = replace(
         record,
@@ -542,6 +560,10 @@ async def test_pg_workspace_store_round_trips_remote_workspace_record() -> None:
     assert failed is not None
     assert failed.status == "cleanup_failed"
     assert failed.cleanup_error == "docker unavailable"
+    assert retained is not None
+    assert retained.retention_policy == "pinned"
+    assert retained.expires_at is None
+    assert retained.status == "retained"
     assert any(
         "CREATE TABLE IF NOT EXISTS agent_remote_workspaces" in query
         for query, _args in pg_pool.pool.executed
