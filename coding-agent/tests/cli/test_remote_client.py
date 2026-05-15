@@ -1538,6 +1538,76 @@ def test_remote_publish_branch_prints_publication_result(
     ]
 
 
+def test_remote_publish_branch_prints_partial_publication_result(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_path = tmp_path / "remotes.json"
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example", "--token", "secret-token"],
+        catch_exceptions=False,
+    )
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "session_id": "sess-123",
+                "mode": "branch",
+                "status": "partial",
+                "branch_name": "coding-agent/result",
+                "pushed_ref": "refs/heads/coding-agent/result",
+                "commit_sha": "abc123",
+                "remote_url": "https://github.com/org/repo.git",
+                "pr_url": None,
+                "error": "git push failed",
+            }
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            headers = kwargs.get("headers")
+            self.headers = headers if isinstance(headers, dict) else {}
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def post(
+            self, path: str, json: dict[str, object] | None = None
+        ) -> FakeResponse:
+            del path, json
+            return FakeResponse()
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+
+    result = runner.invoke(
+        main,
+        [
+            "remote",
+            "publish",
+            "dev",
+            "--session",
+            "sess-123",
+            "--branch",
+            "coding-agent/result",
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "git push failed" in result.output
+    assert "Partial branch publication coding-agent/result" in result.output
+    assert "Ref: refs/heads/coding-agent/result" in result.output
+    assert "Commit: abc123" in result.output
+    assert "Remote: https://github.com/org/repo.git" in result.output
+
+
 def test_remote_publish_pr_prints_pr_result(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "remotes.json"
     monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
@@ -1677,6 +1747,76 @@ def test_remote_publish_pr_reports_branch_when_pr_creation_fails(
 
     assert result.exit_code != 0
     assert "GitHub PR publication failed: github unavailable" in result.output
+    assert "Branch: coding-agent/result" in result.output
+    assert "Ref: refs/heads/coding-agent/result" in result.output
+    assert "Commit: abc123" in result.output
+    assert "Remote: https://github.com/org/repo.git" in result.output
+
+
+def test_remote_publish_pr_reports_branch_when_branch_push_is_partial(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_path = tmp_path / "remotes.json"
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example", "--token", "secret-token"],
+        catch_exceptions=False,
+    )
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "session_id": "sess-123",
+                "mode": "pr",
+                "status": "partial",
+                "branch_name": "coding-agent/result",
+                "pushed_ref": "refs/heads/coding-agent/result",
+                "commit_sha": "abc123",
+                "remote_url": "https://github.com/org/repo.git",
+                "pr_url": None,
+                "error": "git push failed",
+            }
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            headers = kwargs.get("headers")
+            self.headers = headers if isinstance(headers, dict) else {}
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def post(
+            self, path: str, json: dict[str, object] | None = None
+        ) -> FakeResponse:
+            del path, json
+            return FakeResponse()
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+
+    result = runner.invoke(
+        main,
+        [
+            "remote",
+            "publish",
+            "dev",
+            "--session",
+            "sess-123",
+            "--branch",
+            "coding-agent/result",
+            "--pr",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "git push failed" in result.output
     assert "Branch: coding-agent/result" in result.output
     assert "Ref: refs/heads/coding-agent/result" in result.output
     assert "Commit: abc123" in result.output

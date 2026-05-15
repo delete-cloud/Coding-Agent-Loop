@@ -402,7 +402,7 @@ def publish_remote_result(
         "publish remote workspace result",
         json={"mode": mode, "branch_name": branch_name},
     )
-    if data.get("status") not in {"published", "unsupported", "failed"}:
+    if data.get("status") not in {"published", "partial", "unsupported", "failed"}:
         raise click.ClickException(
             "Remote result publication response has invalid status"
         )

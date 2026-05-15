@@ -1292,19 +1292,31 @@ def _publish_git_workspace_branch(
         "git rev-parse",
     ).strip()
     pushed_ref = f"refs/heads/{branch_name}"
-    _run_git_publish_command(
-        provider_config,
-        workspace_root,
-        ["push", "origin", f"HEAD:{pushed_ref}"],
-        "git push",
-        extra_env=push_env,
-    )
+    redacted_remote_url = _redact_git_remote_url(remote_url)
+    try:
+        _run_git_publish_command(
+            provider_config,
+            workspace_root,
+            ["push", "origin", f"HEAD:{pushed_ref}"],
+            "git push",
+            extra_env=push_env,
+        )
+    except ValueError as exc:
+        return WorkspaceBranchPublication(
+            workspace_id=workspace_id,
+            branch_name=branch_name,
+            pushed_ref=pushed_ref,
+            commit_sha=commit_sha,
+            remote_url=redacted_remote_url,
+            status="partial",
+            error=str(exc),
+        )
     return WorkspaceBranchPublication(
         workspace_id=workspace_id,
         branch_name=branch_name,
         pushed_ref=pushed_ref,
         commit_sha=commit_sha,
-        remote_url=_redact_git_remote_url(remote_url),
+        remote_url=redacted_remote_url,
     )
 
 
