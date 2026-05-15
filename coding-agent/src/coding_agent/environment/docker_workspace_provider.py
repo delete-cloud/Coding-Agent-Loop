@@ -1391,6 +1391,12 @@ def _validate_publication_remote_url(
         raise ValueError("Git workspace remote.origin.url must use https")
     if parsed.hostname is None:
         raise ValueError("Git workspace remote.origin.url must include a host")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("Git workspace remote.origin.url must not include credentials")
+    if parsed.query or parsed.fragment:
+        raise ValueError(
+            "Git workspace remote.origin.url must not include query or fragment"
+        )
     allowed_git_hosts = publication_config.get("allowed_git_hosts")
     if allowed_git_hosts is None:
         raise ValueError("remote_publication.allowed_git_hosts must be configured")
