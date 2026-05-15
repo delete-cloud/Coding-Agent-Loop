@@ -21,6 +21,7 @@ dependencies = [
     "sse-starlette>=1.6.0",
     "slowapi>=0.1.9",
     "limits>=3.0.0",
+    "asyncpg>=0.30.0",
 ]
 
 [project.optional-dependencies]

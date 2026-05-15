@@ -116,6 +116,8 @@ class CancelTurnResult:
 
 
 class WorkspaceMetadataStoreProtocol(Protocol):
+    async def save(self, record: WorkspaceRecord) -> None: ...
+
     async def list(self) -> list[WorkspaceRecord]: ...
 
     async def load_by_workspace_id(
@@ -920,6 +922,58 @@ class SessionManager:
             cast(dict[str, Any], session.to_store_data()),
         )
 
+    async def _persist_workspace_record_for_session(self, session: Session) -> None:
+        store = self._workspace_metadata_store
+        if store is None:
+            return
+        binding = session.execution_binding
+        if not isinstance(binding, CloudWorkspaceBinding):
+            return
+        origin = session.origin or {}
+        if (
+            origin.get("binding_kind") != "cloud"
+            or origin.get("workspace_source_kind") is None
+        ):
+            return
+
+        provider = origin.get("workspace_provider") or "docker"
+        provider_instance_id = origin.get("provider_instance_id")
+        workspace_root_ref = origin.get("workspace_root_ref")
+        workspace_host_label = origin.get("workspace_host_label")
+        owner_label = origin.get("owner_label")
+        source_kind = origin.get("workspace_source_kind")
+        if (
+            not isinstance(provider, str)
+            or not isinstance(provider_instance_id, str)
+            or not isinstance(workspace_root_ref, str)
+            or not isinstance(workspace_host_label, str)
+            or not isinstance(owner_label, str)
+            or not isinstance(source_kind, str)
+        ):
+            raise RuntimeError(
+                "cloud workspace session is missing durable workspace metadata"
+            )
+
+        source_ref: dict[str, JSONValue] = {}
+        if binding.runtime_profile is not None:
+            source_ref["runtime_profile"] = binding.runtime_profile
+        await store.save(
+            WorkspaceRecord(
+                workspace_record_id=f"{session.id}:{binding.workspace_id}",
+                workspace_id=binding.workspace_id,
+                session_id=session.id,
+                provider=provider,
+                provider_instance_id=provider_instance_id,
+                workspace_root_ref=workspace_root_ref,
+                workspace_host_label=workspace_host_label,
+                owner_label=owner_label,
+                source_kind=source_kind,
+                source_ref=source_ref,
+                status="active",
+                retention_policy="delete_on_close",
+            )
+        )
+
     async def _acquire_owner_for_session(self, session_id: str) -> None:
         if self._owner_store is None:
             return
@@ -1430,9 +1484,19 @@ class SessionManager:
         async with self._lock:
             try:
                 await self._persist_session_async(session)
+                await self._persist_workspace_record_for_session(session)
                 await self._acquire_owner_for_session(session_id)
             except BaseException:
                 self._session_cache.pop(session_id, None)
+                try:
+                    await self._release_owner_lease_for_session(session_id)
+                except asyncio.CancelledError:
+                    pass
+                except BaseException:
+                    logger.exception(
+                        "Failed to release partially created owner lease during rollback: %s",
+                        session_id,
+                    )
                 try:
                     await self._run_store_io(self._store.delete, session_id)
                 except asyncio.CancelledError:
