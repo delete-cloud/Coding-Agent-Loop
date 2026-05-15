@@ -935,6 +935,7 @@ def _workspace_record_summary_response(
         retention_policy=record.retention_policy,
         expires_at=record.expires_at,
         cleanup_error=record.cleanup_error,
+        result_refs=record.result_refs,
         is_local=(
             local_provider_instance_id is not None
             and record.provider_instance_id == local_provider_instance_id
@@ -989,6 +990,40 @@ async def _update_workspace_retention(
         retention_policy=retention_policy,
         ttl_seconds=ttl_seconds,
         status="retained",
+    )
+
+
+async def _persist_workspace_publication_refs(
+    session_id: str,
+    *,
+    publication: WorkspaceBranchPublication,
+    mode: Literal["branch", "pr"],
+    pr_url: str | None,
+) -> None:
+    if not _remote_retention_enabled():
+        return
+    session = await session_manager.get_session_async(session_id)
+    binding = session.execution_binding
+    if not isinstance(binding, CloudWorkspaceBinding):
+        return
+    record = await session_manager.load_workspace_record_by_workspace_id(
+        binding.workspace_id
+    )
+    if record is None:
+        return
+    result_refs = dict(record.result_refs)
+    result_refs["publication"] = {
+        "mode": mode,
+        "status": "published",
+        "branch_name": publication.branch_name,
+        "pushed_ref": publication.pushed_ref,
+        "commit_sha": publication.commit_sha,
+        "remote_url": publication.remote_url,
+        "pr_url": pr_url,
+    }
+    await session_manager.update_workspace_record_result_refs(
+        record.workspace_record_id,
+        result_refs=result_refs,
     )
 
 
@@ -2334,6 +2369,12 @@ async def publish_session_result(
             publication_config,
         )
 
+    await _persist_workspace_publication_refs(
+        session_id,
+        publication=publication,
+        mode="branch",
+        pr_url=None,
+    )
     return PublishSessionResponse(
         session_id=session_id,
         mode="branch",
@@ -2359,6 +2400,12 @@ async def _publish_session_pr_response(
             publication_config,
         )
     except GitHubPrUnsupportedError as exc:
+        await _persist_workspace_publication_refs(
+            session_id,
+            publication=publication,
+            mode="branch",
+            pr_url=None,
+        )
         return PublishSessionResponse(
             session_id=session_id,
             mode="pr",
@@ -2371,6 +2418,12 @@ async def _publish_session_pr_response(
             error=str(exc),
         )
     except GitHubPrPublicationError as exc:
+        await _persist_workspace_publication_refs(
+            session_id,
+            publication=publication,
+            mode="branch",
+            pr_url=None,
+        )
         return PublishSessionResponse(
             session_id=session_id,
             mode="pr",
@@ -2382,6 +2435,12 @@ async def _publish_session_pr_response(
             pr_url=None,
             error=str(exc),
         )
+    await _persist_workspace_publication_refs(
+        session_id,
+        publication=publication,
+        mode="pr",
+        pr_url=pr_url,
+    )
     return PublishSessionResponse(
         session_id=session_id,
         mode="pr",

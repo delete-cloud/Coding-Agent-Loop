@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import types
+from dataclasses import replace
 from types import SimpleNamespace
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
@@ -44,7 +45,7 @@ from coding_agent.ui.execution_binding import (
 )
 from coding_agent.wire.local import LocalWire
 from coding_agent.ui.session_manager import Session
-from coding_agent.ui.workspace_store import WorkspaceRecord
+from coding_agent.ui.workspace_store import JSONValue, WorkspaceRecord
 from coding_agent.ui.session_owner_store import SessionOwnerRecord
 from coding_agent.ui.session_owner_store import SessionOwnershipConflictError
 from coding_agent.ui.http_server import (
@@ -4001,6 +4002,7 @@ class FakeWorkspaceMetadataStore:
         self.records = records
         self.status_updates: list[tuple[str, str, str | None]] = []
         self.retention_updates: list[tuple[str, str, datetime | None, str]] = []
+        self.result_ref_updates: list[tuple[str, dict[str, JSONValue]]] = []
 
     async def list(self) -> list[WorkspaceRecord]:
         return self.records
@@ -4042,6 +4044,14 @@ class FakeWorkspaceMetadataStore:
         self.retention_updates.append(
             (workspace_record_id, retention_policy, expires_at, status)
         )
+
+    async def update_result_refs(
+        self,
+        workspace_record_id: str,
+        *,
+        result_refs: dict[str, JSONValue],
+    ) -> None:
+        self.result_ref_updates.append((workspace_record_id, result_refs))
 
 
 class TestRemoteWorkspaceRetentionContract:
@@ -4153,6 +4163,7 @@ class TestRemoteWorkspaceRetentionContract:
                 "retention_policy": "pinned",
                 "expires_at": None,
                 "cleanup_error": None,
+                "result_refs": {},
                 "is_local": True,
             },
             {
@@ -4167,6 +4178,7 @@ class TestRemoteWorkspaceRetentionContract:
                 "retention_policy": "ttl",
                 "expires_at": None,
                 "cleanup_error": None,
+                "result_refs": {},
                 "is_local": False,
             },
         ]
@@ -4546,6 +4558,114 @@ class TestRemoteWorkspaceRetentionContract:
             "remote_url": "https://github.com/org/repo.git",
             "pr_url": None,
             "error": None,
+        }
+
+    async def test_publish_branch_persists_workspace_result_refs(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        create_resp = await client.post(
+            "/sessions",
+            json={
+                "execution_binding": {
+                    "kind": "cloud",
+                    "workspace_url": "docker://agent-ws-result-refs/workspace",
+                    "workspace_id": "ws-result-refs",
+                },
+            },
+        )
+        session_id = create_resp.json()["session_id"]
+        store = FakeWorkspaceMetadataStore(
+            [
+                WorkspaceRecord(
+                    workspace_record_id="wr-result-refs",
+                    workspace_id="ws-result-refs",
+                    session_id=session_id,
+                    provider="docker",
+                    provider_instance_id="docker-local",
+                    workspace_root_ref="/workspaces",
+                    workspace_host_label="local-host",
+                    owner_label="owner:test",
+                    source_kind="git",
+                    status="retained",
+                    retention_policy="manual",
+                    result_refs={"existing": "kept"},
+                )
+            ]
+        )
+        session_manager.configure_workspace_metadata_store(store)
+
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_remote_retention_config",
+            lambda: {"enabled": True, "default_policy": "delete_on_close"},
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.publish_workspace_branch_from_config",
+            lambda cloud_config, publication_config, workspace_id, branch_name, commit_message: (
+                WorkspaceBranchPublication(
+                    workspace_id=workspace_id,
+                    branch_name=branch_name,
+                    pushed_ref="refs/heads/coding-agent/result",
+                    commit_sha="abc123",
+                    remote_url="https://github.com/org/repo.git",
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            lambda: {"provider": "docker", "provider_instance_id": "docker-local"},
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_remote_publication_config",
+            lambda: {
+                "enabled": True,
+                "git_author_name": "coding-agent",
+                "git_author_email": "coding-agent@example.com",
+                "allowed_git_hosts": ["github.com"],
+            },
+        )
+
+        response = await client.post(
+            f"/sessions/{session_id}/publish",
+            json={"mode": "branch", "branch_name": "coding-agent/result"},
+        )
+
+        assert response.status_code == 200
+        assert store.result_ref_updates == [
+            (
+                "wr-result-refs",
+                {
+                    "existing": "kept",
+                    "publication": {
+                        "mode": "branch",
+                        "status": "published",
+                        "branch_name": "coding-agent/result",
+                        "pushed_ref": "refs/heads/coding-agent/result",
+                        "commit_sha": "abc123",
+                        "remote_url": "https://github.com/org/repo.git",
+                        "pr_url": None,
+                    },
+                },
+            )
+        ]
+        store.records[0] = replace(
+            store.records[0],
+            result_refs=store.result_ref_updates[0][1],
+            status="cleaned",
+        )
+        workspace_response = await client.get("/workspaces/ws-result-refs")
+
+        assert workspace_response.status_code == 200
+        assert workspace_response.json()["result_refs"] == {
+            "existing": "kept",
+            "publication": {
+                "mode": "branch",
+                "status": "published",
+                "branch_name": "coding-agent/result",
+                "pushed_ref": "refs/heads/coding-agent/result",
+                "commit_sha": "abc123",
+                "remote_url": "https://github.com/org/repo.git",
+                "pr_url": None,
+            },
         }
 
     async def test_publish_pr_creates_github_pr_after_branch_publication(

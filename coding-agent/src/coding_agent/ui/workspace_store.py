@@ -143,6 +143,11 @@ class PGWorkspaceMetadataStore:
     SET retention_policy = $1, expires_at = $2, status = $3, updated_at = NOW()
     WHERE workspace_record_id = $4
     """
+    _UPDATE_RESULT_REFS_SQL = """
+    UPDATE agent_remote_workspaces
+    SET result_refs = $1::jsonb, updated_at = NOW()
+    WHERE workspace_record_id = $2
+    """
 
     def __init__(self, *, pool: AsyncPGWorkspacePool) -> None:
         self._pool = pool
@@ -286,6 +291,24 @@ class PGWorkspaceMetadataStore:
             retention_policy,
             expires_at,
             status,
+            workspace_record_id,
+        )
+        if result == "UPDATE 0":
+            raise KeyError(workspace_record_id)
+
+    async def update_result_refs(
+        self,
+        workspace_record_id: str,
+        *,
+        result_refs: dict[str, JSONValue],
+    ) -> None:
+        pool = await self._ensure_schema()
+        execute = getattr(pool, "execute", None)
+        if not callable(execute):
+            raise TypeError("postgres workspace metadata pool must expose execute")
+        result = await cast(Callable[..., Coroutine[object, object, object]], execute)(
+            self._UPDATE_RESULT_REFS_SQL,
+            result_refs,
             workspace_record_id,
         )
         if result == "UPDATE 0":

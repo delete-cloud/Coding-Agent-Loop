@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -251,6 +251,7 @@ class WorkspaceSummarySchema(BaseModel):
     retention_policy: WorkspaceRetentionPolicy | None = None
     expires_at: datetime | None = None
     cleanup_error: str | None = None
+    result_refs: dict[str, Any] | None = None
     is_local: bool | None = None
 
 
