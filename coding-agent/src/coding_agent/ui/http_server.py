@@ -1129,6 +1129,22 @@ def _session_origin_from_request(
     }
     if body is not None and body.workspace_source is not None:
         origin["workspace_source_kind"] = body.workspace_source.kind
+    if isinstance(binding, CloudWorkspaceBinding):
+        cloud_workspace_config = _load_cloud_workspace_config()
+        provider = cloud_workspace_config.get("provider")
+        provider_instance_id = cloud_workspace_config.get("provider_instance_id")
+        workspace_root_ref = cloud_workspace_config.get("workspace_root")
+        workspace_host_label = cloud_workspace_config.get("workspace_host_label")
+        if isinstance(provider, str) and provider.strip():
+            origin["workspace_provider"] = provider.strip()
+        if isinstance(provider_instance_id, str) and provider_instance_id.strip():
+            origin["provider_instance_id"] = provider_instance_id.strip()
+        if isinstance(workspace_root_ref, str) and workspace_root_ref.strip():
+            origin["workspace_root_ref"] = workspace_root_ref.strip()
+        if isinstance(workspace_host_label, str) and workspace_host_label.strip():
+            origin["workspace_host_label"] = workspace_host_label.strip()
+        elif isinstance(provider_instance_id, str) and provider_instance_id.strip():
+            origin["workspace_host_label"] = provider_instance_id.strip()
     if auth_context is not None:
         origin["owner_label"] = auth_context.owner_label
         origin["auth_scope"] = auth_context.scope

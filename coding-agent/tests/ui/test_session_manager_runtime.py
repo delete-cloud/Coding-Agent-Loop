@@ -1774,6 +1774,9 @@ class FakeWorkspaceMetadataStore:
         self.records = records
         self.status_updates: list[tuple[str, WorkspaceStatus, str | None]] = []
 
+    async def save(self, record: WorkspaceRecord) -> None:
+        self.records.append(record)
+
     async def list(self) -> list[WorkspaceRecord]:
         return self.records
 
@@ -1844,6 +1847,74 @@ def _workspace_record(
 
 
 @pytest.mark.asyncio
+async def test_create_session_persists_cloud_workspace_record() -> None:
+    binding = CloudWorkspaceBinding(
+        workspace_url="docker://agent-ws-created/workspace",
+        workspace_id="ws-created",
+        runtime_profile="universal",
+    )
+    store = FakeWorkspaceMetadataStore([])
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        workspace_metadata_store=store,
+    )
+
+    session_id = await manager.create_session(
+        execution_binding=binding,
+        origin={
+            "channel": "http",
+            "binding_kind": "cloud",
+            "workspace_source_kind": "docker",
+            "workspace_provider": "docker",
+            "provider_instance_id": "docker-host-a",
+            "workspace_root_ref": "/workspaces",
+            "workspace_host_label": "docker-host-a",
+            "owner_label": "owner:test",
+        },
+    )
+
+    assert store.records == [
+        WorkspaceRecord(
+            workspace_record_id=f"{session_id}:ws-created",
+            workspace_id="ws-created",
+            session_id=session_id,
+            provider="docker",
+            provider_instance_id="docker-host-a",
+            workspace_root_ref="/workspaces",
+            workspace_host_label="docker-host-a",
+            owner_label="owner:test",
+            source_kind="docker",
+            source_ref={"runtime_profile": "universal"},
+            status="active",
+            retention_policy="delete_on_close",
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_create_session_does_not_persist_explicit_cloud_binding_record() -> None:
+    binding = CloudWorkspaceBinding(
+        workspace_url="docker://external-workspace/workspace",
+        workspace_id="external-workspace",
+    )
+    store = FakeWorkspaceMetadataStore([])
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        workspace_metadata_store=store,
+    )
+
+    await manager.create_session(
+        execution_binding=binding,
+        origin={
+            "channel": "http",
+            "binding_kind": "cloud",
+        },
+    )
+
+    assert store.records == []
+
+
+@pytest.mark.asyncio
 async def test_close_session_retains_workspace_when_policy_is_pinned() -> None:
     cleaned: list[CloudWorkspaceBinding] = []
     binding = CloudWorkspaceBinding(
@@ -1862,14 +1933,17 @@ async def test_close_session_retains_workspace_when_policy_is_pinned() -> None:
             "channel": "http",
             "binding_kind": "cloud",
             "workspace_source_kind": "git",
+            "workspace_provider": "docker",
+            "provider_instance_id": "docker-host-a",
+            "workspace_root_ref": "/workspaces",
+            "workspace_host_label": "docker-host-a",
+            "owner_label": "owner:test",
         },
     )
-    store.records.append(
-        _workspace_record(
-            session_id=session_id,
-            workspace_id=binding.workspace_id,
-            retention_policy="pinned",
-        )
+    store.records[0] = _workspace_record(
+        session_id=session_id,
+        workspace_id=binding.workspace_id,
+        retention_policy="pinned",
     )
 
     await manager.close_session(session_id)
@@ -1897,14 +1971,17 @@ async def test_close_session_deletes_workspace_when_policy_is_delete_on_close() 
             "channel": "http",
             "binding_kind": "cloud",
             "workspace_source_kind": "git",
+            "workspace_provider": "docker",
+            "provider_instance_id": "docker-host-a",
+            "workspace_root_ref": "/workspaces",
+            "workspace_host_label": "docker-host-a",
+            "owner_label": "owner:test",
         },
     )
-    store.records.append(
-        _workspace_record(
-            session_id=session_id,
-            workspace_id=binding.workspace_id,
-            retention_policy="delete_on_close",
-        )
+    store.records[0] = _workspace_record(
+        session_id=session_id,
+        workspace_id=binding.workspace_id,
+        retention_policy="delete_on_close",
     )
 
     await manager.close_session(session_id)
@@ -1935,14 +2012,17 @@ async def test_close_session_marks_workspace_cleanup_failed() -> None:
             "channel": "http",
             "binding_kind": "cloud",
             "workspace_source_kind": "git",
+            "workspace_provider": "docker",
+            "provider_instance_id": "docker-host-a",
+            "workspace_root_ref": "/workspaces",
+            "workspace_host_label": "docker-host-a",
+            "owner_label": "owner:test",
         },
     )
-    store.records.append(
-        _workspace_record(
-            session_id=session_id,
-            workspace_id=binding.workspace_id,
-            retention_policy="delete_on_close",
-        )
+    store.records[0] = _workspace_record(
+        session_id=session_id,
+        workspace_id=binding.workspace_id,
+        retention_policy="delete_on_close",
     )
 
     await manager.close_session(session_id)
@@ -1975,14 +2055,17 @@ async def test_shutdown_session_runtime_does_not_apply_workspace_retention() -> 
             "channel": "http",
             "binding_kind": "cloud",
             "workspace_source_kind": "git",
+            "workspace_provider": "docker",
+            "provider_instance_id": "docker-host-a",
+            "workspace_root_ref": "/workspaces",
+            "workspace_host_label": "docker-host-a",
+            "owner_label": "owner:test",
         },
     )
-    store.records.append(
-        _workspace_record(
-            session_id=session_id,
-            workspace_id=binding.workspace_id,
-            retention_policy="delete_on_close",
-        )
+    store.records[0] = _workspace_record(
+        session_id=session_id,
+        workspace_id=binding.workspace_id,
+        retention_policy="delete_on_close",
     )
 
     await manager.shutdown_session_runtime(session_id)

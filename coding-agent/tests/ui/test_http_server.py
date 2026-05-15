@@ -4004,6 +4004,9 @@ class FakeWorkspaceMetadataStore:
         self.retention_updates: list[tuple[str, str, datetime | None, str]] = []
         self.result_ref_updates: list[tuple[str, dict[str, JSONValue]]] = []
 
+    async def save(self, record: WorkspaceRecord) -> None:
+        self.records.append(record)
+
     async def list(self) -> list[WorkspaceRecord]:
         return self.records
 
