@@ -69,6 +69,7 @@ from coding_agent.ui.execution_binding import (
     LocalExecutionBinding,
 )
 from coding_agent.ui.workspace_store import (
+    JSONValue,
     WorkspaceRecord,
     WorkspaceRetentionPolicy,
     WorkspaceStatus,
@@ -143,6 +144,13 @@ class WorkspaceMetadataStoreProtocol(Protocol):
         retention_policy: WorkspaceRetentionPolicy,
         expires_at: datetime | None,
         status: WorkspaceStatus,
+    ) -> None: ...
+
+    async def update_result_refs(
+        self,
+        workspace_record_id: str,
+        *,
+        result_refs: dict[str, JSONValue],
     ) -> None: ...
 
 
@@ -646,6 +654,19 @@ class SessionManager:
             retention_policy=retention_policy,
             expires_at=expires_at,
             status=status,
+        )
+
+    async def update_workspace_record_result_refs(
+        self,
+        workspace_record_id: str,
+        *,
+        result_refs: dict[str, JSONValue],
+    ) -> None:
+        if self._workspace_metadata_store is None:
+            raise RuntimeError("workspace metadata store is not configured")
+        await self._workspace_metadata_store.update_result_refs(
+            workspace_record_id,
+            result_refs=result_refs,
         )
 
     def _get_pg_pool(self) -> PGPool:

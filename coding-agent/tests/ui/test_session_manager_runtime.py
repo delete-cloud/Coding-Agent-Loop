@@ -39,6 +39,7 @@ from coding_agent.ui.session_manager import (
 )
 from coding_agent.ui.session_store import InMemorySessionStore
 from coding_agent.ui.workspace_store import (
+    JSONValue,
     WorkspaceRecord,
     WorkspaceRetentionPolicy,
     WorkspaceStatus,
@@ -1811,6 +1812,14 @@ class FakeWorkspaceMetadataStore:
         status: WorkspaceStatus,
     ) -> None:
         del workspace_record_id, retention_policy, expires_at, status
+
+    async def update_result_refs(
+        self,
+        workspace_record_id: str,
+        *,
+        result_refs: dict[str, JSONValue],
+    ) -> None:
+        del workspace_record_id, result_refs
 
 
 def _workspace_record(

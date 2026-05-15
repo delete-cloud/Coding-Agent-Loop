@@ -433,6 +433,13 @@ async def test_pg_workspace_store_round_trips_remote_workspace_record() -> None:
                 }
                 return "INSERT 0 1"
             if "UPDATE agent_remote_workspaces" in query:
+                if "result_refs = $1::jsonb" in query:
+                    result_refs, workspace_record_id = args
+                    assert isinstance(workspace_record_id, str)
+                    if workspace_record_id not in self.workspaces:
+                        return "UPDATE 0"
+                    self.workspaces[workspace_record_id]["result_refs"] = result_refs
+                    return "UPDATE 1"
                 if "retention_policy = $1" in query:
                     retention_policy, expires_at, status, workspace_record_id = args
                     assert isinstance(workspace_record_id, str)
@@ -547,6 +554,11 @@ async def test_pg_workspace_store_round_trips_remote_workspace_record() -> None:
         status="retained",
     )
     retained = await store.load("wr-1")
+    await store.update_result_refs(
+        "wr-1",
+        result_refs={"publication": {"branch_name": "coding-agent/session-1"}},
+    )
+    with_result_refs = await store.load("wr-1")
 
     expected_record = replace(
         record,
@@ -564,6 +576,10 @@ async def test_pg_workspace_store_round_trips_remote_workspace_record() -> None:
     assert retained.retention_policy == "pinned"
     assert retained.expires_at is None
     assert retained.status == "retained"
+    assert with_result_refs is not None
+    assert with_result_refs.result_refs == {
+        "publication": {"branch_name": "coding-agent/session-1"}
+    }
     assert any(
         "CREATE TABLE IF NOT EXISTS agent_remote_workspaces" in query
         for query, _args in pg_pool.pool.executed
