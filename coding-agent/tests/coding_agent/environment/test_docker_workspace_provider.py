@@ -1274,6 +1274,49 @@ def test_docker_workspace_provider_diff_and_patch_include_untracked_files(
     assert status.stdout == "?? new.txt\n"
 
 
+def test_docker_workspace_provider_diff_marks_untracked_binary_file(
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    workspace_dir = workspace_root / "ws-123"
+    workspace_dir.mkdir(parents=True)
+    subprocess.run(["git", "init"], cwd=workspace_dir, check=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test Agent"],
+        cwd=workspace_dir,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "agent@example.com"],
+        cwd=workspace_dir,
+        check=True,
+    )
+    (workspace_dir / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=workspace_dir, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=workspace_dir, check=True)
+    (workspace_dir / "new.bin").write_bytes(b"\x00\xff\x00binary\n")
+
+    diff = workspace_diff_from_config(
+        _docker_config({"workspace_root": str(workspace_root)}),
+        "ws-123",
+    )
+    status = subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        cwd=workspace_dir,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert [
+        (file.path, file.status, file.additions, file.deletions, file.binary)
+        for file in diff.files
+    ] == [("new.bin", "added", None, None, True)]
+    assert diff.additions == 0
+    assert diff.deletions == 0
+    assert status.stdout == "?? new.bin\n"
+
+
 def test_docker_workspace_provider_publishes_git_workspace_branch(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
