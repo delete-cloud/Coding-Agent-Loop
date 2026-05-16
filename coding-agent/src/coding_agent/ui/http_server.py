@@ -23,7 +23,8 @@ from sse_starlette.sse import EventSourceResponse
 
 from agentkit.config.loader import load_config as load_agent_toml
 from agentkit.errors import ConfigError
-from agentkit.tape.extract import ToolCallRecord, TurnTrace, extract_turns
+from agentkit.result.reducers import result_from_turn_trace
+from agentkit.tape.extract import TurnTrace, extract_turns
 from agentkit.tape.tape import Tape
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.environment import (
@@ -116,15 +117,6 @@ logger = logging.getLogger(__name__)
 
 # Constants
 APPROVAL_TIMEOUT_SECONDS = 120
-
-_SESSION_RESULT_TOOL_DETAIL_KEYS = (
-    "command",
-    "path",
-    "file_path",
-    "pattern",
-)
-_SESSION_RESULT_MAX_TOOL_ITEMS = 5
-_SESSION_RESULT_MAX_TOOL_DETAIL_CHARS = 160
 SESSION_IDLE_TIMEOUT_MINUTES = 30
 _SERVER_CONFIG_ENV = "CODING_AGENT_SERVER_CONFIG"
 _GITHUB_API_BASE_URL = "https://api.github.com"
@@ -2153,44 +2145,6 @@ async def _get_visible_session(
     return session
 
 
-def _compact_session_result_text(text: str, *, max_chars: int) -> str:
-    compact = " ".join(text.split())
-    if len(compact) <= max_chars:
-        return compact
-    return compact[: max_chars - 3].rstrip() + "..."
-
-
-def _session_result_tool_detail(call: ToolCallRecord) -> str | None:
-    for key in _SESSION_RESULT_TOOL_DETAIL_KEYS:
-        value = call.arguments.get(key)
-        if not isinstance(value, str) or value.strip() == "":
-            continue
-        return _compact_session_result_text(
-            value,
-            max_chars=_SESSION_RESULT_MAX_TOOL_DETAIL_CHARS,
-        )
-    return None
-
-
-def _session_result_verification_summary(turn: TurnTrace | None) -> str | None:
-    if turn is None or not turn.tool_calls:
-        return None
-
-    items: list[str] = []
-    for call in turn.tool_calls[:_SESSION_RESULT_MAX_TOOL_ITEMS]:
-        name = call.name.strip() or "unnamed_tool"
-        detail = _session_result_tool_detail(call)
-        if detail is None:
-            items.append(name)
-        else:
-            items.append(f"{name}: {detail}")
-
-    remaining = len(turn.tool_calls) - len(items)
-    if remaining > 0:
-        items.append(f"+{remaining} more")
-    return "Tool activity: " + "; ".join(items)
-
-
 def _session_runtime_tape(session: Session) -> Tape | None:
     runtime_ctx = session.runtime_ctx
     if runtime_ctx is None:
@@ -2240,6 +2194,12 @@ async def get_session_result(
     session = await _get_visible_session(session_id, auth_context)
     summary = session.as_dict()
     latest_turn = await _session_result_latest_turn(session)
+    turn_result = None if latest_turn is None else result_from_turn_trace(latest_turn)
+    verification_summary = (
+        None
+        if turn_result is None or turn_result.verification_summary is None
+        else turn_result.verification_summary.summary
+    )
     return SessionResultResponse(
         session_id=session.id,
         status=summary["status"],
@@ -2249,8 +2209,8 @@ async def get_session_result(
         origin=session.origin,
         provider_name=session.provider_name,
         model_name=session.model_name,
-        final_answer=None if latest_turn is None else latest_turn.final_output,
-        verification_summary=_session_result_verification_summary(latest_turn),
+        final_answer=None if turn_result is None else turn_result.final_output,
+        verification_summary=verification_summary,
         failure_details=_session_result_failure_details(session),
     )
 
