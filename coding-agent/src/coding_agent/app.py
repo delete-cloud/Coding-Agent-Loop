@@ -29,6 +29,7 @@ from coding_agent.plugins.mcp import MCPPlugin
 from coding_agent.plugins.memory import MemoryPlugin
 from coding_agent.plugins.kb import KBPlugin
 from coding_agent.plugins.metrics import SessionMetricsPlugin
+from coding_agent.observability import build_observation_sink
 from coding_agent.plugins.parallel_executor import ParallelExecutorPlugin
 from coding_agent.plugins.shell_session import ShellSessionPlugin
 from coding_agent.plugins.skills import SkillsPlugin
@@ -211,6 +212,10 @@ def create_child_pipeline(
     mcp_cfg = cfg.extra.get("mcp", {})
     storage_cfg = cfg.extra.get("storage", {})
     kb_cfg = cfg.extra.get("kb", {})
+    observability_cfg = cfg.extra.get("observability", {})
+    if not isinstance(observability_cfg, dict):
+        raise ValueError("[observability] config must be a table")
+    observation_sink = build_observation_sink(observability_cfg)
 
     def _create_child_with_environment(**kwargs: Any) -> tuple[Any, PipelineContext]:
         kwargs.setdefault("environment", environment)
@@ -371,6 +376,8 @@ def create_child_pipeline(
         "shell": shell_cfg,
         "structured_tool_result_scope": structured_tool_result_scope,
     }
+    if observation_sink is not None:
+        ctx_config["observation_sink"] = observation_sink
     if local_workspace_root is not None:
         ctx_config["workspace_root"] = str(local_workspace_root)
 
