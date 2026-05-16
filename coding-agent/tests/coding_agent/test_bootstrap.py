@@ -3,12 +3,17 @@ from typing import Any, cast
 
 import pytest
 from agentkit.environment import WorkspaceSummary
+from agentkit.observability import NoopObservationSink
 from agentkit.runtime import AgentRunContext, ContextBudget
 from agentkit.runtime.pipeline import PipelineContext
 from agentkit.tools import tool
 from agentkit.tape.tape import Tape
 from coding_agent.__main__ import create_agent, create_child_pipeline
-from coding_agent.environment import CloudCommandResult, CloudEnvironment, LocalEnvironment
+from coding_agent.environment import (
+    CloudCommandResult,
+    CloudEnvironment,
+    LocalEnvironment,
+)
 
 
 class NonLocalEnvironment:
@@ -124,8 +129,6 @@ class TestBootstrap:
         assert isinstance(ctx, PipelineContext)
 
     def test_all_plugins_registered(self, tmp_path):
-        from agentkit.runtime.pipeline import Pipeline, PipelineContext
-
         config_path = (
             Path(__file__).parent.parent.parent / "src" / "coding_agent" / "agent.toml"
         )
@@ -178,6 +181,79 @@ index_extensions = [".md"]
         )
 
         assert "kb" in pipeline._registry.plugin_ids()
+
+    def test_create_agent_does_not_inject_observation_sink_by_default(self, tmp_path):
+        config_path = tmp_path / "agent.toml"
+        config_path.write_text(
+            """
+[agent]
+name = "test-agent"
+model = "claude-sonnet-4-20250514"
+provider = "anthropic"
+
+[agent.plugins]
+enabled = ["storage", "core_tools"]
+""".strip()
+        )
+
+        _pipeline, ctx = create_agent(
+            config_path=config_path,
+            data_dir=tmp_path / "data",
+            api_key="sk-test",
+        )
+
+        assert "observation_sink" not in ctx.config
+
+    def test_create_agent_injects_noop_observation_sink_when_enabled(self, tmp_path):
+        config_path = tmp_path / "agent.toml"
+        config_path.write_text(
+            """
+[agent]
+name = "test-agent"
+model = "claude-sonnet-4-20250514"
+provider = "anthropic"
+
+[agent.plugins]
+enabled = ["storage", "core_tools"]
+
+[observability]
+enabled = true
+backend = "noop"
+""".strip()
+        )
+
+        _pipeline, ctx = create_agent(
+            config_path=config_path,
+            data_dir=tmp_path / "data",
+            api_key="sk-test",
+        )
+
+        assert isinstance(ctx.config["observation_sink"], NoopObservationSink)
+
+    def test_create_agent_rejects_unknown_observability_backend(self, tmp_path):
+        config_path = tmp_path / "agent.toml"
+        config_path.write_text(
+            """
+[agent]
+name = "test-agent"
+model = "claude-sonnet-4-20250514"
+provider = "anthropic"
+
+[agent.plugins]
+enabled = ["storage", "core_tools"]
+
+[observability]
+enabled = true
+backend = "langfuse"
+""".strip()
+        )
+
+        with pytest.raises(ValueError, match="unsupported observability backend"):
+            create_agent(
+                config_path=config_path,
+                data_dir=tmp_path / "data",
+                api_key="sk-test",
+            )
 
     def test_create_agent_respects_enabled_plugins_order(self, tmp_path):
         config_path = tmp_path / "agent.toml"
