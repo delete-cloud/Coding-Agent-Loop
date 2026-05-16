@@ -7,6 +7,7 @@ from typing import Any, cast
 import pytest
 
 from agentkit.directive.types import Approve, AskUser, Reject
+from agentkit.observability import SpanRecord
 from agentkit.plugin.registry import PluginRegistry
 from agentkit.runtime.hook_runtime import HookRuntime
 from agentkit.runtime.hookspecs import HOOK_SPECS
@@ -18,6 +19,22 @@ from agentkit.tools import (
     Toolset,
     UNHANDLED_TOOL_RESULT,
 )
+
+
+class RecordingObservationSink:
+    def __init__(self) -> None:
+        self.spans: list[SpanRecord] = []
+
+    def record_span(self, span: SpanRecord) -> None:
+        self.spans.append(span)
+
+    def record_event(self, event: Any) -> None:
+        del event
+
+
+class ToolContext:
+    def __init__(self, sink: RecordingObservationSink) -> None:
+        self.config = {"observation_sink": sink}
 
 
 class SingleToolPlugin:
@@ -428,6 +445,63 @@ async def test_toolset_executes_single_tools_into_result_envelopes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_toolset_records_tool_call_span_without_arguments_or_result() -> None:
+    plugin = SingleToolPlugin()
+    sink = RecordingObservationSink()
+    toolset = Toolset(runtime=_runtime(plugin))
+
+    results = await toolset.execute_tools(
+        [
+            ToolCallRequest(
+                tool_call_id="tc-1",
+                name="known_tool",
+                arguments={"secret": "do-not-record"},
+            )
+        ],
+        ctx=ToolContext(sink),
+    )
+
+    assert results[0] == ToolExecutionResult(
+        tool_call_id="tc-1",
+        name="known_tool",
+        result="ok:None",
+    )
+    assert len(sink.spans) == 1
+    assert sink.spans[0].name == "tool.call"
+    assert sink.spans[0].status == "ok"
+    assert sink.spans[0].attributes == {
+        "tool.name": "known_tool",
+        "tool.call_id": "tc-1",
+        "tool.missing": False,
+        "tool.error": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_toolset_records_error_tool_call_span() -> None:
+    sink = RecordingObservationSink()
+    toolset = Toolset(runtime=_runtime(FlakyToolPlugin()))
+
+    results = await toolset.execute_tools(
+        [ToolCallRequest(tool_call_id="tc-1", name="known_tool", arguments={})],
+        ctx=ToolContext(sink),
+        options=ToolExecutionOptions(max_retries=0),
+    )
+
+    assert results[0].is_error is True
+    assert len(sink.spans) == 1
+    assert sink.spans[0].name == "tool.call"
+    assert sink.spans[0].status == "ok"
+    assert sink.spans[0].attributes == {
+        "tool.name": "known_tool",
+        "tool.call_id": "tc-1",
+        "tool.missing": False,
+        "tool.error": True,
+        "tool.error_type": "RuntimeError",
+    }
+
+
+@pytest.mark.asyncio
 async def test_toolset_marks_missing_tool_without_raising() -> None:
     toolset = Toolset(runtime=_runtime(SingleToolPlugin()))
 
@@ -523,7 +597,9 @@ async def test_toolset_approval_rejects_when_async_hook_raises(
 
     with caplog.at_level(logging.WARNING):
         approval = await toolset.approve_tool_call(
-            ToolCallRequest(tool_call_id="tc-async-hook", name="bash_run", arguments={}),
+            ToolCallRequest(
+                tool_call_id="tc-async-hook", name="bash_run", arguments={}
+            ),
             ctx=object(),
         )
 
@@ -592,7 +668,9 @@ async def test_toolset_approval_rejects_directive_when_executor_missing() -> Non
     toolset = Toolset(runtime=_runtime(ApprovalPlugin(result=directive)))
 
     approval = await toolset.approve_tool_call(
-        ToolCallRequest(tool_call_id="tc-missing-executor", name="bash_run", arguments={}),
+        ToolCallRequest(
+            tool_call_id="tc-missing-executor", name="bash_run", arguments={}
+        ),
         ctx=object(),
     )
 
@@ -607,7 +685,9 @@ async def test_toolset_approval_rejects_ask_user_when_executor_missing() -> None
     toolset = Toolset(runtime=_runtime(ApprovalPlugin(result=directive)))
 
     approval = await toolset.approve_tool_call(
-        ToolCallRequest(tool_call_id="tc-missing-executor", name="bash_run", arguments={}),
+        ToolCallRequest(
+            tool_call_id="tc-missing-executor", name="bash_run", arguments={}
+        ),
         ctx=object(),
     )
 
@@ -631,7 +711,9 @@ async def test_toolset_approval_awaits_async_hooks_before_directive_check() -> N
     )
 
     approval = await toolset.approve_tool_call(
-        ToolCallRequest(tool_call_id="tc-async-approval", name="bash_run", arguments={}),
+        ToolCallRequest(
+            tool_call_id="tc-async-approval", name="bash_run", arguments={}
+        ),
         ctx=object(),
     )
 
@@ -926,7 +1008,9 @@ async def test_toolset_call_tool_preserves_proxy_hook_exception_type() -> None:
 
 
 @pytest.mark.asyncio
-async def test_toolset_call_tool_rejects_invalid_proxy_arguments_before_execution() -> None:
+async def test_toolset_call_tool_rejects_invalid_proxy_arguments_before_execution() -> (
+    None
+):
     proxy = ProxyToolPlugin()
     approval = RecordingApprovalPlugin()
     toolset = Toolset(runtime=_runtime(proxy, approval))
@@ -985,7 +1069,9 @@ async def test_toolset_call_tool_rejects_when_proxy_target_approval_denies() -> 
 
 
 @pytest.mark.asyncio
-async def test_toolset_call_tool_uses_proxy_hooks_for_conflicting_target_names() -> None:
+async def test_toolset_call_tool_uses_proxy_hooks_for_conflicting_target_names() -> (
+    None
+):
     direct = ConflictingDirectToolPlugin()
     proxy = ProxyToolPlugin()
     toolset = Toolset(runtime=_runtime(direct, proxy))
@@ -1190,7 +1276,9 @@ async def test_toolset_retries_transient_batch_hook_failures() -> None:
 
 
 @pytest.mark.asyncio
-async def test_toolset_falls_back_to_single_tool_execution_when_batch_hook_declines() -> None:
+async def test_toolset_falls_back_to_single_tool_execution_when_batch_hook_declines() -> (
+    None
+):
     single_tool = SingleToolPlugin()
     toolset = Toolset(runtime=_runtime(NoneBatchToolPlugin(), single_tool))
 
