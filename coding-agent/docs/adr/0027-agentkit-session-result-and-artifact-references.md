@@ -1,6 +1,6 @@
 # ADR-0027: Add AgentKit session result and artifact reference models
 
-**Status**: Proposed
+**Status**: Accepted / implemented through PRs #180-#183
 **Date**: 2026-05-16
 **Decision owner**: repository maintainer / current product owner
 
@@ -161,6 +161,22 @@ Docker container ids as operational state, or provider cleanup decisions.
 - Future durable result refs can converge on `agentkit` metadata contracts while
   provider-local exports still live in `coding_agent`.
 
+## Implementation Status
+
+Implemented in four narrow PRs:
+
+- [#180](https://github.com/delete-cloud/Coding-Agent-Loop/pull/180)
+  added `agentkit.result` domain models and `TurnTrace` reducers.
+- [#181](https://github.com/delete-cloud/Coding-Agent-Loop/pull/181)
+  added the metadata-only `ArtifactStore` protocol and in-memory protocol
+  tests.
+- [#182](https://github.com/delete-cloud/Coding-Agent-Loop/pull/182)
+  adapted `/sessions/{id}/result` to use the `agentkit` reducer while preserving
+  the HTTP response shape.
+- [#183](https://github.com/delete-cloud/Coding-Agent-Loop/pull/183)
+  added an `ArtifactRef`-shaped projection to durable workspace publication
+  `result_refs`, while keeping workspace metadata ownership in `coding_agent`.
+
 ## Implementation Plan
 
 ### PR 1: Add result domain models and reducer tests
@@ -220,17 +236,19 @@ Docker container ids as operational state, or provider cleanup decisions.
 
 ## Acceptance Criteria
 
-- [ ] `test_turn_result_from_trace_preserves_final_output`
-- [ ] `test_turn_result_from_trace_summarizes_tool_activity`
-- [ ] `test_turn_result_from_trace_omits_verification_without_tools`
-- [ ] `test_failure_summary_accepts_host_application_details`
-- [ ] `test_artifact_ref_accepts_provider_neutral_metadata`
-- [ ] `test_artifact_store_protocol_saves_and_lists_refs`
-- [ ] `test_session_result_endpoint_uses_agentkit_reducer_without_response_change`
-- [ ] `test_workspace_publication_ref_can_be_represented_as_artifact_ref`
-- [ ] `uv run pytest tests/agentkit/result tests/ui/test_http_server.py -k "turn_result or artifact_ref or session_result" -v`
-- [ ] `uv run basedpyright --level error src/agentkit src/coding_agent/ui tests/agentkit tests/ui/test_http_server.py`
-- [ ] `uv run ruff format --check src/agentkit src/coding_agent/ui tests/agentkit tests/ui/test_http_server.py`
+- [x] `test_turn_result_from_trace_preserves_final_output`
+- [x] `test_turn_result_from_trace_summarizes_tool_activity`
+- [x] `test_turn_result_from_trace_omits_verification_without_tools`
+- [x] `test_failure_summary_accepts_host_application_details`
+- [x] `test_artifact_ref_accepts_provider_neutral_metadata`
+- [x] `test_artifact_store_protocol_saves_and_lists_refs`
+- [x] `test_session_result_endpoint_uses_agentkit_reducer_without_response_change`
+- [x] workspace publication metadata can be represented as `ArtifactRef`
+  (`test_publish_branch_persists_workspace_result_refs`)
+- [x] `uv run pytest tests/agentkit/result tests/agentkit/storage/test_protocols.py tests/ui/test_http_server.py -k "turn_result or artifact_ref or artifact_store or session_result or publish_branch_persists_workspace_result_refs" -q`
+- [x] `uv run basedpyright --level error src/agentkit/result src/agentkit/storage/protocols.py src/coding_agent/ui/http_server.py tests/agentkit/result tests/agentkit/storage/test_protocols.py tests/ui/test_http_server.py`
+- [x] `uv run ruff format --check src/agentkit/result src/agentkit/storage/protocols.py src/coding_agent/ui/http_server.py tests/agentkit/result tests/agentkit/storage/test_protocols.py tests/ui/test_http_server.py`
+- [x] `uv run ruff check src/agentkit/result src/agentkit/storage/protocols.py src/coding_agent/ui/http_server.py tests/agentkit/result tests/agentkit/storage/test_protocols.py tests/ui/test_http_server.py`
 
 ## References
 
