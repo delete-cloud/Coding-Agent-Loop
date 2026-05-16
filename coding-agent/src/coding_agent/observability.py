@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
 import secrets
 from collections.abc import Mapping
@@ -60,6 +61,30 @@ def _otlp_attributes(attributes: Mapping[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def _resource_attributes(attributes: Mapping[str, Any]) -> list[dict[str, Any]]:
+    resource: dict[str, Any] = {"service.name": "coding-agent"}
+    session_id = attributes.get("session_id")
+    if isinstance(session_id, str) and session_id:
+        resource["session.id"] = session_id
+    run_id = attributes.get("run_id")
+    if isinstance(run_id, str) and run_id:
+        resource["run.id"] = run_id
+    return _otlp_attributes(resource)
+
+
+def _trace_id(attributes: Mapping[str, Any]) -> str:
+    session_id = attributes.get("session_id")
+    run_id = attributes.get("run_id")
+    if (
+        isinstance(session_id, str)
+        and session_id
+        and isinstance(run_id, str)
+        and run_id
+    ):
+        return hashlib.sha256(f"{session_id}:{run_id}".encode("utf-8")).hexdigest()[:32]
+    return secrets.token_hex(16)
+
+
 def _nanos(timestamp: float | None) -> str:
     if timestamp is None:
         return "0"
@@ -113,13 +138,13 @@ class OtlpHttpObservationSink:
         return {
             "resourceSpans": [
                 {
-                    "resource": {"attributes": []},
+                    "resource": {"attributes": _resource_attributes(attributes)},
                     "scopeSpans": [
                         {
                             "scope": {"name": "coding_agent"},
                             "spans": [
                                 {
-                                    "traceId": secrets.token_hex(16),
+                                    "traceId": _trace_id(attributes),
                                     "spanId": secrets.token_hex(8),
                                     "name": span.name,
                                     "kind": 1,
