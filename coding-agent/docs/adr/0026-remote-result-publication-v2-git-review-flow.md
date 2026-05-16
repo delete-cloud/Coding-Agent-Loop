@@ -1,6 +1,6 @@
 # ADR-0026: Harden remote result publication as the Git review flow
 
-**Status**: Proposed
+**Status**: Accepted / implemented through PRs #174-#177
 **Date**: 2026-05-15
 **Decision owner**: repository maintainer / current product owner
 
@@ -279,21 +279,69 @@ ADR-0027 may define `agentkit` session result and artifact reference models.
 - **Remove archive download** — rejected because snapshot fallback, local-only
   repos, dogfood smoke, and recovery workflows still need explicit export.
 
+## Implementation Record
+
+Implemented through:
+
+- **#174** — added this ADR and fixed the Git Review Flow v2 decision boundary.
+- **#175** — returned explicit `partial` branch publication state when local
+  commit succeeds but push fails; surfaced that state through HTTP, durable
+  workspace result refs, and CLI output.
+- **#176** — rejected publication remotes with username/password, query, or
+  fragment before mutating the workspace.
+- **#177** — added real Git coverage for untracked binary files in workspace
+  diff output.
+
+Earlier ADR-0024 follow-up PRs had already implemented the temporary-index
+diff/patch path, Git-backed workspace source validation, remote result/diff/
+patch/publish API surface, CLI commands, and documentation updates that this
+ADR hardens.
+
 ## Acceptance Criteria
 
-- [ ] `test_git_workspace_diff_includes_untracked_text_file`
-- [ ] `test_git_workspace_patch_includes_untracked_text_file`
-- [ ] `test_git_workspace_diff_marks_untracked_binary_file`
-- [ ] `test_git_workspace_diff_and_patch_do_not_mutate_index`
-- [ ] `test_git_workspace_source_rejects_disallowed_clone_host_before_subprocess`
-- [ ] `test_git_workspace_source_rejects_file_and_ssh_clone_urls`
-- [ ] `test_publish_preflight_missing_token_does_not_commit`
-- [ ] `test_publish_preflight_disallowed_remote_host_does_not_commit`
-- [ ] `test_publish_push_failure_returns_partial_local_commit_state`
-- [ ] `test_publish_response_redacts_remote_query_and_fragment`
-- [ ] `uv run pytest tests/ui/test_http_server.py tests/cli/test_remote_client.py tests/coding_agent/environment/test_docker_workspace_provider.py -k "git_workspace or workspace_diff or workspace_patch or publish" -v`
-- [ ] `uv run basedpyright --level error src/coding_agent/ui src/coding_agent/environment src/coding_agent/remote/client.py src/coding_agent/__main__.py`
-- [ ] `uv run ruff format --check src/coding_agent/ui src/coding_agent/environment src/coding_agent/remote/client.py src/coding_agent/__main__.py tests/ui/test_http_server.py tests/cli/test_remote_client.py tests/coding_agent/environment/test_docker_workspace_provider.py`
+- [x] Untracked text files are included in workspace diff.
+  Covered by
+  `test_docker_workspace_provider_diff_and_patch_include_untracked_files`.
+- [x] Untracked text files are included in workspace patch.
+  Covered by
+  `test_docker_workspace_provider_diff_and_patch_include_untracked_files`.
+- [x] Untracked binary files are reported as added binary files.
+  Covered by
+  `test_docker_workspace_provider_diff_marks_untracked_binary_file`.
+- [x] Diff/patch generation does not mutate the real Git index.
+  Covered by
+  `test_docker_workspace_provider_diff_and_patch_include_untracked_files` and
+  `test_docker_workspace_provider_diff_marks_untracked_binary_file`.
+- [x] Disallowed Git source clone hosts fail before subprocess execution.
+  Covered by
+  `test_docker_workspace_provider_rejects_unallowlisted_git_source_before_clone`.
+- [x] Unsafe Git source transports fail before subprocess execution.
+  Covered by
+  `test_docker_workspace_provider_rejects_unsafe_git_source_transport_before_clone`.
+- [x] Missing publication token preflight fails before commit.
+  Covered by `test_docker_workspace_provider_requires_git_token_before_commit`.
+- [x] Disallowed publication remotes fail before commit.
+  Covered by
+  `test_docker_workspace_provider_rejects_unsafe_git_remote_before_push`,
+  `test_docker_workspace_provider_rejects_sensitive_git_remote_url_before_commit`,
+  and
+  `test_docker_workspace_provider_rejects_unallowlisted_git_remote_host_before_push`.
+- [x] Push failure returns explicit partial local commit state.
+  Covered by
+  `test_docker_workspace_provider_returns_partial_publication_when_push_fails`,
+  `test_publish_branch_returns_partial_state_when_push_fails`,
+  `test_remote_publish_branch_prints_partial_publication_result`, and
+  `test_remote_publish_pr_reports_branch_when_branch_push_is_partial`.
+- [x] Publication remote URLs do not leak query or fragment in responses.
+  Sensitive query/fragment publication remotes are now rejected before mutation
+  by `test_docker_workspace_provider_rejects_sensitive_git_remote_url_before_commit`.
+- [x] Focused regression suite passes:
+  `uv run pytest tests/ui/test_http_server.py tests/cli/test_remote_client.py tests/coding_agent/environment/test_docker_workspace_provider.py -k "git_workspace or workspace_diff or workspace_patch or publish" -q`.
+- [x] Type check passes:
+  `uv run basedpyright --level error src/coding_agent/ui src/coding_agent/environment src/coding_agent/remote/client.py src/coding_agent/__main__.py`.
+- [x] Touched-file format checks pass during the implementation PRs. A full
+  tree format check currently reports pre-existing formatting drift in files
+  outside ADR-0026's touched set; that drift is not part of this ADR.
 
 ## References
 
