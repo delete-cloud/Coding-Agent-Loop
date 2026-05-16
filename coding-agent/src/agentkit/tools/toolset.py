@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from agentkit.directive.types import Directive
+from agentkit.observability import ObservationSink, record_span
 from agentkit.runtime.hook_runtime import HookRuntime
 from agentkit.tools.schema import ToolSchema
 
@@ -25,6 +26,35 @@ UNHANDLED_TOOL_RESULT = _UnhandledToolResult()
 SEARCH_TOOLS_NAME = "search_tools"
 CALL_TOOL_NAME = "call_tool"
 _PROXY_AFFORDANCE_NAMES = frozenset({SEARCH_TOOLS_NAME, CALL_TOOL_NAME})
+
+
+def _observation_sink(ctx: Any) -> ObservationSink | None:
+    config = getattr(ctx, "config", None)
+    if not isinstance(config, dict):
+        return None
+    sink = config.get("observation_sink")
+    if sink is None:
+        return None
+    if not isinstance(sink, ObservationSink):
+        raise TypeError("observation_sink must implement ObservationSink")
+    return sink
+
+
+def _tool_call_attributes(call: "ToolCallRequest") -> dict[str, Any]:
+    return {
+        "tool.name": call.name,
+        "tool.call_id": call.tool_call_id,
+    }
+
+
+def _set_tool_result_attributes(
+    span: Any,
+    result: "ToolExecutionResult",
+) -> None:
+    span.set_attribute("tool.missing", result.missing)
+    span.set_attribute("tool.error", result.is_error)
+    if result.error is not None:
+        span.set_attribute("tool.error_type", type(result.error).__name__)
 
 
 class ToolProvider(Protocol):
@@ -292,10 +322,14 @@ class Toolset:
         if isinstance(value, int | float) and not isinstance(value, bool):
             minimum = schema.get("minimum")
             if isinstance(minimum, int | float) and value < minimum:
-                return f"invalid argument {self._format_path(path)}: must be >= {minimum}"
+                return (
+                    f"invalid argument {self._format_path(path)}: must be >= {minimum}"
+                )
             maximum = schema.get("maximum")
             if isinstance(maximum, int | float) and value > maximum:
-                return f"invalid argument {self._format_path(path)}: must be <= {maximum}"
+                return (
+                    f"invalid argument {self._format_path(path)}: must be <= {maximum}"
+                )
 
         if isinstance(value, str):
             min_length = schema.get("minLength")
@@ -334,13 +368,17 @@ class Toolset:
         if isinstance(required, list):
             for name in required:
                 if isinstance(name, str) and name not in value:
-                    return f"missing required argument: {self._format_path((*path, name))}"
+                    return (
+                        f"missing required argument: {self._format_path((*path, name))}"
+                    )
 
         if schema.get("additionalProperties") is False:
             allowed = set(properties)
             unexpected = sorted(set(value) - allowed)
             if unexpected:
-                return f"unexpected argument: {self._format_path((*path, unexpected[0]))}"
+                return (
+                    f"unexpected argument: {self._format_path((*path, unexpected[0]))}"
+                )
 
         for name, child_schema in properties.items():
             if name not in value or not isinstance(name, str):
@@ -579,16 +617,24 @@ class Toolset:
         ctx: Any,
         options: ToolExecutionOptions,
     ) -> ToolExecutionResult:
-        if call.name == SEARCH_TOOLS_NAME:
-            return self._execute_search_tools(call)
-        if call.name == CALL_TOOL_NAME:
-            return await self._execute_call_tool(call, ctx=ctx, options=options)
-        return await self._execute_one_from_hook(
-            "execute_tool",
-            call,
-            ctx=ctx,
-            options=options,
-        )
+        with record_span(
+            "tool.call",
+            sink=_observation_sink(ctx),
+            attributes=_tool_call_attributes(call),
+        ) as span:
+            if call.name == SEARCH_TOOLS_NAME:
+                result = self._execute_search_tools(call)
+            elif call.name == CALL_TOOL_NAME:
+                result = await self._execute_call_tool(call, ctx=ctx, options=options)
+            else:
+                result = await self._execute_one_from_hook(
+                    "execute_tool",
+                    call,
+                    ctx=ctx,
+                    options=options,
+                )
+            _set_tool_result_attributes(span, result)
+            return result
 
     async def _execute_one_from_hook(
         self,
@@ -648,11 +694,7 @@ class Toolset:
                 error=ValueError("search_tools.limit must be an integer from 1 to 50"),
             )
 
-        terms = [
-            term
-            for term in query_value.strip().casefold().split()
-            if term
-        ]
+        terms = [term for term in query_value.strip().casefold().split() if term]
         matches: list[ToolSchema] = []
         for schema in self._proxy_schemas():
             haystack = f"{schema.name} {schema.description}".casefold()
@@ -751,8 +793,7 @@ class Toolset:
             return ToolExecutionResult(
                 tool_call_id=call.tool_call_id,
                 name=call.name,
-                error=target_result.error
-                or RuntimeError(target_result.error_message),
+                error=target_result.error or RuntimeError(target_result.error_message),
             )
 
         return ToolExecutionResult(
