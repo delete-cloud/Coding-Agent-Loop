@@ -244,7 +244,7 @@ enabled = ["storage", "core_tools"]
 
 [observability]
 enabled = true
-backend = "langfuse"
+backend = "bogus"
 """.strip()
         )
 
