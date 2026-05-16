@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Protocol, runtime_checkable
 
 from agentkit.checkpoint.models import CheckpointMeta, CheckpointSnapshot
+from agentkit.result.models import ArtifactRef
 
 
 @runtime_checkable
@@ -44,3 +45,25 @@ class SessionStore(Protocol):
     async def load_session(self, session_id: str) -> dict[str, Any] | None: ...
     async def list_sessions(self) -> list[str]: ...
     async def delete_session(self, session_id: str) -> None: ...
+
+
+@runtime_checkable
+class ArtifactStore(Protocol):
+    """Protocol for metadata-only artifact reference persistence."""
+
+    async def save_artifact_ref(
+        self,
+        session_id: str,
+        artifact_ref: ArtifactRef,
+        *,
+        turn_id: str | None = None,
+    ) -> None: ...
+    async def load_artifact_ref(self, artifact_id: str) -> ArtifactRef | None: ...
+    async def list_artifact_refs(
+        self,
+        session_id: str,
+        *,
+        turn_id: str | None = None,
+    ) -> list[ArtifactRef]: ...
+    async def delete_artifact_ref(self, artifact_id: str) -> None: ...
+    async def delete_artifact_refs_for_session(self, session_id: str) -> None: ...
