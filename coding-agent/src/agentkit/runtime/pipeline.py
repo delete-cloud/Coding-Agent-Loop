@@ -113,6 +113,26 @@ def _stage_span_attributes(
     return attributes
 
 
+def _llm_generation_attributes(
+    ctx: "PipelineContext",
+    *,
+    message_count: int,
+    tool_schema_count: int,
+) -> dict[str, Any]:
+    attributes: dict[str, Any] = {
+        "message_count": message_count,
+        "tool_schema_count": tool_schema_count,
+    }
+    if ctx.session_id:
+        attributes["session_id"] = ctx.session_id
+    if ctx.run_context is not None:
+        attributes["run_id"] = ctx.run_context.run_id
+    model = ctx.config.get("model")
+    if isinstance(model, str) and model:
+        attributes["model"] = model
+    return attributes
+
+
 try:
     from agentkit.tracing import get_tracer as _get_tracer
 
@@ -621,32 +641,51 @@ class Pipeline:
             tool_calls: list[dict[str, Any]] = []
             thinking_chunks: list[str] = []
 
-            async for event in ctx.llm_provider.stream(ctx.messages, tools=tool_dicts):
-                if isinstance(event, ThinkingEvent):
-                    if ctx.on_event:
-                        await ctx.on_event(event)
-                    thinking_chunks.append(event.text)
-                elif isinstance(event, TextEvent):
-                    if ctx.on_event:
-                        await ctx.on_event(event)
-                    text_chunks.append(event.text)
-                elif isinstance(event, ToolCallEvent):
-                    if ctx.on_event:
-                        await ctx.on_event(event)
-                    tool_calls.append(
-                        {
-                            "id": event.tool_call_id,
-                            "name": event.name,
-                            "arguments": event.arguments,
-                        }
-                    )
-                elif isinstance(event, UsageEvent):
-                    if ctx.on_event:
-                        await ctx.on_event(event)
-                elif isinstance(event, DoneEvent):
-                    if ctx.on_event:
-                        await ctx.on_event(event)
-                    break
+            with record_span(
+                "llm.generation",
+                sink=_observation_sink(ctx),
+                attributes=_llm_generation_attributes(
+                    ctx,
+                    message_count=len(ctx.messages),
+                    tool_schema_count=len(tool_dicts or []),
+                ),
+            ) as llm_span:
+                async for event in ctx.llm_provider.stream(
+                    ctx.messages, tools=tool_dicts
+                ):
+                    if isinstance(event, ThinkingEvent):
+                        if ctx.on_event:
+                            await ctx.on_event(event)
+                        thinking_chunks.append(event.text)
+                    elif isinstance(event, TextEvent):
+                        if ctx.on_event:
+                            await ctx.on_event(event)
+                        text_chunks.append(event.text)
+                    elif isinstance(event, ToolCallEvent):
+                        if ctx.on_event:
+                            await ctx.on_event(event)
+                        tool_calls.append(
+                            {
+                                "id": event.tool_call_id,
+                                "name": event.name,
+                                "arguments": event.arguments,
+                            }
+                        )
+                    elif isinstance(event, UsageEvent):
+                        if ctx.on_event:
+                            await ctx.on_event(event)
+                        llm_span.set_attribute("input_tokens", event.input_tokens)
+                        llm_span.set_attribute("output_tokens", event.output_tokens)
+                        llm_span.set_attribute(
+                            "total_tokens",
+                            event.input_tokens + event.output_tokens,
+                        )
+                        if event.provider_name:
+                            llm_span.set_attribute("provider_name", event.provider_name)
+                    elif isinstance(event, DoneEvent):
+                        if ctx.on_event:
+                            await ctx.on_event(event)
+                        break
 
             if text_chunks and not tool_calls:
                 payload: dict[str, Any] = {

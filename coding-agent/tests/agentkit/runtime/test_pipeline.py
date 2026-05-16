@@ -390,7 +390,10 @@ class TestPipeline:
 
         await pipeline.run_turn(ctx)
 
-        assert [span.name for span in sink.spans] == [
+        stage_spans = [
+            span for span in sink.spans if span.name.startswith("runtime.stage.")
+        ]
+        assert [span.name for span in stage_spans] == [
             "runtime.stage.resolve",
             "runtime.stage.load_state",
             "runtime.stage.build_context",
@@ -399,8 +402,8 @@ class TestPipeline:
             "runtime.stage.apply_directives",
             "runtime.stage.dispatch",
         ]
-        assert [span.status for span in sink.spans] == ["ok"] * 7
-        build_context_span = sink.spans[2]
+        assert [span.status for span in stage_spans] == ["ok"] * 7
+        build_context_span = stage_spans[2]
         assert build_context_span.attributes == {
             "stage": "build_context",
             "session_id": "session-1",
@@ -408,9 +411,88 @@ class TestPipeline:
             "entry_count_before": 0,
             "entry_count_after": 0,
         }
-        model_span = sink.spans[3]
+        model_span = stage_spans[3]
         assert model_span.attributes["entry_count_before"] == 0
         assert model_span.attributes["entry_count_after"] == 1
+
+    @pytest.mark.asyncio
+    async def test_run_turn_records_llm_generation_span_with_usage_metadata(
+        self, setup
+    ):
+        pipeline, plugin = setup
+        sink = RecordingObservationSink()
+
+        async def mock_stream(messages, tools=None, **kwargs):
+            del messages, tools, kwargs
+            from agentkit.providers.models import DoneEvent, TextEvent, UsageEvent
+
+            yield UsageEvent(
+                input_tokens=12,
+                output_tokens=5,
+                provider_name="test-provider",
+            )
+            yield TextEvent(text="Hello back!")
+            yield DoneEvent()
+
+        plugin._mock_llm.stream = mock_stream
+        ctx = PipelineContext(
+            tape=Tape(),
+            session_id="session-1",
+            run_context=AgentRunContext(
+                session_id="session-1",
+                run_id="turn-1",
+                agent_id=None,
+                environment=RuntimeContextEnvironment(),
+                context_budget=ContextBudget(),
+            ),
+            config={
+                "model": "test-model",
+                "observation_sink": sink,
+            },
+        )
+
+        await pipeline.run_turn(ctx)
+
+        llm_spans = [span for span in sink.spans if span.name == "llm.generation"]
+        assert len(llm_spans) == 1
+        assert llm_spans[0].status == "ok"
+        assert llm_spans[0].attributes == {
+            "session_id": "session-1",
+            "run_id": "turn-1",
+            "message_count": 2,
+            "tool_schema_count": 0,
+            "model": "test-model",
+            "provider_name": "test-provider",
+            "input_tokens": 12,
+            "output_tokens": 5,
+            "total_tokens": 17,
+        }
+
+    @pytest.mark.asyncio
+    async def test_run_turn_records_llm_generation_error_span(self, setup):
+        pipeline, plugin = setup
+        sink = RecordingObservationSink()
+
+        async def mock_stream(messages, tools=None, **kwargs):
+            del messages, tools, kwargs
+            raise RuntimeError("provider exploded")
+            yield
+
+        plugin._mock_llm.stream = mock_stream
+        ctx = PipelineContext(
+            tape=Tape(),
+            session_id="session-1",
+            config={"observation_sink": sink},
+        )
+
+        with pytest.raises(PipelineError, match="provider exploded"):
+            await pipeline.run_turn(ctx)
+
+        llm_spans = [span for span in sink.spans if span.name == "llm.generation"]
+        assert len(llm_spans) == 1
+        assert llm_spans[0].status == "error"
+        assert llm_spans[0].error_type == "RuntimeError"
+        assert llm_spans[0].error_message == "provider exploded"
 
     @pytest.mark.asyncio
     async def test_run_turn_records_error_stage_span_and_preserves_pipeline_error(
