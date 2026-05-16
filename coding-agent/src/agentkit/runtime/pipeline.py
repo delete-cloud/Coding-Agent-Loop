@@ -19,6 +19,7 @@ from typing import Any, Awaitable, Callable, cast
 from agentkit._types import StageName
 from agentkit.directive.types import Directive
 from agentkit.errors import PipelineError
+from agentkit.observability import ObservationSink, record_span
 from agentkit.plugin.registry import PluginRegistry
 from agentkit.providers.models import (
     DoneEvent,
@@ -58,6 +59,15 @@ _PROMPT_RUNTIME_MESSAGE_KINDS = frozenset(
         RuntimeMessageKind.SYSTEM_NOTICE,
     }
 )
+_STAGE_SPAN_NAMES: dict[StageName, str] = {
+    "resolve_session": "runtime.stage.resolve",
+    "load_state": "runtime.stage.load_state",
+    "build_context": "runtime.stage.build_context",
+    "run_model": "runtime.stage.model_generate",
+    "save_state": "runtime.stage.save_tape",
+    "render": "runtime.stage.apply_directives",
+    "dispatch": "runtime.stage.dispatch",
+}
 
 StructuredToolResultScopeFactory = Callable[[bool], AbstractContextManager[None]]
 
@@ -76,6 +86,31 @@ def _structured_tool_result_scope(
     if not callable(scope_factory):
         raise TypeError("structured_tool_result_scope must be callable")
     return cast(StructuredToolResultScopeFactory, scope_factory)(enabled)
+
+
+def _observation_sink(ctx: "PipelineContext") -> ObservationSink | None:
+    sink = ctx.config.get("observation_sink")
+    if sink is None:
+        return None
+    if not isinstance(sink, ObservationSink):
+        raise TypeError("observation_sink must implement ObservationSink")
+    return sink
+
+
+def _stage_span_attributes(
+    ctx: "PipelineContext",
+    *,
+    stage: StageName,
+) -> dict[str, Any]:
+    attributes: dict[str, Any] = {
+        "stage": stage,
+        "entry_count_before": len(ctx.tape),
+    }
+    if ctx.session_id:
+        attributes["session_id"] = ctx.session_id
+    if ctx.run_context is not None:
+        attributes["run_id"] = ctx.run_context.run_id
+    return attributes
 
 
 try:
@@ -373,6 +408,7 @@ class Pipeline:
         ctx.runtime_messages = []
         ctx.runtime_started_at = time.monotonic()
         self._ensure_toolset(ctx)
+        observation_sink = _observation_sink(ctx)
 
         try:
             for stage in self.STAGES:
@@ -393,7 +429,15 @@ class Pipeline:
                             _tracer.info(
                                 "stage_start", stage=stage, entry_count=len(ctx.tape)
                             )
-                        await handler(ctx)
+                        attributes = _stage_span_attributes(ctx, stage=stage)
+                        span_name = _STAGE_SPAN_NAMES[stage]
+                        with record_span(
+                            span_name,
+                            sink=observation_sink,
+                            attributes=attributes,
+                        ) as span:
+                            await handler(ctx)
+                            span.set_attribute("entry_count_after", len(ctx.tape))
                         if _tracer is not None:
                             _tracer.info(
                                 "stage_end", stage=stage, entry_count=len(ctx.tape)
