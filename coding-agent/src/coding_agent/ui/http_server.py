@@ -23,6 +23,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from agentkit.config.loader import load_config as load_agent_toml
 from agentkit.errors import ConfigError
+from agentkit.result.models import ArtifactRef
 from agentkit.result.reducers import result_from_turn_trace
 from agentkit.tape.extract import TurnTrace, extract_turns
 from agentkit.tape.tape import Tape
@@ -54,7 +55,7 @@ from coding_agent.ui.session_owner_store import (
     SessionOwnershipConflictReason,
 )
 from coding_agent.ui.workspace_store import PGWorkspaceMetadataStore
-from coding_agent.ui.workspace_store import WorkspaceRecord
+from coding_agent.ui.workspace_store import JSONValue, WorkspaceRecord
 from coding_agent.ui.schemas import (
     PromptRequest,
     CreateSessionRequest,
@@ -1013,11 +1014,77 @@ async def _persist_workspace_publication_refs(
         "remote_url": publication.remote_url,
         "pr_url": pr_url,
         "error": publication.error,
+        "artifact_ref": _artifact_ref_json(
+            _workspace_publication_artifact_ref(
+                session_id=session_id,
+                publication=publication,
+                mode=mode,
+                pr_url=pr_url,
+            )
+        ),
     }
     await session_manager.update_workspace_record_result_refs(
         record.workspace_record_id,
         result_refs=result_refs,
     )
+
+
+def _workspace_publication_artifact_ref(
+    *,
+    session_id: str,
+    publication: WorkspaceBranchPublication,
+    mode: Literal["branch", "pr"],
+    pr_url: str | None,
+) -> ArtifactRef:
+    metadata: dict[str, object] = {
+        "session_id": session_id,
+        "workspace_id": publication.workspace_id,
+        "mode": mode,
+        "status": publication.status,
+        "branch_name": publication.branch_name,
+        "pushed_ref": publication.pushed_ref,
+        "commit_sha": publication.commit_sha,
+        "remote_url": publication.remote_url,
+        "pr_url": pr_url,
+        "error": publication.error,
+    }
+    artifact_kind: Literal["branch", "pull_request"] = (
+        "pull_request" if pr_url is not None else "branch"
+    )
+    uri = pr_url if pr_url is not None else publication.remote_url
+    summary = _workspace_publication_artifact_summary(publication)
+    return ArtifactRef(
+        artifact_id=f"workspace:{publication.workspace_id}:publication",
+        kind=artifact_kind,
+        title="Workspace publication",
+        summary=summary,
+        uri=uri,
+        metadata=metadata,
+    )
+
+
+def _workspace_publication_artifact_summary(
+    publication: WorkspaceBranchPublication,
+) -> str:
+    if publication.status == "published" and publication.branch_name:
+        if publication.commit_sha:
+            return f"Published branch {publication.branch_name} at {publication.commit_sha}"
+        return f"Published branch {publication.branch_name}"
+    if publication.status == "partial" and publication.commit_sha:
+        return f"Created local publication commit {publication.commit_sha}"
+    return f"Workspace publication {publication.status}"
+
+
+def _artifact_ref_json(artifact_ref: ArtifactRef) -> dict[str, JSONValue]:
+    return {
+        "artifact_id": artifact_ref.artifact_id,
+        "kind": artifact_ref.kind,
+        "title": artifact_ref.title,
+        "summary": artifact_ref.summary,
+        "uri": artifact_ref.uri,
+        "metadata": cast(dict[str, JSONValue], artifact_ref.metadata),
+        "producer_turn_id": artifact_ref.producer_turn_id,
+    }
 
 
 def _workspace_archive_manifest_response(

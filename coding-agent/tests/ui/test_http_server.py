@@ -4693,6 +4693,28 @@ class TestRemoteWorkspaceRetentionContract:
                         "remote_url": "https://github.com/org/repo.git",
                         "pr_url": None,
                         "error": None,
+                        "artifact_ref": {
+                            "artifact_id": "workspace:ws-result-refs:publication",
+                            "kind": "branch",
+                            "title": "Workspace publication",
+                            "summary": (
+                                "Published branch coding-agent/result at abc123"
+                            ),
+                            "uri": "https://github.com/org/repo.git",
+                            "metadata": {
+                                "session_id": session_id,
+                                "workspace_id": "ws-result-refs",
+                                "mode": "branch",
+                                "status": "published",
+                                "branch_name": "coding-agent/result",
+                                "pushed_ref": "refs/heads/coding-agent/result",
+                                "commit_sha": "abc123",
+                                "remote_url": "https://github.com/org/repo.git",
+                                "pr_url": None,
+                                "error": None,
+                            },
+                            "producer_turn_id": None,
+                        },
                     },
                 },
             )
@@ -4716,6 +4738,26 @@ class TestRemoteWorkspaceRetentionContract:
                 "remote_url": "https://github.com/org/repo.git",
                 "pr_url": None,
                 "error": None,
+                "artifact_ref": {
+                    "artifact_id": "workspace:ws-result-refs:publication",
+                    "kind": "branch",
+                    "title": "Workspace publication",
+                    "summary": "Published branch coding-agent/result at abc123",
+                    "uri": "https://github.com/org/repo.git",
+                    "metadata": {
+                        "session_id": session_id,
+                        "workspace_id": "ws-result-refs",
+                        "mode": "branch",
+                        "status": "published",
+                        "branch_name": "coding-agent/result",
+                        "pushed_ref": "refs/heads/coding-agent/result",
+                        "commit_sha": "abc123",
+                        "remote_url": "https://github.com/org/repo.git",
+                        "pr_url": None,
+                        "error": None,
+                    },
+                    "producer_turn_id": None,
+                },
             },
         }
 
