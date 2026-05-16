@@ -5,7 +5,8 @@ Core API:
     Plugin, PluginRegistry — Plugin system
     Directive, Approve, Reject, AskUser, Checkpoint, MemoryRecord — Effect descriptions
     Entry, Tape, ForkTapeStore — Conversation history
-    TapeStore, DocIndex, SessionStore — Storage protocols
+    TapeStore, DocIndex, SessionStore, ArtifactStore — Storage protocols
+    TurnResult, SessionResult, ArtifactRef — Result models
     ToolSchema, ToolRegistry, tool — Tool system
     Channel, LocalChannel — Communication
     AgentConfig, load_config — Configuration
@@ -48,7 +49,19 @@ from agentkit.providers import (
 )
 from agentkit.runtime import HookRuntime, Lifecycle, Pipeline, PipelineContext
 from agentkit.checkpoint import CheckpointMeta, CheckpointService, CheckpointSnapshot
+from agentkit.result import (
+    ArtifactRef,
+    FailureSummary,
+    ResultRef,
+    SessionResult,
+    TurnResult,
+    VerificationSummary,
+    latest_turn_result,
+    result_from_turn_trace,
+    verification_summary_from_turn_trace,
+)
 from agentkit.storage import (
+    ArtifactStore,
     CheckpointStore,
     DocIndex,
     FSCheckpointStore,
@@ -84,10 +97,21 @@ __all__ = [
     "CheckpointSnapshot",
     # Storage
     "CheckpointStore",
+    "ArtifactStore",
     "TapeStore",
     "DocIndex",
     "FSCheckpointStore",
     "SessionStore",
+    # Results
+    "ArtifactRef",
+    "FailureSummary",
+    "ResultRef",
+    "SessionResult",
+    "TurnResult",
+    "VerificationSummary",
+    "latest_turn_result",
+    "result_from_turn_trace",
+    "verification_summary_from_turn_trace",
     # Tools
     "ToolSchema",
     "ToolRegistry",
