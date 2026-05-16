@@ -47,7 +47,7 @@ Introduce a layered observability model:
   observation events, a no-op sink, and a small context-manager helper such as
   `record_span(...)`.
 - `agentkit` instrumentation emits provider-neutral spans for runtime concepts:
-  pipeline stages, LLM generation, tool calls, and approval waits.
+  runtime pipeline stages, LLM generation, tool calls, and human-gate waits.
 - `coding_agent` maps product-specific concepts into spans: sessions, remote
   workspaces, setup/agent phases, diff/patch/archive, branch/PR publication,
   retention, storage operations, and HTTP request context.
@@ -61,24 +61,33 @@ requests, workspace cleanup, or process shutdown.
 
 ### Observability Surface
 
-P0 spans should cover the local runtime path:
+P0 spans should cover the local runtime path. AgentKit-owned span names should
+describe runtime behavior, not HTTP/session/workspace product behavior:
 
-- `pipeline.stage` with stage name, status, duration, session id, and turn id;
+- `runtime.pipeline` as an optional parent span for one runtime turn;
+- `runtime.stage.build_context`;
+- `runtime.stage.model_generate`;
+- `runtime.stage.tool_dispatch`;
+- `runtime.stage.save_tape`;
+- `runtime.stage.apply_directives`;
 - `llm.generation` with provider, model, status, duration, token usage when
   available, and error class/message summary on failure;
 - `tool.call` with tool name, call id, status, duration, approval outcome, and
   sanitized argument summary;
-- `approval.wait` with request id, tool name, status, duration, and timeout
-  outcome.
+- `approval.wait` or `human_gate.wait` with request id, tool name, status,
+  duration, and timeout outcome.
 
 P1/P2 spans should cover `coding_agent` product behavior:
 
-- `workspace.provision`, `workspace.snapshot_import`, `workspace.setup_phase`,
-  `workspace.agent_phase`, `workspace.cleanup`, and `workspace.gc`;
+- `http.request`;
+- `session.resolve` and `session.restore`;
+- `remote.workspace.provision`, `remote.workspace.snapshot_import`,
+  `remote.workspace.setup_phase`, `remote.workspace.agent_phase`,
+  `remote.workspace.cleanup`, and `remote.workspace.gc`;
 - `result.diff`, `result.patch`, `result.archive`, `result.publish_branch`, and
   `result.publish_pr`;
-- `storage.session`, `storage.workspace`, and `session.owner_lease` for
-  persistent store operations and owner fencing.
+- `storage.pg.session_load`, `storage.pg.workspace_update`, and
+  `session.owner_lease` for persistent store operations and owner fencing.
 
 Span records should use stable, low-cardinality names and attributes. Dynamic
 values such as session id, turn id, workspace id, provider instance id, and PR
@@ -86,46 +95,55 @@ URL are attributes, not span names.
 
 ### Trace Shape
 
-Each agent turn should create or join one logical trace. The preferred grouping
-model is:
+P0 uses one root trace per turn. This keeps traces bounded and prevents long
+sessions with many turns, publication steps, and cleanup work from becoming one
+large trace. The preferred grouping model is:
 
 ```text
 trace: coding_agent.turn
-  span: pipeline.stage(resolve_session)
-  span: pipeline.stage(load_state)
-  span: pipeline.stage(build_context)
+  attrs: session_id, turn_id, provider, model, workspace_id
+
+  span: runtime.pipeline
+  span: runtime.stage.build_context
+  span: runtime.stage.model_generate
   span: llm.generation
   span: tool.call(file_read)
   span: approval.wait
   span: tool.call(shell_command)
-  span: pipeline.stage(save_state)
-  span: pipeline.stage(render)
-  span: pipeline.stage(dispatch)
+  span: runtime.stage.save_tape
+  span: runtime.stage.apply_directives
 ```
 
-For remote runs, product spans may appear before or after the turn:
+Remote and product lifecycle work uses a separate trace or linked spans. It is
+correlated with turn traces through stable metadata such as `session_id`,
+`turn_id`, `workspace_id`, and later `trace_link` or result/artifact refs if
+needed.
 
 ```text
 trace: coding_agent.remote_session
-  span: workspace.provision
-  span: workspace.snapshot_import
-  span: workspace.setup_phase
-  span: workspace.agent_phase
-  trace/span: coding_agent.turn
+  attrs: session_id, workspace_id, provider_instance_id
+
+  span: remote.workspace.provision
+  span: remote.workspace.snapshot_import
+  span: remote.workspace.setup_phase
+  span: remote.workspace.agent_phase
   span: result.diff
   span: result.publish_branch
   span: result.publish_pr
-  span: workspace.cleanup
+  span: remote.workspace.cleanup
 ```
 
-Implementations may use one trace per turn with `session_id` grouping, or a
-session root trace with turn child spans, as long as Langfuse can group by
-session id and an operator can inspect one turn without loading an unbounded
-session history.
+Implementations must not require the first version to place all remote session
+work, multiple turns, publication, and cleanup into one trace. Langfuse should
+be able to group by `session_id`, but one turn must remain inspectable without
+loading unbounded session history.
 
 ### Redaction And Data Safety
 
-Safety is a first-class part of this ADR.
+Safety is a first-class part of this ADR. It is enforced in two layers:
+
+- AgentKit avoids collecting sensitive data by default.
+- Coding Agent enforces final egress redaction before delivery to any exporter.
 
 Defaults:
 
@@ -149,6 +167,13 @@ The observability layer may record sanitized summaries, such as:
 Any future mode that exports full prompt text, tool arguments, file content, or
 shell output must be explicit, documented, and disabled in production dogfood
 configuration unless the operator opts in.
+
+AgentKit does not know which product metadata is sensitive in every deployment.
+It must therefore avoid actively collecting prompt text, file content, shell
+output, environment values, and secrets. Coding Agent owns the final outbound
+policy for HTTP auth, owner labels, workspace ids, repo metadata, remote tokens,
+and other product-specific fields. If Coding Agent cannot prove an attribute is
+safe, it should drop it before export.
 
 ### Configuration
 
@@ -289,10 +314,10 @@ Affected paths:
 
 Order:
 
-1. pipeline stage spans;
+1. runtime stage spans;
 2. LLM generation spans with token usage when available;
 3. tool call spans with sanitized argument summaries;
-4. approval wait spans.
+4. approval or human-gate wait spans.
 
 Keep the existing `agentkit.tracing` behavior compatible until it is explicitly
 deprecated or folded into the new sink.
@@ -367,11 +392,15 @@ Add dogfood docs/config examples proving:
 - [ ] ADR exists at
   `docs/adr/0028-observability-and-langfuse-integration.md`.
 - [ ] ADR states the `agentkit` / `coding_agent` / Langfuse layering boundary.
-- [ ] ADR states redaction defaults and fail-open exporter behavior.
+- [ ] ADR states that AgentKit avoids sensitive collection by default while
+  Coding Agent enforces final egress redaction.
+- [ ] ADR states fail-open sink/exporter behavior.
+- [ ] ADR states one-turn-one-trace for P0 and remote session correlation by
+  metadata/linked spans instead of one unbounded trace.
 - [ ] ADR splits implementation into core, instrumentation, exporter, remote
   spans, and dogfood phases.
 - [ ] P0 implementation has no external dependency and is no-op by default.
-- [ ] Pipeline/tool/LLM instrumentation tests verify spans through a fake sink.
+- [ ] Runtime/tool/LLM instrumentation tests verify spans through a fake sink.
 - [ ] Exporter tests verify failures do not fail agent turns or server shutdown.
 - [ ] Dogfood trace verifies session grouping and default redaction.
 
