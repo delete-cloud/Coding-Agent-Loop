@@ -1,7 +1,8 @@
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 from agentkit.directive.types import Reject
 from agentkit.environment import WorkspaceSummary
+from agentkit.observability import SpanRecord
 from agentkit.runtime import (
     AgentRunContext,
     ContextBudget,
@@ -20,6 +21,17 @@ from agentkit.errors import PipelineError
 from agentkit.tools import FatalToolExecutionError
 from agentkit.tools import UNHANDLED_TOOL_RESULT
 from agentkit.tools.schema import ToolSchema
+
+
+class RecordingObservationSink:
+    def __init__(self):
+        self.spans: list[SpanRecord] = []
+
+    def record_span(self, span: SpanRecord) -> None:
+        self.spans.append(span)
+
+    def record_event(self, event) -> None:
+        del event
 
 
 class MinimalPlugin:
@@ -349,6 +361,89 @@ class TestPipeline:
         await pipeline.run_turn(ctx)
 
         assert ctx.toolset is mounted_toolset
+
+    @pytest.mark.asyncio
+    async def test_run_turn_records_runtime_stage_spans(self, setup):
+        pipeline, plugin = setup
+        sink = RecordingObservationSink()
+
+        async def mock_stream(messages, tools=None, **kwargs):
+            del messages, tools, kwargs
+            from agentkit.providers.models import DoneEvent, TextEvent
+
+            yield TextEvent(text="Hello back!")
+            yield DoneEvent()
+
+        plugin._mock_llm.stream = mock_stream
+        ctx = PipelineContext(
+            tape=Tape(),
+            session_id="session-1",
+            run_context=AgentRunContext(
+                session_id="session-1",
+                run_id="turn-1",
+                agent_id=None,
+                environment=RuntimeContextEnvironment(),
+                context_budget=ContextBudget(),
+            ),
+            config={"observation_sink": sink},
+        )
+
+        await pipeline.run_turn(ctx)
+
+        assert [span.name for span in sink.spans] == [
+            "runtime.stage.resolve",
+            "runtime.stage.load_state",
+            "runtime.stage.build_context",
+            "runtime.stage.model_generate",
+            "runtime.stage.save_tape",
+            "runtime.stage.apply_directives",
+            "runtime.stage.dispatch",
+        ]
+        assert [span.status for span in sink.spans] == ["ok"] * 7
+        build_context_span = sink.spans[2]
+        assert build_context_span.attributes == {
+            "stage": "build_context",
+            "session_id": "session-1",
+            "run_id": "turn-1",
+            "entry_count_before": 0,
+            "entry_count_after": 0,
+        }
+        model_span = sink.spans[3]
+        assert model_span.attributes["entry_count_before"] == 0
+        assert model_span.attributes["entry_count_after"] == 1
+
+    @pytest.mark.asyncio
+    async def test_run_turn_records_error_stage_span_and_preserves_pipeline_error(
+        self, setup
+    ):
+        pipeline, _ = setup
+        sink = RecordingObservationSink()
+
+        async def fail_build_context(ctx):
+            del ctx
+            raise RuntimeError("context exploded")
+
+        pipeline._stage_build_context = fail_build_context
+        ctx = PipelineContext(
+            tape=Tape(),
+            session_id="session-1",
+            config={"observation_sink": sink},
+        )
+
+        with pytest.raises(PipelineError, match="context exploded"):
+            await pipeline.run_turn(ctx)
+
+        assert [span.name for span in sink.spans] == [
+            "runtime.stage.resolve",
+            "runtime.stage.load_state",
+            "runtime.stage.build_context",
+        ]
+        error_span = sink.spans[-1]
+        assert error_span.status == "error"
+        assert error_span.error_type == "RuntimeError"
+        assert error_span.error_message == "context exploded"
+        assert error_span.attributes["stage"] == "build_context"
+        assert error_span.attributes["session_id"] == "session-1"
 
     @pytest.mark.asyncio
     async def test_runtime_context_and_messages_are_injected_into_prompt(self, setup):
@@ -855,7 +950,7 @@ class TestPipeline:
         mock_llm.stream = mock_stream
         plugin._mock_llm = mock_llm
 
-        result = await pipeline.run_turn(ctx)
+        await pipeline.run_turn(ctx)
         entries = list(ctx.tape)
         assert any(e.kind == "tool_call" for e in entries)
         assert any(e.kind == "tool_result" for e in entries)
@@ -1460,12 +1555,8 @@ class TestPipeline:
 
         async def mock_stream(messages, tools=None, **kwargs):
             del messages, tools, kwargs
-            yield ToolCallEvent(
-                tool_call_id="tc1", name="fatal_tool", arguments={}
-            )
-            yield ToolCallEvent(
-                tool_call_id="tc2", name="fatal_tool", arguments={}
-            )
+            yield ToolCallEvent(tool_call_id="tc1", name="fatal_tool", arguments={})
+            yield ToolCallEvent(tool_call_id="tc2", name="fatal_tool", arguments={})
             yield DoneEvent()
 
         plugin._mock_llm = MagicMock()
@@ -1483,8 +1574,6 @@ class TestPipeline:
 class TestPipelineView:
     @pytest.mark.asyncio
     async def test_build_context_uses_view(self):
-        from agentkit.tape.view import TapeView
-
         registry = PluginRegistry()
 
         class ViewTestPlugin:
