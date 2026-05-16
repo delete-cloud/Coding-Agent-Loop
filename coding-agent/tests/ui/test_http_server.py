@@ -25,6 +25,8 @@ from starlette.requests import Request
 from agentkit.errors import ConfigError
 from agentkit.checkpoint.models import CheckpointMeta
 from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
+from agentkit.result.models import TurnResult, VerificationSummary
+from agentkit.tape.extract import TurnTrace
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
 from agentkit.tools import FatalToolExecutionError
@@ -3769,6 +3771,51 @@ class TestGetSession:
 
 
 class TestRemoteResultPublicationContract:
+    async def test_session_result_endpoint_uses_agentkit_reducer_without_response_change(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = register_session(
+            "result-agentkit-reducer",
+            execution_binding=CloudWorkspaceBinding(
+                workspace_url="docker://agent-ws-result/workspace",
+                workspace_id="ws-agentkit-result",
+            ),
+            provider_name="openai",
+            model_name="result-model",
+        )
+        tape = Tape(tape_id="runtime-tape")
+        tape.append(
+            Entry(kind="message", payload={"role": "user", "content": "fix it"})
+        )
+        tape.append(
+            Entry(kind="message", payload={"role": "assistant", "content": "ignored"})
+        )
+        session.runtime_ctx = SimpleNamespace(tape=tape)
+        session.tape_id = tape.tape_id
+
+        def fake_result_from_turn_trace(turn: TurnTrace) -> TurnResult:
+            assert turn.user_input == "fix it"
+            return TurnResult(
+                final_output="Reducer final answer.",
+                verification_summary=VerificationSummary(
+                    summary="Reducer verification summary."
+                ),
+            )
+
+        monkeypatch.setattr(
+            http_server,
+            "result_from_turn_trace",
+            fake_result_from_turn_trace,
+        )
+
+        response = await client.get(f"/sessions/{session.id}/result")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["final_answer"] == "Reducer final answer."
+        assert data["verification_summary"] == "Reducer verification summary."
+        assert data["failure_details"] is None
+
     async def test_session_result_includes_final_answer_and_tool_activity_from_runtime_tape(
         self, client: AsyncClient
     ) -> None:
