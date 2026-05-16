@@ -612,6 +612,7 @@ async def test_toolset_approval_rejects_when_async_hook_raises(
 @pytest.mark.asyncio
 async def test_toolset_approval_executes_directive() -> None:
     executed: list[Approve] = []
+    sink = RecordingObservationSink()
 
     class DirectiveExecutor:
         async def execute(self, directive: Approve) -> bool:
@@ -626,18 +627,29 @@ async def test_toolset_approval_executes_directive() -> None:
 
     approval = await toolset.approve_tool_call(
         ToolCallRequest(tool_call_id="tc-1", name="file_read", arguments={}),
-        ctx=object(),
+        ctx=ToolContext(sink),
     )
 
     assert approval.approved is True
     assert approval.directive is directive
     assert executed == [directive]
+    assert len(sink.spans) == 1
+    assert sink.spans[0].name == "approval.wait"
+    assert sink.spans[0].status == "ok"
+    assert sink.spans[0].attributes == {
+        "tool.name": "file_read",
+        "tool.call_id": "tc-1",
+        "approval.directive_type": "Approve",
+        "approval.approved": True,
+    }
 
 
 @pytest.mark.asyncio
 async def test_toolset_approval_rejects_with_directive_reason_when_executor_raises(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    sink = RecordingObservationSink()
+
     class DirectiveExecutor:
         async def execute(self, directive: Reject) -> bool:
             del directive
@@ -652,7 +664,7 @@ async def test_toolset_approval_rejects_with_directive_reason_when_executor_rais
     with caplog.at_level(logging.WARNING):
         approval = await toolset.approve_tool_call(
             ToolCallRequest(tool_call_id="tc-executor", name="bash_run", arguments={}),
-            ctx=object(),
+            ctx=ToolContext(sink),
         )
 
     assert approval.approved is False
@@ -660,6 +672,15 @@ async def test_toolset_approval_rejects_with_directive_reason_when_executor_rais
     assert approval.directive is directive
     assert "RuntimeError" in caplog.text
     assert "bash_run" in caplog.text
+    assert len(sink.spans) == 1
+    assert sink.spans[0].name == "approval.wait"
+    assert sink.spans[0].status == "error"
+    assert sink.spans[0].error_type == "RuntimeError"
+    assert sink.spans[0].attributes == {
+        "tool.name": "bash_run",
+        "tool.call_id": "tc-executor",
+        "approval.directive_type": "Reject",
+    }
 
 
 @pytest.mark.asyncio

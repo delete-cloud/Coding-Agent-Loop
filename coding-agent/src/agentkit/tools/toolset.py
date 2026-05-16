@@ -47,6 +47,17 @@ def _tool_call_attributes(call: "ToolCallRequest") -> dict[str, Any]:
     }
 
 
+def _approval_wait_attributes(
+    call: "ToolCallRequest",
+    directive: Directive,
+) -> dict[str, Any]:
+    return {
+        "tool.name": call.name,
+        "tool.call_id": call.tool_call_id,
+        "approval.directive_type": type(directive).__name__,
+    }
+
+
 def _set_tool_result_attributes(
     span: Any,
     result: "ToolExecutionResult",
@@ -515,7 +526,13 @@ class Toolset:
                 )
             reason = str(getattr(directive, "reason", "policy"))
             try:
-                approved = await self._directive_executor.execute(directive)
+                with record_span(
+                    "approval.wait",
+                    sink=_observation_sink(ctx),
+                    attributes=_approval_wait_attributes(call, directive),
+                ) as span:
+                    approved = await self._directive_executor.execute(directive)
+                    span.set_attribute("approval.approved", bool(approved))
             except Exception as exc:
                 logger.warning(
                     "directive_executor failed for tool %r, rejecting (fail-closed): %s: %s",
