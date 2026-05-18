@@ -332,29 +332,38 @@ async def test_run_agent_persists_agent_run_lifecycle_when_store_configured() ->
 
     session = manager.get_session(session_id)
     assert len(runtime_store.created) == 1
-    assert len(runtime_store.updated) == 1
+    assert len(runtime_store.updated) == 2
     created = runtime_store.created[0]
-    updated = runtime_store.updated[0]
+    running_update = runtime_store.updated[0]
+    completed_update = runtime_store.updated[1]
     assert created.run_id == session.current_turn_id
     assert created.session_id == session_id
     assert created.tape_id == "stable-tape"
-    assert created.status == "running"
+    assert created.status == "queued"
     assert created.metadata == {
         "provider_name": "test-provider",
         "model_name": "test-model",
         "approval_policy": "auto",
         "max_steps": 30,
     }
-    assert updated["run_id"] == created.run_id
-    assert updated["status"] == "succeeded"
-    assert updated["ended_at"] is not None
-    assert updated["metadata"] == created.metadata
-    assert updated["result"] == {
+    assert running_update == {
+        "run_id": created.run_id,
+        "status": "running",
+        "ended_at": None,
+        "metadata": created.metadata,
+        "result": {},
+        "error": None,
+    }
+    assert completed_update["run_id"] == created.run_id
+    assert completed_update["status"] == "completed"
+    assert completed_update["ended_at"] is not None
+    assert completed_update["metadata"] == created.metadata
+    assert completed_update["result"] == {
         "stop_reason": "no_tool_calls",
         "steps_taken": 2,
     }
-    assert "final_message" not in updated["result"]
-    assert updated["error"] is None
+    assert "final_message" not in completed_update["result"]
+    assert completed_update["error"] is None
 
 
 @pytest.mark.asyncio
@@ -399,16 +408,75 @@ async def test_run_agent_marks_agent_run_failed_when_turn_outcome_errors() -> No
 
         await manager.run_agent(session_id, "hello")
 
-    assert runtime_store.updated[0]["status"] == "failed"
-    assert runtime_store.updated[0]["result"] == {
+    assert runtime_store.updated[0]["status"] == "running"
+    assert runtime_store.updated[-1]["status"] == "failed"
+    assert runtime_store.updated[-1]["result"] == {
         "stop_reason": "error",
         "steps_taken": 0,
     }
-    assert runtime_store.updated[0]["error"] == "model failed"
+    assert runtime_store.updated[-1]["error"] == "model failed"
 
 
 @pytest.mark.asyncio
-async def test_recover_stale_runtime_runs_marks_running_runs_failed() -> None:
+async def test_agent_run_marks_interrupted_outcome_as_interrupted() -> None:
+    runtime_store = FakeRuntimeStore()
+    manager = SessionManager(runtime_store=runtime_store)
+    session_id = await manager.create_session()
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, ctx, consumer
+
+        async def run_turn(self, prompt: str) -> TurnOutcome:
+            del prompt
+            return TurnOutcome(
+                stop_reason=StopReason.INTERRUPTED,
+                error="manual interrupt",
+                steps_taken=1,
+            )
+
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        )
+    )
+
+    def fake_create_agent(**kwargs):
+        environment = kwargs["environment"]
+        if not isinstance(environment, LocalEnvironment):
+            raise TypeError("expected local environment")
+        return fake_pipeline, types.SimpleNamespace(
+            session_id=kwargs["session_id_override"],
+            config={},
+            tape=kwargs.get("tape") or Tape(tape_id="stable-tape"),
+            run_context=AgentRunContext(
+                session_id=kwargs["session_id_override"],
+                run_id=kwargs["run_id_override"],
+                agent_id=None,
+                environment=environment,
+            ),
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
+        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+
+        await manager.run_agent(session_id, "hello")
+
+    assert runtime_store.created[0].status == "queued"
+    assert runtime_store.updated[0]["status"] == "running"
+    assert runtime_store.updated[-1]["status"] == "interrupted"
+    assert runtime_store.updated[-1]["result"] == {
+        "stop_reason": "interrupted",
+        "steps_taken": 1,
+    }
+    assert runtime_store.updated[-1]["error"] == "manual interrupt"
+
+
+@pytest.mark.asyncio
+async def test_recover_stale_runtime_runs_marks_running_runs_interrupted_reclaimable() -> (
+    None
+):
     runtime_store = FakeRuntimeStore()
     manager = SessionManager(runtime_store=runtime_store)
     session_id = await manager.create_session()
@@ -433,7 +501,7 @@ async def test_recover_stale_runtime_runs_marks_running_runs_failed() -> None:
                 tape_id="tape-1",
                 parent_run_id=None,
                 agent_id=None,
-                status="succeeded",
+                status="completed",
                 started_at=started_at,
                 ended_at=recovered_at,
                 metadata={},
@@ -450,10 +518,11 @@ async def test_recover_stale_runtime_runs_marks_running_runs_failed() -> None:
     assert runtime_store.updated == [
         {
             "run_id": "run-stale",
-            "status": "failed",
+            "status": "interrupted",
             "ended_at": recovered_at,
             "metadata": {
                 "provider_name": "test-provider",
+                "reclaimable": True,
                 "recovered_at": recovered_at.isoformat(),
                 "recovery_reason": "startup_stale_running_run",
             },
@@ -576,6 +645,7 @@ async def test_recover_stale_runtime_runs_skips_sessions_without_current_owner()
     assert recovered_count == 1
     assert runtime_store.updated[0]["run_id"] == "run-owned"
     assert runtime_store.updated[0]["metadata"] == {
+        "reclaimable": True,
         "recovered_at": recovered_at.isoformat(),
         "recovered_by_owner_id": "pod-a",
         "recovery_reason": "startup_stale_running_run",

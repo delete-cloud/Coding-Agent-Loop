@@ -2,20 +2,53 @@
 
 Last updated: 2026-05-19
 
+## Active Objective Map
+
+This table tracks the current durable-runtime objective. The historical slice log
+below records the earlier implementation order, whose G09-G11 labels do not
+match the active objective map.
+
 | Goal | Status | Evidence |
 | --- | --- | --- |
 | G00 | Complete | `docs/durable_runtime/CURRENT_STATE.md` documents SessionManager, PipelineAdapter, storage plugins, PG storage, observability, approval flow, event flow, and tape flow. |
 | G01 | Complete | `docs/adr/0029-durable-runtime-identity.md` defines session, run, turn compatibility, tape, event, interaction, checkpoint, and Langfuse/OTLP correlation identity. |
-| G02 | Complete | `src/coding_agent/runtime_store.py` adds the inert PostgreSQL durable runtime store, with unit coverage in `tests/coding_agent/test_pg_runtime_store.py` and ADR-0030. |
-| G03 | Complete | `SessionManager.run_agent()` creates a root `run_id`, keeps `current_turn_id` as its alias, and binds cold/hot runtime contexts to that identity. |
-| G04 | Complete | `SessionManager` can persist root HTTP run lifecycle records through an optional runtime store without changing default storage behavior. |
-| G05 | Complete | `storage.runtime_backend = "pg"` opt-in construction wires `PGRuntimeStore` into `SessionManager` while preserving disabled defaults. |
-| G06 | Complete | `SessionManager` appends runtime-store wire events for emitted HTTP turn messages, approval requests, and error turn notifications when a runtime store is configured. |
-| G07 | Complete | `SessionManager` saves `{run_id}:latest` compacted message snapshots from `ctx.messages` when a runtime store is configured. |
-| G08 | Complete | HTTP replay APIs expose runtime run records, latest message snapshots, and runtime events with `last_event_id` filtering. |
-| G09 | Complete | `SessionManager` persists durable approval interaction records for pending requests, applied decisions, session auto-approvals, and approval timeouts when a runtime store is configured. |
-| G10 | Complete | AgentKit pipeline spans include safe runtime correlation attributes, and HTTP root runs bind `turn_id`/`tape_id` trace metadata without weakening OTLP privacy filtering. |
-| G11 | Complete | HTTP startup recovers stale durable runtime runs by marking active-owner `running` rows failed after owner lease backfill. |
+| G02 | Complete | `src/coding_agent/runtime_store.py` adds the PostgreSQL durable runtime store, with unit coverage in `tests/coding_agent/test_pg_runtime_store.py` and ADR-0030. |
+| G03 | Needs audit | `storage.runtime_backend = "pg"` opt-in wiring exists, but the storage/plugin/composition boundary still needs final audit against the active objective wording. |
+| G04 | Complete | ADR-0032 and `SessionManager` now persist `queued -> running -> completed/failed/cancelled/interrupted` root run lifecycle rows while preserving `current_turn_id` compatibility. |
+| G05 | Complete | `SessionManager` persists runtime wire events and `{run_id}:latest` compacted message snapshots when a runtime store is configured. |
+| G06 | Complete | HTTP replay APIs expose runtime run records, latest message snapshots, and runtime events with `last_event_id` filtering. |
+| G07 | Complete | `SessionManager` persists durable approval interaction records for pending requests, applied decisions, session auto-approvals, and approval timeouts when a runtime store is configured. |
+| G08 | Needs audit | AgentKit and HTTP root run correlation were added, but final audit must confirm the active objective's full safe attribute set is populated where required. |
+| G09 | Pending | `tape.info` and `tape.search` for PostgreSQL tape storage are still missing. |
+| G10 | Complete | ADR-0032 changes startup orphan recovery to mark active-owner `running` rows `interrupted` with `reclaimable: true`, without adding a scheduler. |
+| G11 | Pending | End-to-end smoke tests/docs for normal run, failed run, approval run, replay, Langfuse/OTLP correlation, and tape debug remain to be added. |
+
+## Active G04/G10 Alignment Verification
+
+- Added `docs/adr/0032-durable-runtime-lifecycle-statuses.md`.
+- Marked `docs/adr/0031-stale-runtime-run-recovery.md` superseded by
+  ADR-0032 for the recovery terminal-status decision.
+- Added `.opencode/prompts/tasks/durable-runtime-lifecycle-status-alignment.md`.
+- Updated `src/coding_agent/ui/session_manager.py`.
+- Updated `tests/ui/test_session_manager_runtime.py`.
+- Updated `tests/ui/test_http_server.py`.
+- Updated `tests/coding_agent/test_pg_runtime_store.py`.
+- Red tests before implementation:
+  - `uv run pytest tests/ui/test_session_manager_runtime.py -k "agent_run or stale_runtime_runs or run_id" -v`
+  - `uv run pytest tests/ui/test_session_manager_runtime.py -k "interrupted_outcome" -v`
+- Target tests:
+  - `uv run pytest tests/ui/test_session_manager_runtime.py -k "agent_run or stale_runtime_runs or run_id" -v`
+  - `uv run pytest tests/ui/test_http_server.py -k "runtime_replay or lifespan_recovers_stale_runtime_runs or lifespan_backfills_owner_leases or lifespan_logs_backfill_failure" -v`
+  - `uv run pytest tests/coding_agent/test_pg_runtime_store.py -v`
+  - `uv run ruff check src/coding_agent/ui/session_manager.py tests/ui/test_session_manager_runtime.py tests/ui/test_http_server.py tests/coding_agent/test_pg_runtime_store.py docs/adr/0031-stale-runtime-run-recovery.md docs/adr/0032-durable-runtime-lifecycle-statuses.md`
+- Postmortem patterns consulted:
+  - `postmortem/patterns/PM-0001-address-code-review-issues.md`
+  - `postmortem/patterns/PM-0015-require-store-backed-requests-across-http-approval-flow.md`
+  - `postmortem/patterns/PM-0021-guard-event-stream-registration-against-disappearing-sessions.md`
+  - `postmortem/patterns/PM-0022-revalidate-event-stream-ownership-after-queue-attach.md`
+  - `postmortem/patterns/PM-0023-make-event-stream-cleanup-and-teardown-idempotent.md`
+
+## Historical Slice Log
 
 ## G00 Verification
 

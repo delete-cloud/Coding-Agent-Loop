@@ -265,7 +265,7 @@ async def test_create_update_load_and_list_agent_runs(
 
     updated = await store.update_agent_run(
         "run-1",
-        status="succeeded",
+        status="completed",
         ended_at=_dt(9, 30),
         metadata={"model": "gpt-5", "steps": 4},
         result={"final_message": "done"},
@@ -275,7 +275,7 @@ async def test_create_update_load_and_list_agent_runs(
     listed = await store.list_agent_runs("session-1")
 
     assert loaded == updated
-    assert updated.status == "succeeded"
+    assert updated.status == "completed"
     assert updated.tape_id == "tape-1"
     assert updated.ended_at == _dt(9, 30)
     assert updated.metadata == {"model": "gpt-5", "steps": 4}

@@ -1,7 +1,11 @@
 # ADR-0031: Mark stale runtime runs during HTTP startup recovery
 
-**Status**: Proposed
+**Status**: Superseded
 **Date**: 2026-05-19
+
+Superseded by ADR-0032, which keeps the startup recovery owner-safety decision
+but changes recovered orphan run rows from `failed` to `interrupted` with
+reclaimable metadata.
 
 ## Context
 
