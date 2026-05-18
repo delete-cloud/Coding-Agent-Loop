@@ -12,7 +12,7 @@ Last updated: 2026-05-19
 | G05 | Complete | `storage.runtime_backend = "pg"` opt-in construction wires `PGRuntimeStore` into `SessionManager` while preserving disabled defaults. |
 | G06 | Complete | `SessionManager` appends runtime-store wire events for emitted HTTP turn messages, approval requests, and error turn notifications when a runtime store is configured. |
 | G07 | Complete | `SessionManager` saves `{run_id}:latest` compacted message snapshots from `ctx.messages` when a runtime store is configured. |
-| G08 | Pending | Not started. |
+| G08 | Complete | HTTP replay APIs expose runtime run records, latest message snapshots, and runtime events with `last_event_id` filtering. |
 | G09 | Pending | Not started. |
 | G10 | Pending | Not started. |
 | G11 | Pending | Not started. |
@@ -94,3 +94,20 @@ Last updated: 2026-05-19
   - `uv run pytest tests/ui/test_session_manager_runtime.py -v`
   - `uv run pytest tests/coding_agent/test_pg_runtime_store.py -v`
   - `uv run ruff check src/coding_agent/ui/session_manager.py tests/ui/test_session_manager_runtime.py`
+
+## G08 Verification
+
+- Added `.opencode/prompts/tasks/durable-runtime-replay-apis.md`.
+- Updated `src/coding_agent/runtime_store.py`.
+- Updated `src/coding_agent/ui/session_manager.py`.
+- Updated `src/coding_agent/ui/http_server.py`.
+- Updated `src/coding_agent/ui/schemas.py`.
+- Updated `tests/coding_agent/test_pg_runtime_store.py`.
+- Updated `tests/ui/test_http_server.py`.
+- Target tests:
+  - `uv run pytest tests/ui/test_http_server.py -k "runtime_replay or get_runtime_run" -v`
+  - `uv run pytest tests/coding_agent/test_pg_runtime_store.py -k "runtime_event" -v`
+  - `uv run pytest tests/coding_agent/test_pg_runtime_store.py -v`
+  - `uv run pytest tests/ui/test_session_manager_runtime.py -k "message_snapshot or persists_wire_events or approval_request_wire_events or agent_run or run_id" -v`
+  - `uv run ruff check src/coding_agent/runtime_store.py src/coding_agent/ui/session_manager.py src/coding_agent/ui/http_server.py src/coding_agent/ui/schemas.py tests/coding_agent/test_pg_runtime_store.py tests/ui/test_http_server.py`
+- Additional note: `uv run pytest tests/ui/test_http_server.py -v` was attempted but is blocked by the pre-existing `main` failure in `TestSessionCreation.test_http_create_session_provisions_docker_cloud_workspace`, where the current implementation returns `workspace_provider` and `workspace_root_ref` in `origin`.

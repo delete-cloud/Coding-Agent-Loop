@@ -35,6 +35,11 @@ from coding_agent.approval import ApprovalPolicy
 from coding_agent.approval.store import ApprovalStore
 from coding_agent.core.config import settings
 from coding_agent.environment import CloudCommandResult, CloudEnvironment
+from coding_agent.runtime_store import (
+    AgentRunRecord,
+    RunMessageSnapshotRecord,
+    RuntimeEventRecord,
+)
 from coding_agent.environment.workspace_provider import (
     WorkspaceBranchPublication,
     WorkspaceDiff,
@@ -102,6 +107,7 @@ async def clear_sessions():
         fencing_token=None,
     )
     session_manager.configure_workspace_metadata_store(None)
+    session_manager.configure_runtime_store(None)
     session_manager.clear_sessions()
     # Clear rate limit storage to prevent 429 errors
     limiter.reset()
@@ -118,6 +124,7 @@ async def clear_sessions():
         fencing_token=None,
     )
     session_manager.configure_workspace_metadata_store(None)
+    session_manager.configure_runtime_store(None)
     session_manager.clear_sessions()
     # Cleanup session_manager
     for session_id in list(session_manager.list_sessions()):
@@ -6173,6 +6180,165 @@ class TestCheckpointEndpoints:
 
         assert response.status_code == 409
         assert response.json()["detail"] == "turn already in progress"
+
+
+class FakeRuntimeReplayStore:
+    def __init__(
+        self,
+        *,
+        run: AgentRunRecord,
+        snapshot: RunMessageSnapshotRecord | None = None,
+        events: list[RuntimeEventRecord] | None = None,
+    ) -> None:
+        self.run = run
+        self.snapshot = snapshot
+        self.events = events or []
+
+    async def load_agent_run(self, run_id: str) -> AgentRunRecord | None:
+        if run_id == self.run.run_id:
+            return self.run
+        return None
+
+    async def load_message_snapshot(
+        self,
+        snapshot_id: str,
+    ) -> RunMessageSnapshotRecord | None:
+        if self.snapshot is not None and snapshot_id == self.snapshot.snapshot_id:
+            return self.snapshot
+        return None
+
+    async def load_runtime_event(
+        self,
+        event_id: str,
+    ) -> RuntimeEventRecord | None:
+        for event in self.events:
+            if event.event_id == event_id:
+                return event
+        return None
+
+    async def replay_runtime_events(
+        self,
+        run_id: str,
+        *,
+        after_sequence: int = 0,
+        limit: int = 1000,
+    ) -> list[RuntimeEventRecord]:
+        return [
+            event
+            for event in self.events
+            if event.run_id == run_id
+            and event.sequence is not None
+            and event.sequence > after_sequence
+        ][:limit]
+
+
+class TestRuntimeReplayEndpoints:
+    async def test_runtime_replay_endpoints_return_run_snapshot_and_events(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        session_id = "runtime-replay-session"
+        run_id = "run-replay-1"
+        register_session(session_id)
+        started_at = datetime(2026, 1, 2, 3, 4, 5)
+        snapshot_at = datetime(2026, 1, 2, 3, 5, 0)
+        event_at = datetime(2026, 1, 2, 3, 5, 1)
+        run = AgentRunRecord(
+            run_id=run_id,
+            session_id=session_id,
+            tape_id="tape-replay",
+            parent_run_id=None,
+            agent_id=None,
+            status="succeeded",
+            started_at=started_at,
+            ended_at=datetime(2026, 1, 2, 3, 6, 0),
+            metadata={"provider_name": "test-provider"},
+            result={"stop_reason": "no_tool_calls"},
+            error=None,
+        )
+        snapshot = RunMessageSnapshotRecord(
+            snapshot_id=f"{run_id}:latest",
+            run_id=run_id,
+            messages=[{"role": "user", "content": "hello"}],
+            metadata={"snapshot_kind": "latest_context"},
+            created_at=snapshot_at,
+        )
+        first_event = RuntimeEventRecord(
+            sequence=1,
+            event_id="event-1",
+            run_id=run_id,
+            event_kind="wire.StreamDelta",
+            payload={"message_type": "StreamDelta"},
+            created_at=event_at,
+        )
+        second_event = RuntimeEventRecord(
+            sequence=2,
+            event_id="event-2",
+            run_id=run_id,
+            event_kind="wire.TurnEnd",
+            payload={"message_type": "TurnEnd"},
+            created_at=datetime(2026, 1, 2, 3, 5, 2),
+        )
+        session_manager.configure_runtime_store(
+            FakeRuntimeReplayStore(
+                run=run,
+                snapshot=snapshot,
+                events=[first_event, second_event],
+            )
+        )
+
+        run_response = await client.get(f"/runs/{run_id}")
+        snapshot_response = await client.get(f"/runs/{run_id}/message-snapshot")
+        events_response = await client.get(
+            f"/runs/{run_id}/events",
+            params={"last_event_id": "event-1"},
+        )
+
+        assert run_response.status_code == 200
+        assert run_response.json() == {
+            "run_id": run_id,
+            "session_id": session_id,
+            "tape_id": "tape-replay",
+            "parent_run_id": None,
+            "agent_id": None,
+            "status": "succeeded",
+            "started_at": "2026-01-02T03:04:05",
+            "ended_at": "2026-01-02T03:06:00",
+            "metadata": {"provider_name": "test-provider"},
+            "result": {"stop_reason": "no_tool_calls"},
+            "error": None,
+        }
+        assert snapshot_response.status_code == 200
+        assert snapshot_response.json() == {
+            "snapshot_id": f"{run_id}:latest",
+            "run_id": run_id,
+            "messages": [{"role": "user", "content": "hello"}],
+            "metadata": {"snapshot_kind": "latest_context"},
+            "created_at": "2026-01-02T03:05:00",
+        }
+        assert events_response.status_code == 200
+        assert events_response.json() == {
+            "run_id": run_id,
+            "events": [
+                {
+                    "sequence": 2,
+                    "event_id": "event-2",
+                    "run_id": run_id,
+                    "event_kind": "wire.TurnEnd",
+                    "payload": {"message_type": "TurnEnd"},
+                    "created_at": "2026-01-02T03:05:02",
+                }
+            ],
+        }
+
+    async def test_get_runtime_run_returns_404_when_store_is_not_configured(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        response = await client.get("/runs/missing-run")
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Runtime run not found"
 
 
 class TestApprovalStoreIntegration:

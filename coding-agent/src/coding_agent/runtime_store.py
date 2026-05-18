@@ -244,6 +244,7 @@ class PGRuntimeStore:
     ORDER BY sequence
     LIMIT $3
     """
+    _SELECT_EVENT_SQL: Final[str] = "SELECT * FROM runtime_events WHERE event_id = $1"
     _UPSERT_MESSAGE_SNAPSHOT_SQL: Final[str] = """
     INSERT INTO run_message_snapshots (
         snapshot_id,
@@ -417,6 +418,17 @@ class PGRuntimeStore:
         pool = await self._ensure_schema()
         rows = await pool.fetch(self._REPLAY_EVENTS_SQL, run_id, after_sequence, limit)
         return [_runtime_event_from_row(row) for row in rows]
+
+    async def load_runtime_event(
+        self,
+        event_id: str,
+    ) -> RuntimeEventRecord | None:
+        _require_non_empty("event_id", event_id)
+        pool = await self._ensure_schema()
+        row = await pool.fetchrow(self._SELECT_EVENT_SQL, event_id)
+        if row is None:
+            return None
+        return _runtime_event_from_row(row)
 
     async def save_message_snapshot(
         self,
