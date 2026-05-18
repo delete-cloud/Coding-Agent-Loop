@@ -21,7 +21,11 @@ from coding_agent.environment import (
     CloudEnvironment,
     LocalEnvironment,
 )
-from coding_agent.runtime_store import AgentRunRecord, RuntimeEventRecord
+from coding_agent.runtime_store import (
+    AgentRunRecord,
+    RunMessageSnapshotRecord,
+    RuntimeEventRecord,
+)
 from coding_agent.ui.binding_resolver import DefaultBindingResolver
 from coding_agent.ui.execution_binding import (
     CloudWorkspaceBinding,
@@ -54,6 +58,7 @@ class FakeRuntimeStore:
         self.created: list[AgentRunRecord] = []
         self.updated: list[dict[str, object]] = []
         self.events: list[RuntimeEventRecord] = []
+        self.snapshots: list[RunMessageSnapshotRecord] = []
 
     async def create_agent_run(self, record: AgentRunRecord) -> AgentRunRecord:
         self.created.append(record)
@@ -99,6 +104,13 @@ class FakeRuntimeStore:
         record: RuntimeEventRecord,
     ) -> RuntimeEventRecord:
         self.events.append(record)
+        return record
+
+    async def save_message_snapshot(
+        self,
+        record: RunMessageSnapshotRecord,
+    ) -> RunMessageSnapshotRecord:
+        self.snapshots.append(record)
         return record
 
 
@@ -484,6 +496,81 @@ async def test_run_agent_persists_approval_request_wire_events() -> None:
             "args": {"command": "pwd"},
             "risk_level": "low",
         },
+    }
+
+
+@pytest.mark.asyncio
+async def test_run_agent_persists_message_snapshot_when_runtime_store_configured() -> (
+    None
+):
+    runtime_store = FakeRuntimeStore()
+    manager = SessionManager(runtime_store=runtime_store)
+    session_id = await manager.create_session()
+    message_timestamp = datetime(2026, 1, 2, 3, 4, 5)
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+            self.ctx = ctx
+
+        async def run_turn(self, prompt: str) -> TurnOutcome:
+            del prompt
+            self.ctx.messages = [
+                {
+                    "role": "system",
+                    "content": "runtime context",
+                    "created_at": message_timestamp,
+                },
+                {"role": "user", "content": "hello"},
+            ]
+            return TurnOutcome(stop_reason=StopReason.NO_TOOL_CALLS, steps_taken=1)
+
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        )
+    )
+
+    def fake_create_agent(**kwargs):
+        environment = kwargs["environment"]
+        if not isinstance(environment, LocalEnvironment):
+            raise TypeError("expected local environment")
+        return fake_pipeline, types.SimpleNamespace(
+            session_id=kwargs["session_id_override"],
+            config={},
+            tape=kwargs.get("tape") or Tape(tape_id="stable-tape"),
+            run_context=AgentRunContext(
+                session_id=kwargs["session_id_override"],
+                run_id=kwargs["run_id_override"],
+                agent_id=None,
+                environment=environment,
+            ),
+            messages=[],
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
+        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+
+        await manager.run_agent(session_id, "hello")
+
+    assert len(runtime_store.snapshots) == 1
+    snapshot = runtime_store.snapshots[0]
+    assert snapshot.snapshot_id == f"{runtime_store.created[0].run_id}:latest"
+    assert snapshot.run_id == runtime_store.created[0].run_id
+    assert snapshot.messages == [
+        {
+            "role": "system",
+            "content": "runtime context",
+            "created_at": message_timestamp.isoformat(),
+        },
+        {"role": "user", "content": "hello"},
+    ]
+    assert snapshot.metadata == {
+        "session_id": session_id,
+        "tape_id": "stable-tape",
+        "message_count": 2,
+        "snapshot_kind": "latest_context",
     }
 
 

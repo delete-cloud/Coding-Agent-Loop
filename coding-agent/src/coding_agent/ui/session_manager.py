@@ -53,6 +53,7 @@ from coding_agent.runtime_store import (
     AgentRunRecord,
     JSONObject,
     PGRuntimeStore,
+    RunMessageSnapshotRecord,
     RuntimeEventRecord,
     JSONValue as RuntimeJSONValue,
 )
@@ -136,6 +137,22 @@ def _wire_message_event_payload(message: WireMessage) -> JSONObject:
     }
 
 
+def _runtime_message_snapshot(messages: object) -> list[JSONObject] | None:
+    if messages is None:
+        return None
+    if not isinstance(messages, list):
+        raise TypeError("runtime message snapshot source must be a list")
+    payload = _json_compatible_value(messages)
+    if not isinstance(payload, list):
+        raise TypeError("runtime message snapshot must serialize to a JSON array")
+    snapshot: list[JSONObject] = []
+    for message in payload:
+        if not isinstance(message, dict):
+            raise TypeError("runtime message snapshot entries must be JSON objects")
+        snapshot.append(cast(JSONObject, message))
+    return snapshot
+
+
 @dataclass(frozen=True, slots=True)
 class _PublishedApprovalDecision:
     sequence: int
@@ -201,6 +218,11 @@ class RuntimeStoreProtocol(Protocol):
         self,
         record: RuntimeEventRecord,
     ) -> RuntimeEventRecord: ...
+
+    async def save_message_snapshot(
+        self,
+        record: RunMessageSnapshotRecord,
+    ) -> RunMessageSnapshotRecord: ...
 
     async def update_agent_run(
         self,
@@ -1029,6 +1051,33 @@ class SessionManager:
                 event_kind=f"wire.{type(message).__name__}",
                 payload=_wire_message_event_payload(message),
                 created_at=message.timestamp,
+            )
+        )
+
+    async def _save_runtime_message_snapshot(
+        self,
+        session: Session,
+        ctx: Any,
+        *,
+        run_id: str,
+    ) -> None:
+        if self._runtime_store is None:
+            return
+        messages = _runtime_message_snapshot(getattr(ctx, "messages", None))
+        if messages is None:
+            return
+        await self._runtime_store.save_message_snapshot(
+            RunMessageSnapshotRecord(
+                snapshot_id=f"{run_id}:latest",
+                run_id=run_id,
+                messages=messages,
+                metadata={
+                    "session_id": session.id,
+                    "tape_id": session.tape_id,
+                    "message_count": len(messages),
+                    "snapshot_kind": "latest_context",
+                },
+                created_at=datetime.now(UTC),
             )
         )
 
@@ -2045,6 +2094,12 @@ class SessionManager:
                 outcome = await adapter.run_turn(prompt)
                 if self._runtime_store is not None:
                     turn_outcome = self._require_turn_outcome(outcome)
+                    session.tape_id = ctx.tape.tape_id
+                    await self._save_runtime_message_snapshot(
+                        session,
+                        ctx,
+                        run_id=run_id,
+                    )
                     await self._finish_runtime_agent_run(
                         session,
                         run_id=run_id,
@@ -2052,7 +2107,8 @@ class SessionManager:
                         result=self._result_from_turn_outcome(turn_outcome),
                         error=turn_outcome.error,
                     )
-                session.tape_id = ctx.tape.tape_id
+                else:
+                    session.tape_id = ctx.tape.tape_id
                 session.last_failure_details = None
                 await self._persist_session_async(session)
             except FatalToolExecutionError as exc:
