@@ -1105,11 +1105,11 @@ class SessionManager:
         }
 
     def _status_from_turn_outcome(self, outcome: TurnOutcome) -> str:
+        if outcome.stop_reason == StopReason.INTERRUPTED:
+            return "interrupted"
         if outcome.error is not None or outcome.stop_reason == StopReason.ERROR:
             return "failed"
-        if outcome.stop_reason == StopReason.INTERRUPTED:
-            return "cancelled"
-        return "succeeded"
+        return "completed"
 
     def _require_turn_outcome(self, outcome: object) -> TurnOutcome:
         if not isinstance(outcome, TurnOutcome):
@@ -1132,7 +1132,7 @@ class SessionManager:
                 tape_id=session.tape_id,
                 parent_run_id=None,
                 agent_id=None,
-                status="running",
+                status="queued",
                 started_at=started_at,
                 metadata=self._run_metadata_for_session(session),
                 result={},
@@ -1140,6 +1140,27 @@ class SessionManager:
             )
         )
         return True
+
+    async def _update_runtime_agent_run(
+        self,
+        session: Session,
+        *,
+        run_id: str,
+        status: str,
+        ended_at: datetime | None,
+        result: JSONObject,
+        error: str | None,
+    ) -> None:
+        if self._runtime_store is None:
+            return
+        await self._runtime_store.update_agent_run(
+            run_id,
+            status=status,
+            ended_at=ended_at,
+            metadata=self._run_metadata_for_session(session),
+            result=result,
+            error=error,
+        )
 
     async def _finish_runtime_agent_run(
         self,
@@ -1150,13 +1171,11 @@ class SessionManager:
         result: JSONObject,
         error: str | None,
     ) -> None:
-        if self._runtime_store is None:
-            return
-        await self._runtime_store.update_agent_run(
-            run_id,
+        await self._update_runtime_agent_run(
+            session,
+            run_id=run_id,
             status=status,
             ended_at=datetime.now(UTC),
-            metadata=self._run_metadata_for_session(session),
             result=result,
             error=error,
         )
@@ -1180,13 +1199,14 @@ class SessionManager:
                 if run.status != "running" or run.ended_at is not None:
                     continue
                 metadata = dict(run.metadata)
+                metadata["reclaimable"] = True
                 metadata["recovered_at"] = recovery_time.isoformat()
                 metadata["recovery_reason"] = _STALE_RUNTIME_RUN_RECOVERY_REASON
                 if self._owner_id is not None:
                     metadata["recovered_by_owner_id"] = self._owner_id
                 await self._runtime_store.update_agent_run(
                     run.run_id,
-                    status="failed",
+                    status="interrupted",
                     ended_at=recovery_time,
                     metadata=metadata,
                     result=run.result,
@@ -2343,6 +2363,15 @@ class SessionManager:
                     run_id=run_id,
                     started_at=started_at,
                 )
+                if agent_run_created:
+                    await self._update_runtime_agent_run(
+                        session,
+                        run_id=run_id,
+                        status="running",
+                        ended_at=None,
+                        result={},
+                        error=None,
+                    )
                 set_consumer = getattr(adapter, "set_consumer", None)
                 if callable(set_consumer):
                     set_consumer(consumer)
