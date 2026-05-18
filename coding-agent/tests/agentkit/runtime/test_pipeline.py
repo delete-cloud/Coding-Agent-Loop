@@ -386,8 +386,16 @@ class TestPipeline:
                 context_budget=ContextBudget(),
                 trace_metadata={
                     "turn_id": "run-1",
+                    "tool_call_id": "tool-call-1",
                     "interaction_id": "interaction-1",
+                    "event_id": "event-1",
+                    "checkpoint_id": "checkpoint-1",
                     "prompt": "do-not-record",
+                    "message": "do-not-record",
+                    "result": "do-not-record",
+                    "secret": "do-not-record",
+                    "text": "do-not-record",
+                    "ignored_object": {"nested": "do-not-record"},
                 },
             ),
             config={"observation_sink": sink},
@@ -416,11 +424,21 @@ class TestPipeline:
             "agent_id": "root",
             "tape_id": "tape-1",
             "turn_id": "run-1",
+            "tool_call_id": "tool-call-1",
             "interaction_id": "interaction-1",
+            "event_id": "event-1",
+            "checkpoint_id": "checkpoint-1",
             "entry_count_before": 0,
             "entry_count_after": 0,
         }
-        assert "prompt" not in build_context_span.attributes
+        assert {
+            "prompt",
+            "message",
+            "result",
+            "secret",
+            "text",
+            "ignored_object",
+        }.isdisjoint(build_context_span.attributes)
         model_span = stage_spans[3]
         assert model_span.attributes["entry_count_before"] == 0
         assert model_span.attributes["entry_count_after"] == 1

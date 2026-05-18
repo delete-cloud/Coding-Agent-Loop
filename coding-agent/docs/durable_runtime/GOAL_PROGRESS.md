@@ -13,12 +13,12 @@ match the active objective map.
 | G00 | Complete | `docs/durable_runtime/CURRENT_STATE.md` documents SessionManager, PipelineAdapter, storage plugins, PG storage, observability, approval flow, event flow, and tape flow. |
 | G01 | Complete | `docs/adr/0029-durable-runtime-identity.md` defines session, run, turn compatibility, tape, event, interaction, checkpoint, and Langfuse/OTLP correlation identity. |
 | G02 | Complete | `src/coding_agent/runtime_store.py` adds the PostgreSQL durable runtime store, with unit coverage in `tests/coding_agent/test_pg_runtime_store.py` and ADR-0030. |
-| G03 | Needs audit | `storage.runtime_backend = "pg"` opt-in wiring exists, but the storage/plugin/composition boundary still needs final audit against the active objective wording. |
+| G03 | Complete | Storage configuration preserves JSONL/no-runtime defaults and opt-in PG composition wires tape, checkpoint, HTTP session, and runtime stores through tests in `tests/ui/test_session_manager_public_api.py`. |
 | G04 | Complete | ADR-0032 and `SessionManager` now persist `queued -> running -> completed/failed/cancelled/interrupted` root run lifecycle rows while preserving `current_turn_id` compatibility. |
 | G05 | Complete | `SessionManager` persists runtime wire events and `{run_id}:latest` compacted message snapshots when a runtime store is configured. |
 | G06 | Complete | HTTP replay APIs expose runtime run records, latest message snapshots, and runtime events with `last_event_id` filtering. |
 | G07 | Complete | `SessionManager` persists durable approval interaction records for pending requests, applied decisions, session auto-approvals, and approval timeouts when a runtime store is configured. |
-| G08 | Needs audit | AgentKit and HTTP root run correlation were added, but final audit must confirm the active objective's full safe attribute set is populated where required. |
+| G08 | Complete | AgentKit stage/LLM spans include safe runtime correlation keys (`turn_id`, `tape_id`, `tool_call_id`, `interaction_id`, `event_id`, `checkpoint_id`), HTTP root runs bind `turn_id`/`tape_id`, and OTLP privacy tests reject raw prompt/message/result/secret/text attributes. |
 | G09 | Pending | `tape.info` and `tape.search` for PostgreSQL tape storage are still missing. |
 | G10 | Complete | ADR-0032 changes startup orphan recovery to mark active-owner `running` rows `interrupted` with `reclaimable: true`, without adding a scheduler. |
 | G11 | Pending | End-to-end smoke tests/docs for normal run, failed run, approval run, replay, Langfuse/OTLP correlation, and tape debug remain to be added. |
@@ -47,6 +47,24 @@ match the active objective map.
   - `postmortem/patterns/PM-0021-guard-event-stream-registration-against-disappearing-sessions.md`
   - `postmortem/patterns/PM-0022-revalidate-event-stream-ownership-after-queue-attach.md`
   - `postmortem/patterns/PM-0023-make-event-stream-cleanup-and-teardown-idempotent.md`
+
+## Active G03/G08 Audit Verification
+
+- Added `.opencode/prompts/tasks/durable-runtime-g03-g08-audit.md`.
+- Updated `tests/agentkit/runtime/test_pipeline.py` to assert all allowed
+  runtime correlation metadata keys are propagated while unsafe/non-scalar
+  metadata is dropped.
+- Updated this progress table to move active G03 and G08 from `Needs audit` to
+  `Complete`.
+- Baseline and target tests:
+  - `uv run pytest tests/ui/test_session_manager_public_api.py -k "storage_config or runtime_store or pg_backends or pg_pool or runtime_backend" -v`
+  - `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "span" -v`
+  - `uv run pytest tests/coding_agent/test_observability.py -v`
+- Postmortem patterns consulted:
+  - `postmortem/patterns/PM-0001-address-code-review-issues.md`
+  - `postmortem/patterns/PM-0006-add-usage-event-fields-and-fix-tool-name-kwarg-in-pipeline.md`
+  - `postmortem/patterns/PM-0009-preserve-neutral-bare-anchor-semantics.md`
+  - `postmortem/patterns/PM-0010-route-incremental-context-append-through-tapeview.md`
 
 ## Historical Slice Log
 
