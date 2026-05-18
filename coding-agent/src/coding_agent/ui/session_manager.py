@@ -1073,11 +1073,15 @@ class SessionManager:
         if run_context is not None:
             if not isinstance(run_context, AgentRunContext):
                 raise TypeError("runtime context run_context must be AgentRunContext")
+            trace_metadata = dict(run_context.trace_metadata)
+            trace_metadata["turn_id"] = run_id
+            trace_metadata["tape_id"] = ctx.tape.tape_id
             ctx.run_context = replace(
                 run_context,
                 session_id=session.id,
                 run_id=run_id,
                 parent_run_id=None,
+                trace_metadata=trace_metadata,
             )
 
     def _run_metadata_for_session(self, session: Session) -> JSONObject:

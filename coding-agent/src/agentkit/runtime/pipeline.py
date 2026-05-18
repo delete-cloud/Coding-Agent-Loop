@@ -68,6 +68,16 @@ _STAGE_SPAN_NAMES: dict[StageName, str] = {
     "render": "runtime.stage.apply_directives",
     "dispatch": "runtime.stage.dispatch",
 }
+_TRACE_METADATA_ATTRIBUTE_KEYS = frozenset(
+    {
+        "turn_id",
+        "tape_id",
+        "tool_call_id",
+        "interaction_id",
+        "event_id",
+        "checkpoint_id",
+    }
+)
 
 StructuredToolResultScopeFactory = Callable[[bool], AbstractContextManager[None]]
 
@@ -108,8 +118,31 @@ def _stage_span_attributes(
     }
     if ctx.session_id:
         attributes["session_id"] = ctx.session_id
+    attributes.update(_runtime_correlation_attributes(ctx))
+    return attributes
+
+
+def _safe_trace_metadata_attributes(run_context: AgentRunContext) -> dict[str, Any]:
+    attributes: dict[str, Any] = {}
+    for key, value in run_context.trace_metadata.items():
+        if key not in _TRACE_METADATA_ATTRIBUTE_KEYS:
+            continue
+        if isinstance(value, bool | int | float | str):
+            attributes[key] = value
+    return attributes
+
+
+def _runtime_correlation_attributes(ctx: "PipelineContext") -> dict[str, Any]:
+    attributes: dict[str, Any] = {}
     if ctx.run_context is not None:
+        attributes.update(_safe_trace_metadata_attributes(ctx.run_context))
         attributes["run_id"] = ctx.run_context.run_id
+        if ctx.run_context.agent_id is not None:
+            attributes["agent_id"] = ctx.run_context.agent_id
+        if ctx.run_context.parent_run_id is not None:
+            attributes["parent_run_id"] = ctx.run_context.parent_run_id
+    if ctx.tape.tape_id:
+        attributes["tape_id"] = ctx.tape.tape_id
     return attributes
 
 
@@ -125,8 +158,7 @@ def _llm_generation_attributes(
     }
     if ctx.session_id:
         attributes["session_id"] = ctx.session_id
-    if ctx.run_context is not None:
-        attributes["run_id"] = ctx.run_context.run_id
+    attributes.update(_runtime_correlation_attributes(ctx))
     model = ctx.config.get("model")
     if isinstance(model, str) and model:
         attributes["model"] = model

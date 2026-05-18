@@ -376,14 +376,19 @@ class TestPipeline:
 
         plugin._mock_llm.stream = mock_stream
         ctx = PipelineContext(
-            tape=Tape(),
+            tape=Tape(tape_id="tape-1"),
             session_id="session-1",
             run_context=AgentRunContext(
                 session_id="session-1",
-                run_id="turn-1",
-                agent_id=None,
+                run_id="run-1",
+                agent_id="root",
                 environment=RuntimeContextEnvironment(),
                 context_budget=ContextBudget(),
+                trace_metadata={
+                    "turn_id": "run-1",
+                    "interaction_id": "interaction-1",
+                    "prompt": "do-not-record",
+                },
             ),
             config={"observation_sink": sink},
         )
@@ -407,10 +412,15 @@ class TestPipeline:
         assert build_context_span.attributes == {
             "stage": "build_context",
             "session_id": "session-1",
-            "run_id": "turn-1",
+            "run_id": "run-1",
+            "agent_id": "root",
+            "tape_id": "tape-1",
+            "turn_id": "run-1",
+            "interaction_id": "interaction-1",
             "entry_count_before": 0,
             "entry_count_after": 0,
         }
+        assert "prompt" not in build_context_span.attributes
         model_span = stage_spans[3]
         assert model_span.attributes["entry_count_before"] == 0
         assert model_span.attributes["entry_count_after"] == 1
@@ -436,14 +446,15 @@ class TestPipeline:
 
         plugin._mock_llm.stream = mock_stream
         ctx = PipelineContext(
-            tape=Tape(),
+            tape=Tape(tape_id="tape-1"),
             session_id="session-1",
             run_context=AgentRunContext(
                 session_id="session-1",
-                run_id="turn-1",
+                run_id="run-1",
                 agent_id=None,
                 environment=RuntimeContextEnvironment(),
                 context_budget=ContextBudget(),
+                trace_metadata={"turn_id": "run-1"},
             ),
             config={
                 "model": "test-model",
@@ -458,7 +469,9 @@ class TestPipeline:
         assert llm_spans[0].status == "ok"
         assert llm_spans[0].attributes == {
             "session_id": "session-1",
-            "run_id": "turn-1",
+            "run_id": "run-1",
+            "tape_id": "tape-1",
+            "turn_id": "run-1",
             "message_count": 2,
             "tool_schema_count": 0,
             "model": "test-model",

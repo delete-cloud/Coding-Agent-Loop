@@ -14,7 +14,7 @@ Last updated: 2026-05-19
 | G07 | Complete | `SessionManager` saves `{run_id}:latest` compacted message snapshots from `ctx.messages` when a runtime store is configured. |
 | G08 | Complete | HTTP replay APIs expose runtime run records, latest message snapshots, and runtime events with `last_event_id` filtering. |
 | G09 | Complete | `SessionManager` persists durable approval interaction records for pending requests, applied decisions, session auto-approvals, and approval timeouts when a runtime store is configured. |
-| G10 | Pending | Not started. |
+| G10 | Complete | AgentKit pipeline spans include safe runtime correlation attributes, and HTTP root runs bind `turn_id`/`tape_id` trace metadata without weakening OTLP privacy filtering. |
 | G11 | Pending | Not started. |
 
 ## G00 Verification
@@ -128,3 +128,24 @@ Last updated: 2026-05-19
   - `uv run pytest tests/approval/test_coordinator.py tests/approval/test_store.py -v`
   - `uv run pytest tests/coding_agent/test_pg_runtime_store.py -k "interaction" -v`
   - `uv run ruff check src/coding_agent/ui/session_manager.py tests/ui/test_session_manager_runtime.py`
+
+## G10 Verification
+
+- Added `.opencode/prompts/tasks/durable-runtime-observability-correlation.md`.
+- Updated `src/agentkit/runtime/pipeline.py`.
+- Updated `src/coding_agent/ui/session_manager.py`.
+- Updated `tests/agentkit/runtime/test_pipeline.py`.
+- Updated `tests/ui/test_session_manager_runtime.py`.
+- Updated `tests/coding_agent/test_observability.py`.
+- Postmortem patterns consulted:
+  - `postmortem/patterns/PM-0001-address-code-review-issues.md`
+  - `postmortem/patterns/PM-0006-add-usage-event-fields-and-fix-tool-name-kwarg-in-pipeline.md`
+  - `postmortem/patterns/PM-0009-preserve-neutral-bare-anchor-semantics.md`
+  - `postmortem/patterns/PM-0010-route-incremental-context-append-through-tapeview.md`
+- Target tests:
+  - `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "span" -v`
+  - `uv run pytest tests/agentkit/runtime/test_pipeline.py -v`
+  - `uv run pytest tests/agentkit/observability/test_core.py -v`
+  - `uv run pytest tests/ui/test_session_manager_runtime.py -k "run_id or approval or message_snapshot" -v`
+  - `uv run pytest tests/coding_agent/test_observability.py -v`
+  - `uv run ruff check src/agentkit/runtime/pipeline.py src/coding_agent/ui/session_manager.py tests/agentkit/runtime/test_pipeline.py tests/ui/test_session_manager_runtime.py tests/coding_agent/test_observability.py`
