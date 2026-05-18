@@ -17,7 +17,7 @@ from collections.abc import AsyncIterator
 from urllib.parse import urlsplit
 
 import httpx
-from fastapi import FastAPI, HTTPException, Depends, Request, Response
+from fastapi import FastAPI, HTTPException, Depends, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 
@@ -28,6 +28,11 @@ from agentkit.result.reducers import result_from_turn_trace
 from agentkit.tape.extract import TurnTrace, extract_turns
 from agentkit.tape.tape import Tape
 from coding_agent.approval import ApprovalPolicy
+from coding_agent.runtime_store import (
+    AgentRunRecord,
+    RunMessageSnapshotRecord,
+    RuntimeEventRecord,
+)
 from coding_agent.environment import (
     cleanup_cloud_binding_from_config,
     cleanup_cloud_workspace_from_config,
@@ -73,6 +78,10 @@ from coding_agent.ui.schemas import (
     SessionListResponse,
     SessionResultResponse,
     SessionSummaryResponse,
+    RuntimeEventResponse,
+    RuntimeEventsResponse,
+    RuntimeMessageSnapshotResponse,
+    RuntimeRunResponse,
     PublishSessionRequest,
     PublishSessionResponse,
     WorkspaceArchiveResponse,
@@ -2210,6 +2219,127 @@ async def _get_visible_session(
     if not _auth_context_can_access_session(auth_context, session):
         raise HTTPException(status_code=404, detail="Session not found")
     return session
+
+
+def _runtime_run_response(record: AgentRunRecord) -> RuntimeRunResponse:
+    return RuntimeRunResponse(
+        run_id=record.run_id,
+        session_id=record.session_id,
+        tape_id=record.tape_id,
+        parent_run_id=record.parent_run_id,
+        agent_id=record.agent_id,
+        status=record.status,
+        started_at=record.started_at,
+        ended_at=record.ended_at,
+        metadata=record.metadata,
+        result=record.result,
+        error=record.error,
+    )
+
+
+def _runtime_message_snapshot_response(
+    record: RunMessageSnapshotRecord,
+) -> RuntimeMessageSnapshotResponse:
+    return RuntimeMessageSnapshotResponse(
+        snapshot_id=record.snapshot_id,
+        run_id=record.run_id,
+        messages=record.messages,
+        metadata=record.metadata,
+        created_at=record.created_at,
+    )
+
+
+def _runtime_event_response(record: RuntimeEventRecord) -> RuntimeEventResponse:
+    return RuntimeEventResponse(
+        sequence=record.sequence,
+        event_id=record.event_id,
+        run_id=record.run_id,
+        event_kind=record.event_kind,
+        payload=record.payload,
+        created_at=record.created_at,
+    )
+
+
+async def _get_visible_runtime_run(
+    run_id: str,
+    auth_context: AuthContext | None,
+) -> AgentRunRecord:
+    try:
+        record = await session_manager.load_runtime_run(run_id)
+    except (KeyError, RuntimeError) as exc:
+        raise HTTPException(status_code=404, detail="Runtime run not found") from exc
+
+    try:
+        await _get_visible_session(record.session_id, auth_context)
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            raise HTTPException(
+                status_code=404,
+                detail="Runtime run not found",
+            ) from exc
+        raise
+    return record
+
+
+@app.get("/runs/{run_id}", response_model=RuntimeRunResponse)
+@limiter.limit(RateLimits.GET_SESSION)
+async def get_runtime_run(
+    request: Request,
+    run_id: str,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> RuntimeRunResponse:
+    del request
+    record = await _get_visible_runtime_run(run_id, auth_context)
+    return _runtime_run_response(record)
+
+
+@app.get(
+    "/runs/{run_id}/message-snapshot",
+    response_model=RuntimeMessageSnapshotResponse,
+)
+@limiter.limit(RateLimits.GET_SESSION)
+async def get_runtime_message_snapshot(
+    request: Request,
+    run_id: str,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> RuntimeMessageSnapshotResponse:
+    del request
+    _ = await _get_visible_runtime_run(run_id, auth_context)
+    try:
+        record = await session_manager.load_runtime_message_snapshot(run_id)
+    except (KeyError, RuntimeError) as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="Runtime message snapshot not found",
+        ) from exc
+    return _runtime_message_snapshot_response(record)
+
+
+@app.get("/runs/{run_id}/events", response_model=RuntimeEventsResponse)
+@limiter.limit(RateLimits.GET_SESSION)
+async def get_runtime_events(
+    request: Request,
+    run_id: str,
+    last_event_id: str | None = Query(None, min_length=1, max_length=200),
+    limit: int = Query(1000, ge=1, le=1000),
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> RuntimeEventsResponse:
+    del request
+    _ = await _get_visible_runtime_run(run_id, auth_context)
+    try:
+        events = await session_manager.replay_runtime_events(
+            run_id,
+            last_event_id=last_event_id,
+            limit=limit,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Runtime event not found") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=404, detail="Runtime run not found") from exc
+    return RuntimeEventsResponse(
+        run_id=run_id,
+        events=[_runtime_event_response(event) for event in events],
+    )
 
 
 def _session_runtime_tape(session: Session) -> Tape | None:

@@ -214,15 +214,35 @@ class WorkspaceMetadataStoreProtocol(Protocol):
 class RuntimeStoreProtocol(Protocol):
     async def create_agent_run(self, record: AgentRunRecord) -> AgentRunRecord: ...
 
+    async def load_agent_run(self, run_id: str) -> AgentRunRecord | None: ...
+
     async def append_runtime_event(
         self,
         record: RuntimeEventRecord,
     ) -> RuntimeEventRecord: ...
 
+    async def load_runtime_event(
+        self,
+        event_id: str,
+    ) -> RuntimeEventRecord | None: ...
+
+    async def replay_runtime_events(
+        self,
+        run_id: str,
+        *,
+        after_sequence: int = 0,
+        limit: int = 1000,
+    ) -> list[RuntimeEventRecord]: ...
+
     async def save_message_snapshot(
         self,
         record: RunMessageSnapshotRecord,
     ) -> RunMessageSnapshotRecord: ...
+
+    async def load_message_snapshot(
+        self,
+        snapshot_id: str,
+    ) -> RunMessageSnapshotRecord | None: ...
 
     async def update_agent_run(
         self,
@@ -708,6 +728,55 @@ class SessionManager:
         runtime_store: RuntimeStoreProtocol | None,
     ) -> None:
         self._runtime_store = runtime_store
+
+    def _require_runtime_store(self) -> RuntimeStoreProtocol:
+        if self._runtime_store is None:
+            raise RuntimeError("runtime store is not configured")
+        return self._runtime_store
+
+    async def load_runtime_run(self, run_id: str) -> AgentRunRecord:
+        store = self._require_runtime_store()
+        record = await store.load_agent_run(run_id)
+        if record is None:
+            raise KeyError(f"runtime run not found: {run_id}")
+        return record
+
+    async def load_runtime_message_snapshot(
+        self,
+        run_id: str,
+    ) -> RunMessageSnapshotRecord:
+        store = self._require_runtime_store()
+        snapshot_id = f"{run_id}:latest"
+        record = await store.load_message_snapshot(snapshot_id)
+        if record is None:
+            raise KeyError(f"runtime message snapshot not found: {snapshot_id}")
+        return record
+
+    async def replay_runtime_events(
+        self,
+        run_id: str,
+        *,
+        last_event_id: str | None = None,
+        limit: int = 1000,
+    ) -> list[RuntimeEventRecord]:
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        store = self._require_runtime_store()
+        after_sequence = 0
+        if last_event_id is not None:
+            last_event = await store.load_runtime_event(last_event_id)
+            if last_event is None or last_event.run_id != run_id:
+                raise KeyError(f"runtime event not found: {last_event_id}")
+            if last_event.sequence is None:
+                raise RuntimeError(
+                    f"runtime event has no replay sequence: {last_event_id}"
+                )
+            after_sequence = last_event.sequence
+        return await store.replay_runtime_events(
+            run_id,
+            after_sequence=after_sequence,
+            limit=limit,
+        )
 
     async def list_workspace_records(self) -> list[WorkspaceRecord]:
         if self._workspace_metadata_store is None:

@@ -147,6 +147,42 @@ class SessionResultResponse(BaseModel):
     failure_details: str | None = None
 
 
+class RuntimeRunResponse(BaseModel):
+    run_id: str
+    session_id: str
+    tape_id: str | None = None
+    parent_run_id: str | None = None
+    agent_id: str | None = None
+    status: str
+    started_at: datetime
+    ended_at: datetime | None = None
+    metadata: dict[str, Any]
+    result: dict[str, Any]
+    error: str | None = None
+
+
+class RuntimeMessageSnapshotResponse(BaseModel):
+    snapshot_id: str
+    run_id: str
+    messages: list[dict[str, Any]]
+    metadata: dict[str, Any]
+    created_at: datetime
+
+
+class RuntimeEventResponse(BaseModel):
+    sequence: int | None = None
+    event_id: str
+    run_id: str
+    event_kind: str
+    payload: dict[str, Any]
+    created_at: datetime
+
+
+class RuntimeEventsResponse(BaseModel):
+    run_id: str
+    events: list[RuntimeEventResponse]
+
+
 class WorkspaceDiffFileSchema(BaseModel):
     path: str
     status: Literal["added", "modified", "deleted", "renamed", "binary", "unknown"]

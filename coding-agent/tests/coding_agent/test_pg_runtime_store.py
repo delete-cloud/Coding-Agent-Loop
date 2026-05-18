@@ -107,6 +107,8 @@ class FakePool:
             return row
         if "SELECT * FROM run_message_snapshots WHERE snapshot_id = $1" in query:
             return self.run_message_snapshots.get(cast(str, args[0]))
+        if "SELECT * FROM runtime_events WHERE event_id = $1" in query:
+            return self.runtime_events.get(cast(str, args[0]))
         if "INSERT INTO agent_interactions" in query:
             (
                 interaction_id,
@@ -342,6 +344,27 @@ async def test_append_runtime_event_returns_existing_record_for_duplicate_event_
 
     assert duplicate == first
     assert [event.payload for event in replayed] == [{"attempt": 1}]
+
+
+@pytest.mark.asyncio
+async def test_load_runtime_event_returns_record_by_event_id(
+    store: PGRuntimeStore,
+) -> None:
+    event = await store.append_runtime_event(
+        RuntimeEventRecord(
+            event_id="evt-load",
+            run_id="run-1",
+            event_kind="wire.StreamDelta",
+            payload={"delta": "hello"},
+            created_at=_dt(11, 2),
+        )
+    )
+
+    loaded = await store.load_runtime_event("evt-load")
+    missing = await store.load_runtime_event("missing-event")
+
+    assert loaded == event
+    assert missing is None
 
 
 @pytest.mark.asyncio
