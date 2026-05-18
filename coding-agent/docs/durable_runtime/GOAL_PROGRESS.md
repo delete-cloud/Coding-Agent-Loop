@@ -13,7 +13,7 @@ Last updated: 2026-05-19
 | G06 | Complete | `SessionManager` appends runtime-store wire events for emitted HTTP turn messages, approval requests, and error turn notifications when a runtime store is configured. |
 | G07 | Complete | `SessionManager` saves `{run_id}:latest` compacted message snapshots from `ctx.messages` when a runtime store is configured. |
 | G08 | Complete | HTTP replay APIs expose runtime run records, latest message snapshots, and runtime events with `last_event_id` filtering. |
-| G09 | Pending | Not started. |
+| G09 | Complete | `SessionManager` persists durable approval interaction records for pending requests, applied decisions, session auto-approvals, and approval timeouts when a runtime store is configured. |
 | G10 | Pending | Not started. |
 | G11 | Pending | Not started. |
 
@@ -111,3 +111,20 @@ Last updated: 2026-05-19
   - `uv run pytest tests/ui/test_session_manager_runtime.py -k "message_snapshot or persists_wire_events or approval_request_wire_events or agent_run or run_id" -v`
   - `uv run ruff check src/coding_agent/runtime_store.py src/coding_agent/ui/session_manager.py src/coding_agent/ui/http_server.py src/coding_agent/ui/schemas.py tests/coding_agent/test_pg_runtime_store.py tests/ui/test_http_server.py`
 - Additional note: `uv run pytest tests/ui/test_http_server.py -v` was attempted but is blocked by the pre-existing `main` failure in `TestSessionCreation.test_http_create_session_provisions_docker_cloud_workspace`, where the current implementation returns `workspace_provider` and `workspace_root_ref` in `origin`.
+
+## G09 Verification
+
+- Added `.opencode/prompts/tasks/durable-runtime-approval-interactions.md`.
+- Updated `src/coding_agent/ui/session_manager.py`.
+- Updated `tests/ui/test_session_manager_runtime.py`.
+- Postmortem patterns consulted:
+  - `postmortem/patterns/PM-0001-address-code-review-issues.md`
+  - `postmortem/patterns/PM-0013-clear-answered-request-projections.md`
+  - `postmortem/patterns/PM-0014-make-approval-responses-single-shot.md`
+  - `postmortem/patterns/PM-0015-require-store-backed-requests-across-http-approval-flow.md`
+- Target tests:
+  - `uv run pytest tests/ui/test_session_manager_runtime.py -k "approval" -v`
+  - `uv run pytest tests/ui/test_http_server.py -k "ApprovalEndpoint or ApprovalStoreIntegration" -v`
+  - `uv run pytest tests/approval/test_coordinator.py tests/approval/test_store.py -v`
+  - `uv run pytest tests/coding_agent/test_pg_runtime_store.py -k "interaction" -v`
+  - `uv run ruff check src/coding_agent/ui/session_manager.py tests/ui/test_session_manager_runtime.py`
