@@ -25,6 +25,7 @@ enabled = [
 tape_backend = "jsonl"
 http_session_backend = "memory"
 checkpoint_backend = "fs"
+runtime_backend = "none"
 doc_backend = "lancedb"
 
 [storage.paths]

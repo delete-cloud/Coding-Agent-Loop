@@ -489,11 +489,19 @@ def test_session_manager_uses_pg_backends_when_storage_config_requests_pg() -> N
         def __init__(self, *, pool: FakePGPool) -> None:
             self.pool = pool
 
+    class FakePGRuntimeStore:
+        def __init__(self, *, pool: FakePGPool) -> None:
+            self.pool = pool
+
     with (
         patch("coding_agent.ui.session_manager.create_session_store") as create_store,
         patch(
             "coding_agent.ui.session_manager._load_pg_storage_types",
             return_value=(FakePGPool, FakePGTapeStore, FakePGCheckpointStore),
+        ),
+        patch(
+            "coding_agent.ui.session_manager.PGRuntimeStore",
+            FakePGRuntimeStore,
         ),
     ):
         create_store.return_value = PGSessionMetadataStore(
@@ -504,6 +512,7 @@ def test_session_manager_uses_pg_backends_when_storage_config_requests_pg() -> N
                 "tape_backend": "pg",
                 "checkpoint_backend": "pg",
                 "http_session_backend": "pg",
+                "runtime_backend": "pg",
                 "dsn": "postgresql://example",
             }
         )
@@ -511,9 +520,74 @@ def test_session_manager_uses_pg_backends_when_storage_config_requests_pg() -> N
     assert isinstance(manager._store, PGSessionMetadataStore)
     assert isinstance(manager._tape_store, FakePGTapeStore)
     assert isinstance(manager._checkpoint_service._store, FakePGCheckpointStore)
+    assert isinstance(manager._runtime_store, FakePGRuntimeStore)
     assert manager._tape_store.pool is manager._checkpoint_service._store.pool
+    assert manager._runtime_store.pool is manager._tape_store.pool
     assert manager._store._pool is not manager._tape_store.pool
     assert len(FakePGPool.instances) == 2
+
+
+def test_session_manager_disables_runtime_store_by_default() -> None:
+    manager = SessionManager()
+
+    assert manager._runtime_store is None
+    assert (
+        SessionManager(storage_config={"runtime_backend": "none"})._runtime_store
+        is None
+    )
+    assert (
+        SessionManager(storage_config={"runtime_backend": " disabled "})._runtime_store
+        is None
+    )
+
+
+def test_session_manager_creates_pg_runtime_store_when_storage_config_requests_pg() -> (
+    None
+):
+    class FakePGPool:
+        instances: list[FakePGPool] = []
+
+        def __init__(self, *, dsn: str) -> None:
+            self.dsn = dsn
+            self.__class__.instances.append(self)
+
+    class FakePGTapeStore:
+        def __init__(self, *, pool: FakePGPool) -> None:
+            self.pool = pool
+
+    class FakePGCheckpointStore:
+        def __init__(self, *, pool: FakePGPool) -> None:
+            self.pool = pool
+
+    class FakePGRuntimeStore:
+        def __init__(self, *, pool: FakePGPool) -> None:
+            self.pool = pool
+
+    with (
+        patch(
+            "coding_agent.ui.session_manager._load_pg_storage_types",
+            return_value=(FakePGPool, FakePGTapeStore, FakePGCheckpointStore),
+        ),
+        patch(
+            "coding_agent.ui.session_manager.PGRuntimeStore",
+            FakePGRuntimeStore,
+        ),
+    ):
+        manager = SessionManager(
+            storage_config={
+                "runtime_backend": "pg",
+                "dsn": "postgresql://example",
+            }
+        )
+
+    assert isinstance(manager._runtime_store, FakePGRuntimeStore)
+    assert manager._runtime_store.pool is FakePGPool.instances[0]
+    assert len(FakePGPool.instances) == 1
+
+
+def test_session_manager_rejects_unknown_runtime_store_backend() -> None:
+    with pytest.raises(ValueError, match="unsupported storage.runtime_backend"):
+        SessionManager(storage_config={"runtime_backend": "redis"})
 
 
 def test_session_manager_creates_dedicated_pg_pool_for_http_session_store() -> None:
