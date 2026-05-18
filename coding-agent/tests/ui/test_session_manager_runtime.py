@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
+from agentkit.runtime.context import AgentRunContext
 from agentkit.tools import FatalToolExecutionError
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
@@ -82,6 +83,65 @@ async def test_run_agent_does_not_hardcode_api_key() -> None:
 
     assert captured_kwargs["session_id_override"] == session_id
     assert captured_kwargs["api_key"] is None
+
+
+@pytest.mark.asyncio
+async def test_run_agent_creates_run_id_and_preserves_current_turn_id_alias() -> None:
+    manager = SessionManager()
+    session_id = await manager.create_session()
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+            self.ctx = ctx
+
+        async def run_turn(self, prompt: str) -> None:
+            del prompt
+            observed_run_ids.append(self.ctx.run_context.run_id)
+
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        )
+    )
+    captured_kwargs: dict[str, object] = {}
+    observed_run_ids: list[str] = []
+
+    def fake_create_agent(**kwargs):
+        captured_kwargs.update(kwargs)
+        environment = kwargs["environment"]
+        if not isinstance(environment, LocalEnvironment):
+            raise TypeError("expected local environment")
+        return fake_pipeline, types.SimpleNamespace(
+            session_id="stale-session",
+            config={},
+            tape=kwargs.get("tape") or Tape(),
+            run_context=AgentRunContext(
+                session_id="stale-session",
+                run_id="stale-run",
+                agent_id=None,
+                parent_run_id="old-parent",
+                environment=environment,
+            ),
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
+        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+
+        await manager.run_agent(session_id, "hello")
+
+    run_id = captured_kwargs["run_id_override"]
+    assert isinstance(run_id, str)
+    assert run_id
+    assert captured_kwargs["session_id_override"] == session_id
+    session = manager.get_session(session_id)
+    assert session.current_turn_id == run_id
+    assert observed_run_ids == [run_id]
+    assert session.runtime_ctx.session_id == session_id
+    assert session.runtime_ctx.run_context.session_id == session_id
+    assert session.runtime_ctx.run_context.run_id == run_id
+    assert session.runtime_ctx.run_context.parent_run_id is None
 
 
 def test_load_pg_storage_types_reports_missing_optional_dependencies() -> None:
@@ -243,6 +303,7 @@ async def test_run_agent_reuses_live_runtime_for_hot_turns() -> None:
     create_agent_calls = 0
     adapter_instances: list[FakeAdapter] = []
     observed_prompts: list[str] = []
+    observed_run_ids: list[str] = []
 
     class FakeAdapter:
         def __init__(self, pipeline, ctx, consumer) -> None:
@@ -252,6 +313,7 @@ async def test_run_agent_reuses_live_runtime_for_hot_turns() -> None:
 
         async def run_turn(self, prompt: str) -> None:
             observed_prompts.append(prompt)
+            observed_run_ids.append(self.ctx.run_context.run_id)
 
     fake_pipeline = types.SimpleNamespace(
         _registry=types.SimpleNamespace(
@@ -263,8 +325,19 @@ async def test_run_agent_reuses_live_runtime_for_hot_turns() -> None:
     def fake_create_agent(**kwargs):
         nonlocal create_agent_calls
         create_agent_calls += 1
+        environment = kwargs["environment"]
+        if not isinstance(environment, LocalEnvironment):
+            raise TypeError("expected local environment")
         return fake_pipeline, types.SimpleNamespace(
-            config={}, tape=kwargs.get("tape") or Tape()
+            session_id=kwargs["session_id_override"],
+            config={},
+            tape=kwargs.get("tape") or Tape(),
+            run_context=AgentRunContext(
+                session_id=kwargs["session_id_override"],
+                run_id=kwargs["run_id_override"],
+                agent_id=None,
+                environment=environment,
+            ),
         )
 
     with pytest.MonkeyPatch.context() as mp:
@@ -277,6 +350,9 @@ async def test_run_agent_reuses_live_runtime_for_hot_turns() -> None:
     assert create_agent_calls == 1
     assert len(adapter_instances) == 1
     assert observed_prompts == ["first", "second"]
+    assert len(observed_run_ids) == 2
+    assert observed_run_ids[0] != observed_run_ids[1]
+    assert manager.get_session(session_id).current_turn_id == observed_run_ids[1]
 
 
 @pytest.mark.asyncio

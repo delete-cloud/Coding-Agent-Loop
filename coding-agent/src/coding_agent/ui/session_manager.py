@@ -10,7 +10,7 @@ import uuid
 from collections.abc import AsyncIterator
 from collections.abc import Callable
 from functools import partial
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from inspect import isawaitable
 from pathlib import Path
@@ -30,6 +30,7 @@ from agentkit.runtime import (
     RuntimeMessageCursor,
     RuntimeMessageKind,
 )
+from agentkit.runtime.context import AgentRunContext
 from agentkit.storage.protocols import CheckpointStore, TapeStore
 from agentkit.tape.tape import Tape
 from agentkit.tools import FatalToolExecutionError
@@ -840,6 +841,20 @@ class SessionManager:
 
     def _bind_subagent_message_publisher(self, ctx: Any) -> None:
         ctx.config["subagent_message_publisher"] = self.publish_subagent_message
+
+    def _bind_root_run_identity(self, session: Session, ctx: Any, run_id: str) -> None:
+        if hasattr(ctx, "session_id"):
+            ctx.session_id = session.id
+        run_context = getattr(ctx, "run_context", None)
+        if run_context is not None:
+            if not isinstance(run_context, AgentRunContext):
+                raise TypeError("runtime context run_context must be AgentRunContext")
+            ctx.run_context = replace(
+                run_context,
+                session_id=session.id,
+                run_id=run_id,
+                parent_run_id=None,
+            )
 
     def _turn_lock_for(self, session_id: str) -> asyncio.Lock:
         lock = self._session_turn_locks.get(session_id)
@@ -1770,7 +1785,8 @@ class SessionManager:
             session.last_activity = datetime.now()
             session.turn_in_progress = True
             session.turn_status = "running"
-            session.current_turn_id = uuid.uuid4().hex
+            run_id = uuid.uuid4().hex
+            session.current_turn_id = run_id
             session.last_failure_details = None
             await self._persist_session_async(session)
 
@@ -1800,6 +1816,7 @@ class SessionManager:
                             session.approval_policy
                         ],
                         session_id_override=session_id,
+                        run_id_override=run_id,
                         api_key=None,
                         tape=await self._restore_tape(session.tape_id),
                     )
@@ -1820,6 +1837,7 @@ class SessionManager:
                     session.runtime_ctx = ctx
                     session.runtime_adapter = adapter
 
+                self._bind_root_run_identity(session, ctx, run_id)
                 set_consumer = getattr(adapter, "set_consumer", None)
                 if callable(set_consumer):
                     set_consumer(consumer)
@@ -1851,7 +1869,7 @@ class SessionManager:
                     TurnEnd(
                         session_id=session_id,
                         agent_id="",
-                        turn_id=uuid.uuid4().hex,
+                        turn_id=run_id,
                         completion_status=CompletionStatus.ERROR,
                     )
                 )
