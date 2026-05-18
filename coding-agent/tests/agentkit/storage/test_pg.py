@@ -308,7 +308,11 @@ class FakePool:
                         continue
                     entry_anchor_type = entry.get("anchor_type")
                     if not isinstance(entry_anchor_type, str):
-                        entry_anchor_type = nested_str(entry, "anchor_type")
+                        meta = entry.get("meta")
+                        if isinstance(meta, dict):
+                            entry_anchor_type = meta.get("anchor_type")
+                        if not isinstance(entry_anchor_type, str):
+                            entry_anchor_type = None
                     if anchor_type is not None and entry_anchor_type != anchor_type:
                         continue
                     matched.append(
@@ -927,6 +931,11 @@ class TestPGTapeStore:
                     "timestamp": 1.0,
                     "anchor_type": "handoff",
                     "meta": {"run_id": "run-2"},
+                },
+                {
+                    "kind": "anchor",
+                    "payload": {"anchor_type": "handoff"},
+                    "meta": {"run_id": "run-3"},
                 },
             ],
         )
