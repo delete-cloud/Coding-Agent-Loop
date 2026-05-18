@@ -8,7 +8,7 @@ Last updated: 2026-05-18
 | G01 | Complete | `docs/adr/0029-durable-runtime-identity.md` defines session, run, turn compatibility, tape, event, interaction, checkpoint, and Langfuse/OTLP correlation identity. |
 | G02 | Complete | `src/coding_agent/runtime_store.py` adds the inert PostgreSQL durable runtime store, with unit coverage in `tests/coding_agent/test_pg_runtime_store.py` and ADR-0030. |
 | G03 | Complete | `SessionManager.run_agent()` creates a root `run_id`, keeps `current_turn_id` as its alias, and binds cold/hot runtime contexts to that identity. |
-| G04 | Pending | Not started. |
+| G04 | Complete | `SessionManager` can persist root HTTP run lifecycle records through an optional runtime store without changing default storage behavior. |
 | G05 | Pending | Not started. |
 | G06 | Pending | Not started. |
 | G07 | Pending | Not started. |
@@ -46,4 +46,16 @@ Last updated: 2026-05-18
   - `uv run pytest tests/ui/test_session_manager_runtime.py -k "run_id or reuses_live_runtime or hardcode_api_key or emits_error_turn_end" -v`
   - `uv run pytest tests/ui/test_session_manager_runtime.py -v`
   - `uv run pytest tests/ui/test_session_manager_public_api.py -k "run_agent or turn_id" -v`
+  - `uv run ruff check src/coding_agent/ui/session_manager.py tests/ui/test_session_manager_runtime.py`
+
+## G04 Verification
+
+- Added `.opencode/prompts/tasks/durable-runtime-run-lifecycle.md`.
+- Updated `src/coding_agent/ui/session_manager.py`.
+- Updated `tests/ui/test_session_manager_runtime.py`.
+- Target tests:
+  - `uv run pytest tests/ui/test_session_manager_runtime.py -k "agent_run or run_id or reuses_live_runtime or hardcode_api_key or emits_error_turn_end" -v`
+  - `uv run pytest tests/ui/test_session_manager_runtime.py -v`
+  - `uv run pytest tests/ui/test_session_manager_public_api.py -k "run_agent or turn_id" -v`
+  - `uv run pytest tests/coding_agent/test_pg_runtime_store.py -v`
   - `uv run ruff check src/coding_agent/ui/session_manager.py tests/ui/test_session_manager_runtime.py`

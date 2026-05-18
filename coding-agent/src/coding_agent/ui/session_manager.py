@@ -47,6 +47,8 @@ from coding_agent.approval.store import ApprovalStore
 from coding_agent.core import config as core_config
 from coding_agent.plugins.storage import JSONLTapeStore
 from coding_agent.providers.base import ToolSchema
+from coding_agent.adapter_types import StopReason, TurnOutcome
+from coding_agent.runtime_store import AgentRunRecord, JSONObject
 from coding_agent.wire.local import LocalWire
 from coding_agent.wire.protocol import (
     ApprovalRequest,
@@ -155,6 +157,21 @@ class WorkspaceMetadataStoreProtocol(Protocol):
         *,
         result_refs: dict[str, JSONValue],
     ) -> None: ...
+
+
+class RuntimeStoreProtocol(Protocol):
+    async def create_agent_run(self, record: AgentRunRecord) -> AgentRunRecord: ...
+
+    async def update_agent_run(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        ended_at: datetime | None,
+        metadata: JSONObject,
+        result: JSONObject,
+        error: str | None,
+    ) -> AgentRunRecord: ...
 
 
 class MockProvider:
@@ -540,6 +557,7 @@ class SessionManager:
             Callable[[CloudWorkspaceBinding], None] | None
         ) = None,
         workspace_metadata_store: WorkspaceMetadataStoreProtocol | None = None,
+        runtime_store: RuntimeStoreProtocol | None = None,
         owner_store: SessionOwnerStoreProtocol | None = None,
         owner_id: str | None = None,
         fencing_token: int | None = None,
@@ -567,6 +585,7 @@ class SessionManager:
         self._binding_resolver = binding_resolver or DefaultBindingResolver()
         self._provisioned_cloud_binding_cleanup = provisioned_cloud_binding_cleanup
         self._workspace_metadata_store = workspace_metadata_store
+        self._runtime_store = runtime_store
         self.configure_owner_leases(
             owner_store=owner_store,
             owner_id=owner_id,
@@ -614,6 +633,12 @@ class SessionManager:
         workspace_metadata_store: WorkspaceMetadataStoreProtocol | None,
     ) -> None:
         self._workspace_metadata_store = workspace_metadata_store
+
+    def configure_runtime_store(
+        self,
+        runtime_store: RuntimeStoreProtocol | None,
+    ) -> None:
+        self._runtime_store = runtime_store
 
     async def list_workspace_records(self) -> list[WorkspaceRecord]:
         if self._workspace_metadata_store is None:
@@ -855,6 +880,77 @@ class SessionManager:
                 run_id=run_id,
                 parent_run_id=None,
             )
+
+    def _run_metadata_for_session(self, session: Session) -> JSONObject:
+        return {
+            "provider_name": session.provider_name,
+            "model_name": session.model_name,
+            "approval_policy": session.approval_policy.value,
+            "max_steps": session.max_steps,
+        }
+
+    def _result_from_turn_outcome(self, outcome: TurnOutcome) -> JSONObject:
+        return {
+            "stop_reason": outcome.stop_reason.value,
+            "steps_taken": outcome.steps_taken,
+        }
+
+    def _status_from_turn_outcome(self, outcome: TurnOutcome) -> str:
+        if outcome.error is not None or outcome.stop_reason == StopReason.ERROR:
+            return "failed"
+        if outcome.stop_reason == StopReason.INTERRUPTED:
+            return "cancelled"
+        return "succeeded"
+
+    def _require_turn_outcome(self, outcome: object) -> TurnOutcome:
+        if not isinstance(outcome, TurnOutcome):
+            raise TypeError("runtime store requires PipelineAdapter.run_turn outcome")
+        return outcome
+
+    async def _create_runtime_agent_run(
+        self,
+        session: Session,
+        *,
+        run_id: str,
+        started_at: datetime,
+    ) -> bool:
+        if self._runtime_store is None:
+            return False
+        await self._runtime_store.create_agent_run(
+            AgentRunRecord(
+                run_id=run_id,
+                session_id=session.id,
+                tape_id=session.tape_id,
+                parent_run_id=None,
+                agent_id=None,
+                status="running",
+                started_at=started_at,
+                metadata=self._run_metadata_for_session(session),
+                result={},
+                error=None,
+            )
+        )
+        return True
+
+    async def _finish_runtime_agent_run(
+        self,
+        session: Session,
+        *,
+        run_id: str,
+        status: str,
+        result: JSONObject,
+        error: str | None,
+    ) -> None:
+        if self._runtime_store is None:
+            return
+        await self._runtime_store.update_agent_run(
+            run_id,
+            status=status,
+            ended_at=datetime.now(UTC),
+            metadata=self._run_metadata_for_session(session),
+            result=result,
+            error=error,
+        )
 
     def _turn_lock_for(self, session_id: str) -> asyncio.Lock:
         lock = self._session_turn_locks.get(session_id)
@@ -1786,9 +1882,11 @@ class SessionManager:
             session.turn_in_progress = True
             session.turn_status = "running"
             run_id = uuid.uuid4().hex
+            started_at = datetime.now(UTC)
             session.current_turn_id = run_id
             session.last_failure_details = None
             await self._persist_session_async(session)
+            agent_run_created = False
 
             try:
                 approval_mode_map = {
@@ -1838,22 +1936,62 @@ class SessionManager:
                     session.runtime_adapter = adapter
 
                 self._bind_root_run_identity(session, ctx, run_id)
+                agent_run_created = await self._create_runtime_agent_run(
+                    session,
+                    run_id=run_id,
+                    started_at=started_at,
+                )
                 set_consumer = getattr(adapter, "set_consumer", None)
                 if callable(set_consumer):
                     set_consumer(consumer)
                 ctx.runtime_message_bus = session.runtime_message_bus
                 ctx.config["wire_consumer"] = consumer
                 self._bind_subagent_message_publisher(ctx)
-                await adapter.run_turn(prompt)
+                outcome = await adapter.run_turn(prompt)
+                if self._runtime_store is not None:
+                    turn_outcome = self._require_turn_outcome(outcome)
+                    await self._finish_runtime_agent_run(
+                        session,
+                        run_id=run_id,
+                        status=self._status_from_turn_outcome(turn_outcome),
+                        result=self._result_from_turn_outcome(turn_outcome),
+                        error=turn_outcome.error,
+                    )
                 session.tape_id = ctx.tape.tape_id
                 session.last_failure_details = None
                 await self._persist_session_async(session)
             except FatalToolExecutionError as exc:
+                if agent_run_created:
+                    await self._finish_runtime_agent_run(
+                        session,
+                        run_id=run_id,
+                        status="failed",
+                        result={},
+                        error=str(exc),
+                    )
                 session.turn_status = "failed"
                 session.last_failure_details = f"Fatal tool execution failed: {exc}"
                 await self._close_runtime(session)
                 raise
+            except asyncio.CancelledError:
+                if agent_run_created:
+                    await self._finish_runtime_agent_run(
+                        session,
+                        run_id=run_id,
+                        status="cancelled",
+                        result={},
+                        error="cancelled",
+                    )
+                raise
             except Exception as exc:
+                if agent_run_created:
+                    await self._finish_runtime_agent_run(
+                        session,
+                        run_id=run_id,
+                        status="failed",
+                        result={},
+                        error=str(exc),
+                    )
                 session.turn_status = "failed"
                 session.last_failure_details = f"HTTP session turn failed: {exc}"
                 await self._close_runtime(session)
