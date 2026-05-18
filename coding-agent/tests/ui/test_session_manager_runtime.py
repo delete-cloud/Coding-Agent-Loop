@@ -249,6 +249,10 @@ async def test_run_agent_creates_run_id_and_preserves_current_turn_id_alias() ->
     assert session.runtime_ctx.run_context.session_id == session_id
     assert session.runtime_ctx.run_context.run_id == run_id
     assert session.runtime_ctx.run_context.parent_run_id is None
+    assert session.runtime_ctx.run_context.trace_metadata == {
+        "turn_id": run_id,
+        "tape_id": session.runtime_ctx.tape.tape_id,
+    }
 
 
 @pytest.mark.asyncio
