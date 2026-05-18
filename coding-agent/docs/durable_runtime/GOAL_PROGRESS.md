@@ -21,7 +21,7 @@ match the active objective map.
 | G08 | Complete | AgentKit stage/LLM spans include safe runtime correlation keys (`turn_id`, `tape_id`, `tool_call_id`, `interaction_id`, `event_id`, `checkpoint_id`), HTTP root runs bind `turn_id`/`tape_id`, and OTLP privacy tests reject raw prompt/message/result/secret/text attributes. |
 | G09 | Complete | `PGTapeStore` implements optional `TapeDebugStore.info()` and `TapeDebugStore.search()` with `kind`, `run_id`, `tool_call_id`, and `anchor_type` filters. |
 | G10 | Complete | ADR-0032 changes startup orphan recovery to mark active-owner `running` rows `interrupted` with `reclaimable: true`, without adding a scheduler. |
-| G11 | Pending | End-to-end smoke tests/docs for normal run, failed run, approval run, replay, Langfuse/OTLP correlation, and tape debug remain to be added. |
+| G11 | Complete | `tests/integration/test_durable_runtime_smoke.py` and `docs/durable_runtime/SMOKE.md` cover normal run, failed run, approval run, runtime replay, Langfuse/OTLP correlation, and tape debug with deterministic fakes. |
 
 ## Active G04/G10 Alignment Verification
 
@@ -89,6 +89,32 @@ match the active objective map.
   - `postmortem/patterns/PM-0006-add-usage-event-fields-and-fix-tool-name-kwarg-in-pipeline.md`
   - `postmortem/patterns/PM-0009-preserve-neutral-bare-anchor-semantics.md`
   - `postmortem/patterns/PM-0010-route-incremental-context-append-through-tapeview.md`
+
+## Active G11 Smoke Verification
+
+- Added `.opencode/prompts/tasks/durable-runtime-g11-smoke.md`.
+- Added `tests/integration/test_durable_runtime_smoke.py`.
+- Added `docs/durable_runtime/SMOKE.md`.
+- Updated this progress table to mark active G11 complete.
+- Red tests before documentation/progress implementation:
+  - `uv run pytest tests/integration/test_durable_runtime_smoke.py -v`
+- Target tests:
+  - `uv run pytest tests/integration/test_durable_runtime_smoke.py -v`
+  - `uv run pytest tests/ui/test_session_manager_runtime.py -k "agent_run or persists_wire_events or approval_interaction or message_snapshot" -v`
+  - `uv run pytest tests/ui/test_http_server.py -k "runtime_replay" -v`
+  - `uv run pytest tests/coding_agent/test_observability.py -v`
+  - `uv run pytest tests/agentkit/storage/test_pg.py -k "tape" -v`
+  - `uv run ruff check tests/integration/test_durable_runtime_smoke.py`
+  - `uv run ruff format --check tests/integration/test_durable_runtime_smoke.py`
+- Postmortem patterns consulted:
+  - `postmortem/patterns/PM-0001-address-code-review-issues.md`
+  - `postmortem/patterns/PM-0006-add-usage-event-fields-and-fix-tool-name-kwarg-in-pipeline.md`
+  - `postmortem/patterns/PM-0009-preserve-neutral-bare-anchor-semantics.md`
+  - `postmortem/patterns/PM-0010-route-incremental-context-append-through-tapeview.md`
+  - `postmortem/patterns/PM-0015-require-store-backed-requests-across-http-approval-flow.md`
+  - `postmortem/patterns/PM-0021-guard-event-stream-registration-against-disappearing-sessions.md`
+  - `postmortem/patterns/PM-0022-revalidate-event-stream-ownership-after-queue-attach.md`
+  - `postmortem/patterns/PM-0023-make-event-stream-cleanup-and-teardown-idempotent.md`
 
 ## Historical Slice Log
 
