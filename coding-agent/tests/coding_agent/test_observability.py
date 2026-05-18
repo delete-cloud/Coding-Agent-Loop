@@ -96,6 +96,15 @@ def test_otlp_sink_posts_span_without_prompt_or_output_content() -> None:
     assert "result-do-not-send" not in body
     assert "secret-do-not-send" not in body
     assert "text-do-not-send" not in body
+    span = _first_span(json.loads(body))
+    exported_keys = {
+        item["key"]
+        for item in span.get("attributes", [])
+        if isinstance(item, dict) and isinstance(item.get("key"), str)
+    }
+    assert {"content", "message", "prompt", "result", "secret", "text"}.isdisjoint(
+        exported_keys
+    )
 
 
 def test_otlp_sink_groups_spans_by_session_and_run() -> None:

@@ -35,9 +35,12 @@ Context:
 
 Target tests:
 - `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "span" -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -v`
+- `uv run pytest tests/agentkit/observability/test_core.py -v`
 - `uv run pytest tests/ui/test_session_manager_runtime.py -k "run_id or approval or message_snapshot" -v`
 - `uv run pytest tests/coding_agent/test_observability.py -v`
-- `uv run ruff check src/agentkit/runtime/pipeline.py src/coding_agent/ui/session_manager.py tests/agentkit/runtime/test_pipeline.py tests/ui/test_session_manager_runtime.py`
+- `uv run ruff check src/agentkit/runtime/pipeline.py src/coding_agent/ui/session_manager.py tests/agentkit/runtime/test_pipeline.py tests/ui/test_session_manager_runtime.py tests/coding_agent/test_observability.py`
+- `uv run ruff format --check src/agentkit/runtime/pipeline.py src/coding_agent/ui/session_manager.py tests/agentkit/runtime/test_pipeline.py tests/ui/test_session_manager_runtime.py tests/coding_agent/test_observability.py`
 
 Stop conditions:
 - Stop with a blocker if the work requires exporting raw prompt/message/result
