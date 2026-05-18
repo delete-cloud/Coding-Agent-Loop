@@ -11,7 +11,12 @@ from _pytest.monkeypatch import MonkeyPatch
 from datetime import UTC, datetime
 
 from agentkit.checkpoint.models import CheckpointMeta, CheckpointSnapshot
-from agentkit.storage.protocols import CheckpointStore, SessionStore, TapeStore
+from agentkit.storage.protocols import (
+    CheckpointStore,
+    SessionStore,
+    TapeDebugStore,
+    TapeStore,
+)
 from agentkit.storage.pg import (
     PGCheckpointStore,
     PGPool,
@@ -194,6 +199,20 @@ class FakePool:
 
     async def fetchrow(self, query: str, *args: object) -> dict[str, object] | None:
         self.executed.append((query, args))
+        if "COUNT(*)::int AS entry_count" in query:
+            (tape_id,) = args
+            if not isinstance(tape_id, str):
+                raise TypeError("tape_id must be a string")
+            rows = self.tapes.get(tape_id, [])
+            if not rows:
+                return None
+            seqs = [row["seq"] for row in rows if isinstance(row["seq"], int)]
+            return {
+                "tape_id": tape_id,
+                "entry_count": len(rows),
+                "first_seq": min(seqs),
+                "last_seq": max(seqs),
+            }
         if "SELECT payload FROM agent_sessions" not in query:
             if (
                 "SELECT owner_id, lease_expires_at, fencing_token FROM session_owners"
@@ -241,6 +260,69 @@ class FakePool:
                 {"session_id": session_id}
                 for session_id in sorted(self.sessions.keys())
             ]
+        if "SELECT tape_id, seq, entry" in query and "FROM agent_tapes" in query:
+            tape_id, kind, run_id, tool_call_id, anchor_type, limit = args
+            if tape_id is not None and not isinstance(tape_id, str):
+                raise TypeError("tape_id must be a string or None")
+            if kind is not None and not isinstance(kind, str):
+                raise TypeError("kind must be a string or None")
+            if run_id is not None and not isinstance(run_id, str):
+                raise TypeError("run_id must be a string or None")
+            if tool_call_id is not None and not isinstance(tool_call_id, str):
+                raise TypeError("tool_call_id must be a string or None")
+            if anchor_type is not None and not isinstance(anchor_type, str):
+                raise TypeError("anchor_type must be a string or None")
+            if not isinstance(limit, int):
+                raise TypeError("limit must be an int")
+
+            def nested_str(entry: dict[str, object], field: str) -> str | None:
+                for parent_name in ("meta", "payload"):
+                    parent = entry.get(parent_name)
+                    if isinstance(parent, dict):
+                        value = parent.get(field)
+                        if isinstance(value, str):
+                            return value
+                return None
+
+            matched: list[dict[str, object]] = []
+            for current_tape_id, rows in sorted(self.tapes.items()):
+                if tape_id is not None and current_tape_id != tape_id:
+                    continue
+                for row in sorted(
+                    rows,
+                    key=lambda item: (
+                        item["seq"] if isinstance(item["seq"], int) else -1
+                    ),
+                ):
+                    entry = row["entry"]
+                    if not isinstance(entry, dict):
+                        raise TypeError("entry must be a dict")
+                    if kind is not None and entry.get("kind") != kind:
+                        continue
+                    if run_id is not None and nested_str(entry, "run_id") != run_id:
+                        continue
+                    if (
+                        tool_call_id is not None
+                        and nested_str(entry, "tool_call_id") != tool_call_id
+                    ):
+                        continue
+                    entry_anchor_type = entry.get("anchor_type")
+                    if not isinstance(entry_anchor_type, str):
+                        meta = entry.get("meta")
+                        if isinstance(meta, dict):
+                            entry_anchor_type = meta.get("anchor_type")
+                        if not isinstance(entry_anchor_type, str):
+                            entry_anchor_type = None
+                    if anchor_type is not None and entry_anchor_type != anchor_type:
+                        continue
+                    matched.append(
+                        {
+                            "tape_id": current_tape_id,
+                            "seq": row["seq"],
+                            "entry": entry,
+                        }
+                    )
+            return matched[:limit]
         if "SELECT entry FROM agent_tapes" in query:
             (tape_id,) = args
             if not isinstance(tape_id, str):
@@ -675,6 +757,7 @@ class TestPGTapeStore:
 
     def test_satisfies_protocol(self, store: PGTapeStore):
         assert isinstance(store, TapeStore)
+        assert isinstance(store, TapeDebugStore)
 
     @pytest.mark.asyncio
     async def test_save_computes_seq_from_zero(self, store: PGTapeStore):
@@ -797,6 +880,94 @@ class TestPGTapeStore:
     async def test_truncate_rejects_negative_keep(self, store: PGTapeStore):
         with pytest.raises(ValueError, match="keep must be >= 0"):
             await store.truncate("tape-truncate", -1)
+
+    @pytest.mark.asyncio
+    async def test_info_returns_tape_metadata(self, store: PGTapeStore):
+        await store.save(
+            "tape-info",
+            [
+                {"kind": "message", "payload": {"content": "a"}},
+                {"kind": "event", "payload": {"name": "done"}},
+            ],
+        )
+
+        info = await store.info("tape-info")
+
+        assert info is not None
+        assert info.tape_id == "tape-info"
+        assert info.entry_count == 2
+        assert info.first_seq == 0
+        assert info.last_seq == 1
+
+    @pytest.mark.asyncio
+    async def test_info_returns_none_for_missing_tape(self, store: PGTapeStore):
+        assert await store.info("missing-tape") is None
+
+    @pytest.mark.asyncio
+    async def test_search_filters_by_kind_run_tool_call_and_anchor_type(
+        self, store: PGTapeStore
+    ):
+        await store.save(
+            "tape-debug",
+            [
+                {
+                    "kind": "message",
+                    "payload": {"content": "hello", "run_id": "run-1"},
+                    "meta": {"run_id": "run-1"},
+                },
+                {
+                    "kind": "tool_call",
+                    "payload": {"tool_call_id": "tool-1", "run_id": "run-1"},
+                },
+                {
+                    "kind": "tool_result",
+                    "payload": {"tool_call_id": "tool-1"},
+                    "meta": {"run_id": "run-1"},
+                },
+                {
+                    "id": "anchor-1",
+                    "kind": "anchor",
+                    "payload": {"summary": "folded"},
+                    "timestamp": 1.0,
+                    "anchor_type": "handoff",
+                    "meta": {"run_id": "run-2"},
+                },
+                {
+                    "kind": "anchor",
+                    "payload": {"anchor_type": "handoff"},
+                    "meta": {"run_id": "run-3"},
+                },
+            ],
+        )
+        await store.save(
+            "tape-other",
+            [{"kind": "tool_call", "payload": {"tool_call_id": "tool-2"}}],
+        )
+
+        kind_results = await store.search(kind="tool_call")
+        call_results = await store.search(
+            tape_id="tape-debug",
+            run_id="run-1",
+            tool_call_id="tool-1",
+        )
+        anchor_results = await store.search(anchor_type="handoff")
+
+        assert [(item.tape_id, item.seq) for item in kind_results] == [
+            ("tape-debug", 1),
+            ("tape-other", 0),
+        ]
+        assert [item.entry["kind"] for item in call_results] == [
+            "tool_call",
+            "tool_result",
+        ]
+        assert [(item.tape_id, item.entry["kind"]) for item in anchor_results] == [
+            ("tape-debug", "anchor")
+        ]
+
+    @pytest.mark.asyncio
+    async def test_search_rejects_non_positive_limit(self, store: PGTapeStore):
+        with pytest.raises(ValueError, match="limit must be positive"):
+            await store.search(limit=0)
 
 
 class TestPGCheckpointStore:
