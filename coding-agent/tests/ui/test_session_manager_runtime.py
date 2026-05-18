@@ -14,12 +14,14 @@ from agentkit.runtime.context import AgentRunContext
 from agentkit.tools import FatalToolExecutionError
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
+from coding_agent.adapter_types import StopReason, TurnOutcome
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.environment import (
     CloudCommandResult,
     CloudEnvironment,
     LocalEnvironment,
 )
+from coding_agent.runtime_store import AgentRunRecord
 from coding_agent.ui.binding_resolver import DefaultBindingResolver
 from coding_agent.ui.execution_binding import (
     CloudWorkspaceBinding,
@@ -45,6 +47,51 @@ from coding_agent.ui.workspace_store import (
     WorkspaceRetentionPolicy,
     WorkspaceStatus,
 )
+
+
+class FakeRuntimeStore:
+    def __init__(self) -> None:
+        self.created: list[AgentRunRecord] = []
+        self.updated: list[dict[str, object]] = []
+
+    async def create_agent_run(self, record: AgentRunRecord) -> AgentRunRecord:
+        self.created.append(record)
+        return record
+
+    async def update_agent_run(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        ended_at: datetime | None,
+        metadata: dict[str, object],
+        result: dict[str, object],
+        error: str | None,
+    ) -> AgentRunRecord:
+        self.updated.append(
+            {
+                "run_id": run_id,
+                "status": status,
+                "ended_at": ended_at,
+                "metadata": metadata,
+                "result": result,
+                "error": error,
+            }
+        )
+        created = self.created[-1]
+        return AgentRunRecord(
+            run_id=run_id,
+            session_id=created.session_id,
+            tape_id=created.tape_id,
+            parent_run_id=created.parent_run_id,
+            agent_id=created.agent_id,
+            status=status,
+            started_at=created.started_at,
+            ended_at=ended_at,
+            metadata=metadata,
+            result=result,
+            error=error,
+        )
 
 
 @pytest.mark.asyncio
@@ -142,6 +189,135 @@ async def test_run_agent_creates_run_id_and_preserves_current_turn_id_alias() ->
     assert session.runtime_ctx.run_context.session_id == session_id
     assert session.runtime_ctx.run_context.run_id == run_id
     assert session.runtime_ctx.run_context.parent_run_id is None
+
+
+@pytest.mark.asyncio
+async def test_run_agent_persists_agent_run_lifecycle_when_store_configured() -> None:
+    runtime_store = FakeRuntimeStore()
+    manager = SessionManager(runtime_store=runtime_store)
+    session_id = await manager.create_session(
+        provider=MockProvider(),
+        provider_name="test-provider",
+        model_name="test-model",
+        base_url="https://user:pass@example.invalid",
+    )
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+            self.ctx = ctx
+
+        async def run_turn(self, prompt: str) -> TurnOutcome:
+            del prompt
+            return TurnOutcome(
+                stop_reason=StopReason.NO_TOOL_CALLS,
+                final_message="do not persist raw final text",
+                steps_taken=2,
+            )
+
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        )
+    )
+
+    def fake_create_agent(**kwargs):
+        environment = kwargs["environment"]
+        if not isinstance(environment, LocalEnvironment):
+            raise TypeError("expected local environment")
+        return fake_pipeline, types.SimpleNamespace(
+            session_id=kwargs["session_id_override"],
+            config={},
+            tape=kwargs.get("tape") or Tape(tape_id="stable-tape"),
+            run_context=AgentRunContext(
+                session_id=kwargs["session_id_override"],
+                run_id=kwargs["run_id_override"],
+                agent_id=None,
+                environment=environment,
+            ),
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
+        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+
+        await manager.run_agent(session_id, "hello")
+
+    session = manager.get_session(session_id)
+    assert len(runtime_store.created) == 1
+    assert len(runtime_store.updated) == 1
+    created = runtime_store.created[0]
+    updated = runtime_store.updated[0]
+    assert created.run_id == session.current_turn_id
+    assert created.session_id == session_id
+    assert created.tape_id == "stable-tape"
+    assert created.status == "running"
+    assert created.metadata == {
+        "provider_name": "test-provider",
+        "model_name": "test-model",
+        "approval_policy": "auto",
+        "max_steps": 30,
+    }
+    assert updated["run_id"] == created.run_id
+    assert updated["status"] == "succeeded"
+    assert updated["ended_at"] is not None
+    assert updated["metadata"] == created.metadata
+    assert updated["result"] == {
+        "stop_reason": "no_tool_calls",
+        "steps_taken": 2,
+    }
+    assert "final_message" not in updated["result"]
+    assert updated["error"] is None
+
+
+@pytest.mark.asyncio
+async def test_run_agent_marks_agent_run_failed_when_turn_outcome_errors() -> None:
+    runtime_store = FakeRuntimeStore()
+    manager = SessionManager(runtime_store=runtime_store)
+    session_id = await manager.create_session()
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+
+        async def run_turn(self, prompt: str) -> TurnOutcome:
+            del prompt
+            return TurnOutcome(stop_reason=StopReason.ERROR, error="model failed")
+
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        )
+    )
+
+    def fake_create_agent(**kwargs):
+        environment = kwargs["environment"]
+        if not isinstance(environment, LocalEnvironment):
+            raise TypeError("expected local environment")
+        return fake_pipeline, types.SimpleNamespace(
+            session_id=kwargs["session_id_override"],
+            config={},
+            tape=kwargs.get("tape") or Tape(tape_id="stable-tape"),
+            run_context=AgentRunContext(
+                session_id=kwargs["session_id_override"],
+                run_id=kwargs["run_id_override"],
+                agent_id=None,
+                environment=environment,
+            ),
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
+        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+
+        await manager.run_agent(session_id, "hello")
+
+    assert runtime_store.updated[0]["status"] == "failed"
+    assert runtime_store.updated[0]["result"] == {
+        "stop_reason": "error",
+        "steps_taken": 0,
+    }
+    assert runtime_store.updated[0]["error"] == "model failed"
 
 
 def test_load_pg_storage_types_reports_missing_optional_dependencies() -> None:
