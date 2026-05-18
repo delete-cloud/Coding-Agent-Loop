@@ -32,6 +32,7 @@ bearer_token_env = "CODING_AGENT_BEARER_TOKEN"
 tape_backend = "pg"
 http_session_backend = "pg"
 checkpoint_backend = "pg"
+runtime_backend = "pg"
 dsn = "postgresql://coding_agent:change-me@postgres:5432/coding_agent"
 owner_id = "coding-agent-1"
 fencing_token = 1

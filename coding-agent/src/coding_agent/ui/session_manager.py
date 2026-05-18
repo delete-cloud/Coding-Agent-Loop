@@ -48,7 +48,7 @@ from coding_agent.core import config as core_config
 from coding_agent.plugins.storage import JSONLTapeStore
 from coding_agent.providers.base import ToolSchema
 from coding_agent.adapter_types import StopReason, TurnOutcome
-from coding_agent.runtime_store import AgentRunRecord, JSONObject
+from coding_agent.runtime_store import AgentRunRecord, JSONObject, PGRuntimeStore
 from coding_agent.wire.local import LocalWire
 from coding_agent.wire.protocol import (
     ApprovalRequest,
@@ -585,7 +585,9 @@ class SessionManager:
         self._binding_resolver = binding_resolver or DefaultBindingResolver()
         self._provisioned_cloud_binding_cleanup = provisioned_cloud_binding_cleanup
         self._workspace_metadata_store = workspace_metadata_store
-        self._runtime_store = runtime_store
+        self._runtime_store = (
+            runtime_store if runtime_store is not None else self._create_runtime_store()
+        )
         self.configure_owner_leases(
             owner_store=owner_store,
             owner_id=owner_id,
@@ -759,6 +761,19 @@ class SessionManager:
             _, _, PGCheckpointStore = _load_pg_storage_types()
             return cast(CheckpointStore, PGCheckpointStore(pool=self._get_pg_pool()))
         return FSCheckpointStore(data_dir / "checkpoints")
+
+    def _create_runtime_store(self) -> RuntimeStoreProtocol | None:
+        configured_backend = self._storage_config.get("runtime_backend")
+        if configured_backend is None:
+            return None
+        if not isinstance(configured_backend, str):
+            raise ValueError("storage.runtime_backend must be a string")
+        backend = configured_backend.strip().lower()
+        if backend in {"", "none", "disabled"}:
+            return None
+        if backend == "pg":
+            return PGRuntimeStore(pool=self._get_pg_pool())
+        raise ValueError(f"unsupported storage.runtime_backend: {backend}")
 
     async def _close_runtime(self, session: Session) -> None:
         adapter = session.runtime_adapter
