@@ -35,7 +35,7 @@ class TapeSearchResult:
 
 
 @runtime_checkable
-class TapeDebugStore(Protocol):
+class TapeDebugStore(TapeStore, Protocol):
     """Optional debug/query extension for tape stores."""
 
     async def info(self, tape_id: str) -> TapeInfo | None: ...

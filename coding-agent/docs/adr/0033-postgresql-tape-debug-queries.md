@@ -1,6 +1,6 @@
 # ADR-0033: Add PostgreSQL tape debug queries
 
-**Status**: Proposed
+**Status**: Accepted
 **Date**: 2026-05-19
 
 ## Context
