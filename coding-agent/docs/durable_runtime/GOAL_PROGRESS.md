@@ -15,7 +15,7 @@ Last updated: 2026-05-19
 | G08 | Complete | HTTP replay APIs expose runtime run records, latest message snapshots, and runtime events with `last_event_id` filtering. |
 | G09 | Complete | `SessionManager` persists durable approval interaction records for pending requests, applied decisions, session auto-approvals, and approval timeouts when a runtime store is configured. |
 | G10 | Complete | AgentKit pipeline spans include safe runtime correlation attributes, and HTTP root runs bind `turn_id`/`tape_id` trace metadata without weakening OTLP privacy filtering. |
-| G11 | Pending | Not started. |
+| G11 | Complete | HTTP startup recovers stale durable runtime runs by marking owned `running` rows failed after owner lease backfill. |
 
 ## G00 Verification
 
@@ -149,3 +149,27 @@ Last updated: 2026-05-19
   - `uv run pytest tests/ui/test_session_manager_runtime.py -k "run_id or approval or message_snapshot" -v`
   - `uv run pytest tests/coding_agent/test_observability.py -v`
   - `uv run ruff check src/agentkit/runtime/pipeline.py src/coding_agent/ui/session_manager.py tests/agentkit/runtime/test_pipeline.py tests/ui/test_session_manager_runtime.py tests/coding_agent/test_observability.py`
+
+## G11 Verification
+
+- Added `docs/adr/0031-stale-runtime-run-recovery.md`.
+- Added `.opencode/prompts/tasks/durable-runtime-stale-run-recovery.md`.
+- Updated `src/coding_agent/ui/session_manager.py`.
+- Updated `src/coding_agent/ui/http_server.py`.
+- Updated `tests/ui/test_session_manager_runtime.py`.
+- Updated `tests/ui/test_http_server.py`.
+- Postmortem patterns consulted:
+  - `postmortem/patterns/PM-0001-address-code-review-issues.md`
+  - `postmortem/patterns/PM-0015-require-store-backed-requests-across-http-approval-flow.md`
+  - `postmortem/patterns/PM-0021-guard-event-stream-registration-against-disappearing-sessions.md`
+  - `postmortem/patterns/PM-0022-revalidate-event-stream-ownership-after-queue-attach.md`
+  - `postmortem/patterns/PM-0023-make-event-stream-cleanup-and-teardown-idempotent.md`
+- Red tests before implementation:
+  - `uv run pytest tests/ui/test_session_manager_runtime.py -k "stale_runtime_runs" -v`
+  - `uv run pytest tests/ui/test_http_server.py -k "lifespan_recovers_stale_runtime_runs" -v`
+- Target tests:
+  - `uv run pytest tests/ui/test_session_manager_runtime.py -k "stale_runtime_runs or agent_run or run_id" -v`
+  - `uv run pytest tests/ui/test_http_server.py -k "lifespan_recovers_stale_runtime_runs or lifespan_backfills_owner_leases or lifespan_logs_backfill_failure" -v`
+  - `uv run pytest tests/coding_agent/test_pg_runtime_store.py -v`
+  - `uv run ruff check src/coding_agent/ui/session_manager.py src/coding_agent/ui/http_server.py tests/ui/test_session_manager_runtime.py tests/ui/test_http_server.py`
+  - `uv run ruff format --check src/coding_agent/ui/session_manager.py src/coding_agent/ui/http_server.py tests/ui/test_session_manager_runtime.py tests/ui/test_http_server.py`

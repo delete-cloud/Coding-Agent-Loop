@@ -3586,6 +3586,65 @@ class TestLifespanShutdown:
 
         assert events == ["backfill", "renew", "close"]
 
+    async def test_lifespan_recovers_stale_runtime_runs_after_backfill_before_renewal(
+        self, monkeypatch
+    ):
+        events: list[str] = []
+
+        async def fake_cleanup_idle_sessions() -> None:
+            try:
+                while True:
+                    await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                raise
+
+        async def fake_backfill_owner_leases() -> None:
+            events.append("backfill")
+
+        async def fake_recover_stale_runtime_runs() -> int:
+            events.append("recover")
+            return 2
+
+        async def fake_renew_owner_leases() -> None:
+            events.append("renew")
+            raise asyncio.CancelledError
+
+        async def fake_list_sessions_async() -> list[str]:
+            return []
+
+        async def fake_close() -> None:
+            events.append("close")
+
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._cleanup_idle_sessions",
+            fake_cleanup_idle_sessions,
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._renew_owner_leases",
+            fake_renew_owner_leases,
+        )
+        monkeypatch.setattr(
+            session_manager,
+            "backfill_owner_leases",
+            fake_backfill_owner_leases,
+        )
+        monkeypatch.setattr(
+            session_manager,
+            "recover_stale_runtime_runs",
+            fake_recover_stale_runtime_runs,
+        )
+        monkeypatch.setattr(
+            session_manager, "list_sessions_async", fake_list_sessions_async
+        )
+        monkeypatch.setattr(session_manager, "close", fake_close)
+
+        cm = app.router.lifespan_context(app)
+        await cm.__aenter__()
+        await asyncio.sleep(0)
+        await cm.__aexit__(None, None, None)
+
+        assert events == ["backfill", "recover", "renew", "close"]
+
     async def test_lifespan_logs_backfill_failure_and_still_starts(
         self, monkeypatch, caplog
     ):

@@ -795,6 +795,12 @@ async def lifespan(app: FastAPI):
         await session_manager.backfill_owner_leases()
     except Exception:
         logger.exception("Failed to backfill owner leases during startup")
+    try:
+        recovered = await session_manager.recover_stale_runtime_runs()
+        if recovered:
+            logger.info("Recovered %s stale runtime run(s)", recovered)
+    except Exception:
+        logger.exception("Failed to recover stale runtime runs during startup")
     cleanup_task = asyncio.create_task(_cleanup_idle_sessions())
     owner_renew_task = asyncio.create_task(_renew_owner_leases())
     cloud_workspace_gc_task = asyncio.create_task(
