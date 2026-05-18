@@ -22,6 +22,7 @@ from coding_agent.environment import (
     LocalEnvironment,
 )
 from coding_agent.runtime_store import (
+    AgentInteractionRecord,
     AgentRunRecord,
     RunMessageSnapshotRecord,
     RuntimeEventRecord,
@@ -59,6 +60,7 @@ class FakeRuntimeStore:
         self.updated: list[dict[str, object]] = []
         self.events: list[RuntimeEventRecord] = []
         self.snapshots: list[RunMessageSnapshotRecord] = []
+        self.interactions: list[AgentInteractionRecord] = []
 
     async def create_agent_run(self, record: AgentRunRecord) -> AgentRunRecord:
         self.created.append(record)
@@ -112,6 +114,44 @@ class FakeRuntimeStore:
     ) -> RunMessageSnapshotRecord:
         self.snapshots.append(record)
         return record
+
+    async def create_agent_interaction(
+        self,
+        record: AgentInteractionRecord,
+    ) -> AgentInteractionRecord:
+        for interaction in self.interactions:
+            if interaction.interaction_id == record.interaction_id:
+                return interaction
+        self.interactions.append(record)
+        return record
+
+    async def resolve_agent_interaction(
+        self,
+        interaction_id: str,
+        *,
+        status: str,
+        response_payload: dict[str, object],
+        resolved_at: datetime,
+    ) -> AgentInteractionRecord:
+        for index, interaction in enumerate(self.interactions):
+            if interaction.interaction_id != interaction_id:
+                continue
+            if interaction.resolved_at is not None:
+                return interaction
+            resolved = AgentInteractionRecord(
+                interaction_id=interaction.interaction_id,
+                run_id=interaction.run_id,
+                interaction_kind=interaction.interaction_kind,
+                status=status,
+                request_payload=interaction.request_payload,
+                response_payload=response_payload,
+                metadata=interaction.metadata,
+                created_at=interaction.created_at,
+                resolved_at=resolved_at,
+            )
+            self.interactions[index] = resolved
+            return resolved
+        raise KeyError(f"agent interaction not found: {interaction_id}")
 
 
 @pytest.mark.asyncio
@@ -496,6 +536,176 @@ async def test_run_agent_persists_approval_request_wire_events() -> None:
             "args": {"command": "pwd"},
             "risk_level": "low",
         },
+    }
+
+
+@pytest.mark.asyncio
+async def test_wait_for_http_approval_persists_runtime_approval_interaction() -> None:
+    runtime_store = FakeRuntimeStore()
+    manager = SessionManager(runtime_store=runtime_store)
+    session_id = await manager.create_session(provider=MockProvider())
+    session = manager.get_session(session_id)
+    session.turn_in_progress = True
+    session.current_turn_id = "run-approval"
+    requested_at = datetime(2026, 1, 2, 3, 4, 5)
+    tool_called_at = datetime(2026, 1, 2, 3, 4, 4)
+    req = ApprovalRequest(
+        session_id=session_id,
+        request_id="req-runtime-interaction",
+        timestamp=requested_at,
+        tool_call=ToolCallDelta(
+            session_id=session_id,
+            tool_name="bash",
+            arguments={"command": "pwd"},
+            call_id="call-runtime-interaction",
+            timestamp=tool_called_at,
+        ),
+        timeout_seconds=5,
+    )
+
+    wait_task = asyncio.create_task(
+        manager.wait_for_http_approval(session_id, req, timeout_seconds=5)
+    )
+    for _ in range(50):
+        if runtime_store.interactions:
+            break
+        await asyncio.sleep(0)
+
+    assert len(runtime_store.interactions) == 1
+    pending = runtime_store.interactions[0]
+    assert pending.interaction_id == "run-approval:approval:req-runtime-interaction"
+    assert pending.run_id == "run-approval"
+    assert pending.interaction_kind == "approval"
+    assert pending.status == "pending"
+    assert pending.request_payload == {
+        "session_id": session_id,
+        "request_id": "req-runtime-interaction",
+        "timestamp": requested_at.isoformat(),
+        "timeout_seconds": 5,
+        "tool_call": {
+            "session_id": session_id,
+            "agent_id": "",
+            "timestamp": tool_called_at.isoformat(),
+            "tool_name": "bash",
+            "arguments": {"command": "pwd"},
+            "call_id": "call-runtime-interaction",
+        },
+    }
+    assert pending.metadata == {
+        "session_id": session_id,
+        "request_id": "req-runtime-interaction",
+        "tool_call_id": "call-runtime-interaction",
+        "tool_name": "bash",
+    }
+
+    submitted = await manager.submit_approval_response(
+        session_id,
+        "req-runtime-interaction",
+        approved=True,
+        feedback="approved",
+        scope="session",
+    )
+    waited = await wait_task
+
+    assert submitted is not None
+    assert submitted.approved is True
+    assert waited.approved is True
+    resolved = runtime_store.interactions[0]
+    assert resolved.status == "approved"
+    assert resolved.response_payload == {
+        "session_id": session_id,
+        "request_id": "req-runtime-interaction",
+        "approved": True,
+        "feedback": "approved",
+        "scope": "session",
+    }
+    assert resolved.resolved_at is not None
+
+
+@pytest.mark.asyncio
+async def test_wait_for_http_approval_resolves_runtime_interaction_on_timeout() -> None:
+    runtime_store = FakeRuntimeStore()
+    manager = SessionManager(runtime_store=runtime_store)
+    session_id = await manager.create_session(provider=MockProvider())
+    session = manager.get_session(session_id)
+    session.turn_in_progress = True
+    session.current_turn_id = "run-timeout"
+    req = ApprovalRequest(
+        session_id=session_id,
+        request_id="req-timeout-interaction",
+        tool_call=ToolCallDelta(
+            session_id=session_id,
+            tool_name="bash",
+            arguments={"command": "pwd"},
+            call_id="call-timeout-interaction",
+        ),
+        timeout_seconds=0,
+    )
+
+    response = await manager.wait_for_http_approval(
+        session_id,
+        req,
+        timeout_seconds=0,
+    )
+
+    assert response.approved is False
+    assert response.feedback == "Approval timeout or error"
+    assert len(runtime_store.interactions) == 1
+    interaction = runtime_store.interactions[0]
+    assert interaction.interaction_id == "run-timeout:approval:req-timeout-interaction"
+    assert interaction.status == "timed_out"
+    assert interaction.response_payload == {
+        "session_id": session_id,
+        "request_id": "req-timeout-interaction",
+        "approved": False,
+        "feedback": "Approval timeout or error",
+        "scope": "once",
+    }
+
+
+@pytest.mark.asyncio
+async def test_wait_for_http_approval_persists_session_auto_approval_interaction() -> (
+    None
+):
+    runtime_store = FakeRuntimeStore()
+    manager = SessionManager(runtime_store=runtime_store)
+    session_id = await manager.create_session(provider=MockProvider())
+    session = manager.get_session(session_id)
+    session.turn_in_progress = True
+    session.current_turn_id = "run-auto-approval"
+    req = ApprovalRequest(
+        session_id=session_id,
+        request_id="req-auto-interaction",
+        tool_call=ToolCallDelta(
+            session_id=session_id,
+            tool_name="bash",
+            arguments={"command": "pwd"},
+            call_id="call-auto-interaction",
+        ),
+        timeout_seconds=5,
+    )
+    session.approval_coordinator.remember_session_approval(req)
+
+    response = await manager.wait_for_http_approval(
+        session_id,
+        req,
+        timeout_seconds=5,
+    )
+
+    assert response.approved is True
+    assert response.scope == "session"
+    assert len(runtime_store.interactions) == 1
+    interaction = runtime_store.interactions[0]
+    assert interaction.interaction_id == (
+        "run-auto-approval:approval:req-auto-interaction"
+    )
+    assert interaction.status == "approved"
+    assert interaction.response_payload == {
+        "session_id": session_id,
+        "request_id": "req-auto-interaction",
+        "approved": True,
+        "feedback": None,
+        "scope": "session",
     }
 
 
