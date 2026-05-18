@@ -7,12 +7,13 @@ import importlib
 import logging
 import os
 import uuid
-from collections.abc import AsyncIterator
-from collections.abc import Callable
-from functools import partial
-from dataclasses import dataclass, field, replace
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from datetime import UTC, datetime
+from enum import Enum
+from functools import partial
 from inspect import isawaitable
+from math import isfinite
 from pathlib import Path
 from typing import Any, Literal, Protocol, TypeVar, cast
 
@@ -48,7 +49,13 @@ from coding_agent.core import config as core_config
 from coding_agent.plugins.storage import JSONLTapeStore
 from coding_agent.providers.base import ToolSchema
 from coding_agent.adapter_types import StopReason, TurnOutcome
-from coding_agent.runtime_store import AgentRunRecord, JSONObject, PGRuntimeStore
+from coding_agent.runtime_store import (
+    AgentRunRecord,
+    JSONObject,
+    PGRuntimeStore,
+    RuntimeEventRecord,
+    JSONValue as RuntimeJSONValue,
+)
 from coding_agent.wire.local import LocalWire
 from coding_agent.wire.protocol import (
     ApprovalRequest,
@@ -98,6 +105,34 @@ def _approval_response_projection(response: ApprovalResponse) -> dict[str, Any]:
         "request_id": response.request_id,
         "decision": "approve" if response.approved else "deny",
         "feedback": response.feedback,
+    }
+
+
+def _json_compatible_value(value: object) -> RuntimeJSONValue:
+    if value is None or isinstance(value, str | int | bool):
+        return value
+    if isinstance(value, float):
+        return value if isfinite(value) else str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Enum):
+        return cast(RuntimeJSONValue, value.value)
+    if is_dataclass(value) and not isinstance(value, type):
+        return _json_compatible_value(asdict(value))
+    if isinstance(value, Mapping):
+        return {str(key): _json_compatible_value(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_json_compatible_value(item) for item in value]
+    return str(value)
+
+
+def _wire_message_event_payload(message: WireMessage) -> JSONObject:
+    message_payload = _json_compatible_value(asdict(message))
+    if not isinstance(message_payload, dict):
+        raise TypeError("wire message payload must serialize to a JSON object")
+    return {
+        "message_type": type(message).__name__,
+        "message": cast(RuntimeJSONValue, message_payload),
     }
 
 
@@ -161,6 +196,11 @@ class WorkspaceMetadataStoreProtocol(Protocol):
 
 class RuntimeStoreProtocol(Protocol):
     async def create_agent_run(self, record: AgentRunRecord) -> AgentRunRecord: ...
+
+    async def append_runtime_event(
+        self,
+        record: RuntimeEventRecord,
+    ) -> RuntimeEventRecord: ...
 
     async def update_agent_run(
         self,
@@ -528,11 +568,16 @@ class _WireConsumer:
         self,
         wire: LocalWire,
         approval_handler: Any,
+        emit_handler: Callable[[WireMessage], Awaitable[None]] | None = None,
     ) -> None:
         self._wire = wire
         self._approval_handler = approval_handler
+        self._emit_handler = emit_handler
 
     async def emit(self, msg: WireMessage) -> None:
+        if self._emit_handler is not None:
+            await self._emit_handler(msg)
+            return
         await self._wire.send(msg)
 
     async def request_approval(self, req: ApprovalRequest) -> ApprovalResponse:
@@ -967,6 +1012,34 @@ class SessionManager:
             error=error,
         )
 
+    async def _append_runtime_wire_event(
+        self,
+        session: Session,
+        message: WireMessage,
+    ) -> None:
+        if self._runtime_store is None:
+            return
+        run_id = session.current_turn_id
+        if run_id is None:
+            return
+        await self._runtime_store.append_runtime_event(
+            RuntimeEventRecord(
+                event_id=f"{run_id}:wire:{uuid.uuid4().hex}",
+                run_id=run_id,
+                event_kind=f"wire.{type(message).__name__}",
+                payload=_wire_message_event_payload(message),
+                created_at=message.timestamp,
+            )
+        )
+
+    async def _send_session_wire_message(
+        self,
+        session: Session,
+        message: WireMessage,
+    ) -> None:
+        await self._append_runtime_wire_event(session, message)
+        await session.wire.send(message)
+
     def _turn_lock_for(self, session_id: str) -> asyncio.Lock:
         lock = self._session_turn_locks.get(session_id)
         if lock is None:
@@ -1378,7 +1451,7 @@ class SessionManager:
                 )
                 if response is not None:
                     return response
-            await session.wire.send(req)
+            await self._send_session_wire_message(session, req)
             try:
                 response = await session.approval_coordinator.wait_for_response(
                     req.request_id,
@@ -1405,7 +1478,14 @@ class SessionManager:
                 session.approval_response = None
                 await self._persist_session_async(session)
 
-        return _WireConsumer(session.wire, _request_approval)
+        return _WireConsumer(
+            session.wire,
+            _request_approval,
+            emit_handler=lambda message: self._send_session_wire_message(
+                session,
+                message,
+            ),
+        )
 
     async def _restore_checkpoint(self, session: Session, checkpoint_id: str) -> None:
         snapshot = await self._checkpoint_service.restore(checkpoint_id)
@@ -2011,20 +2091,22 @@ class SessionManager:
                 session.last_failure_details = f"HTTP session turn failed: {exc}"
                 await self._close_runtime(session)
                 logger.exception("HTTP session turn failed")
-                await session.wire.send(
+                await self._send_session_wire_message(
+                    session,
                     StreamDelta(
                         session_id=session_id,
                         agent_id="",
                         content=f"Error: {exc}",
-                    )
+                    ),
                 )
-                await session.wire.send(
+                await self._send_session_wire_message(
+                    session,
                     TurnEnd(
                         session_id=session_id,
                         agent_id="",
                         turn_id=run_id,
                         completion_status=CompletionStatus.ERROR,
-                    )
+                    ),
                 )
             finally:
                 current_task = asyncio.current_task()

@@ -1,6 +1,6 @@
 # Durable Runtime Goal Progress
 
-Last updated: 2026-05-18
+Last updated: 2026-05-19
 
 | Goal | Status | Evidence |
 | --- | --- | --- |
@@ -10,7 +10,7 @@ Last updated: 2026-05-18
 | G03 | Complete | `SessionManager.run_agent()` creates a root `run_id`, keeps `current_turn_id` as its alias, and binds cold/hot runtime contexts to that identity. |
 | G04 | Complete | `SessionManager` can persist root HTTP run lifecycle records through an optional runtime store without changing default storage behavior. |
 | G05 | Complete | `storage.runtime_backend = "pg"` opt-in construction wires `PGRuntimeStore` into `SessionManager` while preserving disabled defaults. |
-| G06 | Pending | Not started. |
+| G06 | Complete | `SessionManager` appends runtime-store wire events for emitted HTTP turn messages, approval requests, and error turn notifications when a runtime store is configured. |
 | G07 | Pending | Not started. |
 | G08 | Pending | Not started. |
 | G09 | Pending | Not started. |
@@ -72,3 +72,14 @@ Last updated: 2026-05-18
   - `uv run pytest tests/ui/test_session_manager_runtime.py -k "agent_run or run_id" -v`
   - `uv run pytest tests/coding_agent/test_pg_runtime_store.py -v`
   - `uv run ruff check src/coding_agent/ui/session_manager.py tests/ui/test_session_manager_public_api.py`
+
+## G06 Verification
+
+- Added `.opencode/prompts/tasks/durable-runtime-events.md`.
+- Updated `src/coding_agent/ui/session_manager.py`.
+- Updated `tests/ui/test_session_manager_runtime.py`.
+- Target tests:
+  - `uv run pytest tests/ui/test_session_manager_runtime.py -k "persists_wire_events or approval_request_wire_events or agent_run or run_id" -v`
+  - `uv run pytest tests/ui/test_session_manager_runtime.py -v`
+  - `uv run pytest tests/coding_agent/test_pg_runtime_store.py -v`
+  - `uv run ruff check src/coding_agent/ui/session_manager.py tests/ui/test_session_manager_runtime.py`

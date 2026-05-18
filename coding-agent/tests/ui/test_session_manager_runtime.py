@@ -21,7 +21,7 @@ from coding_agent.environment import (
     CloudEnvironment,
     LocalEnvironment,
 )
-from coding_agent.runtime_store import AgentRunRecord
+from coding_agent.runtime_store import AgentRunRecord, RuntimeEventRecord
 from coding_agent.ui.binding_resolver import DefaultBindingResolver
 from coding_agent.ui.execution_binding import (
     CloudWorkspaceBinding,
@@ -53,6 +53,7 @@ class FakeRuntimeStore:
     def __init__(self) -> None:
         self.created: list[AgentRunRecord] = []
         self.updated: list[dict[str, object]] = []
+        self.events: list[RuntimeEventRecord] = []
 
     async def create_agent_run(self, record: AgentRunRecord) -> AgentRunRecord:
         self.created.append(record)
@@ -92,6 +93,13 @@ class FakeRuntimeStore:
             result=result,
             error=error,
         )
+
+    async def append_runtime_event(
+        self,
+        record: RuntimeEventRecord,
+    ) -> RuntimeEventRecord:
+        self.events.append(record)
+        return record
 
 
 @pytest.mark.asyncio
@@ -318,6 +326,165 @@ async def test_run_agent_marks_agent_run_failed_when_turn_outcome_errors() -> No
         "steps_taken": 0,
     }
     assert runtime_store.updated[0]["error"] == "model failed"
+
+
+@pytest.mark.asyncio
+async def test_run_agent_persists_wire_events_when_runtime_store_configured() -> None:
+    runtime_store = FakeRuntimeStore()
+    manager = SessionManager(runtime_store=runtime_store)
+    session_id = await manager.create_session()
+    emitted_at = datetime(2026, 1, 2, 3, 4, 5)
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline
+            self.ctx = ctx
+            self.consumer = consumer
+
+        async def run_turn(self, prompt: str) -> TurnOutcome:
+            del prompt
+            await self.consumer.emit(
+                StreamDelta(
+                    session_id=session_id,
+                    agent_id="root",
+                    timestamp=emitted_at,
+                    content="hello",
+                )
+            )
+            return TurnOutcome(stop_reason=StopReason.NO_TOOL_CALLS, steps_taken=1)
+
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        )
+    )
+
+    def fake_create_agent(**kwargs):
+        environment = kwargs["environment"]
+        if not isinstance(environment, LocalEnvironment):
+            raise TypeError("expected local environment")
+        return fake_pipeline, types.SimpleNamespace(
+            session_id=kwargs["session_id_override"],
+            config={},
+            tape=kwargs.get("tape") or Tape(tape_id="stable-tape"),
+            run_context=AgentRunContext(
+                session_id=kwargs["session_id_override"],
+                run_id=kwargs["run_id_override"],
+                agent_id=None,
+                environment=environment,
+            ),
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
+        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+
+        await manager.run_agent(session_id, "hello")
+
+    assert len(runtime_store.events) == 1
+    event = runtime_store.events[0]
+    assert event.run_id == runtime_store.created[0].run_id
+    assert event.event_kind == "wire.StreamDelta"
+    assert event.created_at == emitted_at
+    assert event.payload == {
+        "message_type": "StreamDelta",
+        "message": {
+            "session_id": session_id,
+            "agent_id": "root",
+            "timestamp": emitted_at.isoformat(),
+            "content": "hello",
+            "role": "assistant",
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_run_agent_persists_approval_request_wire_events() -> None:
+    runtime_store = FakeRuntimeStore()
+    manager = SessionManager(runtime_store=runtime_store)
+    session_id = await manager.create_session(provider=MockProvider())
+    requested_at = datetime(2026, 1, 2, 3, 4, 5)
+    tool_called_at = datetime(2026, 1, 2, 3, 4, 4)
+    req = ApprovalRequest(
+        session_id=session_id,
+        request_id="req-runtime-event",
+        timestamp=requested_at,
+        tool_call=ToolCallDelta(
+            session_id=session_id,
+            tool_name="bash",
+            arguments={"command": "pwd"},
+            call_id="call-runtime-event",
+            timestamp=tool_called_at,
+        ),
+        timeout_seconds=0,
+    )
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline
+            self.ctx = ctx
+            self.consumer = consumer
+
+        async def run_turn(self, prompt: str) -> TurnOutcome:
+            del prompt
+            await self.consumer.request_approval(req)
+            return TurnOutcome(stop_reason=StopReason.NO_TOOL_CALLS, steps_taken=1)
+
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        )
+    )
+
+    def fake_create_agent(**kwargs):
+        environment = kwargs["environment"]
+        if not isinstance(environment, LocalEnvironment):
+            raise TypeError("expected local environment")
+        return fake_pipeline, types.SimpleNamespace(
+            session_id=kwargs["session_id_override"],
+            config={},
+            tape=kwargs.get("tape") or Tape(tape_id="stable-tape"),
+            run_context=AgentRunContext(
+                session_id=kwargs["session_id_override"],
+                run_id=kwargs["run_id_override"],
+                agent_id=None,
+                environment=environment,
+            ),
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
+        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+
+        await manager.run_agent(session_id, "needs approval")
+
+    assert len(runtime_store.events) == 1
+    event = runtime_store.events[0]
+    assert event.run_id == runtime_store.created[0].run_id
+    assert event.event_kind == "wire.ApprovalRequest"
+    assert event.created_at == requested_at
+    assert event.payload == {
+        "message_type": "ApprovalRequest",
+        "message": {
+            "session_id": session_id,
+            "agent_id": "",
+            "timestamp": requested_at.isoformat(),
+            "request_id": "req-runtime-event",
+            "tool_call": {
+                "session_id": session_id,
+                "agent_id": "",
+                "timestamp": tool_called_at.isoformat(),
+                "tool_name": "bash",
+                "arguments": {"command": "pwd"},
+                "call_id": "call-runtime-event",
+            },
+            "timeout_seconds": 0,
+            "call_id": "req-runtime-event",
+            "tool": "bash",
+            "args": {"command": "pwd"},
+            "risk_level": "low",
+        },
+    }
 
 
 def test_load_pg_storage_types_reports_missing_optional_dependencies() -> None:
