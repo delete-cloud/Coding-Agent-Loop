@@ -11,7 +11,7 @@ Last updated: 2026-05-19
 | G04 | Complete | `SessionManager` can persist root HTTP run lifecycle records through an optional runtime store without changing default storage behavior. |
 | G05 | Complete | `storage.runtime_backend = "pg"` opt-in construction wires `PGRuntimeStore` into `SessionManager` while preserving disabled defaults. |
 | G06 | Complete | `SessionManager` appends runtime-store wire events for emitted HTTP turn messages, approval requests, and error turn notifications when a runtime store is configured. |
-| G07 | Pending | Not started. |
+| G07 | Complete | `SessionManager` saves `{run_id}:latest` compacted message snapshots from `ctx.messages` when a runtime store is configured. |
 | G08 | Pending | Not started. |
 | G09 | Pending | Not started. |
 | G10 | Pending | Not started. |
@@ -80,6 +80,17 @@ Last updated: 2026-05-19
 - Updated `tests/ui/test_session_manager_runtime.py`.
 - Target tests:
   - `uv run pytest tests/ui/test_session_manager_runtime.py -k "persists_wire_events or approval_request_wire_events or agent_run or run_id" -v`
+  - `uv run pytest tests/ui/test_session_manager_runtime.py -v`
+  - `uv run pytest tests/coding_agent/test_pg_runtime_store.py -v`
+  - `uv run ruff check src/coding_agent/ui/session_manager.py tests/ui/test_session_manager_runtime.py`
+
+## G07 Verification
+
+- Added `.opencode/prompts/tasks/durable-runtime-message-snapshots.md`.
+- Updated `src/coding_agent/ui/session_manager.py`.
+- Updated `tests/ui/test_session_manager_runtime.py`.
+- Target tests:
+  - `uv run pytest tests/ui/test_session_manager_runtime.py -k "message_snapshot or persists_wire_events or approval_request_wire_events or agent_run or run_id" -v`
   - `uv run pytest tests/ui/test_session_manager_runtime.py -v`
   - `uv run pytest tests/coding_agent/test_pg_runtime_store.py -v`
   - `uv run ruff check src/coding_agent/ui/session_manager.py tests/ui/test_session_manager_runtime.py`
