@@ -21,9 +21,9 @@ During HTTP startup, after owner lease backfill and before owner lease renewal,
 recover stale runtime runs through `SessionManager`.
 
 Recovery scans durable runs for persisted sessions. When owner leases are
-configured, it only updates sessions currently owned by this process. When owner
-leases are not configured, it treats the process as a single-instance owner and
-scans all persisted sessions.
+configured, it only updates sessions with an active, unexpired lease owned by
+this process. When owner leases are not configured, it treats the process as a
+single-instance owner and scans all persisted sessions.
 
 Only runs with `status == "running"` and no `ended_at` are recovered. Recovery
 marks those rows `failed`, sets `ended_at` to the recovery timestamp, preserves

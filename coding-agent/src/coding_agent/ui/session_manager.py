@@ -1171,8 +1171,8 @@ class SessionManager:
         recovery_time = recovered_at or datetime.now(UTC)
         recovered_count = 0
         for session_id in await self.list_sessions_async():
-            if self._owner_store is not None and not await self._holds_owner_lease(
-                session_id
+            if self._owner_store is not None and not (
+                await self._holds_active_owner_lease(session_id)
             ):
                 continue
             runs = await self._runtime_store.list_agent_runs(session_id)
@@ -1471,6 +1471,20 @@ class SessionManager:
         return (
             owner.owner_id == self._owner_id
             and owner.fencing_token == self._fencing_token
+        )
+
+    async def _holds_active_owner_lease(self, session_id: str) -> bool:
+        if self._owner_store is None:
+            return False
+        if self._owner_id is None or self._fencing_token is None:
+            raise SessionOwnershipConflictError("stale owner or fencing token rejected")
+        owner = await self._owner_store.get_owner(session_id)
+        if owner is None:
+            return False
+        return (
+            owner.owner_id == self._owner_id
+            and owner.fencing_token == self._fencing_token
+            and owner.lease_expires_at > datetime.now(UTC)
         )
 
     async def release_owned_sessions(self) -> None:

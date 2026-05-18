@@ -15,7 +15,7 @@ Last updated: 2026-05-19
 | G08 | Complete | HTTP replay APIs expose runtime run records, latest message snapshots, and runtime events with `last_event_id` filtering. |
 | G09 | Complete | `SessionManager` persists durable approval interaction records for pending requests, applied decisions, session auto-approvals, and approval timeouts when a runtime store is configured. |
 | G10 | Complete | AgentKit pipeline spans include safe runtime correlation attributes, and HTTP root runs bind `turn_id`/`tape_id` trace metadata without weakening OTLP privacy filtering. |
-| G11 | Complete | HTTP startup recovers stale durable runtime runs by marking owned `running` rows failed after owner lease backfill. |
+| G11 | Complete | HTTP startup recovers stale durable runtime runs by marking active-owner `running` rows failed after owner lease backfill. |
 
 ## G00 Verification
 

@@ -4,8 +4,8 @@ Recover stale durable runtime runs left in `running` after HTTP process restart.
 Scope:
 - Add startup recovery semantics for durable runtime run rows.
 - Recover only `running` agent runs with no `ended_at`.
-- When owner leases are configured, mutate only sessions currently owned by the
-  current `SessionManager`.
+- When owner leases are configured, mutate only sessions with an active,
+  unexpired lease owned by the current `SessionManager`.
 - Wire HTTP startup to run recovery after owner lease backfill and before owner
   renewal.
 - Update durable runtime progress documentation for G11.

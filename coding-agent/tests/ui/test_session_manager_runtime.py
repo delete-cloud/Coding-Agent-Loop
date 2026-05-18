@@ -510,6 +510,7 @@ async def test_recover_stale_runtime_runs_skips_sessions_without_current_owner()
     manager = SessionManager(runtime_store=runtime_store)
     owned_session_id = await manager.create_session()
     foreign_session_id = await manager.create_session()
+    expired_session_id = await manager.create_session()
     now = datetime.now(UTC)
     manager.configure_owner_leases(
         owner_store=FakeOwnerStore(
@@ -523,6 +524,11 @@ async def test_recover_stale_runtime_runs_skips_sessions_without_current_owner()
                     owner_id="pod-b",
                     lease_expires_at=now + timedelta(seconds=30),
                     fencing_token=8,
+                ),
+                expired_session_id: SessionOwnerRecord(
+                    owner_id="pod-a",
+                    lease_expires_at=now - timedelta(seconds=1),
+                    fencing_token=7,
                 ),
             }
         ),
@@ -546,6 +552,15 @@ async def test_recover_stale_runtime_runs_skips_sessions_without_current_owner()
                 run_id="run-foreign",
                 session_id=foreign_session_id,
                 tape_id="tape-foreign",
+                parent_run_id=None,
+                agent_id=None,
+                status="running",
+                started_at=started_at,
+            ),
+            AgentRunRecord(
+                run_id="run-expired",
+                session_id=expired_session_id,
+                tape_id="tape-expired",
                 parent_run_id=None,
                 agent_id=None,
                 status="running",
