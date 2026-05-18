@@ -171,6 +171,10 @@ def _approval_interaction_status(response: ApprovalResponse) -> str:
     return "approved" if response.approved else "rejected"
 
 
+_STALE_RUNTIME_RUN_ERROR = "runtime run was still running during startup recovery"
+_STALE_RUNTIME_RUN_RECOVERY_REASON = "startup_stale_running_run"
+
+
 def _runtime_message_snapshot(messages: object) -> list[JSONObject] | None:
     if messages is None:
         return None
@@ -249,6 +253,8 @@ class RuntimeStoreProtocol(Protocol):
     async def create_agent_run(self, record: AgentRunRecord) -> AgentRunRecord: ...
 
     async def load_agent_run(self, run_id: str) -> AgentRunRecord | None: ...
+
+    async def list_agent_runs(self, session_id: str) -> list[AgentRunRecord]: ...
 
     async def append_runtime_event(
         self,
@@ -1155,6 +1161,40 @@ class SessionManager:
             error=error,
         )
 
+    async def recover_stale_runtime_runs(
+        self,
+        *,
+        recovered_at: datetime | None = None,
+    ) -> int:
+        if self._runtime_store is None:
+            return 0
+        recovery_time = recovered_at or datetime.now(UTC)
+        recovered_count = 0
+        for session_id in await self.list_sessions_async():
+            if self._owner_store is not None and not (
+                await self._holds_active_owner_lease(session_id)
+            ):
+                continue
+            runs = await self._runtime_store.list_agent_runs(session_id)
+            for run in runs:
+                if run.status != "running" or run.ended_at is not None:
+                    continue
+                metadata = dict(run.metadata)
+                metadata["recovered_at"] = recovery_time.isoformat()
+                metadata["recovery_reason"] = _STALE_RUNTIME_RUN_RECOVERY_REASON
+                if self._owner_id is not None:
+                    metadata["recovered_by_owner_id"] = self._owner_id
+                await self._runtime_store.update_agent_run(
+                    run.run_id,
+                    status="failed",
+                    ended_at=recovery_time,
+                    metadata=metadata,
+                    result=run.result,
+                    error=_STALE_RUNTIME_RUN_ERROR,
+                )
+                recovered_count += 1
+        return recovered_count
+
     async def _append_runtime_wire_event(
         self,
         session: Session,
@@ -1431,6 +1471,20 @@ class SessionManager:
         return (
             owner.owner_id == self._owner_id
             and owner.fencing_token == self._fencing_token
+        )
+
+    async def _holds_active_owner_lease(self, session_id: str) -> bool:
+        if self._owner_store is None:
+            return False
+        if self._owner_id is None or self._fencing_token is None:
+            raise SessionOwnershipConflictError("stale owner or fencing token rejected")
+        owner = await self._owner_store.get_owner(session_id)
+        if owner is None:
+            return False
+        return (
+            owner.owner_id == self._owner_id
+            and owner.fencing_token == self._fencing_token
+            and owner.lease_expires_at > datetime.now(UTC)
         )
 
     async def release_owned_sessions(self) -> None:

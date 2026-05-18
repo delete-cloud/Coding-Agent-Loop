@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import types
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 from unittest.mock import patch
@@ -33,6 +33,7 @@ from coding_agent.ui.execution_binding import (
     LocalExecutionBinding,
 )
 from coding_agent.ui.session_owner_store import SessionOwnershipConflictError
+from coding_agent.ui.session_owner_store import SessionOwnerRecord
 from coding_agent.wire.protocol import (
     ApprovalRequest,
     CompletionStatus,
@@ -100,6 +101,28 @@ class FakeRuntimeStore:
             result=result,
             error=error,
         )
+
+    async def list_agent_runs(self, session_id: str) -> list[AgentRunRecord]:
+        records = [record for record in self.created if record.session_id == session_id]
+        for update in self.updated:
+            run_id = cast(str, update["run_id"])
+            for index, record in enumerate(records):
+                if record.run_id != run_id:
+                    continue
+                records[index] = AgentRunRecord(
+                    run_id=record.run_id,
+                    session_id=record.session_id,
+                    tape_id=record.tape_id,
+                    parent_run_id=record.parent_run_id,
+                    agent_id=record.agent_id,
+                    status=cast(str, update["status"]),
+                    started_at=record.started_at,
+                    ended_at=cast(datetime | None, update["ended_at"]),
+                    metadata=cast(dict[str, JSONValue], update["metadata"]),
+                    result=cast(dict[str, JSONValue], update["result"]),
+                    error=cast(str | None, update["error"]),
+                )
+        return records
 
     async def append_runtime_event(
         self,
@@ -382,6 +405,181 @@ async def test_run_agent_marks_agent_run_failed_when_turn_outcome_errors() -> No
         "steps_taken": 0,
     }
     assert runtime_store.updated[0]["error"] == "model failed"
+
+
+@pytest.mark.asyncio
+async def test_recover_stale_runtime_runs_marks_running_runs_failed() -> None:
+    runtime_store = FakeRuntimeStore()
+    manager = SessionManager(runtime_store=runtime_store)
+    session_id = await manager.create_session()
+    recovered_at = datetime(2026, 5, 19, 12, 0, tzinfo=UTC)
+    started_at = datetime(2026, 5, 19, 11, 0, tzinfo=UTC)
+    runtime_store.created.extend(
+        [
+            AgentRunRecord(
+                run_id="run-stale",
+                session_id=session_id,
+                tape_id="tape-1",
+                parent_run_id=None,
+                agent_id=None,
+                status="running",
+                started_at=started_at,
+                metadata={"provider_name": "test-provider"},
+                result={"steps_taken": 1},
+            ),
+            AgentRunRecord(
+                run_id="run-complete",
+                session_id=session_id,
+                tape_id="tape-1",
+                parent_run_id=None,
+                agent_id=None,
+                status="succeeded",
+                started_at=started_at,
+                ended_at=recovered_at,
+                metadata={},
+                result={},
+            ),
+        ]
+    )
+
+    recovered_count = await manager.recover_stale_runtime_runs(
+        recovered_at=recovered_at
+    )
+
+    assert recovered_count == 1
+    assert runtime_store.updated == [
+        {
+            "run_id": "run-stale",
+            "status": "failed",
+            "ended_at": recovered_at,
+            "metadata": {
+                "provider_name": "test-provider",
+                "recovered_at": recovered_at.isoformat(),
+                "recovery_reason": "startup_stale_running_run",
+            },
+            "result": {"steps_taken": 1},
+            "error": "runtime run was still running during startup recovery",
+        }
+    ]
+
+
+class FakeOwnerStore:
+    def __init__(self, owners: dict[str, SessionOwnerRecord]) -> None:
+        self.owners = owners
+
+    async def acquire(
+        self,
+        session_id: str,
+        owner_id: str,
+        lease_seconds: float = 30.0,
+        fencing_token: int = 1,
+    ) -> bool:
+        del session_id, owner_id, lease_seconds, fencing_token
+        return False
+
+    async def renew(
+        self,
+        session_id: str,
+        owner_id: str,
+        lease_seconds: float = 30.0,
+        new_fencing_token: int = 2,
+        current_fencing_token: int = 1,
+    ) -> bool:
+        del session_id, owner_id, lease_seconds, new_fencing_token
+        del current_fencing_token
+        return False
+
+    async def release(
+        self,
+        session_id: str,
+        owner_id: str,
+        fencing_token: int,
+    ) -> bool:
+        del session_id, owner_id, fencing_token
+        return False
+
+    async def get_owner(self, session_id: str) -> SessionOwnerRecord | None:
+        return self.owners.get(session_id)
+
+
+@pytest.mark.asyncio
+async def test_recover_stale_runtime_runs_skips_sessions_without_current_owner() -> (
+    None
+):
+    runtime_store = FakeRuntimeStore()
+    manager = SessionManager(runtime_store=runtime_store)
+    owned_session_id = await manager.create_session()
+    foreign_session_id = await manager.create_session()
+    expired_session_id = await manager.create_session()
+    now = datetime.now(UTC)
+    manager.configure_owner_leases(
+        owner_store=FakeOwnerStore(
+            {
+                owned_session_id: SessionOwnerRecord(
+                    owner_id="pod-a",
+                    lease_expires_at=now + timedelta(seconds=30),
+                    fencing_token=7,
+                ),
+                foreign_session_id: SessionOwnerRecord(
+                    owner_id="pod-b",
+                    lease_expires_at=now + timedelta(seconds=30),
+                    fencing_token=8,
+                ),
+                expired_session_id: SessionOwnerRecord(
+                    owner_id="pod-a",
+                    lease_expires_at=now - timedelta(seconds=1),
+                    fencing_token=7,
+                ),
+            }
+        ),
+        owner_id="pod-a",
+        fencing_token=7,
+    )
+    recovered_at = datetime(2026, 5, 19, 12, 30, tzinfo=UTC)
+    started_at = datetime(2026, 5, 19, 11, 30, tzinfo=UTC)
+    runtime_store.created.extend(
+        [
+            AgentRunRecord(
+                run_id="run-owned",
+                session_id=owned_session_id,
+                tape_id="tape-owned",
+                parent_run_id=None,
+                agent_id=None,
+                status="running",
+                started_at=started_at,
+            ),
+            AgentRunRecord(
+                run_id="run-foreign",
+                session_id=foreign_session_id,
+                tape_id="tape-foreign",
+                parent_run_id=None,
+                agent_id=None,
+                status="running",
+                started_at=started_at,
+            ),
+            AgentRunRecord(
+                run_id="run-expired",
+                session_id=expired_session_id,
+                tape_id="tape-expired",
+                parent_run_id=None,
+                agent_id=None,
+                status="running",
+                started_at=started_at,
+            ),
+        ]
+    )
+
+    recovered_count = await manager.recover_stale_runtime_runs(
+        recovered_at=recovered_at
+    )
+
+    assert recovered_count == 1
+    assert runtime_store.updated[0]["run_id"] == "run-owned"
+    assert runtime_store.updated[0]["metadata"] == {
+        "recovered_at": recovered_at.isoformat(),
+        "recovered_by_owner_id": "pod-a",
+        "recovery_reason": "startup_stale_running_run",
+    }
 
 
 @pytest.mark.asyncio
