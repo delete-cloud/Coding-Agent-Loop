@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Final, Protocol, cast
 
 from agentkit.checkpoint.models import CheckpointMeta, CheckpointSnapshot
+from agentkit.storage.protocols import TapeInfo, TapeSearchResult
 
 
 class AsyncPGPool(Protocol):
@@ -188,6 +189,39 @@ class PGTapeStore:
     _TRUNCATE_SQL: Final[str] = (
         "DELETE FROM agent_tapes WHERE tape_id = $1 AND seq >= $2"
     )
+    _INFO_SQL: Final[str] = """
+    SELECT
+        tape_id,
+        COUNT(*)::int AS entry_count,
+        MIN(seq)::int AS first_seq,
+        MAX(seq)::int AS last_seq
+    FROM agent_tapes
+    WHERE tape_id = $1
+    GROUP BY tape_id
+    """
+    _SEARCH_SQL: Final[str] = """
+    SELECT tape_id, seq, entry
+    FROM agent_tapes
+    WHERE ($1::text IS NULL OR tape_id = $1)
+      AND ($2::text IS NULL OR entry->>'kind' = $2)
+      AND (
+          $3::text IS NULL
+          OR entry->'meta'->>'run_id' = $3
+          OR entry->'payload'->>'run_id' = $3
+      )
+      AND (
+          $4::text IS NULL
+          OR entry->'meta'->>'tool_call_id' = $4
+          OR entry->'payload'->>'tool_call_id' = $4
+      )
+      AND (
+          $5::text IS NULL
+          OR entry->>'anchor_type' = $5
+          OR entry->'meta'->>'anchor_type' = $5
+      )
+    ORDER BY tape_id, seq
+    LIMIT $6
+    """
 
     def __init__(self, *, pool: PGPool) -> None:
         self._pool: PGPool = pool
@@ -235,6 +269,37 @@ class PGTapeStore:
             raise ValueError("keep must be >= 0")
         pool = await self._ensure_schema()
         _ = await pool.execute(self._TRUNCATE_SQL, tape_id, keep)
+
+    async def info(self, tape_id: str) -> TapeInfo | None:
+        pool = await self._ensure_schema()
+        row = await pool.fetchrow(self._INFO_SQL, tape_id)
+        if row is None:
+            return None
+        return _tape_info_from_row(row)
+
+    async def search(
+        self,
+        *,
+        tape_id: str | None = None,
+        kind: str | None = None,
+        run_id: str | None = None,
+        tool_call_id: str | None = None,
+        anchor_type: str | None = None,
+        limit: int = 100,
+    ) -> list[TapeSearchResult]:
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        pool = await self._ensure_schema()
+        rows = await pool.fetch(
+            self._SEARCH_SQL,
+            tape_id,
+            kind,
+            run_id,
+            tool_call_id,
+            anchor_type,
+            limit,
+        )
+        return [_tape_search_result_from_row(row) for row in rows]
 
 
 class PGCheckpointStore:
@@ -507,6 +572,44 @@ def _required_list(row: dict[str, object], key: str) -> list[object]:
     if not isinstance(value, list):
         raise TypeError(f"postgres checkpoint row must include list {key}")
     return value
+
+
+def _tape_info_from_row(row: dict[str, object]) -> TapeInfo:
+    tape_id = row.get("tape_id")
+    entry_count = row.get("entry_count")
+    first_seq = row.get("first_seq")
+    last_seq = row.get("last_seq")
+    if not isinstance(tape_id, str):
+        raise TypeError("postgres tape info row must include string tape_id")
+    if not isinstance(entry_count, int):
+        raise TypeError("postgres tape info row must include int entry_count")
+    if not isinstance(first_seq, int):
+        raise TypeError("postgres tape info row must include int first_seq")
+    if not isinstance(last_seq, int):
+        raise TypeError("postgres tape info row must include int last_seq")
+    return TapeInfo(
+        tape_id=tape_id,
+        entry_count=entry_count,
+        first_seq=first_seq,
+        last_seq=last_seq,
+    )
+
+
+def _tape_search_result_from_row(row: dict[str, object]) -> TapeSearchResult:
+    tape_id = row.get("tape_id")
+    seq = row.get("seq")
+    entry = row.get("entry")
+    if not isinstance(tape_id, str):
+        raise TypeError("postgres tape search row must include string tape_id")
+    if not isinstance(seq, int):
+        raise TypeError("postgres tape search row must include int seq")
+    if not isinstance(entry, dict):
+        raise TypeError("postgres tape search row must include dict entry")
+    return TapeSearchResult(
+        tape_id=tape_id,
+        seq=seq,
+        entry=cast(dict[str, object], entry),
+    )
 
 
 def _meta_from_raw(raw: dict[str, object]) -> CheckpointMeta:

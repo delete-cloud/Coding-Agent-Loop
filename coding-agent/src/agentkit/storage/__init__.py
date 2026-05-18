@@ -4,6 +4,9 @@ from agentkit.storage.protocols import (
     CheckpointStore,
     DocIndex,
     SessionStore,
+    TapeDebugStore,
+    TapeInfo,
+    TapeSearchResult,
     TapeStore,
 )
 from agentkit.storage.session import FileSessionStore
@@ -15,5 +18,8 @@ __all__ = [
     "FileSessionStore",
     "FSCheckpointStore",
     "SessionStore",
+    "TapeDebugStore",
+    "TapeInfo",
+    "TapeSearchResult",
     "TapeStore",
 ]

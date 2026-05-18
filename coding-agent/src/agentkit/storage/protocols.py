@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 from agentkit.checkpoint.models import CheckpointMeta, CheckpointSnapshot
@@ -16,6 +17,39 @@ class TapeStore(Protocol):
     async def load(self, tape_id: str) -> list[dict[str, Any]]: ...
     async def list_ids(self) -> list[str]: ...
     async def truncate(self, tape_id: str, keep: int) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class TapeInfo:
+    tape_id: str
+    entry_count: int
+    first_seq: int
+    last_seq: int
+
+
+@dataclass(frozen=True, slots=True)
+class TapeSearchResult:
+    tape_id: str
+    seq: int
+    entry: dict[str, Any]
+
+
+@runtime_checkable
+class TapeDebugStore(Protocol):
+    """Optional debug/query extension for tape stores."""
+
+    async def info(self, tape_id: str) -> TapeInfo | None: ...
+
+    async def search(
+        self,
+        *,
+        tape_id: str | None = None,
+        kind: str | None = None,
+        run_id: str | None = None,
+        tool_call_id: str | None = None,
+        anchor_type: str | None = None,
+        limit: int = 100,
+    ) -> list[TapeSearchResult]: ...
 
 
 @runtime_checkable
