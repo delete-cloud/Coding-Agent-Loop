@@ -1,0 +1,23 @@
+name: release-hardening-g38-g45
+description: Deterministic release-hardening regression gates for G38-G45.
+gates:
+  - id: durable-runtime-smoke
+    command: uv run pytest tests/integration/test_durable_runtime_smoke.py -v
+    required: true
+    scope: durable-runtime
+  - id: context-system-smoke
+    command: uv run pytest tests/coding_agent/test_context_system_smoke.py -v
+    required: true
+    scope: context-system
+  - id: action-safety-smoke
+    command: uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v
+    required: true
+    scope: action-safety
+  - id: evaluation-suite
+    command: uv run pytest tests/coding_agent/evaluation/ -v
+    required: true
+    scope: evaluation
+  - id: agentkit-context-pipeline
+    command: uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v
+    required: true
+    scope: agentkit-runtime

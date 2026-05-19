@@ -104,3 +104,83 @@ Remaining risks:
 
 - G38 is documentation and scope setup only; it does not add new release gates yet.
 - The G38-G45 goal map is inferred from the release-hardening objective because no prior repository document defined those goal ids.
+
+## G39 - Release Verification Manifest
+
+Status: in progress.
+
+### Before
+
+Goal id: G39
+
+Intended files:
+
+- `docs/release_hardening/release-verification.yaml`
+- `src/coding_agent/verification/release_manifest.py`
+- `src/coding_agent/verification/__init__.py`
+- `tests/coding_agent/test_release_verification_manifest.py`
+- `docs/release_hardening/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/release-hardening-g39-verification-manifest.md`
+
+Verification commands:
+
+- `uv run pytest tests/coding_agent/test_release_verification_manifest.py -v`
+- `uv run pytest tests/coding_agent/test_verification.py tests/cli/test_verify.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check src/coding_agent/verification tests/coding_agent/test_release_verification_manifest.py`
+- `uv run ruff check src/coding_agent/verification tests/coding_agent/test_release_verification_manifest.py`
+- `git diff --check -- .`
+
+Stop criteria:
+
+- Manifest execution requires external services, production credentials, real LLM calls, or shell-specific syntax.
+- Loader changes existing task-packet verification semantics from ADR-0007.
+- Manifest format cannot be validated deterministically with local fixtures.
+- More than two fix iterations fail for the same reason.
+
+Postmortem routing:
+
+- G39 touches `src/coding_agent/verification/`, new tests, and release docs. No direct `postmortem/index.yaml` `related_files` match was found for these paths.
+
+### After
+
+Changed files:
+
+- `docs/release_hardening/release-verification.yaml`
+- `src/coding_agent/verification/release_manifest.py`
+- `src/coding_agent/verification/__init__.py`
+- `tests/coding_agent/test_release_verification_manifest.py`
+- `docs/release_hardening/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/release-hardening-g39-verification-manifest.md`
+
+Tests run:
+
+- `uv run pytest tests/coding_agent/test_release_verification_manifest.py -v`
+- `uv run pytest tests/coding_agent/test_verification.py tests/cli/test_verify.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check src/coding_agent/verification tests/coding_agent/test_release_verification_manifest.py`
+- `uv run ruff check src/coding_agent/verification tests/coding_agent/test_release_verification_manifest.py`
+- `git diff --check -- .`
+
+Results:
+
+- Release verification manifest tests passed: 3 passed.
+- Existing task-packet verification and CLI verify tests passed: 22 passed.
+- Context-system smoke test passed: 1 passed.
+- Action-safety smoke test passed: 1 passed.
+- AgentKit build_context/runtime-stage span tests passed: 8 passed, 29 deselected.
+- Scoped ruff format/check passed for `src/coding_agent/verification` and the release manifest test.
+- Diff whitespace check passed.
+
+Local review:
+
+- The first implementation attempt exposed an incomplete negative-test fixture: malformed fixtures lacked `description`, so they failed before the intended duplicate-id and shell-syntax checks. G39 fixed the fixture setup, then reran the red/green target tests successfully.
+
+Remaining risks:
+
+- G39 adds a central manifest and deterministic loader, but it does not automatically execute release gates in CI.
+- The manifest intentionally rejects shell syntax and relies on explicit single-process commands, matching the current ADR-0007 verification contract.
