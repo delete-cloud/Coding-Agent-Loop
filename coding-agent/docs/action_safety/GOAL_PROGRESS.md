@@ -793,7 +793,7 @@ Remaining risks:
 
 ## G35 - Approval Routing
 
-Status: passed local verification; pending PR.
+Status: merged via PR #237.
 
 ### Before
 
@@ -868,3 +868,77 @@ Remaining risks:
 
 - G35 defines routing semantics only; live tool execution still needs to call this route before mutation/execution.
 - Existing approval coordinator/store behavior was intentionally not changed in this goal.
+
+## G36 - End-to-End Safe Action Smoke
+
+Status: in progress.
+
+### Before
+
+Goal id: G36
+
+Intended files:
+
+- `tests/coding_agent/action_safety/test_safe_action_smoke.py`
+- `docs/adr/0035-action-safety-and-workspace-execution.md`
+- `docs/action_safety/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/action-safety-g36-e2e-smoke.md`
+
+Verification commands:
+
+- `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+- `uv run pytest tests/coding_agent/action_safety/ tests/coding_agent/tools/test_file_patch_tool.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `uv run ruff check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `git diff --check -- .`
+
+Stop criteria:
+
+- Smoke coverage requires changing live tool execution, approval coordinator/store behavior, durable runtime semantics, or context-system authority semantics.
+- Safe summaries require raw command output, patch content, file content, raw prompts, messages, results, secrets, or env values.
+- Restore cannot be covered without snapshot roots outside the workspace.
+- More than two fix iterations fail for the same reason.
+
+Postmortem routing:
+
+- G36 adds action-safety tests only and does not directly match `postmortem/index.yaml` production `related_files`.
+- Because the smoke test exercises file patch and restore behavior, it includes existing focused patch and action-safety test suites in verification.
+
+### After
+
+Changed files:
+
+- `tests/coding_agent/action_safety/test_safe_action_smoke.py`
+- `docs/adr/0035-action-safety-and-workspace-execution.md`
+- `docs/action_safety/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/action-safety-g36-e2e-smoke.md`
+
+Tests run:
+
+- `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+- `uv run pytest tests/coding_agent/action_safety/ tests/coding_agent/tools/test_file_patch_tool.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `uv run ruff check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `git diff --check -- .`
+
+Results:
+
+- Safe action smoke test passed: 1 passed.
+- Action-safety and file patch tool regression tests passed: 55 passed.
+- Context-system smoke test passed: 1 passed.
+- AgentKit build_context/runtime-stage span tests passed: 8 passed, 29 deselected.
+- Scoped ruff format/check passed for `src/coding_agent/action_safety` and `tests/coding_agent/action_safety`.
+- Diff whitespace check passed.
+
+Local review:
+
+- The first smoke attempt used `python -m py_compile pkg/app.py`; existing command policy denied it as path escape. G36 kept the production policy unchanged and switched the smoke validation command to the existing deterministic allow path, `python -c pass`, so the test covers command policy plus validation runner composition without broadening command execution.
+
+Remaining risks:
+
+- G36 is a deterministic composition smoke test; it still does not wire action-safety primitives into live autonomous execution paths.
+- The smoke test intentionally uses an allowed validation command without file path arguments because path-bearing Python commands remain conservatively denied by the current command policy.
