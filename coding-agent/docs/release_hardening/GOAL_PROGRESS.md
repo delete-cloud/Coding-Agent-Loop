@@ -548,7 +548,7 @@ Remaining risks:
 
 ## G45 - Final Implementation Report And Acceptance Audit
 
-Status: in progress.
+Status: merged via PR #250.
 
 ### Before
 
@@ -617,6 +617,8 @@ Cleanup evidence:
 - Before G45, `HEAD == origin/main == bc4325874a9960b5d8787279e24aca4dafe7824f`.
 - Merged PRs confirmed for G38-G44: #241, #243, #244, #245, #246, #247, #248, #249.
 - No local or remote release-hardening branches/worktrees remained except the active G45 branch/worktree.
+- After PR #250, `HEAD == origin/main == 6dbfeddbcf9daef782c21b080868de26bfd71dad`.
+- Final cleanup confirmed no local or remote release-hardening branches/worktrees remained before this ledger-only follow-up branch.
 
 Remaining risks:
 
