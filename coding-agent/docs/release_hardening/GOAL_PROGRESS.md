@@ -34,7 +34,7 @@ No pre-existing repository document defined G38-G45 individually. The following 
 
 ## G38 - Current-State Audit And Phase Ledger
 
-Status: in progress.
+Status: merged via PR #241.
 
 ### Before
 
@@ -107,7 +107,7 @@ Remaining risks:
 
 ## G39 - Release Verification Manifest
 
-Status: in progress.
+Status: merged via PR #243.
 
 ### Before
 
@@ -187,7 +187,7 @@ Remaining risks:
 
 ## G40 - Package Import Contract
 
-Status: in progress.
+Status: merged via PR #244.
 
 ### Before
 
@@ -258,7 +258,7 @@ Remaining risks:
 
 ## G41 - CLI Entrypoint Contract
 
-Status: in progress.
+Status: merged via PR #245, with follow-up fix merged via PR #246.
 
 ### Before
 
@@ -325,7 +325,7 @@ Remaining risks:
 
 ## G42 - Documentation Command And Boundary Consistency
 
-Status: in progress.
+Status: merged via PR #247.
 
 ### Before
 
@@ -399,7 +399,7 @@ Remaining risks:
 
 ## G43 - Observability Metadata Safety Contract
 
-Status: in progress.
+Status: merged via PR #248.
 
 ### Before
 
@@ -473,7 +473,7 @@ Remaining risks:
 
 ## G44 - Packaging And JSONL Compatibility Smoke
 
-Status: in progress.
+Status: merged via PR #249.
 
 ### Before
 
@@ -545,3 +545,80 @@ Remaining risks:
 
 - G44 validates package metadata and local JSONL compatibility smoke behavior; it does not publish or install an artifact from an external package index.
 - JSONL compatibility coverage focuses on tape entry and anchor forms used by the current repo rather than every historical tape shape ever produced.
+
+## G45 - Final Implementation Report And Acceptance Audit
+
+Status: in progress.
+
+### Before
+
+Goal id: G45
+
+Intended files:
+
+- `docs/release_hardening/IMPLEMENTATION_REPORT.md`
+- `docs/release_hardening/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/release-hardening-g45-final-audit.md`
+
+Verification commands:
+
+- `test -f docs/release_hardening/IMPLEMENTATION_REPORT.md`
+- `uv run pytest tests/integration/test_durable_runtime_smoke.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+- `uv run pytest tests/coding_agent/evaluation/ -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run pytest tests/coding_agent/test_release_verification_manifest.py tests/coding_agent/test_package_import_contract.py tests/cli/test_entrypoint_contract.py tests/coding_agent/test_release_documentation_contract.py tests/coding_agent/test_release_observability_contract.py tests/coding_agent/test_release_package_jsonl_contract.py -v`
+- `git diff --check -- .`
+
+Stop criteria:
+
+- Final audit finds any G38-G44 goal missing its merged PR, artifact, or target verification evidence.
+- Baseline regression gates fail after two focused fix attempts.
+- Remote or local release-hardening branches cannot be reconciled without human decision.
+- Final report would need to claim external service, production credential, or real LLM verification.
+
+Postmortem routing:
+
+- G45 is docs/report scoped and does not modify production files listed in `postmortem/index.yaml`.
+
+### After
+
+Changed files:
+
+- `docs/release_hardening/IMPLEMENTATION_REPORT.md`
+- `docs/release_hardening/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/release-hardening-g45-final-audit.md`
+
+Tests run:
+
+- `test -f docs/release_hardening/IMPLEMENTATION_REPORT.md`
+- `uv run pytest tests/integration/test_durable_runtime_smoke.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+- `uv run pytest tests/coding_agent/evaluation/ -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run pytest tests/coding_agent/test_release_verification_manifest.py tests/coding_agent/test_package_import_contract.py tests/cli/test_entrypoint_contract.py tests/coding_agent/test_release_documentation_contract.py tests/coding_agent/test_release_observability_contract.py tests/coding_agent/test_release_package_jsonl_contract.py -v`
+- `git diff --check -- .`
+
+Results:
+
+- Implementation report exists.
+- Durable runtime smoke tests passed: 6 passed, 32 dependency deprecation warnings from `slowapi`.
+- Context-system smoke test passed: 1 passed.
+- Action-safety smoke test passed: 1 passed.
+- Evaluation tests passed: 20 passed.
+- AgentKit build_context/runtime-stage span tests passed: 8 passed, 29 deselected.
+- Release-hardening contract tests passed: 19 passed.
+- Diff whitespace check passed.
+
+Cleanup evidence:
+
+- Before G45, `HEAD == origin/main == bc4325874a9960b5d8787279e24aca4dafe7824f`.
+- Merged PRs confirmed for G38-G44: #241, #243, #244, #245, #246, #247, #248, #249.
+- No local or remote release-hardening branches/worktrees remained except the active G45 branch/worktree.
+
+Remaining risks:
+
+- G45 is the final audit/report goal and does not add new runtime behavior.
+- CodeRabbit was rate-limited on several late PRs; local subagent review was used as the fallback per project instruction.
