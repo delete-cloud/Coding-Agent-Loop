@@ -9,6 +9,15 @@ from .adapter import (
     load_tape_entries,
     turn_to_test_case,
 )
+from .context_system import (
+    ContextSystemGoldenCase,
+    ContextSystemGoldenExpectation,
+    ContextSystemGoldenFailure,
+    ContextSystemGoldenRepoFile,
+    ContextSystemGoldenResult,
+    evaluate_context_system_golden_cases,
+    load_context_system_golden_cases,
+)
 from .manifest import (
     EvaluationManifest,
     EvaluationManifestCase,
@@ -27,9 +36,16 @@ __all__ = [
     "EvaluationManifest",
     "EvaluationManifestCase",
     "GoldenTurnSpec",
+    "ContextSystemGoldenCase",
+    "ContextSystemGoldenExpectation",
+    "ContextSystemGoldenFailure",
+    "ContextSystemGoldenRepoFile",
+    "ContextSystemGoldenResult",
     "build_manifest_test_cases",
     "build_test_cases",
+    "evaluate_context_system_golden_cases",
     "load_evaluation_manifest",
+    "load_context_system_golden_cases",
     "load_golden_spec",
     "load_tape_entries",
     "make_tool_correctness_metric",
