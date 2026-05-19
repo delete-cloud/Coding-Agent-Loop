@@ -470,3 +470,78 @@ Remaining risks:
 
 - G43 is a release-level representative contract for exporter, runtime trace metadata, action, retrieval, and context-pack attributes; it is not a full static proof over every future attribute factory.
 - The OTLP sink still accepts raw values internally on `SpanRecord`, but the product exporter drops sensitive keys before serialization, matching the current observability boundary.
+
+## G44 - Packaging And JSONL Compatibility Smoke
+
+Status: in progress.
+
+### Before
+
+Goal id: G44
+
+Intended files:
+
+- `tests/coding_agent/test_release_package_jsonl_contract.py`
+- `docs/release_hardening/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/release-hardening-g44-package-jsonl.md`
+
+Verification commands:
+
+- `uv run pytest tests/coding_agent/test_release_package_jsonl_contract.py -v`
+- `uv run pytest tests/agentkit/tape/ tests/coding_agent/plugins/test_storage.py tests/coding_agent/test_package_import_contract.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check tests/coding_agent/test_release_package_jsonl_contract.py`
+- `uv run ruff check tests/coding_agent/test_release_package_jsonl_contract.py`
+- `git diff --check -- .`
+
+Stop criteria:
+
+- Packaging or JSONL smoke coverage requires changing runtime, tape, storage, or CLI semantics beyond narrow test-backed corrections.
+- Checks require external services, production credentials, real LLM calls, or non-deterministic package publishing.
+- JSONL compatibility cannot cover both legacy and current anchor forms with local fixtures.
+- More than two fix iterations fail for the same reason.
+
+Postmortem routing:
+
+- G44 adds tests and release docs only. It touches no production storage, tape, runtime, or package metadata files listed in `postmortem/index.yaml`.
+
+### After
+
+Changed files:
+
+- `tests/coding_agent/test_release_package_jsonl_contract.py`
+- `docs/release_hardening/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/release-hardening-g44-package-jsonl.md`
+
+Tests run:
+
+- `uv run pytest tests/coding_agent/test_release_package_jsonl_contract.py -v`
+- `uv run pytest tests/agentkit/tape/ tests/coding_agent/plugins/test_storage.py tests/coding_agent/test_package_import_contract.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check tests/coding_agent/test_release_package_jsonl_contract.py`
+- `uv run ruff check tests/coding_agent/test_release_package_jsonl_contract.py`
+- `git diff --check -- .`
+
+Results:
+
+- Release package/JSONL contract tests passed: 3 passed.
+- AgentKit tape, JSONL storage, and package import contract tests passed: 116 passed.
+- Context-system smoke test passed: 1 passed.
+- Action-safety smoke test passed: 1 passed.
+- AgentKit build_context/runtime-stage span tests passed: 8 passed, 29 deselected.
+- Scoped ruff format/check passed for `tests/coding_agent/test_release_package_jsonl_contract.py`.
+- Diff whitespace check passed.
+
+Local review:
+
+- Initial test implementation needed formatting.
+- Local review found the mixed legacy/current handoff fixture only asserted the latest current handoff window behavior; G44 added explicit assertions that the legacy `meta.is_handoff` anchor is promoted to a handoff anchor.
+
+Remaining risks:
+
+- G44 validates package metadata and local JSONL compatibility smoke behavior; it does not publish or install an artifact from an external package index.
+- JSONL compatibility coverage focuses on tape entry and anchor forms used by the current repo rather than every historical tape shape ever produced.
