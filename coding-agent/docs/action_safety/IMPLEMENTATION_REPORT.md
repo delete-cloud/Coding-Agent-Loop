@@ -48,7 +48,7 @@ The final audit also covers the ADR-level verification commands:
 
 ## Safety Boundaries
 
-- Safe summaries use bounded enums, counts, booleans, durations, labels, and metadata. Tests assert that raw file content, patch content, command strings, command output, secrets, prompts, messages, results, and text payloads are not emitted through action-safety safe dictionaries or observability attributes.
+- Safe summaries use bounded enums, counts, booleans, durations, labels, and metadata. Tests assert that raw file content, patch content, command strings, command output, prompts, messages, results, and text payloads are not emitted through the action-safety safe dictionaries or observability attributes covered by this phase. Labels remain caller-controlled safe labels, so callers must avoid embedding secrets or sensitive identifiers in labels.
 - Validation feedback can be rendered as reference context evidence, but it does not change Context System authority semantics from ADR-0034.
 - Snapshot restore validates the snapshot before clearing the workspace, rejects symlinks and preserved-root members, preserves `.git`, and rejects nested snapshot/workspace layouts.
 - Approval routing distinguishes denied actions from approval-required actions and requires safe-edit decisions for file patch routing.
