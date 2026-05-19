@@ -639,7 +639,7 @@ Remaining risks:
 
 ## G33 - Workspace Snapshot Restore
 
-Status: passed local verification; pending PR.
+Status: merged via PR #235.
 
 ### Before
 
@@ -714,3 +714,79 @@ Remaining risks:
 
 - G33 is a local filesystem MVP only; it does not implement remote live sync, Docker sandboxing, or concurrent workspace reconciliation.
 - Snapshot roots are caller-managed directories; lifecycle cleanup remains the caller's responsibility.
+
+## G34 - Validation Feedback Context
+
+Status: passed local verification; pending PR.
+
+### Before
+
+Goal id: G34
+
+Intended files:
+
+- `src/coding_agent/action_safety/__init__.py`
+- `src/coding_agent/action_safety/validation_feedback.py`
+- `tests/coding_agent/action_safety/test_validation_feedback.py`
+- `docs/adr/0035-action-safety-and-workspace-execution.md`
+- `docs/action_safety/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/action-safety-g34-validation-feedback.md`
+
+Verification commands:
+
+- `uv run pytest tests/coding_agent/action_safety/test_validation_feedback.py tests/coding_agent/test_context_pack.py -v`
+- `uv run pytest tests/coding_agent/action_safety/test_validation_runner.py tests/coding_agent/action_safety/test_command_policy.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `uv run ruff check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `git diff --check -- .`
+
+Stop criteria:
+
+- Integration requires changing AgentKit pipeline/context stages.
+- Integration changes context-pack authority semantics from ADR-0034.
+- Feedback requires raw command output, raw commands, env values, prompts, messages, results, secrets, or file content.
+- More than two fix iterations fail for the same reason.
+
+Postmortem routing:
+
+- G34 adds action-safety files and uses the existing context-pack model without changing context-system plugin behavior.
+
+### After
+
+Changed files:
+
+- `src/coding_agent/action_safety/__init__.py`
+- `src/coding_agent/action_safety/validation_feedback.py`
+- `tests/coding_agent/action_safety/test_validation_feedback.py`
+- `docs/action_safety/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/action-safety-g34-validation-feedback.md`
+
+Tests run:
+
+- `uv run pytest tests/coding_agent/action_safety/test_validation_feedback.py tests/coding_agent/test_context_pack.py -v`
+- `uv run pytest tests/coding_agent/action_safety/test_validation_runner.py tests/coding_agent/action_safety/test_command_policy.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `uv run ruff check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `git diff --check -- .`
+
+Results:
+
+- Validation feedback and context-pack tests passed: 9 passed.
+- Validation runner and command policy regression tests passed: 14 passed.
+- Context-system smoke test passed: 1 passed.
+- AgentKit build_context/runtime-stage span tests passed: 8 passed, 29 deselected.
+- Scoped ruff format/check passed for `src/coding_agent/action_safety` and `tests/coding_agent/action_safety`.
+- Diff whitespace check passed.
+
+Local review:
+
+- Local review found and G34 fixed two validation-feedback disclosure risks: validation labels are no longer rendered into context evidence, and failure summaries now only render typed numeric fields plus tightly bounded enum-like values.
+
+Remaining risks:
+
+- G34 provides a reference context adapter for validation feedback; it does not yet automatically inject feedback into live edit/command tool execution.
+- Unsafe validation labels are intentionally omitted from rendered evidence rather than normalized, so callers should prefer stable safe labels when they want labels visible in context.
