@@ -255,3 +255,70 @@ Remaining risks:
 
 - G40 adds import/package contract smoke tests only; it does not prove wheel install behavior from a built artifact.
 - The AST scan covers direct Python imports under `src/agentkit`; it does not inspect dynamic imports built from strings.
+
+## G41 - CLI Entrypoint Contract
+
+Status: in progress.
+
+### Before
+
+Goal id: G41
+
+Intended files:
+
+- `tests/cli/test_entrypoint_contract.py`
+- `docs/release_hardening/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/release-hardening-g41-cli-entrypoints.md`
+
+Verification commands:
+
+- `uv run pytest tests/cli/test_entrypoint_contract.py tests/cli/test_commands.py tests/cli/test_verify.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check tests/cli/test_entrypoint_contract.py`
+- `uv run ruff check tests/cli/test_entrypoint_contract.py`
+- `git diff --check -- .`
+
+Stop criteria:
+
+- CLI smoke tests require real agent runs, provider API keys, external services, or server startup.
+- Entrypoint contract checks require changing durable runtime, context-system, or action-safety semantics.
+- Test coverage would need to assert unstable Click formatting beyond command names and required guidance.
+- More than two fix iterations fail for the same reason.
+
+Postmortem routing:
+
+- G41 adds CLI tests and touches no production files. Existing CLI command tests are included because PM-0001 lists CLI command/input surfaces as recurring review-risk areas.
+
+### After
+
+Changed files:
+
+- `tests/cli/test_entrypoint_contract.py`
+- `docs/release_hardening/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/release-hardening-g41-cli-entrypoints.md`
+
+Tests run:
+
+- `uv run pytest tests/cli/test_entrypoint_contract.py tests/cli/test_commands.py tests/cli/test_verify.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check tests/cli/test_entrypoint_contract.py`
+- `uv run ruff check tests/cli/test_entrypoint_contract.py`
+- `git diff --check -- .`
+
+Results:
+
+- CLI entrypoint, slash-command, and verify CLI tests passed: 51 passed.
+- Context-system smoke test passed: 1 passed.
+- Action-safety smoke test passed: 1 passed.
+- AgentKit build_context/runtime-stage span tests passed: 8 passed, 29 deselected.
+- Scoped ruff format/check passed for `tests/cli/test_entrypoint_contract.py`.
+- Diff whitespace check passed.
+
+Remaining risks:
+
+- G41 checks command help and non-interactive default behavior only; it does not execute real agent turns or start the HTTP server.
+- The subprocess module help check validates installed source import behavior through `PYTHONPATH=src`, not a built wheel.
