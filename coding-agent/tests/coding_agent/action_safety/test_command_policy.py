@@ -185,3 +185,23 @@ def test_command_policy_safe_dict_sanitizes_command_name(tmp_path: Path) -> None
 
     assert payload["command_name"] is None
     assert "SECRET=abc" not in serialized
+
+
+def test_command_policy_denies_absolute_executable_outside_workspace(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    outside_executable = tmp_path / "pytest"
+    outside_executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+    verdict = evaluate_command_policy(
+        str(outside_executable),
+        environment_kind="local",
+        workspace_root=workspace,
+        cwd=workspace,
+        validation_command=True,
+    )
+
+    assert verdict.decision == CommandPolicyDecision.DENY
+    assert verdict.reasons == (CommandPolicyReason.PATH_ESCAPE,)

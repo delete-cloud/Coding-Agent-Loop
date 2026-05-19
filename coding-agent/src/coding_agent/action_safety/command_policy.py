@@ -255,7 +255,7 @@ def _path_inside_workspace(path: Path, root: Path) -> bool:
 
 
 def _has_path_escape(args: list[str], root: Path) -> bool:
-    for arg in args[1:]:
+    for arg in args:
         for match in re.findall(r"/[A-Za-z0-9_./-]+", arg):
             if not _path_inside_workspace(Path(match), root):
                 return True
