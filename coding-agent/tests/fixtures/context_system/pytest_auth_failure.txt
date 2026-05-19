@@ -1,0 +1,4 @@
+FAILED tests/test_auth.py::test_rejects_expired_token - AssertionError: expired token accepted
+E   AssertionError: expired token accepted
+E   assert True is False
+tests/test_auth.py:18: AssertionError

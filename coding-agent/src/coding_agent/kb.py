@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 
 _METADATA_VERSION = 1
 _MAX_REPO_RETRIEVAL_FETCH_K = 5000
+_MAX_FAILURE_RETRIEVAL_FETCH_K = 5000
+_MAX_TEST_FAILURE_SNIPPET_CHARS = 4000
 _LANGUAGE_BY_SUFFIX = {
     ".bash": "shell",
     ".cfg": "config",
@@ -88,6 +90,26 @@ class RepoRetrievalResult:
     line_end: int | None
     document_sha256: str | None
     chunk_sha256: str | None
+
+
+@dataclass(frozen=True)
+class TestFailureRetrievalResult:
+    """A ranked test-failure retrieval result."""
+
+    rank: int
+    score: float
+    chunk: DocumentChunk
+    chunk_id: str
+    source_kind: str
+    source_id: str
+    command_label: str
+    exit_code: int
+    test_node_id: str
+    repo_path: str | None
+    line_start: int | None
+    line_end: int | None
+    failure_sha256: str | None
+    snippet_sha256: str | None
 
 
 def _repo_relative_path(path: Path, repo_root: Path | None) -> str | None:
@@ -223,6 +245,98 @@ def _repo_retrieval_results(
         if len(repo_results) >= k:
             break
     return repo_results
+
+
+def _test_failure_source_id(command_label: str, test_node_id: str) -> str:
+    return hashlib.sha256(
+        f"test_failure:{command_label}:{test_node_id}".encode("utf-8")
+    ).hexdigest()
+
+
+def _validate_test_failure_input(
+    *,
+    command_label: str,
+    exit_code: int,
+    test_node_id: str,
+    failure_snippet: str,
+    line_start: int | None,
+    line_end: int | None,
+) -> None:
+    if not command_label.strip():
+        raise ValueError("command_label must be non-empty")
+    if exit_code < 0:
+        raise ValueError("exit_code must be non-negative")
+    if not test_node_id.strip():
+        raise ValueError("test_node_id must be non-empty")
+    if not failure_snippet.strip():
+        raise ValueError("failure_snippet must be non-empty")
+    if line_start is not None and line_start <= 0:
+        raise ValueError("line_start must be positive")
+    if line_end is not None and line_end <= 0:
+        raise ValueError("line_end must be positive")
+    if line_start is not None and line_end is not None and line_end < line_start:
+        raise ValueError("line_end must be greater than or equal to line_start")
+
+
+def _bounded_test_failure_snippet(failure_snippet: str) -> str:
+    return failure_snippet[:_MAX_TEST_FAILURE_SNIPPET_CHARS]
+
+
+def _failure_retrieval_result(
+    result: KBSearchResult,
+    *,
+    rank: int,
+) -> TestFailureRetrievalResult | None:
+    metadata = result.chunk.metadata
+    source_kind = _optional_str(metadata, "source_kind")
+    source_id = _optional_str(metadata, "source_id")
+    command_label = _optional_str(metadata, "command_label")
+    exit_code = _optional_int(metadata, "exit_code")
+    test_node_id = _optional_str(metadata, "test_node_id")
+    if (
+        source_kind != "test_failure"
+        or source_id is None
+        or command_label is None
+        or exit_code is None
+        or test_node_id is None
+    ):
+        return None
+
+    return TestFailureRetrievalResult(
+        rank=rank,
+        score=result.score,
+        chunk=result.chunk,
+        chunk_id=result.chunk.id,
+        source_kind=source_kind,
+        source_id=source_id,
+        command_label=command_label,
+        exit_code=exit_code,
+        test_node_id=test_node_id,
+        repo_path=_optional_str(metadata, "repo_path"),
+        line_start=_optional_int(metadata, "line_start"),
+        line_end=_optional_int(metadata, "line_end"),
+        failure_sha256=_optional_str(metadata, "failure_sha256"),
+        snippet_sha256=_optional_str(metadata, "snippet_sha256"),
+    )
+
+
+def _failure_retrieval_results(
+    results: list[KBSearchResult],
+    *,
+    k: int,
+) -> list[TestFailureRetrievalResult]:
+    failure_results: list[TestFailureRetrievalResult] = []
+    for result in results:
+        failure_result = _failure_retrieval_result(
+            result,
+            rank=len(failure_results) + 1,
+        )
+        if failure_result is None:
+            continue
+        failure_results.append(failure_result)
+        if len(failure_results) >= k:
+            break
+    return failure_results
 
 
 class KB:
@@ -524,6 +638,66 @@ class KB:
         # Insert into LanceDB
         table.add(data)
 
+    async def index_test_failure(
+        self,
+        *,
+        command_label: str,
+        exit_code: int,
+        test_node_id: str,
+        failure_snippet: str,
+        repo_path: str | None = None,
+        line_start: int | None = None,
+        line_end: int | None = None,
+    ) -> None:
+        _validate_test_failure_input(
+            command_label=command_label,
+            exit_code=exit_code,
+            test_node_id=test_node_id,
+            failure_snippet=failure_snippet,
+            line_start=line_start,
+            line_end=line_end,
+        )
+
+        snippet = _bounded_test_failure_snippet(failure_snippet)
+        embeddings = await self._embed([snippet])
+        if len(embeddings) != 1:
+            raise ValueError("embedding function must return exactly one embedding")
+
+        failure_sha256 = hashlib.sha256(failure_snippet.encode("utf-8")).hexdigest()
+        snippet_sha256 = hashlib.sha256(snippet.encode("utf-8")).hexdigest()
+        source_id = _test_failure_source_id(command_label, test_node_id)
+        chunk_id = f"failure_{source_id[:12]}_{snippet_sha256[:12]}"
+        metadata = {
+            "metadata_version": _METADATA_VERSION,
+            "source_kind": "test_failure",
+            "source_id": source_id,
+            "command_label": command_label,
+            "exit_code": exit_code,
+            "test_node_id": test_node_id,
+            "repo_path": repo_path,
+            "line_start": line_start,
+            "line_end": line_end,
+            "failure_sha256": failure_sha256,
+            "snippet_sha256": snippet_sha256,
+        }
+
+        import json
+
+        row = {
+            "id": chunk_id,
+            "content": snippet,
+            "source": test_node_id,
+            "metadata": json.dumps(metadata),
+            "vector": embeddings[0],
+        }
+        table = self._get_table()
+        (
+            table.merge_insert("id")
+            .when_matched_update_all()
+            .when_not_matched_insert_all()
+            .execute([row])
+        )
+
     async def index_directory(
         self,
         root: Path,
@@ -672,6 +846,37 @@ class KB:
             ):
                 return repo_results
             fetch_k = min(fetch_k * 2, _MAX_REPO_RETRIEVAL_FETCH_K)
+
+    async def search_test_failures(
+        self,
+        query: str,
+        k: int = 5,
+    ) -> list[TestFailureRetrievalResult]:
+        if not query.strip() or k <= 0:
+            return []
+        if k > _MAX_FAILURE_RETRIEVAL_FETCH_K:
+            raise ValueError(
+                f"k must be less than or equal to {_MAX_FAILURE_RETRIEVAL_FETCH_K}"
+            )
+        if not self.has_table():
+            return []
+
+        table = self._get_table()
+        embeddings = await self._embed([query])
+        query_vector = embeddings[0]
+        fetch_k = _repo_retrieval_initial_fetch_k(k, _MAX_FAILURE_RETRIEVAL_FETCH_K)
+
+        while True:
+            rows = table.search(query_vector).limit(fetch_k).to_list()
+            fetched = [_search_result_from_row(row) for row in rows]
+            failure_results = _failure_retrieval_results(fetched, k=k)
+            if (
+                len(failure_results) >= k
+                or len(rows) < fetch_k
+                or fetch_k >= _MAX_FAILURE_RETRIEVAL_FETCH_K
+            ):
+                return failure_results
+            fetch_k = min(fetch_k * 2, _MAX_FAILURE_RETRIEVAL_FETCH_K)
 
     def search_sync(self, query: str, k: int = 5) -> list[KBSearchResult]:
         if not query.strip():

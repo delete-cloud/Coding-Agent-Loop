@@ -294,3 +294,73 @@ Remaining risks:
 
 - G15 returns repo evidence from KB but does not render context packs or inject through `build_context`; those remain G17/G18.
 - G15 skips legacy rows without repo metadata for repo retrieval; generic vector search still returns those rows unchanged.
+
+## G16 - Testing Failure Retrieval Ingest/Search Fixtures
+
+Status: passed local verification.
+
+### Before
+
+Goal id: G16
+
+Intended files:
+
+- `src/coding_agent/kb.py`
+- `tests/test_kb.py`
+- `tests/fixtures/context_system/pytest_auth_failure.txt`
+- `tests/fixtures/context_system/pytest_billing_failure.txt`
+- `docs/context_system/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/context-system-g16-failure-retrieval-fixtures.md`
+
+Verification commands:
+
+- `uv run pytest tests/test_kb.py -k "failure_retrieval_indexes_pytest_failure_evidence or failure_retrieval_skips_non_failure_rows" -v`
+- `uv run pytest tests/test_kb.py tests/coding_agent/test_kb_sync.py tests/cli/test_kb_commands.py -v`
+
+Stop criteria:
+
+- Change requires context-pack rendering or `build_context` pipeline changes.
+- Change requires AgentKit runtime changes.
+- Deterministic verification cannot be produced.
+- More than two fix iterations fail for the same reason.
+
+Postmortem routing:
+
+- `src/coding_agent/kb.py` matches PM-0009. Release checks: run focused tests for affected KB behavior and review affected control-flow shape before shipping.
+
+### After
+
+Changed files:
+
+- `src/coding_agent/kb.py`
+- `tests/test_kb.py`
+- `tests/fixtures/context_system/pytest_auth_failure.txt`
+- `tests/fixtures/context_system/pytest_billing_failure.txt`
+- `docs/context_system/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/context-system-g16-failure-retrieval-fixtures.md`
+
+Tests run:
+
+- Red: `uv run pytest tests/test_kb.py -k "failure_retrieval_indexes_pytest_failure_evidence or failure_retrieval_skips_non_failure_rows" -v`
+- Green: `uv run pytest tests/test_kb.py -k "failure_retrieval_indexes_pytest_failure_evidence or failure_retrieval_skips_non_failure_rows" -v`
+- Local review fix red: `uv run pytest tests/test_kb.py -k "failure_retrieval_upserts_same_failure_evidence" -v`
+- Local review fix green: `uv run pytest tests/test_kb.py -k "failure_retrieval_upserts_same_failure_evidence" -v`
+- `uv run ruff format --check src/coding_agent/kb.py tests/test_kb.py`
+- `git diff --check -- .`
+- `uv run pytest tests/test_kb.py tests/coding_agent/test_kb_sync.py tests/cli/test_kb_commands.py -v`
+- `uv run pytest tests/coding_agent/plugins/test_kb.py tests/coding_agent/plugins/test_kb_plugin.py -v`
+
+Results:
+
+- Red tests failed before `KB.index_test_failure` existed.
+- Focused failure retrieval tests passed after implementation: 2 passed, 41 deselected.
+- Local review regression failed before deterministic failure evidence upsert and passed after switching failure ingest to `merge_insert`: 1 passed, 43 deselected.
+- Ruff format check passed.
+- Git diff whitespace check passed.
+- KB, sync, and CLI KB tests passed: 54 passed.
+- KB plugin tests passed: 15 passed.
+
+Remaining risks:
+
+- G16 indexes and retrieves test-failure evidence but does not render context packs or inject through `build_context`; those remain G17/G18.
+- G16 stores bounded failure snippets for retrieval; richer pytest output parsing and automatic command-log ingestion are deferred unless future goals require them.

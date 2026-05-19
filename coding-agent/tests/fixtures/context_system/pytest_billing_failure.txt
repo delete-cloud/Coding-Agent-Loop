@@ -1,0 +1,4 @@
+FAILED tests/test_billing.py::test_invoice_total_rounds_cents - AssertionError: invoice total mismatch
+E   AssertionError: invoice total mismatch
+E   assert Decimal('10.019') == Decimal('10.02')
+tests/test_billing.py:44: AssertionError
