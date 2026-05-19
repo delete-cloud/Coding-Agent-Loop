@@ -63,7 +63,7 @@ class TestKBPlugin:
 
         assert result == []
 
-    def test_build_context_returns_grounding(self, tmp_path: Path):
+    def test_build_context_returns_context_pack_grounding(self, tmp_path: Path):
         db_path = tmp_path / "kb-db"
         plugin = KBPlugin(db_path=db_path, embedding_dim=8, embedding_fn=_fake_embed)
 
@@ -94,7 +94,9 @@ class TestKBPlugin:
 
         assert len(result) == 1
         assert result[0]["role"] == "system"
-        assert result[0]["content"].startswith("[KB]")
+        assert result[0]["content"].startswith("[Context Pack]")
+        assert "## Repo references" in result[0]["content"]
+        assert "- [Repo] src/auth.py" in result[0]["content"]
         assert "src/auth.py" in result[0]["content"]
         assert "Authentication module" in result[0]["content"]
 
@@ -153,8 +155,11 @@ class TestKBPlugin:
         result = plugin.build_context(tape=tape)
         content = result[0]["content"]
         lines = content.splitlines()
-        chunk_line = next(line for line in lines if line.startswith("- docs/auth.md:"))
-        chunk_text = chunk_line.split(": ", 1)[1]
+        label_line = next(
+            line for line in lines if line.startswith("- [Repo] docs/auth.md")
+        )
+        chunk_line_index = lines.index(label_line) + 1
+        chunk_text = lines[chunk_line_index].strip()
 
         assert chunk_text.startswith("auth ")
         assert len(chunk_text) == 503

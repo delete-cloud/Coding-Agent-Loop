@@ -7,11 +7,19 @@ from typing import Any, Callable
 
 from agentkit.tape.tape import Tape
 
+from coding_agent.context_pack import (
+    ContextPack,
+    ContextPackItem,
+    ContextPackRenderer,
+    ContextPackSection,
+    EvidenceRef,
+)
 from coding_agent.kb import KB, KBSearchResult
 
 logger = logging.getLogger(__name__)
 
 _CHUNK_TRUNCATE = 500
+_CONTEXT_PACK_RENDERER = ContextPackRenderer(max_item_chars=_CHUNK_TRUNCATE)
 
 
 @dataclass
@@ -125,10 +133,109 @@ def _format_grounding_messages(results: list[KBSearchResult]) -> list[dict[str, 
     if not results:
         return []
 
-    lines = ["[KB] Relevant context:"]
-    for result in results:
-        content = result.chunk.content.strip()
-        if len(content) > _CHUNK_TRUNCATE:
-            content = f"{content[:_CHUNK_TRUNCATE]}..."
-        lines.append(f"- {result.chunk.source}: {content}")
-    return [{"role": "system", "content": "\n".join(lines)}]
+    pack = _context_pack_from_search_results(results)
+    return _CONTEXT_PACK_RENDERER.render_messages(pack)
+
+
+def _context_pack_from_search_results(results: list[KBSearchResult]) -> ContextPack:
+    repo_items: list[ContextPackItem] = []
+    failure_items: list[ContextPackItem] = []
+    kb_items: list[ContextPackItem] = []
+
+    for rank, result in enumerate(results, start=1):
+        item = _context_pack_item_from_search_result(result, rank=rank)
+        if item.source_kind == "repo_file":
+            repo_items.append(item)
+        elif item.source_kind == "test_failure":
+            failure_items.append(item)
+        else:
+            kb_items.append(item)
+
+    sections: list[ContextPackSection] = []
+    if repo_items:
+        sections.append(
+            ContextPackSection(title="Repo references", items=tuple(repo_items))
+        )
+    if failure_items:
+        sections.append(
+            ContextPackSection(title="Test failures", items=tuple(failure_items))
+        )
+    if kb_items:
+        sections.append(
+            ContextPackSection(title="KB references", items=tuple(kb_items))
+        )
+    return ContextPack(sections=tuple(sections))
+
+
+def _context_pack_item_from_search_result(
+    result: KBSearchResult,
+    *,
+    rank: int,
+) -> ContextPackItem:
+    metadata = result.chunk.metadata
+    source_kind = _metadata_str(metadata, "source_kind") or "kb_chunk"
+    source_id = _metadata_str(metadata, "source_id") or result.chunk.id
+    label = _item_label(result, source_kind)
+    return ContextPackItem(
+        source_kind=source_kind,
+        source_id=source_id,
+        label=label,
+        body=result.chunk.content.strip(),
+        rank=rank,
+        score=result.score,
+        repo_path=_metadata_str(metadata, "repo_path"),
+        line_start=_metadata_int(metadata, "line_start"),
+        line_end=_metadata_int(metadata, "line_end"),
+        evidence=(
+            _evidence_ref_from_search_result(
+                result,
+                source_kind=source_kind,
+                source_id=source_id,
+            ),
+        ),
+    )
+
+
+def _item_label(result: KBSearchResult, source_kind: str) -> str:
+    metadata = result.chunk.metadata
+    if source_kind == "test_failure":
+        return _metadata_str(metadata, "test_node_id") or result.chunk.source
+    return _metadata_str(metadata, "repo_path") or result.chunk.source
+
+
+def _evidence_ref_from_search_result(
+    result: KBSearchResult,
+    *,
+    source_kind: str,
+    source_id: str,
+) -> EvidenceRef:
+    metadata = result.chunk.metadata
+    label = (
+        result.chunk.id
+        if source_kind == "repo_file"
+        else _item_label(
+            result,
+            source_kind,
+        )
+    )
+    return EvidenceRef(
+        kind=source_kind,
+        source_id=source_id,
+        label=label,
+        repo_path=_metadata_str(metadata, "repo_path"),
+        line_start=_metadata_int(metadata, "line_start"),
+        line_end=_metadata_int(metadata, "line_end"),
+        chunk_id=result.chunk.id if source_kind == "repo_file" else None,
+        test_node_id=_metadata_str(metadata, "test_node_id"),
+        command_label=_metadata_str(metadata, "command_label"),
+    )
+
+
+def _metadata_str(metadata: dict[str, Any], key: str) -> str | None:
+    value = metadata.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def _metadata_int(metadata: dict[str, Any], key: str) -> int | None:
+    value = metadata.get(key)
+    return value if isinstance(value, int) else None

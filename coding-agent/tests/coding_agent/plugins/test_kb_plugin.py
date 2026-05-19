@@ -126,7 +126,29 @@ class TestBuildContextSearch:
         assert len(result) == 1
         msg = result[0]
         assert msg["role"] == "system"
-        assert msg["content"].startswith("[KB]")
+        assert msg["content"].startswith("[Context Pack]")
+        assert "## Repo references" in msg["content"]
+
+    def test_context_pack_injection_uses_build_context_without_pipeline_rewrite(
+        self, indexed_plugin: KBPlugin
+    ):
+        hooks = indexed_plugin.hooks()
+        tape = Tape()
+        tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "user", "content": "How does auth work?"},
+            )
+        )
+
+        result = hooks["build_context"](tape=tape)
+
+        assert hooks.keys() == {"mount", "build_context"}
+        assert len(result) == 1
+        assert result[0]["role"] == "system"
+        assert result[0]["content"].startswith("[Context Pack]")
+        assert "## Repo references" in result[0]["content"]
+        assert "- [Repo] src/auth.py" in result[0]["content"]
 
     def test_cache_hit_same_message(self, indexed_plugin: KBPlugin):
         tape = Tape()

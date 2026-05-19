@@ -428,3 +428,69 @@ Remaining risks:
 
 - G17 defines and renders context packs but does not inject them through plugin `build_context`; that remains G18.
 - G17 renders memory as evidence-backed reference material and omits unevidenced memory by default, but persisted memory evidence fields are not added until G22.
+
+## G18 - Context Pack Injection Through Existing Build Context Hooks
+
+Status: passed local verification.
+
+### Before
+
+Goal id: G18
+
+Intended files:
+
+- `src/coding_agent/plugins/kb.py`
+- `tests/coding_agent/plugins/test_kb.py`
+- `tests/coding_agent/plugins/test_kb_plugin.py`
+- `docs/context_system/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/context-system-g18-context-pack-injection.md`
+
+Verification commands:
+
+- `uv run pytest tests/coding_agent/plugins/test_kb.py tests/coding_agent/plugins/test_kb_plugin.py -v`
+- `uv run pytest tests/coding_agent/ -k "context_pack or retrieval or memory or evaluation" -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context" -v`
+
+Stop criteria:
+
+- Change requires AgentKit runtime or pipeline changes.
+- Change requires memory persistence format changes.
+- Deterministic verification cannot be produced.
+- More than two fix iterations fail for the same reason.
+
+Postmortem routing:
+
+- `src/coding_agent/plugins/kb.py` matches PM-0009 and PM-0017. Release checks: run focused tests for affected plugin/bootstrap behavior and review affected control-flow shape before shipping.
+
+### After
+
+Changed files:
+
+- `src/coding_agent/plugins/kb.py`
+- `tests/coding_agent/plugins/test_kb.py`
+- `tests/coding_agent/plugins/test_kb_plugin.py`
+- `docs/context_system/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/context-system-g18-context-pack-injection.md`
+
+Tests run:
+
+- Red: `uv run pytest tests/coding_agent/plugins/test_kb.py tests/coding_agent/plugins/test_kb_plugin.py -v`
+- Green: `uv run pytest tests/coding_agent/plugins/test_kb.py tests/coding_agent/plugins/test_kb_plugin.py -v`
+- `uv run ruff format --check src/coding_agent/plugins/kb.py tests/coding_agent/plugins/test_kb.py tests/coding_agent/plugins/test_kb_plugin.py`
+- `git diff --check -- .`
+- `uv run pytest tests/coding_agent/ -k "context_pack or retrieval or memory or evaluation" -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context" -v`
+
+Results:
+
+- Red tests failed while `KBPlugin.build_context` still emitted legacy `[KB]` grounding.
+- Focused KB plugin tests passed after rendering a context pack through the existing `build_context` hook: 16 passed.
+- Ruff format check passed after formatting changed plugin test files.
+- Git diff whitespace check passed.
+- Coding Agent context/memory/evaluation filtered tests passed: 35 passed, 585 deselected.
+- AgentKit build_context regression tests passed: 7 passed, 30 deselected.
+
+Remaining risks:
+
+- G18 routes KB grounding through context packs but does not migrate MemoryPlugin injection; evidence-backed memory records remain G22/G23.
+- G18 keeps KBPlugin on synchronous generic KB search for existing hook compatibility; richer source-specific retrieval composition remains future pack-building work.
