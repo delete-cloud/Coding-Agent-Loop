@@ -858,7 +858,7 @@ Remaining risks:
 
 ## G24 - End-To-End Context-System Smoke, Implementation Report, And Final Audit
 
-Status: passed local verification; pending PR.
+Status: merged via PR #225.
 
 ### Before
 
@@ -920,7 +920,7 @@ Implementation notes:
 - Added a deterministic smoke test that builds a Pipeline with KBPlugin and MemoryPlugin, indexes repo and test-failure evidence, and verifies the composed `build_context` prompt contains repo, failure, and memory reference context.
 - Updated the final implementation report with landed goal and ADR acceptance evidence.
 - Marked ADR-0034 accepted and checked off the executable acceptance criteria.
-- Updated the phase ledger with merged PR status for G12-G23.
+- Updated the phase ledger with merged PR status for G12-G24.
 
 Remaining risks:
 
