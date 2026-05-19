@@ -497,7 +497,7 @@ Remaining risks:
 
 ## G19 - Safe Retrieval Observability Counters And Spans
 
-Status: passed local verification; pending PR.
+Status: merged via PR #220.
 
 ### Before
 
@@ -564,7 +564,7 @@ Remaining risks:
 
 ## G20 - Manifest-Driven Deterministic Evaluation Harness Baseline
 
-Status: passed local verification; pending PR.
+Status: merged via PR #221.
 
 ### Before
 
@@ -633,3 +633,79 @@ Remaining risks:
 
 - G20 uses the existing parent/child golden fixture to prove manifest mechanics; retrieval and context-pack-specific golden cases remain G21.
 - The manifest runner builds local deterministic cases only; metric execution and external judges remain optional adapter behavior outside this baseline.
+
+## G21 - Evaluation Golden Cases For Retrieval And Context-Pack Behavior
+
+Status: passed local verification; pending PR.
+
+### Before
+
+Goal id: G21
+
+Intended files:
+
+- `src/coding_agent/evaluation/context_system.py`
+- `src/coding_agent/evaluation/__init__.py`
+- `tests/coding_agent/evaluation/test_context_system_goldens.py`
+- `data/eval/golden/context-system-retrieval-context-pack.yaml`
+- `docs/context_system/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/context-system-g21-evaluation-goldens.md`
+
+Verification commands:
+
+- `uv run pytest tests/coding_agent/evaluation/test_context_system_goldens.py -v`
+- `uv run pytest tests/coding_agent/evaluation/ -v`
+- `uv run pytest tests/coding_agent/plugins/test_kb.py tests/coding_agent/plugins/test_kb_plugin.py tests/coding_agent/test_context_pack.py -v`
+- `uv run pytest tests/coding_agent/ -k "context_pack or retrieval or memory or evaluation" -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context" -v`
+
+Stop criteria:
+
+- Change requires AgentKit runtime or pipeline changes.
+- Change requires external LLM calls, DeepEval, production credentials, or external services.
+- Golden cases cannot run deterministically with local fixtures and fake embeddings.
+- Change duplicates production context-pack injection instead of exercising the existing `KBPlugin.build_context` path.
+- More than two fix iterations fail for the same reason.
+
+Postmortem routing:
+
+- Intended G21 files do not match any `postmortem/index.yaml` `related_files` entry.
+
+### After
+
+Changed files:
+
+- `src/coding_agent/evaluation/context_system.py`
+- `src/coding_agent/evaluation/__init__.py`
+- `tests/coding_agent/evaluation/test_context_system_goldens.py`
+- `data/eval/golden/context-system-retrieval-context-pack.yaml`
+- `docs/context_system/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/context-system-g21-evaluation-goldens.md`
+
+Verification results:
+
+- Red: `uv run pytest tests/coding_agent/evaluation/test_context_system_goldens.py -v` failed during collection because the context-system golden evaluator was not exported yet.
+- Green: `uv run pytest tests/coding_agent/evaluation/test_context_system_goldens.py -v` passed with 3 passed.
+- Local review fix red: `uv run pytest tests/coding_agent/evaluation/test_context_system_goldens.py -k "reuse_workspace" -v` failed when stale KB rows in a reused workspace displaced the test-failure section on the second run.
+- Local review fix green: `uv run pytest tests/coding_agent/evaluation/test_context_system_goldens.py -k "unsafe_case_id or fixture_escape or reuse_workspace" -v` passed with 3 passed, 3 deselected after adding fresh per-run case directories, safe case-id validation, and fixture-root bounding.
+- Final focused: `uv run pytest tests/coding_agent/evaluation/test_context_system_goldens.py -v` passed with 6 passed.
+- `uv run ruff format --check src/coding_agent/evaluation tests/coding_agent/evaluation` initially failed because the new evaluator needed formatting; after `uv run ruff format src/coding_agent/evaluation/context_system.py tests/coding_agent/evaluation/test_context_system_goldens.py`, it passed with 10 files already formatted.
+- `uv run ruff check src/coding_agent/evaluation tests/coding_agent/evaluation` initially failed on one unused import; after removing it, the command passed.
+- `git diff --check -- .` passed.
+- `uv run pytest tests/coding_agent/evaluation/ -v` passed with 20 passed.
+- `uv run pytest tests/coding_agent/plugins/test_kb.py tests/coding_agent/plugins/test_kb_plugin.py tests/coding_agent/test_context_pack.py -v` passed with 22 passed.
+- `uv run pytest tests/coding_agent/ -k "context_pack or retrieval or memory or evaluation" -v` passed with 47 passed, 585 deselected.
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context" -v` passed with 7 passed, 30 deselected.
+- Local subagent review reported two P2 findings: reused workspaces could accumulate stale KB rows, and case/fixture paths needed stronger bounds. Both were fixed and covered by regression tests.
+
+Implementation notes:
+
+- Added a context-system golden evaluator that creates a local repo fixture, indexes repo and test-failure evidence into KB, and exercises the existing `KBPlugin.build_context` path.
+- Added a golden case that proves auth retrieval renders both repo references and test-failure context pack sections while excluding an unrelated billing fixture.
+- Added a negative golden test proving missing expected rendered snippets fail deterministically.
+- Golden evaluation now uses fresh temporary case directories under the caller-provided workspace and validates fixture paths under `tests/fixtures`.
+
+Remaining risks:
+
+- G21 covers KB-backed retrieval/context-pack behavior only; memory evidence golden behavior remains G22/G23.
+- G21 uses a purpose-built fake embedder for deterministic fixture ranking and does not attempt to evaluate production embedding quality.
