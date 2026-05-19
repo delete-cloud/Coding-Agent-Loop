@@ -481,7 +481,7 @@ Remaining risks:
 
 ## G31 - Validation Runner Contract
 
-Status: passed local verification; pending PR.
+Status: merged via PR #233.
 
 ### Before
 
@@ -559,3 +559,80 @@ Remaining risks:
 
 - G31 adds a standalone action-safety validation runner; it does not yet wire validation outcomes into shell tools, approvals, observability, or context evidence.
 - Validation outcome summaries intentionally avoid raw stdout/stderr; later user-facing reporting may need a separate local-only channel if raw output is required.
+
+## G32 - Action Observability
+
+Status: passed local verification; pending PR.
+
+### Before
+
+Goal id: G32
+
+Intended files:
+
+- `src/coding_agent/action_safety/__init__.py`
+- `src/coding_agent/action_safety/action_observability.py`
+- `tests/coding_agent/action_safety/test_action_observability.py`
+- `docs/adr/0035-action-safety-and-workspace-execution.md`
+- `docs/action_safety/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/action-safety-g32-observability.md`
+
+Verification commands:
+
+- `uv run pytest tests/coding_agent/action_safety/test_action_observability.py tests/coding_agent/test_observability.py tests/agentkit/observability/test_core.py -v`
+- `uv run pytest tests/coding_agent/action_safety/test_validation_runner.py tests/coding_agent/action_safety/test_command_policy.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `uv run ruff check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `git diff --check -- .`
+
+Stop criteria:
+
+- Implementation requires AgentKit observability model changes.
+- Safe attributes require raw prompts, content, messages, results, secrets, command output, file content, env values, or free-form text.
+- Implementation requires wiring action observability into live tool execution paths before G35/G36.
+- More than two fix iterations fail for the same reason.
+
+Postmortem routing:
+
+- Intended G32 production/test files are action-safety files and do not directly match `postmortem/index.yaml` `related_files`.
+
+### After
+
+Changed files:
+
+- `src/coding_agent/action_safety/__init__.py`
+- `src/coding_agent/action_safety/action_observability.py`
+- `tests/coding_agent/action_safety/test_action_observability.py`
+- `docs/adr/0035-action-safety-and-workspace-execution.md`
+- `docs/action_safety/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/action-safety-g32-observability.md`
+
+Tests run:
+
+- `uv run pytest tests/coding_agent/action_safety/test_action_observability.py tests/coding_agent/test_observability.py tests/agentkit/observability/test_core.py -v`
+- `uv run pytest tests/coding_agent/action_safety/test_validation_runner.py tests/coding_agent/action_safety/test_command_policy.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `uv run ruff check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `git diff --check -- .`
+
+Results:
+
+- Action observability, Coding Agent observability, and AgentKit observability tests passed: 19 passed.
+- Validation runner and command policy regression tests passed: 14 passed.
+- Context-system smoke test passed: 1 passed.
+- AgentKit build_context/runtime-stage span tests passed: 8 passed, 29 deselected.
+- Scoped ruff format/check passed for `src/coding_agent/action_safety` and `tests/coding_agent/action_safety`.
+- Diff whitespace check passed.
+
+Local review:
+
+- Local review found and G32 fixed three observability risks: action event/span names are no longer caller-controlled, event sink failures fail open, and action spans now expose a safe updater for final metadata.
+
+Remaining risks:
+
+- G32 adds metadata-only action observation primitives; it does not yet wire them into live file, command, approval, or restore execution paths.
+- String-valued metadata is intentionally restricted to bounded labels; callers that need rich user-facing explanations must keep those outside trace attributes.

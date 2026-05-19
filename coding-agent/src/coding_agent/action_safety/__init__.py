@@ -1,3 +1,12 @@
+from .action_observability import (
+    ACTION_OBSERVATION_NAME,
+    ActionKind,
+    ActionObservation,
+    ActionObservationStatus,
+    ActionSpanUpdater,
+    emit_action_event,
+    record_action_span,
+)
 from .command_policy import (
     CommandPolicyDecision,
     CommandPolicyReason,
@@ -25,6 +34,11 @@ from .validation_runner import (
 )
 
 __all__ = [
+    "ActionKind",
+    "ACTION_OBSERVATION_NAME",
+    "ActionObservation",
+    "ActionObservationStatus",
+    "ActionSpanUpdater",
     "CommandPolicyDecision",
     "CommandPolicyReason",
     "CommandPolicyVerdict",
@@ -40,6 +54,8 @@ __all__ = [
     "ValidationRunner",
     "ValidationStatus",
     "build_patch_plan",
+    "emit_action_event",
     "evaluate_command_policy",
+    "record_action_span",
     "validate_safe_edit_path",
 ]

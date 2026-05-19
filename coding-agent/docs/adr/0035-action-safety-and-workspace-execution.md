@@ -75,7 +75,7 @@ Implementation of G27-G37 should add executable tests covering these contracts:
 - [x] `test_command_policy_classifies_allow_deny_and_approval_required`
 - [x] `test_command_policy_applies_to_local_and_cloud_shell_tools`
 - [x] `test_validation_runner_records_structured_outcomes_for_deterministic_commands`
-- [ ] `test_action_observability_emits_safe_metadata_without_sensitive_attributes`
+- [x] `test_action_observability_emits_safe_metadata_without_sensitive_attributes`
 - [ ] `test_workspace_snapshot_restore_preserves_git_and_recovers_modified_files`
 - [ ] `test_high_risk_file_or_command_action_routes_to_approval`
 - [ ] `test_safe_action_smoke_covers_patch_command_validation_and_restore`
