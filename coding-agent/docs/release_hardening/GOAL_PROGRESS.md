@@ -184,3 +184,74 @@ Remaining risks:
 
 - G39 adds a central manifest and deterministic loader, but it does not automatically execute release gates in CI.
 - The manifest intentionally rejects shell syntax and relies on explicit single-process commands, matching the current ADR-0007 verification contract.
+
+## G40 - Package Import Contract
+
+Status: in progress.
+
+### Before
+
+Goal id: G40
+
+Intended files:
+
+- `tests/coding_agent/test_package_import_contract.py`
+- `docs/release_hardening/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/release-hardening-g40-import-contract.md`
+
+Verification commands:
+
+- `uv run pytest tests/coding_agent/test_package_import_contract.py tests/coding_agent/test_bootstrap.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check tests/coding_agent/test_package_import_contract.py`
+- `uv run ruff check tests/coding_agent/test_package_import_contract.py`
+- `git diff --check -- .`
+
+Stop criteria:
+
+- Import-contract coverage requires changing AgentKit Core or package semantics beyond narrow test-backed corrections.
+- Import smoke tests require provider credentials, real LLM calls, or external services.
+- Tests would need to assert private implementation details unrelated to package/import boundaries.
+- More than two fix iterations fail for the same reason.
+
+Postmortem routing:
+
+- G40 adds tests only and does not modify files listed in `postmortem/index.yaml`.
+
+### After
+
+Changed files:
+
+- `tests/coding_agent/test_package_import_contract.py`
+- `docs/release_hardening/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/release-hardening-g40-import-contract.md`
+
+Tests run:
+
+- `uv run pytest tests/coding_agent/test_package_import_contract.py tests/coding_agent/test_bootstrap.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check tests/coding_agent/test_package_import_contract.py`
+- `uv run ruff check tests/coding_agent/test_package_import_contract.py`
+- `git diff --check -- .`
+
+Results:
+
+- Package import contract and bootstrap tests passed: 25 passed.
+- Context-system smoke test passed: 1 passed.
+- Action-safety smoke test passed: 1 passed.
+- AgentKit build_context/runtime-stage span tests passed: 8 passed, 29 deselected.
+- Scoped ruff format/check passed for `tests/coding_agent/test_package_import_contract.py`.
+- Diff whitespace check passed.
+
+Local review:
+
+- Local review found and G40 fixed three package-contract test issues: `coding_agent` lazy-import checks now run in an isolated subprocess, `agentkit` import checks now assert no `coding_agent` modules are loaded, and `src/agentkit` checks now parse AST imports instead of scanning raw text.
+
+Remaining risks:
+
+- G40 adds import/package contract smoke tests only; it does not prove wheel install behavior from a built artifact.
+- The AST scan covers direct Python imports under `src/agentkit`; it does not inspect dynamic imports built from strings.
