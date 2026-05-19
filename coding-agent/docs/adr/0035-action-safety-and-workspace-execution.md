@@ -70,7 +70,7 @@ Provide workspace snapshot/restore as a local MVP:
 Implementation of G27-G37 should add executable tests covering these contracts:
 
 - [x] `test_patch_plan_summarizes_hunks_and_risk_without_file_content`
-- [ ] `test_safe_edit_policy_rejects_workspace_escape_symlink_binary_and_oversized_file`
+- [x] `test_safe_edit_policy_rejects_workspace_escape_symlink_binary_and_oversized_file`
 - [ ] `test_file_patch_dry_run_reports_context_failure_without_mutation`
 - [ ] `test_command_policy_classifies_allow_deny_and_approval_required`
 - [ ] `test_command_policy_applies_to_local_and_cloud_shell_tools`
