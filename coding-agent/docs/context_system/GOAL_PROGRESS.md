@@ -494,3 +494,70 @@ Remaining risks:
 
 - G18 routes KB grounding through context packs but does not migrate MemoryPlugin injection; evidence-backed memory records remain G22/G23.
 - G18 keeps KBPlugin on synchronous generic KB search for existing hook compatibility; richer source-specific retrieval composition remains future pack-building work.
+
+## G19 - Safe Retrieval Observability Counters And Spans
+
+Status: passed local verification; pending PR.
+
+### Before
+
+Goal id: G19
+
+Intended files:
+
+- `src/coding_agent/plugins/kb.py`
+- `tests/coding_agent/plugins/test_kb_plugin.py`
+- `docs/context_system/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/context-system-g19-retrieval-observability.md`
+
+Verification commands:
+
+- `uv run pytest tests/coding_agent/plugins/test_kb_plugin.py -k "retrieval_observability" -v`
+- `uv run pytest tests/coding_agent/plugins/test_kb.py tests/coding_agent/plugins/test_kb_plugin.py -v`
+- `uv run pytest tests/coding_agent/test_observability.py -v`
+- `uv run pytest tests/coding_agent/ -k "context_pack or retrieval or memory or evaluation or observability" -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+
+Stop criteria:
+
+- Change requires AgentKit runtime or pipeline changes.
+- Change requires raw prompt/content/message/result/secret/text attributes.
+- Deterministic verification cannot be produced.
+- More than two fix iterations fail for the same reason.
+
+Postmortem routing:
+
+- `src/coding_agent/plugins/kb.py` matches PM-0009 and PM-0017. Release checks: run focused tests for affected plugin/bootstrap behavior and review affected control-flow shape before shipping.
+
+### After
+
+Changed files:
+
+- `src/coding_agent/plugins/kb.py`
+- `tests/coding_agent/plugins/test_kb_plugin.py`
+- `docs/context_system/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/context-system-g19-retrieval-observability.md`
+
+Verification results:
+
+- Red: `uv run pytest tests/coding_agent/plugins/test_kb_plugin.py -k "retrieval_observability" -v` failed with 2 failed, 9 deselected before retrieval spans were implemented.
+- Green: `uv run pytest tests/coding_agent/plugins/test_kb_plugin.py -k "retrieval_observability" -v` passed with 2 passed, 9 deselected.
+- `uv run ruff format src/coding_agent/plugins/kb.py tests/coding_agent/plugins/test_kb_plugin.py` left both files formatted.
+- `uv run ruff format --check src/coding_agent/plugins/kb.py tests/coding_agent/plugins/test_kb_plugin.py` passed with both files already formatted.
+- `git diff --check -- .` passed.
+- `uv run pytest tests/coding_agent/plugins/test_kb.py tests/coding_agent/plugins/test_kb_plugin.py -v` passed with 18 passed.
+- `uv run pytest tests/coding_agent/test_observability.py -v` passed with 7 passed.
+- `uv run pytest tests/coding_agent/ -k "context_pack or retrieval or memory or evaluation or observability" -v` passed with 45 passed, 577 deselected.
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v` passed with 8 passed, 29 deselected.
+- Local subagent review was attempted three times but did not return before timeout; per workflow override, manual P1/P2 review gate checked staged span attributes for query/content/path/source-id leakage and cache-hit/miss correctness.
+
+Implementation notes:
+
+- `KBPlugin` emits safe `retrieval.kb.search` spans for search misses and cache hits through the mounted `observation_sink`.
+- `KBPlugin` emits a `context_pack.render` span around the existing context-pack renderer path.
+- Span attributes are restricted to counts, booleans, and bounded enum-like labels; tests guard against prompt, message, result, text, secret, chunk content, and fixture path/source labels leaking through attributes.
+
+Remaining risks:
+
+- G19 observes the existing synchronous KB search path only; richer multi-source retrieval composition remains later context-system work.
+- G19 does not add new exporter behavior beyond existing observation sink contracts.

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from agentkit.observability import SpanRecord
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
 from coding_agent.kb import KB
@@ -13,6 +14,32 @@ from coding_agent.plugins.kb import KBPlugin
 
 def _fake_embed(texts: list[str]) -> list[list[float]]:
     return [[float(i)] * 8 for i, _ in enumerate(texts)]
+
+
+class RecordingObservationSink:
+    def __init__(self) -> None:
+        self.spans: list[SpanRecord] = []
+
+    def record_span(self, span: SpanRecord) -> None:
+        self.spans.append(span)
+
+    def record_event(self, event) -> None:
+        del event
+
+
+class _MountContext:
+    def __init__(self, sink: RecordingObservationSink) -> None:
+        self.config = {"observation_sink": sink}
+
+
+def _span_by_name(sink: RecordingObservationSink, name: str) -> SpanRecord:
+    matches = [span for span in sink.spans if span.name == name]
+    assert len(matches) == 1
+    return matches[0]
+
+
+def _serialized_attributes(span: SpanRecord) -> str:
+    return repr(sorted(span.attributes.items()))
 
 
 class TestKBPluginInit:
@@ -199,3 +226,90 @@ class TestBuildContextSearch:
         assert calls == ["How does auth work?", "What API endpoints exist?"]
         assert indexed_plugin._snapshot is not None
         assert indexed_plugin._snapshot.last_user_msg == "What API endpoints exist?"
+
+    def test_retrieval_observability_emits_counts_without_sensitive_attributes(
+        self, indexed_plugin: KBPlugin
+    ):
+        sink = RecordingObservationSink()
+        indexed_plugin.do_mount(ctx=_MountContext(sink))
+        tape = Tape()
+        tape.append(
+            Entry(
+                kind="message",
+                payload={
+                    "role": "user",
+                    "content": "secret prompt auth token should not be exported",
+                },
+            )
+        )
+
+        indexed_plugin.build_context(tape=tape)
+
+        search_span = _span_by_name(sink, "retrieval.kb.search")
+        render_span = _span_by_name(sink, "context_pack.render")
+        assert search_span.attributes == {
+            "retrieval.cache_hit": False,
+            "retrieval.candidate_count": 2,
+            "retrieval.kb_chunk_count": 0,
+            "retrieval.query_present": True,
+            "retrieval.repo_file_count": 2,
+            "retrieval.selected_count": 2,
+            "retrieval.source_kind": "kb",
+            "retrieval.test_failure_count": 0,
+            "retrieval.top_k": 5,
+        }
+        assert render_span.attributes == {
+            "pack.item_count": 2,
+            "pack.kb_chunk_count": 0,
+            "pack.repo_file_count": 2,
+            "pack.section_count": 1,
+            "pack.test_failure_count": 0,
+        }
+        for span in (search_span, render_span):
+            serialized = _serialized_attributes(span)
+            assert "secret prompt auth token" not in serialized
+            assert "Authentication module" not in serialized
+            assert "API documentation" not in serialized
+            assert "src/auth.py" not in serialized
+            assert "docs/api.md" not in serialized
+            assert not any(
+                forbidden in key
+                for key in span.attributes
+                for forbidden in (
+                    "content",
+                    "message",
+                    "prompt",
+                    "result",
+                    "secret",
+                    "text",
+                )
+            )
+
+    def test_retrieval_observability_records_cache_hit_without_query_content(
+        self, indexed_plugin: KBPlugin
+    ):
+        sink = RecordingObservationSink()
+        indexed_plugin.do_mount(ctx=_MountContext(sink))
+        tape = Tape()
+        tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "user", "content": "How does auth work?"},
+            )
+        )
+
+        indexed_plugin.build_context(tape=tape)
+        indexed_plugin.build_context(tape=tape)
+
+        search_spans = [
+            span for span in sink.spans if span.name == "retrieval.kb.search"
+        ]
+        assert [span.attributes["retrieval.cache_hit"] for span in search_spans] == [
+            False,
+            True,
+        ]
+        assert search_spans[1].attributes["retrieval.selected_count"] == 2
+        serialized_cache_hit = _serialized_attributes(search_spans[1])
+        assert "How does auth work?" not in serialized_cache_hit
+        assert "src/auth.py" not in serialized_cache_hit
+        assert "docs/api.md" not in serialized_cache_hit
