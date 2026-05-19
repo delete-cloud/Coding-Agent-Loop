@@ -364,3 +364,67 @@ Remaining risks:
 
 - G16 indexes and retrieves test-failure evidence but does not render context packs or inject through `build_context`; those remain G17/G18.
 - G16 stores bounded failure snippets for retrieval; richer pytest output parsing and automatic command-log ingestion are deferred unless future goals require them.
+
+## G17 - Context Pack Data Model And Renderer Contract
+
+Status: passed local verification.
+
+### Before
+
+Goal id: G17
+
+Intended files:
+
+- `src/coding_agent/context_pack.py`
+- `tests/coding_agent/test_context_pack.py`
+- `docs/context_system/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/context-system-g17-context-pack-model.md`
+
+Verification commands:
+
+- `uv run pytest tests/coding_agent/test_context_pack.py -v`
+- `uv run pytest tests/coding_agent/ -k "context_pack or retrieval or memory or evaluation" -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context" -v`
+
+Stop criteria:
+
+- Change requires `build_context` plugin wiring.
+- Change requires AgentKit runtime changes.
+- Deterministic verification cannot be produced.
+- More than two fix iterations fail for the same reason.
+
+Postmortem routing:
+
+- Intended G17 production file is new and does not match any `postmortem/index.yaml` `related_files` entry.
+
+### After
+
+Changed files:
+
+- `src/coding_agent/context_pack.py`
+- `tests/coding_agent/test_context_pack.py`
+- `docs/context_system/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/context-system-g17-context-pack-model.md`
+
+Tests run:
+
+- Red: `uv run pytest tests/coding_agent/test_context_pack.py -v`
+- Green: `uv run pytest tests/coding_agent/test_context_pack.py -v`
+- `uv run ruff format --check src/coding_agent/context_pack.py tests/coding_agent/test_context_pack.py`
+- `git diff --check -- .`
+- `uv run pytest tests/coding_agent/ -k "context_pack or retrieval or memory or evaluation" -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context" -v`
+
+Results:
+
+- Red test failed before `coding_agent.context_pack` existed.
+- Focused context pack tests passed after implementation: 4 passed.
+- Ruff format check passed after formatting the test file.
+- Git diff whitespace check passed.
+- Coding Agent context/memory/evaluation filtered tests passed: 33 passed, 586 deselected.
+- AgentKit build_context regression tests passed: 7 passed, 30 deselected.
+
+Remaining risks:
+
+- G17 defines and renders context packs but does not inject them through plugin `build_context`; that remains G18.
+- G17 renders memory as evidence-backed reference material and omits unevidenced memory by default, but persisted memory evidence fields are not added until G22.
