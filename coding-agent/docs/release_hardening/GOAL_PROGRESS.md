@@ -396,3 +396,77 @@ Remaining risks:
 
 - G42 treats `README.md` and `docs/release_hardening/release-verification.yaml` as live release contracts; archived design docs under `docs/superpowers/` are intentionally excluded.
 - The docs command parser covers fenced `bash` command examples and does not attempt to lint prose-only command mentions.
+
+## G43 - Observability Metadata Safety Contract
+
+Status: in progress.
+
+### Before
+
+Goal id: G43
+
+Intended files:
+
+- `tests/coding_agent/test_release_observability_contract.py`
+- `docs/release_hardening/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/release-hardening-g43-observability-contract.md`
+
+Verification commands:
+
+- `uv run pytest tests/coding_agent/test_release_observability_contract.py -v`
+- `uv run pytest tests/coding_agent/test_observability.py tests/coding_agent/action_safety/test_action_observability.py tests/coding_agent/plugins/test_kb_plugin.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check tests/coding_agent/test_release_observability_contract.py`
+- `uv run ruff check tests/coding_agent/test_release_observability_contract.py`
+- `git diff --check -- .`
+
+Stop criteria:
+
+- Observability safety checks require changing durable runtime, context-system, or action-safety semantics.
+- Checks require real observability backends, external services, production credentials, or real LLM calls.
+- The release contract cannot avoid raw prompt/content/message/result/secret/text values in span attributes.
+- More than two fix iterations fail for the same reason.
+
+Postmortem routing:
+
+- G43 is observability test scoped. PM-0005 was consulted because it covers redaction failures, but its release checks apply to adapter changes; G43 does not modify `src/coding_agent/adapter.py`.
+
+### After
+
+Changed files:
+
+- `tests/coding_agent/test_release_observability_contract.py`
+- `docs/release_hardening/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/release-hardening-g43-observability-contract.md`
+
+Tests run:
+
+- `uv run pytest tests/coding_agent/test_release_observability_contract.py -v`
+- `uv run pytest tests/coding_agent/test_observability.py tests/coding_agent/action_safety/test_action_observability.py tests/coding_agent/plugins/test_kb_plugin.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check tests/coding_agent/test_release_observability_contract.py`
+- `uv run ruff check tests/coding_agent/test_release_observability_contract.py`
+- `git diff --check -- .`
+
+Results:
+
+- Release observability contract tests passed: 3 passed.
+- Existing observability, action observability, and KB plugin observability tests passed: 24 passed.
+- Context-system smoke test passed: 1 passed.
+- Action-safety smoke test passed: 1 passed.
+- AgentKit build_context/runtime-stage span tests passed: 8 passed, 29 deselected.
+- Scoped ruff format/check passed for `tests/coding_agent/test_release_observability_contract.py`.
+- Diff whitespace check passed.
+
+Local review:
+
+- Initial test fixtures used stale constructor shapes for `AgentRunContext` and `ContextPackItem`; G43 fixed the fixtures to match current runtime/environment and context-pack models before final verification.
+
+Remaining risks:
+
+- G43 is a release-level representative contract for exporter, runtime trace metadata, action, retrieval, and context-pack attributes; it is not a full static proof over every future attribute factory.
+- The OTLP sink still accepts raw values internally on `SpanRecord`, but the product exporter drops sensitive keys before serialization, matching the current observability boundary.
