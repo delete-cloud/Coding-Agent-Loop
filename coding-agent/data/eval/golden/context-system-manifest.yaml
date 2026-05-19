@@ -1,0 +1,12 @@
+version: 1
+
+cases:
+  - id: parent-child-subagent-baseline
+    tape: parent-child-subagent-001.jsonl
+    spec: parent-child-subagent-001.yaml
+    visibility: visible
+    tags:
+      - context-system
+      - baseline
+    metadata:
+      area: evaluation-harness

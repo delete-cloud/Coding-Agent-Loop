@@ -9,6 +9,12 @@ from .adapter import (
     load_tape_entries,
     turn_to_test_case,
 )
+from .manifest import (
+    EvaluationManifest,
+    EvaluationManifestCase,
+    build_manifest_test_cases,
+    load_evaluation_manifest,
+)
 from .metrics import (
     make_tool_correctness_metric,
     metric_measure,
@@ -18,8 +24,12 @@ from .metrics import (
 __all__ = [
     "EvaluationTestCase",
     "EvaluationToolCall",
+    "EvaluationManifest",
+    "EvaluationManifestCase",
     "GoldenTurnSpec",
+    "build_manifest_test_cases",
     "build_test_cases",
+    "load_evaluation_manifest",
     "load_golden_spec",
     "load_tape_entries",
     "make_tool_correctness_metric",

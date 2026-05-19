@@ -561,3 +561,75 @@ Remaining risks:
 
 - G19 observes the existing synchronous KB search path only; richer multi-source retrieval composition remains later context-system work.
 - G19 does not add new exporter behavior beyond existing observation sink contracts.
+
+## G20 - Manifest-Driven Deterministic Evaluation Harness Baseline
+
+Status: passed local verification; pending PR.
+
+### Before
+
+Goal id: G20
+
+Intended files:
+
+- `src/coding_agent/evaluation/manifest.py`
+- `src/coding_agent/evaluation/__init__.py`
+- `tests/coding_agent/evaluation/test_manifest.py`
+- `data/eval/golden/context-system-manifest.yaml`
+- `docs/context_system/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/context-system-g20-evaluation-manifest.md`
+
+Verification commands:
+
+- `uv run pytest tests/coding_agent/evaluation/test_manifest.py -v`
+- `uv run pytest tests/coding_agent/evaluation/test_adapter.py tests/coding_agent/evaluation/test_manifest.py -v`
+- `uv run pytest tests/coding_agent/ -k "context_pack or retrieval or memory or evaluation" -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context" -v`
+
+Stop criteria:
+
+- Change requires AgentKit runtime or pipeline changes.
+- Change requires external LLM calls, DeepEval, production credentials, or external services.
+- Change breaks JSONL tape fixture compatibility.
+- Deterministic verification cannot be produced.
+- More than two fix iterations fail for the same reason.
+
+Postmortem routing:
+
+- Intended G20 files do not match any `postmortem/index.yaml` `related_files` entry.
+
+### After
+
+Changed files:
+
+- `src/coding_agent/evaluation/manifest.py`
+- `src/coding_agent/evaluation/__init__.py`
+- `tests/coding_agent/evaluation/test_manifest.py`
+- `data/eval/golden/context-system-manifest.yaml`
+- `docs/context_system/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/context-system-g20-evaluation-manifest.md`
+
+Verification results:
+
+- Red: `uv run pytest tests/coding_agent/evaluation/test_manifest.py -v` failed during collection because `EvaluationManifest` was not exported yet.
+- Green: `uv run pytest tests/coding_agent/evaluation/test_manifest.py -v` passed with 3 passed.
+- Manual review regression: `uv run pytest tests/coding_agent/evaluation/test_manifest.py -v` failed when a list-key YAML fixture errored before schema validation; the regression was adjusted to use a numeric metadata key and passed with 4 passed.
+- `uv run pytest tests/coding_agent/evaluation/test_adapter.py tests/coding_agent/evaluation/test_manifest.py -v` passed with 10 passed.
+- `uv run pytest tests/coding_agent/evaluation/ -v` passed with 14 passed.
+- `uv run ruff format --check src/coding_agent/evaluation tests/coding_agent/evaluation` passed with 8 files already formatted.
+- `uv run ruff check src/coding_agent/evaluation tests/coding_agent/evaluation` passed.
+- `git diff --check -- .` passed.
+- `uv run pytest tests/coding_agent/ -k "context_pack or retrieval or memory or evaluation" -v` passed with 41 passed, 585 deselected.
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context" -v` passed with 7 passed, 30 deselected.
+- Local subagent review was attempted but did not return before timeout; per workflow override, manual P1/P2 review checked path resolution, JSONL/golden compatibility, external-service boundaries, and manifest schema validation.
+
+Implementation notes:
+
+- Added a YAML manifest loader for local fixture-backed evaluation cases.
+- Added `build_manifest_test_cases` to construct existing `EvaluationTestCase` objects from manifest entries without DeepEval, external LLM calls, or credentials.
+- Manifest-derived cases preserve JSONL tape/golden-spec adapter behavior and add manifest metadata under explicit metadata keys.
+
+Remaining risks:
+
+- G20 uses the existing parent/child golden fixture to prove manifest mechanics; retrieval and context-pack-specific golden cases remain G21.
+- The manifest runner builds local deterministic cases only; metric execution and external judges remain optional adapter behavior outside this baseline.
