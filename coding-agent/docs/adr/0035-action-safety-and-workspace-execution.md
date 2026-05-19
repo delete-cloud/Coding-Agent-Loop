@@ -79,8 +79,8 @@ Implementation of G27-G37 should add executable tests covering these contracts:
 - [x] `test_workspace_snapshot_restore_preserves_git_and_recovers_modified_files`
 - [x] `test_high_risk_file_or_command_action_routes_to_approval`
 - [x] `test_safe_action_smoke_covers_patch_command_validation_and_restore`
-- [ ] `uv run pytest tests/coding_agent/ -k "action_safety or safe_edit or patch_plan or command_policy or validation_runner or workspace_snapshot" -v`
-- [ ] `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- [x] `uv run pytest tests/coding_agent/ -k "action_safety or safe_edit or patch_plan or command_policy or validation_runner or workspace_snapshot" -v`
+- [x] `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
 
 ## References
 

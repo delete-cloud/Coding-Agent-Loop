@@ -871,7 +871,7 @@ Remaining risks:
 
 ## G36 - End-to-End Safe Action Smoke
 
-Status: in progress.
+Status: merged via PR #238.
 
 ### Before
 
@@ -942,3 +942,81 @@ Remaining risks:
 
 - G36 is a deterministic composition smoke test; it still does not wire action-safety primitives into live autonomous execution paths.
 - The smoke test intentionally uses an allowed validation command without file path arguments because path-bearing Python commands remain conservatively denied by the current command policy.
+
+## G37 - Final Audit And Implementation Report
+
+Status: in progress.
+
+### Before
+
+Goal id: G37
+
+Intended files:
+
+- `docs/action_safety/IMPLEMENTATION_REPORT.md`
+- `docs/action_safety/GOAL_PROGRESS.md`
+- `docs/adr/0035-action-safety-and-workspace-execution.md`
+- `tests/coding_agent/action_safety/test_safe_action_smoke.py`
+- `.opencode/prompts/tasks/action-safety-g37-final-audit.md`
+
+Verification commands:
+
+- `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+- `uv run pytest tests/coding_agent/ -k "action_safety or safe_edit or patch_plan or command_policy or validation_runner or workspace_snapshot" -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/integration/test_durable_runtime_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `uv run ruff check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `git diff --check -- .`
+
+Stop criteria:
+
+- Final audit discovers a failed acceptance criterion that cannot be fixed without changing durable runtime, context-system authority semantics, approval coordinator/store behavior, or live autonomous execution wiring.
+- Verification requires full-repository ruff cleanup outside this phase.
+- Safe audit/report evidence would require raw prompts, messages, results, secrets, command output, or file content.
+- More than two fix iterations fail for the same reason.
+
+Postmortem routing:
+
+- G37 is report/audit scoped. It also tightens G36 smoke assertions based on local review feedback, so the G36 smoke test remains in final verification.
+
+### After
+
+Changed files:
+
+- `docs/action_safety/IMPLEMENTATION_REPORT.md`
+- `docs/action_safety/GOAL_PROGRESS.md`
+- `docs/adr/0035-action-safety-and-workspace-execution.md`
+- `tests/coding_agent/action_safety/test_safe_action_smoke.py`
+- `.opencode/prompts/tasks/action-safety-g37-final-audit.md`
+
+Tests run:
+
+- `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+- `uv run pytest tests/coding_agent/ -k "action_safety or safe_edit or patch_plan or command_policy or validation_runner or workspace_snapshot" -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/integration/test_durable_runtime_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `uv run ruff check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `git diff --check -- .`
+
+Results:
+
+- Strengthened safe action smoke test passed: 1 passed.
+- ADR action-safety selector passed: 51 passed, 641 deselected.
+- Context-system smoke test passed: 1 passed.
+- Durable runtime smoke tests passed: 6 passed, 32 warnings from `slowapi` deprecation in dependencies.
+- AgentKit build_context/runtime-stage span tests passed: 8 passed, 29 deselected.
+- Scoped ruff format/check passed for `src/coding_agent/action_safety` and `tests/coding_agent/action_safety`.
+- Diff whitespace check passed.
+
+Local review:
+
+- Late G36 local review found and G37 fixed three smoke-test assertion gaps: patch tool payloads are now included in no-leak checks, validation command strings are asserted absent from safe payloads, and patch/validation/restore spans now assert expected final safe metadata.
+
+Remaining risks:
+
+- G37 completes the phase-level implementation report and acceptance audit, but it does not wire action-safety primitives into every live autonomous execution path.
+- Full-repository ruff remains outside this phase scope; G37 only ran scoped action-safety ruff checks.

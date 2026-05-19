@@ -204,9 +204,32 @@ def test_safe_action_smoke_covers_patch_command_validation_and_restore(
         ACTION_OBSERVATION_NAME,
         ACTION_OBSERVATION_NAME,
     ]
+    patch_attributes = sink.spans[0].attributes
+    assert patch_attributes["action_kind"] == "patch"
+    assert patch_attributes["action_status"] == "completed"
+    assert patch_attributes["policy_decision"] == "allow"
+    assert patch_attributes["risk_level"] == "low"
+    assert patch_attributes["changed_path_count"] == 1
+    assert patch_attributes["file_extension_buckets"] == "py"
+    assert patch_attributes["dry_run"] is False
+
+    validation_attributes = sink.spans[1].attributes
+    assert validation_attributes["action_kind"] == "validation"
+    assert validation_attributes["action_status"] == "completed"
+    assert validation_attributes["policy_decision"] == "allow"
+    assert validation_attributes["command_label"] == "unit_smoke"
+    assert validation_attributes["exit_code"] == 0
+
+    restore_attributes = sink.spans[2].attributes
+    assert restore_attributes["action_kind"] == "restore"
+    assert restore_attributes["action_status"] == "completed"
+    assert restore_attributes["restore_status"] == "completed"
+    assert restore_attributes["changed_path_count"] == snapshot.file_count
 
     serialized_safe_payloads = json.dumps(
         {
+            "dry_run_payload": dry_run_payload,
+            "apply_payload": apply_payload,
             "patch_route": patch_route.to_safe_dict(),
             "command_route": command_route.to_safe_dict(),
             "approval_route": approval_route.to_safe_dict(),
@@ -217,4 +240,6 @@ def test_safe_action_smoke_covers_patch_command_validation_and_restore(
     )
     assert "return 'after'" not in serialized_safe_payloads
     assert "return 'before'" not in serialized_safe_payloads
+    assert validation_command not in serialized_safe_payloads
+    assert "-c pass" not in serialized_safe_payloads
     assert "rm -rf" not in serialized_safe_payloads
