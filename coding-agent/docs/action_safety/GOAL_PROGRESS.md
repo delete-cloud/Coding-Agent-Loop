@@ -326,7 +326,7 @@ Remaining risks:
 
 ## G29 - Patch Dry-Run And Preview Validation
 
-Status: passed local verification; pending PR.
+Status: merged via PR #231.
 
 ### Before
 
@@ -401,3 +401,80 @@ Remaining risks:
 - G29 keeps multi-file transactions out of scope.
 - Approval routing and command policy remain future goals.
 - Local review found and G29 fixed a compatibility regression: standard single-file git diffs are accepted in both dry-run and default apply paths.
+
+## G30 - Command Execution Policy Model
+
+Status: passed local verification; pending PR.
+
+### Before
+
+Goal id: G30
+
+Intended files:
+
+- `src/coding_agent/action_safety/__init__.py`
+- `src/coding_agent/action_safety/command_policy.py`
+- `tests/coding_agent/action_safety/test_command_policy.py`
+- `docs/adr/0035-action-safety-and-workspace-execution.md`
+- `docs/action_safety/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/action-safety-g30-command-policy.md`
+
+Verification commands:
+
+- `uv run pytest tests/coding_agent/action_safety/test_command_policy.py tests/coding_agent/action_safety/test_safe_edit.py tests/coding_agent/action_safety/test_patch_plan.py -v`
+- `uv run pytest tests/coding_agent/tools/test_shell.py tests/approval/test_policy.py tests/coding_agent/environment/test_cloud_environment.py tests/coding_agent/environment/test_local_environment.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `uv run ruff check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `git diff --check -- .`
+
+Stop criteria:
+
+- Command policy model requires `bash_run` execution integration.
+- Command policy model requires approval coordinator routing.
+- Implementation would expose raw command arguments or environment values in safe summaries.
+- Implementation would require AgentKit pipeline changes.
+- More than two fix iterations fail for the same reason.
+
+Postmortem routing:
+
+- Intended G30 production/test files are action-safety files and do not directly match `postmortem/index.yaml` `related_files`.
+- Later shell/core tool integration must apply PM-0001/PM-0009 focused checks.
+
+### After
+
+Changed files:
+
+- `src/coding_agent/action_safety/__init__.py`
+- `src/coding_agent/action_safety/command_policy.py`
+- `tests/coding_agent/action_safety/test_command_policy.py`
+- `docs/adr/0035-action-safety-and-workspace-execution.md`
+- `docs/action_safety/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/action-safety-g30-command-policy.md`
+
+Tests run:
+
+- `uv run pytest tests/coding_agent/action_safety/test_command_policy.py tests/coding_agent/action_safety/test_safe_edit.py tests/coding_agent/action_safety/test_patch_plan.py -v`
+- `uv run pytest tests/coding_agent/tools/test_shell.py tests/approval/test_policy.py tests/coding_agent/environment/test_cloud_environment.py tests/coding_agent/environment/test_local_environment.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `uv run ruff check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `git diff --check -- .`
+
+Results:
+
+- Command policy, safe edit, and patch planning tests passed: 20 passed.
+- Shell tool, approval policy, cloud environment, and local environment tests passed: 28 passed.
+- Context-system smoke test passed: 1 passed.
+- AgentKit build_context/runtime-stage span tests passed: 8 passed, 29 deselected.
+- Scoped ruff format/check passed for `src/coding_agent/action_safety` and `tests/coding_agent/action_safety`.
+- Diff whitespace check passed.
+
+Remaining risks:
+
+- G30 does not wire command policy into local or cloud `bash_run`; later goals own execution integration and approval routing.
+- Validation command handling is a policy classification only; G31 owns validation runner execution and outcomes.
+- The allow/approval command lists are intentionally conservative and can be refined when command policy is integrated into execution.
+- Local review found and G30 fixed three policy risks: validation commands cannot bypass destructive/package-install approval, raw shell syntax is denied before local/cloud execution, and safe summaries sanitize command names.

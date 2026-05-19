@@ -1,3 +1,9 @@
+from .command_policy import (
+    CommandPolicyDecision,
+    CommandPolicyReason,
+    CommandPolicyVerdict,
+    evaluate_command_policy,
+)
 from .patch_plan import (
     PatchHunkPlan,
     PatchOperation,
@@ -12,6 +18,9 @@ from .safe_edit import (
 )
 
 __all__ = [
+    "CommandPolicyDecision",
+    "CommandPolicyReason",
+    "CommandPolicyVerdict",
     "PatchHunkPlan",
     "PatchOperation",
     "PatchPlan",
@@ -19,5 +28,6 @@ __all__ = [
     "SafeEditDecision",
     "SafeEditReason",
     "build_patch_plan",
+    "evaluate_command_policy",
     "validate_safe_edit_path",
 ]
