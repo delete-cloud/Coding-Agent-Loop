@@ -17,6 +17,30 @@ import pyarrow as pa
 
 logger = logging.getLogger(__name__)
 
+_METADATA_VERSION = 1
+_LANGUAGE_BY_SUFFIX = {
+    ".bash": "shell",
+    ".cfg": "config",
+    ".css": "css",
+    ".fish": "shell",
+    ".html": "html",
+    ".ini": "config",
+    ".js": "javascript",
+    ".json": "json",
+    ".jsx": "javascript",
+    ".md": "markdown",
+    ".py": "python",
+    ".rst": "rst",
+    ".sh": "shell",
+    ".toml": "toml",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".txt": "text",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+    ".zsh": "shell",
+}
+
 from rich.console import Console
 from rich.progress import (
     Progress,
@@ -45,6 +69,67 @@ class KBSearchResult:
 
     chunk: DocumentChunk
     score: float
+
+
+def _repo_relative_path(path: Path, repo_root: Path | None) -> str | None:
+    path = Path(path)
+    if repo_root is None:
+        if path.is_absolute():
+            return None
+        return path.as_posix()
+
+    root = Path(os.path.abspath(repo_root))
+    candidate = path if path.is_absolute() else root / path
+    candidate = Path(os.path.abspath(candidate))
+    try:
+        return candidate.relative_to(root).as_posix()
+    except ValueError as exc:
+        raise ValueError(f"{path} is outside repo_root {repo_root}") from exc
+
+
+def _path_target_within_repo(path: Path, repo_root: Path) -> bool:
+    root = Path(repo_root)
+    candidate = path if path.is_absolute() else root / path
+    if not candidate.exists() and not candidate.is_symlink():
+        return True
+
+    try:
+        candidate.resolve(strict=True).relative_to(root.resolve(strict=True))
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _language_for_path(path: Path) -> str:
+    suffix = Path(path).suffix.lower()
+    if suffix in _LANGUAGE_BY_SUFFIX:
+        return _LANGUAGE_BY_SUFFIX[suffix]
+    if suffix:
+        return suffix.removeprefix(".")
+    return "unknown"
+
+
+def _source_id(
+    *,
+    source_kind: str,
+    repo_path: str | None,
+    source: str,
+) -> str:
+    if not source_kind.strip():
+        raise ValueError("source_kind must be non-empty")
+    source_key = repo_path if repo_path is not None else source
+    return hashlib.sha256(f"{source_kind}:{source_key}".encode("utf-8")).hexdigest()
+
+
+def _line_range_for_span(text: str, start: int, end: int) -> tuple[int, int]:
+    line_start = text.count("\n", 0, start) + 1
+    if end <= start:
+        return line_start, line_start
+
+    line_end = text.count("\n", 0, end)
+    if text[end - 1] != "\n":
+        line_end += 1
+    return line_start, max(line_start, line_end)
 
 
 class KB:
@@ -209,20 +294,23 @@ class KB:
         Returns:
             List of text chunks.
         """
+        return [chunk for chunk, _start, _end in self._chunk_text_with_spans(text)]
+
+    def _chunk_text_with_spans(self, text: str) -> list[tuple[str, int, int]]:
         chars_per_token = 4
         chunk_chars = self.chunk_size * chars_per_token
         overlap_chars = self.chunk_overlap * chars_per_token
 
         if len(text) <= chunk_chars:
-            return [text]
+            return [(text, 0, len(text))]
 
-        chunks = []
+        chunks: list[tuple[str, int, int]] = []
         start = 0
 
         while start < len(text):
             end = start + chunk_chars
             chunk = text[start:end]
-            chunks.append(chunk)
+            chunks.append((chunk, start, min(end, len(text))))
             start += chunk_chars - overlap_chars
 
             # Avoid infinite loop for very small texts
@@ -262,17 +350,37 @@ class KB:
     def has_table(self, table_name: str = "chunks") -> bool:
         return table_name in self._table_names()
 
-    async def index_file(self, path: Path, content: str) -> None:
+    async def index_file(
+        self,
+        path: Path,
+        content: str,
+        *,
+        repo_root: Path | None = None,
+        source_kind: str = "repo_file",
+    ) -> None:
         """Index a single file into the knowledge base.
 
         Args:
             path: The file path (used as source identifier).
             content: The file content to index.
         """
+        path = Path(path)
+        source = str(path)
+        if repo_root is not None and not _path_target_within_repo(path, repo_root):
+            raise ValueError(f"{path} target is outside repo_root {repo_root}")
+        repo_path = _repo_relative_path(path, repo_root)
+        document_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        source_id = _source_id(
+            source_kind=source_kind,
+            repo_path=repo_path,
+            source=source,
+        )
+
         table = self._get_table()
 
         # Split content into chunks
-        chunks = self._chunk_text(content)
+        chunk_spans = self._chunk_text_with_spans(content)
+        chunks = [chunk for chunk, _start, _end in chunk_spans]
 
         if not chunks or all(not c.strip() for c in chunks):
             return
@@ -283,18 +391,31 @@ class KB:
         # Prepare data for insertion
         import json
 
-        source = str(path)
         data = []
-        for i, (chunk_content, embedding) in enumerate(zip(chunks, embeddings)):
+        for i, ((chunk_content, start, end), embedding) in enumerate(
+            zip(chunk_spans, embeddings, strict=True)
+        ):
             # Generate deterministic ID based on content hash
             content_hash = hashlib.sha256(
                 f"{source}:{i}:{chunk_content}".encode()
             ).hexdigest()
             chunk_id = f"{uuid.uuid4().hex[:8]}_{content_hash[:16]}"
+            line_start, line_end = _line_range_for_span(content, start, end)
 
             metadata = {
+                "metadata_version": _METADATA_VERSION,
+                "source_kind": source_kind,
+                "source_id": source_id,
+                "repo_path": repo_path,
+                "language": _language_for_path(path),
+                "document_sha256": document_sha256,
+                "chunk_sha256": hashlib.sha256(
+                    chunk_content.encode("utf-8")
+                ).hexdigest(),
                 "chunk_index": i,
                 "total_chunks": len(chunks),
+                "line_start": line_start,
+                "line_end": line_end,
             }
 
             data.append(
@@ -341,9 +462,11 @@ class KB:
             # Original implementation without progress
             for path in files:
                 try:
+                    if not _path_target_within_repo(path, root):
+                        continue
                     content = path.read_text(encoding="utf-8")
-                    await self.index_file(path, content)
-                except (IOError, UnicodeDecodeError):
+                    await self.index_file(path, content, repo_root=root)
+                except (IOError, UnicodeDecodeError, ValueError):
                     continue
             return
 
@@ -372,9 +495,11 @@ class KB:
                 progress.update(task, description=f"Indexing [cyan]{path.name}")
 
                 try:
+                    if not _path_target_within_repo(path, root):
+                        continue
                     content = path.read_text(encoding="utf-8")
-                    await self.index_file(path, content)
-                except (IOError, UnicodeDecodeError) as e:
+                    await self.index_file(path, content, repo_root=root)
+                except (IOError, UnicodeDecodeError, ValueError) as e:
                     errors.append((path, e))
                 finally:
                     progress.advance(task)
