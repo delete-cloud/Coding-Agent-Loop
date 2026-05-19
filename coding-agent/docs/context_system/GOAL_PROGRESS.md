@@ -636,7 +636,7 @@ Remaining risks:
 
 ## G21 - Evaluation Golden Cases For Retrieval And Context-Pack Behavior
 
-Status: passed local verification; pending PR.
+Status: merged via PR #222.
 
 ### Before
 
@@ -709,3 +709,73 @@ Remaining risks:
 
 - G21 covers KB-backed retrieval/context-pack behavior only; memory evidence golden behavior remains G22/G23.
 - G21 uses a purpose-built fake embedder for deterministic fixture ranking and does not attempt to evaluate production embedding quality.
+
+## G22 - Memory Records With Evidence References And JSONL-Compatible Migration
+
+Status: passed local verification; pending PR.
+
+### Before
+
+Goal id: G22
+
+Intended files:
+
+- `src/coding_agent/plugins/memory.py`
+- `tests/coding_agent/plugins/test_memory.py`
+- `docs/context_system/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/context-system-g22-memory-evidence.md`
+
+Verification commands:
+
+- `uv run pytest tests/coding_agent/plugins/test_memory.py -k "evidence or Persistence" -v`
+- `uv run pytest tests/coding_agent/plugins/test_memory.py -v`
+- `uv run pytest tests/coding_agent/ -k "context_pack or retrieval or memory or evaluation" -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context" -v`
+
+Stop criteria:
+
+- Change requires AgentKit runtime or pipeline changes.
+- Change requires changing `agentkit.directive.types.MemoryRecord`.
+- Change requires changing memory rendering/injection semantics; that belongs to G23.
+- Change breaks loading legacy JSONL `memory_record` payloads without evidence.
+- Deterministic verification cannot be produced.
+- More than two fix iterations fail for the same reason.
+
+Postmortem routing:
+
+- `src/coding_agent/plugins/memory.py` and `tests/coding_agent/plugins/test_memory.py` match PM-0009. Release checks: run focused affected memory tests and review control-flow shape before shipping.
+
+### After
+
+Changed files:
+
+- `src/coding_agent/plugins/memory.py`
+- `tests/coding_agent/plugins/test_memory.py`
+- `docs/context_system/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/context-system-g22-memory-evidence.md`
+
+Verification results:
+
+- Red: `uv run pytest tests/coding_agent/plugins/test_memory.py -k "evidence or Persistence" -v` failed with 3 failed, 17 deselected before memory records carried evidence.
+- Local review found one P2 issue: malformed persisted evidence with `line_end < line_start` preserved an invalid range. Red: `uv run pytest tests/coding_agent/plugins/test_memory.py -k "invalid_persisted_evidence_ranges" -v` failed with 1 failed, 20 deselected before range normalization.
+- Green: `uv run pytest tests/coding_agent/plugins/test_memory.py -k "invalid_persisted_evidence_ranges" -v` passed with 1 passed, 20 deselected after invalid ranges were stripped.
+- Green: `uv run pytest tests/coding_agent/plugins/test_memory.py -k "evidence or Persistence" -v` passed with 4 passed, 17 deselected.
+- `uv run ruff format --check src/coding_agent/plugins/memory.py tests/coding_agent/plugins/test_memory.py` passed with both files already formatted after formatting the touched test file.
+- `uv run ruff check src/coding_agent/plugins/memory.py tests/coding_agent/plugins/test_memory.py` passed after removing unused imports from the touched test file.
+- `git diff --check -- .` passed.
+- `uv run pytest tests/coding_agent/plugins/test_memory.py -v` passed with 21 passed.
+- `uv run pytest tests/coding_agent/ -k "context_pack or retrieval or memory or evaluation" -v` passed with 49 passed, 585 deselected.
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context" -v` passed with 7 passed, 30 deselected.
+
+Implementation notes:
+
+- New working memories infer JSON-safe repo-file evidence references from file-like tags.
+- Topic compaction merges repo-file evidence from topic files and working memories before persisting JSONL memory records.
+- Legacy JSONL memory records without `evidence` still load, receive importance decay, and normalize to `evidence: []`.
+- Malformed persisted evidence ranges are normalized by dropping invalid line fields before future context-pack rendering consumes them.
+- Memory rendering/injection behavior is intentionally unchanged for G22.
+
+Remaining risks:
+
+- G22 records evidence but still renders legacy `[Memory]` grounding; G23 owns rendering memory as context-pack reference material and omitting unevidenced memories.
+- Evidence inference is intentionally conservative and file-tag based; richer tape-entry/session/test-failure evidence can be added without breaking the JSONL shape.
