@@ -29,6 +29,8 @@ class EvidenceRef:
     chunk_id: str | None = None
     test_node_id: str | None = None
     command_label: str | None = None
+    session_id: str | None = None
+    tape_entry_id: str | None = None
 
     def __post_init__(self) -> None:
         _require_non_empty(self.kind, "kind")
@@ -48,6 +50,8 @@ class EvidenceRef:
         _add_optional(payload, "chunk_id", self.chunk_id)
         _add_optional(payload, "test_node_id", self.test_node_id)
         _add_optional(payload, "command_label", self.command_label)
+        _add_optional(payload, "session_id", self.session_id)
+        _add_optional(payload, "tape_entry_id", self.tape_entry_id)
         return payload
 
 
@@ -263,6 +267,10 @@ def _format_evidence(evidence: EvidenceRef) -> str:
         _append_unique(details, evidence.test_node_id)
     if evidence.command_label is not None:
         _append_unique(details, evidence.command_label)
+    if evidence.session_id is not None:
+        _append_unique(details, evidence.session_id)
+    if evidence.tape_entry_id is not None:
+        _append_unique(details, evidence.tape_entry_id)
     return f"{evidence.kind}:{evidence.source_id} ({'; '.join(details)})"
 
 

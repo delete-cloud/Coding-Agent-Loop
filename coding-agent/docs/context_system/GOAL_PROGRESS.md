@@ -779,3 +779,79 @@ Remaining risks:
 
 - G22 records evidence but still renders legacy `[Memory]` grounding; G23 owns rendering memory as context-pack reference material and omitting unevidenced memories.
 - Evidence inference is intentionally conservative and file-tag based; richer tape-entry/session/test-failure evidence can be added without breaking the JSONL shape.
+
+## G23 - Memory Retrieval And Injection As Evidence-Backed Reference Context
+
+Status: in progress.
+
+### Before
+
+Goal id: G23
+
+Intended files:
+
+- `src/coding_agent/plugins/memory.py`
+- `src/coding_agent/context_pack.py`
+- `tests/coding_agent/plugins/test_memory.py`
+- `tests/coding_agent/test_context_pack.py`
+- `docs/context_system/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/context-system-g23-memory-context-pack.md`
+
+Verification commands:
+
+- `uv run pytest tests/coding_agent/plugins/test_memory.py -k "build_context or TopicScopedRecall" -v`
+- `uv run pytest tests/coding_agent/test_context_pack.py -k "memory" -v`
+- `uv run pytest tests/coding_agent/plugins/test_memory.py tests/coding_agent/test_context_pack.py -v`
+- `uv run pytest tests/coding_agent/ -k "context_pack or retrieval or memory or evaluation" -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context" -v`
+
+Stop criteria:
+
+- Change requires AgentKit runtime, `ContextBuilder`, or directive schema changes.
+- Change renders memory as instructions or policy rather than reference material.
+- Change injects unevidenced memory by default.
+- Change breaks topic-file filtering or importance ordering for memory recall.
+- Deterministic verification cannot be produced.
+- More than two fix iterations fail for the same reason.
+
+Postmortem routing:
+
+- `src/coding_agent/plugins/memory.py`, `src/coding_agent/context_pack.py`, `tests/coding_agent/plugins/test_memory.py`, and `tests/coding_agent/test_context_pack.py` match PM-0009. Release checks: run focused affected tests and review control-flow shape before shipping.
+
+### After
+
+Changed files:
+
+- `src/coding_agent/plugins/memory.py`
+- `src/coding_agent/context_pack.py`
+- `tests/coding_agent/plugins/test_memory.py`
+- `tests/coding_agent/test_context_pack.py`
+- `docs/context_system/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/context-system-g23-memory-context-pack.md`
+
+Verification results:
+
+- Baseline: `uv run pytest tests/coding_agent/plugins/test_memory.py -v` passed with 21 passed before G23 edits.
+- Red: `uv run pytest tests/coding_agent/plugins/test_memory.py -k "build_context or TopicScopedRecall" -v` failed with 3 failed, 3 passed, 16 deselected because memory still used legacy `[Memory]` rendering and unevidenced injection.
+- Red: `uv run pytest tests/coding_agent/test_context_pack.py -k "memory_session_evidence" -v` failed with 1 failed, 4 deselected because `EvidenceRef` did not accept session/tape-entry evidence fields.
+- Green: `uv run pytest tests/coding_agent/plugins/test_memory.py -k "build_context or TopicScopedRecall" -v` passed with 6 passed, 16 deselected.
+- Green: `uv run pytest tests/coding_agent/test_context_pack.py -k "memory" -v` passed with 3 passed, 2 deselected.
+- `uv run ruff format --check src/coding_agent/plugins/memory.py src/coding_agent/context_pack.py tests/coding_agent/plugins/test_memory.py tests/coding_agent/test_context_pack.py` passed with all four files already formatted.
+- `uv run ruff check src/coding_agent/plugins/memory.py src/coding_agent/context_pack.py tests/coding_agent/plugins/test_memory.py tests/coding_agent/test_context_pack.py` passed.
+- `git diff --check -- .` passed.
+- `uv run pytest tests/coding_agent/plugins/test_memory.py tests/coding_agent/test_context_pack.py -v` passed with 27 passed.
+- `uv run pytest tests/coding_agent/ -k "context_pack or retrieval or memory or evaluation" -v` passed with 51 passed, 585 deselected.
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context" -v` passed with 7 passed, 30 deselected.
+
+Implementation notes:
+
+- MemoryPlugin now renders recalled memories through `ContextPackRenderer` as a single `Memory references` section.
+- Memory records without evidence are omitted from grounding by default.
+- Topic-file filtering and importance ordering still choose memory candidates before rendering.
+- Memory context-pack source ids are deterministic hashes of normalized summary, tags, and evidence.
+- ContextPack `EvidenceRef` now supports optional `session_id` and `tape_entry_id` fields for memory evidence.
+
+Remaining risks:
+
+- MemoryPlugin still uses simple tag overlap for memory retrieval; richer memory ranking is outside G23.
+- Unevidenced legacy memories remain persisted and loadable but are intentionally invisible to default grounding.
