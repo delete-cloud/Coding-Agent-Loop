@@ -322,3 +322,77 @@ Remaining risks:
 
 - G41 checks command help and non-interactive default behavior only; it does not execute real agent turns or start the HTTP server.
 - The subprocess module help check validates installed source import behavior through `PYTHONPATH=src`, not a built wheel.
+
+## G42 - Documentation Command And Boundary Consistency
+
+Status: in progress.
+
+### Before
+
+Goal id: G42
+
+Intended files:
+
+- `tests/coding_agent/test_release_documentation_contract.py`
+- `docs/release_hardening/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/release-hardening-g42-doc-contract.md`
+
+Verification commands:
+
+- `uv run pytest tests/coding_agent/test_release_documentation_contract.py -v`
+- `uv run pytest tests/coding_agent/test_release_verification_manifest.py tests/cli/test_entrypoint_contract.py tests/coding_agent/test_package_import_contract.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check tests/coding_agent/test_release_documentation_contract.py`
+- `uv run ruff check tests/coding_agent/test_release_documentation_contract.py`
+- `git diff --check -- .`
+
+Stop criteria:
+
+- Documentation contract checks require changing CLI, runtime, context-system, or action-safety behavior.
+- Checks require external services, production credentials, real LLM calls, or server startup.
+- README parsing becomes broad enough to treat archived design docs as live release contracts.
+- More than two fix iterations fail for the same reason.
+
+Postmortem routing:
+
+- G42 adds tests and release docs only. It does not modify production files listed in `postmortem/index.yaml`.
+
+### After
+
+Changed files:
+
+- `tests/coding_agent/test_release_documentation_contract.py`
+- `docs/release_hardening/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/release-hardening-g42-doc-contract.md`
+
+Tests run:
+
+- `uv run pytest tests/coding_agent/test_release_documentation_contract.py -v`
+- `uv run pytest tests/coding_agent/test_release_verification_manifest.py tests/cli/test_entrypoint_contract.py tests/coding_agent/test_package_import_contract.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check tests/coding_agent/test_release_documentation_contract.py`
+- `uv run ruff check tests/coding_agent/test_release_documentation_contract.py`
+- `git diff --check -- .`
+
+Results:
+
+- Release documentation contract tests passed: 3 passed.
+- Release manifest, CLI entrypoint, and package import contract tests passed: 10 passed.
+- Context-system smoke test passed: 1 passed.
+- Action-safety smoke test passed: 1 passed.
+- AgentKit build_context/runtime-stage span tests passed: 8 passed, 29 deselected.
+- Scoped ruff format/check passed for `tests/coding_agent/test_release_documentation_contract.py`.
+- Diff whitespace check passed.
+
+Local review:
+
+- Initial test implementation was too strict about README tree-block spacing; G42 relaxed that assertion to match the documented boundary semantics rather than exact decoration.
+
+Remaining risks:
+
+- G42 treats `README.md` and `docs/release_hardening/release-verification.yaml` as live release contracts; archived design docs under `docs/superpowers/` are intentionally excluded.
+- The docs command parser covers fenced `bash` command examples and does not attempt to lint prose-only command mentions.
