@@ -249,7 +249,7 @@ Remaining risks:
 
 ## G28 - Safe File Edit Policy
 
-Status: passed local verification; pending PR.
+Status: merged via PR #230.
 
 ### Before
 
@@ -323,3 +323,81 @@ Remaining risks:
 - G28 is local filesystem policy only. Cloud execution still depends on provider/client enforcement until later local/cloud action policy integration.
 - Missing nested parent creation is denied for now; future tool integration can decide whether to create parents after explicit policy coverage.
 - Local review found and G28 fixed a create-target parent validation risk: create under an existing regular file is rejected.
+
+## G29 - Patch Dry-Run And Preview Validation
+
+Status: passed local verification; pending PR.
+
+### Before
+
+Goal id: G29
+
+Intended files:
+
+- `src/coding_agent/tools/file_patch_tool.py`
+- `tests/coding_agent/tools/test_file_patch_tool.py`
+- `docs/adr/0035-action-safety-and-workspace-execution.md`
+- `docs/action_safety/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/action-safety-g29-patch-apply.md`
+
+Verification commands:
+
+- `uv run pytest tests/coding_agent/tools/test_file_patch_tool.py tests/coding_agent/action_safety/test_patch_plan.py tests/coding_agent/action_safety/test_safe_edit.py -v`
+- `uv run pytest tests/coding_agent/environment/test_local_environment.py tests/agentkit/environment/test_protocols.py tests/coding_agent/plugins/test_core_tools_parity.py -v`
+- `uv run pytest tests/coding_agent/tools/test_file_ops.py tests/coding_agent/tools/test_shell.py tests/approval/test_policy.py tests/coding_agent/environment/test_cloud_environment.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check src/coding_agent/action_safety src/coding_agent/tools/file_patch_tool.py tests/coding_agent/action_safety tests/coding_agent/tools/test_file_patch_tool.py`
+- `uv run ruff check src/coding_agent/action_safety src/coding_agent/tools/file_patch_tool.py tests/coding_agent/action_safety tests/coding_agent/tools/test_file_patch_tool.py`
+- `git diff --check -- .`
+
+Stop criteria:
+
+- Patch apply integration requires multi-file transactions.
+- Implementation would expose raw patch/file content in preview summaries.
+- Implementation would require command policy or approval routing from later goals.
+- Implementation would require AgentKit pipeline changes.
+- More than two fix iterations fail for the same reason.
+
+Postmortem routing:
+
+- `src/coding_agent/tools/file_patch_tool.py` is not listed directly in `postmortem/index.yaml`.
+- Because patch execution is registered through `CoreToolsPlugin`, G29 applies PM-0001/PM-0009 style focused tool-control-flow checks and local environment parity tests.
+
+### After
+
+Changed files:
+
+- `src/coding_agent/tools/file_patch_tool.py`
+- `tests/coding_agent/tools/test_file_patch_tool.py`
+- `docs/adr/0035-action-safety-and-workspace-execution.md`
+- `docs/action_safety/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/action-safety-g29-patch-apply.md`
+
+Tests run:
+
+- `uv run pytest tests/coding_agent/tools/test_file_patch_tool.py tests/coding_agent/action_safety/test_patch_plan.py tests/coding_agent/action_safety/test_safe_edit.py -v`
+- `uv run pytest tests/coding_agent/environment/test_local_environment.py tests/agentkit/environment/test_protocols.py tests/coding_agent/plugins/test_core_tools_parity.py -v`
+- `uv run pytest tests/coding_agent/tools/test_file_ops.py tests/coding_agent/tools/test_shell.py tests/approval/test_policy.py tests/coding_agent/environment/test_cloud_environment.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check src/coding_agent/action_safety src/coding_agent/tools/file_patch_tool.py tests/coding_agent/action_safety tests/coding_agent/tools/test_file_patch_tool.py`
+- `uv run ruff check src/coding_agent/action_safety src/coding_agent/tools/file_patch_tool.py tests/coding_agent/action_safety tests/coding_agent/tools/test_file_patch_tool.py`
+- `git diff --check -- .`
+
+Results:
+
+- Patch dry-run, patch planning, and safe edit tests passed: 18 passed.
+- Local environment, AgentKit environment protocol, and core tool parity tests passed: 16 passed.
+- File tools, shell tool, approval policy, and cloud environment tests passed: 31 passed.
+- Context-system smoke test passed: 1 passed.
+- AgentKit build_context/runtime-stage span tests passed: 8 passed, 29 deselected.
+- Scoped ruff format/check passed for changed action-safety and patch-tool files.
+- Diff whitespace check passed.
+
+Remaining risks:
+
+- G29 integrates local `file_patch` only. Cloud `file_patch` still delegates to the cloud client.
+- G29 keeps multi-file transactions out of scope.
+- Approval routing and command policy remain future goals.
+- Local review found and G29 fixed a compatibility regression: standard single-file git diffs are accepted in both dry-run and default apply paths.

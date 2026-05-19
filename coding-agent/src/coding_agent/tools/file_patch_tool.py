@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Callable
 
 from agentkit.tools import tool
+from coding_agent.action_safety import build_patch_plan, validate_safe_edit_path
 
 
 @dataclass
@@ -145,7 +146,7 @@ def build_file_patch_tool(
         name="file_patch",
         description="Apply a unified diff patch to an existing file. The patch should contain @@ hunk headers.",
     )
-    def bound_file_patch(path: str, patch: str) -> str:
+    def bound_file_patch(path: str, patch: str, dry_run: bool = False) -> str:
         try:
             target = _resolve(path)
             if not target.exists():
@@ -154,6 +155,21 @@ def build_file_patch_tool(
                 )
             if not target.is_file():
                 return json.dumps({"success": False, "error": f"Not a file: {path}"})
+            if root is not None:
+                edit_decision = validate_safe_edit_path(root, path)
+                if not edit_decision.allowed:
+                    return json.dumps(
+                        {
+                            "success": False,
+                            "path": path,
+                            "dry_run": dry_run,
+                            "error": "Safe edit policy rejected target",
+                            "reason": edit_decision.reason.value,
+                            "decision": edit_decision.to_safe_dict(),
+                        }
+                    )
+
+            plan = build_patch_plan(path, patch, file_exists=True)
 
             original = target.read_text(encoding="utf-8", errors="replace")
             original_lines = original.splitlines(keepends=True)
@@ -162,11 +178,24 @@ def build_file_patch_tool(
             new_lines, hunk_results = _apply_hunks_to_lines(original_lines, hunks)
             new_content = "".join(new_lines)
 
+            if dry_run:
+                return json.dumps(
+                    {
+                        "success": True,
+                        "path": path,
+                        "dry_run": True,
+                        "changed": new_content != original,
+                        "plan": plan.to_safe_dict(),
+                        "hunks": hunk_results,
+                    }
+                )
+
             if new_content == original:
                 return json.dumps(
                     {
                         "success": True,
                         "path": path,
+                        "dry_run": False,
                         "changed": False,
                         "hunks": hunk_results,
                     }
@@ -180,12 +209,15 @@ def build_file_patch_tool(
                 {
                     "success": True,
                     "path": path,
+                    "dry_run": False,
                     "changed": True,
                     "bytes_written": len(new_content.encode("utf-8")),
                     "hunks": hunk_results,
                 }
             )
         except Exception as e:
-            return json.dumps({"success": False, "error": str(e), "path": path})
+            return json.dumps(
+                {"success": False, "error": str(e), "path": path, "dry_run": dry_run}
+            )
 
     return bound_file_patch

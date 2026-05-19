@@ -165,14 +165,12 @@ def _parse_hunk_plans(patch: str) -> list[PatchHunkPlan]:
 
 
 def _reject_multi_file_patch(lines: list[str]) -> None:
-    file_header_count = sum(
-        1
-        for line in lines
-        if line.startswith("--- ")
-        or line.startswith("+++ ")
-        or line.startswith("diff ")
-    )
-    if file_header_count > 2:
+    diff_header_count = sum(1 for line in lines if line.startswith("diff --git "))
+    if diff_header_count > 1:
+        raise ValueError("Patch plan supports a single target file")
+    old_header_count = sum(1 for line in lines if line.startswith("--- "))
+    new_header_count = sum(1 for line in lines if line.startswith("+++ "))
+    if old_header_count > 1 or new_header_count > 1:
         raise ValueError("Patch plan supports a single target file")
 
 

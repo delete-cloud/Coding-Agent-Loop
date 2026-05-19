@@ -134,6 +134,26 @@ def test_patch_plan_rejects_multi_file_patch() -> None:
         build_patch_plan("one.txt", patch, file_exists=True)
 
 
+def test_patch_plan_accepts_single_file_git_diff_headers() -> None:
+    patch = textwrap.dedent(
+        """\
+        diff --git a/one.txt b/one.txt
+        index 1111111..2222222 100644
+        --- a/one.txt
+        +++ b/one.txt
+        @@ -1,1 +1,1 @@
+        -old one
+        +new one
+        """
+    )
+
+    plan = build_patch_plan("one.txt", patch, file_exists=True)
+
+    assert plan.hunk_count == 1
+    assert plan.additions == 1
+    assert plan.deletions == 1
+
+
 def test_patch_plan_rejects_hunk_header_count_mismatch() -> None:
     patch = textwrap.dedent(
         """\
