@@ -1,5 +1,6 @@
 """Tests for knowledge base RAG module."""
 
+import hashlib
 import json
 import tempfile
 from pathlib import Path
@@ -182,6 +183,188 @@ class TestKBIndexing:
 
         # Should not call embedding for empty content
         assert mock_embedding_fn.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_repo_chunk_metadata_records_source_kind_and_repo_path(
+        self, tmp_path, mock_embedding_fn
+    ):
+        """Repo-aware indexing records stable source and chunk metadata."""
+        repo_root = tmp_path / "repo"
+        source_path = repo_root / "src" / "app.py"
+        source_path.parent.mkdir(parents=True)
+        content = "def alpha():\n    return 'alpha'\n"
+        source_path.write_text(content)
+        kb = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_fn=mock_embedding_fn,
+            chunk_size=1000,
+            chunk_overlap=0,
+        )
+
+        await kb.index_file(source_path, content, repo_root=repo_root)
+
+        results = await kb.search("alpha", k=1)
+        assert len(results) == 1
+        metadata = results[0].chunk.metadata
+        assert metadata["metadata_version"] == 1
+        assert metadata["source_kind"] == "repo_file"
+        assert metadata["repo_path"] == "src/app.py"
+        assert metadata["language"] == "python"
+        assert metadata["line_start"] == 1
+        assert metadata["line_end"] == 2
+        assert (
+            metadata["document_sha256"]
+            == hashlib.sha256(content.encode("utf-8")).hexdigest()
+        )
+        assert (
+            metadata["chunk_sha256"]
+            == hashlib.sha256(results[0].chunk.content.encode("utf-8")).hexdigest()
+        )
+        assert isinstance(metadata["source_id"], str)
+        assert len(metadata["source_id"]) == 64
+
+    @pytest.mark.asyncio
+    async def test_index_directory_records_repo_relative_metadata(
+        self, tmp_path, mock_embedding_fn
+    ):
+        repo_root = tmp_path / "repo"
+        source_path = repo_root / "src" / "app.py"
+        source_path.parent.mkdir(parents=True)
+        source_path.write_text("def alpha():\n    return 'alpha'\n")
+        kb = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_fn=mock_embedding_fn,
+            chunk_size=1000,
+            chunk_overlap=0,
+        )
+
+        await kb.index_directory(repo_root, show_progress=False)
+
+        results = await kb.search("alpha", k=1)
+        assert len(results) == 1
+        assert results[0].chunk.metadata["source_kind"] == "repo_file"
+        assert results[0].chunk.metadata["repo_path"] == "src/app.py"
+
+    @pytest.mark.asyncio
+    async def test_index_file_rejects_path_outside_repo_root(
+        self, tmp_path, mock_embedding_fn
+    ):
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        outside = tmp_path / "outside.py"
+        outside.write_text("print('outside')\n")
+        kb = KB(db_path=tmp_path / "kb_db", embedding_fn=mock_embedding_fn)
+
+        with pytest.raises(ValueError, match="outside repo_root"):
+            await kb.index_file(
+                outside,
+                outside.read_text(),
+                repo_root=repo_root,
+            )
+        assert mock_embedding_fn.call_count == 0
+        assert not kb.has_table()
+
+    @pytest.mark.asyncio
+    async def test_index_file_rejects_embedding_count_mismatch(self, tmp_path):
+        def short_embed(texts: list[str]) -> list[list[float]]:
+            return [[0.1] * 1536 for _ in texts[:-1]]
+
+        kb = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_fn=short_embed,
+            chunk_size=1,
+            chunk_overlap=0,
+        )
+
+        with pytest.raises(ValueError, match="shorter than argument 1"):
+            await kb.index_file(Path("src/app.py"), "abcdefghijkl")
+
+    @pytest.mark.asyncio
+    async def test_repo_source_id_stays_stable_when_document_content_changes(
+        self, tmp_path, mock_embedding_fn
+    ):
+        repo_root = tmp_path / "repo"
+        source_path = repo_root / "src" / "app.py"
+        source_path.parent.mkdir(parents=True)
+        first_content = "def alpha():\n    return 'first'\n"
+        second_content = "def alpha():\n    return 'second'\n"
+        kb = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_fn=mock_embedding_fn,
+            chunk_size=1000,
+            chunk_overlap=0,
+        )
+
+        await kb.index_file(source_path, first_content, repo_root=repo_root)
+        await kb.index_file(source_path, second_content, repo_root=repo_root)
+
+        rows = kb._get_table().to_arrow().to_pylist()
+        metadata = [json.loads(row["metadata"]) for row in rows]
+        assert len(metadata) == 2
+        assert {item["repo_path"] for item in metadata} == {"src/app.py"}
+        assert len({item["source_id"] for item in metadata}) == 1
+        assert {item["document_sha256"] for item in metadata} == {
+            hashlib.sha256(first_content.encode("utf-8")).hexdigest(),
+            hashlib.sha256(second_content.encode("utf-8")).hexdigest(),
+        }
+
+    @pytest.mark.asyncio
+    async def test_index_directory_records_symlink_repo_path(
+        self, tmp_path, mock_embedding_fn
+    ):
+        repo_root = tmp_path / "repo"
+        target_path = repo_root / "src" / "target.py"
+        link_path = repo_root / "docs" / "linked.py"
+        target_path.parent.mkdir(parents=True)
+        link_path.parent.mkdir(parents=True)
+        target_path.write_text("def target():\n    return 'target'\n")
+        try:
+            link_path.symlink_to(target_path)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks are not supported on this filesystem")
+        kb = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_fn=mock_embedding_fn,
+            chunk_size=1000,
+            chunk_overlap=0,
+        )
+
+        await kb.index_directory(repo_root, show_progress=False)
+
+        rows = kb._get_table().to_arrow().to_pylist()
+        metadata = [json.loads(row["metadata"]) for row in rows]
+        assert {item["repo_path"] for item in metadata} == {
+            "docs/linked.py",
+            "src/target.py",
+        }
+
+    @pytest.mark.asyncio
+    async def test_index_directory_skips_symlink_targets_outside_repo(
+        self, tmp_path, mock_embedding_fn
+    ):
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        inside_path = repo_root / "inside.py"
+        outside_path = tmp_path / "outside.py"
+        link_path = repo_root / "external.py"
+        inside_path.write_text("print('inside')\n")
+        outside_path.write_text("print('outside')\n")
+        try:
+            link_path.symlink_to(outside_path)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks are not supported on this filesystem")
+        kb = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_fn=mock_embedding_fn,
+            chunk_size=1000,
+            chunk_overlap=0,
+        )
+
+        await kb.index_directory(repo_root, show_progress=False)
+
+        rows = kb._get_table().to_arrow().to_pylist()
+        metadata = [json.loads(row["metadata"]) for row in rows]
+        assert [item["repo_path"] for item in metadata] == ["inside.py"]
 
     @pytest.mark.asyncio
     async def test_index_file_deterministic_ids(self, temp_db_path, mock_embedding_fn):

@@ -157,3 +157,72 @@ Remaining risks:
 
 - ADR acceptance criteria intentionally describe future G14-G24 implementation tests that do not exist yet.
 - Context-pack shape is still conceptual until G17 introduces executable model tests.
+
+## G14 - Repo-Aware Retrieval Source And Chunk Metadata
+
+Status: passed local verification.
+
+### Before
+
+Goal id: G14
+
+Intended files:
+
+- `src/coding_agent/kb.py`
+- `tests/test_kb.py`
+- `docs/context_system/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/context-system-g14-repo-metadata.md`
+
+Verification commands:
+
+- `uv run pytest tests/test_kb.py -k "repo_chunk_metadata_records_source_kind_and_repo_path or index_directory_records_repo_relative_metadata or index_file_rejects_path_outside_repo_root" -v`
+- `uv run pytest tests/test_kb.py tests/coding_agent/test_kb_sync.py tests/cli/test_kb_commands.py -v`
+- `uv run pytest tests/coding_agent/plugins/test_kb.py tests/coding_agent/plugins/test_kb_plugin.py -v`
+
+Stop criteria:
+
+- Change requires rewriting AgentKit pipeline behavior.
+- Change requires durable runtime semantic changes.
+- Deterministic verification cannot be produced.
+- More than two fix iterations fail for the same reason.
+
+Postmortem routing:
+
+- `src/coding_agent/kb.py` matches PM-0009. Release checks: run focused tests for affected KB behavior and review affected control-flow shape before shipping.
+
+### After
+
+Changed files:
+
+- `src/coding_agent/kb.py`
+- `tests/test_kb.py`
+- `docs/context_system/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/context-system-g14-repo-metadata.md`
+
+Tests run:
+
+- Red: `uv run pytest tests/test_kb.py -k "repo_chunk_metadata_records_source_kind_and_repo_path or index_directory_records_repo_relative_metadata or index_file_rejects_path_outside_repo_root" -v`
+- Green: `uv run pytest tests/test_kb.py -k "repo_chunk_metadata_records_source_kind_and_repo_path or index_directory_records_repo_relative_metadata or index_file_rejects_path_outside_repo_root" -v`
+- CodeRabbit fix red: `uv run pytest tests/test_kb.py -k "embedding_count_mismatch" -v`
+- CodeRabbit fix green: `uv run pytest tests/test_kb.py -k "embedding_count_mismatch" -v`
+- Local review fix red: `uv run pytest tests/test_kb.py -k "repo_source_id_stays_stable_when_document_content_changes or index_directory_records_symlink_repo_path or index_directory_skips_symlink_targets_outside_repo" -v`
+- Local review fix green: `uv run pytest tests/test_kb.py -k "repo_source_id_stays_stable_when_document_content_changes or index_directory_records_symlink_repo_path or index_directory_skips_symlink_targets_outside_repo" -v`
+- `uv run ruff format --check src/coding_agent/kb.py tests/test_kb.py`
+- `uv run pytest tests/test_kb.py -k "repo_chunk_metadata_records_source_kind_and_repo_path or index_directory_records_repo_relative_metadata or index_file_rejects_path_outside_repo_root or embedding_count_mismatch or repo_source_id_stays_stable_when_document_content_changes or index_directory_records_symlink_repo_path or index_directory_skips_symlink_targets_outside_repo" -v`
+- `uv run pytest tests/test_kb.py tests/coding_agent/test_kb_sync.py tests/cli/test_kb_commands.py -v`
+- `uv run pytest tests/coding_agent/plugins/test_kb.py tests/coding_agent/plugins/test_kb_plugin.py -v`
+
+Results:
+
+- Red test failed for missing `repo_root` support and missing repo-aware metadata.
+- Focused repo metadata tests passed after implementation: 7 passed, 29 deselected.
+- CodeRabbit regression test failed before `zip(..., strict=True)` and passed after the fix: 1 passed, 32 deselected.
+- Local review regression tests failed before stable `source_id` and symlink path handling fixes, then passed: 3 passed, 33 deselected.
+- Ruff format check passed after formatting touched Python files.
+- KB, sync, and CLI KB tests passed: 46 passed.
+- KB plugin tests passed: 15 passed.
+
+Remaining risks:
+
+- G14 records metadata but does not change retrieval ranking or context rendering yet.
+- Existing LanceDB rows created before G14 do not have the new metadata keys; future code must tolerate legacy metadata during retrieval.
