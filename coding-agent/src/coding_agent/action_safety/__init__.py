@@ -7,6 +7,14 @@ from .action_observability import (
     emit_action_event,
     record_action_span,
 )
+from .approval_routing import (
+    ActionApprovalReason,
+    ActionApprovalRoute,
+    ActionApprovalRoutingResult,
+    route_command_action,
+    route_file_edit_action,
+    route_file_patch_action,
+)
 from .command_policy import (
     CommandPolicyDecision,
     CommandPolicyReason,
@@ -48,6 +56,9 @@ __all__ = [
     "ACTION_OBSERVATION_NAME",
     "ActionObservation",
     "ActionObservationStatus",
+    "ActionApprovalReason",
+    "ActionApprovalRoute",
+    "ActionApprovalRoutingResult",
     "ActionSpanUpdater",
     "CommandPolicyDecision",
     "CommandPolicyReason",
@@ -71,6 +82,9 @@ __all__ = [
     "evaluate_command_policy",
     "record_action_span",
     "restore_workspace_snapshot",
+    "route_command_action",
+    "route_file_edit_action",
+    "route_file_patch_action",
     "render_validation_feedback_messages",
     "validate_safe_edit_path",
     "validation_feedback_context_pack",

@@ -717,7 +717,7 @@ Remaining risks:
 
 ## G34 - Validation Feedback Context
 
-Status: passed local verification; pending PR.
+Status: merged via PR #236.
 
 ### Before
 
@@ -790,3 +790,81 @@ Remaining risks:
 
 - G34 provides a reference context adapter for validation feedback; it does not yet automatically inject feedback into live edit/command tool execution.
 - Unsafe validation labels are intentionally omitted from rendered evidence rather than normalized, so callers should prefer stable safe labels when they want labels visible in context.
+
+## G35 - Approval Routing
+
+Status: passed local verification; pending PR.
+
+### Before
+
+Goal id: G35
+
+Intended files:
+
+- `src/coding_agent/action_safety/__init__.py`
+- `src/coding_agent/action_safety/approval_routing.py`
+- `tests/coding_agent/action_safety/test_approval_routing.py`
+- `docs/adr/0035-action-safety-and-workspace-execution.md`
+- `docs/action_safety/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/action-safety-g35-approval-routing.md`
+
+Verification commands:
+
+- `uv run pytest tests/coding_agent/action_safety/test_approval_routing.py tests/approval/test_policy.py -v`
+- `uv run pytest tests/coding_agent/action_safety/test_command_policy.py tests/coding_agent/action_safety/test_safe_edit.py tests/coding_agent/action_safety/test_patch_plan.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `uv run ruff check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `git diff --check -- .`
+
+Stop criteria:
+
+- Routing requires modifying approval coordinator/store lifecycle semantics.
+- Routing would conflate denied actions with approval-required actions.
+- Safe summaries require raw commands, raw paths, file content, env values, prompts, messages, results, or secrets.
+- More than two fix iterations fail for the same reason.
+
+Postmortem routing:
+
+- G35 does not modify approval coordinator/store files.
+- Because it defines approval routing semantics, G35 consulted PM-0011 and includes focused approval policy tests.
+
+### After
+
+Changed files:
+
+- `src/coding_agent/action_safety/__init__.py`
+- `src/coding_agent/action_safety/approval_routing.py`
+- `tests/coding_agent/action_safety/test_approval_routing.py`
+- `docs/adr/0035-action-safety-and-workspace-execution.md`
+- `docs/action_safety/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/action-safety-g35-approval-routing.md`
+
+Tests run:
+
+- `uv run pytest tests/coding_agent/action_safety/test_approval_routing.py tests/approval/test_policy.py -v`
+- `uv run pytest tests/coding_agent/action_safety/test_command_policy.py tests/coding_agent/action_safety/test_safe_edit.py tests/coding_agent/action_safety/test_patch_plan.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `uv run ruff check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `git diff --check -- .`
+
+Results:
+
+- Approval routing and approval policy tests passed: 16 passed.
+- Command policy, safe edit, and patch plan regression tests passed: 21 passed.
+- Context-system smoke test passed: 1 passed.
+- AgentKit build_context/runtime-stage span tests passed: 8 passed, 29 deselected.
+- Scoped ruff format/check passed for `src/coding_agent/action_safety` and `tests/coding_agent/action_safety`.
+- Diff whitespace check passed.
+
+Local review:
+
+- Local review found and G35 fixed two approval-routing risks: patch routing now requires a safe-edit decision and denies unsafe paths before risk routing, and file-edit routing now requires an explicit risk level so omitted risk cannot fail open.
+
+Remaining risks:
+
+- G35 defines routing semantics only; live tool execution still needs to call this route before mutation/execution.
+- Existing approval coordinator/store behavior was intentionally not changed in this goal.
