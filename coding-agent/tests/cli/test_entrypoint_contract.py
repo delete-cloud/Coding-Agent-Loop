@@ -29,6 +29,7 @@ def test_module_help_lists_release_entrypoint_commands_without_credentials() -> 
         text=True,
         cwd=Path.cwd(),
         env=_credential_free_env(),
+        timeout=10,
     )
 
     assert completed.returncode == 0
@@ -38,7 +39,7 @@ def test_module_help_lists_release_entrypoint_commands_without_credentials() -> 
 
 
 def test_subcommand_help_is_available_without_provider_credentials() -> None:
-    runner = CliRunner(env=_credential_free_env())
+    runner = CliRunner(env=_click_credential_free_env())
 
     for command in ("run", "repl", "serve", "verify"):
         result = runner.invoke(main, [command, "--help"], catch_exceptions=False)
@@ -49,7 +50,7 @@ def test_subcommand_help_is_available_without_provider_credentials() -> None:
 
 
 def test_default_non_interactive_entrypoint_points_to_batch_mode() -> None:
-    runner = CliRunner(env=_credential_free_env())
+    runner = CliRunner(env=_click_credential_free_env())
 
     result = runner.invoke(main, [])
 
@@ -62,5 +63,11 @@ def _credential_free_env() -> dict[str, str]:
     env = dict(os.environ)
     for key in _CREDENTIAL_ENV_KEYS:
         env.pop(key, None)
+    env["PYTHONPATH"] = str(Path("src").resolve())
+    return env
+
+
+def _click_credential_free_env() -> dict[str, str | None]:
+    env: dict[str, str | None] = {key: None for key in _CREDENTIAL_ENV_KEYS}
     env["PYTHONPATH"] = str(Path("src").resolve())
     return env
