@@ -32,6 +32,10 @@ from .validation_runner import (
     ValidationRunner,
     ValidationStatus,
 )
+from .validation_feedback import (
+    render_validation_feedback_messages,
+    validation_feedback_context_pack,
+)
 from .workspace_snapshot import (
     WorkspaceSnapshotEntry,
     WorkspaceSnapshot,
@@ -67,5 +71,7 @@ __all__ = [
     "evaluate_command_policy",
     "record_action_span",
     "restore_workspace_snapshot",
+    "render_validation_feedback_messages",
     "validate_safe_edit_path",
+    "validation_feedback_context_pack",
 ]
