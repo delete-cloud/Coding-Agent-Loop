@@ -1,6 +1,6 @@
 # ADR-0034: Bound context-system retrieval, packs, evidence, and evaluation
 
-**Status**: Proposed
+**Status**: Accepted
 **Date**: 2026-05-19
 
 ## Context
@@ -61,17 +61,17 @@ Make evaluation deterministic and fixture-driven:
 
 Implementation of G14-G24 should add executable tests covering these contracts:
 
-- [ ] `test_repo_chunk_metadata_records_source_kind_and_repo_path`
-- [ ] `test_repo_retrieval_returns_ranked_evidence_with_fake_embedder`
-- [ ] `test_failure_retrieval_indexes_pytest_failure_evidence`
-- [ ] `test_context_pack_renderer_labels_memory_as_reference`
-- [ ] `test_context_pack_injection_uses_build_context_without_pipeline_rewrite`
-- [ ] `test_retrieval_observability_emits_counts_without_sensitive_attributes`
-- [ ] `test_evaluation_manifest_builds_context_system_cases_from_local_fixtures`
-- [ ] `test_memory_records_persist_evidence_and_load_legacy_records`
-- [ ] `test_memory_without_evidence_is_not_rendered_as_instruction`
-- [ ] `uv run pytest tests/coding_agent/ -k "context_pack or retrieval or memory or evaluation" -v`
-- [ ] `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context" -v`
+- [x] `test_repo_chunk_metadata_records_source_kind_and_repo_path`
+- [x] `test_repo_retrieval_returns_ranked_evidence_with_fake_embedder`
+- [x] `test_failure_retrieval_indexes_pytest_failure_evidence`
+- [x] `test_context_pack_renderer_labels_memory_as_reference`
+- [x] `test_context_pack_injection_uses_build_context_without_pipeline_rewrite`
+- [x] `test_retrieval_observability_emits_counts_without_sensitive_attributes`
+- [x] `test_evaluation_manifest_builds_context_system_cases_from_local_fixtures`
+- [x] `test_memory_records_persist_evidence_and_load_legacy_records`
+- [x] `test_memory_without_evidence_is_not_rendered_as_instruction`
+- [x] `uv run pytest tests/coding_agent/ -k "context_pack or retrieval or memory or evaluation" -v`
+- [x] `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context" -v`
 
 ## References
 

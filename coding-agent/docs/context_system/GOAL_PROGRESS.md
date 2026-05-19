@@ -39,7 +39,7 @@ No pre-existing repository document defined G12-G24 individually. The following 
 
 ## G12 - Current-State Audit And Phase Ledger
 
-Status: passed local verification.
+Status: merged via PR #213.
 
 ### Before
 
@@ -99,7 +99,7 @@ Remaining risks:
 
 ## G13 - Context-System Boundary ADR
 
-Status: passed local verification.
+Status: merged via PR #214.
 
 ### Before
 
@@ -160,7 +160,7 @@ Remaining risks:
 
 ## G14 - Repo-Aware Retrieval Source And Chunk Metadata
 
-Status: passed local verification.
+Status: merged via PR #215.
 
 ### Before
 
@@ -229,7 +229,7 @@ Remaining risks:
 
 ## G15 - Repo-Aware Retrieval Indexing And Query Fixtures
 
-Status: passed local verification.
+Status: merged via PR #216.
 
 ### Before
 
@@ -297,7 +297,7 @@ Remaining risks:
 
 ## G16 - Testing Failure Retrieval Ingest/Search Fixtures
 
-Status: passed local verification.
+Status: merged via PR #217.
 
 ### Before
 
@@ -367,7 +367,7 @@ Remaining risks:
 
 ## G17 - Context Pack Data Model And Renderer Contract
 
-Status: passed local verification.
+Status: merged via PR #218.
 
 ### Before
 
@@ -431,7 +431,7 @@ Remaining risks:
 
 ## G18 - Context Pack Injection Through Existing Build Context Hooks
 
-Status: passed local verification.
+Status: merged via PR #219.
 
 ### Before
 
@@ -712,7 +712,7 @@ Remaining risks:
 
 ## G22 - Memory Records With Evidence References And JSONL-Compatible Migration
 
-Status: passed local verification; pending PR.
+Status: merged via PR #223.
 
 ### Before
 
@@ -782,7 +782,7 @@ Remaining risks:
 
 ## G23 - Memory Retrieval And Injection As Evidence-Backed Reference Context
 
-Status: in progress.
+Status: merged via PR #224.
 
 ### Before
 
@@ -855,3 +855,73 @@ Remaining risks:
 
 - MemoryPlugin still uses simple tag overlap for memory retrieval; richer memory ranking is outside G23.
 - Unevidenced legacy memories remain persisted and loadable but are intentionally invisible to default grounding.
+
+## G24 - End-To-End Context-System Smoke, Implementation Report, And Final Audit
+
+Status: passed local verification; pending PR.
+
+### Before
+
+Goal id: G24
+
+Intended files:
+
+- `tests/coding_agent/test_context_system_smoke.py`
+- `docs/context_system/IMPLEMENTATION_REPORT.md`
+- `docs/context_system/GOAL_PROGRESS.md`
+- `docs/adr/0034-context-system-boundaries-and-evidence.md`
+- `.opencode/prompts/tasks/context-system-g24-final-audit.md`
+
+Verification commands:
+
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/test_kb.py -k "repo_chunk_metadata_records_source_kind_and_repo_path or repo_retrieval_returns_ranked_evidence_with_fake_embedder or failure_retrieval_indexes_pytest_failure_evidence" -v`
+- `uv run pytest tests/coding_agent/evaluation/ -v`
+- `uv run pytest tests/coding_agent/plugins/test_kb.py tests/coding_agent/plugins/test_kb_plugin.py tests/coding_agent/plugins/test_memory.py tests/coding_agent/test_context_pack.py tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/coding_agent/ -k "context_pack or retrieval or memory or evaluation" -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+
+Stop criteria:
+
+- End-to-end smoke requires AgentKit runtime, `ContextBuilder`, or directive schema changes.
+- Verification requires external services, external judges, production credentials, or remote vector stores.
+- Final audit finds an unmet ADR-0034 acceptance criterion without executable test coverage.
+- Deterministic verification cannot be produced.
+- More than two fix iterations fail for the same reason.
+
+Postmortem routing:
+
+- `tests/coding_agent/test_context_system_smoke.py`, `docs/context_system/GOAL_PROGRESS.md`, and `docs/adr/0034-context-system-boundaries-and-evidence.md` match PM-0009. Release checks: run focused affected tests and review control-flow shape before shipping.
+
+### After
+
+Changed files:
+
+- `tests/coding_agent/test_context_system_smoke.py`
+- `docs/context_system/IMPLEMENTATION_REPORT.md`
+- `docs/context_system/GOAL_PROGRESS.md`
+- `docs/adr/0034-context-system-boundaries-and-evidence.md`
+- `.opencode/prompts/tasks/context-system-g24-final-audit.md`
+
+Verification results:
+
+- `uv run ruff format --check tests/coding_agent/test_context_system_smoke.py` passed with the file already formatted after running `uv run ruff format tests/coding_agent/test_context_system_smoke.py`.
+- `uv run ruff check tests/coding_agent/test_context_system_smoke.py` passed.
+- `git diff --check -- .` passed.
+- Green: `uv run pytest tests/coding_agent/test_context_system_smoke.py -v` passed with 1 passed.
+- `uv run pytest tests/test_kb.py -k "repo_chunk_metadata_records_source_kind_and_repo_path or repo_retrieval_returns_ranked_evidence_with_fake_embedder or failure_retrieval_indexes_pytest_failure_evidence" -v` passed with 3 passed, 41 deselected.
+- `uv run pytest tests/coding_agent/evaluation/ -v` passed with 20 passed.
+- `uv run pytest tests/coding_agent/plugins/test_kb.py tests/coding_agent/plugins/test_kb_plugin.py tests/coding_agent/plugins/test_memory.py tests/coding_agent/test_context_pack.py tests/coding_agent/test_context_system_smoke.py -v` passed with 46 passed.
+- `uv run pytest tests/coding_agent/ -k "context_pack or retrieval or memory or evaluation" -v` passed with 52 passed, 585 deselected.
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v` passed with 8 passed, 29 deselected.
+
+Implementation notes:
+
+- Added a deterministic smoke test that builds a Pipeline with KBPlugin and MemoryPlugin, indexes repo and test-failure evidence, and verifies the composed `build_context` prompt contains repo, failure, and memory reference context.
+- Updated the final implementation report with landed goal and ADR acceptance evidence.
+- Marked ADR-0034 accepted and checked off the executable acceptance criteria.
+- Updated the phase ledger with merged PR status for G12-G23.
+
+Remaining risks:
+
+- G24 is a final smoke/audit goal; it does not add new ranking, indexing, or memory capture policy beyond prior goals.
