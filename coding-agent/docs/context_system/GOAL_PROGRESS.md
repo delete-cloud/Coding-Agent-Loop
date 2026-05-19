@@ -96,3 +96,64 @@ Remaining risks:
 
 - G12 is docs-only and does not prove the future retrieval design.
 - The G12-G24 goal map is inferred from the phase objective because no prior repository document defined those individual goal ids.
+
+## G13 - Context-System Boundary ADR
+
+Status: passed local verification.
+
+### Before
+
+Goal id: G13
+
+Intended files:
+
+- `docs/adr/0034-context-system-boundaries-and-evidence.md`
+- `docs/context_system/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/context-system-g13-adr.md`
+
+Verification commands:
+
+- `test -f docs/adr/0034-context-system-boundaries-and-evidence.md`
+- `test -f .opencode/prompts/tasks/context-system-g13-adr.md`
+- `rg -n "## Context|## Decision|## Alternatives Rejected|## Acceptance Criteria|## References" docs/adr/0034-context-system-boundaries-and-evidence.md`
+- `uv run pytest tests/coding_agent/plugins/test_kb.py tests/coding_agent/plugins/test_kb_plugin.py tests/coding_agent/plugins/test_memory.py tests/coding_agent/evaluation/test_adapter.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+
+Stop criteria:
+
+- ADR would require rewriting AgentKit pipeline behavior.
+- ADR would require durable runtime semantic changes.
+- Deterministic verification cannot be produced.
+- More than two fix iterations fail for the same reason.
+
+Postmortem routing:
+
+- Intended G13 files do not match any `postmortem/index.yaml` `related_files` entry.
+
+### After
+
+Changed files:
+
+- `docs/adr/0034-context-system-boundaries-and-evidence.md`
+- `docs/context_system/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/context-system-g13-adr.md`
+
+Tests run:
+
+- `test -f docs/adr/0034-context-system-boundaries-and-evidence.md`
+- `test -f .opencode/prompts/tasks/context-system-g13-adr.md`
+- `rg -n "## Context|## Decision|## Alternatives Rejected|## Acceptance Criteria|## References" docs/adr/0034-context-system-boundaries-and-evidence.md`
+- `uv run pytest tests/coding_agent/plugins/test_kb.py tests/coding_agent/plugins/test_kb_plugin.py tests/coding_agent/plugins/test_memory.py tests/coding_agent/evaluation/test_adapter.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+
+Results:
+
+- ADR file and G13 task packet existence checks passed.
+- ADR required-section check passed.
+- KB, KBPlugin, MemoryPlugin, and evaluation adapter tests passed: 40 passed.
+- AgentKit build_context/runtime-stage span tests passed: 8 passed, 29 deselected.
+
+Remaining risks:
+
+- ADR acceptance criteria intentionally describe future G14-G24 implementation tests that do not exist yet.
+- Context-pack shape is still conceptual until G17 introduces executable model tests.
