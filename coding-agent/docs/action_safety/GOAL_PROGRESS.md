@@ -562,7 +562,7 @@ Remaining risks:
 
 ## G32 - Action Observability
 
-Status: passed local verification; pending PR.
+Status: merged via PR #234.
 
 ### Before
 
@@ -636,3 +636,81 @@ Remaining risks:
 
 - G32 adds metadata-only action observation primitives; it does not yet wire them into live file, command, approval, or restore execution paths.
 - String-valued metadata is intentionally restricted to bounded labels; callers that need rich user-facing explanations must keep those outside trace attributes.
+
+## G33 - Workspace Snapshot Restore
+
+Status: passed local verification; pending PR.
+
+### Before
+
+Goal id: G33
+
+Intended files:
+
+- `src/coding_agent/action_safety/__init__.py`
+- `src/coding_agent/action_safety/workspace_snapshot.py`
+- `tests/coding_agent/action_safety/test_workspace_snapshot.py`
+- `docs/adr/0035-action-safety-and-workspace-execution.md`
+- `docs/action_safety/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/action-safety-g33-snapshot-restore.md`
+
+Verification commands:
+
+- `uv run pytest tests/coding_agent/action_safety/test_workspace_snapshot.py tests/coding_agent/environment/test_workspace_archive.py -v`
+- `uv run pytest tests/coding_agent/action_safety/test_action_observability.py tests/coding_agent/action_safety/test_validation_runner.py tests/coding_agent/action_safety/test_command_policy.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `uv run ruff check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `git diff --check -- .`
+
+Stop criteria:
+
+- Restore requires remote workspace live sync or Docker sandboxing.
+- Restore cannot validate the snapshot before clearing the target workspace.
+- Restore would overwrite or delete `.git`.
+- More than two fix iterations fail for the same reason.
+
+Postmortem routing:
+
+- G33 adds action-safety files and does not directly match `postmortem/index.yaml` `related_files`.
+- Workspace archive safety tests are included because G33 reuses the same restore safety constraints: reject symlinks/preserved roots and never clear the target before snapshot validation succeeds.
+
+### After
+
+Changed files:
+
+- `src/coding_agent/action_safety/__init__.py`
+- `src/coding_agent/action_safety/workspace_snapshot.py`
+- `tests/coding_agent/action_safety/test_workspace_snapshot.py`
+- `docs/adr/0035-action-safety-and-workspace-execution.md`
+- `docs/action_safety/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/action-safety-g33-snapshot-restore.md`
+
+Tests run:
+
+- `uv run pytest tests/coding_agent/action_safety/test_workspace_snapshot.py tests/coding_agent/environment/test_workspace_archive.py -v`
+- `uv run pytest tests/coding_agent/action_safety/test_action_observability.py tests/coding_agent/action_safety/test_validation_runner.py tests/coding_agent/action_safety/test_command_policy.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `uv run ruff check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `git diff --check -- .`
+
+Results:
+
+- Workspace snapshot and workspace archive safety tests passed: 25 passed.
+- Action observability, validation runner, and command policy regression tests passed: 20 passed.
+- Context-system smoke test passed: 1 passed.
+- AgentKit build_context/runtime-stage span tests passed: 8 passed, 29 deselected.
+- Scoped ruff format/check passed for `src/coding_agent/action_safety` and `tests/coding_agent/action_safety`.
+- Diff whitespace check passed.
+
+Local review:
+
+- Local review found and G33 fixed two snapshot safety risks: restore now rejects snapshots stored inside the workspace before clearing, and snapshots now include a per-file path/size/SHA-256 manifest that rejects path or same-size content tampering.
+
+Remaining risks:
+
+- G33 is a local filesystem MVP only; it does not implement remote live sync, Docker sandboxing, or concurrent workspace reconciliation.
+- Snapshot roots are caller-managed directories; lifecycle cleanup remains the caller's responsibility.
