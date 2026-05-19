@@ -24,7 +24,7 @@ AgentKit Core remains generic. The implementation did not rewrite the AgentKit p
 | G34 | #236 | Validation feedback context adapter without raw output or authority changes. |
 | G35 | #237 | Approval routing for command and file action policy results. |
 | G36 | #238 | End-to-end safe action smoke coverage. |
-| G37 | this PR | Final audit, report, and baseline verification. |
+| G37 | #239 | Final audit, report, and baseline verification. |
 
 ## Acceptance Audit
 

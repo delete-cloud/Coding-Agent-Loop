@@ -945,7 +945,7 @@ Remaining risks:
 
 ## G37 - Final Audit And Implementation Report
 
-Status: in progress.
+Status: merged via PR #239.
 
 ### Before
 
