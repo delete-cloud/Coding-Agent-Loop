@@ -404,7 +404,7 @@ Remaining risks:
 
 ## G30 - Command Execution Policy Model
 
-Status: passed local verification; pending PR.
+Status: merged via PR #232.
 
 ### Before
 
@@ -478,3 +478,84 @@ Remaining risks:
 - Validation command handling is a policy classification only; G31 owns validation runner execution and outcomes.
 - The allow/approval command lists are intentionally conservative and can be refined when command policy is integrated into execution.
 - Local review found and G30 fixed three policy risks: validation commands cannot bypass destructive/package-install approval, raw shell syntax is denied before local/cloud execution, and safe summaries sanitize command names.
+
+## G31 - Validation Runner Contract
+
+Status: passed local verification; pending PR.
+
+### Before
+
+Goal id: G31
+
+Intended files:
+
+- `src/coding_agent/action_safety/__init__.py`
+- `src/coding_agent/action_safety/command_policy.py`
+- `src/coding_agent/action_safety/validation_runner.py`
+- `tests/coding_agent/action_safety/test_command_policy.py`
+- `tests/coding_agent/action_safety/test_validation_runner.py`
+- `docs/adr/0035-action-safety-and-workspace-execution.md`
+- `docs/action_safety/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/action-safety-g31-validation-runner.md`
+
+Verification commands:
+
+- `uv run pytest tests/coding_agent/action_safety/test_validation_runner.py tests/coding_agent/action_safety/test_command_policy.py -v`
+- `uv run pytest tests/coding_agent/test_verification.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `uv run ruff check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `git diff --check -- .`
+
+Stop criteria:
+
+- Validation runner requires modifying AgentKit pipeline stages.
+- Validation runner requires context-system authority or evidence semantics changes.
+- Outcomes require raw command output, raw env values, or raw tool arguments in safe summaries.
+- More than two fix iterations fail for the same reason.
+
+Postmortem routing:
+
+- Intended G31 production/test files are action-safety files and do not directly match `postmortem/index.yaml` `related_files`.
+
+### After
+
+Changed files:
+
+- `src/coding_agent/action_safety/__init__.py`
+- `src/coding_agent/action_safety/command_policy.py`
+- `src/coding_agent/action_safety/validation_runner.py`
+- `tests/coding_agent/action_safety/test_command_policy.py`
+- `tests/coding_agent/action_safety/test_validation_runner.py`
+- `docs/adr/0035-action-safety-and-workspace-execution.md`
+- `docs/action_safety/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/action-safety-g31-validation-runner.md`
+
+Tests run:
+
+- `uv run pytest tests/coding_agent/action_safety/test_validation_runner.py tests/coding_agent/action_safety/test_command_policy.py -v`
+- `uv run pytest tests/coding_agent/test_verification.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `uv run ruff check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `git diff --check -- .`
+
+Results:
+
+- Validation runner and command policy tests passed: 14 passed.
+- Existing task-packet verification tests passed: 16 passed.
+- Context-system smoke test passed: 1 passed.
+- AgentKit build_context/runtime-stage span tests passed: 8 passed, 29 deselected.
+- Scoped ruff format/check passed for `src/coding_agent/action_safety` and `tests/coding_agent/action_safety`.
+- Diff whitespace check passed.
+
+Local review:
+
+- Local review found and G31 fixed three validation-runner safety risks: absolute executable paths outside the workspace are denied, cloud validation requests fail fast instead of executing locally, and validation subprocesses no longer inherit the full parent process environment.
+
+Remaining risks:
+
+- G31 adds a standalone action-safety validation runner; it does not yet wire validation outcomes into shell tools, approvals, observability, or context evidence.
+- Validation outcome summaries intentionally avoid raw stdout/stderr; later user-facing reporting may need a separate local-only channel if raw output is required.

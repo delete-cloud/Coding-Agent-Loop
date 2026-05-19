@@ -16,6 +16,13 @@ from .safe_edit import (
     SafeEditReason,
     validate_safe_edit_path,
 )
+from .validation_runner import (
+    ValidationCommandSpec,
+    ValidationOutcome,
+    ValidationReport,
+    ValidationRunner,
+    ValidationStatus,
+)
 
 __all__ = [
     "CommandPolicyDecision",
@@ -27,6 +34,11 @@ __all__ = [
     "PatchRiskLevel",
     "SafeEditDecision",
     "SafeEditReason",
+    "ValidationCommandSpec",
+    "ValidationOutcome",
+    "ValidationReport",
+    "ValidationRunner",
+    "ValidationStatus",
     "build_patch_plan",
     "evaluate_command_policy",
     "validate_safe_edit_path",
