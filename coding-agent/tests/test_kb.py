@@ -76,6 +76,23 @@ def _repo_retrieval_embed(texts: list[str]) -> list[list[float]]:
     return vectors
 
 
+def _failure_retrieval_embed(texts: list[str]) -> list[list[float]]:
+    vectors: list[list[float]] = []
+    for text in texts:
+        lower = text.lower()
+        if "auth" in lower or "expired token" in lower:
+            vectors.append([1.0, 0.0, 0.0, 0.0])
+        elif "billing" in lower or "invoice" in lower:
+            vectors.append([0.0, 1.0, 0.0, 0.0])
+        else:
+            vectors.append([0.0, 0.0, 1.0, 0.0])
+    return vectors
+
+
+def _context_fixture(name: str) -> str:
+    return (Path(__file__).parent / "fixtures" / "context_system" / name).read_text()
+
+
 @pytest.fixture
 async def kb(temp_db_path, mock_embedding_fn):
     """Create a KB instance with mock embeddings."""
@@ -766,6 +783,145 @@ class TestKBSearch:
 
         with pytest.raises(ValueError, match="k must be less than or equal to"):
             await kb.search_repo("auth", k=5)
+
+    @pytest.mark.asyncio
+    async def test_failure_retrieval_indexes_pytest_failure_evidence(self, tmp_path):
+        auth_failure = _context_fixture("pytest_auth_failure.txt")
+        billing_failure = _context_fixture("pytest_billing_failure.txt")
+        kb = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_dim=4,
+            embedding_fn=_failure_retrieval_embed,
+        )
+
+        await kb.index_test_failure(
+            command_label="uv run pytest tests/test_auth.py::test_rejects_expired_token",
+            exit_code=1,
+            test_node_id="tests/test_auth.py::test_rejects_expired_token",
+            repo_path="tests/test_auth.py",
+            line_start=18,
+            line_end=18,
+            failure_snippet=auth_failure,
+        )
+        await kb.index_test_failure(
+            command_label="uv run pytest tests/test_billing.py::test_invoice_total_rounds_cents",
+            exit_code=1,
+            test_node_id="tests/test_billing.py::test_invoice_total_rounds_cents",
+            repo_path="tests/test_billing.py",
+            line_start=44,
+            line_end=44,
+            failure_snippet=billing_failure,
+        )
+
+        results = await kb.search_test_failures("expired auth assertion", k=2)
+
+        assert [result.rank for result in results] == [1, 2]
+        assert [result.test_node_id for result in results] == [
+            "tests/test_auth.py::test_rejects_expired_token",
+            "tests/test_billing.py::test_invoice_total_rounds_cents",
+        ]
+        assert results[0].source_kind == "test_failure"
+        assert results[0].chunk_id == results[0].chunk.id
+        assert results[0].source_id == results[0].chunk.metadata["source_id"]
+        assert results[0].command_label == (
+            "uv run pytest tests/test_auth.py::test_rejects_expired_token"
+        )
+        assert results[0].exit_code == 1
+        assert results[0].repo_path == "tests/test_auth.py"
+        assert results[0].line_start == 18
+        assert results[0].line_end == 18
+        assert results[0].chunk.content == auth_failure
+        assert (
+            results[0].failure_sha256
+            == hashlib.sha256(auth_failure.encode("utf-8")).hexdigest()
+        )
+        assert (
+            results[0].snippet_sha256
+            == hashlib.sha256(auth_failure.encode("utf-8")).hexdigest()
+        )
+        assert results[0].score <= results[1].score
+
+    @pytest.mark.asyncio
+    async def test_failure_retrieval_skips_non_failure_rows(self, tmp_path):
+        def mixed_failure_embed(texts: list[str]) -> list[list[float]]:
+            vectors: list[list[float]] = []
+            for text in texts:
+                if text == "auth":
+                    vectors.append([1.0, 0.0, 0.0, 0.0])
+                elif "pytest failure evidence" in text:
+                    vectors.append([0.95, 0.0, 0.0, 0.0])
+                else:
+                    vectors.append([0.0, 0.0, 1.0, 0.0])
+            return vectors
+
+        auth_failure = "pytest failure evidence for auth regression\n"
+        kb = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_dim=4,
+            embedding_fn=mixed_failure_embed,
+        )
+        table = kb._get_table()
+        table.add(
+            [
+                {
+                    "id": f"repo-auth-{i}",
+                    "content": f"repo auth row {i}",
+                    "source": f"src/auth_{i}.py",
+                    "metadata": json.dumps(
+                        {
+                            "source_kind": "repo_file",
+                            "source_id": f"repo-source-{i}",
+                            "repo_path": f"src/auth_{i}.py",
+                        }
+                    ),
+                    "vector": [1.0, 0.0, 0.0, 0.0],
+                }
+                for i in range(4)
+            ]
+        )
+        await kb.index_test_failure(
+            command_label="uv run pytest tests/test_auth.py",
+            exit_code=1,
+            test_node_id="tests/test_auth.py::test_failure_fixture",
+            repo_path="tests/test_auth.py",
+            line_start=20,
+            line_end=20,
+            failure_snippet=auth_failure,
+        )
+
+        results = await kb.search_test_failures("auth", k=1)
+
+        assert len(results) == 1
+        assert results[0].test_node_id == "tests/test_auth.py::test_failure_fixture"
+        assert results[0].chunk.id not in {f"repo-auth-{i}" for i in range(4)}
+
+    @pytest.mark.asyncio
+    async def test_failure_retrieval_upserts_same_failure_evidence(self, tmp_path):
+        auth_failure = _context_fixture("pytest_auth_failure.txt")
+        kb = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_dim=4,
+            embedding_fn=_failure_retrieval_embed,
+        )
+        kwargs = {
+            "command_label": "uv run pytest tests/test_auth.py::test_rejects_expired_token",
+            "exit_code": 1,
+            "test_node_id": "tests/test_auth.py::test_rejects_expired_token",
+            "repo_path": "tests/test_auth.py",
+            "line_start": 18,
+            "line_end": 18,
+            "failure_snippet": auth_failure,
+        }
+
+        await kb.index_test_failure(**kwargs)
+        await kb.index_test_failure(**kwargs)
+
+        results = await kb.search_test_failures("expired auth assertion", k=5)
+
+        assert len(results) == 1
+        assert results[0].test_node_id == (
+            "tests/test_auth.py::test_rejects_expired_token"
+        )
 
 
 class TestKBHybridSearch:
