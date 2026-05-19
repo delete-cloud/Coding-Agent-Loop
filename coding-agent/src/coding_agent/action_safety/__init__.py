@@ -32,6 +32,12 @@ from .validation_runner import (
     ValidationRunner,
     ValidationStatus,
 )
+from .workspace_snapshot import (
+    WorkspaceSnapshotEntry,
+    WorkspaceSnapshot,
+    create_workspace_snapshot,
+    restore_workspace_snapshot,
+)
 
 __all__ = [
     "ActionKind",
@@ -53,9 +59,13 @@ __all__ = [
     "ValidationReport",
     "ValidationRunner",
     "ValidationStatus",
+    "WorkspaceSnapshot",
+    "WorkspaceSnapshotEntry",
     "build_patch_plan",
+    "create_workspace_snapshot",
     "emit_action_event",
     "evaluate_command_policy",
     "record_action_span",
+    "restore_workspace_snapshot",
     "validate_safe_edit_path",
 ]
