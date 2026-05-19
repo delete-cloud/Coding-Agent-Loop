@@ -14,6 +14,8 @@ importance scoring, tag extraction.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from pathlib import PurePosixPath
 from typing import Any, Callable
@@ -21,6 +23,13 @@ from typing import Any, Callable
 from agentkit.directive.types import MemoryRecord
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
+from coding_agent.context_pack import (
+    ContextPack,
+    ContextPackItem,
+    ContextPackRenderer,
+    ContextPackSection,
+    EvidenceRef,
+)
 
 
 class MemoryPlugin:
@@ -112,7 +121,7 @@ class MemoryPlugin:
     def build_context(
         self, tape: Tape | None = None, **kwargs: Any
     ) -> list[dict[str, Any]]:
-        """Grounding mode: inject relevant memories as system messages.
+        """Grounding mode: inject evidence-backed memories as reference context.
 
         If topic file tags are available, filter memories to those with
         overlapping tags. Falls back to importance-sorted top-N otherwise.
@@ -139,16 +148,28 @@ class MemoryPlugin:
                 self._memories, key=lambda m: m.get("importance", 0.5), reverse=True
             )
 
-        top = sorted_memories[: self._max_grounding]
+        memory_items: list[ContextPackItem] = []
+        for memory in sorted_memories:
+            item = _memory_context_pack_item(memory)
+            if item is None:
+                continue
+            memory_items.append(item)
+            if len(memory_items) == self._max_grounding:
+                break
 
-        grounding_messages = []
-        for mem in top:
-            content = f"[Memory] {mem['summary']}"
-            if mem.get("tags"):
-                content += f" (tags: {', '.join(mem['tags'])})"
-            grounding_messages.append({"role": "system", "content": content})
+        if not memory_items:
+            return []
 
-        return grounding_messages
+        return ContextPackRenderer().render_messages(
+            ContextPack(
+                sections=(
+                    ContextPackSection(
+                        title="Memory references",
+                        items=tuple(memory_items),
+                    ),
+                )
+            )
+        )
 
     def _tags_overlap(self, memory_tags: list[str], topic_files: set[str]) -> bool:
         """Check if any memory tag overlaps with topic file paths."""
@@ -369,6 +390,76 @@ def _normalize_evidence_refs(value: Any) -> list[dict[str, Any]]:
             ref["line_end"] = line_end
         refs.append(ref)
     return _merge_evidence_refs(refs)
+
+
+def _memory_context_pack_item(memory: dict[str, Any]) -> ContextPackItem | None:
+    summary = _memory_summary(memory)
+    if summary is None:
+        return None
+
+    evidence = tuple(
+        evidence_ref
+        for raw_ref in _normalize_evidence_refs(memory.get("evidence", []))
+        if (evidence_ref := _evidence_ref_from_memory_ref(raw_ref)) is not None
+    )
+    if not evidence:
+        return None
+
+    return ContextPackItem(
+        source_kind="memory",
+        source_id=_memory_source_id(memory, summary=summary, evidence=evidence),
+        label=summary,
+        evidence=evidence,
+    )
+
+
+def _memory_summary(memory: dict[str, Any]) -> str | None:
+    summary = memory.get("summary")
+    if not isinstance(summary, str):
+        return None
+    normalized = " ".join(summary.split())
+    return normalized or None
+
+
+def _evidence_ref_from_memory_ref(ref: dict[str, Any]) -> EvidenceRef | None:
+    kind = _non_empty_str(ref.get("kind"))
+    source_id = _non_empty_str(ref.get("source_id"))
+    label = _non_empty_str(ref.get("label"))
+    if kind is None or source_id is None or label is None:
+        return None
+
+    return EvidenceRef(
+        kind=kind,
+        source_id=source_id,
+        label=label,
+        repo_path=_non_empty_str(ref.get("repo_path")),
+        line_start=_positive_int(ref.get("line_start")),
+        line_end=_positive_int(ref.get("line_end")),
+        chunk_id=_non_empty_str(ref.get("chunk_id")),
+        test_node_id=_non_empty_str(ref.get("test_node_id")),
+        command_label=_non_empty_str(ref.get("command_label")),
+        session_id=_non_empty_str(ref.get("session_id")),
+        tape_entry_id=_non_empty_str(ref.get("tape_entry_id")),
+    )
+
+
+def _memory_source_id(
+    memory: dict[str, Any],
+    *,
+    summary: str,
+    evidence: tuple[EvidenceRef, ...],
+) -> str:
+    key = {
+        "summary": summary,
+        "tags": _normalize_tags(memory.get("tags", [])),
+        "evidence": [ref.to_dict() for ref in evidence],
+    }
+    encoded = json.dumps(key, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    return f"memory:{hashlib.sha256(encoded.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _non_empty_str(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
 
 
 def _positive_int(value: Any) -> int | None:

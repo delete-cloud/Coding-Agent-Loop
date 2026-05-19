@@ -141,6 +141,39 @@ def test_context_pack_renderer_omits_memory_without_evidence_by_default() -> Non
     assert ContextPackRenderer().render_messages(pack) == []
 
 
+def test_context_pack_renderer_renders_memory_session_evidence() -> None:
+    pack = ContextPack(
+        sections=(
+            ContextPackSection(
+                title="Memory references",
+                items=(
+                    ContextPackItem(
+                        source_kind="memory",
+                        source_id="memory-auth",
+                        label="Prior auth debugging note",
+                        evidence=(
+                            EvidenceRef(
+                                kind="memory",
+                                source_id="session-1:entry-9",
+                                label="compacted topic memory",
+                                session_id="session-1",
+                                tape_entry_id="entry-9",
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+    )
+
+    rendered = ContextPackRenderer().render(pack)
+
+    assert (
+        "Evidence: memory:session-1:entry-9 "
+        "(compacted topic memory; session-1; entry-9)"
+    ) in rendered
+
+
 def test_context_pack_renderer_renders_repo_and_failure_evidence() -> None:
     pack = ContextPack(
         sections=(
