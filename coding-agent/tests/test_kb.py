@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from coding_agent import kb as kb_module
 from coding_agent.kb import DocumentChunk, KB, KBSearchResult
 
 
@@ -60,6 +61,19 @@ def temp_db_path():
 def mock_embedding_fn():
     """Create a mock embedding function."""
     return MockEmbeddingFn()
+
+
+def _repo_retrieval_embed(texts: list[str]) -> list[list[float]]:
+    vectors: list[list[float]] = []
+    for text in texts:
+        lower = text.lower()
+        if "auth" in lower or "jwt" in lower:
+            vectors.append([1.0, 0.0, 0.0, 0.0])
+        elif "billing" in lower or "invoice" in lower:
+            vectors.append([0.0, 1.0, 0.0, 0.0])
+        else:
+            vectors.append([0.0, 0.0, 1.0, 0.0])
+    return vectors
 
 
 @pytest.fixture
@@ -567,6 +581,191 @@ class TestKBSearch:
         results = await kb.search("anything")
 
         assert results == []
+
+    @pytest.mark.asyncio
+    async def test_repo_retrieval_returns_ranked_evidence_with_fake_embedder(
+        self, tmp_path
+    ):
+        repo_root = tmp_path / "repo"
+        auth_path = repo_root / "src" / "auth.py"
+        billing_path = repo_root / "src" / "billing.py"
+        auth_content = "def validate_jwt():\n    return 'auth token'\n"
+        billing_content = "def invoice_total():\n    return 'billing invoice'\n"
+        auth_path.parent.mkdir(parents=True)
+        auth_path.write_text(auth_content)
+        billing_path.write_text(billing_content)
+        kb = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_dim=4,
+            embedding_fn=_repo_retrieval_embed,
+            chunk_size=1000,
+            chunk_overlap=0,
+        )
+        await kb.index_directory(repo_root, show_progress=False)
+
+        results = await kb.search_repo("jwt auth", k=2)
+
+        assert [result.rank for result in results] == [1, 2]
+        assert [result.repo_path for result in results] == [
+            "src/auth.py",
+            "src/billing.py",
+        ]
+        assert results[0].source_kind == "repo_file"
+        assert results[0].source_id == results[0].chunk.metadata["source_id"]
+        assert results[0].chunk_id == results[0].chunk.id
+        assert results[0].language == "python"
+        assert results[0].line_start == 1
+        assert results[0].line_end == 2
+        assert (
+            results[0].document_sha256
+            == hashlib.sha256(auth_content.encode("utf-8")).hexdigest()
+        )
+        assert (
+            results[0].chunk_sha256
+            == hashlib.sha256(results[0].chunk.content.encode("utf-8")).hexdigest()
+        )
+        assert results[0].score <= results[1].score
+
+    @pytest.mark.asyncio
+    async def test_repo_retrieval_skips_legacy_rows_without_repo_metadata(
+        self, tmp_path
+    ):
+        repo_root = tmp_path / "repo"
+        repo_path = repo_root / "src" / "auth.py"
+        repo_path.parent.mkdir(parents=True)
+        repo_path.write_text("def auth_guard():\n    return 'repo auth'\n")
+        kb = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_dim=4,
+            embedding_fn=_repo_retrieval_embed,
+            chunk_size=1000,
+            chunk_overlap=0,
+        )
+        table = kb._get_table()
+        table.add(
+            [
+                {
+                    "id": "legacy-auth",
+                    "content": "legacy auth row",
+                    "source": "/old/auth.py",
+                    "metadata": json.dumps({"chunk_index": 0}),
+                    "vector": [1.0, 0.0, 0.0, 0.0],
+                }
+            ]
+        )
+        await kb.index_directory(repo_root, show_progress=False)
+
+        results = await kb.search_repo("auth", k=1)
+
+        assert len(results) == 1
+        assert results[0].repo_path == "src/auth.py"
+        assert results[0].chunk.id != "legacy-auth"
+
+    @pytest.mark.asyncio
+    async def test_repo_retrieval_expands_past_legacy_candidate_window(self, tmp_path):
+        def mixed_legacy_embed(texts: list[str]) -> list[list[float]]:
+            vectors: list[list[float]] = []
+            for text in texts:
+                if text == "auth":
+                    vectors.append([1.0, 0.0, 0.0, 0.0])
+                elif "repo evidence" in text:
+                    vectors.append([0.95, 0.0, 0.0, 0.0])
+                else:
+                    vectors.append([0.0, 0.0, 1.0, 0.0])
+            return vectors
+
+        repo_root = tmp_path / "repo"
+        repo_path = repo_root / "src" / "auth.py"
+        repo_path.parent.mkdir(parents=True)
+        repo_path.write_text("repo evidence for authentication\n")
+        kb = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_dim=4,
+            embedding_fn=mixed_legacy_embed,
+            chunk_size=1000,
+            chunk_overlap=0,
+        )
+        table = kb._get_table()
+        table.add(
+            [
+                {
+                    "id": f"legacy-auth-{i}",
+                    "content": f"legacy auth row {i}",
+                    "source": f"/old/auth_{i}.py",
+                    "metadata": json.dumps({"chunk_index": i}),
+                    "vector": [1.0, 0.0, 0.0, 0.0],
+                }
+                for i in range(4)
+            ]
+        )
+        await kb.index_directory(repo_root, show_progress=False)
+
+        results = await kb.search_repo("auth", k=1)
+
+        assert len(results) == 1
+        assert results[0].repo_path == "src/auth.py"
+        assert results[0].chunk.id not in {f"legacy-auth-{i}" for i in range(4)}
+
+    @pytest.mark.asyncio
+    async def test_repo_retrieval_stops_at_candidate_fetch_cap(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(kb_module, "_MAX_REPO_RETRIEVAL_FETCH_K", 4, raising=False)
+
+        def mixed_legacy_embed(texts: list[str]) -> list[list[float]]:
+            vectors: list[list[float]] = []
+            for text in texts:
+                if text == "auth":
+                    vectors.append([1.0, 0.0, 0.0, 0.0])
+                elif "repo evidence" in text:
+                    vectors.append([0.95, 0.0, 0.0, 0.0])
+                else:
+                    vectors.append([0.0, 0.0, 1.0, 0.0])
+            return vectors
+
+        repo_root = tmp_path / "repo"
+        repo_path = repo_root / "src" / "auth.py"
+        repo_path.parent.mkdir(parents=True)
+        repo_path.write_text("repo evidence for authentication\n")
+        kb = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_dim=4,
+            embedding_fn=mixed_legacy_embed,
+            chunk_size=1000,
+            chunk_overlap=0,
+        )
+        table = kb._get_table()
+        table.add(
+            [
+                {
+                    "id": f"legacy-auth-{i}",
+                    "content": f"legacy auth row {i}",
+                    "source": f"/old/auth_{i}.py",
+                    "metadata": json.dumps({"chunk_index": i}),
+                    "vector": [1.0, 0.0, 0.0, 0.0],
+                }
+                for i in range(4)
+            ]
+        )
+        await kb.index_directory(repo_root, show_progress=False)
+
+        results = await kb.search_repo("auth", k=1)
+
+        assert results == []
+
+    @pytest.mark.asyncio
+    async def test_repo_retrieval_rejects_k_above_candidate_fetch_cap(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(kb_module, "_MAX_REPO_RETRIEVAL_FETCH_K", 4, raising=False)
+        kb = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_dim=4,
+            embedding_fn=_repo_retrieval_embed,
+        )
+
+        with pytest.raises(ValueError, match="k must be less than or equal to"):
+            await kb.search_repo("auth", k=5)
 
 
 class TestKBHybridSearch:

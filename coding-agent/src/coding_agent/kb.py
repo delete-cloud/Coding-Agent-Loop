@@ -18,6 +18,7 @@ import pyarrow as pa
 logger = logging.getLogger(__name__)
 
 _METADATA_VERSION = 1
+_MAX_REPO_RETRIEVAL_FETCH_K = 5000
 _LANGUAGE_BY_SUFFIX = {
     ".bash": "shell",
     ".cfg": "config",
@@ -69,6 +70,24 @@ class KBSearchResult:
 
     chunk: DocumentChunk
     score: float
+
+
+@dataclass(frozen=True)
+class RepoRetrievalResult:
+    """A ranked repo-aware retrieval result."""
+
+    rank: int
+    score: float
+    chunk: DocumentChunk
+    chunk_id: str
+    source_kind: str
+    source_id: str
+    repo_path: str
+    language: str | None
+    line_start: int | None
+    line_end: int | None
+    document_sha256: str | None
+    chunk_sha256: str | None
 
 
 def _repo_relative_path(path: Path, repo_root: Path | None) -> str | None:
@@ -130,6 +149,80 @@ def _line_range_for_span(text: str, start: int, end: int) -> tuple[int, int]:
     if text[end - 1] != "\n":
         line_end += 1
     return line_start, max(line_start, line_end)
+
+
+def _optional_str(metadata: dict[str, Any], key: str) -> str | None:
+    value = metadata.get(key)
+    return value if isinstance(value, str) else None
+
+
+def _optional_int(metadata: dict[str, Any], key: str) -> int | None:
+    value = metadata.get(key)
+    return value if isinstance(value, int) else None
+
+
+def _repo_retrieval_initial_fetch_k(k: int, max_fetch_k: int) -> int:
+    if k <= 0:
+        return 0
+    return min(max(k * 4, k), max_fetch_k)
+
+
+def _search_result_from_row(row: dict[str, Any]) -> KBSearchResult:
+    import json
+
+    return KBSearchResult(
+        chunk=DocumentChunk(
+            id=row["id"],
+            content=row["content"],
+            source=row["source"],
+            metadata=json.loads(row["metadata"]),
+        ),
+        score=row["_distance"],
+    )
+
+
+def _repo_retrieval_result(
+    result: KBSearchResult,
+    *,
+    rank: int,
+) -> RepoRetrievalResult | None:
+    metadata = result.chunk.metadata
+    source_kind = _optional_str(metadata, "source_kind")
+    source_id = _optional_str(metadata, "source_id")
+    repo_path = _optional_str(metadata, "repo_path")
+    if source_kind != "repo_file" or source_id is None or repo_path is None:
+        return None
+
+    return RepoRetrievalResult(
+        rank=rank,
+        score=result.score,
+        chunk=result.chunk,
+        chunk_id=result.chunk.id,
+        source_kind=source_kind,
+        source_id=source_id,
+        repo_path=repo_path,
+        language=_optional_str(metadata, "language"),
+        line_start=_optional_int(metadata, "line_start"),
+        line_end=_optional_int(metadata, "line_end"),
+        document_sha256=_optional_str(metadata, "document_sha256"),
+        chunk_sha256=_optional_str(metadata, "chunk_sha256"),
+    )
+
+
+def _repo_retrieval_results(
+    results: list[KBSearchResult],
+    *,
+    k: int,
+) -> list[RepoRetrievalResult]:
+    repo_results: list[RepoRetrievalResult] = []
+    for result in results:
+        repo_result = _repo_retrieval_result(result, rank=len(repo_results) + 1)
+        if repo_result is None:
+            continue
+        repo_results.append(repo_result)
+        if len(repo_results) >= k:
+            break
+    return repo_results
 
 
 class KB:
@@ -548,6 +641,37 @@ class KB:
             )
             for r in results
         ]
+
+    async def search_repo(
+        self,
+        query: str,
+        k: int = 5,
+    ) -> list[RepoRetrievalResult]:
+        if not query.strip() or k <= 0:
+            return []
+        if k > _MAX_REPO_RETRIEVAL_FETCH_K:
+            raise ValueError(
+                f"k must be less than or equal to {_MAX_REPO_RETRIEVAL_FETCH_K}"
+            )
+        if not self.has_table():
+            return []
+
+        table = self._get_table()
+        embeddings = await self._embed([query])
+        query_vector = embeddings[0]
+        fetch_k = _repo_retrieval_initial_fetch_k(k, _MAX_REPO_RETRIEVAL_FETCH_K)
+
+        while True:
+            rows = table.search(query_vector).limit(fetch_k).to_list()
+            fetched = [_search_result_from_row(row) for row in rows]
+            repo_results = _repo_retrieval_results(fetched, k=k)
+            if (
+                len(repo_results) >= k
+                or len(rows) < fetch_k
+                or fetch_k >= _MAX_REPO_RETRIEVAL_FETCH_K
+            ):
+                return repo_results
+            fetch_k = min(fetch_k * 2, _MAX_REPO_RETRIEVAL_FETCH_K)
 
     def search_sync(self, query: str, k: int = 5) -> list[KBSearchResult]:
         if not query.strip():

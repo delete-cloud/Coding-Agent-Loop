@@ -226,3 +226,71 @@ Remaining risks:
 
 - G14 records metadata but does not change retrieval ranking or context rendering yet.
 - Existing LanceDB rows created before G14 do not have the new metadata keys; future code must tolerate legacy metadata during retrieval.
+
+## G15 - Repo-Aware Retrieval Indexing And Query Fixtures
+
+Status: passed local verification.
+
+### Before
+
+Goal id: G15
+
+Intended files:
+
+- `src/coding_agent/kb.py`
+- `tests/test_kb.py`
+- `docs/context_system/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/context-system-g15-retrieval-fixtures.md`
+
+Verification commands:
+
+- `uv run pytest tests/test_kb.py -k "repo_retrieval_returns_ranked_evidence_with_fake_embedder or repo_retrieval_skips_legacy_rows_without_repo_metadata" -v`
+- `uv run pytest tests/test_kb.py tests/coding_agent/test_kb_sync.py tests/cli/test_kb_commands.py -v`
+
+Stop criteria:
+
+- Change requires context-pack rendering or `build_context` pipeline changes.
+- Change requires AgentKit runtime changes.
+- Deterministic verification cannot be produced.
+- More than two fix iterations fail for the same reason.
+
+Postmortem routing:
+
+- `src/coding_agent/kb.py` matches PM-0009. Release checks: run focused tests for affected KB behavior and review affected control-flow shape before shipping.
+
+### After
+
+Changed files:
+
+- `src/coding_agent/kb.py`
+- `tests/test_kb.py`
+- `docs/context_system/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/context-system-g15-retrieval-fixtures.md`
+
+Tests run:
+
+- Red: `uv run pytest tests/test_kb.py -k "repo_retrieval_returns_ranked_evidence_with_fake_embedder or repo_retrieval_skips_legacy_rows_without_repo_metadata" -v`
+- Green: `uv run pytest tests/test_kb.py -k "repo_retrieval_returns_ranked_evidence_with_fake_embedder or repo_retrieval_skips_legacy_rows_without_repo_metadata" -v`
+- Local review fix red: `uv run pytest tests/test_kb.py -k "repo_retrieval_expands_past_legacy_candidate_window" -v`
+- Local review fix green: `uv run pytest tests/test_kb.py -k "repo_retrieval_expands_past_legacy_candidate_window" -v`
+- CodeRabbit fix red: `uv run pytest tests/test_kb.py -k "repo_retrieval_stops_at_candidate_fetch_cap" -v`
+- CodeRabbit fix green: `uv run pytest tests/test_kb.py -k "repo_retrieval_stops_at_candidate_fetch_cap" -v`
+- Local review gate fix red: `uv run pytest tests/test_kb.py -k "repo_retrieval_rejects_k_above_candidate_fetch_cap" -v`
+- Local review gate fix green: `uv run pytest tests/test_kb.py -k "repo_retrieval_rejects_k_above_candidate_fetch_cap" -v`
+- `uv run ruff format --check src/coding_agent/kb.py tests/test_kb.py`
+- `uv run pytest tests/test_kb.py tests/coding_agent/test_kb_sync.py tests/cli/test_kb_commands.py -v`
+
+Results:
+
+- Red tests failed before `KB.search_repo` existed.
+- Focused repo retrieval tests passed after implementation: 2 passed, 36 deselected.
+- Local review regression failed before expanding past legacy candidate windows and passed after iterative candidate expansion: 1 passed, 38 deselected.
+- CodeRabbit regression failed before capping adaptive fetch growth and passed after adding `_MAX_REPO_RETRIEVAL_FETCH_K`: 1 passed, 39 deselected.
+- Local review gate regression failed before rejecting `k` above the fetch cap and passed after input validation moved ahead of table lookup: 1 passed, 40 deselected.
+- Ruff format check passed.
+- KB, sync, and CLI KB tests passed: 51 passed.
+
+Remaining risks:
+
+- G15 returns repo evidence from KB but does not render context packs or inject through `build_context`; those remain G17/G18.
+- G15 skips legacy rows without repo metadata for repo retrieval; generic vector search still returns those rows unchanged.
