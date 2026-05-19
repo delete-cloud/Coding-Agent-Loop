@@ -2,7 +2,6 @@
 
 import pytest
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
 from agentkit.plugin.registry import PluginRegistry
 from agentkit.runtime.pipeline import Pipeline, PipelineContext
 from agentkit.runtime.hook_runtime import HookRuntime
@@ -258,6 +257,32 @@ class TestMemoryPluginDirectiveFlow:
         assert plugin._memories == []
         assert len(plugin._working_memories) == 1
 
+    def test_add_memory_records_repo_file_evidence_from_tags(self):
+        plugin = MemoryPlugin()
+        record = MemoryRecord(
+            summary="Fixed auth bug",
+            tags=["src/auth.py", "file_read"],
+            importance=0.8,
+        )
+
+        plugin.add_memory(record)
+
+        assert plugin._working_memories == [
+            {
+                "summary": "Fixed auth bug",
+                "tags": ["src/auth.py", "file_read"],
+                "importance": 0.8,
+                "evidence": [
+                    {
+                        "kind": "repo_file",
+                        "source_id": "src/auth.py",
+                        "label": "src/auth.py",
+                        "repo_path": "src/auth.py",
+                    }
+                ],
+            }
+        ]
+
 
 class TestMemoryPluginSessionEvents:
     def test_topic_end_event_adds_compacted_memory(self):
@@ -320,6 +345,14 @@ class TestMemoryPluginSessionEvents:
         assert len(memory._memories) == 1
         assert memory._memories[0]["summary"] == "Topic involved files: src/auth.py"
         assert memory._memories[0]["tags"] == ["src/auth.py"]
+        assert memory._memories[0]["evidence"] == [
+            {
+                "kind": "repo_file",
+                "source_id": "src/auth.py",
+                "label": "src/auth.py",
+                "repo_path": "src/auth.py",
+            }
+        ]
 
 
 class TestMemoryPersistence:
@@ -332,6 +365,22 @@ class TestMemoryPersistence:
         tape_store.append_memory_record(
             "session-1",
             {"summary": "Persisted memory", "tags": ["src/auth.py"], "importance": 1.0},
+        )
+        tape_store.append_memory_record(
+            "session-1",
+            {
+                "summary": "Evidence memory",
+                "tags": ["tests/test_auth.py"],
+                "importance": 0.8,
+                "evidence": [
+                    {
+                        "kind": "repo_file",
+                        "source_id": "tests/test_auth.py",
+                        "label": "tests/test_auth.py",
+                        "repo_path": "tests/test_auth.py",
+                    }
+                ],
+            },
         )
 
         registry = PluginRegistry(specs=HOOK_SPECS)
@@ -349,6 +398,69 @@ class TestMemoryPersistence:
                 "summary": "Persisted memory",
                 "tags": ["src/auth.py"],
                 "importance": 0.9,
+                "evidence": [],
+            },
+            {
+                "summary": "Evidence memory",
+                "tags": ["tests/test_auth.py"],
+                "importance": 0.72,
+                "evidence": [
+                    {
+                        "kind": "repo_file",
+                        "source_id": "tests/test_auth.py",
+                        "label": "tests/test_auth.py",
+                        "repo_path": "tests/test_auth.py",
+                    }
+                ],
+            },
+        ]
+
+    @pytest.mark.asyncio
+    async def test_mount_drops_invalid_persisted_evidence_ranges(self, tmp_path: Path):
+        storage = StoragePlugin(data_dir=tmp_path)
+        tape_store = storage._get_jsonl_store()
+        tape_store.append_memory_record(
+            "session-1",
+            {
+                "summary": "Malformed evidence memory",
+                "tags": ["src/auth.py"],
+                "importance": 1.0,
+                "evidence": [
+                    {
+                        "kind": "repo_file",
+                        "source_id": "src/auth.py",
+                        "label": "src/auth.py",
+                        "repo_path": "src/auth.py",
+                        "line_start": 20,
+                        "line_end": 10,
+                    }
+                ],
+            },
+        )
+
+        registry = PluginRegistry(specs=HOOK_SPECS)
+        registry.register(storage)
+        memory = MemoryPlugin()
+        registry.register(memory)
+        runtime = HookRuntime(registry, specs=HOOK_SPECS)
+        pipeline = Pipeline(runtime=runtime, registry=registry)
+        ctx = PipelineContext(tape=Tape(), session_id="session-1", config={})
+
+        await pipeline.mount(ctx)
+
+        assert memory._memories == [
+            {
+                "summary": "Malformed evidence memory",
+                "tags": ["src/auth.py"],
+                "importance": 0.9,
+                "evidence": [
+                    {
+                        "kind": "repo_file",
+                        "source_id": "src/auth.py",
+                        "label": "src/auth.py",
+                        "repo_path": "src/auth.py",
+                    }
+                ],
             }
         ]
 
@@ -389,6 +501,20 @@ class TestMemoryPersistence:
                 "summary": "Topic involved files: src/auth.py",
                 "tags": ["src/auth.py", "tests/test_auth.py"],
                 "importance": 0.8,
+                "evidence": [
+                    {
+                        "kind": "repo_file",
+                        "source_id": "src/auth.py",
+                        "label": "src/auth.py",
+                        "repo_path": "src/auth.py",
+                    },
+                    {
+                        "kind": "repo_file",
+                        "source_id": "tests/test_auth.py",
+                        "label": "tests/test_auth.py",
+                        "repo_path": "tests/test_auth.py",
+                    },
+                ],
             }
         ]
 
@@ -407,5 +533,19 @@ class TestMemoryPersistence:
                 "summary": "Topic involved files: src/auth.py",
                 "tags": ["src/auth.py", "tests/test_auth.py"],
                 "importance": 0.72,
+                "evidence": [
+                    {
+                        "kind": "repo_file",
+                        "source_id": "src/auth.py",
+                        "label": "src/auth.py",
+                        "repo_path": "src/auth.py",
+                    },
+                    {
+                        "kind": "repo_file",
+                        "source_id": "tests/test_auth.py",
+                        "label": "tests/test_auth.py",
+                        "repo_path": "tests/test_auth.py",
+                    },
+                ],
             }
         ]
