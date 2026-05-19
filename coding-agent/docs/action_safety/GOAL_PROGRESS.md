@@ -106,7 +106,7 @@ Remaining risks:
 
 ## G26 - Action-Safety Boundary ADR
 
-Status: passed local verification; pending PR.
+Status: merged via PR #228.
 
 ### Before
 
@@ -170,3 +170,79 @@ Remaining risks:
 - G26 is docs-only and does not prove the future action-safety implementation.
 - ADR-0035 acceptance criteria intentionally describe future G27-G37 implementation tests that do not exist yet.
 - ADR-0035 remains `Proposed` until implementation goals prove and check off the criteria.
+
+## G27 - Patch Planning Data Model
+
+Status: passed local verification; pending PR.
+
+### Before
+
+Goal id: G27
+
+Intended files:
+
+- `src/coding_agent/action_safety/__init__.py`
+- `src/coding_agent/action_safety/patch_plan.py`
+- `tests/coding_agent/action_safety/test_patch_plan.py`
+- `docs/action_safety/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/action-safety-g27-patch-plan.md`
+
+Verification commands:
+
+- `uv run pytest tests/coding_agent/action_safety/test_patch_plan.py -v`
+- `uv run pytest tests/coding_agent/tools/test_file_ops.py tests/coding_agent/tools/test_shell.py tests/approval/test_policy.py tests/coding_agent/environment/test_cloud_environment.py tests/coding_agent/environment/test_local_environment.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `uv run ruff check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `git diff --check -- .`
+
+Stop criteria:
+
+- Patch planning requires safe edit policy, workspace validation, or dry-run behavior from later goals.
+- Implementation would expose raw patch/file content in plan summaries.
+- Implementation would require AgentKit pipeline changes.
+- Deterministic verification cannot be produced.
+- More than two fix iterations fail for the same reason.
+
+Postmortem routing:
+
+- Intended G27 production/test files are new and do not directly match `postmortem/index.yaml` `related_files`.
+- Later integration into existing file, shell, or core tool surfaces must apply PM-0001/PM-0009 focused checks.
+
+### After
+
+Changed files:
+
+- `src/coding_agent/action_safety/__init__.py`
+- `src/coding_agent/action_safety/patch_plan.py`
+- `tests/coding_agent/action_safety/test_patch_plan.py`
+- `docs/adr/0035-action-safety-and-workspace-execution.md`
+- `docs/action_safety/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/action-safety-g27-patch-plan.md`
+
+Tests run:
+
+- `uv run pytest tests/coding_agent/action_safety/test_patch_plan.py -v`
+- `uv run pytest tests/coding_agent/tools/test_file_ops.py tests/coding_agent/tools/test_shell.py tests/approval/test_policy.py tests/coding_agent/environment/test_cloud_environment.py tests/coding_agent/environment/test_local_environment.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `uv run ruff check src/coding_agent/action_safety tests/coding_agent/action_safety`
+- `git diff --check -- .`
+
+Results:
+
+- Patch planning tests passed: 6 passed.
+- File tools, shell tool, approval policy, cloud environment, and local environment tests passed: 34 passed.
+- Context-system smoke test passed: 1 passed.
+- AgentKit build_context/runtime-stage span tests passed: 8 passed, 29 deselected.
+- Scoped ruff format/check passed for `src/coding_agent/action_safety` and `tests/coding_agent/action_safety`.
+- Diff whitespace check passed.
+
+Remaining risks:
+
+- G27 does not integrate patch plans into `file_patch`; G29 owns dry-run/preview and apply flow.
+- G27 intentionally does not perform safe edit validation for symlinks, binary files, size, or workspace paths; G28 owns that policy.
+- Risk classification is bounded and deterministic but intentionally coarse until later goals add action policy and approval routing.
+- Local review found and G27 fixed two parser correctness risks: multi-file diffs are rejected for single-path plans, and hunk body counts must match hunk headers.
