@@ -40,7 +40,7 @@ No pre-existing repository document defined G25-G37 individually. The following 
 
 ## G25 - Current-State Audit And Phase Ledger
 
-Status: passed local verification; pending PR.
+Status: merged via PR #227.
 
 ### Before
 
@@ -103,3 +103,70 @@ Remaining risks:
 - G25 is docs-only and does not prove the future action-safety implementation.
 - The G25-G37 goal map is inferred from the phase objective because no prior repository document defined those individual goal ids.
 - Command policy, patch planning, validation runner, observability, approval risk routing, local/cloud parity, and snapshot/restore behavior remain future goals.
+
+## G26 - Action-Safety Boundary ADR
+
+Status: passed local verification; pending PR.
+
+### Before
+
+Goal id: G26
+
+Intended files:
+
+- `docs/adr/0035-action-safety-and-workspace-execution.md`
+- `docs/action_safety/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/action-safety-g26-adr.md`
+
+Verification commands:
+
+- `test -f docs/adr/0035-action-safety-and-workspace-execution.md`
+- `test -f .opencode/prompts/tasks/action-safety-g26-adr.md`
+- `rg -n "## Context|## Decision|## Alternatives Rejected|## Acceptance Criteria|## References" docs/adr/0035-action-safety-and-workspace-execution.md`
+- `uv run pytest tests/coding_agent/tools/test_file_ops.py tests/coding_agent/tools/test_shell.py tests/approval/test_policy.py tests/coding_agent/environment/test_workspace_archive.py tests/coding_agent/environment/test_cloud_environment.py tests/coding_agent/environment/test_local_environment.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+
+Stop criteria:
+
+- ADR would require rewriting the AgentKit pipeline.
+- ADR would require durable runtime semantic changes.
+- ADR would require changing context-system semantics in G26.
+- Deterministic verification cannot be produced.
+- More than two fix iterations fail for the same reason.
+
+Postmortem routing:
+
+- Intended G26 files are docs/task-packet files and do not directly match `postmortem/index.yaml` `related_files`.
+- The ADR records PM-0001/PM-0009 implications for later production changes touching file, shell, or core tool surfaces.
+
+### After
+
+Changed files:
+
+- `docs/adr/0035-action-safety-and-workspace-execution.md`
+- `docs/action_safety/GOAL_PROGRESS.md`
+- `.opencode/prompts/tasks/action-safety-g26-adr.md`
+
+Tests run:
+
+- `test -f docs/adr/0035-action-safety-and-workspace-execution.md`
+- `test -f .opencode/prompts/tasks/action-safety-g26-adr.md`
+- `rg -n "## Context|## Decision|## Alternatives Rejected|## Acceptance Criteria|## References" docs/adr/0035-action-safety-and-workspace-execution.md`
+- `uv run pytest tests/coding_agent/tools/test_file_ops.py tests/coding_agent/tools/test_shell.py tests/approval/test_policy.py tests/coding_agent/environment/test_workspace_archive.py tests/coding_agent/environment/test_cloud_environment.py tests/coding_agent/environment/test_local_environment.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+
+Results:
+
+- ADR and G26 task packet existence checks passed.
+- ADR required-section check passed.
+- File tools, shell tool, approval policy, workspace archive, cloud environment, and local environment tests passed: 51 passed.
+- Context-system smoke test passed: 1 passed.
+- AgentKit build_context/runtime-stage span tests passed: 8 passed, 29 deselected.
+
+Remaining risks:
+
+- G26 is docs-only and does not prove the future action-safety implementation.
+- ADR-0035 acceptance criteria intentionally describe future G27-G37 implementation tests that do not exist yet.
+- ADR-0035 remains `Proposed` until implementation goals prove and check off the criteria.
