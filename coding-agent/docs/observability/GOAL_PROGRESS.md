@@ -43,7 +43,7 @@ backend/exporter wiring.
 
 ## G46 Observability Current State Map
 
-Status: passed local verification; pending PR.
+Status: merged via PR #252.
 
 ### Intended Files
 
@@ -94,3 +94,49 @@ Status: passed local verification; pending PR.
 
 - G46 is a documentation-only map. It does not yet add the composite sink,
   Prometheus exporter, metrics endpoint, or Grafana local stack.
+
+## G47 Observability Backend ADR
+
+Status: passed local verification; pending PR.
+
+### Intended Files
+
+- `docs/adr/0036-observability-backend-exporter-boundaries.md`
+- `docs/observability/GOAL_PROGRESS.md`
+
+### Verification Commands
+
+- `test -f docs/adr/0036-observability-backend-exporter-boundaries.md`
+- `rg -n "Langfuse/OTLP remains a tracing backend|Prometheus is a metrics backend|CompositeObservationSink|Forbidden Prometheus labels|Exporter failures must fail open" docs/adr/0036-observability-backend-exporter-boundaries.md`
+- `git diff --check -- .`
+- `git diff --cached --check -- .`
+
+### Stop Criteria
+
+- Stop if the backend/exporter decision requires AgentKit to import Langfuse,
+  Prometheus, Grafana, or Coding Agent runtime modules.
+- Stop if Prometheus metrics need high-cardinality labels to satisfy the phase.
+
+### Changed Files
+
+- `docs/adr/0036-observability-backend-exporter-boundaries.md`
+- `docs/observability/GOAL_PROGRESS.md`
+
+### Tests Run
+
+- `test -f docs/adr/0036-observability-backend-exporter-boundaries.md`
+- `rg -n "Langfuse/OTLP remains a tracing backend|Prometheus is a metrics backend|CompositeObservationSink|Forbidden Prometheus labels|Exporter failures must fail open" docs/adr/0036-observability-backend-exporter-boundaries.md`
+- `git diff --check -- .`
+- `git diff --cached --check -- .`
+
+### Results
+
+- ADR file exists.
+- Key backend/exporter boundary decisions are present.
+- `git diff --check -- .` passed.
+- `git diff --cached --check -- .` passed.
+
+### Remaining Risks
+
+- G47 is decision documentation only. The composite sink, Prometheus exporter,
+  metrics endpoint, and dashboard artifacts remain for G48-G53.
