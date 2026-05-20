@@ -269,7 +269,7 @@ Status: merged via PR #255.
 
 ## G50 Metrics Endpoint And HTTP Metrics
 
-Status: passed local verification; pending PR.
+Status: merged via PR #256.
 
 ### Intended Files
 
@@ -332,3 +332,66 @@ Status: passed local verification; pending PR.
 
 - G50 covers HTTP request metrics and the `/metrics` endpoint. Additional
   runtime/context/action/evaluation/storage metric coverage remains G51 work.
+
+## G51 Runtime Context Action Metrics
+
+Status: passed local verification; pending PR.
+
+### Intended Files
+
+- `src/coding_agent/observability.py`
+- `tests/coding_agent/test_observability.py`
+- `docs/observability/GOAL_PROGRESS.md`
+
+### Verification Commands
+
+- `uv run pytest tests/coding_agent/test_observability.py -v`
+- `uv run pytest tests/coding_agent/plugins/test_kb_plugin.py tests/coding_agent/action_safety/test_action_observability.py -v`
+- `uv run pytest tests/coding_agent/test_release_observability_contract.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "runtime_stage_spans" -v`
+- `uv run ruff format --check src/coding_agent/observability.py tests/coding_agent/test_observability.py`
+- `uv run ruff check src/coding_agent/observability.py tests/coding_agent/test_observability.py`
+- `git diff --check -- .`
+
+### Stop Criteria
+
+- Stop if representative runtime/context/action/eval/HITL/storage metrics
+  require run/session ids, file paths, command output, raw prompts, or other
+  high-cardinality labels.
+- Stop if adding metrics requires changing AgentKit pipeline semantics.
+
+### Changed Files
+
+- `src/coding_agent/observability.py`
+- `tests/coding_agent/test_observability.py`
+- `docs/observability/GOAL_PROGRESS.md`
+
+### Tests Run
+
+- `uv run pytest tests/coding_agent/test_observability.py -v`
+- `uv run pytest tests/coding_agent/plugins/test_kb_plugin.py tests/coding_agent/action_safety/test_action_observability.py -v`
+- `uv run pytest tests/coding_agent/test_release_observability_contract.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "runtime_stage_spans" -v`
+- `uv run ruff format --check src/coding_agent/observability.py tests/coding_agent/test_observability.py`
+- `uv run ruff check src/coding_agent/observability.py tests/coding_agent/test_observability.py`
+- `git diff --check -- .`
+
+### Results
+
+- Observability tests passed: 24 passed.
+- KB/action observability tests passed: 17 passed.
+- Release observability contract tests passed: 3 passed.
+- AgentKit runtime span regression passed: 1 passed, 36 deselected.
+- Scoped ruff format/check passed.
+- `git diff --check -- .` passed.
+- Local review found missing real action-kind labels, missing
+  `action_safety.action` event mapping, and weak default-recorder coverage for
+  eval/HITL/storage helpers. The allowlist now includes `file_edit` and
+  `command`, action events map to a known event label, and default-recorder
+  helpers/tests prove those metrics reach the `/metrics` exposition path.
+
+### Remaining Risks
+
+- G51 provides representative low-cardinality metrics for existing spans and
+  explicit eval/HITL/storage recorder hooks. It does not attempt exhaustive
+  instrumentation of every storage or evaluation call path in this phase.

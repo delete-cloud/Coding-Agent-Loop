@@ -14,7 +14,10 @@ from coding_agent.observability import (
     PrometheusMetricsRecorder,
     build_observation_sink,
     prometheus_metrics_text,
+    record_evaluation_case_metric,
+    record_hitl_interaction_metric,
     record_http_request_metric,
+    record_storage_operation_metric,
     reset_prometheus_metrics,
 )
 
@@ -296,6 +299,129 @@ def test_prometheus_metrics_record_http_request_metrics() -> None:
     )
     assert (
         'coding_agent_http_request_duration_ms_sum{method="GET",route="healthz",status_code="200"} 12.5'
+        in text
+    )
+
+
+def test_prometheus_metrics_map_representative_runtime_context_action_spans() -> None:
+    recorder = PrometheusMetricsRecorder()
+    sink = PrometheusMetricsObservationSink(recorder=recorder)
+
+    sink.record_span(
+        SpanRecord(
+            name="runtime.stage.build_context",
+            status="ok",
+            attributes={"stage": "build_context"},
+            duration_ms=4,
+        )
+    )
+    sink.record_span(
+        SpanRecord(
+            name="retrieval.kb.search",
+            status="ok",
+            attributes={
+                "retrieval.cache_hit": False,
+                "retrieval.source_kind": "kb",
+            },
+            duration_ms=5,
+        )
+    )
+    sink.record_span(
+        SpanRecord(
+            name="context_pack.render",
+            status="ok",
+            attributes={},
+            duration_ms=6,
+        )
+    )
+    sink.record_span(
+        SpanRecord(
+            name="action_safety.action",
+            status="ok",
+            attributes={
+                "action_kind": "file_edit",
+                "action_status": "completed",
+                "policy_decision": "allow",
+                "risk_level": "low",
+            },
+            duration_ms=7,
+        )
+    )
+    sink.record_span(
+        SpanRecord(
+            name="action_safety.action",
+            status="ok",
+            attributes={"action_kind": "command", "action_status": "started"},
+            duration_ms=1,
+        )
+    )
+    sink.record_event(
+        ObservationEvent(
+            name="action_safety.action",
+            attributes={"action_kind": "validation", "action_status": "completed"},
+        )
+    )
+
+    text = recorder.exposition_text()
+
+    assert 'span="runtime.stage.build_context"' in text
+    assert 'stage="build_context"' in text
+    assert 'span="retrieval.kb.search"' in text
+    assert 'cache_hit="false"' in text
+    assert 'source_kind="kb"' in text
+    assert 'span="context_pack.render"' in text
+    assert 'span="action_safety.action"' in text
+    assert 'event="action_safety.action"' in text
+    assert 'action_kind="file_edit"' in text
+    assert 'action_kind="command"' in text
+    assert 'action_kind="validation"' in text
+    assert 'action_status="completed"' in text
+    assert 'policy_decision="allow"' in text
+    assert 'risk_level="low"' in text
+
+
+def test_prometheus_metrics_record_eval_hitl_and_storage_outcomes() -> None:
+    recorder = PrometheusMetricsRecorder()
+
+    recorder.record_evaluation_case_result(status="passed")
+    recorder.record_hitl_interaction(status="approved")
+    recorder.record_storage_operation(
+        operation="checkpoint_save",
+        status="ok",
+        duration_ms=11,
+    )
+
+    text = recorder.exposition_text()
+
+    assert 'coding_agent_evaluation_case_results_total{eval_status="passed"} 1' in text
+    assert 'coding_agent_hitl_interactions_total{hitl_status="approved"} 1' in text
+    assert (
+        'coding_agent_storage_operations_total{operation="checkpoint_save",storage_status="ok"} 1'
+        in text
+    )
+    assert (
+        'coding_agent_storage_operation_duration_ms_count{operation="checkpoint_save",storage_status="ok"} 1'
+        in text
+    )
+
+
+def test_prometheus_metrics_record_eval_hitl_and_storage_on_default_recorder() -> None:
+    reset_prometheus_metrics()
+
+    record_evaluation_case_metric(status="passed")
+    record_hitl_interaction_metric(status="approved")
+    record_storage_operation_metric(
+        operation="checkpoint_save",
+        status="ok",
+        duration_ms=11,
+    )
+
+    text = prometheus_metrics_text()
+
+    assert 'coding_agent_evaluation_case_results_total{eval_status="passed"} 1' in text
+    assert 'coding_agent_hitl_interactions_total{hitl_status="approved"} 1' in text
+    assert (
+        'coding_agent_storage_operations_total{operation="checkpoint_save",storage_status="ok"} 1'
         in text
     )
 
