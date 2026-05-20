@@ -35,6 +35,41 @@ class ConsoleRunSummary:
     error_summary: str | None = None
 
 
+@dataclass(frozen=True)
+class ConsoleSnapshotSummary:
+    snapshot_id: str
+    message_count: int
+    created_at: datetime | None
+    message_labels: tuple[str, ...]
+    metadata_keys: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ConsoleEventSummary:
+    sequence: int | None
+    event_id: str
+    event_kind: str
+    created_at: datetime
+    payload_keys: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ConsoleRunDetail:
+    run_id: str
+    session_id: str
+    tape_id: str | None
+    parent_run_id: str | None
+    agent_id: str | None
+    status: str
+    started_at: datetime
+    ended_at: datetime | None
+    error_summary: str | None
+    metadata_keys: tuple[str, ...]
+    result_keys: tuple[str, ...]
+    snapshot: ConsoleSnapshotSummary | None
+    events: tuple[ConsoleEventSummary, ...]
+
+
 CONSOLE_PAGES: tuple[ConsolePage, ...] = (
     ConsolePage(
         path="/console/sessions",
@@ -144,6 +179,19 @@ def render_console_runs_page(
     return _html_document(title=page.title, body=body, active_path=page.path)
 
 
+def render_console_run_detail_page(detail: ConsoleRunDetail) -> str:
+    title = "Run Detail"
+    body = (
+        f"<h1>{title}</h1>"
+        '<p class="lede">Replayable runtime summary with sanitized snapshot and event metadata.</p>'
+        f"{_run_metadata_detail(detail)}"
+        f"{_run_snapshot_section(detail.snapshot)}"
+        f"{_run_events_section(detail.run_id, detail.events)}"
+        f"{_run_detail_links(detail)}"
+    )
+    return _html_document(title=title, body=body, active_path="/console/runs")
+
+
 def safe_error_summary(error: str | None) -> str | None:
     if error is None:
         return None
@@ -163,6 +211,39 @@ def safe_error_summary(error: str | None) -> str | None:
     if any(token in normalized for token in forbidden):
         return "Sensitive error summary redacted."
     return error[:240]
+
+
+def safe_key_tuple(mapping: dict[str, object]) -> tuple[str, ...]:
+    return tuple(
+        sorted(key for key in mapping if not _contains_sensitive_token(str(key)))
+    )
+
+
+def message_label(message: dict[str, object]) -> str:
+    role = message.get("role")
+    if isinstance(role, str) and role:
+        return f"role:{role}"
+    message_type = message.get("type") or message.get("message_type")
+    if isinstance(message_type, str) and message_type:
+        return f"type:{message_type}"
+    return "message"
+
+
+def _contains_sensitive_token(value: str) -> bool:
+    normalized = value.lower()
+    forbidden = (
+        "prompt",
+        "message",
+        "content",
+        "command_output",
+        "stdout",
+        "stderr",
+        "env",
+        "secret",
+        "result",
+        "text",
+    )
+    return any(token in normalized for token in forbidden)
 
 
 def _html_document(*, title: str, body: str, active_path: str) -> str:
@@ -194,6 +275,11 @@ def _html_document(*, title: str, body: str, active_path: str) -> str:
         "th{font-size:13px;text-transform:uppercase;color:#52616f;background:#f1f5f9;}"
         ".filter-note{font-size:14px;color:#52616f;}"
         ".status{font-weight:700;}"
+        "dl{display:grid;grid-template-columns:180px minmax(0,1fr);gap:8px 16px;background:#fff;border:1px solid #cbd5df;padding:16px;}"
+        "dt{font-weight:700;color:#52616f;}dd{margin:0;}"
+        "section{margin:0 0 24px;}"
+        ".pill-list{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 0;padding:0;list-style:none;}"
+        ".pill-list li{border:1px solid #cbd5df;border-radius:6px;padding:4px 8px;background:#fff;}"
         "@media(max-width:760px){.layout{grid-template-columns:1fr;}nav{position:static;}main{padding:20px;}}"
         "</style>"
         "</head>"
@@ -204,6 +290,93 @@ def _html_document(*, title: str, body: str, active_path: str) -> str:
         "</div>"
         "</body>"
         "</html>"
+    )
+
+
+def _run_metadata_detail(detail: ConsoleRunDetail) -> str:
+    return (
+        '<section aria-label="Run metadata">'
+        "<h2>Run Metadata</h2>"
+        "<dl>"
+        f"<dt>Run ID</dt><dd>{escape(detail.run_id)}</dd>"
+        f"<dt>Session ID</dt><dd>{escape(detail.session_id)}</dd>"
+        f"<dt>Status</dt><dd>{escape(detail.status)}</dd>"
+        f"<dt>Started</dt><dd>{escape(_format_datetime(detail.started_at))}</dd>"
+        f"<dt>Finished</dt><dd>{escape(_format_optional_datetime(detail.ended_at))}</dd>"
+        f"<dt>Tape ID</dt><dd>{escape(detail.tape_id or '-')}</dd>"
+        f"<dt>Parent Run ID</dt><dd>{escape(detail.parent_run_id or '-')}</dd>"
+        f"<dt>Agent ID</dt><dd>{escape(detail.agent_id or '-')}</dd>"
+        f"<dt>Error Summary</dt><dd>{escape(detail.error_summary or '-')}</dd>"
+        f"<dt>Metadata Keys</dt><dd>{escape(_join_or_dash(detail.metadata_keys))}</dd>"
+        f"<dt>Result Keys</dt><dd>{escape(_join_or_dash(detail.result_keys))}</dd>"
+        "</dl>"
+        "</section>"
+    )
+
+
+def _run_snapshot_section(snapshot: ConsoleSnapshotSummary | None) -> str:
+    if snapshot is None:
+        return _empty_state(
+            "Message Snapshot", "No latest message snapshot is available."
+        )
+    labels = "".join(f"<li>{escape(label)}</li>" for label in snapshot.message_labels)
+    metadata_keys = _join_or_dash(snapshot.metadata_keys)
+    return (
+        '<section aria-label="Message snapshot">'
+        "<h2>Message Snapshot</h2>"
+        "<dl>"
+        f"<dt>Snapshot ID</dt><dd>{escape(snapshot.snapshot_id)}</dd>"
+        f"<dt>Created</dt><dd>{escape(_format_optional_datetime(snapshot.created_at))}</dd>"
+        f"<dt>Messages</dt><dd>{snapshot.message_count} messages</dd>"
+        f"<dt>Metadata Keys</dt><dd>{escape(metadata_keys)}</dd>"
+        "</dl>"
+        f'<ul class="pill-list">{labels}</ul>'
+        "</section>"
+    )
+
+
+def _run_events_section(run_id: str, events: tuple[ConsoleEventSummary, ...]) -> str:
+    replay_note = (
+        "Runtime event replay uses the existing "
+        f"/runs/{escape(run_id)}/events API. Pass Last-Event-ID to resume after a known event."
+    )
+    if not events:
+        return _empty_state("Runtime Events", replay_note)
+    rows = []
+    for event in events:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(str(event.sequence or '-'))}</td>"
+            f"<td>{escape(event.event_kind)}</td>"
+            f"<td>{escape(event.event_id)}</td>"
+            f"<td>{escape(_format_datetime(event.created_at))}</td>"
+            f"<td>{escape(_join_or_dash(event.payload_keys))}</td>"
+            "</tr>"
+        )
+    return (
+        '<section aria-label="Runtime events">'
+        "<h2>Runtime Events</h2>"
+        f'<p class="lede">{replay_note}</p>'
+        '<table aria-label="Run runtime events">'
+        "<thead><tr><th>Sequence</th><th>Kind</th><th>Event ID</th>"
+        "<th>Created</th><th>Payload Keys</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+        "</section>"
+    )
+
+
+def _run_detail_links(detail: ConsoleRunDetail) -> str:
+    return (
+        '<section aria-label="Related console links">'
+        "<h2>Related Views</h2>"
+        '<ul class="pill-list">'
+        f'<li><a href="/console/tape">Tape {escape(detail.tape_id or "-")}</a></li>'
+        f'<li><a href="/console/context?run_id={escape(detail.run_id)}">Context</a></li>'
+        f'<li><a href="/console/actions?run_id={escape(detail.run_id)}">Actions</a></li>'
+        f'<li><a href="/console/observability?run_id={escape(detail.run_id)}">Observability</a></li>'
+        "</ul>"
+        "</section>"
     )
 
 
@@ -278,6 +451,12 @@ def _format_optional_datetime(value: datetime | None) -> str:
 
 def _format_datetime(value: datetime) -> str:
     return value.isoformat()
+
+
+def _join_or_dash(values: tuple[str, ...]) -> str:
+    if not values:
+        return "-"
+    return ", ".join(values)
 
 
 def _navigation(active_path: str) -> str:
