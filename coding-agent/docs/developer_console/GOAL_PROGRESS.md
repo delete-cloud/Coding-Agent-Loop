@@ -418,7 +418,7 @@ Status: merged via PR #267.
 
 ## G60 Tape And Context Inspector
 
-Status: passed local verification; pending PR.
+Status: merged via PR #268.
 
 ### Intended Files
 
@@ -489,3 +489,82 @@ Status: passed local verification; pending PR.
 - Context inspector currently depends on context-pack summary data being
   present in durable run metadata or equivalent fixture data. It does not add a
   new persistence model for historical context packs.
+
+## G61 Memory Action Validation Inspector
+
+Status: passed local verification; pending PR.
+
+### Intended Files
+
+- `src/coding_agent/ui/developer_console.py`
+- `src/coding_agent/ui/http_server.py`
+- `tests/ui/test_developer_console.py`
+- `docs/developer_console/GOAL_PROGRESS.md`
+
+### Verification Commands
+
+- `uv run pytest tests/ui/test_developer_console.py -v`
+- `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+- `uv run pytest tests/coding_agent/action_safety/test_validation_runner.py tests/coding_agent/action_safety/test_command_policy.py -v`
+- `uv run ruff format --check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/ui/test_developer_console.py`
+- `uv run ruff check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/ui/test_developer_console.py`
+- `git diff --check -- .`
+
+### Stop Criteria
+
+- Stop if memory/action/validation inspection requires new action execution,
+  approval bypass routes, or changes to G00-G53 semantics.
+- Stop if existing stores or run metadata cannot provide deterministic fixture
+  summaries for memory evidence, action summaries, policy decisions, and
+  validation results.
+- Stop if rendering requires raw prompt/content/message/result/text,
+  command output, stdout/stderr, env, file contents, patch contents, command
+  strings, or secrets.
+
+### Changed Files
+
+- `src/coding_agent/ui/developer_console.py`
+- `src/coding_agent/ui/http_server.py`
+- `tests/ui/test_developer_console.py`
+- `docs/developer_console/GOAL_PROGRESS.md`
+
+### Tests Run
+
+- `uv run pytest tests/ui/test_developer_console.py -v`
+- `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+- `uv run pytest tests/coding_agent/action_safety/test_validation_runner.py tests/coding_agent/action_safety/test_command_policy.py -v`
+- `uv run ruff format --check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/ui/test_developer_console.py`
+- `uv run ruff check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/ui/test_developer_console.py`
+- `git diff --check -- .`
+
+### Results
+
+- `/console/memory?run_id=...` now renders read-only memory evidence from
+  existing visible run metadata and context-pack memory entries.
+- Memory rows show source ID, safe label, status, tag/evidence counts, source
+  path, and line range without raw memory body or raw evidence text.
+- `/console/actions?run_id=...` now renders action summaries from existing
+  visible run metadata.
+- Action rows show action ID, kind, status, policy decision, risk level,
+  changed-path count, extension buckets, approval linkage/status, validation
+  ID, and safe patch summary counts.
+- Validation rows show safe validation labels, status, exit code, duration,
+  policy decision, normalized failure summary counts, and a context link for
+  failed validation investigation.
+- Empty states are deterministic for missing run IDs, missing memory evidence,
+  missing action summaries, and missing validation summaries.
+- Memory and action pages use existing runtime-run visibility checks, with a
+  regression test proving user tokens cannot inspect another owner's run.
+- Local review found and G61 fixed two issues: context-pack memory labels are
+  no longer rendered as prose in the memory page, and action extension buckets
+  now accept the comma-separated string shape emitted by action observability.
+- Console tests, safe action smoke, validation runner/command policy tests,
+  scoped ruff format/check, and `git diff --check -- .` passed.
+
+### Remaining Risks
+
+- G61 reads memory/action/validation summaries from run metadata fixture shapes
+  and existing context-pack summaries. It does not add a new persistence model
+  or wire live action execution to produce every possible historical summary.
+- Memory labels are rendered only after the existing console sanitizer, and
+  metadata `summary` fields are intentionally not displayed by default.

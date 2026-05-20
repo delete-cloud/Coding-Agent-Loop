@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from html import escape
+import re
 
 
 @dataclass(frozen=True)
@@ -124,6 +125,59 @@ class ConsoleContextSectionSummary:
 class ConsoleContextSummary:
     run_id: str | None
     sections: tuple[ConsoleContextSectionSummary, ...]
+
+
+@dataclass(frozen=True)
+class ConsoleMemoryEvidence:
+    run_id: str | None
+    source_id: str
+    label: str
+    status: str | None
+    tags_count: int | None
+    evidence_count: int | None
+    repo_path: str | None
+    line_start: int | None
+    line_end: int | None
+
+
+@dataclass(frozen=True)
+class ConsoleMemorySummary:
+    run_id: str | None
+    items: tuple[ConsoleMemoryEvidence, ...]
+
+
+@dataclass(frozen=True)
+class ConsoleActionSummary:
+    action_id: str | None
+    run_id: str | None
+    interaction_id: str | None
+    validation_id: str | None
+    kind: str
+    status: str
+    policy_decision: str | None
+    risk_level: str | None
+    changed_path_count: int | None
+    extension_buckets: tuple[str, ...]
+    approval_status: str | None
+    patch_summary: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
+class ConsoleValidationOutcomeSummary:
+    label: str
+    status: str
+    exit_code: int | None
+    duration_ms: int | None
+    policy_decision: str | None
+    failure_summary: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
+class ConsoleActionValidationSummary:
+    run_id: str | None
+    actions: tuple[ConsoleActionSummary, ...]
+    validation_status: str | None
+    validations: tuple[ConsoleValidationOutcomeSummary, ...]
 
 
 CONSOLE_PAGES: tuple[ConsolePage, ...] = (
@@ -294,6 +348,30 @@ def render_console_context_page(context: ConsoleContextSummary | None) -> str:
     return _html_document(title=page.title, body=body, active_path=page.path)
 
 
+def render_console_memory_page(memory: ConsoleMemorySummary | None) -> str:
+    page = _PAGE_BY_PATH["/console/memory"]
+    body = (
+        f"<h1>{escape(page.title)}</h1>"
+        f'<p class="lede">{escape(page.description)}</p>'
+        "<p>Read-only memory evidence from existing run metadata and context packs.</p>"
+        f"{_memory_evidence_section(memory)}"
+    )
+    return _html_document(title=page.title, body=body, active_path=page.path)
+
+
+def render_console_actions_page(
+    summary: ConsoleActionValidationSummary | None,
+) -> str:
+    page = _PAGE_BY_PATH["/console/actions"]
+    body = (
+        f"<h1>{escape(page.title)}</h1>"
+        f'<p class="lede">{escape(page.description)}</p>'
+        f"{_action_summary_section(summary)}"
+        f"{_validation_summary_section(summary)}"
+    )
+    return _html_document(title=page.title, body=body, active_path=page.path)
+
+
 def safe_error_summary(error: str | None) -> str | None:
     if error is None:
         return None
@@ -329,6 +407,19 @@ def safe_text_value(value: object) -> str | None:
     if _contains_sensitive_token(value):
         return "redacted"
     return value[:240]
+
+
+_SAFE_LABEL_RE = re.compile(r"[A-Za-z0-9_.:-]{1,80}")
+
+
+def safe_label_value(value: object) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    if _contains_sensitive_token(value):
+        return "redacted"
+    if _SAFE_LABEL_RE.fullmatch(value) is None:
+        return "redacted"
+    return value
 
 
 def safe_key_tuple(mapping: dict[str, object]) -> tuple[str, ...]:
@@ -557,6 +648,125 @@ def _context_sections(context: ConsoleContextSummary | None) -> str:
             "</section>"
         )
     return "".join(sections)
+
+
+def _memory_evidence_section(memory: ConsoleMemorySummary | None) -> str:
+    if memory is None or not memory.items:
+        return _empty_state(
+            "Memory Evidence",
+            "No data loaded yet. No memory evidence is available.",
+        )
+    run_link = (
+        f'<p><a href="/console/runs/{escape(memory.run_id)}">Run detail</a></p>'
+        if memory.run_id
+        else ""
+    )
+    rows = []
+    for item in memory.items:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(item.source_id)}</td>"
+            f"<td>{escape(item.label)}</td>"
+            f"<td>{escape(item.status or '-')}</td>"
+            f"<td>{escape('-' if item.tags_count is None else str(item.tags_count))}</td>"
+            f"<td>{escape('-' if item.evidence_count is None else str(item.evidence_count))}</td>"
+            f"<td>{escape(item.repo_path or '-')}</td>"
+            f"<td>{escape(_line_range(item.line_start, item.line_end))}</td>"
+            "</tr>"
+        )
+    return (
+        '<section aria-label="Memory evidence">'
+        "<h2>Memory Evidence</h2>"
+        f"{run_link}"
+        '<table aria-label="Memory evidence results">'
+        "<thead><tr><th>Source ID</th><th>Label</th><th>Status</th>"
+        "<th>Tags</th><th>Evidence</th><th>Source Path</th><th>Line Range</th>"
+        "</tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+        "</section>"
+    )
+
+
+def _action_summary_section(
+    summary: ConsoleActionValidationSummary | None,
+) -> str:
+    if summary is None or not summary.actions:
+        return _empty_state(
+            "Action Executions",
+            "No data loaded yet. No action summaries are available.",
+        )
+    rows = []
+    for action in summary.actions:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(action.action_id or '-')}</td>"
+            f"<td>{escape(action.kind)}</td>"
+            f"<td>{escape(action.status)}</td>"
+            f"<td>{escape(action.policy_decision or '-')}</td>"
+            f"<td>{escape(action.risk_level or '-')}</td>"
+            f"<td>{escape('-' if action.changed_path_count is None else str(action.changed_path_count))}</td>"
+            f"<td>{escape(_join_or_dash(action.extension_buckets))}</td>"
+            f"<td>{escape(action.interaction_id or '-')}</td>"
+            f"<td>{escape(action.approval_status or '-')}</td>"
+            f"<td>{escape(action.validation_id or '-')}</td>"
+            f"<td>{escape(_summary_pairs(action.patch_summary))}</td>"
+            "</tr>"
+        )
+    return (
+        '<section aria-label="Action executions">'
+        "<h2>Action Executions</h2>"
+        '<table aria-label="Action execution summaries">'
+        "<thead><tr><th>Action ID</th><th>Kind</th><th>Status</th>"
+        "<th>Policy</th><th>Risk</th><th>Changed Paths</th>"
+        "<th>Extensions</th><th>Approval Link</th><th>Approval</th>"
+        "<th>Validation ID</th><th>Patch Summary</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+        "</section>"
+    )
+
+
+def _validation_summary_section(
+    summary: ConsoleActionValidationSummary | None,
+) -> str:
+    if summary is None or not summary.validations:
+        return _empty_state(
+            "Validation Results",
+            "No data loaded yet. No validation summaries are available.",
+        )
+    rows = []
+    for outcome in summary.validations:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(outcome.label)}</td>"
+            f"<td>{escape(outcome.status)}</td>"
+            f"<td>{escape('-' if outcome.exit_code is None else str(outcome.exit_code))}</td>"
+            f"<td>{escape('-' if outcome.duration_ms is None else str(outcome.duration_ms))}</td>"
+            f"<td>{escape(outcome.policy_decision or '-')}</td>"
+            f"<td>{escape(_summary_pairs(outcome.failure_summary))}</td>"
+            f'<td><a href="/console/context?run_id={escape(summary.run_id or "")}">Context</a></td>'
+            "</tr>"
+        )
+    status = summary.validation_status or "-"
+    return (
+        '<section aria-label="Validation results">'
+        "<h2>Validation Results</h2>"
+        f"<p>Status: <strong>{escape(status)}</strong></p>"
+        '<table aria-label="Validation result summaries">'
+        "<thead><tr><th>Label</th><th>Status</th><th>Exit Code</th>"
+        "<th>Duration ms</th><th>Policy</th><th>Failure Summary</th>"
+        "<th>Context Link</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+        "</section>"
+    )
+
+
+def _summary_pairs(values: tuple[tuple[str, str], ...]) -> str:
+    if not values:
+        return "-"
+    return ", ".join(f"{key}={value}" for key, value in values)
 
 
 def _run_snapshot_section(snapshot: ConsoleSnapshotSummary | None) -> str:

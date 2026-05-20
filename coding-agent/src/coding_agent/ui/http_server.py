@@ -60,25 +60,33 @@ from coding_agent.observability import (
 )
 from coding_agent.ui.binding_resolver import DefaultBindingResolver
 from coding_agent.ui.developer_console import (
+    ConsoleActionSummary,
+    ConsoleActionValidationSummary,
     ConsoleContextEvidence,
     ConsoleContextSectionSummary,
     ConsoleContextSummary,
     ConsoleEventSummary,
     ConsoleInteractionSummary,
+    ConsoleMemoryEvidence,
+    ConsoleMemorySummary,
     ConsoleRunDetail,
     ConsoleRunSummary,
     ConsoleSessionSummary,
     ConsoleTapeEntrySummary,
     ConsoleTapeInfo,
+    ConsoleValidationOutcomeSummary,
     ConsoleSnapshotSummary,
     message_label,
+    render_console_actions_page,
     render_console_page,
     render_console_context_page,
     render_console_interactions_page,
+    render_console_memory_page,
     render_console_run_detail_page,
     render_console_runs_page,
     render_console_sessions_page,
     render_console_tape_page,
+    safe_label_value,
     safe_id_value,
     safe_key_tuple,
     safe_error_summary,
@@ -1217,15 +1225,41 @@ async def console_context(
 
 
 @app.get("/console/memory", response_class=HTMLResponse)
-async def console_memory(request: Request) -> HTMLResponse:
+async def console_memory(
+    request: Request,
+    run_id: str | None = Query(None, min_length=1, max_length=200),
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> HTMLResponse:
     del request
-    return HTMLResponse(render_console_page("/console/memory"))
+    if run_id is None:
+        return HTMLResponse(render_console_memory_page(None))
+    try:
+        run = await _get_visible_runtime_run(run_id, auth_context)
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            return HTMLResponse(render_console_memory_page(None))
+        raise
+    return HTMLResponse(render_console_memory_page(_memory_summary_from_run(run)))
 
 
 @app.get("/console/actions", response_class=HTMLResponse)
-async def console_actions(request: Request) -> HTMLResponse:
+async def console_actions(
+    request: Request,
+    run_id: str | None = Query(None, min_length=1, max_length=200),
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> HTMLResponse:
     del request
-    return HTMLResponse(render_console_page("/console/actions"))
+    if run_id is None:
+        return HTMLResponse(render_console_actions_page(None))
+    try:
+        run = await _get_visible_runtime_run(run_id, auth_context)
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            return HTMLResponse(render_console_actions_page(None))
+        raise
+    return HTMLResponse(
+        render_console_actions_page(_action_validation_summary_from_run(run))
+    )
 
 
 @app.get("/console/observability", response_class=HTMLResponse)
@@ -2719,6 +2753,230 @@ def _context_evidence_from_item(
         score=score,
         reason=evidence_reason,
     )
+
+
+def _memory_summary_from_run(run: AgentRunRecord) -> ConsoleMemorySummary:
+    items: list[ConsoleMemoryEvidence] = []
+    seen_source_ids: set[str] = set()
+    context = _context_summary_from_run(run)
+    if context is not None:
+        for section in context.sections:
+            for item in section.items:
+                if item.kind != "memory":
+                    continue
+                if item.source_id in seen_source_ids:
+                    continue
+                seen_source_ids.add(item.source_id)
+                items.append(
+                    ConsoleMemoryEvidence(
+                        run_id=run.run_id,
+                        source_id=item.source_id,
+                        label="Memory",
+                        status="context_pack",
+                        tags_count=None,
+                        evidence_count=None,
+                        repo_path=item.repo_path,
+                        line_start=item.line_start,
+                        line_end=item.line_end,
+                    )
+                )
+    for raw_item in _metadata_lists(
+        run.metadata,
+        ("memory_evidence", "memory_candidates", "memories"),
+    ):
+        memory = _memory_evidence_from_item(run.run_id, raw_item)
+        if memory is None or memory.source_id in seen_source_ids:
+            continue
+        seen_source_ids.add(memory.source_id)
+        items.append(memory)
+    return ConsoleMemorySummary(run_id=run.run_id, items=tuple(items))
+
+
+def _memory_evidence_from_item(
+    run_id: str,
+    raw_item: dict[str, object],
+) -> ConsoleMemoryEvidence | None:
+    source_id = (
+        safe_id_value(raw_item.get("source_id"))
+        or safe_id_value(raw_item.get("memory_id"))
+        or safe_id_value(raw_item.get("id"))
+    )
+    if source_id is None:
+        return None
+    label = safe_text_value(raw_item.get("label")) or "Memory"
+    evidence = raw_item.get("evidence")
+    tags = raw_item.get("tags")
+    return ConsoleMemoryEvidence(
+        run_id=run_id,
+        source_id=source_id,
+        label=label,
+        status=safe_label_value(raw_item.get("status")),
+        tags_count=len(tags) if isinstance(tags, list) else None,
+        evidence_count=len(evidence) if isinstance(evidence, list) else None,
+        repo_path=safe_text_value(raw_item.get("repo_path")),
+        line_start=_optional_int(raw_item.get("line_start")),
+        line_end=_optional_int(raw_item.get("line_end")),
+    )
+
+
+def _action_validation_summary_from_run(
+    run: AgentRunRecord,
+) -> ConsoleActionValidationSummary:
+    actions = tuple(
+        action
+        for raw_item in _metadata_lists(run.metadata, ("actions", "action_summaries"))
+        for action in [_action_summary_from_item(run.run_id, raw_item)]
+        if action is not None
+    )
+    validation_report = _safe_dict(
+        run.metadata.get("validation_report") or run.metadata.get("validation")
+    )
+    validations = tuple(_validation_outcomes(validation_report))
+    validation_status = safe_label_value(validation_report.get("status"))
+    return ConsoleActionValidationSummary(
+        run_id=run.run_id,
+        actions=actions,
+        validation_status=validation_status,
+        validations=validations,
+    )
+
+
+def _action_summary_from_item(
+    run_id: str,
+    raw_item: dict[str, object],
+) -> ConsoleActionSummary | None:
+    kind = safe_label_value(raw_item.get("kind") or raw_item.get("action_kind"))
+    status = safe_label_value(raw_item.get("status") or raw_item.get("action_status"))
+    if kind is None or status is None:
+        return None
+    policy = _safe_dict(raw_item.get("policy"))
+    patch_summary = _safe_dict(raw_item.get("patch_summary") or raw_item.get("patch"))
+    return ConsoleActionSummary(
+        action_id=safe_id_value(raw_item.get("action_id") or raw_item.get("id")),
+        run_id=run_id,
+        interaction_id=safe_id_value(
+            raw_item.get("interaction_id") or raw_item.get("approval_interaction_id")
+        ),
+        validation_id=safe_id_value(raw_item.get("validation_id")),
+        kind=kind,
+        status=status,
+        policy_decision=safe_label_value(
+            raw_item.get("policy_decision") or policy.get("decision")
+        ),
+        risk_level=safe_label_value(raw_item.get("risk_level")),
+        changed_path_count=_optional_int(raw_item.get("changed_path_count")),
+        extension_buckets=_safe_label_tuple(raw_item.get("file_extension_buckets")),
+        approval_status=safe_label_value(raw_item.get("approval_status")),
+        patch_summary=_safe_summary_pairs(
+            patch_summary,
+            (
+                "changed_path_count",
+                "created_count",
+                "updated_count",
+                "deleted_count",
+                "hunk_count",
+                "risk_level",
+            ),
+        ),
+    )
+
+
+def _validation_outcomes(
+    report: dict[str, object],
+) -> list[ConsoleValidationOutcomeSummary]:
+    raw_outcomes = report.get("outcomes")
+    if not isinstance(raw_outcomes, list):
+        return []
+    outcomes: list[ConsoleValidationOutcomeSummary] = []
+    for raw_outcome in raw_outcomes:
+        if not isinstance(raw_outcome, dict):
+            continue
+        label = safe_label_value(raw_outcome.get("label")) or "redacted"
+        status = safe_label_value(raw_outcome.get("status"))
+        if status is None:
+            continue
+        policy = _safe_dict(raw_outcome.get("policy"))
+        failure = _safe_dict(raw_outcome.get("failure_summary"))
+        outcomes.append(
+            ConsoleValidationOutcomeSummary(
+                label=label,
+                status=status,
+                exit_code=_optional_int(raw_outcome.get("exit_code")),
+                duration_ms=_optional_int(raw_outcome.get("duration_ms")),
+                policy_decision=safe_label_value(policy.get("decision")),
+                failure_summary=_safe_failure_summary_pairs(failure),
+            )
+        )
+    return outcomes
+
+
+def _metadata_lists(
+    metadata: dict[str, object],
+    keys: tuple[str, ...],
+) -> list[dict[str, object]]:
+    items: list[dict[str, object]] = []
+    for key in keys:
+        value = metadata.get(key)
+        if isinstance(value, list):
+            items.extend(item for item in value if isinstance(item, dict))
+    return items
+
+
+def _safe_label_tuple(value: object) -> tuple[str, ...]:
+    if isinstance(value, str):
+        raw_items: list[object] = [item.strip() for item in value.split(",")]
+    elif isinstance(value, list | tuple):
+        raw_items = list(value)
+    else:
+        return ()
+    labels: list[str] = []
+    for item in raw_items:
+        label = safe_label_value(item)
+        if label is not None:
+            labels.append(label)
+    return tuple(labels)
+
+
+def _safe_summary_pairs(
+    mapping: dict[str, object],
+    allowed_keys: tuple[str, ...],
+) -> tuple[tuple[str, str], ...]:
+    pairs: list[tuple[str, str]] = []
+    for key in allowed_keys:
+        value = mapping.get(key)
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            pairs.append((key, str(value).lower()))
+        elif isinstance(value, int | float | str):
+            safe_value = safe_label_value(str(value))
+            if safe_value is not None:
+                pairs.append((key, safe_value))
+    return tuple(pairs)
+
+
+def _safe_failure_summary_pairs(
+    mapping: dict[str, object],
+) -> tuple[tuple[str, str], ...]:
+    display_names = {
+        "stdout_bytes": "output_bytes",
+        "stderr_bytes": "error_bytes",
+        "stdout_lines": "output_lines",
+        "stderr_lines": "error_lines",
+        "timeout_seconds": "timeout_seconds",
+        "policy_decision": "policy_decision",
+        "error_kind": "error_kind",
+    }
+    pairs: list[tuple[str, str]] = []
+    for key, display_name in display_names.items():
+        value = mapping.get(key)
+        if isinstance(value, int | float):
+            pairs.append((display_name, str(value)))
+        elif isinstance(value, str):
+            safe_value = safe_label_value(value)
+            if safe_value is not None:
+                pairs.append((display_name, safe_value))
+    return tuple(pairs)
 
 
 def _optional_int(value: object) -> int | None:
