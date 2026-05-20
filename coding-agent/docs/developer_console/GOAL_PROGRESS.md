@@ -99,7 +99,7 @@ Status: merged via PR #262.
 
 ## G55 Developer Console ADR And UI Contract
 
-Status: passed local verification; pending PR.
+Status: merged via PR #263.
 
 ### Intended Files
 
@@ -152,3 +152,63 @@ Status: passed local verification; pending PR.
 
 - G55 is documentation-only. The console shell, route rendering, and fixture
   tests remain for G56+.
+
+## G56 Console Shell And Navigation
+
+Status: passed local verification; pending PR.
+
+### Intended Files
+
+- `src/coding_agent/ui/developer_console.py`
+- `src/coding_agent/ui/http_server.py`
+- `tests/ui/test_developer_console.py`
+- `docs/developer_console/GOAL_PROGRESS.md`
+
+### Verification Commands
+
+- `uv run pytest tests/ui/test_developer_console.py -v`
+- `uv run pytest tests/ui/test_http_server.py -k "healthz or readyz or metrics" -v`
+- `uv run ruff format --check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/ui/test_developer_console.py`
+- `uv run ruff check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/ui/test_developer_console.py`
+- `git diff --check -- .`
+
+### Stop Criteria
+
+- Stop if minimal console shell requires a frontend framework or build system.
+- Stop if shell routes require changing existing HTTP API/runtime behavior.
+- Stop if no-secret rendering cannot be tested deterministically.
+
+### Changed Files
+
+- `src/coding_agent/ui/developer_console.py`
+- `src/coding_agent/ui/http_server.py`
+- `tests/ui/test_developer_console.py`
+- `docs/developer_console/GOAL_PROGRESS.md`
+
+### Tests Run
+
+- `uv run pytest tests/ui/test_developer_console.py -v`
+- `uv run pytest tests/ui/test_http_server.py -k "healthz or readyz or metrics" -v`
+- `uv run ruff format --check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/ui/test_developer_console.py`
+- `uv run ruff check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/ui/test_developer_console.py`
+- `git diff --check -- .`
+
+### Results
+
+- Added a server-rendered Developer Console shell in Coding Agent UI code.
+- Added `/console`, `/console/sessions`, `/console/runs`,
+  `/console/interactions`, `/console/tape`, `/console/context`,
+  `/console/memory`, `/console/actions`, `/console/observability`, and
+  `/console/release`.
+- Console navigation renders all required sections with empty-state content.
+- Console route tests passed and verify no query-provided secret text, raw
+  prompt/message markers, command output markers, stdout/stderr, or env markers
+  are rendered.
+- HTTP health/readiness/metrics scoped regression tests passed.
+- Ruff format/check and `git diff --check -- .` passed.
+
+### Remaining Risks
+
+- G56 intentionally renders fixture/empty data only. Durable runtime, HITL,
+  context, memory, action, observability, and release data views remain for
+  G57-G63.
