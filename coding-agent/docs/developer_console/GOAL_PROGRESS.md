@@ -471,6 +471,8 @@ Status: passed local verification; pending PR.
   through the existing `TapeDebugStore` extension when available.
 - Tape search supports low-risk query filters for tape ID, kind, run ID, tool
   call ID, and anchor type.
+- Tape debug access follows existing console visibility rules: admin can query
+  globally, while user tokens are restricted to visible session/run tape IDs.
 - Tape rows show sequence, kind, safe correlation IDs, anchor type, and safe
   payload/meta key names without raw payload values.
 - `/console/context?run_id=...` now renders sanitized context-pack evidence

@@ -1126,8 +1126,56 @@ async def console_tape(
     run_id: str | None = Query(None, min_length=1, max_length=200),
     tool_call_id: str | None = Query(None, min_length=1, max_length=200),
     anchor_type: str | None = Query(None, min_length=1, max_length=80),
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
 ) -> HTMLResponse:
     del request
+    if (
+        run_id is not None
+        and auth_context is not None
+        and auth_context.scope != "admin"
+    ):
+        try:
+            visible_run = await _get_visible_runtime_run(run_id, auth_context)
+        except HTTPException as exc:
+            if exc.status_code == 404:
+                return HTMLResponse(render_console_tape_page(None, []))
+            raise
+        if visible_run.tape_id is not None:
+            if tape_id is not None and tape_id != visible_run.tape_id:
+                return HTMLResponse(render_console_tape_page(None, []))
+            tape_id = visible_run.tape_id
+    visible_tape_ids = await _visible_console_tape_ids(auth_context)
+    if not _can_search_tape(
+        auth_context=auth_context,
+        tape_id=tape_id,
+        run_id=run_id,
+        visible_tape_ids=visible_tape_ids,
+    ):
+        return HTMLResponse(render_console_tape_page(None, []))
+    if (
+        auth_context is not None
+        and auth_context.scope != "admin"
+        and tape_id is None
+        and run_id is None
+    ):
+        entries = []
+        for visible_tape_id in sorted(visible_tape_ids):
+            entries.extend(
+                await session_manager.search_tape_debug_entries(
+                    tape_id=visible_tape_id,
+                    kind=kind,
+                    run_id=None,
+                    tool_call_id=tool_call_id,
+                    anchor_type=anchor_type,
+                    limit=100,
+                )
+            )
+        return HTMLResponse(
+            render_console_tape_page(
+                None,
+                [_tape_entry_summary(entry) for entry in entries],
+            )
+        )
     info = None
     if tape_id is not None:
         tape_info = await session_manager.load_tape_debug_info(tape_id)
@@ -2675,6 +2723,47 @@ def _context_evidence_from_item(
 
 def _optional_int(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+async def _visible_console_tape_ids(
+    auth_context: AuthContext | None,
+) -> set[str]:
+    if auth_context is None or auth_context.scope == "admin":
+        return set()
+    visible: set[str] = set()
+    for session_id in await session_manager.list_sessions_async():
+        try:
+            session = await session_manager.get_session_async(session_id)
+        except KeyError:
+            continue
+        if not _auth_context_can_access_session(auth_context, session):
+            continue
+        if session.tape_id is not None:
+            visible.add(session.tape_id)
+        try:
+            runs = await session_manager.list_runtime_runs(session_id)
+        except RuntimeError:
+            runs = []
+        for run in runs:
+            if run.tape_id is not None:
+                visible.add(run.tape_id)
+    return visible
+
+
+def _can_search_tape(
+    *,
+    auth_context: AuthContext | None,
+    tape_id: str | None,
+    run_id: str | None,
+    visible_tape_ids: set[str],
+) -> bool:
+    if auth_context is None or auth_context.scope == "admin":
+        return True
+    if run_id is not None and tape_id is None:
+        return False
+    if tape_id is None:
+        return True
+    return tape_id in visible_tape_ids
 
 
 async def _get_visible_runtime_run(
