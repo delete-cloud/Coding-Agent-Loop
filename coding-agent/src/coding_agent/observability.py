@@ -122,6 +122,20 @@ _PROMETHEUS_LABEL_VALUE_ALLOWLISTS = {
     "status": frozenset({"ok", "error", "started", "completed", "failed"}),
 }
 _PROMETHEUS_HISTOGRAM_BUCKETS = (5.0, 10.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 5000.0)
+_PROMETHEUS_HTTP_HISTOGRAM_BUCKETS = (
+    1.0,
+    5.0,
+    10.0,
+    50.0,
+    100.0,
+    250.0,
+    500.0,
+    1000.0,
+    5000.0,
+)
+_PROMETHEUS_HTTP_METHODS = frozenset(
+    {"CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "TRACE"}
+)
 _LABEL_VALUE_PATTERN = re.compile(r"[^a-zA-Z0-9_.:-]+")
 
 
@@ -175,6 +189,28 @@ def _prometheus_metric_part(value: str, allowed_values: frozenset[str]) -> str:
     if normalized not in allowed_values:
         return "unknown"
     return normalized or "unknown"
+
+
+def _prometheus_http_method(value: str) -> str:
+    normalized = value.strip().upper()
+    if normalized not in _PROMETHEUS_HTTP_METHODS:
+        return "unknown"
+    return normalized
+
+
+def _prometheus_http_route(value: str) -> str:
+    normalized = value.strip()
+    if not normalized.startswith("/"):
+        return "unknown"
+    if any(part in normalized.casefold() for part in _FORBIDDEN_PROMETHEUS_LABELS):
+        return "unknown"
+    return _LABEL_VALUE_PATTERN.sub("_", normalized[:120]).strip("_") or "root"
+
+
+def _prometheus_http_status(value: int) -> str:
+    if 100 <= value <= 599:
+        return str(value)
+    return "unknown"
 
 
 def _prometheus_escape(value: str) -> str:
@@ -347,6 +383,27 @@ class PrometheusMetricsRecorder:
                 float(event.timestamp),
             )
 
+    def record_http_request(
+        self,
+        *,
+        method: str,
+        route: str,
+        status_code: int,
+        duration_ms: float,
+    ) -> None:
+        labels = {
+            "method": _prometheus_http_method(method),
+            "route": _prometheus_http_route(route),
+            "status_code": _prometheus_http_status(status_code),
+        }
+        with self._lock:
+            self._inc("coding_agent_http_requests_total", labels)
+            self._observe(
+                "coding_agent_http_request_duration_ms",
+                labels,
+                max(0.0, float(duration_ms)),
+            )
+
     def exposition_text(self) -> str:
         lines: list[str] = []
         with self._lock:
@@ -364,14 +421,15 @@ class PrometheusMetricsRecorder:
                         "coding_agent_observation_spans_total", span_counters
                     )
                 )
-            if self._histograms:
+            observation_histograms = self._observation_span_histograms
+            if observation_histograms:
                 lines.extend(
                     (
                         "# HELP coding_agent_observation_span_duration_ms Observation span duration in milliseconds.",
                         "# TYPE coding_agent_observation_span_duration_ms histogram",
                     )
                 )
-                lines.extend(self._format_histograms())
+                lines.extend(self._format_histograms(histograms=observation_histograms))
             if event_counters:
                 lines.extend(
                     (
@@ -398,6 +456,35 @@ class PrometheusMetricsRecorder:
                         self._gauges,
                     )
                 )
+            http_counters = self._http_request_counters
+            http_histograms = self._http_request_histograms
+            if http_counters:
+                lines.extend(
+                    (
+                        "# HELP coding_agent_http_requests_total HTTP requests handled.",
+                        "# TYPE coding_agent_http_requests_total counter",
+                    )
+                )
+                lines.extend(
+                    self._format_metric(
+                        "coding_agent_http_requests_total",
+                        http_counters,
+                    )
+                )
+            if http_histograms:
+                lines.extend(
+                    (
+                        "# HELP coding_agent_http_request_duration_ms HTTP request duration in milliseconds.",
+                        "# TYPE coding_agent_http_request_duration_ms histogram",
+                    )
+                )
+                lines.extend(
+                    self._format_histograms(
+                        histograms=http_histograms,
+                        metric_name="coding_agent_http_request_duration_ms",
+                        buckets=_PROMETHEUS_HTTP_HISTOGRAM_BUCKETS,
+                    )
+                )
         return "\n".join(lines) + ("\n" if lines else "")
 
     def reset(self) -> None:
@@ -420,6 +507,36 @@ class PrometheusMetricsRecorder:
             key: value
             for key, value in self._counters.items()
             if key[0] == "coding_agent_observation_events_total"
+        }
+
+    @property
+    def _observation_span_histograms(
+        self,
+    ) -> dict[tuple[str, tuple[tuple[str, str], ...]], list[float]]:
+        return {
+            key: value
+            for key, value in self._histograms.items()
+            if key[0] == "coding_agent_observation_span_duration_ms"
+        }
+
+    @property
+    def _http_request_counters(
+        self,
+    ) -> dict[tuple[str, tuple[tuple[str, str], ...]], float]:
+        return {
+            key: value
+            for key, value in self._counters.items()
+            if key[0] == "coding_agent_http_requests_total"
+        }
+
+    @property
+    def _http_request_histograms(
+        self,
+    ) -> dict[tuple[str, tuple[tuple[str, str], ...]], list[float]]:
+        return {
+            key: value
+            for key, value in self._histograms.items()
+            if key[0] == "coding_agent_http_request_duration_ms"
         }
 
     def _inc(self, metric: str, labels: Mapping[str, str], amount: float = 1.0) -> None:
@@ -446,32 +563,36 @@ class PrometheusMetricsRecorder:
             lines.append(f"{metric}{_format_labels(labels)} {_format_number(value)}")
         return lines
 
-    def _format_histograms(self) -> list[str]:
+    def _format_histograms(
+        self,
+        *,
+        histograms: Mapping[tuple[str, tuple[tuple[str, str], ...]], list[float]]
+        | None = None,
+        metric_name: str = "coding_agent_observation_span_duration_ms",
+        buckets: tuple[float, ...] = _PROMETHEUS_HISTOGRAM_BUCKETS,
+    ) -> list[str]:
         lines: list[str] = []
-        for (_metric, labels), values in sorted(self._histograms.items()):
+        selected_histograms = self._histograms if histograms is None else histograms
+        for (_metric, labels), values in sorted(selected_histograms.items()):
             sorted_values = sorted(values)
             base_labels = dict(labels)
             count_so_far = 0
-            for bucket in _PROMETHEUS_HISTOGRAM_BUCKETS:
+            for bucket in buckets:
                 count_so_far = sum(1 for value in sorted_values if value <= bucket)
                 bucket_labels = tuple(
                     sorted({**base_labels, "le": _format_number(bucket)}.items())
                 )
                 lines.append(
-                    "coding_agent_observation_span_duration_ms_bucket"
+                    f"{metric_name}_bucket"
                     f"{_format_labels(bucket_labels)} {count_so_far}"
                 )
             inf_labels = tuple(sorted({**base_labels, "le": "+Inf"}.items()))
             lines.append(
-                "coding_agent_observation_span_duration_ms_bucket"
-                f"{_format_labels(inf_labels)} {len(values)}"
+                f"{metric_name}_bucket{_format_labels(inf_labels)} {len(values)}"
             )
+            lines.append(f"{metric_name}_count{_format_labels(labels)} {len(values)}")
             lines.append(
-                "coding_agent_observation_span_duration_ms_count"
-                f"{_format_labels(labels)} {len(values)}"
-            )
-            lines.append(
-                "coding_agent_observation_span_duration_ms_sum"
+                f"{metric_name}_sum"
                 f"{_format_labels(labels)} {_format_number(sum(values))}"
             )
         return lines
@@ -493,6 +614,32 @@ def _format_labels(labels: tuple[tuple[str, str], ...]) -> str:
 
 
 _DEFAULT_PROMETHEUS_RECORDER = PrometheusMetricsRecorder()
+
+
+def prometheus_metrics_text() -> str:
+    return _DEFAULT_PROMETHEUS_RECORDER.exposition_text()
+
+
+def record_http_request_metric(
+    *,
+    method: str,
+    route: str,
+    status_code: int,
+    duration_ms: float,
+) -> None:
+    try:
+        _DEFAULT_PROMETHEUS_RECORDER.record_http_request(
+            method=method,
+            route=route,
+            status_code=status_code,
+            duration_ms=duration_ms,
+        )
+    except Exception:
+        return
+
+
+def reset_prometheus_metrics() -> None:
+    _DEFAULT_PROMETHEUS_RECORDER.reset()
 
 
 @dataclass

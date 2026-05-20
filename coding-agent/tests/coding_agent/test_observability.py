@@ -13,6 +13,9 @@ from coding_agent.observability import (
     PrometheusMetricsObservationSink,
     PrometheusMetricsRecorder,
     build_observation_sink,
+    prometheus_metrics_text,
+    record_http_request_metric,
+    reset_prometheus_metrics,
 )
 
 
@@ -269,6 +272,32 @@ def test_prometheus_metrics_event_only_exposition_omits_span_metadata() -> None:
     assert "coding_agent_observation_events_total" in text
     assert "# TYPE coding_agent_observation_spans_total counter" not in text
     assert "coding_agent_observation_spans_total" not in text
+
+
+def test_prometheus_metrics_record_http_request_metrics() -> None:
+    reset_prometheus_metrics()
+
+    record_http_request_metric(
+        method="GET",
+        route="/healthz",
+        status_code=200,
+        duration_ms=12.5,
+    )
+
+    text = prometheus_metrics_text()
+
+    assert (
+        'coding_agent_http_requests_total{method="GET",route="healthz",status_code="200"} 1'
+        in text
+    )
+    assert (
+        'coding_agent_http_request_duration_ms_count{method="GET",route="healthz",status_code="200"} 1'
+        in text
+    )
+    assert (
+        'coding_agent_http_request_duration_ms_sum{method="GET",route="healthz",status_code="200"} 12.5'
+        in text
+    )
 
 
 def test_prometheus_metrics_fail_open_when_registry_write_fails() -> None:

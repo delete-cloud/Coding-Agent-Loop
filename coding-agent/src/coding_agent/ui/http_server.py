@@ -8,17 +8,19 @@ import logging
 import os
 import re
 import socket
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, cast
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from urllib.parse import urlsplit
 
 import httpx
 from fastapi import FastAPI, HTTPException, Depends, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse
 from sse_starlette.sse import EventSourceResponse
 
 from agentkit.config.loader import load_config as load_agent_toml
@@ -51,6 +53,10 @@ from coding_agent.environment import (
     workspace_archive_manifest_from_config,
     workspace_diff_from_config,
     workspace_patch_from_config,
+)
+from coding_agent.observability import (
+    prometheus_metrics_text,
+    record_http_request_metric,
 )
 from coding_agent.ui.binding_resolver import DefaultBindingResolver
 from coding_agent.ui.session_manager import Session, SessionManager
@@ -220,6 +226,26 @@ def _load_remote_phases_config() -> dict[str, Any]:
 
 def _load_server_config() -> dict[str, Any]:
     return _load_agent_config_section("server")
+
+
+def _load_observability_config() -> dict[str, Any]:
+    return _load_agent_config_section("observability")
+
+
+def _prometheus_metrics_enabled() -> bool:
+    try:
+        config = _load_observability_config()
+    except Exception:
+        logger.exception("Unable to load observability metrics config")
+        return False
+    if config.get("enabled") is not True:
+        return False
+    metrics_config = config.get("metrics")
+    if not isinstance(metrics_config, Mapping):
+        return False
+    if metrics_config.get("enabled") is not True:
+        return False
+    return metrics_config.get("endpoint_enabled", True) is not False
 
 
 def _load_agent_runtime_defaults() -> dict[str, Any]:
@@ -866,6 +892,28 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def _record_http_metrics(request: Request, call_next):
+    start = time.perf_counter()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        if _prometheus_metrics_enabled():
+            route = request.scope.get("route")
+            route_label = getattr(route, "path", None)
+            if not isinstance(route_label, str) or not route_label:
+                route_label = "unmatched"
+            record_http_request_metric(
+                method=request.method,
+                route=route_label,
+                status_code=status_code,
+                duration_ms=(time.perf_counter() - start) * 1000,
+            )
 
 
 # Add exception handler for rate limit exceeded
@@ -1566,6 +1614,17 @@ async def liveness_check(request: Request) -> HealthResponse:
         status="healthy",
         sessions=await session_manager.count_sessions_async(),
         version="2.0.0",
+    )
+
+
+@app.get("/metrics", response_class=PlainTextResponse)
+@limiter.limit(RateLimits.HEALTH)
+async def metrics_endpoint(request: Request) -> PlainTextResponse:
+    if not _prometheus_metrics_enabled():
+        raise HTTPException(status_code=404, detail="Metrics endpoint disabled")
+    return PlainTextResponse(
+        prometheus_metrics_text(),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
     )
 
 
