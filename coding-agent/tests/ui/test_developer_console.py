@@ -87,7 +87,6 @@ class _ConsoleTapeStore:
         anchor_type: str | None = None,
         limit: int = 100,
     ) -> list[TapeSearchResult]:
-        del limit
         entries = []
         for known_tape_id in self.tape_ids:
             known_run_id = known_tape_id.replace("tape", "run")
@@ -151,7 +150,9 @@ class _ConsoleTapeStore:
             if anchor_type is not None and meta.get("anchor_type") != anchor_type:
                 continue
             filtered.append(result)
-        return filtered
+        if limit <= 0:
+            return []
+        return filtered[:limit]
 
 
 class _ConsoleRuntimeStore:
@@ -589,6 +590,16 @@ async def test_console_tape_renders_info_and_search_without_raw_payload() -> Non
     assert "message" in response.text
     for forbidden in FORBIDDEN_RENDERED_TEXT:
         assert forbidden not in response.text
+
+
+@pytest.mark.asyncio
+async def test_console_tape_store_fixture_honors_search_limit() -> None:
+    store = _ConsoleTapeStore()
+
+    results = await store.search(tape_id="tape-alpha", limit=1)
+
+    assert len(results) == 1
+    assert results[0].seq == 0
 
 
 @pytest.mark.asyncio
