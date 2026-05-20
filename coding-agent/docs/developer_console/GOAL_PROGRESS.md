@@ -555,6 +555,9 @@ Status: passed local verification; pending PR.
   missing action summaries, and missing validation summaries.
 - Memory and action pages use existing runtime-run visibility checks, with a
   regression test proving user tokens cannot inspect another owner's run.
+- Local review found and G61 fixed two issues: context-pack memory labels are
+  no longer rendered as prose in the memory page, and action extension buckets
+  now accept the comma-separated string shape emitted by action observability.
 - Console tests, safe action smoke, validation runner/command policy tests,
   scoped ruff format/check, and `git diff --check -- .` passed.
 

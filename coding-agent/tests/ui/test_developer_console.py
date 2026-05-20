@@ -368,7 +368,27 @@ def _runtime_run(
                                 ],
                             }
                         ],
-                    }
+                    },
+                    {
+                        "title": "Memory references",
+                        "items": [
+                            {
+                                "source_kind": "memory",
+                                "source_id": "mem-pack-ref",
+                                "label": "Compacted memory prose that must not render",
+                                "repo_path": "src/memory.py",
+                                "line_start": 5,
+                                "line_end": 6,
+                                "evidence": [
+                                    {
+                                        "kind": "repo_file",
+                                        "label": "memory evidence",
+                                        "repo_path": "src/memory.py",
+                                    }
+                                ],
+                            }
+                        ],
+                    },
                 ]
             },
             "memory_evidence": [
@@ -397,7 +417,7 @@ def _runtime_run(
                     "policy_decision": "allow",
                     "risk_level": "medium",
                     "changed_path_count": 2,
-                    "file_extension_buckets": [".py", ".md"],
+                    "file_extension_buckets": ".py,.md",
                     "approval_interaction_id": "interaction-pending",
                     "approval_status": "approved",
                     "validation_id": "validation-alpha",
@@ -813,7 +833,9 @@ async def test_console_memory_renders_memory_evidence_without_raw_content() -> N
     assert response.status_code == 200
     assert "Memory Evidence" in response.text
     assert "memory-auth-policy" in response.text
+    assert "mem-pack-ref" in response.text
     assert "memory_auth_policy" in response.text
+    assert "Compacted memory prose that must not render" not in response.text
     assert "Auth regression memory" not in response.text
     assert "accepted" in response.text
     assert "src/auth.py" in response.text
@@ -853,6 +875,7 @@ async def test_console_actions_renders_action_validation_and_policy_summaries() 
     assert "patch" in response.text
     assert "allow" in response.text
     assert "medium" in response.text
+    assert ".py, .md" in response.text
     assert "interaction-pending" in response.text
     assert "validation-alpha" in response.text
     assert "hunk_count=3" in response.text

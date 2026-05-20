@@ -2771,7 +2771,7 @@ def _memory_summary_from_run(run: AgentRunRecord) -> ConsoleMemorySummary:
                     ConsoleMemoryEvidence(
                         run_id=run.run_id,
                         source_id=item.source_id,
-                        label=item.label,
+                        label="Memory",
                         status="context_pack",
                         tags_count=None,
                         evidence_count=None,
@@ -2923,10 +2923,14 @@ def _metadata_lists(
 
 
 def _safe_label_tuple(value: object) -> tuple[str, ...]:
-    if not isinstance(value, list | tuple):
+    if isinstance(value, str):
+        raw_items: list[object] = [item.strip() for item in value.split(",")]
+    elif isinstance(value, list | tuple):
+        raw_items = list(value)
+    else:
         return ()
     labels: list[str] = []
-    for item in value:
+    for item in raw_items:
         label = safe_label_value(item)
         if label is not None:
             labels.append(label)
