@@ -68,3 +68,47 @@ Status: passed local verification; in PR #276.
     Console workspace visibility and omitted several workspace lifecycle/archive
     endpoints. The map now identifies the missing dedicated console view and
     lists the additional endpoints.
+
+## G69_WORKSPACE_PROVIDER_BOUNDARY_ADR
+
+### Before
+
+- Goal id: G69_WORKSPACE_PROVIDER_BOUNDARY_ADR
+- Intended files:
+  - `docs/workspace_provider/GOAL_PROGRESS.md`
+  - `docs/adr/0038-workspace-provider-and-sandbox-mvp-boundaries.md`
+- Verification commands:
+  - Run from `coding-agent/`.
+  - `test -f docs/adr/0038-workspace-provider-and-sandbox-mvp-boundaries.md`
+  - `rg -n "WorkspaceProvider|sandbox|Docker|Prometheus|raw prompt|Acceptance Criteria" docs/adr/0038-workspace-provider-and-sandbox-mvp-boundaries.md`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Workspace provider boundaries require moving provider-specific behavior into
+    AgentKit Core.
+  - The sandbox MVP cannot be defined without requiring Docker for every test,
+    production credentials, hosted services, or schedule/desktop/bridge work.
+
+### After
+
+Status: passed local verification; in PR #277.
+
+- Changed files:
+  - `docs/workspace_provider/GOAL_PROGRESS.md`
+  - `docs/adr/0038-workspace-provider-and-sandbox-mvp-boundaries.md`
+- Tests run:
+  - Run from `coding-agent/`.
+  - `test -f docs/adr/0038-workspace-provider-and-sandbox-mvp-boundaries.md`
+  - `rg -n "WorkspaceProvider|sandbox|Docker|Prometheus|raw prompt|Acceptance Criteria" docs/adr/0038-workspace-provider-and-sandbox-mvp-boundaries.md`
+  - `git diff --check -- .`
+- Results:
+  - All commands passed.
+- Remaining risks:
+  - Later goals still need executable proof that action tools route through the
+    selected workspace binding and that Docker remains optional.
+  - Console and metrics additions must keep workspace identifiers out of
+    Prometheus labels and raw workspace content out of rendered pages.
+- Review notes:
+  - Local review found that the ADR needed to carry forward the ADR-0025
+    provider-instance fail-closed rule and the ADR-0021 session/admin ownership
+    boundary for workspace lifecycle routes. Both boundary rules and matching
+    acceptance criteria were added before merge.
