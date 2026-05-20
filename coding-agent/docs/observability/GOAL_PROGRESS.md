@@ -97,7 +97,7 @@ Status: merged via PR #252.
 
 ## G47 Observability Backend ADR
 
-Status: passed local verification; pending PR.
+Status: merged via PR #253.
 
 ### Intended Files
 
@@ -140,3 +140,69 @@ Status: passed local verification; pending PR.
 
 - G47 is decision documentation only. The composite sink, Prometheus exporter,
   metrics endpoint, and dashboard artifacts remain for G48-G53.
+
+## G48 Observability Factory And Composite Sink
+
+Status: passed local verification; pending PR.
+
+### Intended Files
+
+- `src/coding_agent/observability.py`
+- `tests/coding_agent/test_observability.py`
+- `tests/coding_agent/test_bootstrap.py`
+- `docs/observability/GOAL_PROGRESS.md`
+
+### Verification Commands
+
+- `uv run pytest tests/coding_agent/test_observability.py -v`
+- `uv run pytest tests/coding_agent/test_bootstrap.py -k "observation_sink or observability" -v`
+- `uv run pytest tests/coding_agent/test_release_observability_contract.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "runtime_stage_spans" -v`
+- `uv run ruff format --check src/coding_agent/observability.py tests/coding_agent/test_observability.py tests/coding_agent/test_bootstrap.py`
+- `uv run ruff check src/coding_agent/observability.py tests/coding_agent/test_observability.py tests/coding_agent/test_bootstrap.py`
+- `git diff --check -- .`
+
+### Stop Criteria
+
+- Stop if additive tracing plus metrics wiring requires AgentKit pipeline
+  changes.
+- Stop if Prometheus metrics require high-cardinality labels for the factory
+  contract.
+- Stop if preserving legacy flat Langfuse/OTLP config conflicts with nested
+  tracing/metrics config.
+
+### Changed Files
+
+- `src/coding_agent/observability.py`
+- `tests/coding_agent/test_observability.py`
+- `tests/coding_agent/test_bootstrap.py`
+- `docs/observability/GOAL_PROGRESS.md`
+
+### Tests Run
+
+- `uv run pytest tests/coding_agent/test_observability.py -v`
+- `uv run pytest tests/coding_agent/test_bootstrap.py -k "observation_sink or observability" -v`
+- `uv run pytest tests/coding_agent/test_release_observability_contract.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "runtime_stage_spans" -v`
+- `uv run ruff format --check src/coding_agent/observability.py tests/coding_agent/test_observability.py tests/coding_agent/test_bootstrap.py`
+- `uv run ruff check src/coding_agent/observability.py tests/coding_agent/test_observability.py tests/coding_agent/test_bootstrap.py`
+- `git diff --check -- .`
+
+### Results
+
+- Observability unit tests passed: 15 passed.
+- Bootstrap observability tests passed: 4 passed, 18 deselected.
+- Release observability contract tests passed: 3 passed.
+- AgentKit runtime span regression passed: 1 passed, 36 deselected.
+- Scoped ruff format/check passed.
+- `git diff --check -- .` passed.
+- Local review found that nested metrics config could suppress existing flat
+  Langfuse/OTLP tracing config. The factory now preserves flat tracing config
+  when `[observability.metrics]` is added without `[observability.tracing]`, and
+  a regression test covers that additive path.
+
+### Remaining Risks
+
+- G48 adds the additive factory/composite shape and a metrics exporter type.
+  The real Prometheus registry, metric mapping, label normalization, and text
+  exposition are still G49-G50 work.
