@@ -11,6 +11,7 @@ from coding_agent.observability import (
     CompositeObservationSink,
     OtlpHttpObservationSink,
     PrometheusMetricsObservationSink,
+    PrometheusMetricsRecorder,
     build_observation_sink,
 )
 
@@ -45,6 +46,16 @@ class FailingObservationSink:
     def record_event(self, event: ObservationEvent) -> None:
         del event
         raise RuntimeError("event sink failed")
+
+
+class FailingPrometheusMetricsRecorder(PrometheusMetricsRecorder):
+    def record_span(self, span: SpanRecord) -> None:
+        del span
+        raise RuntimeError("registry failed")
+
+    def record_event(self, event: ObservationEvent) -> None:
+        del event
+        raise RuntimeError("registry failed")
 
 
 def _payload(request: httpx.Request) -> dict[str, object]:
@@ -108,6 +119,163 @@ def test_composite_observation_sink_fail_opens_when_child_sink_fails() -> None:
 
     assert recording.spans == [span]
     assert recording.events == [event]
+
+
+def test_prometheus_metrics_record_spans_events_counters_histograms_and_gauges() -> (
+    None
+):
+    recorder = PrometheusMetricsRecorder()
+    sink = PrometheusMetricsObservationSink(recorder=recorder)
+
+    sink.record_span(
+        SpanRecord(
+            name="runtime.stage.build_context",
+            status="ok",
+            attributes={"stage": "build_context", "provider": "anthropic"},
+            duration_ms=42.5,
+        )
+    )
+    sink.record_event(
+        ObservationEvent(
+            name="runtime.started",
+            attributes={"stage": "build_context"},
+            timestamp=123.0,
+        )
+    )
+
+    text = recorder.exposition_text()
+
+    assert (
+        'coding_agent_observation_spans_total{provider="anthropic",span="runtime.stage.build_context",stage="build_context",status="ok"} 1'
+        in text
+    )
+    assert (
+        'coding_agent_observation_span_duration_ms_count{provider="anthropic",span="runtime.stage.build_context",stage="build_context",status="ok"} 1'
+        in text
+    )
+    assert (
+        'coding_agent_observation_span_duration_ms_sum{provider="anthropic",span="runtime.stage.build_context",stage="build_context",status="ok"} 42.5'
+        in text
+    )
+    assert (
+        'coding_agent_observation_events_total{event="runtime.started",stage="build_context"} 1'
+        in text
+    )
+    assert (
+        'coding_agent_observation_last_event_timestamp_seconds{event="runtime.started",stage="build_context"} 123'
+        in text
+    )
+
+
+def test_prometheus_metrics_drop_forbidden_high_cardinality_labels() -> None:
+    recorder = PrometheusMetricsRecorder()
+    sink = PrometheusMetricsObservationSink(recorder=recorder)
+
+    sink.record_span(
+        SpanRecord(
+            name="tool.call",
+            status="ok",
+            attributes={
+                "stage": "dispatch",
+                "run_id": "run-1",
+                "session_id": "session-1",
+                "trace_id": "trace-1",
+                "event_id": "event-1",
+                "interaction_id": "interaction-1",
+                "tool_call_id": "tool-call-1",
+                "file_path": "src/secret.py",
+                "prompt": "raw prompt",
+                "message": "raw message",
+                "content": "raw content",
+                "command_output": "raw output",
+                "secret": "raw secret",
+            },
+            duration_ms=1,
+        )
+    )
+
+    text = recorder.exposition_text()
+
+    assert 'stage="dispatch"' in text
+    for forbidden in (
+        "run_id",
+        "session_id",
+        "trace_id",
+        "event_id",
+        "interaction_id",
+        "tool_call_id",
+        "file_path",
+        "prompt",
+        "message",
+        "content",
+        "command_output",
+        "secret",
+        "raw prompt",
+        "raw message",
+        "raw content",
+        "raw output",
+        "raw secret",
+        "src/secret.py",
+    ):
+        assert forbidden not in text
+
+
+def test_prometheus_metrics_normalize_unsafe_allowed_values_and_reserved_labels() -> (
+    None
+):
+    recorder = PrometheusMetricsRecorder()
+    sink = PrometheusMetricsObservationSink(recorder=recorder)
+
+    sink.record_span(
+        SpanRecord(
+            name="custom.span.with.raw.name",
+            status="ok",
+            attributes={
+                "status": "raw prompt secret status",
+                "stage": "raw prompt secret stage",
+                "provider": "raw prompt secret provider",
+            },
+            error_type="RuntimeError",
+            duration_ms=1,
+        )
+    )
+    sink.record_event(
+        ObservationEvent(
+            name="custom.event.with.raw.name",
+            attributes={"event": "raw prompt secret event"},
+            timestamp=1,
+        )
+    )
+
+    text = recorder.exposition_text()
+
+    assert 'span="unknown"' in text
+    assert 'event="unknown"' in text
+    assert 'status="ok"' in text
+    assert 'stage="unknown"' in text
+    assert "raw_prompt_secret" not in text
+    assert "custom.span" not in text
+    assert "custom.event" not in text
+
+
+def test_prometheus_metrics_event_only_exposition_omits_span_metadata() -> None:
+    recorder = PrometheusMetricsRecorder()
+    sink = PrometheusMetricsObservationSink(recorder=recorder)
+
+    sink.record_event(ObservationEvent(name="runtime.started", timestamp=123.0))
+
+    text = recorder.exposition_text()
+
+    assert "coding_agent_observation_events_total" in text
+    assert "# TYPE coding_agent_observation_spans_total counter" not in text
+    assert "coding_agent_observation_spans_total" not in text
+
+
+def test_prometheus_metrics_fail_open_when_registry_write_fails() -> None:
+    sink = PrometheusMetricsObservationSink(recorder=FailingPrometheusMetricsRecorder())
+
+    sink.record_span(SpanRecord(name="tool.call", status="ok"))
+    sink.record_event(ObservationEvent(name="tool.call.completed"))
 
 
 def test_otlp_sink_posts_span_without_prompt_or_output_content() -> None:
