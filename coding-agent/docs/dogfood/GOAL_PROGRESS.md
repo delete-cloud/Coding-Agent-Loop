@@ -123,3 +123,54 @@ Status: passed local verification; pending PR.
   - G65 uses the existing local `MockProvider` because production credentials
     and hosted LLM calls are out of scope for this phase.
   - G66 still needs to turn the validated path into a repeatable demo checklist.
+
+## G66_DOGFOOD_REPEATABLE_DEMO_PATH
+
+### Before
+
+- Goal id: G66_DOGFOOD_REPEATABLE_DEMO_PATH
+- Intended files:
+  - `docs/dogfood/GOAL_PROGRESS.md`
+  - `docs/dogfood/DEMO_PATH.md`
+- Verification commands:
+  - Run from `coding-agent/`.
+  - `test -f docs/dogfood/DEMO_PATH.md`
+  - `rg -n "Demo Checklist|G65 evidence replay|/console/runs/\\{run_id\\}|No production credentials" docs/dogfood/DEMO_PATH.md`
+  - `git diff --check -- .`
+- Stop criteria:
+  - A deterministic local demo cannot be described without production
+    credentials, external hosted services, or real external LLM calls.
+  - The demo path would require schedules, sandbox, desktop, bridge,
+    proactive-agent, or multi-agent work.
+  - The demo documentation would need raw prompt, message, model result text,
+    command output, stdout, stderr, environment values, or secrets.
+
+### After
+
+Status: passed local verification; pending PR.
+
+- Changed files:
+  - `docs/dogfood/GOAL_PROGRESS.md`
+  - `docs/dogfood/DEMO_PATH.md`
+- Dogfood evidence:
+  - G66 does not create new run evidence.
+  - It turns the G65 run evidence and existing console/observability/release
+    surfaces into a repeatable demo checklist.
+- Tests run:
+  - Run from `coding-agent/`.
+  - `test -f docs/dogfood/DEMO_PATH.md`
+  - `rg -n "Demo Checklist|G65 evidence replay|/console/runs/\\{run_id\\}|No production credentials" docs/dogfood/DEMO_PATH.md`
+  - `uv run pytest tests/dogfood/test_local_dogfood_run.py -v`
+  - `git diff --check -- .`
+- Results:
+  - `tests/dogfood/test_local_dogfood_run.py`: `1 passed`
+  - Documentation checks passed.
+  - `git diff --check -- .` passed.
+- Review notes:
+  - Local review found the initial demo text implied a G65 in-memory `run_id`
+    would be visible in a separately started server. The doc now separates G65
+    same-process replay from manual server empty-state and persistent-store
+    demos.
+- Remaining risks:
+  - G67 still needs to run final practical smoke checks and publish the phase
+    implementation report.
