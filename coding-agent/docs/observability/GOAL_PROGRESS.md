@@ -209,7 +209,7 @@ Status: merged via PR #254.
 
 ## G49 Prometheus Metrics Registry And Sink
 
-Status: passed local verification; pending PR.
+Status: merged via PR #255.
 
 ### Intended Files
 
@@ -266,3 +266,69 @@ Status: passed local verification; pending PR.
 - G49 provides the local Prometheus recorder, sink, label filtering, and text
   exposition. The HTTP `/metrics` route and HTTP request metrics are still G50
   work.
+
+## G50 Metrics Endpoint And HTTP Metrics
+
+Status: passed local verification; pending PR.
+
+### Intended Files
+
+- `src/coding_agent/observability.py`
+- `src/coding_agent/ui/http_server.py`
+- `tests/coding_agent/test_observability.py`
+- `tests/ui/test_http_server.py`
+- `docs/observability/GOAL_PROGRESS.md`
+
+### Verification Commands
+
+- `uv run pytest tests/coding_agent/test_observability.py -v`
+- `uv run pytest tests/ui/test_http_server.py -k "metrics" -v`
+- `uv run pytest tests/ui/test_http_server.py -k "healthz or readyz" -v`
+- `uv run pytest tests/coding_agent/test_release_observability_contract.py -v`
+- `uv run ruff format --check src/coding_agent/observability.py src/coding_agent/ui/http_server.py tests/coding_agent/test_observability.py tests/ui/test_http_server.py`
+- `uv run ruff check src/coding_agent/observability.py src/coding_agent/ui/http_server.py tests/coding_agent/test_observability.py tests/ui/test_http_server.py`
+- `git diff --check -- .`
+
+### Stop Criteria
+
+- Stop if `/metrics` cannot be enabled/disabled deterministically from local
+  config.
+- Stop if HTTP metrics require raw paths, request bodies, session ids, or other
+  high-cardinality labels.
+- Stop if metrics middleware failures can break HTTP requests.
+
+### Changed Files
+
+- `src/coding_agent/observability.py`
+- `src/coding_agent/ui/http_server.py`
+- `tests/coding_agent/test_observability.py`
+- `tests/ui/test_http_server.py`
+- `docs/observability/GOAL_PROGRESS.md`
+
+### Tests Run
+
+- `uv run pytest tests/coding_agent/test_observability.py -v`
+- `uv run pytest tests/ui/test_http_server.py -k "metrics" -v`
+- `uv run pytest tests/ui/test_http_server.py -k "healthz or readyz" -v`
+- `uv run pytest tests/coding_agent/test_release_observability_contract.py -v`
+- `uv run ruff format --check src/coding_agent/observability.py src/coding_agent/ui/http_server.py tests/coding_agent/test_observability.py tests/ui/test_http_server.py`
+- `uv run ruff check src/coding_agent/observability.py src/coding_agent/ui/http_server.py tests/coding_agent/test_observability.py tests/ui/test_http_server.py`
+- `git diff --check -- .`
+
+### Results
+
+- Observability tests passed: 21 passed.
+- Metrics endpoint tests passed: 4 passed, 207 deselected.
+- Health/readiness HTTP tests passed: 7 passed, 204 deselected.
+- Release observability contract tests passed: 3 passed.
+- Scoped ruff format/check passed.
+- `git diff --check -- .` passed.
+- Local review found that metrics config loading could break otherwise
+  successful HTTP requests. `_prometheus_metrics_enabled()` now fails closed
+  when config loading raises, and a `/healthz` regression covers the fail-open
+  HTTP behavior.
+
+### Remaining Risks
+
+- G50 covers HTTP request metrics and the `/metrics` endpoint. Additional
+  runtime/context/action/evaluation/storage metric coverage remains G51 work.

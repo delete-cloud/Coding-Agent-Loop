@@ -72,6 +72,7 @@ from coding_agent.ui.http_server import (
     wait_for_approval,
 )
 import coding_agent.ui.http_server as http_server
+from coding_agent.observability import reset_prometheus_metrics
 from coding_agent.wire.protocol import (
     ApprovalRequest,
     ApprovalResponse,
@@ -101,6 +102,7 @@ def _test_runtime_profile_config(image: str = "python:3.11-slim") -> dict[str, o
 @pytest.fixture(autouse=True)
 async def clear_sessions():
     """Clear sessions before each test."""
+    reset_prometheus_metrics()
     session_manager.configure_owner_leases(
         owner_store=None,
         owner_id=None,
@@ -126,6 +128,7 @@ async def clear_sessions():
     session_manager.configure_workspace_metadata_store(None)
     session_manager.configure_runtime_store(None)
     session_manager.clear_sessions()
+    reset_prometheus_metrics()
     # Cleanup session_manager
     for session_id in list(session_manager.list_sessions()):
         try:
@@ -915,6 +918,87 @@ class TestSessionCreation:
 
         assert health.status_code == 200
         assert health.json()["sessions"] == 7
+
+    async def test_metrics_endpoint_returns_404_when_disabled(self, client):
+        response = await client.get("/metrics")
+
+        assert response.status_code == 404
+
+    async def test_metrics_endpoint_returns_prometheus_text_when_enabled(
+        self,
+        client,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(
+            http_server,
+            "_load_observability_config",
+            lambda: {
+                "enabled": True,
+                "metrics": {"enabled": True, "endpoint_enabled": True},
+            },
+        )
+
+        health = await client.get("/healthz")
+        metrics = await client.get("/metrics")
+
+        assert health.status_code == 200
+        assert metrics.status_code == 200
+        assert metrics.headers["content-type"].startswith("text/plain")
+        text = metrics.text
+        assert "coding_agent_http_requests_total" in text
+        assert 'method="GET"' in text
+        assert 'route="healthz"' in text
+        assert 'status_code="200"' in text
+        assert "coding_agent_http_request_duration_ms_count" in text
+
+    async def test_metrics_endpoint_exposition_has_no_forbidden_labels_or_raw_text(
+        self,
+        client,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(
+            http_server,
+            "_load_observability_config",
+            lambda: {
+                "enabled": True,
+                "metrics": {"enabled": True, "endpoint_enabled": True},
+            },
+        )
+
+        await client.get("/sessions/not-a-secret-session-id")
+        metrics = await client.get("/metrics")
+
+        assert metrics.status_code == 200
+        for forbidden in (
+            "run_id",
+            "session_id",
+            "trace_id",
+            "event_id",
+            "interaction_id",
+            "tool_call_id",
+            "file_path",
+            "prompt",
+            "message",
+            "content",
+            "command_output",
+            "secret",
+            "not-a-secret-session-id",
+        ):
+            assert forbidden not in metrics.text
+
+    async def test_metrics_config_failure_does_not_break_http_request(
+        self,
+        client,
+        monkeypatch,
+    ):
+        def fail_config():
+            raise RuntimeError("metrics config failed")
+
+        monkeypatch.setattr(http_server, "_load_observability_config", fail_config)
+
+        response = await client.get("/healthz")
+
+        assert response.status_code == 200
 
     async def test_readyz_reports_dependencies_ready(self, client):
         ready = await client.get("/readyz")
