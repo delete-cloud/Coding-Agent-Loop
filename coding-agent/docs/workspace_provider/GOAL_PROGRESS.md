@@ -353,7 +353,7 @@ Status: passed local verification; in PR #281.
 
 ### After
 
-Status: passed local verification; pending PR.
+Status: merged via PR #282.
 
 - Changed files:
   - `docs/workspace_provider/GOAL_PROGRESS.md`
@@ -363,6 +363,7 @@ Status: passed local verification; pending PR.
 - Tests run:
   - Run from `coding-agent/`.
   - `uv run pytest tests/ui/test_developer_console.py -k "workspace or console_shell_routes_render_navigation_without_secrets or developer_console_e2e" -v`
+  - `uv run pytest tests/ui/test_developer_console.py -v`
   - `uv run ruff format --check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/ui/test_developer_console.py`
   - `uv run ruff check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/ui/test_developer_console.py`
   - `git diff --check -- .`
@@ -374,3 +375,68 @@ Status: passed local verification; pending PR.
     label and do not include workspace ids or `workspace_id` labels.
 - Remaining risks:
   - G75 still needs dogfood/demo evidence for the workspace provider path.
+
+## G75_DOGFOOD_DEMO_WORKSPACE_PROVIDER_PATH
+
+### Before
+
+- Goal id: G75_DOGFOOD_DEMO_WORKSPACE_PROVIDER_PATH
+- Intended files:
+  - `docs/workspace_provider/GOAL_PROGRESS.md`
+  - `docs/workspace_provider/RUN_EVIDENCE.md`
+  - `docs/workspace_provider/DEMO_PATH.md`
+  - `tests/dogfood/test_workspace_provider_demo.py`
+- Verification commands:
+  - Run from `coding-agent/`.
+  - `uv run pytest tests/dogfood/test_workspace_provider_demo.py -v`
+  - `uv run pytest tests/dogfood/test_local_dogfood_run.py -v`
+  - `uv run ruff format --check tests/dogfood/test_workspace_provider_demo.py`
+  - `uv run ruff check tests/dogfood/test_workspace_provider_demo.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Workspace provider dogfood cannot collect run_id-level evidence without
+    production credentials, hosted services, or Docker as a mandatory test
+    dependency.
+  - The demo path requires raw prompt/content/message/result/secret/text,
+    command output, stdout/stderr/env, file contents, or patch contents in
+    durable evidence, docs, metrics, traces, or console pages.
+  - The path requires schedule, desktop, bridge, proactive-agent, or multi-agent
+    work.
+
+### After
+
+Status: passed local verification; pending PR.
+
+- Changed files:
+  - `docs/workspace_provider/GOAL_PROGRESS.md`
+  - `docs/workspace_provider/RUN_EVIDENCE.md`
+  - `docs/workspace_provider/DEMO_PATH.md`
+  - `tests/dogfood/test_workspace_provider_demo.py`
+- Dogfood evidence:
+  - Recorded in `docs/workspace_provider/RUN_EVIDENCE.md`.
+  - `session_id`: `9ba40953-dfdf-403c-b6dc-5e72fc62fbf1`
+  - `run_id`: `3ad60c7953a74d84a63adc217286212a`
+  - `workspace_id`: `ws-dogfood`
+  - provider: `docker`
+  - provider instance: `dogfood-local`
+- Tests run:
+  - Run from `coding-agent/`.
+  - `uv run pytest tests/dogfood/test_workspace_provider_demo.py -v`
+  - `uv run pytest tests/dogfood/test_local_dogfood_run.py -v`
+  - `uv run ruff format --check tests/dogfood/test_workspace_provider_demo.py`
+  - `uv run ruff check tests/dogfood/test_workspace_provider_demo.py`
+  - `git diff --check -- .`
+- Results:
+  - Workspace provider dogfood replay passed without Docker, hosted services,
+    production credentials, or real external LLM calls.
+  - The replay created an explicit cloud execution binding, persisted durable
+    workspace metadata, routed representative tools through the fake workspace
+    client, rendered workspace/run/observability console pages, and verified
+    workspace ids did not enter Prometheus exposition.
+  - Local review feedback narrowed the evidence wording to committed evidence
+    and rendered console pages, and the test now injects a secret sentinel into
+    non-rendered workspace metadata.
+- Remaining risks:
+  - Live Docker provider demonstration remains optional and environment
+    dependent; deterministic proof uses a fake provider/client.
+  - G76 still needs final smoke and phase implementation report.
