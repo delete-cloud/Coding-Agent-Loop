@@ -64,21 +64,34 @@ _FORBIDDEN_PROMETHEUS_LABELS = frozenset(
 _PROMETHEUS_ALLOWED_ATTRIBUTE_LABELS = frozenset(
     {
         "action_kind",
+        "action_status",
+        "cache_hit",
         "error_type",
+        "eval_status",
+        "hitl_status",
         "model",
+        "operation",
         "policy_decision",
         "provider",
         "risk_level",
+        "source_kind",
         "stage",
         "status",
+        "storage_status",
         "tool_name",
     }
 )
+_PROMETHEUS_ATTRIBUTE_LABEL_ALIASES = {
+    "retrieval.cache_hit": "cache_hit",
+    "retrieval.source_kind": "source_kind",
+}
 _PROMETHEUS_RESERVED_LABELS = frozenset({"event", "span", "status"})
 _PROMETHEUS_KNOWN_SPAN_NAMES = frozenset(
     {
         "action.execute",
+        "action_safety.action",
         "context_pack.build",
+        "context_pack.render",
         "kb.index_failure",
         "kb.index_repo",
         "kb.query",
@@ -91,10 +104,12 @@ _PROMETHEUS_KNOWN_SPAN_NAMES = frozenset(
         "runtime.stage.run_model",
         "runtime.stage.save_state",
         "tool.call",
+        "retrieval.kb.search",
     }
 )
 _PROMETHEUS_KNOWN_EVENT_NAMES = frozenset(
     {
+        "action_safety.action",
         "action.completed",
         "action.failed",
         "action.started",
@@ -104,10 +119,42 @@ _PROMETHEUS_KNOWN_EVENT_NAMES = frozenset(
 )
 _PROMETHEUS_LABEL_VALUE_ALLOWLISTS = {
     "action_kind": frozenset(
-        {"approval", "command_policy", "patch", "restore", "validation"}
+        {
+            "approval",
+            "command",
+            "command_policy",
+            "file_edit",
+            "patch",
+            "restore",
+            "validation",
+        }
+    ),
+    "action_status": frozenset(
+        {
+            "allowed",
+            "approval_required",
+            "completed",
+            "denied",
+            "failed",
+            "started",
+        }
+    ),
+    "cache_hit": frozenset({"false", "true"}),
+    "eval_status": frozenset({"failed", "passed", "skipped"}),
+    "hitl_status": frozenset({"approved", "rejected", "requested", "timed_out"}),
+    "operation": frozenset(
+        {
+            "checkpoint_load",
+            "checkpoint_save",
+            "session_load",
+            "session_save",
+            "tape_append",
+            "tape_load",
+        }
     ),
     "policy_decision": frozenset({"allow", "approval_required", "deny"}),
     "risk_level": frozenset({"low", "medium", "high"}),
+    "source_kind": frozenset({"kb", "kb_chunk", "repo_file", "test_failure"}),
     "stage": frozenset(
         {
             "apply_directives",
@@ -120,6 +167,7 @@ _PROMETHEUS_LABEL_VALUE_ALLOWLISTS = {
         }
     ),
     "status": frozenset({"ok", "error", "started", "completed", "failed"}),
+    "storage_status": frozenset({"ok", "error"}),
 }
 _PROMETHEUS_HISTOGRAM_BUCKETS = (5.0, 10.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 5000.0)
 _PROMETHEUS_HTTP_HISTOGRAM_BUCKETS = (
@@ -152,6 +200,7 @@ def _attribute_allowed(key: str) -> bool:
 
 
 def _prometheus_label_allowed(key: str) -> bool:
+    key = _PROMETHEUS_ATTRIBUTE_LABEL_ALIASES.get(key, key)
     key_folded = key.casefold()
     if key_folded in _FORBIDDEN_PROMETHEUS_LABELS:
         return False
@@ -224,12 +273,13 @@ def _prometheus_labels(
 ) -> dict[str, str]:
     labels: dict[str, str] = {}
     for key, value in attributes.items():
-        if key in reserved:
+        label_key = _PROMETHEUS_ATTRIBUTE_LABEL_ALIASES.get(key, key)
+        if label_key in reserved:
             continue
         if not _prometheus_label_allowed(key):
             continue
         if isinstance(value, bool | int | float | str):
-            labels[key] = _prometheus_allowed_label_value(key, value)
+            labels[label_key] = _prometheus_allowed_label_value(label_key, value)
     return labels
 
 
@@ -404,6 +454,35 @@ class PrometheusMetricsRecorder:
                 max(0.0, float(duration_ms)),
             )
 
+    def record_evaluation_case_result(self, *, status: str) -> None:
+        labels = {"eval_status": _prometheus_allowed_label_value("eval_status", status)}
+        with self._lock:
+            self._inc("coding_agent_evaluation_case_results_total", labels)
+
+    def record_hitl_interaction(self, *, status: str) -> None:
+        labels = {"hitl_status": _prometheus_allowed_label_value("hitl_status", status)}
+        with self._lock:
+            self._inc("coding_agent_hitl_interactions_total", labels)
+
+    def record_storage_operation(
+        self,
+        *,
+        operation: str,
+        status: str,
+        duration_ms: float,
+    ) -> None:
+        labels = {
+            "operation": _prometheus_allowed_label_value("operation", operation),
+            "storage_status": _prometheus_allowed_label_value("storage_status", status),
+        }
+        with self._lock:
+            self._inc("coding_agent_storage_operations_total", labels)
+            self._observe(
+                "coding_agent_storage_operation_duration_ms",
+                labels,
+                max(0.0, float(duration_ms)),
+            )
+
     def exposition_text(self) -> str:
         lines: list[str] = []
         with self._lock:
@@ -485,6 +564,59 @@ class PrometheusMetricsRecorder:
                         buckets=_PROMETHEUS_HTTP_HISTOGRAM_BUCKETS,
                     )
                 )
+            domain_counters = self._domain_counters
+            if domain_counters:
+                lines.extend(
+                    (
+                        "# HELP coding_agent_evaluation_case_results_total Evaluation case results.",
+                        "# TYPE coding_agent_evaluation_case_results_total counter",
+                    )
+                )
+                lines.extend(
+                    self._format_metric(
+                        "coding_agent_evaluation_case_results_total",
+                        domain_counters,
+                    )
+                )
+                lines.extend(
+                    (
+                        "# HELP coding_agent_hitl_interactions_total Human interaction outcomes.",
+                        "# TYPE coding_agent_hitl_interactions_total counter",
+                    )
+                )
+                lines.extend(
+                    self._format_metric(
+                        "coding_agent_hitl_interactions_total",
+                        domain_counters,
+                    )
+                )
+                lines.extend(
+                    (
+                        "# HELP coding_agent_storage_operations_total Storage operations.",
+                        "# TYPE coding_agent_storage_operations_total counter",
+                    )
+                )
+                lines.extend(
+                    self._format_metric(
+                        "coding_agent_storage_operations_total",
+                        domain_counters,
+                    )
+                )
+            storage_histograms = self._storage_operation_histograms
+            if storage_histograms:
+                lines.extend(
+                    (
+                        "# HELP coding_agent_storage_operation_duration_ms Storage operation duration in milliseconds.",
+                        "# TYPE coding_agent_storage_operation_duration_ms histogram",
+                    )
+                )
+                lines.extend(
+                    self._format_histograms(
+                        histograms=storage_histograms,
+                        metric_name="coding_agent_storage_operation_duration_ms",
+                        buckets=_PROMETHEUS_HISTOGRAM_BUCKETS,
+                    )
+                )
         return "\n".join(lines) + ("\n" if lines else "")
 
     def reset(self) -> None:
@@ -537,6 +669,31 @@ class PrometheusMetricsRecorder:
             key: value
             for key, value in self._histograms.items()
             if key[0] == "coding_agent_http_request_duration_ms"
+        }
+
+    @property
+    def _domain_counters(
+        self,
+    ) -> dict[tuple[str, tuple[tuple[str, str], ...]], float]:
+        return {
+            key: value
+            for key, value in self._counters.items()
+            if key[0]
+            in {
+                "coding_agent_evaluation_case_results_total",
+                "coding_agent_hitl_interactions_total",
+                "coding_agent_storage_operations_total",
+            }
+        }
+
+    @property
+    def _storage_operation_histograms(
+        self,
+    ) -> dict[tuple[str, tuple[tuple[str, str], ...]], list[float]]:
+        return {
+            key: value
+            for key, value in self._histograms.items()
+            if key[0] == "coding_agent_storage_operation_duration_ms"
         }
 
     def _inc(self, metric: str, labels: Mapping[str, str], amount: float = 1.0) -> None:
@@ -632,6 +789,36 @@ def record_http_request_metric(
             method=method,
             route=route,
             status_code=status_code,
+            duration_ms=duration_ms,
+        )
+    except Exception:
+        return
+
+
+def record_evaluation_case_metric(*, status: str) -> None:
+    try:
+        _DEFAULT_PROMETHEUS_RECORDER.record_evaluation_case_result(status=status)
+    except Exception:
+        return
+
+
+def record_hitl_interaction_metric(*, status: str) -> None:
+    try:
+        _DEFAULT_PROMETHEUS_RECORDER.record_hitl_interaction(status=status)
+    except Exception:
+        return
+
+
+def record_storage_operation_metric(
+    *,
+    operation: str,
+    status: str,
+    duration_ms: float,
+) -> None:
+    try:
+        _DEFAULT_PROMETHEUS_RECORDER.record_storage_operation(
+            operation=operation,
+            status=status,
             duration_ms=duration_ms,
         )
     except Exception:
