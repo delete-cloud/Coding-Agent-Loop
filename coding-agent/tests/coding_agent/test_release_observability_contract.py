@@ -27,10 +27,14 @@ from coding_agent.plugins.kb import (
 
 _FORBIDDEN_ATTRIBUTE_PARTS = (
     "content",
+    "env",
     "message",
+    "output",
     "prompt",
     "result",
     "secret",
+    "stderr",
+    "stdout",
     "text",
 )
 _SENSITIVE_SENTINEL = "SECRET_PROMPT_RESULT_TEXT"
