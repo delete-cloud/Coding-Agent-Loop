@@ -41,9 +41,11 @@ from coding_agent.runtime_store import (
     RuntimeEventRecord,
 )
 from coding_agent.environment.workspace_provider import (
+    WorkspaceArchiveManifest,
     WorkspaceBranchPublication,
     WorkspaceDiff,
     WorkspaceDiffFile,
+    WorkspaceInventoryEntry,
     WorkspacePatch,
 )
 from coding_agent.ui.execution_binding import (
@@ -4480,6 +4482,317 @@ class TestRemoteWorkspaceRetentionContract:
 
         assert response.status_code == 404
         assert response.json() == {"detail": "Workspace not found: missing"}
+
+    async def test_delete_workspace_fails_closed_for_foreign_provider_instance(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_remote_retention_config",
+            lambda: {"enabled": True},
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            lambda: {"provider": "docker", "provider_instance_id": "docker-local"},
+        )
+        store = FakeWorkspaceMetadataStore(
+            [
+                WorkspaceRecord(
+                    workspace_record_id="wr-remote",
+                    workspace_id="ws-remote",
+                    session_id="session-remote",
+                    provider="docker",
+                    provider_instance_id="docker-remote",
+                    workspace_root_ref="/workspaces",
+                    workspace_host_label="remote-host",
+                    owner_label="owner:test",
+                    source_kind="git",
+                    status="retained",
+                    retention_policy="manual",
+                )
+            ]
+        )
+        session_manager.configure_workspace_metadata_store(store)
+        cleanup = MagicMock()
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.cleanup_cloud_workspace_from_config",
+            cleanup,
+        )
+
+        response = await client.delete("/workspaces/ws-remote")
+
+        assert response.status_code == 409
+        assert response.json() == {
+            "detail": (
+                "Workspace belongs to a different provider instance and cannot "
+                "be operated by this server"
+            )
+        }
+        cleanup.assert_not_called()
+        assert store.status_updates == []
+
+    async def test_delete_workspace_updates_local_durable_record(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_remote_retention_config",
+            lambda: {"enabled": True},
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            lambda: {"provider": "docker", "provider_instance_id": "docker-local"},
+        )
+        store = FakeWorkspaceMetadataStore(
+            [
+                WorkspaceRecord(
+                    workspace_record_id="wr-local",
+                    workspace_id="ws-local",
+                    session_id="session-local",
+                    provider="docker",
+                    provider_instance_id="docker-local",
+                    workspace_root_ref="/workspaces",
+                    workspace_host_label="local-host",
+                    owner_label="owner:test",
+                    source_kind="git",
+                    status="retained",
+                    retention_policy="manual",
+                )
+            ]
+        )
+        session_manager.configure_workspace_metadata_store(store)
+
+        def fake_cleanup(
+            config: dict[str, object],
+            workspace_id: str,
+            *,
+            active_workspace_ids: set[str] | None = None,
+        ) -> WorkspaceInventoryEntry:
+            assert config == {
+                "provider": "docker",
+                "provider_instance_id": "docker-local",
+            }
+            assert workspace_id == "ws-local"
+            assert active_workspace_ids == set()
+            return WorkspaceInventoryEntry(
+                workspace_id=workspace_id,
+                status="cleaned",
+                updated_at=datetime(2026, 5, 14, tzinfo=UTC),
+            )
+
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.cleanup_cloud_workspace_from_config",
+            fake_cleanup,
+        )
+
+        response = await client.delete("/workspaces/ws-local")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "workspace_id": "ws-local",
+            "status": "cleaned",
+            "error": None,
+        }
+        assert store.status_updates == [
+            ("wr-local", "cleaning", None),
+            ("wr-local", "cleaned", None),
+        ]
+
+    async def test_delete_workspace_marks_local_durable_record_lost_on_provider_404(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_remote_retention_config",
+            lambda: {"enabled": True},
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            lambda: {"provider": "docker", "provider_instance_id": "docker-local"},
+        )
+        store = FakeWorkspaceMetadataStore(
+            [
+                WorkspaceRecord(
+                    workspace_record_id="wr-local",
+                    workspace_id="ws-local",
+                    session_id="session-local",
+                    provider="docker",
+                    provider_instance_id="docker-local",
+                    workspace_root_ref="/workspaces",
+                    workspace_host_label="local-host",
+                    owner_label="owner:test",
+                    source_kind="git",
+                    status="retained",
+                    retention_policy="manual",
+                )
+            ]
+        )
+        session_manager.configure_workspace_metadata_store(store)
+
+        def fake_cleanup(
+            config: dict[str, object],
+            workspace_id: str,
+            *,
+            active_workspace_ids: set[str] | None = None,
+        ) -> WorkspaceInventoryEntry:
+            del config, active_workspace_ids
+            raise KeyError(f"workspace not found: {workspace_id}")
+
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.cleanup_cloud_workspace_from_config",
+            fake_cleanup,
+        )
+
+        response = await client.delete("/workspaces/ws-local")
+
+        assert response.status_code == 404
+        assert store.status_updates == [
+            ("wr-local", "cleaning", None),
+            ("wr-local", "lost", "'workspace not found: ws-local'"),
+        ]
+
+    async def test_workspace_archive_manifest_fails_closed_for_foreign_provider_instance(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_remote_retention_config",
+            lambda: {"enabled": True},
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            lambda: {"provider": "docker", "provider_instance_id": "docker-local"},
+        )
+        store = FakeWorkspaceMetadataStore(
+            [
+                WorkspaceRecord(
+                    workspace_record_id="wr-remote",
+                    workspace_id="ws-remote",
+                    session_id="session-remote",
+                    provider="docker",
+                    provider_instance_id="docker-remote",
+                    workspace_root_ref="/workspaces",
+                    workspace_host_label="remote-host",
+                    owner_label="owner:test",
+                    source_kind="git",
+                    status="retained",
+                    retention_policy="manual",
+                )
+            ]
+        )
+        session_manager.configure_workspace_metadata_store(store)
+        manifest = MagicMock()
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.workspace_archive_manifest_from_config",
+            manifest,
+        )
+
+        response = await client.get("/workspaces/ws-remote/archive/manifest")
+
+        assert response.status_code == 409
+        manifest.assert_not_called()
+
+    async def test_workspace_archive_fails_closed_for_foreign_provider_instance(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_remote_retention_config",
+            lambda: {"enabled": True},
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            lambda: {"provider": "docker", "provider_instance_id": "docker-local"},
+        )
+        store = FakeWorkspaceMetadataStore(
+            [
+                WorkspaceRecord(
+                    workspace_record_id="wr-remote",
+                    workspace_id="ws-remote",
+                    session_id="session-remote",
+                    provider="docker",
+                    provider_instance_id="docker-remote",
+                    workspace_root_ref="/workspaces",
+                    workspace_host_label="remote-host",
+                    owner_label="owner:test",
+                    source_kind="git",
+                    status="retained",
+                    retention_policy="manual",
+                )
+            ]
+        )
+        session_manager.configure_workspace_metadata_store(store)
+        export_archive = MagicMock()
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.export_workspace_archive_by_id_from_config",
+            export_archive,
+        )
+
+        response = await client.get("/workspaces/ws-remote/archive")
+
+        assert response.status_code == 409
+        export_archive.assert_not_called()
+
+    async def test_workspace_archive_manifest_uses_local_durable_record(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_remote_retention_config",
+            lambda: {"enabled": True},
+        )
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            lambda: {"provider": "docker", "provider_instance_id": "docker-local"},
+        )
+        store = FakeWorkspaceMetadataStore(
+            [
+                WorkspaceRecord(
+                    workspace_record_id="wr-local",
+                    workspace_id="ws-local",
+                    session_id="session-local",
+                    provider="docker",
+                    provider_instance_id="docker-local",
+                    workspace_root_ref="/workspaces",
+                    workspace_host_label="local-host",
+                    owner_label="owner:test",
+                    source_kind="git",
+                    status="retained",
+                    retention_policy="manual",
+                )
+            ]
+        )
+        session_manager.configure_workspace_metadata_store(store)
+
+        def fake_manifest(
+            config: dict[str, object],
+            workspace_id: str,
+            *,
+            session_id: str | None = None,
+        ) -> WorkspaceArchiveManifest:
+            assert config == {
+                "provider": "docker",
+                "provider_instance_id": "docker-local",
+            }
+            assert workspace_id == "ws-local"
+            assert session_id is None
+            return WorkspaceArchiveManifest(
+                workspace_id=workspace_id,
+                session_id=None,
+                format="tar.gz",
+                generated_at=datetime(2026, 5, 14, tzinfo=UTC),
+                file_count=1,
+                total_bytes=10,
+                changed_files=["README.md"],
+                deleted_files=[],
+                excluded_files=[],
+                archive_sha256="abc123",
+            )
+
+        monkeypatch.setattr(
+            "coding_agent.ui.http_server.workspace_archive_manifest_from_config",
+            fake_manifest,
+        )
+
+        response = await client.get("/workspaces/ws-local/archive/manifest")
+
+        assert response.status_code == 200
+        assert response.json()["workspace_id"] == "ws-local"
+        assert response.json()["archive_sha256"] == "abc123"
 
     async def test_workspace_pin_updates_durable_retention_policy(
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
