@@ -180,6 +180,47 @@ class ConsoleActionValidationSummary:
     validations: tuple[ConsoleValidationOutcomeSummary, ...]
 
 
+@dataclass(frozen=True)
+class ConsoleCorrelationSummary:
+    session_id: str | None
+    run_id: str | None
+    tape_id: str | None
+    retrieval_id: str | None
+    action_id: str | None
+    validation_id: str | None
+    interaction_id: str | None
+
+
+@dataclass(frozen=True)
+class ConsoleObservabilitySummary:
+    correlation: ConsoleCorrelationSummary | None
+    metrics_enabled: bool
+    metrics_path: str
+    tracing_backend: str | None
+    metrics_backend: str | None
+    langfuse_url: str | None
+    grafana_url: str | None
+
+
+@dataclass(frozen=True)
+class ConsoleReleaseGateSummary:
+    gate_id: str
+    command: str
+    required: bool
+    scope: str
+
+
+@dataclass(frozen=True)
+class ConsoleReleaseSummary:
+    health_status: str
+    session_count: int
+    version: str
+    readiness_status: str
+    readiness_checks: tuple[tuple[str, str], ...]
+    release_manifest_name: str | None
+    release_gates: tuple[ConsoleReleaseGateSummary, ...]
+
+
 CONSOLE_PAGES: tuple[ConsolePage, ...] = (
     ConsolePage(
         path="/console/sessions",
@@ -368,6 +409,30 @@ def render_console_actions_page(
         f'<p class="lede">{escape(page.description)}</p>'
         f"{_action_summary_section(summary)}"
         f"{_validation_summary_section(summary)}"
+    )
+    return _html_document(title=page.title, body=body, active_path=page.path)
+
+
+def render_console_observability_page(
+    summary: ConsoleObservabilitySummary,
+) -> str:
+    page = _PAGE_BY_PATH["/console/observability"]
+    body = (
+        f"<h1>{escape(page.title)}</h1>"
+        f'<p class="lede">{escape(page.description)}</p>'
+        f"{_correlation_section(summary.correlation)}"
+        f"{_observability_backend_section(summary)}"
+    )
+    return _html_document(title=page.title, body=body, active_path=page.path)
+
+
+def render_console_release_page(summary: ConsoleReleaseSummary) -> str:
+    page = _PAGE_BY_PATH["/console/release"]
+    body = (
+        f"<h1>{escape(page.title)}</h1>"
+        f'<p class="lede">{escape(page.description)}</p>'
+        f"{_health_section(summary)}"
+        f"{_release_gate_section(summary)}"
     )
     return _html_document(title=page.title, body=body, active_path=page.path)
 
@@ -757,6 +822,102 @@ def _validation_summary_section(
         "<thead><tr><th>Label</th><th>Status</th><th>Exit Code</th>"
         "<th>Duration ms</th><th>Policy</th><th>Failure Summary</th>"
         "<th>Context Link</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+        "</section>"
+    )
+
+
+def _correlation_section(correlation: ConsoleCorrelationSummary | None) -> str:
+    if correlation is None:
+        return _empty_state(
+            "Trace Correlation",
+            "No data loaded yet. Select a run to view correlation metadata.",
+        )
+    return (
+        '<section aria-label="Trace correlation">'
+        "<h2>Trace Correlation</h2>"
+        "<dl>"
+        f"<dt>Session ID</dt><dd>{escape(correlation.session_id or '-')}</dd>"
+        f"<dt>Run ID</dt><dd>{escape(correlation.run_id or '-')}</dd>"
+        f"<dt>Tape ID</dt><dd>{escape(correlation.tape_id or '-')}</dd>"
+        f"<dt>Retrieval ID</dt><dd>{escape(correlation.retrieval_id or '-')}</dd>"
+        f"<dt>Action ID</dt><dd>{escape(correlation.action_id or '-')}</dd>"
+        f"<dt>Validation ID</dt><dd>{escape(correlation.validation_id or '-')}</dd>"
+        f"<dt>Interaction ID</dt><dd>{escape(correlation.interaction_id or '-')}</dd>"
+        "</dl>"
+        "</section>"
+    )
+
+
+def _observability_backend_section(summary: ConsoleObservabilitySummary) -> str:
+    langfuse = (
+        f'<a href="{escape(summary.langfuse_url)}">Langfuse</a>'
+        if summary.langfuse_url
+        else "not configured"
+    )
+    grafana = (
+        f'<a href="{escape(summary.grafana_url)}">Grafana</a>'
+        if summary.grafana_url
+        else "not configured"
+    )
+    metrics_status = "enabled" if summary.metrics_enabled else "disabled"
+    return (
+        '<section aria-label="Observability backends">'
+        "<h2>Backends</h2>"
+        "<dl>"
+        f"<dt>Metrics Endpoint</dt><dd>{escape(metrics_status)} at "
+        f'<a href="{escape(summary.metrics_path)}">{escape(summary.metrics_path)}</a></dd>'
+        f"<dt>Tracing Backend</dt><dd>{escape(summary.tracing_backend or 'not configured')}</dd>"
+        f"<dt>Metrics Backend</dt><dd>{escape(summary.metrics_backend or 'not configured')}</dd>"
+        f"<dt>Langfuse Link</dt><dd>{langfuse}</dd>"
+        f"<dt>Grafana Link</dt><dd>{grafana}</dd>"
+        "</dl>"
+        "</section>"
+    )
+
+
+def _health_section(summary: ConsoleReleaseSummary) -> str:
+    checks = "".join(
+        f"<li>{escape(name)}={escape(status)}</li>"
+        for name, status in summary.readiness_checks
+    )
+    return (
+        '<section aria-label="Health and readiness">'
+        "<h2>Health / Readiness</h2>"
+        "<dl>"
+        f"<dt>Health</dt><dd>{escape(summary.health_status)}</dd>"
+        f"<dt>Sessions</dt><dd>{summary.session_count}</dd>"
+        f"<dt>Version</dt><dd>{escape(summary.version)}</dd>"
+        f"<dt>Readiness</dt><dd>{escape(summary.readiness_status)}</dd>"
+        "</dl>"
+        f'<ul class="pill-list">{checks}</ul>'
+        "</section>"
+    )
+
+
+def _release_gate_section(summary: ConsoleReleaseSummary) -> str:
+    if not summary.release_gates:
+        return _empty_state(
+            "Release Verification",
+            "No release verification manifest is available.",
+        )
+    rows = []
+    for gate in summary.release_gates:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(gate.gate_id)}</td>"
+            f"<td>{escape(gate.scope)}</td>"
+            f"<td>{escape('yes' if gate.required else 'no')}</td>"
+            f"<td>{escape(gate.command)}</td>"
+            "</tr>"
+        )
+    title = summary.release_manifest_name or "Release Verification"
+    return (
+        '<section aria-label="Release verification">'
+        f"<h2>{escape(title)}</h2>"
+        '<table aria-label="Release verification gates">'
+        "<thead><tr><th>Gate</th><th>Scope</th><th>Required</th><th>Command</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
         "</section>"

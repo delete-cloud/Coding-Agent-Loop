@@ -35,6 +35,9 @@ from coding_agent.runtime_store import (
     RunMessageSnapshotRecord,
     RuntimeEventRecord,
 )
+from coding_agent.verification.release_manifest import (
+    load_release_verification_manifest,
+)
 from coding_agent.environment import (
     cleanup_cloud_binding_from_config,
     cleanup_cloud_workspace_from_config,
@@ -62,6 +65,7 @@ from coding_agent.ui.binding_resolver import DefaultBindingResolver
 from coding_agent.ui.developer_console import (
     ConsoleActionSummary,
     ConsoleActionValidationSummary,
+    ConsoleCorrelationSummary,
     ConsoleContextEvidence,
     ConsoleContextSectionSummary,
     ConsoleContextSummary,
@@ -69,6 +73,9 @@ from coding_agent.ui.developer_console import (
     ConsoleInteractionSummary,
     ConsoleMemoryEvidence,
     ConsoleMemorySummary,
+    ConsoleObservabilitySummary,
+    ConsoleReleaseGateSummary,
+    ConsoleReleaseSummary,
     ConsoleRunDetail,
     ConsoleRunSummary,
     ConsoleSessionSummary,
@@ -82,6 +89,8 @@ from coding_agent.ui.developer_console import (
     render_console_context_page,
     render_console_interactions_page,
     render_console_memory_page,
+    render_console_observability_page,
+    render_console_release_page,
     render_console_run_detail_page,
     render_console_runs_page,
     render_console_sessions_page,
@@ -1263,15 +1272,32 @@ async def console_actions(
 
 
 @app.get("/console/observability", response_class=HTMLResponse)
-async def console_observability(request: Request) -> HTMLResponse:
+async def console_observability(
+    request: Request,
+    run_id: str | None = Query(None, min_length=1, max_length=200),
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> HTMLResponse:
     del request
-    return HTMLResponse(render_console_page("/console/observability"))
+    correlation = None
+    if run_id is not None:
+        try:
+            run = await _get_visible_runtime_run(run_id, auth_context)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+        else:
+            correlation = _correlation_summary_from_run(run)
+    return HTMLResponse(
+        render_console_observability_page(
+            _observability_summary(correlation=correlation)
+        )
+    )
 
 
 @app.get("/console/release", response_class=HTMLResponse)
 async def console_release(request: Request) -> HTMLResponse:
     del request
-    return HTMLResponse(render_console_page("/console/release"))
+    return HTMLResponse(render_console_release_page(await _release_summary()))
 
 
 def _session_to_dict(session: Session) -> dict[str, Any]:
@@ -2841,6 +2867,111 @@ def _action_validation_summary_from_run(
     )
 
 
+def _correlation_summary_from_run(run: AgentRunRecord) -> ConsoleCorrelationSummary:
+    action = _first_metadata_item(run.metadata, ("actions", "action_summaries"))
+    return ConsoleCorrelationSummary(
+        session_id=safe_id_value(run.session_id),
+        run_id=safe_id_value(run.run_id),
+        tape_id=safe_id_value(run.tape_id),
+        retrieval_id=safe_id_value(
+            run.metadata.get("retrieval_id") or run.metadata.get("context_retrieval_id")
+        ),
+        action_id=(
+            safe_id_value(action.get("action_id") or action.get("id"))
+            if action is not None
+            else safe_id_value(run.metadata.get("action_id"))
+        ),
+        validation_id=(
+            safe_id_value(action.get("validation_id"))
+            if action is not None
+            else safe_id_value(run.metadata.get("validation_id"))
+        ),
+        interaction_id=(
+            safe_id_value(
+                action.get("interaction_id") or action.get("approval_interaction_id")
+            )
+            if action is not None
+            else safe_id_value(run.metadata.get("interaction_id"))
+        ),
+    )
+
+
+def _observability_summary(
+    *,
+    correlation: ConsoleCorrelationSummary | None,
+) -> ConsoleObservabilitySummary:
+    config = _safe_observability_config()
+    tracing_config = _safe_dict(config.get("tracing"))
+    metrics_config = _safe_dict(config.get("metrics"))
+    tracing_backend = safe_label_value(
+        tracing_config.get("backend")
+    ) or safe_label_value(config.get("backend"))
+    metrics_backend = safe_label_value(metrics_config.get("backend") or "prometheus")
+    return ConsoleObservabilitySummary(
+        correlation=correlation,
+        metrics_enabled=_prometheus_metrics_enabled(),
+        metrics_path="/metrics",
+        tracing_backend=tracing_backend,
+        metrics_backend=metrics_backend,
+        langfuse_url=_safe_observability_link(
+            tracing_config.get("public_url")
+            or tracing_config.get("ui_url")
+            or config.get("langfuse_url")
+        ),
+        grafana_url=_safe_observability_link(
+            metrics_config.get("grafana_url")
+            or config.get("grafana_url")
+            or config.get("dashboard_url")
+        ),
+    )
+
+
+async def _release_summary() -> ConsoleReleaseSummary:
+    readiness_checks: dict[str, str]
+    try:
+        session_store_ok = bool(await session_manager.check_health_async())
+    except Exception:
+        logger.exception("Console session store readiness check failed")
+        session_store_ok = False
+    try:
+        rate_limiter_ok = bool(limiter._storage.check())
+    except Exception:
+        logger.exception("Console rate limiter readiness check failed")
+        rate_limiter_ok = False
+    readiness_checks = {
+        "session_store": "ok" if session_store_ok else "error",
+        "rate_limiter": "ok" if rate_limiter_ok else "error",
+    }
+    ready = session_store_ok and rate_limiter_ok
+    manifest_name = None
+    gates: tuple[ConsoleReleaseGateSummary, ...] = ()
+    manifest_path = Path("docs/release_hardening/release-verification.yaml")
+    try:
+        manifest = load_release_verification_manifest(manifest_path)
+    except Exception:
+        logger.exception("Unable to load release verification manifest")
+    else:
+        manifest_name = manifest.name
+        gates = tuple(
+            ConsoleReleaseGateSummary(
+                gate_id=gate.id,
+                command=gate.command,
+                required=gate.required,
+                scope=gate.scope,
+            )
+            for gate in manifest.gates
+        )
+    return ConsoleReleaseSummary(
+        health_status="healthy",
+        session_count=await session_manager.count_sessions_async(),
+        version="2.0.0",
+        readiness_status="ready" if ready else "not_ready",
+        readiness_checks=tuple(sorted(readiness_checks.items())),
+        release_manifest_name=manifest_name,
+        release_gates=gates,
+    )
+
+
 def _action_summary_from_item(
     run_id: str,
     raw_item: dict[str, object],
@@ -2920,6 +3051,36 @@ def _metadata_lists(
         if isinstance(value, list):
             items.extend(item for item in value if isinstance(item, dict))
     return items
+
+
+def _first_metadata_item(
+    metadata: dict[str, object],
+    keys: tuple[str, ...],
+) -> dict[str, object] | None:
+    for item in _metadata_lists(metadata, keys):
+        return item
+    return None
+
+
+def _safe_observability_config() -> dict[str, object]:
+    try:
+        return _load_observability_config()
+    except Exception:
+        logger.exception("Unable to load observability config for console")
+        return {}
+
+
+def _safe_observability_link(value: object) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    parts = urlsplit(value.strip())
+    if parts.scheme not in {"http", "https"}:
+        return None
+    if parts.username or parts.password or parts.query or parts.fragment:
+        return None
+    if not parts.netloc:
+        return None
+    return parts.geturl()
 
 
 def _safe_label_tuple(value: object) -> tuple[str, ...]:

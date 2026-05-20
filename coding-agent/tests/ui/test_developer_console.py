@@ -16,6 +16,7 @@ from coding_agent.runtime_store import (
     RuntimeEventRecord,
 )
 from coding_agent.core.config import settings
+from coding_agent.ui import http_server
 from coding_agent.ui.http_server import app, session_manager
 from coding_agent.ui.session_manager import Session
 
@@ -429,6 +430,7 @@ def _runtime_run(
                     "command": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT",
                 }
             ],
+            "retrieval_id": "retrieval-alpha",
             "validation_report": {
                 "status": "failed",
                 "outcomes": [
@@ -613,8 +615,6 @@ async def test_console_placeholder_pages_render_empty_states() -> None:
         "/console/context": "Context",
         "/console/memory": "Memory",
         "/console/actions": "Actions / Validation",
-        "/console/observability": "Observability",
-        "/console/release": "Release / Health",
     }
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -624,6 +624,112 @@ async def test_console_placeholder_pages_render_empty_states() -> None:
             assert response.status_code == 200, route
             assert f"<h1>{title}</h1>" in response.text
             assert "No data loaded yet." in response.text
+
+
+@pytest.mark.asyncio
+async def test_console_observability_renders_configured_links_and_correlation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _register_console_session("session-alpha")
+    session_manager.configure_runtime_store(
+        _ConsoleRuntimeStore(
+            [_runtime_run("run-alpha", "session-alpha", status="completed")]
+        )
+    )
+    monkeypatch.setattr(
+        http_server,
+        "_load_observability_config",
+        lambda: {
+            "enabled": True,
+            "tracing": {
+                "enabled": True,
+                "backend": "langfuse",
+                "public_url": "https://langfuse.example.test/project/demo",
+                "public_key": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT",
+            },
+            "metrics": {
+                "enabled": True,
+                "endpoint_enabled": True,
+                "backend": "prometheus",
+                "grafana_url": "http://localhost:3000/d/coding-agent-observability",
+                "token": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT",
+            },
+        },
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/console/observability",
+            params={"run_id": "run-alpha"},
+        )
+
+    assert response.status_code == 200
+    assert "Trace Correlation" in response.text
+    assert "session-alpha" in response.text
+    assert "run-alpha" in response.text
+    assert "retrieval-alpha" in response.text
+    assert "action-alpha" in response.text
+    assert "validation-alpha" in response.text
+    assert "interaction-pending" in response.text
+    assert "langfuse" in response.text
+    assert "prometheus" in response.text
+    assert "https://langfuse.example.test/project/demo" in response.text
+    assert "http://localhost:3000/d/coding-agent-observability" in response.text
+    for forbidden in FORBIDDEN_RENDERED_TEXT:
+        assert forbidden not in response.text
+
+
+@pytest.mark.asyncio
+async def test_console_observability_degrades_without_links(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        http_server,
+        "_load_observability_config",
+        lambda: {
+            "enabled": True,
+            "tracing": {"enabled": True, "backend": "otlp_http"},
+            "metrics": {"enabled": False, "endpoint_enabled": False},
+            "grafana_url": "https://grafana.example.test/?token=SECRET",
+        },
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/console/observability")
+
+    assert response.status_code == 200
+    assert "Trace Correlation" in response.text
+    assert "not configured" in response.text
+    assert "otlp_http" in response.text
+    assert "disabled at" in response.text
+    assert "grafana.example.test" not in response.text
+    for forbidden in FORBIDDEN_RENDERED_TEXT:
+        assert forbidden not in response.text
+
+
+@pytest.mark.asyncio
+async def test_console_release_renders_health_and_release_manifest() -> None:
+    _register_console_session("session-alpha")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/console/release")
+
+    assert response.status_code == 200
+    assert "Health / Readiness" in response.text
+    assert "healthy" in response.text
+    assert "session_store=ok" in response.text
+    assert "rate_limiter=ok" in response.text
+    assert "release-hardening-g38-g45" in response.text
+    assert "durable-runtime-smoke" in response.text
+    assert (
+        "uv run pytest tests/integration/test_durable_runtime_smoke.py -v"
+        in response.text
+    )
+    for forbidden in FORBIDDEN_RENDERED_TEXT:
+        assert forbidden not in response.text
 
 
 @pytest.mark.asyncio
