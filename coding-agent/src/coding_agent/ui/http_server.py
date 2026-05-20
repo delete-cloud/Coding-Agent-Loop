@@ -59,7 +59,14 @@ from coding_agent.observability import (
     record_http_request_metric,
 )
 from coding_agent.ui.binding_resolver import DefaultBindingResolver
-from coding_agent.ui.developer_console import render_console_page
+from coding_agent.ui.developer_console import (
+    ConsoleRunSummary,
+    ConsoleSessionSummary,
+    render_console_page,
+    render_console_runs_page,
+    render_console_sessions_page,
+    safe_error_summary,
+)
 from coding_agent.ui.session_manager import Session, SessionManager
 from coding_agent.ui.session_owner_store import (
     SessionOwnerStore,
@@ -930,15 +937,68 @@ async def console_overview(request: Request) -> HTMLResponse:
 
 
 @app.get("/console/sessions", response_class=HTMLResponse)
-async def console_sessions(request: Request) -> HTMLResponse:
+async def console_sessions(
+    request: Request,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> HTMLResponse:
     del request
-    return HTMLResponse(render_console_page("/console/sessions"))
+    sessions: list[ConsoleSessionSummary] = []
+    for session_id in await session_manager.list_sessions_async():
+        try:
+            session = await session_manager.get_session_async(session_id)
+        except KeyError:
+            continue
+        if not _auth_context_can_access_session(auth_context, session):
+            continue
+        summary = session.as_dict()
+        sessions.append(
+            ConsoleSessionSummary(
+                session_id=session.id,
+                status=str(summary["status"]),
+                turn_status=str(summary["turn_status"]),
+                created_at=session.created_at,
+                updated_at=session.last_activity,
+                current_turn_id=session.current_turn_id,
+            )
+        )
+    sessions.sort(key=lambda item: item.updated_at, reverse=True)
+    return HTMLResponse(render_console_sessions_page(sessions))
 
 
 @app.get("/console/runs", response_class=HTMLResponse)
-async def console_runs(request: Request) -> HTMLResponse:
+async def console_runs(
+    request: Request,
+    status: str | None = Query(None, min_length=1, max_length=80),
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> HTMLResponse:
     del request
-    return HTMLResponse(render_console_page("/console/runs"))
+    runs: list[ConsoleRunSummary] = []
+    for session_id in await session_manager.list_sessions_async():
+        try:
+            session = await session_manager.get_session_async(session_id)
+        except KeyError:
+            continue
+        if not _auth_context_can_access_session(auth_context, session):
+            continue
+        try:
+            session_runs = await session_manager.list_runtime_runs(session_id)
+        except RuntimeError:
+            session_runs = []
+        for run in session_runs:
+            if status is not None and run.status != status:
+                continue
+            runs.append(
+                ConsoleRunSummary(
+                    run_id=run.run_id,
+                    session_id=run.session_id,
+                    status=run.status,
+                    started_at=run.started_at,
+                    ended_at=run.ended_at,
+                    error_summary=safe_error_summary(run.error),
+                )
+            )
+    runs.sort(key=lambda item: item.started_at, reverse=True)
+    return HTMLResponse(render_console_runs_page(runs, status_filter=status))
 
 
 @app.get("/console/interactions", response_class=HTMLResponse)

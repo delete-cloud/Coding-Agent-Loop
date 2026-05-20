@@ -1,9 +1,19 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from coding_agent.ui.http_server import app
+from coding_agent.runtime_store import (
+    AgentInteractionRecord,
+    AgentRunRecord,
+    RunMessageSnapshotRecord,
+    RuntimeEventRecord,
+)
+from coding_agent.ui.http_server import app, session_manager
+from coding_agent.ui.session_manager import Session
 
 
 CONSOLE_ROUTES = (
@@ -40,6 +50,159 @@ FORBIDDEN_RENDERED_TEXT = (
     "stderr",
     "env",
 )
+
+
+class _ConsoleRuntimeStore:
+    def __init__(self, runs: list[AgentRunRecord] | None = None) -> None:
+        self.runs = {run.run_id: run for run in runs or []}
+
+    async def create_agent_run(self, record: AgentRunRecord) -> AgentRunRecord:
+        self.runs[record.run_id] = record
+        return record
+
+    async def load_agent_run(self, run_id: str) -> AgentRunRecord | None:
+        return self.runs.get(run_id)
+
+    async def list_agent_runs(self, session_id: str) -> list[AgentRunRecord]:
+        return [run for run in self.runs.values() if run.session_id == session_id]
+
+    async def update_agent_run(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        ended_at: datetime | None,
+        metadata: dict[str, object],
+        result: dict[str, object],
+        error: str | None,
+    ) -> AgentRunRecord:
+        current = self.runs[run_id]
+        updated = AgentRunRecord(
+            run_id=current.run_id,
+            session_id=current.session_id,
+            tape_id=current.tape_id,
+            parent_run_id=current.parent_run_id,
+            agent_id=current.agent_id,
+            status=status,
+            started_at=current.started_at,
+            ended_at=ended_at,
+            metadata=metadata,
+            result=result,
+            error=error,
+        )
+        self.runs[run_id] = updated
+        return updated
+
+    async def append_runtime_event(
+        self,
+        record: RuntimeEventRecord,
+    ) -> RuntimeEventRecord:
+        return record
+
+    async def load_runtime_event(self, event_id: str) -> RuntimeEventRecord | None:
+        return None
+
+    async def replay_runtime_events(
+        self,
+        run_id: str,
+        *,
+        after_sequence: int = 0,
+        limit: int = 1000,
+    ) -> list[RuntimeEventRecord]:
+        return []
+
+    async def save_message_snapshot(
+        self,
+        record: RunMessageSnapshotRecord,
+    ) -> RunMessageSnapshotRecord:
+        return record
+
+    async def load_message_snapshot(
+        self,
+        snapshot_id: str,
+    ) -> RunMessageSnapshotRecord | None:
+        return None
+
+    async def create_agent_interaction(
+        self,
+        record: AgentInteractionRecord,
+    ) -> AgentInteractionRecord:
+        return record
+
+    async def resolve_agent_interaction(
+        self,
+        interaction_id: str,
+        *,
+        status: str,
+        response_payload: dict[str, object],
+        resolved_at: datetime,
+    ) -> AgentInteractionRecord:
+        raise KeyError(interaction_id)
+
+    async def list_agent_interactions(
+        self,
+        run_id: str,
+    ) -> list[AgentInteractionRecord]:
+        return []
+
+
+@pytest.fixture(autouse=True)
+async def clear_console_state() -> AsyncIterator[None]:
+    session_manager.configure_runtime_store(None)
+    session_manager.clear_sessions()
+    yield
+    session_manager.configure_runtime_store(None)
+    session_manager.clear_sessions()
+
+
+def _register_console_session(
+    session_id: str,
+    *,
+    status: str = "created",
+) -> Session:
+    created_at = datetime(2026, 5, 20, 1, 2, 3, tzinfo=UTC)
+    session = Session(
+        id=session_id,
+        created_at=created_at,
+        last_activity=datetime(2026, 5, 20, 1, 3, 4, tzinfo=UTC),
+        provider_name="fixture-provider",
+        model_name="fixture-model",
+    )
+    if status == "running":
+        session.turn_in_progress = True
+        session.turn_status = "running"
+        session.current_turn_id = f"{session_id}-turn"
+    elif status == "failed":
+        session.turn_status = "failed"
+        session.last_failure_details = "hidden failure details"
+    elif status == "waiting_approval":
+        session.pending_approval = {"request_id": "approval-secret-payload"}
+    session_manager.register_session(session)
+    return session
+
+
+def _runtime_run(
+    run_id: str,
+    session_id: str,
+    *,
+    status: str,
+    error: str | None = None,
+) -> AgentRunRecord:
+    return AgentRunRecord(
+        run_id=run_id,
+        session_id=session_id,
+        tape_id=f"{session_id}-tape",
+        parent_run_id=None,
+        agent_id=None,
+        status=status,
+        started_at=datetime(2026, 5, 20, 2, 0, 0, tzinfo=UTC),
+        ended_at=(
+            None if status == "running" else datetime(2026, 5, 20, 2, 1, 0, tzinfo=UTC)
+        ),
+        metadata={"prompt": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT"},
+        result={"content": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT"},
+        error=error,
+    )
 
 
 @pytest.mark.asyncio
@@ -85,3 +248,90 @@ async def test_console_placeholder_pages_render_empty_states() -> None:
             assert response.status_code == 200, route
             assert f"<h1>{title}</h1>" in response.text
             assert "No data loaded yet." in response.text
+
+
+@pytest.mark.asyncio
+async def test_console_sessions_list_renders_fixture_data_without_raw_content() -> None:
+    _register_console_session("session-alpha")
+    _register_console_session("session-running", status="running")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/console/sessions")
+
+    assert response.status_code == 200
+    assert "session-alpha" in response.text
+    assert "session-running" in response.text
+    assert "created" in response.text
+    assert "running" in response.text
+    assert "2026-05-20T01:02:03+00:00" in response.text
+    assert "approval-secret-payload" not in response.text
+    for forbidden in FORBIDDEN_RENDERED_TEXT:
+        assert forbidden not in response.text
+
+
+@pytest.mark.asyncio
+async def test_console_runs_list_renders_fixture_data_and_status_filter() -> None:
+    _register_console_session("session-alpha")
+    _register_console_session("session-beta")
+    session_manager.configure_runtime_store(
+        _ConsoleRuntimeStore(
+            [
+                _runtime_run("run-complete", "session-alpha", status="completed"),
+                _runtime_run(
+                    "run-failed",
+                    "session-beta",
+                    status="failed",
+                    error="safe failure summary",
+                ),
+                _runtime_run("run-running", "session-alpha", status="running"),
+            ]
+        )
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/console/runs")
+        failed_response = await client.get("/console/runs", params={"status": "failed"})
+
+    assert response.status_code == 200
+    assert "run-complete" in response.text
+    assert "run-failed" in response.text
+    assert "run-running" in response.text
+    assert 'href="/console/runs/run-failed"' in response.text
+    assert "safe failure summary" in response.text
+
+    assert failed_response.status_code == 200
+    assert "run-failed" in failed_response.text
+    assert "run-complete" not in failed_response.text
+    assert "run-running" not in failed_response.text
+    for forbidden in FORBIDDEN_RENDERED_TEXT:
+        assert forbidden not in response.text
+        assert forbidden not in failed_response.text
+
+
+@pytest.mark.asyncio
+async def test_console_runs_list_redacts_sensitive_error_summary() -> None:
+    _register_console_session("session-sensitive")
+    session_manager.configure_runtime_store(
+        _ConsoleRuntimeStore(
+            [
+                _runtime_run(
+                    "run-sensitive",
+                    "session-sensitive",
+                    status="failed",
+                    error="SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT command_output",
+                )
+            ]
+        )
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/console/runs")
+
+    assert response.status_code == 200
+    assert "run-sensitive" in response.text
+    assert "Sensitive error summary redacted." in response.text
+    for forbidden in FORBIDDEN_RENDERED_TEXT:
+        assert forbidden not in response.text

@@ -155,7 +155,7 @@ Status: merged via PR #263.
 
 ## G56 Console Shell And Navigation
 
-Status: passed local verification; pending PR.
+Status: merged via PR #264.
 
 ### Intended Files
 
@@ -212,3 +212,69 @@ Status: passed local verification; pending PR.
 - G56 intentionally renders fixture/empty data only. Durable runtime, HITL,
   context, memory, action, observability, and release data views remain for
   G57-G63.
+
+## G57 Sessions And Runs List
+
+Status: passed local verification; pending PR.
+
+### Intended Files
+
+- `src/coding_agent/ui/developer_console.py`
+- `src/coding_agent/ui/http_server.py`
+- `src/coding_agent/ui/session_manager.py`
+- `tests/ui/test_developer_console.py`
+- `docs/developer_console/GOAL_PROGRESS.md`
+
+### Verification Commands
+
+- `uv run pytest tests/ui/test_developer_console.py -v`
+- `uv run pytest tests/integration/test_durable_runtime_smoke.py -v`
+- `uv run ruff format --check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py src/coding_agent/ui/session_manager.py tests/ui/test_developer_console.py`
+- `uv run ruff check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py src/coding_agent/ui/session_manager.py tests/ui/test_developer_console.py`
+- `git diff --check -- .`
+
+### Stop Criteria
+
+- Stop if sessions/runs list requires changing durable runtime semantics.
+- Stop if existing runtime APIs cannot provide deterministic fixture data.
+- Stop if run list rendering requires exposing raw prompt/content/message,
+  command output, stdout/stderr, env, or secrets.
+
+### Changed Files
+
+- `src/coding_agent/ui/developer_console.py`
+- `src/coding_agent/ui/http_server.py`
+- `src/coding_agent/ui/session_manager.py`
+- `tests/ui/test_developer_console.py`
+- `docs/developer_console/GOAL_PROGRESS.md`
+
+### Tests Run
+
+- `uv run pytest tests/ui/test_developer_console.py -v`
+- `uv run pytest tests/integration/test_durable_runtime_smoke.py -v`
+- `uv run ruff format --check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py src/coding_agent/ui/session_manager.py tests/ui/test_developer_console.py`
+- `uv run ruff check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py src/coding_agent/ui/session_manager.py tests/ui/test_developer_console.py`
+- `git diff --check -- .`
+
+### Results
+
+- `/console/sessions` now renders recent visible session summaries with
+  session ID, status, turn status, created/updated times, and current turn ID.
+- `/console/runs` now renders visible durable runtime run summaries by walking
+  visible sessions and reading existing runtime-store records.
+- `/console/runs?status=...` filters runs by low-cardinality status without
+  echoing arbitrary query text into the page.
+- Run rows link to `/console/runs/{run_id}` for G58 detail work.
+- Error summaries are rendered only through a sensitive-token redaction helper.
+- Console tests cover fixture sessions, fixture runs, status filtering, empty
+  states, and no raw prompt/content/message/command output/stdout/stderr/env or
+  secret marker leakage.
+- Durable runtime smoke, scoped ruff format/check, and `git diff --check -- .`
+  passed.
+
+### Remaining Risks
+
+- Run detail links intentionally target the G58 page, which is not implemented
+  in G57.
+- Session/run list data remains limited to existing visible sessions; a global
+  durable run index is not introduced in this goal.

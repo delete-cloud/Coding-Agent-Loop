@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from html import escape
 
 
@@ -12,6 +13,26 @@ class ConsolePage:
     title: str
     nav_label: str
     description: str
+
+
+@dataclass(frozen=True)
+class ConsoleSessionSummary:
+    session_id: str
+    status: str
+    turn_status: str
+    created_at: datetime
+    updated_at: datetime
+    current_turn_id: str | None = None
+
+
+@dataclass(frozen=True)
+class ConsoleRunSummary:
+    run_id: str
+    session_id: str
+    status: str
+    started_at: datetime
+    ended_at: datetime | None = None
+    error_summary: str | None = None
 
 
 CONSOLE_PAGES: tuple[ConsolePage, ...] = (
@@ -97,6 +118,53 @@ def render_console_page(path: str) -> str:
     )
 
 
+def render_console_sessions_page(sessions: list[ConsoleSessionSummary]) -> str:
+    page = _PAGE_BY_PATH["/console/sessions"]
+    body = (
+        f"<h1>{escape(page.title)}</h1>"
+        f'<p class="lede">{escape(page.description)}</p>' + _session_table(sessions)
+    )
+    return _html_document(title=page.title, body=body, active_path=page.path)
+
+
+def render_console_runs_page(
+    runs: list[ConsoleRunSummary],
+    *,
+    status_filter: str | None = None,
+) -> str:
+    page = _PAGE_BY_PATH["/console/runs"]
+    filter_note = (
+        '<p class="filter-note">Status filter active.</p>' if status_filter else ""
+    )
+    body = (
+        f"<h1>{escape(page.title)}</h1>"
+        f'<p class="lede">{escape(page.description)}</p>'
+        f"{filter_note}" + _run_table(runs)
+    )
+    return _html_document(title=page.title, body=body, active_path=page.path)
+
+
+def safe_error_summary(error: str | None) -> str | None:
+    if error is None:
+        return None
+    normalized = error.lower()
+    forbidden = (
+        "prompt",
+        "message",
+        "content",
+        "command_output",
+        "stdout",
+        "stderr",
+        "env",
+        "secret",
+        "result",
+        "text",
+    )
+    if any(token in normalized for token in forbidden):
+        return "Sensitive error summary redacted."
+    return error[:240]
+
+
 def _html_document(*, title: str, body: str, active_path: str) -> str:
     return (
         "<!doctype html>"
@@ -121,6 +189,11 @@ def _html_document(*, title: str, body: str, active_path: str) -> str:
         ".empty-state{max-width:840px;border:1px solid #cbd5df;background:#fff;padding:20px;border-radius:8px;}"
         ".empty-state h2{font-size:18px;margin:0 0 8px;}"
         ".empty-state p{margin:0;color:#52616f;}"
+        "table{width:100%;border-collapse:collapse;background:#fff;border:1px solid #cbd5df;}"
+        "th,td{text-align:left;border-bottom:1px solid #e5e7eb;padding:10px;vertical-align:top;}"
+        "th{font-size:13px;text-transform:uppercase;color:#52616f;background:#f1f5f9;}"
+        ".filter-note{font-size:14px;color:#52616f;}"
+        ".status{font-weight:700;}"
         "@media(max-width:760px){.layout{grid-template-columns:1fr;}nav{position:static;}main{padding:20px;}}"
         "</style>"
         "</head>"
@@ -132,6 +205,79 @@ def _html_document(*, title: str, body: str, active_path: str) -> str:
         "</body>"
         "</html>"
     )
+
+
+def _session_table(sessions: list[ConsoleSessionSummary]) -> str:
+    if not sessions:
+        return _empty_state("No data loaded yet.", "No sessions are available.")
+    rows = []
+    for session in sessions:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(session.session_id)}</td>"
+            f'<td class="status">{escape(session.status)}</td>'
+            f"<td>{escape(session.turn_status)}</td>"
+            f"<td>{escape(_format_datetime(session.created_at))}</td>"
+            f"<td>{escape(_format_datetime(session.updated_at))}</td>"
+            f"<td>{escape(session.current_turn_id or '-')}</td>"
+            "</tr>"
+        )
+    return (
+        '<table aria-label="Developer Console sessions">'
+        "<thead><tr>"
+        "<th>Session ID</th><th>Status</th><th>Turn Status</th>"
+        "<th>Created</th><th>Updated</th><th>Turn ID</th>"
+        "</tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+    )
+
+
+def _run_table(runs: list[ConsoleRunSummary]) -> str:
+    if not runs:
+        return _empty_state("No data loaded yet.", "No runtime runs are available.")
+    rows = []
+    for run in runs:
+        error = run.error_summary or "-"
+        rows.append(
+            "<tr>"
+            f'<td><a href="/console/runs/{escape(run.run_id)}">'
+            f"{escape(run.run_id)}</a></td>"
+            f"<td>{escape(run.session_id)}</td>"
+            f'<td class="status">{escape(run.status)}</td>'
+            f"<td>{escape(_format_datetime(run.started_at))}</td>"
+            f"<td>{escape(_format_optional_datetime(run.ended_at))}</td>"
+            f"<td>{escape(error)}</td>"
+            "</tr>"
+        )
+    return (
+        '<table aria-label="Developer Console runs">'
+        "<thead><tr>"
+        "<th>Run ID</th><th>Session ID</th><th>Status</th>"
+        "<th>Started</th><th>Finished</th><th>Error Summary</th>"
+        "</tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+    )
+
+
+def _empty_state(title: str, description: str) -> str:
+    return (
+        '<section class="empty-state">'
+        f"<h2>{escape(title)}</h2>"
+        f"<p>{escape(description)}</p>"
+        "</section>"
+    )
+
+
+def _format_optional_datetime(value: datetime | None) -> str:
+    if value is None:
+        return "-"
+    return _format_datetime(value)
+
+
+def _format_datetime(value: datetime) -> str:
+    return value.isoformat()
 
 
 def _navigation(active_path: str) -> str:
