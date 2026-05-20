@@ -795,6 +795,10 @@ class SessionManager:
             raise KeyError(f"runtime run not found: {run_id}")
         return record
 
+    async def list_runtime_runs(self, session_id: str) -> list[AgentRunRecord]:
+        store = self._require_runtime_store()
+        return await store.list_agent_runs(session_id)
+
     async def load_runtime_message_snapshot(
         self,
         run_id: str,
