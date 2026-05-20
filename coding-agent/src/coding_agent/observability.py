@@ -92,6 +92,49 @@ def _nanos(timestamp: float | None) -> str:
 
 
 @dataclass
+class CompositeObservationSink:
+    """Observation sink that fans out to multiple child sinks."""
+
+    sinks: tuple[ObservationSink, ...]
+
+    def __post_init__(self) -> None:
+        if not self.sinks:
+            raise ValueError("CompositeObservationSink requires at least one sink")
+        for sink in self.sinks:
+            if not isinstance(sink, ObservationSink):
+                raise TypeError(
+                    "all composite observation sinks must implement ObservationSink"
+                )
+
+    def record_span(self, span: SpanRecord) -> None:
+        for sink in self.sinks:
+            try:
+                sink.record_span(span)
+            except Exception:
+                continue
+
+    def record_event(self, event: ObservationEvent) -> None:
+        for sink in self.sinks:
+            try:
+                sink.record_event(event)
+            except Exception:
+                continue
+
+
+@dataclass
+class PrometheusMetricsObservationSink:
+    """Prometheus metrics exporter placeholder expanded by the G49 registry work."""
+
+    enabled: bool = True
+
+    def record_span(self, span: SpanRecord) -> None:
+        del span
+
+    def record_event(self, event: ObservationEvent) -> None:
+        del event
+
+
+@dataclass
 class OtlpHttpObservationSink:
     """Synchronous OTLP/HTTP JSON span exporter.
 
@@ -198,19 +241,16 @@ def _langfuse_headers(config: Mapping[str, Any]) -> dict[str, str]:
     return headers
 
 
-def build_observation_sink(config: Mapping[str, Any]) -> ObservationSink | None:
-    """Build the configured observation sink.
-
-    The default is intentionally disabled. This module owns product-level
-    exporter configuration; agentkit remains provider-neutral.
-    """
-
+def _enabled(config: Mapping[str, Any]) -> bool:
     enabled = config.get("enabled", False)
     if not isinstance(enabled, bool):
         raise ValueError("observability.enabled must be a boolean")
-    if not enabled:
-        return None
+    return enabled
 
+
+def _build_tracing_sink(config: Mapping[str, Any]) -> ObservationSink | None:
+    if not _enabled(config):
+        return None
     backend = config.get("backend", "noop")
     if not isinstance(backend, str) or not backend.strip():
         raise ValueError("observability.backend must be a non-empty string")
@@ -235,3 +275,62 @@ def build_observation_sink(config: Mapping[str, Any]) -> ObservationSink | None:
         headers=headers,
         timeout_seconds=float(timeout),
     )
+
+
+def _build_metrics_sink(config: Mapping[str, Any]) -> ObservationSink | None:
+    if not _enabled(config):
+        return None
+    backend = config.get("backend", "prometheus")
+    if not isinstance(backend, str) or not backend.strip():
+        raise ValueError("observability.metrics.backend must be a non-empty string")
+    if backend != "prometheus":
+        raise ValueError(f"unsupported observability metrics backend: {backend}")
+    return PrometheusMetricsObservationSink()
+
+
+def _table(value: Any, *, field_name: str) -> Mapping[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{field_name} must be a table")
+    return value
+
+
+def _has_flat_tracing_config(config: Mapping[str, Any]) -> bool:
+    return any(key in config for key in ("backend", "endpoint", "headers"))
+
+
+def build_observation_sink(config: Mapping[str, Any]) -> ObservationSink | None:
+    """Build the configured observation sink.
+
+    The default is intentionally disabled. This module owns product-level
+    exporter configuration; agentkit remains provider-neutral.
+    """
+
+    if not _enabled(config):
+        return None
+
+    tracing_config = _table(config.get("tracing"), field_name="observability.tracing")
+    metrics_config = _table(config.get("metrics"), field_name="observability.metrics")
+    if tracing_config is None and metrics_config is None:
+        return _build_tracing_sink(config)
+
+    sinks: list[ObservationSink] = []
+    if tracing_config is not None:
+        tracing_sink = _build_tracing_sink(tracing_config)
+        if tracing_sink is not None:
+            sinks.append(tracing_sink)
+    elif _has_flat_tracing_config(config):
+        tracing_sink = _build_tracing_sink(config)
+        if tracing_sink is not None:
+            sinks.append(tracing_sink)
+    if metrics_config is not None:
+        metrics_sink = _build_metrics_sink(metrics_config)
+        if metrics_sink is not None:
+            sinks.append(metrics_sink)
+
+    if not sinks:
+        return NoopObservationSink()
+    if len(sinks) == 1:
+        return sinks[0]
+    return CompositeObservationSink(tuple(sinks))

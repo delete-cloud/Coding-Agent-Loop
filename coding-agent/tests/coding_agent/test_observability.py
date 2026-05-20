@@ -6,9 +6,11 @@ import json
 import httpx
 import pytest
 
-from agentkit.observability import SpanRecord
+from agentkit.observability import NoopObservationSink, ObservationEvent, SpanRecord
 from coding_agent.observability import (
+    CompositeObservationSink,
     OtlpHttpObservationSink,
+    PrometheusMetricsObservationSink,
     build_observation_sink,
 )
 
@@ -21,6 +23,28 @@ class RecordingTransport:
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         return httpx.Response(self.status_code)
+
+
+class RecordingObservationSink:
+    def __init__(self) -> None:
+        self.spans: list[SpanRecord] = []
+        self.events: list[ObservationEvent] = []
+
+    def record_span(self, span: SpanRecord) -> None:
+        self.spans.append(span)
+
+    def record_event(self, event: ObservationEvent) -> None:
+        self.events.append(event)
+
+
+class FailingObservationSink:
+    def record_span(self, span: SpanRecord) -> None:
+        del span
+        raise RuntimeError("span sink failed")
+
+    def record_event(self, event: ObservationEvent) -> None:
+        del event
+        raise RuntimeError("event sink failed")
 
 
 def _payload(request: httpx.Request) -> dict[str, object]:
@@ -55,6 +79,35 @@ def _resource_attributes(payload: dict[str, object]) -> dict[str, object]:
         assert isinstance(value, dict)
         result[key] = value
     return result
+
+
+def test_composite_observation_sink_records_spans_and_events_to_all_sinks() -> None:
+    first = RecordingObservationSink()
+    second = RecordingObservationSink()
+    sink = CompositeObservationSink((first, second))
+    span = SpanRecord(name="runtime.stage.build_context", status="ok")
+    event = ObservationEvent(name="runtime.started")
+
+    sink.record_span(span)
+    sink.record_event(event)
+
+    assert first.spans == [span]
+    assert second.spans == [span]
+    assert first.events == [event]
+    assert second.events == [event]
+
+
+def test_composite_observation_sink_fail_opens_when_child_sink_fails() -> None:
+    recording = RecordingObservationSink()
+    sink = CompositeObservationSink((FailingObservationSink(), recording))
+    span = SpanRecord(name="tool.call", status="ok")
+    event = ObservationEvent(name="tool.call.completed")
+
+    sink.record_span(span)
+    sink.record_event(event)
+
+    assert recording.spans == [span]
+    assert recording.events == [event]
 
 
 def test_otlp_sink_posts_span_without_prompt_or_output_content() -> None:
@@ -187,6 +240,100 @@ def test_build_observation_sink_builds_otlp_http_sink() -> None:
 
     assert isinstance(sink, OtlpHttpObservationSink)
     assert sink.endpoint == "https://otel.example.test/api/public/otel/v1/traces"
+
+
+def test_build_observation_sink_supports_tracing_only() -> None:
+    sink = build_observation_sink(
+        {
+            "enabled": True,
+            "tracing": {
+                "enabled": True,
+                "backend": "otlp_http",
+                "endpoint": "https://otel.example.test/api/public/otel",
+            },
+        }
+    )
+
+    assert isinstance(sink, OtlpHttpObservationSink)
+    assert sink.endpoint == "https://otel.example.test/api/public/otel/v1/traces"
+
+
+def test_build_observation_sink_supports_metrics_only() -> None:
+    sink = build_observation_sink(
+        {
+            "enabled": True,
+            "metrics": {
+                "enabled": True,
+                "backend": "prometheus",
+            },
+        }
+    )
+
+    assert isinstance(sink, PrometheusMetricsObservationSink)
+
+
+def test_build_observation_sink_supports_tracing_and_metrics() -> None:
+    sink = build_observation_sink(
+        {
+            "enabled": True,
+            "tracing": {
+                "enabled": True,
+                "backend": "otlp_http",
+                "endpoint": "https://otel.example.test/api/public/otel",
+            },
+            "metrics": {
+                "enabled": True,
+                "backend": "prometheus",
+            },
+        }
+    )
+
+    assert isinstance(sink, CompositeObservationSink)
+    assert len(sink.sinks) == 2
+    assert isinstance(sink.sinks[0], OtlpHttpObservationSink)
+    assert isinstance(sink.sinks[1], PrometheusMetricsObservationSink)
+
+
+def test_build_observation_sink_preserves_flat_tracing_when_metrics_are_nested() -> (
+    None
+):
+    sink = build_observation_sink(
+        {
+            "enabled": True,
+            "backend": "otlp_http",
+            "endpoint": "https://otel.example.test/api/public/otel",
+            "metrics": {
+                "enabled": True,
+                "backend": "prometheus",
+            },
+        }
+    )
+
+    assert isinstance(sink, CompositeObservationSink)
+    assert len(sink.sinks) == 2
+    assert isinstance(sink.sinks[0], OtlpHttpObservationSink)
+    assert (
+        sink.sinks[0].endpoint == "https://otel.example.test/api/public/otel/v1/traces"
+    )
+    assert isinstance(sink.sinks[1], PrometheusMetricsObservationSink)
+
+
+def test_build_observation_sink_returns_none_when_disabled() -> None:
+    assert build_observation_sink({"enabled": False}) is None
+
+
+def test_build_observation_sink_returns_noop_when_all_nested_backends_disabled() -> (
+    None
+):
+    sink = build_observation_sink(
+        {
+            "enabled": True,
+            "tracing": {"enabled": False},
+            "metrics": {"enabled": False},
+        }
+    )
+
+    assert isinstance(sink, NoopObservationSink)
 
 
 def test_build_observation_sink_builds_langfuse_basic_auth(

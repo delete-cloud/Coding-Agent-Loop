@@ -14,6 +14,10 @@ from coding_agent.environment import (
     CloudEnvironment,
     LocalEnvironment,
 )
+from coding_agent.observability import (
+    CompositeObservationSink,
+    PrometheusMetricsObservationSink,
+)
 
 
 class NonLocalEnvironment:
@@ -229,6 +233,45 @@ backend = "noop"
         )
 
         assert isinstance(ctx.config["observation_sink"], NoopObservationSink)
+
+    def test_create_agent_injects_composite_observation_sink_for_tracing_and_metrics(
+        self,
+        tmp_path,
+    ):
+        config_path = tmp_path / "agent.toml"
+        config_path.write_text(
+            """
+[agent]
+name = "test-agent"
+model = "claude-sonnet-4-20250514"
+provider = "anthropic"
+
+[agent.plugins]
+enabled = ["storage", "core_tools"]
+
+[observability]
+enabled = true
+
+[observability.tracing]
+enabled = true
+backend = "noop"
+
+[observability.metrics]
+enabled = true
+backend = "prometheus"
+""".strip()
+        )
+
+        _pipeline, ctx = create_agent(
+            config_path=config_path,
+            data_dir=tmp_path / "data",
+            api_key="sk-test",
+        )
+
+        sink = ctx.config["observation_sink"]
+        assert isinstance(sink, CompositeObservationSink)
+        assert isinstance(sink.sinks[0], NoopObservationSink)
+        assert isinstance(sink.sinks[1], PrometheusMetricsObservationSink)
 
     def test_create_agent_rejects_unknown_observability_backend(self, tmp_path):
         config_path = tmp_path / "agent.toml"
