@@ -81,6 +81,18 @@ class WorkspaceBranchPublication:
     error: str | None = None
 
 
+@dataclass(frozen=True)
+class WorkspaceProviderCapabilities:
+    provider: str
+    available: bool
+    reason: str
+    supports_provision: bool
+    supports_archive: bool
+    supports_diff: bool
+    supports_patch: bool
+    supports_publish: bool
+
+
 class WorkspaceProvider(Protocol):
     def build_cloud_client_factory(
         self, config: dict[str, object]
@@ -177,6 +189,12 @@ class WorkspaceProvider(Protocol):
     ) -> WorkspaceBranchPublication: ...
 
 
+class WorkspaceProviderCapabilityReporter(Protocol):
+    def workspace_capabilities(
+        self, config: dict[str, object]
+    ) -> WorkspaceProviderCapabilities: ...
+
+
 _WORKSPACE_PROVIDERS: dict[str, WorkspaceProvider] = {}
 
 
@@ -197,6 +215,33 @@ def cloud_client_factory_from_config(
 def cloud_workspace_ready_from_config(config: dict[str, object]) -> bool:
     provider = _provider_from_config(config)
     return bool(provider.check_readiness(config))
+
+
+def workspace_provider_capabilities_from_config(
+    config: dict[str, object],
+) -> WorkspaceProviderCapabilities:
+    provider = _provider_from_config(config)
+    capability_reporter = getattr(provider, "workspace_capabilities", None)
+    if callable(capability_reporter):
+        result = capability_reporter(config)
+        if not isinstance(result, WorkspaceProviderCapabilities):
+            raise TypeError(
+                "workspace provider capability reporter must return "
+                "WorkspaceProviderCapabilities"
+            )
+        return result
+    provider_name = _provider_name_from_config(config)
+    available = bool(provider.check_readiness(config))
+    return WorkspaceProviderCapabilities(
+        provider=provider_name,
+        available=available,
+        reason="ready" if available else "unavailable",
+        supports_provision=available,
+        supports_archive=available,
+        supports_diff=available,
+        supports_patch=available,
+        supports_publish=available,
+    )
 
 
 def provision_cloud_binding_from_config(
@@ -333,13 +378,18 @@ def publish_workspace_branch_from_config(
 
 
 def _provider_from_config(config: dict[str, object]) -> WorkspaceProvider:
+    provider_name = _provider_name_from_config(config)
+
+    provider = _WORKSPACE_PROVIDERS.get(provider_name)
+    if provider is None:
+        raise ValueError(f"unsupported cloud workspace provider: {provider_name}")
+    return provider
+
+
+def _provider_name_from_config(config: dict[str, object]) -> str:
     provider_name = config.get("provider")
     if not isinstance(provider_name, str) or not provider_name.strip():
         raise ValueError(
             "cloud_workspace.provider is required when cloud_workspace.enabled=true"
         )
-
-    provider = _WORKSPACE_PROVIDERS.get(provider_name.strip().lower())
-    if provider is None:
-        raise ValueError(f"unsupported cloud workspace provider: {provider_name}")
-    return provider
+    return provider_name.strip().lower()

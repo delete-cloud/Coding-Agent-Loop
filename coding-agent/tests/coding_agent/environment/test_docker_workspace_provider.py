@@ -18,6 +18,7 @@ from coding_agent.environment import (
     publish_workspace_branch_from_config,
     workspace_diff_from_config,
     workspace_patch_from_config,
+    workspace_provider_capabilities_from_config,
     provision_cloud_binding_from_config,
 )
 from coding_agent.ui.execution_binding import CloudWorkspaceBinding
@@ -576,6 +577,65 @@ def test_docker_workspace_provider_readiness_returns_false_when_docker_binary_mi
         )
         is False
     )
+
+
+def test_docker_workspace_provider_capabilities_report_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_command: list[str] = []
+
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        captured_command[:] = command
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    capabilities = workspace_provider_capabilities_from_config(
+        _docker_config(
+            {
+                "workspace_root": "/srv/workspaces",
+                "docker_binary": "/usr/bin/docker",
+            }
+        )
+    )
+
+    assert captured_command == ["/usr/bin/docker", "info", "--format", "{{json .}}"]
+    assert capabilities.provider == "docker"
+    assert capabilities.available is True
+    assert capabilities.reason == "docker_ready"
+    assert capabilities.supports_provision is True
+    assert capabilities.supports_archive is True
+    assert capabilities.supports_diff is True
+    assert capabilities.supports_patch is True
+    assert capabilities.supports_publish is True
+
+
+def test_docker_workspace_provider_capabilities_report_unavailable_without_docker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        del command, kwargs
+        raise OSError("docker missing")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    capabilities = workspace_provider_capabilities_from_config(
+        _docker_config({"workspace_root": "/srv/workspaces"})
+    )
+
+    assert capabilities.provider == "docker"
+    assert capabilities.available is False
+    assert capabilities.reason == "docker_unavailable"
+    assert capabilities.supports_provision is False
+    assert capabilities.supports_archive is False
+    assert capabilities.supports_diff is False
+    assert capabilities.supports_patch is False
+    assert capabilities.supports_publish is False
 
 
 @pytest.mark.parametrize("root", ["/", "//", "/./", "/workspace/.."])
