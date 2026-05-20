@@ -221,10 +221,15 @@ def safe_key_tuple(mapping: dict[str, object]) -> tuple[str, ...]:
 
 def message_label(message: dict[str, object]) -> str:
     role = message.get("role")
-    if isinstance(role, str) and role:
+    if isinstance(role, str) and role in {"user", "assistant", "system", "tool"}:
         return f"role:{role}"
     message_type = message.get("type") or message.get("message_type")
-    if isinstance(message_type, str) and message_type:
+    if isinstance(message_type, str) and message_type in {
+        "user",
+        "assistant",
+        "system",
+        "tool",
+    }:
         return f"type:{message_type}"
     return "message"
 
@@ -338,7 +343,7 @@ def _run_snapshot_section(snapshot: ConsoleSnapshotSummary | None) -> str:
 def _run_events_section(run_id: str, events: tuple[ConsoleEventSummary, ...]) -> str:
     replay_note = (
         "Runtime event replay uses the existing "
-        f"/runs/{escape(run_id)}/events API. Pass Last-Event-ID to resume after a known event."
+        f"/runs/{escape(run_id)}/events API. Pass last_event_id to resume after a known event."
     )
     if not events:
         return _empty_state("Runtime Events", replay_note)
