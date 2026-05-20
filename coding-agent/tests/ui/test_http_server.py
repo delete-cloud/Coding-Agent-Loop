@@ -1184,6 +1184,46 @@ class TestSessionCreation:
         )
         assert session.execution_binding.workspace_id == "ws-123"
 
+    async def test_http_create_session_round_trips_workspace_provider_metadata(
+        self, client
+    ):
+        response = await client.post(
+            "/sessions",
+            json={
+                "execution_binding": {
+                    "kind": "cloud",
+                    "workspace_url": "https://workspace.example.com",
+                    "workspace_id": "ws-123",
+                    "workspace_provider": "docker",
+                    "provider_instance_id": "docker-host-a",
+                }
+            },
+        )
+
+        assert response.status_code == 200
+        session = session_manager.get_session(response.json()["session_id"])
+        assert isinstance(session.execution_binding, CloudWorkspaceBinding)
+        assert session.execution_binding.workspace_provider == "docker"
+        assert session.execution_binding.provider_instance_id == "docker-host-a"
+
+    @pytest.mark.parametrize("field", ["workspace_provider", "provider_instance_id"])
+    async def test_http_create_session_rejects_blank_workspace_provider_metadata(
+        self, client, field
+    ):
+        execution_binding = {
+            "kind": "cloud",
+            "workspace_url": "https://workspace.example.com",
+            "workspace_id": "ws-123",
+            field: "   ",
+        }
+
+        response = await client.post(
+            "/sessions",
+            json={"execution_binding": execution_binding},
+        )
+
+        assert response.status_code == 422
+
     async def test_http_create_session_provisions_docker_cloud_workspace(
         self, client, monkeypatch, tmp_path
     ):
