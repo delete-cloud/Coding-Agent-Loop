@@ -55,6 +55,8 @@ FORBIDDEN_RENDERED_TEXT = (
 class _ConsoleRuntimeStore:
     def __init__(self, runs: list[AgentRunRecord] | None = None) -> None:
         self.runs = {run.run_id: run for run in runs or []}
+        self.events: dict[str, list[RuntimeEventRecord]] = {}
+        self.snapshots: dict[str, RunMessageSnapshotRecord] = {}
 
     async def create_agent_run(self, record: AgentRunRecord) -> AgentRunRecord:
         self.runs[record.run_id] = record
@@ -97,9 +99,14 @@ class _ConsoleRuntimeStore:
         self,
         record: RuntimeEventRecord,
     ) -> RuntimeEventRecord:
+        self.events.setdefault(record.run_id, []).append(record)
         return record
 
     async def load_runtime_event(self, event_id: str) -> RuntimeEventRecord | None:
+        for events in self.events.values():
+            for event in events:
+                if event.event_id == event_id:
+                    return event
         return None
 
     async def replay_runtime_events(
@@ -109,19 +116,25 @@ class _ConsoleRuntimeStore:
         after_sequence: int = 0,
         limit: int = 1000,
     ) -> list[RuntimeEventRecord]:
-        return []
+        events = self.events.get(run_id, [])
+        return [
+            event
+            for event in events
+            if event.sequence is not None and event.sequence > after_sequence
+        ][:limit]
 
     async def save_message_snapshot(
         self,
         record: RunMessageSnapshotRecord,
     ) -> RunMessageSnapshotRecord:
+        self.snapshots[record.snapshot_id] = record
         return record
 
     async def load_message_snapshot(
         self,
         snapshot_id: str,
     ) -> RunMessageSnapshotRecord | None:
-        return None
+        return self.snapshots.get(snapshot_id)
 
     async def create_agent_interaction(
         self,
@@ -205,6 +218,81 @@ def _runtime_run(
     )
 
 
+def _runtime_event(
+    event_id: str,
+    run_id: str,
+    *,
+    event_kind: str,
+    sequence: int,
+) -> RuntimeEventRecord:
+    return RuntimeEventRecord(
+        event_id=event_id,
+        run_id=run_id,
+        event_kind=event_kind,
+        payload={
+            "message_type": event_kind,
+            "content": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT",
+            "tool_call_id": "tool-secret",
+        },
+        created_at=datetime(2026, 5, 20, 2, 0, sequence, tzinfo=UTC),
+        sequence=sequence,
+    )
+
+
+async def _configure_run_detail_fixture(
+    *,
+    status: str = "completed",
+    error: str | None = None,
+) -> _ConsoleRuntimeStore:
+    _register_console_session("session-detail")
+    store = _ConsoleRuntimeStore(
+        [
+            _runtime_run(
+                "run-detail",
+                "session-detail",
+                status=status,
+                error=error,
+            )
+        ]
+    )
+    await store.save_message_snapshot(
+        RunMessageSnapshotRecord(
+            snapshot_id="run-detail:latest",
+            run_id="run-detail",
+            messages=[
+                {
+                    "role": "user",
+                    "content": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT",
+                },
+                {"role": "assistant", "tool_calls": [{"id": "tool-secret"}]},
+            ],
+            metadata={
+                "snapshot_kind": "latest_context",
+                "prompt": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT",
+            },
+            created_at=datetime(2026, 5, 20, 2, 0, 10, tzinfo=UTC),
+        )
+    )
+    await store.append_runtime_event(
+        _runtime_event(
+            "event-2",
+            "run-detail",
+            event_kind="wire.TurnEnd",
+            sequence=2,
+        )
+    )
+    await store.append_runtime_event(
+        _runtime_event(
+            "event-1",
+            "run-detail",
+            event_kind="wire.StreamDelta",
+            sequence=1,
+        )
+    )
+    session_manager.configure_runtime_store(store)
+    return store
+
+
 @pytest.mark.asyncio
 async def test_console_shell_routes_render_navigation_without_secrets() -> None:
     transport = ASGITransport(app=app)
@@ -266,6 +354,107 @@ async def test_console_sessions_list_renders_fixture_data_without_raw_content() 
     assert "running" in response.text
     assert "2026-05-20T01:02:03+00:00" in response.text
     assert "approval-secret-payload" not in response.text
+    for forbidden in FORBIDDEN_RENDERED_TEXT:
+        assert forbidden not in response.text
+
+
+@pytest.mark.asyncio
+async def test_console_run_detail_renders_completed_run_without_raw_snapshot() -> None:
+    await _configure_run_detail_fixture()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/console/runs/run-detail")
+
+    assert response.status_code == 200
+    assert "Run Detail" in response.text
+    assert "run-detail" in response.text
+    assert "session-detail" in response.text
+    assert "completed" in response.text
+    assert "Message Snapshot" in response.text
+    assert "2 messages" in response.text
+    assert "role:user" in response.text
+    assert "role:assistant" in response.text
+    assert "Runtime Events" in response.text
+    assert "wire.StreamDelta" in response.text
+    assert "wire.TurnEnd" in response.text
+    assert response.text.index("wire.StreamDelta") < response.text.index("wire.TurnEnd")
+    assert "last_event_id" in response.text
+    assert "/runs/run-detail/events" in response.text
+    for forbidden in FORBIDDEN_RENDERED_TEXT:
+        assert forbidden not in response.text
+    assert "tool-secret" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_console_run_detail_renders_failed_run_with_safe_error_summary() -> None:
+    await _configure_run_detail_fixture(status="failed", error="safe failure summary")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/console/runs/run-detail")
+
+    assert response.status_code == 200
+    assert "failed" in response.text
+    assert "safe failure summary" in response.text
+    for forbidden in FORBIDDEN_RENDERED_TEXT:
+        assert forbidden not in response.text
+
+
+@pytest.mark.asyncio
+async def test_console_run_detail_redacts_sensitive_message_labels() -> None:
+    store = await _configure_run_detail_fixture()
+    await store.save_message_snapshot(
+        RunMessageSnapshotRecord(
+            snapshot_id="run-detail:latest",
+            run_id="run-detail",
+            messages=[
+                {"role": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT"},
+                {"message_type": "command_output"},
+            ],
+            metadata={},
+            created_at=datetime(2026, 5, 20, 2, 0, 10, tzinfo=UTC),
+        )
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/console/runs/run-detail")
+
+    assert response.status_code == 200
+    assert "<li>message</li>" in response.text
+    assert "role:SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT" not in response.text
+    assert "type:command_output" not in response.text
+    for forbidden in FORBIDDEN_RENDERED_TEXT:
+        assert forbidden not in response.text
+
+
+@pytest.mark.asyncio
+async def test_console_run_detail_renders_running_run_without_finished_time() -> None:
+    await _configure_run_detail_fixture(status="running")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/console/runs/run-detail")
+
+    assert response.status_code == 200
+    assert "running" in response.text
+    assert "<dt>Finished</dt><dd>-</dd>" in response.text
+
+
+@pytest.mark.asyncio
+async def test_console_run_detail_redacts_sensitive_error_summary() -> None:
+    await _configure_run_detail_fixture(
+        status="failed",
+        error="SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT stdout",
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/console/runs/run-detail")
+
+    assert response.status_code == 200
+    assert "Sensitive error summary redacted." in response.text
     for forbidden in FORBIDDEN_RENDERED_TEXT:
         assert forbidden not in response.text
 

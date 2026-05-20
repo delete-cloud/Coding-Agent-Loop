@@ -215,7 +215,7 @@ Status: merged via PR #264.
 
 ## G57 Sessions And Runs List
 
-Status: passed local verification; pending PR.
+Status: merged via PR #265.
 
 ### Intended Files
 
@@ -278,3 +278,71 @@ Status: passed local verification; pending PR.
   in G57.
 - Session/run list data remains limited to existing visible sessions; a global
   durable run index is not introduced in this goal.
+
+## G58 Run Detail And Event Replay
+
+Status: passed local verification; pending PR.
+
+### Intended Files
+
+- `src/coding_agent/ui/developer_console.py`
+- `src/coding_agent/ui/http_server.py`
+- `tests/ui/test_developer_console.py`
+- `docs/developer_console/GOAL_PROGRESS.md`
+
+### Verification Commands
+
+- `uv run pytest tests/ui/test_developer_console.py -v`
+- `uv run pytest tests/integration/test_durable_runtime_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/ui/test_developer_console.py`
+- `uv run ruff check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/ui/test_developer_console.py`
+- `git diff --check -- .`
+
+### Stop Criteria
+
+- Stop if run detail requires changing runtime replay semantics.
+- Stop if message snapshot/event timeline cannot be represented without raw
+  prompt/content/message/result/secret/text/command_output/stdout/stderr/env.
+- Stop if deterministic fixture tests cannot cover completed, failed, running,
+  event ordering, and no-leak rendering.
+
+### Changed Files
+
+- `src/coding_agent/ui/developer_console.py`
+- `src/coding_agent/ui/http_server.py`
+- `tests/ui/test_developer_console.py`
+- `docs/developer_console/GOAL_PROGRESS.md`
+
+### Tests Run
+
+- `uv run pytest tests/ui/test_developer_console.py -v`
+- `uv run pytest tests/integration/test_durable_runtime_smoke.py -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/ui/test_developer_console.py`
+- `uv run ruff check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/ui/test_developer_console.py`
+- `git diff --check -- .`
+
+### Results
+
+- Added `/console/runs/{run_id}` run detail page using existing visible runtime
+  run, message snapshot, and runtime event replay APIs.
+- Run detail renders metadata, status timeline fields, sanitized message
+  snapshot summary, ordered runtime events, error summary, and related console
+  links.
+- Message snapshots are represented by role/type labels, message count,
+  snapshot ID, timestamp, and safe metadata keys only.
+- Runtime events are represented by sequence, kind, event ID, timestamp, and
+  safe payload keys only.
+- Page documents existing `/runs/{run_id}/events` replay behavior and
+  Last-Event-ID resume semantics.
+- Tests cover completed, failed, running, event ordering, sensitive error
+  redaction, and no raw prompt/content/message/result/secret/text/command
+  output/stdout/stderr/env or tool-call payload leakage.
+- Durable runtime smoke, pipeline stage/context baseline, scoped ruff
+  format/check, and `git diff --check -- .` passed.
+
+### Remaining Risks
+
+- G58 keeps the page read-only and does not add live streaming. Links to tape,
+  context, action, and observability detail pages are completed in later goals.

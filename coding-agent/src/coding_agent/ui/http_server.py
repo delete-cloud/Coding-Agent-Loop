@@ -60,11 +60,17 @@ from coding_agent.observability import (
 )
 from coding_agent.ui.binding_resolver import DefaultBindingResolver
 from coding_agent.ui.developer_console import (
+    ConsoleEventSummary,
+    ConsoleRunDetail,
     ConsoleRunSummary,
     ConsoleSessionSummary,
+    ConsoleSnapshotSummary,
+    message_label,
     render_console_page,
+    render_console_run_detail_page,
     render_console_runs_page,
     render_console_sessions_page,
+    safe_key_tuple,
     safe_error_summary,
 )
 from coding_agent.ui.session_manager import Session, SessionManager
@@ -999,6 +1005,62 @@ async def console_runs(
             )
     runs.sort(key=lambda item: item.started_at, reverse=True)
     return HTMLResponse(render_console_runs_page(runs, status_filter=status))
+
+
+@app.get("/console/runs/{run_id}", response_class=HTMLResponse)
+async def console_run_detail(
+    request: Request,
+    run_id: str,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> HTMLResponse:
+    del request
+    run = await _get_visible_runtime_run(run_id, auth_context)
+    try:
+        snapshot_record = await session_manager.load_runtime_message_snapshot(run_id)
+    except (KeyError, RuntimeError):
+        snapshot = None
+    else:
+        snapshot = ConsoleSnapshotSummary(
+            snapshot_id=snapshot_record.snapshot_id,
+            message_count=len(snapshot_record.messages),
+            created_at=snapshot_record.created_at,
+            message_labels=tuple(
+                message_label(message) for message in snapshot_record.messages
+            ),
+            metadata_keys=safe_key_tuple(snapshot_record.metadata),
+        )
+    try:
+        events = await session_manager.replay_runtime_events(run_id, limit=1000)
+    except (KeyError, RuntimeError):
+        events = []
+    event_summaries = tuple(
+        ConsoleEventSummary(
+            sequence=event.sequence,
+            event_id=event.event_id,
+            event_kind=event.event_kind,
+            created_at=event.created_at,
+            payload_keys=safe_key_tuple(event.payload),
+        )
+        for event in sorted(
+            events, key=lambda item: (item.sequence or 0, item.created_at)
+        )
+    )
+    detail = ConsoleRunDetail(
+        run_id=run.run_id,
+        session_id=run.session_id,
+        tape_id=run.tape_id,
+        parent_run_id=run.parent_run_id,
+        agent_id=run.agent_id,
+        status=run.status,
+        started_at=run.started_at,
+        ended_at=run.ended_at,
+        error_summary=safe_error_summary(run.error),
+        metadata_keys=safe_key_tuple(run.metadata),
+        result_keys=safe_key_tuple(run.result),
+        snapshot=snapshot,
+        events=event_summaries,
+    )
+    return HTMLResponse(render_console_run_detail_page(detail))
 
 
 @app.get("/console/interactions", response_class=HTMLResponse)
