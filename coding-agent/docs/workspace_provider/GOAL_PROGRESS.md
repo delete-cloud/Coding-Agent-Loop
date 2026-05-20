@@ -45,7 +45,7 @@ requiring production credentials, hosted services, or Docker for all tests.
 
 ### After
 
-Status: passed local verification; in PR #276.
+Status: merged via PR #276.
 
 - Changed files:
   - `docs/workspace_provider/GOAL_PROGRESS.md`
@@ -90,7 +90,7 @@ Status: passed local verification; in PR #276.
 
 ### After
 
-Status: passed local verification; in PR #277.
+Status: merged via PR #277.
 
 - Changed files:
   - `docs/workspace_provider/GOAL_PROGRESS.md`
@@ -137,7 +137,7 @@ Status: passed local verification; in PR #277.
 
 ### After
 
-Status: passed local verification; in PR #278.
+Status: merged via PR #278.
 
 - Changed files:
   - `docs/workspace_provider/GOAL_PROGRESS.md`
@@ -193,7 +193,7 @@ Status: passed local verification; in PR #278.
 
 ### After
 
-Status: passed local verification; in PR #279.
+Status: merged via PR #279.
 
 - Changed files:
   - `docs/workspace_provider/GOAL_PROGRESS.md`
@@ -247,7 +247,7 @@ Status: passed local verification; in PR #279.
 
 ### After
 
-Status: passed local verification; in PR #280.
+Status: merged via PR #280.
 
 - Changed files:
   - `docs/workspace_provider/GOAL_PROGRESS.md`
@@ -298,7 +298,7 @@ Status: passed local verification; in PR #280.
 
 ### After
 
-Status: passed local verification; in PR #281.
+Status: merged via PR #281.
 
 - Changed files:
   - `docs/workspace_provider/GOAL_PROGRESS.md`
@@ -405,7 +405,7 @@ Status: merged via PR #282.
 
 ### After
 
-Status: passed local verification; pending PR.
+Status: merged via PR #283.
 
 - Changed files:
   - `docs/workspace_provider/GOAL_PROGRESS.md`
@@ -440,3 +440,68 @@ Status: passed local verification; pending PR.
   - Live Docker provider demonstration remains optional and environment
     dependent; deterministic proof uses a fake provider/client.
   - G76 still needs final smoke and phase implementation report.
+
+## G76_FINAL_SMOKE_AND_IMPLEMENTATION_REPORT
+
+### Before
+
+- Goal id: G76_FINAL_SMOKE_AND_IMPLEMENTATION_REPORT
+- Intended files:
+  - `docs/workspace_provider/GOAL_PROGRESS.md`
+  - `docs/workspace_provider/IMPLEMENTATION_REPORT.md`
+- Verification commands:
+  - Run from `coding-agent/`.
+  - `uv run pytest tests/dogfood/test_workspace_provider_demo.py -v`
+  - `uv run pytest tests/dogfood/test_local_dogfood_run.py -v`
+  - `uv run pytest tests/coding_agent/test_workspace_action_routing.py -v`
+  - `uv run pytest tests/ui/test_developer_console.py -v`
+  - `uv run pytest tests/coding_agent/environment/test_docker_workspace_provider.py -k "capabilities or readiness" -v`
+  - `uv run pytest tests/ui/test_http_server.py -k "foreign_provider_instance or local_durable_record or durable_cloud_workspace_gc" -v`
+  - `uv run pytest tests/coding_agent/test_observability_platform_smoke.py -v`
+  - `uv run pytest tests/integration/test_durable_runtime_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+  - `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+  - `uv run pytest tests/coding_agent/evaluation/ -v`
+  - `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Final smoke requires changing AgentKit Core or G00-G75 behavior.
+  - Final smoke requires production credentials, hosted services, or Docker as a
+    mandatory dependency.
+  - More than two fix iterations fail for the same reason.
+  - A deterministic implementation report cannot be produced without raw
+    sensitive content.
+
+### After
+
+Status: passed local verification; pending merge via PR #284.
+
+- Changed files:
+  - `docs/workspace_provider/GOAL_PROGRESS.md`
+  - `docs/workspace_provider/IMPLEMENTATION_REPORT.md`
+- Tests run:
+  - Run from `coding-agent/`.
+  - `uv run pytest tests/dogfood/test_workspace_provider_demo.py -v`
+  - `uv run pytest tests/dogfood/test_local_dogfood_run.py -v`
+  - `uv run pytest tests/coding_agent/test_workspace_action_routing.py -v`
+  - `uv run pytest tests/ui/test_developer_console.py -v`
+  - `uv run pytest tests/coding_agent/environment/test_docker_workspace_provider.py -k "capabilities or readiness" -v`
+  - `uv run pytest tests/ui/test_http_server.py -k "foreign_provider_instance or local_durable_record or durable_cloud_workspace_gc" -v`
+  - `uv run pytest tests/coding_agent/test_observability_platform_smoke.py -v`
+  - `uv run pytest tests/integration/test_durable_runtime_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+  - `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+  - `uv run pytest tests/coding_agent/evaluation/ -v`
+  - `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+  - `git diff --check -- .`
+- Results:
+  - All commands passed.
+  - `docs/workspace_provider/IMPLEMENTATION_REPORT.md` now records landed
+    goals, key artifacts, acceptance summary, final verification scope, and
+    residual risks.
+  - Scoped ruff was not run for G76 because the goal changed documentation only.
+- Remaining risks:
+  - Live Docker provider demonstration remains optional and environment
+    dependent.
+  - Full repository ruff remains outside this phase because unrelated existing
+    repository lint/format failures were already recorded by earlier phases.
