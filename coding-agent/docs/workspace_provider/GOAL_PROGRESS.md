@@ -325,3 +325,52 @@ Status: passed local verification; in PR #281.
   - Local review found that provider 404 after the `cleaning` transition could
     strand a durable record. The KeyError path now marks the record `lost` and a
     focused regression covers it.
+
+## G74_CONSOLE_AND_OBSERVABILITY_WORKSPACE_VISIBILITY
+
+### Before
+
+- Goal id: G74_CONSOLE_AND_OBSERVABILITY_WORKSPACE_VISIBILITY
+- Intended files:
+  - `docs/workspace_provider/GOAL_PROGRESS.md`
+  - `src/coding_agent/ui/developer_console.py`
+  - `src/coding_agent/ui/http_server.py`
+  - `tests/ui/test_developer_console.py`
+- Verification commands:
+  - Run from `coding-agent/`.
+  - `uv run pytest tests/ui/test_developer_console.py -k "workspace or console_shell_routes_render_navigation_without_secrets or developer_console_e2e" -v`
+  - `uv run pytest tests/ui/test_developer_console.py -v`
+  - `uv run ruff format --check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/ui/test_developer_console.py`
+  - `uv run ruff check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/ui/test_developer_console.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Console workspace visibility requires exposing raw prompt/content/message,
+    command output, stdout/stderr/env, or secrets.
+  - Workspace observability requires high-cardinality Prometheus labels such as
+    workspace_id, run_id, session_id, file_path, or command.
+  - The change requires schedule, sandbox, desktop, bridge, proactive-agent, or
+    multi-agent work.
+
+### After
+
+Status: passed local verification; pending PR.
+
+- Changed files:
+  - `docs/workspace_provider/GOAL_PROGRESS.md`
+  - `src/coding_agent/ui/developer_console.py`
+  - `src/coding_agent/ui/http_server.py`
+  - `tests/ui/test_developer_console.py`
+- Tests run:
+  - Run from `coding-agent/`.
+  - `uv run pytest tests/ui/test_developer_console.py -k "workspace or console_shell_routes_render_navigation_without_secrets or developer_console_e2e" -v`
+  - `uv run ruff format --check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/ui/test_developer_console.py`
+  - `uv run ruff check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/ui/test_developer_console.py`
+  - `git diff --check -- .`
+- Results:
+  - All commands passed.
+  - Added `/console/workspaces` with navigation, provider capability summary,
+    and sanitized workspace inventory from existing workspace APIs/stores.
+  - Verified HTTP metrics for the console workspace route use the stable route
+    label and do not include workspace ids or `workspace_id` labels.
+- Remaining risks:
+  - G75 still needs dogfood/demo evidence for the workspace provider path.

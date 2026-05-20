@@ -44,6 +44,7 @@ from coding_agent.environment import (
     cleanup_stale_cloud_workspaces_from_config,
     cloud_client_factory_from_config,
     cloud_workspace_ready_from_config,
+    WorkspaceProviderCapabilities,
     WorkspaceArchiveManifest,
     WorkspaceBranchPublication,
     WorkspaceInventoryEntry,
@@ -53,6 +54,7 @@ from coding_agent.environment import (
     list_cloud_workspaces_from_config,
     publish_workspace_branch_from_config,
     provision_cloud_binding_from_config,
+    workspace_provider_capabilities_from_config,
     workspace_archive_manifest_from_config,
     workspace_diff_from_config,
     workspace_patch_from_config,
@@ -82,6 +84,8 @@ from coding_agent.ui.developer_console import (
     ConsoleTapeEntrySummary,
     ConsoleTapeInfo,
     ConsoleValidationOutcomeSummary,
+    ConsoleWorkspaceCapabilitySummary,
+    ConsoleWorkspaceSummary,
     ConsoleSnapshotSummary,
     message_label,
     render_console_actions_page,
@@ -95,6 +99,7 @@ from coding_agent.ui.developer_console import (
     render_console_runs_page,
     render_console_sessions_page,
     render_console_tape_page,
+    render_console_workspaces_page,
     safe_label_value,
     safe_id_value,
     safe_key_tuple,
@@ -1290,6 +1295,21 @@ async def console_observability(
     return HTMLResponse(
         render_console_observability_page(
             _observability_summary(correlation=correlation)
+        )
+    )
+
+
+@app.get("/console/workspaces", response_class=HTMLResponse)
+async def console_workspaces(
+    request: Request,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> HTMLResponse:
+    del request
+    _require_admin_context(auth_context)
+    return HTMLResponse(
+        render_console_workspaces_page(
+            await _console_workspace_summaries(),
+            _console_workspace_capability_summary(),
         )
     )
 
@@ -3013,6 +3033,81 @@ def _observability_summary(
             or config.get("grafana_url")
             or config.get("dashboard_url")
         ),
+    )
+
+
+async def _console_workspace_summaries() -> list[ConsoleWorkspaceSummary]:
+    if _remote_retention_enabled():
+        records = await session_manager.list_workspace_records()
+        summaries = [
+            _console_workspace_summary_from_schema(
+                _workspace_record_summary_response(record)
+            )
+            for record in records
+        ]
+    else:
+        try:
+            entries = await asyncio.to_thread(
+                list_cloud_workspaces_from_config,
+                _load_cloud_workspace_config(),
+                active_workspace_ids=await _active_cloud_workspace_ids(),
+            )
+        except ValueError:
+            summaries = []
+        else:
+            summaries = [
+                _console_workspace_summary_from_schema(
+                    _workspace_summary_response(entry)
+                )
+                for entry in entries
+            ]
+    summaries.sort(key=lambda item: item.updated_at, reverse=True)
+    return summaries
+
+
+def _console_workspace_capability_summary() -> ConsoleWorkspaceCapabilitySummary | None:
+    try:
+        capabilities = workspace_provider_capabilities_from_config(
+            _load_cloud_workspace_config()
+        )
+    except ValueError:
+        return None
+    return _console_workspace_capability_from_provider(capabilities)
+
+
+def _console_workspace_capability_from_provider(
+    capabilities: WorkspaceProviderCapabilities,
+) -> ConsoleWorkspaceCapabilitySummary:
+    return ConsoleWorkspaceCapabilitySummary(
+        provider=safe_label_value(capabilities.provider) or "redacted",
+        available=capabilities.available,
+        reason=safe_label_value(capabilities.reason) or "redacted",
+        supports_provision=capabilities.supports_provision,
+        supports_archive=capabilities.supports_archive,
+        supports_diff=capabilities.supports_diff,
+        supports_patch=capabilities.supports_patch,
+        supports_publish=capabilities.supports_publish,
+    )
+
+
+def _console_workspace_summary_from_schema(
+    workspace: WorkspaceSummarySchema,
+) -> ConsoleWorkspaceSummary:
+    result_refs = workspace.result_refs or {}
+    return ConsoleWorkspaceSummary(
+        workspace_id=safe_id_value(workspace.workspace_id) or "redacted",
+        status=safe_label_value(workspace.status) or "redacted",
+        updated_at=workspace.updated_at,
+        session_id=safe_id_value(workspace.session_id),
+        provider=safe_label_value(workspace.provider),
+        provider_instance_id=safe_label_value(workspace.provider_instance_id),
+        workspace_host_label=safe_label_value(workspace.workspace_host_label),
+        source_kind=safe_label_value(workspace.source_kind),
+        retention_policy=safe_label_value(workspace.retention_policy),
+        expires_at=workspace.expires_at,
+        is_local=workspace.is_local,
+        result_ref_keys=safe_key_tuple(result_refs),
+        cleanup_error=safe_error_summary(workspace.cleanup_error),
     )
 
 
