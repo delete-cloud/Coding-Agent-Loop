@@ -41,7 +41,7 @@ release hardening, or observability platform semantics.
 
 ## G54 Developer Console Current State Map
 
-Status: passed local verification; pending PR.
+Status: merged via PR #262.
 
 ### Intended Files
 
@@ -96,3 +96,59 @@ Status: passed local verification; pending PR.
 - Existing APIs do not yet expose global run listing, interaction inbox,
   tape debug, context inspector, memory evidence, or release verification pages
   through console routes.
+
+## G55 Developer Console ADR And UI Contract
+
+Status: passed local verification; pending PR.
+
+### Intended Files
+
+- `docs/adr/0037-developer-console-debug-ui.md`
+- `docs/developer_console/UI_CONTRACT.md`
+- `docs/developer_console/GOAL_PROGRESS.md`
+
+### Verification Commands
+
+- `test -f docs/adr/0037-developer-console-debug-ui.md`
+- `test -f docs/developer_console/UI_CONTRACT.md`
+- `rg -n "Developer Console debug UI boundary|server-rendered HTML|must never bypass approval|privacy-preserving|API Dependency Map|Observability Integration|Testing Strategy|Non-Goals" docs/adr/0037-developer-console-debug-ui.md`
+- `rg -n "Route Contract|Navigation Contract|Data Contract|Action Contract|Testing Contract|must not render" docs/developer_console/UI_CONTRACT.md`
+- `git diff --check -- .`
+
+### Stop Criteria
+
+- Stop if the console contract requires a new frontend build stack before the
+  server-rendered MVP can be validated.
+- Stop if the console contract requires changing AgentKit Core or G00-G53
+  semantics.
+- Stop if required pages cannot be defined without exposing raw sensitive data
+  or bypassing approval/action policy.
+
+### Changed Files
+
+- `docs/adr/0037-developer-console-debug-ui.md`
+- `docs/developer_console/UI_CONTRACT.md`
+- `docs/developer_console/GOAL_PROGRESS.md`
+
+### Tests Run
+
+- `test -f docs/adr/0037-developer-console-debug-ui.md`
+- `test -f docs/developer_console/UI_CONTRACT.md`
+- `rg -n "Developer Console debug UI boundary|server-rendered HTML|must never bypass approval|privacy-preserving|API Dependency Map|Observability Integration|Testing Strategy|Non-Goals" docs/adr/0037-developer-console-debug-ui.md`
+- `rg -n "Route Contract|Navigation Contract|Data Contract|Action Contract|Testing Contract|must not render" docs/developer_console/UI_CONTRACT.md`
+- `git diff --check -- .`
+
+### Results
+
+- ADR-0037 exists and defines the Developer Console as a Coding Agent
+  debug/product surface over existing APIs and stores.
+- ADR-0037 defines scope, supported pages, privacy/no-leak rules, API
+  dependency map, observability integration, testing strategy, and non-goals.
+- UI contract exists with route, navigation, data, action, rendering, and test
+  contracts.
+- `git diff --check -- .` passed.
+
+### Remaining Risks
+
+- G55 is documentation-only. The console shell, route rendering, and fixture
+  tests remain for G56+.
