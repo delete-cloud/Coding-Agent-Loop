@@ -461,7 +461,7 @@ Status: merged via PR #258.
 
 ## G53 Observability E2E Smoke And Report
 
-Status: passed local verification; pending PR #259.
+Status: merged via PR #259.
 
 ### Intended Files
 
@@ -540,4 +540,5 @@ Status: passed local verification; pending PR #259.
 
 - G53 does not run a live Docker Prometheus/Grafana stack; G52 keeps that
   config deterministic through YAML/JSON contract tests.
-- G53 is pending PR #259 merge and final main cleanup.
+- G53 completed the final smoke, no-leak checks, implementation report, and
+  main merge for the Observability Platform phase.
