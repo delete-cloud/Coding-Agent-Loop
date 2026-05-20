@@ -174,3 +174,75 @@ Status: passed local verification; pending PR.
 - Remaining risks:
   - G67 still needs to run final practical smoke checks and publish the phase
     implementation report.
+
+## G67_DOGFOOD_FINAL_SMOKE_AND_REPORT
+
+### Before
+
+- Goal id: G67_DOGFOOD_FINAL_SMOKE_AND_REPORT
+- Intended files:
+  - `docs/dogfood/GOAL_PROGRESS.md`
+  - `docs/dogfood/IMPLEMENTATION_REPORT.md`
+- Verification commands:
+  - Run from `coding-agent/`.
+  - `uv run pytest tests/dogfood/test_local_dogfood_run.py -v`
+  - `uv run pytest tests/ui/test_developer_console.py -v`
+  - `uv run pytest tests/integration/test_durable_runtime_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+  - `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_observability_platform_smoke.py -v`
+  - `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+  - `uv run pytest tests/coding_agent/evaluation/ -v`
+  - release verification manifest commands from
+    `docs/release_hardening/release-verification.yaml`
+  - `uv run ruff format --check tests/dogfood/test_local_dogfood_run.py`
+  - `uv run ruff check tests/dogfood/test_local_dogfood_run.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Final deterministic smoke checks cannot run.
+  - Any check fails more than two fix iterations for the same reason.
+  - The final report would need to include raw prompt, message, model result
+    text, command output, stdout, stderr, environment values, or secrets.
+
+### After
+
+Status: passed local verification; pending PR.
+
+- Changed files:
+  - `docs/dogfood/GOAL_PROGRESS.md`
+  - `docs/dogfood/IMPLEMENTATION_REPORT.md`
+- Dogfood evidence:
+  - Final report references G65 evidence in `docs/dogfood/RUN_EVIDENCE.md`.
+  - No new run_id evidence was required for G67.
+- Tests run:
+  - Run from `coding-agent/`.
+  - `uv run pytest tests/dogfood/test_local_dogfood_run.py -v`
+  - `uv run pytest tests/ui/test_developer_console.py -v`
+  - `uv run pytest tests/integration/test_durable_runtime_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+  - `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_observability_platform_smoke.py -v`
+  - `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+  - `uv run pytest tests/coding_agent/evaluation/ -v`
+  - `uv run pytest tests/coding_agent/test_observability.py tests/coding_agent/test_observability_local_stack.py tests/coding_agent/test_release_observability_contract.py -v`
+  - `uv run ruff format --check tests/dogfood/test_local_dogfood_run.py`
+  - `uv run ruff check tests/dogfood/test_local_dogfood_run.py`
+  - `git diff --check -- .`
+- Results:
+  - `tests/dogfood/test_local_dogfood_run.py`: `1 passed`
+  - `tests/ui/test_developer_console.py`: `27 passed`
+  - `tests/integration/test_durable_runtime_smoke.py`: `6 passed`
+  - `tests/coding_agent/test_context_system_smoke.py`: `1 passed`
+  - `tests/coding_agent/action_safety/test_safe_action_smoke.py`: `1 passed`
+  - `tests/coding_agent/test_observability_platform_smoke.py`: `2 passed`
+  - `tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans"`:
+    `8 passed, 29 deselected`
+  - `tests/coding_agent/evaluation/`: `20 passed`
+  - observability/release contract suite: `32 passed`
+  - scoped ruff format/check passed.
+  - `git diff --check -- .` passed.
+- Remaining risks:
+  - Hosted LLM/provider dogfood remains outside this phase because production
+    credentials and hosted services are out of scope.
+  - Optional Prometheus/Grafana visual demo still requires starting the local
+    stack separately.
