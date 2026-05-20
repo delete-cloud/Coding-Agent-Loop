@@ -24,10 +24,14 @@ from agentkit.observability import (
 _SENSITIVE_ATTRIBUTE_PARTS = frozenset(
     {
         "content",
+        "env",
         "message",
+        "output",
         "prompt",
         "result",
         "secret",
+        "stderr",
+        "stdout",
         "text",
     }
 )
