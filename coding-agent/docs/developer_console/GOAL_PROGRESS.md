@@ -492,7 +492,7 @@ Status: merged via PR #268.
 
 ## G61 Memory Action Validation Inspector
 
-Status: passed local verification; pending PR.
+Status: merged via PR #269.
 
 ### Intended Files
 
@@ -568,3 +568,73 @@ Status: passed local verification; pending PR.
   or wire live action execution to produce every possible historical summary.
 - Memory labels are rendered only after the existing console sanitizer, and
   metadata `summary` fields are intentionally not displayed by default.
+
+## G62 Observability Release Integration
+
+Status: passed local verification; pending PR.
+
+### Intended Files
+
+- `src/coding_agent/ui/developer_console.py`
+- `src/coding_agent/ui/http_server.py`
+- `tests/ui/test_developer_console.py`
+- `docs/developer_console/GOAL_PROGRESS.md`
+
+### Verification Commands
+
+- `uv run pytest tests/ui/test_developer_console.py -v`
+- `uv run pytest tests/ui/test_http_server.py -k "healthz or readyz or metrics" -v`
+- `uv run pytest tests/coding_agent/test_observability.py tests/coding_agent/test_observability_local_stack.py tests/coding_agent/test_release_observability_contract.py -v`
+- `uv run ruff format --check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/ui/test_developer_console.py`
+- `uv run ruff check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/ui/test_developer_console.py`
+- `git diff --check -- .`
+
+### Stop Criteria
+
+- Stop if observability/release console integration requires external hosted
+  services, production credentials, or changing G46-G53 observability
+  contracts.
+- Stop if rendering safe links requires exposing Langfuse keys, Grafana tokens,
+  Prometheus credentials, or raw trace attributes.
+- Stop if health, metrics, release verification, or dashboard status cannot be
+  represented deterministically from local config and fixture data.
+
+### Changed Files
+
+- `src/coding_agent/ui/developer_console.py`
+- `src/coding_agent/ui/http_server.py`
+- `tests/ui/test_developer_console.py`
+- `docs/developer_console/GOAL_PROGRESS.md`
+
+### Tests Run
+
+- `uv run pytest tests/ui/test_developer_console.py -v`
+- `uv run pytest tests/ui/test_http_server.py -k "healthz or readyz or metrics" -v`
+- `uv run pytest tests/coding_agent/test_observability.py tests/coding_agent/test_observability_local_stack.py tests/coding_agent/test_release_observability_contract.py -v`
+- `uv run ruff format --check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/ui/test_developer_console.py`
+- `uv run ruff check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/ui/test_developer_console.py`
+- `git diff --check -- .`
+
+### Results
+
+- `/console/observability` now renders safe run correlation metadata for
+  visible runs: session ID, run ID, tape ID, retrieval ID, action ID,
+  validation ID, and interaction ID.
+- Observability backend status renders metrics endpoint state, tracing backend,
+  metrics backend, and safe Langfuse/Grafana links when configured.
+- Unsafe dashboard links with query strings, fragments, userinfo, or non-HTTP
+  schemes are omitted.
+- `/console/release` now renders local health/readiness summary and release
+  verification gates from `docs/release_hardening/release-verification.yaml`.
+- Local/no-Langfuse/no-Grafana modes degrade to explicit `not configured`
+  states without external service calls or credentials.
+- Console tests, health/readiness/metrics HTTP tests, observability local stack
+  tests, release observability contract tests, scoped ruff format/check, and
+  `git diff --check -- .` passed.
+
+### Remaining Risks
+
+- G62 does not validate live Grafana or Langfuse availability. It only renders
+  configured safe links and local status, keeping external services optional.
+- Release verification page displays the deterministic manifest commands but
+  does not execute the release gate suite from the browser.
