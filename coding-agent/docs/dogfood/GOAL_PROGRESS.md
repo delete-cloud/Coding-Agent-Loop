@@ -65,3 +65,61 @@ Status: passed local verification; pending PR.
   - G65 still needs to prove whether real local agent execution can produce
     run_id-level evidence without production credentials or external hosted
     services.
+
+## G65_DOGFOOD_REAL_RUN_EVIDENCE
+
+### Before
+
+- Goal id: G65_DOGFOOD_REAL_RUN_EVIDENCE
+- Intended files:
+  - `docs/dogfood/GOAL_PROGRESS.md`
+  - `docs/dogfood/RUN_EVIDENCE.md`
+  - `tests/dogfood/test_local_dogfood_run.py`
+- Verification commands:
+  - Run from `coding-agent/`.
+  - `uv run pytest tests/dogfood/test_local_dogfood_run.py -v`
+  - `uv run pytest tests/ui/test_developer_console.py -v`
+  - `git diff --check -- .`
+- Stop criteria:
+  - A local run cannot produce a non-empty `session_id` and `run_id`.
+  - A local run requires production credentials or external hosted services.
+  - Evidence would require storing raw prompt, message, model result text,
+    command output, stdout, stderr, env, or secrets.
+
+### After
+
+Status: passed local verification; pending PR.
+
+- Changed files:
+  - `docs/dogfood/GOAL_PROGRESS.md`
+  - `docs/dogfood/RUN_EVIDENCE.md`
+  - `tests/dogfood/test_local_dogfood_run.py`
+- Dogfood evidence:
+  - Recorded in `docs/dogfood/RUN_EVIDENCE.md`.
+  - `session_id`: `3bfed77d-4d2c-4f03-977f-f7c56a2e9a04`
+  - `run_id`: `5c716d8294c84d99848dba9aeab0d0b5`
+  - run status: `completed`
+  - `/healthz`, `/readyz`, `/console/sessions`, `/console/runs`,
+    `/console/runs/{run_id}`, `/console/observability?run_id={run_id}`, and
+    `/console/release` returned `200`.
+- Tests run:
+  - Run from `coding-agent/`.
+  - `uv run pytest tests/dogfood/test_local_dogfood_run.py -v`
+  - `uv run pytest tests/ui/test_developer_console.py -v`
+  - `uv run ruff format --check tests/dogfood/test_local_dogfood_run.py`
+  - `uv run ruff check tests/dogfood/test_local_dogfood_run.py`
+  - `git diff --check -- .`
+- Results:
+  - `tests/dogfood/test_local_dogfood_run.py`: `1 passed`
+  - `tests/ui/test_developer_console.py`: `27 passed`
+  - scoped ruff format/check passed after formatting the new test file.
+  - `git diff --check -- .` passed.
+  - Local evidence harness produced a completed run with message snapshot and
+    console route evidence.
+- Fix iterations:
+  - 1. Adjusted the new test to accept the actual no-tool local turn
+    `steps_taken` value instead of assuming it would be `1`.
+- Remaining risks:
+  - G65 uses the existing local `MockProvider` because production credentials
+    and hosted LLM calls are out of scope for this phase.
+  - G66 still needs to turn the validated path into a repeatable demo checklist.
