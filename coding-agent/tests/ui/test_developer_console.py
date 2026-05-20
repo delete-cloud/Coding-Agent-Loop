@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
+from agentkit.storage.protocols import TapeInfo, TapeSearchResult
 from httpx import ASGITransport, AsyncClient
 
 from coding_agent.runtime_store import (
@@ -12,6 +15,7 @@ from coding_agent.runtime_store import (
     RunMessageSnapshotRecord,
     RuntimeEventRecord,
 )
+from coding_agent.core.config import settings
 from coding_agent.ui.http_server import app, session_manager
 from coding_agent.ui.session_manager import Session
 
@@ -50,6 +54,105 @@ FORBIDDEN_RENDERED_TEXT = (
     "stderr",
     "env",
 )
+
+
+class _ConsoleTapeStore:
+    def __init__(self, tape_ids: list[str] | None = None) -> None:
+        self.tape_ids = tape_ids or ["tape-alpha"]
+
+    async def save(self, tape_id: str, entries: list[dict[str, object]]) -> None:
+        return None
+
+    async def load(self, tape_id: str) -> list[dict[str, object]]:
+        return []
+
+    async def list_ids(self) -> list[str]:
+        return list(self.tape_ids)
+
+    async def truncate(self, tape_id: str, keep: int) -> None:
+        return None
+
+    async def info(self, tape_id: str) -> TapeInfo | None:
+        if tape_id not in self.tape_ids:
+            return None
+        return TapeInfo(tape_id=tape_id, entry_count=3, first_seq=0, last_seq=2)
+
+    async def search(
+        self,
+        *,
+        tape_id: str | None = None,
+        kind: str | None = None,
+        run_id: str | None = None,
+        tool_call_id: str | None = None,
+        anchor_type: str | None = None,
+        limit: int = 100,
+    ) -> list[TapeSearchResult]:
+        entries = []
+        for known_tape_id in self.tape_ids:
+            known_run_id = known_tape_id.replace("tape", "run")
+            entries.extend(
+                [
+                    TapeSearchResult(
+                        tape_id=known_tape_id,
+                        seq=0,
+                        entry={
+                            "kind": "message",
+                            "payload": {
+                                "run_id": known_run_id,
+                                "content": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT",
+                            },
+                        },
+                    ),
+                    TapeSearchResult(
+                        tape_id=known_tape_id,
+                        seq=1,
+                        entry={
+                            "kind": "tool_call",
+                            "payload": {
+                                "run_id": known_run_id,
+                                "tool_call_id": "tool-alpha",
+                            },
+                        },
+                    ),
+                    TapeSearchResult(
+                        tape_id=known_tape_id,
+                        seq=2,
+                        entry={
+                            "kind": "anchor",
+                            "meta": {"anchor_type": "handoff", "secret": "hidden"},
+                        },
+                    ),
+                ]
+            )
+        filtered = []
+        for result in entries:
+            entry = result.entry
+            payload = (
+                entry.get("payload") if isinstance(entry.get("payload"), dict) else {}
+            )
+            meta = entry.get("meta") if isinstance(entry.get("meta"), dict) else {}
+            if tape_id is not None and result.tape_id != tape_id:
+                continue
+            if kind is not None and entry.get("kind") != kind:
+                continue
+            if (
+                run_id is not None
+                and payload.get("run_id") != run_id
+                and meta.get("run_id") != run_id
+            ):
+                continue
+            if (
+                tool_call_id is not None
+                and payload.get("tool_call_id") != tool_call_id
+                and meta.get("tool_call_id") != tool_call_id
+            ):
+                continue
+            if anchor_type is not None and meta.get("anchor_type") != anchor_type:
+                continue
+            filtered.append(result)
+        if limit <= 0:
+            return []
+        return filtered[:limit]
 
 
 class _ConsoleRuntimeStore:
@@ -181,9 +284,11 @@ class _ConsoleRuntimeStore:
 @pytest.fixture(autouse=True)
 async def clear_console_state() -> AsyncIterator[None]:
     session_manager.configure_runtime_store(None)
+    original_tape_store = session_manager._tape_store
     session_manager.clear_sessions()
     yield
     session_manager.configure_runtime_store(None)
+    session_manager._tape_store = original_tape_store
     session_manager.clear_sessions()
 
 
@@ -191,6 +296,7 @@ def _register_console_session(
     session_id: str,
     *,
     status: str = "created",
+    owner_label: str | None = None,
 ) -> Session:
     created_at = datetime(2026, 5, 20, 1, 2, 3, tzinfo=UTC)
     session = Session(
@@ -199,6 +305,7 @@ def _register_console_session(
         last_activity=datetime(2026, 5, 20, 1, 3, 4, tzinfo=UTC),
         provider_name="fixture-provider",
         model_name="fixture-model",
+        origin=None if owner_label is None else {"owner_label": owner_label},
     )
     if status == "running":
         session.turn_in_progress = True
@@ -219,11 +326,12 @@ def _runtime_run(
     *,
     status: str,
     error: str | None = None,
+    tape_id: str | None = None,
 ) -> AgentRunRecord:
     return AgentRunRecord(
         run_id=run_id,
         session_id=session_id,
-        tape_id=f"{session_id}-tape",
+        tape_id=tape_id or f"{session_id}-tape",
         parent_run_id=None,
         agent_id=None,
         status=status,
@@ -231,10 +339,65 @@ def _runtime_run(
         ended_at=(
             None if status == "running" else datetime(2026, 5, 20, 2, 1, 0, tzinfo=UTC)
         ),
-        metadata={"prompt": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT"},
+        metadata={
+            "prompt": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT",
+            "context_pack": {
+                "sections": [
+                    {
+                        "title": "Repo references",
+                        "items": [
+                            {
+                                "source_kind": "repo_file",
+                                "source_id": "repo-src-auth",
+                                "label": "Auth module",
+                                "repo_path": "src/auth.py",
+                                "line_start": 10,
+                                "line_end": 20,
+                                "score": 0.12,
+                                "body": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT",
+                                "evidence": [
+                                    {
+                                        "kind": "repo_file",
+                                        "source_id": "repo-src-auth",
+                                        "label": "reason: auth evidence",
+                                        "repo_path": "src/auth.py",
+                                        "line_start": 10,
+                                        "line_end": 20,
+                                        "chunk_id": "chunk-auth",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            },
+        },
         result={"content": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT"},
         error=error,
     )
+
+
+def _owner_label(token: str) -> str:
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    return f"owner:{digest}"
+
+
+def _write_console_auth_config(tmp_path: Path) -> Path:
+    config_path = tmp_path / "server.toml"
+    config_path.write_text(
+        """
+[agent]
+name = "test-agent"
+model = "test-model"
+provider = "openai"
+
+[server]
+bearer_token = "user-token-a"
+admin_bearer_token = "admin-token"
+""".strip(),
+        encoding="utf-8",
+    )
+    return config_path
 
 
 def _runtime_event(
@@ -404,6 +567,177 @@ async def test_console_sessions_list_renders_fixture_data_without_raw_content() 
     assert "approval-secret-payload" not in response.text
     for forbidden in FORBIDDEN_RENDERED_TEXT:
         assert forbidden not in response.text
+
+
+@pytest.mark.asyncio
+async def test_console_tape_renders_info_and_search_without_raw_payload() -> None:
+    session_manager._tape_store = _ConsoleTapeStore()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/console/tape",
+            params={"tape_id": "tape-alpha", "run_id": "run-alpha"},
+        )
+
+    assert response.status_code == 200
+    assert "Tape Info" in response.text
+    assert "tape-alpha" in response.text
+    assert "3" in response.text
+    assert "Tape Search" in response.text
+    assert "tool_call" in response.text
+    assert "tool-alpha" in response.text
+    assert "message" in response.text
+    for forbidden in FORBIDDEN_RENDERED_TEXT:
+        assert forbidden not in response.text
+
+
+@pytest.mark.asyncio
+async def test_console_tape_store_fixture_honors_search_limit() -> None:
+    store = _ConsoleTapeStore()
+
+    results = await store.search(tape_id="tape-alpha", limit=1)
+
+    assert len(results) == 1
+    assert results[0].seq == 0
+
+
+@pytest.mark.asyncio
+async def test_console_tape_restricts_user_token_to_visible_tapes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "CODING_AGENT_SERVER_CONFIG",
+        str(_write_console_auth_config(tmp_path)),
+    )
+    monkeypatch.setattr(settings, "http_api_key", None)
+    _register_console_session(
+        "session-user",
+        owner_label=_owner_label("user-token-a"),
+    )
+    _register_console_session(
+        "session-admin",
+        owner_label=_owner_label("admin-token"),
+    )
+    session_manager.configure_runtime_store(
+        _ConsoleRuntimeStore(
+            [
+                _runtime_run(
+                    "run-user",
+                    "session-user",
+                    status="completed",
+                    tape_id="tape-user",
+                ),
+                _runtime_run(
+                    "run-admin",
+                    "session-admin",
+                    status="completed",
+                    tape_id="tape-admin",
+                ),
+            ]
+        )
+    )
+    session_manager._tape_store = _ConsoleTapeStore(["tape-user", "tape-admin"])
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        forbidden = await client.get(
+            "/console/tape",
+            params={"tape_id": "tape-admin"},
+            headers={"Authorization": "Bearer user-token-a"},
+        )
+        allowed = await client.get(
+            "/console/tape",
+            params={"tape_id": "tape-user"},
+            headers={"Authorization": "Bearer user-token-a"},
+        )
+        admin = await client.get(
+            "/console/tape",
+            params={"tape_id": "tape-admin"},
+            headers={"Authorization": "Bearer admin-token"},
+        )
+
+    assert forbidden.status_code == 200
+    assert "tape-admin" not in forbidden.text
+    assert "No tape info is available." in forbidden.text
+    assert allowed.status_code == 200
+    assert "tape-user" in allowed.text
+    assert admin.status_code == 200
+    assert "tape-admin" in admin.text
+
+
+@pytest.mark.asyncio
+async def test_console_tape_renders_missing_state() -> None:
+    session_manager._tape_store = _ConsoleTapeStore()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/console/tape", params={"tape_id": "missing"})
+
+    assert response.status_code == 200
+    assert "Tape Info" in response.text
+    assert "No tape info is available." in response.text
+
+
+@pytest.mark.asyncio
+async def test_console_context_renders_context_pack_evidence_without_body() -> None:
+    _register_console_session("session-alpha")
+    session_manager.configure_runtime_store(
+        _ConsoleRuntimeStore(
+            [_runtime_run("run-alpha", "session-alpha", status="completed")]
+        )
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/console/context", params={"run_id": "run-alpha"})
+
+    assert response.status_code == 200
+    assert "Context Inspector" in response.text
+    assert "Repo references" in response.text
+    assert "Auth module" in response.text
+    assert "repo_file" in response.text
+    assert "src/auth.py" in response.text
+    assert "10-20" in response.text
+    assert "0.12" in response.text
+    assert "reason: auth evidence" in response.text
+    assert 'href="/console/runs/run-alpha"' in response.text
+    for forbidden in FORBIDDEN_RENDERED_TEXT:
+        assert forbidden not in response.text
+
+
+@pytest.mark.asyncio
+async def test_console_context_renders_empty_state_for_missing_pack() -> None:
+    _register_console_session("session-alpha")
+    run = _runtime_run("run-alpha", "session-alpha", status="completed")
+    session_manager.configure_runtime_store(
+        _ConsoleRuntimeStore(
+            [
+                AgentRunRecord(
+                    run_id=run.run_id,
+                    session_id=run.session_id,
+                    tape_id=run.tape_id,
+                    parent_run_id=run.parent_run_id,
+                    agent_id=run.agent_id,
+                    status=run.status,
+                    started_at=run.started_at,
+                    ended_at=run.ended_at,
+                    metadata={},
+                    result=run.result,
+                    error=run.error,
+                )
+            ]
+        )
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/console/context", params={"run_id": "run-alpha"})
+
+    assert response.status_code == 200
+    assert "Context Inspector" in response.text
+    assert "No context pack evidence is available." in response.text
 
 
 @pytest.mark.asyncio

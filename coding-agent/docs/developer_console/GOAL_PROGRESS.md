@@ -335,7 +335,7 @@ Status: merged via PR #266.
 - Runtime events are represented by sequence, kind, event ID, timestamp, and
   safe payload keys only.
 - Page documents existing `/runs/{run_id}/events` replay behavior and
-  Last-Event-ID resume semantics.
+  `last_event_id` resume semantics.
 - Tests cover completed, failed, running, event ordering, sensitive error
   redaction, and no raw prompt/content/message/result/secret/text/command
   output/stdout/stderr/env or tool-call payload leakage.
@@ -349,7 +349,7 @@ Status: merged via PR #266.
 
 ## G59 HITL Interaction Inbox
 
-Status: passed local verification; pending PR.
+Status: merged via PR #267.
 
 ### Intended Files
 
@@ -415,3 +415,77 @@ Status: passed local verification; pending PR.
 
 - G59 keeps HITL interactions read-only. A resolve UI can be added later only
   if it reuses existing approval endpoints and policy checks.
+
+## G60 Tape And Context Inspector
+
+Status: passed local verification; pending PR.
+
+### Intended Files
+
+- `src/coding_agent/ui/developer_console.py`
+- `src/coding_agent/ui/http_server.py`
+- `src/coding_agent/ui/session_manager.py`
+- `tests/ui/test_developer_console.py`
+- `docs/developer_console/GOAL_PROGRESS.md`
+
+### Verification Commands
+
+- `uv run pytest tests/ui/test_developer_console.py -v`
+- `uv run pytest tests/integration/test_durable_runtime_smoke.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/coding_agent/test_context_pack.py -v`
+- `uv run ruff format --check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py src/coding_agent/ui/session_manager.py tests/ui/test_developer_console.py`
+- `uv run ruff check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py src/coding_agent/ui/session_manager.py tests/ui/test_developer_console.py`
+- `git diff --check -- .`
+
+### Stop Criteria
+
+- Stop if tape/context inspection requires changing tape persistence or
+  context-pack semantics.
+- Stop if no deterministic fixture can represent tape info/search and context
+  evidence without raw content.
+- Stop if rendering requires raw prompt/content/message/result/text,
+  command output, stdout/stderr, env, file contents, or secrets.
+
+### Changed Files
+
+- `src/coding_agent/ui/developer_console.py`
+- `src/coding_agent/ui/http_server.py`
+- `src/coding_agent/ui/session_manager.py`
+- `tests/ui/test_developer_console.py`
+- `docs/developer_console/GOAL_PROGRESS.md`
+
+### Tests Run
+
+- `uv run pytest tests/ui/test_developer_console.py -v`
+- `uv run pytest tests/integration/test_durable_runtime_smoke.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/coding_agent/test_context_pack.py -v`
+- `uv run ruff format --check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py src/coding_agent/ui/session_manager.py tests/ui/test_developer_console.py`
+- `uv run ruff check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py src/coding_agent/ui/session_manager.py tests/ui/test_developer_console.py`
+- `git diff --check -- .`
+
+### Results
+
+- `/console/tape` now renders optional tape debug info and tape search results
+  through the existing `TapeDebugStore` extension when available.
+- Tape search supports low-risk query filters for tape ID, kind, run ID, tool
+  call ID, and anchor type.
+- Tape debug access follows existing console visibility rules: admin can query
+  globally, while user tokens are restricted to visible session/run tape IDs.
+- Tape rows show sequence, kind, safe correlation IDs, anchor type, and safe
+  payload/meta key names without raw payload values.
+- `/console/context?run_id=...` now renders sanitized context-pack evidence
+  summaries from existing run metadata when present.
+- Context rows show section title, source kind, label, source ID, source path,
+  line range, score, and evidence reason, with a link back to run detail.
+- Empty/missing states are deterministic for both tape and context views.
+- Console tests, durable runtime tape debug smoke, context-system smoke,
+  context-pack tests, scoped ruff format/check, and `git diff --check -- .`
+  passed.
+
+### Remaining Risks
+
+- Context inspector currently depends on context-pack summary data being
+  present in durable run metadata or equivalent fixture data. It does not add a
+  new persistence model for historical context packs.

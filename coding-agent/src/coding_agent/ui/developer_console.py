@@ -82,6 +82,50 @@ class ConsoleInteractionSummary:
     resolved_at: datetime | None
 
 
+@dataclass(frozen=True)
+class ConsoleTapeInfo:
+    tape_id: str
+    entry_count: int
+    first_seq: int
+    last_seq: int
+
+
+@dataclass(frozen=True)
+class ConsoleTapeEntrySummary:
+    tape_id: str
+    seq: int
+    kind: str
+    run_id: str | None
+    tool_call_id: str | None
+    anchor_type: str | None
+    payload_keys: tuple[str, ...]
+    meta_keys: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ConsoleContextEvidence:
+    kind: str
+    label: str
+    source_id: str
+    repo_path: str | None
+    line_start: int | None
+    line_end: int | None
+    score: float | None
+    reason: str | None
+
+
+@dataclass(frozen=True)
+class ConsoleContextSectionSummary:
+    title: str
+    items: tuple[ConsoleContextEvidence, ...]
+
+
+@dataclass(frozen=True)
+class ConsoleContextSummary:
+    run_id: str | None
+    sections: tuple[ConsoleContextSectionSummary, ...]
+
+
 CONSOLE_PAGES: tuple[ConsolePage, ...] = (
     ConsolePage(
         path="/console/sessions",
@@ -225,6 +269,31 @@ def render_console_interactions_page(
     return _html_document(title=page.title, body=body, active_path=page.path)
 
 
+def render_console_tape_page(
+    info: ConsoleTapeInfo | None,
+    entries: list[ConsoleTapeEntrySummary],
+) -> str:
+    page = _PAGE_BY_PATH["/console/tape"]
+    body = (
+        f"<h1>{escape(page.title)}</h1>"
+        f'<p class="lede">{escape(page.description)}</p>'
+        f"{_tape_info_section(info)}"
+        f"{_tape_search_section(entries)}"
+    )
+    return _html_document(title=page.title, body=body, active_path=page.path)
+
+
+def render_console_context_page(context: ConsoleContextSummary | None) -> str:
+    page = _PAGE_BY_PATH["/console/context"]
+    body = (
+        f"<h1>{escape(page.title)}</h1>"
+        f'<p class="lede">{escape(page.description)}</p>'
+        "<p>Context Inspector</p>"
+        f"{_context_sections(context)}"
+    )
+    return _html_document(title=page.title, body=body, active_path=page.path)
+
+
 def safe_error_summary(error: str | None) -> str | None:
     if error is None:
         return None
@@ -252,6 +321,14 @@ def safe_id_value(value: object) -> str | None:
     if _contains_sensitive_token(value):
         return "redacted"
     return value[:120]
+
+
+def safe_text_value(value: object) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    if _contains_sensitive_token(value):
+        return "redacted"
+    return value[:240]
 
 
 def safe_key_tuple(mapping: dict[str, object]) -> tuple[str, ...]:
@@ -394,6 +471,92 @@ def _interaction_table(
         "</table>"
         "</section>"
     )
+
+
+def _tape_info_section(info: ConsoleTapeInfo | None) -> str:
+    if info is None:
+        return _empty_state("Tape Info", "No tape info is available.")
+    return (
+        '<section aria-label="Tape Info">'
+        "<h2>Tape Info</h2>"
+        "<dl>"
+        f"<dt>Tape ID</dt><dd>{escape(info.tape_id)}</dd>"
+        f"<dt>Entry Count</dt><dd>{info.entry_count}</dd>"
+        f"<dt>First Seq</dt><dd>{info.first_seq}</dd>"
+        f"<dt>Last Seq</dt><dd>{info.last_seq}</dd>"
+        "</dl>"
+        "</section>"
+    )
+
+
+def _tape_search_section(entries: list[ConsoleTapeEntrySummary]) -> str:
+    if not entries:
+        return _empty_state("Tape Search", "No data loaded yet. No tape entries match.")
+    rows = []
+    for entry in entries:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(entry.tape_id)}</td>"
+            f"<td>{entry.seq}</td>"
+            f"<td>{escape(entry.kind)}</td>"
+            f"<td>{escape(entry.run_id or '-')}</td>"
+            f"<td>{escape(entry.tool_call_id or '-')}</td>"
+            f"<td>{escape(entry.anchor_type or '-')}</td>"
+            f"<td>{escape(_join_or_dash(entry.payload_keys))}</td>"
+            f"<td>{escape(_join_or_dash(entry.meta_keys))}</td>"
+            "</tr>"
+        )
+    return (
+        '<section aria-label="Tape Search">'
+        "<h2>Tape Search</h2>"
+        '<table aria-label="Tape search results">'
+        "<thead><tr><th>Tape ID</th><th>Seq</th><th>Kind</th>"
+        "<th>Run ID</th><th>Tool Call ID</th><th>Anchor Type</th>"
+        "<th>Payload Keys</th><th>Meta Keys</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+        "</section>"
+    )
+
+
+def _context_sections(context: ConsoleContextSummary | None) -> str:
+    if context is None or not context.sections:
+        return _empty_state(
+            "Context Inspector",
+            "No data loaded yet. No context pack evidence is available.",
+        )
+    run_link = (
+        f'<p><a href="/console/runs/{escape(context.run_id)}">Run detail</a></p>'
+        if context.run_id
+        else ""
+    )
+    sections = [run_link]
+    for section in context.sections:
+        rows = []
+        for item in section.items:
+            rows.append(
+                "<tr>"
+                f"<td>{escape(item.kind)}</td>"
+                f"<td>{escape(item.label)}</td>"
+                f"<td>{escape(item.source_id)}</td>"
+                f"<td>{escape(item.repo_path or '-')}</td>"
+                f"<td>{escape(_line_range(item.line_start, item.line_end))}</td>"
+                f"<td>{escape('-' if item.score is None else str(item.score))}</td>"
+                f"<td>{escape(item.reason or '-')}</td>"
+                "</tr>"
+            )
+        sections.append(
+            '<section aria-label="Context evidence">'
+            f"<h2>{escape(section.title)}</h2>"
+            '<table aria-label="Context evidence results">'
+            "<thead><tr><th>Kind</th><th>Label</th><th>Source ID</th>"
+            "<th>Source Path</th><th>Line Range</th><th>Score</th>"
+            "<th>Evidence Reason</th></tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody>"
+            "</table>"
+            "</section>"
+        )
+    return "".join(sections)
 
 
 def _run_snapshot_section(snapshot: ConsoleSnapshotSummary | None) -> str:
@@ -539,6 +702,16 @@ def _join_or_dash(values: tuple[str, ...]) -> str:
     if not values:
         return "-"
     return ", ".join(values)
+
+
+def _line_range(line_start: int | None, line_end: int | None) -> str:
+    if line_start is None and line_end is None:
+        return "-"
+    if line_start is None:
+        return f"-{line_end}"
+    if line_end is None:
+        return f"{line_start}-"
+    return f"{line_start}-{line_end}"
 
 
 def _navigation(active_path: str) -> str:
