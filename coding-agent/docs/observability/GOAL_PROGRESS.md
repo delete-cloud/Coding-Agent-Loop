@@ -1,0 +1,96 @@
+# Observability Platform G46-G53 Goal Progress
+
+Date started: 2026-05-20
+
+## Phase Scope
+
+This phase adds service-level observability through Prometheus metrics and
+Grafana local dashboards while preserving existing Langfuse/OTLP tracing.
+
+AgentKit Core remains provider-neutral and depends only on
+`ObservationSink`, `SpanRecord`, and `ObservationEvent`. Coding Agent owns
+backend/exporter wiring.
+
+## Global Constraints
+
+- Do not rewrite AgentKit Core.
+- Do not change G00-G45 behavior.
+- Do not remove Langfuse/OTLP support.
+- Do not make Prometheus mutually exclusive with Langfuse.
+- Do not introduce Loki, Tempo, Kubernetes, or a full LGTM stack.
+- Do not require external hosted services, production credentials, or real LLM
+  calls.
+- Do not use high-cardinality Prometheus labels: `run_id`, `session_id`,
+  `trace_id`, `event_id`, `interaction_id`, `tool_call_id`, `file_path`,
+  `prompt`, `message`, `content`, `command_output`, or `secret`.
+- Do not add raw prompt text, file content, shell output, environment values,
+  secrets, full tool payloads, command output, message content, model results,
+  or other unredacted text to tracing attributes or metrics.
+- Metrics failures must not break the main runtime.
+
+## Planned Goals
+
+| Goal | Scope |
+| --- | --- |
+| G46 | Current-state observability map. |
+| G47 | ADR for observability backend/exporter boundaries. |
+| G48 | Config parsing/factory and `CompositeObservationSink`. |
+| G49 | Prometheus metrics registry and sink. |
+| G50 | Metrics endpoint and HTTP request metrics. |
+| G51 | Representative runtime/context/action metrics. |
+| G52 | Local Prometheus/Grafana stack config and alerts. |
+| G53 | E2E smoke, no-leak checks, and final implementation report. |
+
+## G46 Observability Current State Map
+
+Status: passed local verification; pending PR.
+
+### Intended Files
+
+- `docs/observability/CURRENT_STATE.md`
+- `docs/observability/GOAL_PROGRESS.md`
+
+### Verification Commands
+
+- `test -f docs/observability/CURRENT_STATE.md`
+- `test -f docs/observability/GOAL_PROGRESS.md`
+- `rg -n "backend == \"noop\"|backend not in \\{\"otlp_http\", \"langfuse\"\\}|OtlpHttpObservationSink|_SENSITIVE_ATTRIBUTE_PARTS" src/coding_agent/observability.py`
+- `rg -n "observation_sink|build_observation_sink" src/coding_agent/app.py src/agentkit`
+- `rg -n "\"/metrics\"|prometheus|grafana" src tests docs || true`
+- `git diff --check -- .`
+
+### Stop Criteria
+
+- Stop if current observability boundaries cannot be described without changing
+  production code.
+- Stop if the existing Langfuse/OTLP implementation appears to require
+  replacement rather than additive extension.
+
+### Changed Files
+
+- `docs/observability/CURRENT_STATE.md`
+- `docs/observability/GOAL_PROGRESS.md`
+
+### Tests Run
+
+- `test -f docs/observability/CURRENT_STATE.md`
+- `test -f docs/observability/GOAL_PROGRESS.md`
+- `rg -n "backend == \"noop\"|backend not in \\{\"otlp_http\", \"langfuse\"\\}|OtlpHttpObservationSink|_SENSITIVE_ATTRIBUTE_PARTS" src/coding_agent/observability.py`
+- `rg -n "observation_sink|build_observation_sink" src/coding_agent/app.py src/agentkit`
+- `rg -n "\"/metrics\"|prometheus|grafana" src tests docs || true`
+- `git diff --check -- .`
+
+### Results
+
+- File existence checks passed.
+- Read-only evidence confirmed current `noop`, `otlp_http`, and `langfuse`
+  backend handling, OTLP sink construction, sensitive-key filtering, app-level
+  observation sink wiring, and AgentKit's `ObservationSink` abstraction usage.
+- Read-only evidence found no existing Prometheus/Grafana implementation and
+  no existing `/metrics` HTTP endpoint.
+- `git diff --check -- .` passed.
+
+### Remaining Risks
+
+- G46 is a documentation-only map. It does not yet add the composite sink,
+  Prometheus exporter, metrics endpoint, or Grafana local stack.
