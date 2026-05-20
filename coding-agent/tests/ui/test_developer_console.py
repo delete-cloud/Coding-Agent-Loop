@@ -371,6 +371,63 @@ def _runtime_run(
                     }
                 ]
             },
+            "memory_evidence": [
+                {
+                    "source_id": "memory-auth-policy",
+                    "summary": "Auth regression memory",
+                    "label": "memory_auth_policy",
+                    "status": "accepted",
+                    "tags": ["src/auth.py", "tests/auth"],
+                    "evidence": [
+                        {
+                            "repo_path": "src/auth.py",
+                            "label": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT",
+                        }
+                    ],
+                    "repo_path": "src/auth.py",
+                    "line_start": 30,
+                    "line_end": 32,
+                }
+            ],
+            "actions": [
+                {
+                    "action_id": "action-alpha",
+                    "kind": "patch",
+                    "status": "completed",
+                    "policy_decision": "allow",
+                    "risk_level": "medium",
+                    "changed_path_count": 2,
+                    "file_extension_buckets": [".py", ".md"],
+                    "approval_interaction_id": "interaction-pending",
+                    "approval_status": "approved",
+                    "validation_id": "validation-alpha",
+                    "patch_summary": {
+                        "hunk_count": 3,
+                        "changed_path_count": 2,
+                        "patch_content": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT",
+                    },
+                    "command": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT",
+                }
+            ],
+            "validation_report": {
+                "status": "failed",
+                "outcomes": [
+                    {
+                        "label": "pytest_auth",
+                        "status": "failed",
+                        "exit_code": 1,
+                        "duration_ms": 42,
+                        "policy": {"decision": "allow"},
+                        "failure_summary": {
+                            "stdout_bytes": 12,
+                            "stderr_bytes": 20,
+                            "stdout_lines": 1,
+                            "stderr_lines": 2,
+                            "raw_output": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT",
+                        },
+                    }
+                ],
+            },
         },
         result={"content": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT"},
         error=error,
@@ -738,6 +795,136 @@ async def test_console_context_renders_empty_state_for_missing_pack() -> None:
     assert response.status_code == 200
     assert "Context Inspector" in response.text
     assert "No context pack evidence is available." in response.text
+
+
+@pytest.mark.asyncio
+async def test_console_memory_renders_memory_evidence_without_raw_content() -> None:
+    _register_console_session("session-alpha")
+    session_manager.configure_runtime_store(
+        _ConsoleRuntimeStore(
+            [_runtime_run("run-alpha", "session-alpha", status="completed")]
+        )
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/console/memory", params={"run_id": "run-alpha"})
+
+    assert response.status_code == 200
+    assert "Memory Evidence" in response.text
+    assert "memory-auth-policy" in response.text
+    assert "memory_auth_policy" in response.text
+    assert "Auth regression memory" not in response.text
+    assert "accepted" in response.text
+    assert "src/auth.py" in response.text
+    assert "30-32" in response.text
+    assert 'href="/console/runs/run-alpha"' in response.text
+    for forbidden in FORBIDDEN_RENDERED_TEXT:
+        assert forbidden not in response.text
+
+
+@pytest.mark.asyncio
+async def test_console_memory_renders_empty_state_for_missing_run() -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/console/memory", params={"run_id": "missing"})
+
+    assert response.status_code == 200
+    assert "Memory Evidence" in response.text
+    assert "No memory evidence is available." in response.text
+
+
+@pytest.mark.asyncio
+async def test_console_actions_renders_action_validation_and_policy_summaries() -> None:
+    _register_console_session("session-alpha")
+    session_manager.configure_runtime_store(
+        _ConsoleRuntimeStore(
+            [_runtime_run("run-alpha", "session-alpha", status="completed")]
+        )
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/console/actions", params={"run_id": "run-alpha"})
+
+    assert response.status_code == 200
+    assert "Action Executions" in response.text
+    assert "action-alpha" in response.text
+    assert "patch" in response.text
+    assert "allow" in response.text
+    assert "medium" in response.text
+    assert "interaction-pending" in response.text
+    assert "validation-alpha" in response.text
+    assert "hunk_count=3" in response.text
+    assert "Validation Results" in response.text
+    assert "pytest_auth" in response.text
+    assert "failed" in response.text
+    assert "output_bytes=12" in response.text
+    assert "error_lines=2" in response.text
+    assert 'href="/console/context?run_id=run-alpha"' in response.text
+    for forbidden in FORBIDDEN_RENDERED_TEXT:
+        assert forbidden not in response.text
+
+
+@pytest.mark.asyncio
+async def test_console_actions_renders_empty_state_without_run_id() -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/console/actions")
+
+    assert response.status_code == 200
+    assert "Action Executions" in response.text
+    assert "Validation Results" in response.text
+    assert "No action summaries are available." in response.text
+    assert "No validation summaries are available." in response.text
+
+
+@pytest.mark.asyncio
+async def test_console_memory_and_actions_restrict_user_token_to_visible_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "CODING_AGENT_SERVER_CONFIG",
+        str(_write_console_auth_config(tmp_path)),
+    )
+    monkeypatch.setattr(settings, "http_api_key", None)
+    _register_console_session(
+        "session-user",
+        owner_label=_owner_label("user-token-a"),
+    )
+    _register_console_session(
+        "session-admin",
+        owner_label=_owner_label("admin-token"),
+    )
+    session_manager.configure_runtime_store(
+        _ConsoleRuntimeStore(
+            [
+                _runtime_run("run-user", "session-user", status="completed"),
+                _runtime_run("run-admin", "session-admin", status="completed"),
+            ]
+        )
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        memory = await client.get(
+            "/console/memory",
+            params={"run_id": "run-admin"},
+            headers={"Authorization": "Bearer user-token-a"},
+        )
+        actions = await client.get(
+            "/console/actions",
+            params={"run_id": "run-admin"},
+            headers={"Authorization": "Bearer user-token-a"},
+        )
+
+    assert memory.status_code == 200
+    assert "memory-auth-policy" not in memory.text
+    assert "No memory evidence is available." in memory.text
+    assert actions.status_code == 200
+    assert "action-alpha" not in actions.text
+    assert "No action summaries are available." in actions.text
 
 
 @pytest.mark.asyncio
