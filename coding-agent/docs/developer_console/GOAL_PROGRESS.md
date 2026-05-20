@@ -281,7 +281,7 @@ Status: merged via PR #265.
 
 ## G58 Run Detail And Event Replay
 
-Status: passed local verification; pending PR.
+Status: merged via PR #266.
 
 ### Intended Files
 
@@ -346,3 +346,72 @@ Status: passed local verification; pending PR.
 
 - G58 keeps the page read-only and does not add live streaming. Links to tape,
   context, action, and observability detail pages are completed in later goals.
+
+## G59 HITL Interaction Inbox
+
+Status: passed local verification; pending PR.
+
+### Intended Files
+
+- `src/coding_agent/ui/developer_console.py`
+- `src/coding_agent/ui/http_server.py`
+- `src/coding_agent/ui/session_manager.py`
+- `tests/ui/test_developer_console.py`
+- `docs/developer_console/GOAL_PROGRESS.md`
+
+### Verification Commands
+
+- `uv run pytest tests/ui/test_developer_console.py -v`
+- `uv run pytest tests/integration/test_durable_runtime_smoke.py -v`
+- `uv run pytest tests/ui/test_session_manager_public_api.py -k "approval or interaction" -v`
+- `uv run ruff format --check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py src/coding_agent/ui/session_manager.py tests/ui/test_developer_console.py`
+- `uv run ruff check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py src/coding_agent/ui/session_manager.py tests/ui/test_developer_console.py`
+- `git diff --check -- .`
+
+### Stop Criteria
+
+- Stop if interaction inbox requires bypassing approval/action policy.
+- Stop if existing runtime interaction records cannot be listed
+  deterministically from visible sessions/runs.
+- Stop if rendering interactions requires raw request/response payload,
+  command output, stdout/stderr, env, prompt/content/message/result/text, or
+  secrets.
+
+### Changed Files
+
+- `src/coding_agent/ui/developer_console.py`
+- `src/coding_agent/ui/http_server.py`
+- `src/coding_agent/ui/session_manager.py`
+- `tests/ui/test_developer_console.py`
+- `docs/developer_console/GOAL_PROGRESS.md`
+
+### Tests Run
+
+- `uv run pytest tests/ui/test_developer_console.py -v`
+- `uv run pytest tests/integration/test_durable_runtime_smoke.py -v`
+- `uv run pytest tests/ui/test_session_manager_public_api.py -k "approval or interaction" -v`
+- `uv run ruff format --check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py src/coding_agent/ui/session_manager.py tests/ui/test_developer_console.py`
+- `uv run ruff check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py src/coding_agent/ui/session_manager.py tests/ui/test_developer_console.py`
+- `git diff --check -- .`
+
+### Results
+
+- `/console/interactions` now renders read-only pending and resolved
+  interaction inbox sections.
+- Inbox data is assembled from visible sessions, visible runtime runs, and
+  existing runtime interaction records.
+- Rows show interaction ID, linked run ID, session ID, tool call ID, kind,
+  status, created time, and resolved time.
+- Duplicate/terminal resolved states render explicitly in the resolved section.
+- The console does not expose interaction request/response payloads or raw
+  prompt/content/message/result/text/command output/stdout/stderr/env/secret
+  markers.
+- Existing approval resolution policy is unchanged; no resolve action is added
+  in G59.
+- Console tests, durable runtime smoke, approval-focused session manager tests,
+  scoped ruff format/check, and `git diff --check -- .` passed.
+
+### Remaining Risks
+
+- G59 keeps HITL interactions read-only. A resolve UI can be added later only
+  if it reuses existing approval endpoints and policy checks.

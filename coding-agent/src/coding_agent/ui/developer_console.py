@@ -70,6 +70,18 @@ class ConsoleRunDetail:
     events: tuple[ConsoleEventSummary, ...]
 
 
+@dataclass(frozen=True)
+class ConsoleInteractionSummary:
+    interaction_id: str
+    run_id: str
+    session_id: str
+    tool_call_id: str | None
+    interaction_kind: str
+    status: str
+    created_at: datetime
+    resolved_at: datetime | None
+
+
 CONSOLE_PAGES: tuple[ConsolePage, ...] = (
     ConsolePage(
         path="/console/sessions",
@@ -192,6 +204,27 @@ def render_console_run_detail_page(detail: ConsoleRunDetail) -> str:
     return _html_document(title=title, body=body, active_path="/console/runs")
 
 
+def render_console_interactions_page(
+    interactions: list[ConsoleInteractionSummary],
+) -> str:
+    page = _PAGE_BY_PATH["/console/interactions"]
+    pending = [
+        interaction
+        for interaction in interactions
+        if interaction.resolved_at is None and interaction.status == "pending"
+    ]
+    resolved = [
+        interaction for interaction in interactions if interaction not in pending
+    ]
+    body = (
+        f"<h1>{escape(page.title)}</h1>"
+        f'<p class="lede">{escape(page.description)}</p>'
+        f"{_interaction_table('Pending Interactions', pending)}"
+        f"{_interaction_table('Resolved Interactions', resolved)}"
+    )
+    return _html_document(title=page.title, body=body, active_path=page.path)
+
+
 def safe_error_summary(error: str | None) -> str | None:
     if error is None:
         return None
@@ -211,6 +244,14 @@ def safe_error_summary(error: str | None) -> str | None:
     if any(token in normalized for token in forbidden):
         return "Sensitive error summary redacted."
     return error[:240]
+
+
+def safe_id_value(value: object) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    if _contains_sensitive_token(value):
+        return "redacted"
+    return value[:120]
 
 
 def safe_key_tuple(mapping: dict[str, object]) -> tuple[str, ...]:
@@ -315,6 +356,42 @@ def _run_metadata_detail(detail: ConsoleRunDetail) -> str:
         f"<dt>Metadata Keys</dt><dd>{escape(_join_or_dash(detail.metadata_keys))}</dd>"
         f"<dt>Result Keys</dt><dd>{escape(_join_or_dash(detail.result_keys))}</dd>"
         "</dl>"
+        "</section>"
+    )
+
+
+def _interaction_table(
+    title: str,
+    interactions: list[ConsoleInteractionSummary],
+) -> str:
+    if not interactions:
+        return _empty_state(title, "No data loaded yet. No interactions are available.")
+    rows = []
+    for interaction in interactions:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(interaction.interaction_id)}</td>"
+            f'<td><a href="/console/runs/{escape(interaction.run_id)}">'
+            f"{escape(interaction.run_id)}</a></td>"
+            f"<td>{escape(interaction.session_id)}</td>"
+            f"<td>{escape(interaction.tool_call_id or '-')}</td>"
+            f"<td>{escape(interaction.interaction_kind)}</td>"
+            f'<td class="status">{escape(interaction.status)}</td>'
+            f"<td>{escape(_format_datetime(interaction.created_at))}</td>"
+            f"<td>{escape(_format_optional_datetime(interaction.resolved_at))}</td>"
+            "</tr>"
+        )
+    return (
+        f'<section aria-label="{escape(title)}">'
+        f"<h2>{escape(title)}</h2>"
+        '<table aria-label="Developer Console interactions">'
+        "<thead><tr>"
+        "<th>Interaction ID</th><th>Run ID</th><th>Session ID</th>"
+        "<th>Tool Call ID</th><th>Kind</th><th>Status</th>"
+        "<th>Created</th><th>Resolved</th>"
+        "</tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
         "</section>"
     )
 
