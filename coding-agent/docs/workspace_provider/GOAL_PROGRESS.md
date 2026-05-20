@@ -112,3 +112,58 @@ Status: passed local verification; in PR #277.
     provider-instance fail-closed rule and the ADR-0021 session/admin ownership
     boundary for workspace lifecycle routes. Both boundary rules and matching
     acceptance criteria were added before merge.
+
+## G70_PROVIDER_NEUTRAL_LOCAL_WORKSPACE_PROVIDER_CONTRACT
+
+### Before
+
+- Goal id: G70_PROVIDER_NEUTRAL_LOCAL_WORKSPACE_PROVIDER_CONTRACT
+- Intended files:
+  - `docs/workspace_provider/GOAL_PROGRESS.md`
+  - `src/coding_agent/ui/execution_binding.py`
+  - `src/coding_agent/ui/schemas.py`
+  - `src/coding_agent/ui/http_server.py`
+  - `tests/ui/test_execution_binding.py`
+  - `tests/ui/test_http_server.py`
+- Verification commands:
+  - Run from `coding-agent/`.
+  - `uv run pytest tests/ui/test_execution_binding.py -v`
+  - `uv run pytest tests/ui/test_http_server.py -k "execution_binding or workspace_provider_metadata" -v`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Provider metadata requires changing AgentKit Core or rewriting the pipeline.
+  - Deterministic local provider behavior cannot be represented without Docker,
+    hosted services, production credentials, or raw sensitive workspace content.
+
+### After
+
+Status: passed local verification; in PR #278.
+
+- Changed files:
+  - `docs/workspace_provider/GOAL_PROGRESS.md`
+  - `src/coding_agent/ui/execution_binding.py`
+  - `src/coding_agent/ui/schemas.py`
+  - `src/coding_agent/ui/http_server.py`
+  - `tests/ui/test_execution_binding.py`
+  - `tests/ui/test_http_server.py`
+- Tests run:
+  - Run from `coding-agent/`.
+  - `uv run pytest tests/ui/test_execution_binding.py -v`
+  - `uv run pytest tests/ui/test_http_server.py -k "execution_binding or workspace_provider_metadata" -v`
+  - `uv run pytest tests/ui/test_session_manager_public_api.py -k "execution_binding" -v`
+  - `uv run ruff format --check src/coding_agent/ui/execution_binding.py src/coding_agent/ui/schemas.py src/coding_agent/ui/http_server.py tests/ui/test_execution_binding.py tests/ui/test_http_server.py`
+  - `uv run ruff check src/coding_agent/ui/execution_binding.py src/coding_agent/ui/schemas.py src/coding_agent/ui/http_server.py tests/ui/test_execution_binding.py tests/ui/test_http_server.py`
+  - `git diff --check -- .`
+- Results:
+  - New provider metadata tests first failed against the previous binding
+    contract, then passed after implementation.
+  - Final targeted verification passed.
+- Remaining risks:
+  - G71 still needs proof that action tools route through the selected binding.
+  - G73 still needs lifecycle fail-closed provider-instance checks beyond
+    binding metadata round-trip.
+- Review notes:
+  - Local review found that HTTP schemas accepted whitespace-only provider
+    metadata while binding deserialization rejected it on reload. Schema
+    validation now rejects blank-after-strip metadata and `/sessions` has a
+    regression test for both provider metadata fields.

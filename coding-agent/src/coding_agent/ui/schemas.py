@@ -13,12 +13,36 @@ from coding_agent.core.config import ProviderName
 class LocalExecutionBindingRequest(BaseModel):
     kind: Literal["local"]
     workspace_root: str = Field(..., min_length=1, max_length=500)
+    workspace_provider: str | None = Field(
+        None,
+        min_length=1,
+        max_length=100,
+        pattern=r"^.*\S.*$",
+    )
+    provider_instance_id: str | None = Field(
+        None,
+        min_length=1,
+        max_length=200,
+        pattern=r"^.*\S.*$",
+    )
 
 
 class CloudWorkspaceBindingRequest(BaseModel):
     kind: Literal["cloud"]
     workspace_url: str = Field(..., min_length=1, max_length=500)
     workspace_id: str = Field(..., min_length=1, max_length=200)
+    workspace_provider: str | None = Field(
+        None,
+        min_length=1,
+        max_length=100,
+        pattern=r"^.*\S.*$",
+    )
+    provider_instance_id: str | None = Field(
+        None,
+        min_length=1,
+        max_length=200,
+        pattern=r"^.*\S.*$",
+    )
 
 
 class DockerWorkspaceSourceRequest(BaseModel):

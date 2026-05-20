@@ -79,6 +79,24 @@ def test_local_binding_round_trip(tmp_path: Path) -> None:
     assert restored.workspace_root == str(workspace)
 
 
+def test_local_binding_round_trips_explicit_workspace_provider_metadata(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    binding = LocalExecutionBinding(
+        workspace_root=str(workspace),
+        workspace_provider="local",
+        provider_instance_id="local-dev",
+    )
+
+    restored = ExecutionBinding.from_dict(binding.to_dict())
+
+    assert isinstance(restored, LocalExecutionBinding)
+    assert restored.workspace_root == str(workspace)
+    assert restored.workspace_provider == "local"
+    assert restored.provider_instance_id == "local-dev"
+
+
 def test_cloud_binding_round_trip() -> None:
     binding = CloudWorkspaceBinding(
         workspace_url="https://workspace.example.com",
@@ -90,6 +108,21 @@ def test_cloud_binding_round_trip() -> None:
     assert isinstance(restored, CloudWorkspaceBinding)
     assert restored.workspace_url == "https://workspace.example.com"
     assert restored.workspace_id == "ws-123"
+
+
+def test_cloud_binding_round_trips_explicit_workspace_provider_metadata() -> None:
+    binding = CloudWorkspaceBinding(
+        workspace_url="https://workspace.example.com",
+        workspace_id="ws-123",
+        workspace_provider="docker",
+        provider_instance_id="docker-host-a",
+    )
+
+    restored = ExecutionBinding.from_dict(binding.to_dict())
+
+    assert isinstance(restored, CloudWorkspaceBinding)
+    assert restored.workspace_provider == "docker"
+    assert restored.provider_instance_id == "docker-host-a"
 
 
 def test_cloud_binding_round_trip_preserves_runtime_profile() -> None:

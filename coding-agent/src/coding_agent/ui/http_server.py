@@ -1559,10 +1559,16 @@ def _execution_binding_from_request(
         return None
     binding = body.execution_binding
     if binding.kind == "local":
-        return LocalExecutionBinding(workspace_root=binding.workspace_root)
+        return LocalExecutionBinding(
+            workspace_root=binding.workspace_root,
+            workspace_provider=binding.workspace_provider,
+            provider_instance_id=binding.provider_instance_id,
+        )
     return CloudWorkspaceBinding(
         workspace_url=binding.workspace_url,
         workspace_id=binding.workspace_id,
+        workspace_provider=binding.workspace_provider,
+        provider_instance_id=binding.provider_instance_id,
     )
 
 
