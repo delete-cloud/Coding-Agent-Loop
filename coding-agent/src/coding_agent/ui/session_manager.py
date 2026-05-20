@@ -33,6 +33,7 @@ from agentkit.runtime import (
 )
 from agentkit.runtime.context import AgentRunContext
 from agentkit.storage.protocols import CheckpointStore, TapeStore
+from agentkit.storage.protocols import TapeDebugStore, TapeInfo, TapeSearchResult
 from agentkit.tape.tape import Tape
 from agentkit.tools import FatalToolExecutionError
 from agentkit.tape.models import Entry
@@ -810,6 +811,32 @@ class SessionManager:
     ) -> list[AgentInteractionRecord]:
         store = self._require_runtime_store()
         return await store.list_agent_interactions(run_id)
+
+    async def load_tape_debug_info(self, tape_id: str) -> TapeInfo | None:
+        if not isinstance(self._tape_store, TapeDebugStore):
+            return None
+        return await self._tape_store.info(tape_id)
+
+    async def search_tape_debug_entries(
+        self,
+        *,
+        tape_id: str | None = None,
+        kind: str | None = None,
+        run_id: str | None = None,
+        tool_call_id: str | None = None,
+        anchor_type: str | None = None,
+        limit: int = 100,
+    ) -> list[TapeSearchResult]:
+        if not isinstance(self._tape_store, TapeDebugStore):
+            return []
+        return await self._tape_store.search(
+            tape_id=tape_id,
+            kind=kind,
+            run_id=run_id,
+            tool_call_id=tool_call_id,
+            anchor_type=anchor_type,
+            limit=limit,
+        )
 
     async def load_runtime_message_snapshot(
         self,

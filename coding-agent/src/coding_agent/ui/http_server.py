@@ -60,21 +60,29 @@ from coding_agent.observability import (
 )
 from coding_agent.ui.binding_resolver import DefaultBindingResolver
 from coding_agent.ui.developer_console import (
+    ConsoleContextEvidence,
+    ConsoleContextSectionSummary,
+    ConsoleContextSummary,
     ConsoleEventSummary,
     ConsoleInteractionSummary,
     ConsoleRunDetail,
     ConsoleRunSummary,
     ConsoleSessionSummary,
+    ConsoleTapeEntrySummary,
+    ConsoleTapeInfo,
     ConsoleSnapshotSummary,
     message_label,
     render_console_page,
+    render_console_context_page,
     render_console_interactions_page,
     render_console_run_detail_page,
     render_console_runs_page,
     render_console_sessions_page,
+    render_console_tape_page,
     safe_id_value,
     safe_key_tuple,
     safe_error_summary,
+    safe_text_value,
 )
 from coding_agent.ui.session_manager import Session, SessionManager
 from coding_agent.ui.session_owner_store import (
@@ -1111,15 +1119,53 @@ async def console_interactions(
 
 
 @app.get("/console/tape", response_class=HTMLResponse)
-async def console_tape(request: Request) -> HTMLResponse:
+async def console_tape(
+    request: Request,
+    tape_id: str | None = Query(None, min_length=1, max_length=200),
+    kind: str | None = Query(None, min_length=1, max_length=80),
+    run_id: str | None = Query(None, min_length=1, max_length=200),
+    tool_call_id: str | None = Query(None, min_length=1, max_length=200),
+    anchor_type: str | None = Query(None, min_length=1, max_length=80),
+) -> HTMLResponse:
     del request
-    return HTMLResponse(render_console_page("/console/tape"))
+    info = None
+    if tape_id is not None:
+        tape_info = await session_manager.load_tape_debug_info(tape_id)
+        if tape_info is not None:
+            info = ConsoleTapeInfo(
+                tape_id=tape_info.tape_id,
+                entry_count=tape_info.entry_count,
+                first_seq=tape_info.first_seq,
+                last_seq=tape_info.last_seq,
+            )
+    entries = await session_manager.search_tape_debug_entries(
+        tape_id=tape_id,
+        kind=kind,
+        run_id=run_id,
+        tool_call_id=tool_call_id,
+        anchor_type=anchor_type,
+        limit=100,
+    )
+    summaries = [_tape_entry_summary(entry) for entry in entries]
+    return HTMLResponse(render_console_tape_page(info, summaries))
 
 
 @app.get("/console/context", response_class=HTMLResponse)
-async def console_context(request: Request) -> HTMLResponse:
+async def console_context(
+    request: Request,
+    run_id: str | None = Query(None, min_length=1, max_length=200),
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> HTMLResponse:
     del request
-    return HTMLResponse(render_console_page("/console/context"))
+    if run_id is None:
+        return HTMLResponse(render_console_context_page(None))
+    try:
+        run = await _get_visible_runtime_run(run_id, auth_context)
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            return HTMLResponse(render_console_context_page(None))
+        raise
+    return HTMLResponse(render_console_context_page(_context_summary_from_run(run)))
 
 
 @app.get("/console/memory", response_class=HTMLResponse)
@@ -2547,6 +2593,88 @@ def _runtime_event_response(record: RuntimeEventRecord) -> RuntimeEventResponse:
         payload=record.payload,
         created_at=record.created_at,
     )
+
+
+def _safe_dict(value: object) -> dict[str, object]:
+    return value if isinstance(value, dict) else {}
+
+
+def _tape_entry_summary(result: object) -> ConsoleTapeEntrySummary:
+    entry = _safe_dict(getattr(result, "entry", {}))
+    payload = _safe_dict(entry.get("payload"))
+    meta = _safe_dict(entry.get("meta"))
+    kind = entry.get("kind")
+    return ConsoleTapeEntrySummary(
+        tape_id=str(getattr(result, "tape_id", "")),
+        seq=int(getattr(result, "seq", 0)),
+        kind=kind if isinstance(kind, str) else "-",
+        run_id=safe_id_value(payload.get("run_id") or meta.get("run_id")),
+        tool_call_id=safe_id_value(
+            payload.get("tool_call_id") or meta.get("tool_call_id")
+        ),
+        anchor_type=safe_id_value(meta.get("anchor_type")),
+        payload_keys=safe_key_tuple(payload),
+        meta_keys=safe_key_tuple(meta),
+    )
+
+
+def _context_summary_from_run(run: AgentRunRecord) -> ConsoleContextSummary | None:
+    raw_pack = run.metadata.get("context_pack")
+    if not isinstance(raw_pack, dict):
+        return ConsoleContextSummary(run_id=run.run_id, sections=())
+    raw_sections = raw_pack.get("sections")
+    if not isinstance(raw_sections, list):
+        return ConsoleContextSummary(run_id=run.run_id, sections=())
+    sections: list[ConsoleContextSectionSummary] = []
+    for raw_section in raw_sections:
+        if not isinstance(raw_section, dict):
+            continue
+        title = safe_text_value(raw_section.get("title")) or "Context"
+        raw_items = raw_section.get("items")
+        if not isinstance(raw_items, list):
+            continue
+        items = tuple(
+            item
+            for raw_item in raw_items
+            if isinstance(raw_item, dict)
+            for item in [_context_evidence_from_item(raw_item)]
+            if item is not None
+        )
+        if items:
+            sections.append(ConsoleContextSectionSummary(title=title, items=items))
+    return ConsoleContextSummary(run_id=run.run_id, sections=tuple(sections))
+
+
+def _context_evidence_from_item(
+    raw_item: dict[str, object],
+) -> ConsoleContextEvidence | None:
+    source_id = safe_text_value(raw_item.get("source_id"))
+    label = safe_text_value(raw_item.get("label"))
+    source_kind = safe_text_value(raw_item.get("source_kind"))
+    if source_id is None or label is None or source_kind is None:
+        return None
+    evidence_reason = None
+    raw_evidence = raw_item.get("evidence")
+    if isinstance(raw_evidence, list) and raw_evidence:
+        first = raw_evidence[0]
+        if isinstance(first, dict):
+            evidence_reason = safe_text_value(first.get("label"))
+    score_raw = raw_item.get("score")
+    score = float(score_raw) if isinstance(score_raw, int | float) else None
+    return ConsoleContextEvidence(
+        kind=source_kind,
+        label=label,
+        source_id=source_id,
+        repo_path=safe_text_value(raw_item.get("repo_path")),
+        line_start=_optional_int(raw_item.get("line_start")),
+        line_end=_optional_int(raw_item.get("line_end")),
+        score=score,
+        reason=evidence_reason,
+    )
+
+
+def _optional_int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 async def _get_visible_runtime_run(
