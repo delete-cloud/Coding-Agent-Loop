@@ -9,6 +9,7 @@ import pytest
 from agentkit.storage.protocols import TapeInfo, TapeSearchResult
 from httpx import ASGITransport, AsyncClient
 
+from coding_agent.environment import WorkspaceProviderCapabilities
 from coding_agent.runtime_store import (
     AgentInteractionRecord,
     AgentRunRecord,
@@ -16,9 +17,11 @@ from coding_agent.runtime_store import (
     RuntimeEventRecord,
 )
 from coding_agent.core.config import settings
+from coding_agent.observability import prometheus_metrics_text, reset_prometheus_metrics
 from coding_agent.ui import http_server
 from coding_agent.ui.http_server import app, session_manager
 from coding_agent.ui.session_manager import Session
+from coding_agent.ui.workspace_store import WorkspaceRecord
 
 
 CONSOLE_ROUTES = (
@@ -31,6 +34,7 @@ CONSOLE_ROUTES = (
     "/console/memory",
     "/console/actions",
     "/console/observability",
+    "/console/workspaces",
     "/console/release",
 )
 
@@ -43,6 +47,7 @@ NAV_LINKS = {
     "Memory": "/console/memory",
     "Actions / Validation": "/console/actions",
     "Observability": "/console/observability",
+    "Workspaces": "/console/workspaces",
     "Release / Health": "/console/release",
 }
 
@@ -282,14 +287,73 @@ class _ConsoleRuntimeStore:
         ]
 
 
+class _ConsoleWorkspaceStore:
+    def __init__(self, records: list[WorkspaceRecord]) -> None:
+        self.records = records
+
+    async def save(self, record: WorkspaceRecord) -> None:
+        self.records.append(record)
+
+    async def list(self) -> list[WorkspaceRecord]:
+        return list(self.records)
+
+    async def load_by_workspace_id(self, workspace_id: str) -> WorkspaceRecord | None:
+        for record in self.records:
+            if record.workspace_id == workspace_id:
+                return record
+        return None
+
+    async def load_for_session_workspace(
+        self, session_id: str, workspace_id: str
+    ) -> WorkspaceRecord | None:
+        for record in self.records:
+            if record.session_id == session_id and record.workspace_id == workspace_id:
+                return record
+        return None
+
+    async def update_status(
+        self,
+        workspace_record_id: str,
+        *,
+        status: str,
+        cleanup_error: str | None = None,
+    ) -> WorkspaceRecord | None:
+        del workspace_record_id, status, cleanup_error
+        return None
+
+    async def update_retention(
+        self,
+        workspace_record_id: str,
+        *,
+        retention_policy: str,
+        expires_at: datetime | None,
+        status: str,
+    ) -> WorkspaceRecord | None:
+        del workspace_record_id, retention_policy, expires_at, status
+        return None
+
+    async def update_result_refs(
+        self,
+        workspace_record_id: str,
+        *,
+        result_refs: dict[str, object],
+    ) -> WorkspaceRecord | None:
+        del workspace_record_id, result_refs
+        return None
+
+
 @pytest.fixture(autouse=True)
 async def clear_console_state() -> AsyncIterator[None]:
     session_manager.configure_runtime_store(None)
+    session_manager.configure_workspace_metadata_store(None)
     original_tape_store = session_manager._tape_store
+    reset_prometheus_metrics()
     session_manager.clear_sessions()
     yield
     session_manager.configure_runtime_store(None)
+    session_manager.configure_workspace_metadata_store(None)
     session_manager._tape_store = original_tape_store
+    reset_prometheus_metrics()
     session_manager.clear_sessions()
 
 
@@ -453,6 +517,37 @@ def _runtime_run(
         },
         result={"content": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT"},
         error=error,
+    )
+
+
+def _workspace_record(
+    workspace_id: str,
+    *,
+    status: str = "active",
+    provider_instance_id: str = "docker-local",
+    cleanup_error: str | None = None,
+) -> WorkspaceRecord:
+    return WorkspaceRecord(
+        workspace_record_id=f"record-{workspace_id}",
+        workspace_id=workspace_id,
+        session_id="session-alpha",
+        provider="docker",
+        provider_instance_id=provider_instance_id,
+        workspace_root_ref="/workspaces",
+        workspace_host_label="local-host",
+        owner_label="owner:fixture",
+        source_kind="git",
+        source_ref={"remote_url": "https://example.test/repo.git"},
+        status=status,
+        retention_policy="ttl",
+        expires_at=datetime(2026, 5, 21, 2, 0, 0, tzinfo=UTC),
+        cleanup_error=cleanup_error,
+        result_refs={
+            "branch_url": "https://example.test/branch",
+            "secret_token": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT",
+        },
+        created_at=datetime(2026, 5, 20, 2, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 5, 20, 2, 5, 0, tzinfo=UTC),
     )
 
 
@@ -823,6 +918,127 @@ async def test_console_observability_degrades_without_links(
     assert "grafana.example.test" not in response.text
     for forbidden in FORBIDDEN_RENDERED_TEXT:
         assert forbidden not in response.text
+
+
+@pytest.mark.asyncio
+async def test_console_workspaces_renders_provider_inventory_without_raw_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_manager.configure_workspace_metadata_store(
+        _ConsoleWorkspaceStore(
+            [
+                _workspace_record("workspace-alpha"),
+                _workspace_record(
+                    "workspace-remote",
+                    status="retained",
+                    provider_instance_id="docker-remote",
+                    cleanup_error="safe cleanup failure",
+                ),
+            ]
+        )
+    )
+    monkeypatch.setattr(
+        http_server,
+        "_load_remote_retention_config",
+        lambda: {"enabled": True},
+    )
+    monkeypatch.setattr(
+        http_server,
+        "_load_cloud_workspace_config",
+        lambda: {"provider": "docker", "provider_instance_id": "docker-local"},
+    )
+    monkeypatch.setattr(
+        http_server,
+        "workspace_provider_capabilities_from_config",
+        lambda config: WorkspaceProviderCapabilities(
+            provider=str(config["provider"]),
+            available=True,
+            reason="ready",
+            supports_provision=True,
+            supports_archive=True,
+            supports_diff=True,
+            supports_patch=True,
+            supports_publish=False,
+        ),
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/console/workspaces")
+
+    assert response.status_code == 200
+    assert "Workspace Provider" in response.text
+    assert "Workspace Inventory" in response.text
+    assert "docker" in response.text
+    assert "ready" in response.text
+    assert "provision, archive, diff, patch" in response.text
+    assert "workspace-alpha" in response.text
+    assert "workspace-remote" in response.text
+    assert "docker-local" in response.text
+    assert "docker-remote" in response.text
+    assert "local-host" in response.text
+    assert "ttl" in response.text
+    assert "branch_url" in response.text
+    assert "secret_token" not in response.text
+    assert "safe cleanup failure" in response.text
+    for forbidden in FORBIDDEN_RENDERED_TEXT:
+        assert forbidden not in response.text
+
+
+@pytest.mark.asyncio
+async def test_console_workspaces_does_not_emit_workspace_ids_as_metric_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_manager.configure_workspace_metadata_store(
+        _ConsoleWorkspaceStore([_workspace_record("workspace-high-cardinality")])
+    )
+    monkeypatch.setattr(
+        http_server,
+        "_load_remote_retention_config",
+        lambda: {"enabled": True},
+    )
+    monkeypatch.setattr(
+        http_server,
+        "_load_cloud_workspace_config",
+        lambda: {"provider": "docker", "provider_instance_id": "docker-local"},
+    )
+    monkeypatch.setattr(
+        http_server,
+        "_load_observability_config",
+        lambda: {
+            "enabled": True,
+            "metrics": {
+                "enabled": True,
+                "endpoint_enabled": True,
+                "backend": "prometheus",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        http_server,
+        "workspace_provider_capabilities_from_config",
+        lambda config: WorkspaceProviderCapabilities(
+            provider=str(config["provider"]),
+            available=False,
+            reason="docker_unavailable",
+            supports_provision=False,
+            supports_archive=False,
+            supports_diff=False,
+            supports_patch=False,
+            supports_publish=False,
+        ),
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/console/workspaces")
+
+    assert response.status_code == 200
+    assert "workspace-high-cardinality" in response.text
+    metrics = prometheus_metrics_text()
+    assert 'route="console_workspaces"' in metrics
+    assert "workspace-high-cardinality" not in metrics
+    assert "workspace_id" not in metrics
 
 
 @pytest.mark.asyncio

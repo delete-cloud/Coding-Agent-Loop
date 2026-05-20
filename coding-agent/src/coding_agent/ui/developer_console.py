@@ -203,6 +203,35 @@ class ConsoleObservabilitySummary:
 
 
 @dataclass(frozen=True)
+class ConsoleWorkspaceCapabilitySummary:
+    provider: str
+    available: bool
+    reason: str
+    supports_provision: bool
+    supports_archive: bool
+    supports_diff: bool
+    supports_patch: bool
+    supports_publish: bool
+
+
+@dataclass(frozen=True)
+class ConsoleWorkspaceSummary:
+    workspace_id: str
+    status: str
+    updated_at: datetime
+    session_id: str | None
+    provider: str | None
+    provider_instance_id: str | None
+    workspace_host_label: str | None
+    source_kind: str | None
+    retention_policy: str | None
+    expires_at: datetime | None
+    is_local: bool | None
+    result_ref_keys: tuple[str, ...]
+    cleanup_error: str | None
+
+
+@dataclass(frozen=True)
 class ConsoleReleaseGateSummary:
     gate_id: str
     command: str
@@ -269,6 +298,12 @@ CONSOLE_PAGES: tuple[ConsolePage, ...] = (
         title="Observability",
         nav_label="Observability",
         description="Metrics, trace, and dashboard links will appear here.",
+    ),
+    ConsolePage(
+        path="/console/workspaces",
+        title="Workspaces",
+        nav_label="Workspaces",
+        description="Workspace provider inventory and local capability status will appear here.",
     ),
     ConsolePage(
         path="/console/release",
@@ -422,6 +457,20 @@ def render_console_observability_page(
         f'<p class="lede">{escape(page.description)}</p>'
         f"{_correlation_section(summary.correlation)}"
         f"{_observability_backend_section(summary)}"
+    )
+    return _html_document(title=page.title, body=body, active_path=page.path)
+
+
+def render_console_workspaces_page(
+    workspaces: list[ConsoleWorkspaceSummary],
+    capability: ConsoleWorkspaceCapabilitySummary | None,
+) -> str:
+    page = _PAGE_BY_PATH["/console/workspaces"]
+    body = (
+        f"<h1>{escape(page.title)}</h1>"
+        f'<p class="lede">{escape(page.description)}</p>'
+        f"{_workspace_capability_section(capability)}"
+        f"{_workspace_table(workspaces)}"
     )
     return _html_document(title=page.title, body=body, active_path=page.path)
 
@@ -877,6 +926,79 @@ def _observability_backend_section(summary: ConsoleObservabilitySummary) -> str:
     )
 
 
+def _workspace_capability_section(
+    capability: ConsoleWorkspaceCapabilitySummary | None,
+) -> str:
+    if capability is None:
+        return _empty_state(
+            "Workspace Provider",
+            "Workspace provider capabilities are not configured.",
+        )
+    available = "available" if capability.available else "unavailable"
+    supported = tuple(
+        name
+        for name, enabled in (
+            ("provision", capability.supports_provision),
+            ("archive", capability.supports_archive),
+            ("diff", capability.supports_diff),
+            ("patch", capability.supports_patch),
+            ("publish", capability.supports_publish),
+        )
+        if enabled
+    )
+    return (
+        '<section aria-label="Workspace provider capabilities">'
+        "<h2>Workspace Provider</h2>"
+        "<dl>"
+        f"<dt>Provider</dt><dd>{escape(capability.provider)}</dd>"
+        f"<dt>Status</dt><dd>{escape(available)}</dd>"
+        f"<dt>Reason</dt><dd>{escape(capability.reason)}</dd>"
+        f"<dt>Supported Operations</dt><dd>{escape(_join_or_dash(supported))}</dd>"
+        "</dl>"
+        "</section>"
+    )
+
+
+def _workspace_table(workspaces: list[ConsoleWorkspaceSummary]) -> str:
+    if not workspaces:
+        return _empty_state(
+            "Workspace Inventory",
+            "No data loaded yet. No workspaces are available.",
+        )
+    rows = []
+    for workspace in workspaces:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(workspace.workspace_id)}</td>"
+            f'<td class="status">{escape(workspace.status)}</td>'
+            f"<td>{escape(_format_datetime(workspace.updated_at))}</td>"
+            f"<td>{escape(workspace.session_id or '-')}</td>"
+            f"<td>{escape(workspace.provider or '-')}</td>"
+            f"<td>{escape(workspace.provider_instance_id or '-')}</td>"
+            f"<td>{escape(workspace.workspace_host_label or '-')}</td>"
+            f"<td>{escape(workspace.source_kind or '-')}</td>"
+            f"<td>{escape(workspace.retention_policy or '-')}</td>"
+            f"<td>{escape(_format_optional_datetime(workspace.expires_at))}</td>"
+            f"<td>{escape(_optional_bool(workspace.is_local))}</td>"
+            f"<td>{escape(_join_or_dash(workspace.result_ref_keys))}</td>"
+            f"<td>{escape(workspace.cleanup_error or '-')}</td>"
+            "</tr>"
+        )
+    return (
+        '<section aria-label="Workspace inventory">'
+        "<h2>Workspace Inventory</h2>"
+        '<table aria-label="Developer Console workspaces">'
+        "<thead><tr><th>Workspace ID</th><th>Status</th><th>Updated</th>"
+        "<th>Session ID</th><th>Provider</th><th>Provider Instance</th>"
+        "<th>Host Label</th><th>Source</th><th>Retention</th>"
+        "<th>Expires</th><th>Local</th><th>Result Ref Keys</th>"
+        "<th>Cleanup Error</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+        "</section>"
+    )
+
+
 def _health_section(summary: ConsoleReleaseSummary) -> str:
     checks = "".join(
         f"<li>{escape(name)}={escape(status)}</li>"
@@ -1067,6 +1189,12 @@ def _format_optional_datetime(value: datetime | None) -> str:
 
 def _format_datetime(value: datetime) -> str:
     return value.isoformat()
+
+
+def _optional_bool(value: bool | None) -> str:
+    if value is None:
+        return "-"
+    return "yes" if value else "no"
 
 
 def _join_or_dash(values: tuple[str, ...]) -> str:
