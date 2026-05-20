@@ -22,6 +22,7 @@ from coding_agent.environment.workspace_provider import (
     cloud_workspace_ready_from_config,
     provision_cloud_binding_from_config,
     register_workspace_provider,
+    workspace_provider_capabilities_from_config,
     WorkspaceProvider,
 )
 from coding_agent.ui.execution_binding import (
@@ -387,3 +388,29 @@ def test_workspace_provider_registry_checks_readiness(
     assert provider.seen_configs == [
         {"provider": "fake-provider", "workspace_root": "/srv/workspaces"}
     ]
+
+
+def test_workspace_provider_capabilities_fall_back_to_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(workspace_provider_module, "_WORKSPACE_PROVIDERS", {})
+    provider = FakeWorkspaceProvider()
+    register_workspace_provider(
+        "fake-provider", cast(WorkspaceProvider, cast(object, provider))
+    )
+
+    capabilities = workspace_provider_capabilities_from_config(
+        {
+            "provider": "fake-provider",
+            "workspace_root": "/srv/workspaces",
+        }
+    )
+
+    assert capabilities.provider == "fake-provider"
+    assert capabilities.available is True
+    assert capabilities.reason == "ready"
+    assert capabilities.supports_provision is True
+    assert capabilities.supports_archive is True
+    assert capabilities.supports_diff is True
+    assert capabilities.supports_patch is True
+    assert capabilities.supports_publish is True

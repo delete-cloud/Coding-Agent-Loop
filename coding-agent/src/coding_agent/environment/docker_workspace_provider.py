@@ -33,6 +33,7 @@ from .workspace_provider import (
     WorkspaceDiffStatus,
     WorkspaceInventoryEntry,
     WorkspacePatch,
+    WorkspaceProviderCapabilities,
     WorkspaceStatus,
     register_workspace_provider,
 )
@@ -373,6 +374,22 @@ class DockerWorkspaceProvider(WorkspaceProvider):
     def check_readiness(self, config: dict[str, object]) -> bool:
         provider_config = _docker_workspace_provider_config(config)
         return _docker_provider_ready(provider_config)
+
+    def workspace_capabilities(
+        self, config: dict[str, object]
+    ) -> WorkspaceProviderCapabilities:
+        provider_config = _docker_workspace_provider_config(config)
+        available = _docker_provider_ready(provider_config)
+        return WorkspaceProviderCapabilities(
+            provider="docker",
+            available=available,
+            reason="docker_ready" if available else "docker_unavailable",
+            supports_provision=available,
+            supports_archive=available,
+            supports_diff=available,
+            supports_patch=available,
+            supports_publish=available,
+        )
 
     @override
     def provision_cloud_workspace_binding(

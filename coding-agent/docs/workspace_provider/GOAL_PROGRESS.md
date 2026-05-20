@@ -220,3 +220,56 @@ Status: passed local verification; in PR #279.
     and that the ledger overclaimed validation routing. The test now starts from
     `CloudWorkspaceBinding` resolution, and the ledger explicitly scopes
     validation out of provider-client routing for this goal.
+
+## G72_SANDBOX_MVP_PROVIDER_CAPABILITY_DETECTION
+
+### Before
+
+- Goal id: G72_SANDBOX_MVP_PROVIDER_CAPABILITY_DETECTION
+- Intended files:
+  - `docs/workspace_provider/GOAL_PROGRESS.md`
+  - `src/coding_agent/environment/workspace_provider.py`
+  - `src/coding_agent/environment/docker_workspace_provider.py`
+  - `tests/ui/test_execution_binding.py`
+  - `tests/coding_agent/environment/test_docker_workspace_provider.py`
+- Verification commands:
+  - Run from `coding-agent/`.
+  - `uv run pytest tests/ui/test_execution_binding.py -k "capabilities" -v`
+  - `uv run pytest tests/coding_agent/environment/test_docker_workspace_provider.py -k "capabilities or readiness" -v`
+  - `uv run ruff format --check src/coding_agent/environment/workspace_provider.py src/coding_agent/environment/docker_workspace_provider.py tests/ui/test_execution_binding.py tests/coding_agent/environment/test_docker_workspace_provider.py`
+  - `uv run ruff check src/coding_agent/environment/workspace_provider.py src/coding_agent/environment/docker_workspace_provider.py tests/ui/test_execution_binding.py tests/coding_agent/environment/test_docker_workspace_provider.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Capability detection requires Docker for all tests or external hosted
+    services.
+  - Docker unavailability cannot be represented as deterministic provider
+    metadata without changing workspace/action semantics.
+
+### After
+
+Status: passed local verification; in PR #280.
+
+- Changed files:
+  - `docs/workspace_provider/GOAL_PROGRESS.md`
+  - `src/coding_agent/environment/__init__.py`
+  - `src/coding_agent/environment/workspace_provider.py`
+  - `src/coding_agent/environment/docker_workspace_provider.py`
+  - `tests/ui/test_execution_binding.py`
+  - `tests/coding_agent/environment/test_docker_workspace_provider.py`
+- Tests run:
+  - Run from `coding-agent/`.
+  - `uv run pytest tests/ui/test_execution_binding.py -k "capabilities" -v`
+  - `uv run pytest tests/ui/test_execution_binding.py -v`
+  - `uv run pytest tests/coding_agent/environment/test_docker_workspace_provider.py -k "capabilities or readiness" -v`
+  - `uv run ruff format --check src/coding_agent/environment/workspace_provider.py src/coding_agent/environment/docker_workspace_provider.py src/coding_agent/environment/__init__.py tests/ui/test_execution_binding.py tests/coding_agent/environment/test_docker_workspace_provider.py`
+  - `uv run ruff check src/coding_agent/environment/workspace_provider.py src/coding_agent/environment/docker_workspace_provider.py src/coding_agent/environment/__init__.py tests/ui/test_execution_binding.py tests/coding_agent/environment/test_docker_workspace_provider.py`
+  - `git diff --check -- .`
+- Results:
+  - All commands passed.
+  - Added provider capability reporting with deterministic fallback to existing
+    readiness for providers that do not implement a dedicated reporter.
+  - Docker capability reporting returns low-cardinality ready/unavailable
+    reasons and does not require a Docker daemon in tests.
+- Remaining risks:
+  - G73 must apply provider-instance fail-closed semantics to lifecycle APIs and
+    durable metadata paths.
