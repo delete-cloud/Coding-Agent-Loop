@@ -1,0 +1,12 @@
+apiVersion: 1
+
+providers:
+  - name: Coding Agent
+    orgId: 1
+    folder: Coding Agent
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards/json
