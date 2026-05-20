@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 import httpx
 from fastapi import FastAPI, HTTPException, Depends, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse
 from sse_starlette.sse import EventSourceResponse
 
 from agentkit.config.loader import load_config as load_agent_toml
@@ -59,6 +59,7 @@ from coding_agent.observability import (
     record_http_request_metric,
 )
 from coding_agent.ui.binding_resolver import DefaultBindingResolver
+from coding_agent.ui.developer_console import render_console_page
 from coding_agent.ui.session_manager import Session, SessionManager
 from coding_agent.ui.session_owner_store import (
     SessionOwnerStore,
@@ -920,6 +921,66 @@ async def _record_http_metrics(request: Request, call_next):
 @app.exception_handler(RateLimitExceeded)
 async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
     raise HTTPException(status_code=429, detail=str(exc))
+
+
+@app.get("/console", response_class=HTMLResponse)
+async def console_overview(request: Request) -> HTMLResponse:
+    del request
+    return HTMLResponse(render_console_page("/console"))
+
+
+@app.get("/console/sessions", response_class=HTMLResponse)
+async def console_sessions(request: Request) -> HTMLResponse:
+    del request
+    return HTMLResponse(render_console_page("/console/sessions"))
+
+
+@app.get("/console/runs", response_class=HTMLResponse)
+async def console_runs(request: Request) -> HTMLResponse:
+    del request
+    return HTMLResponse(render_console_page("/console/runs"))
+
+
+@app.get("/console/interactions", response_class=HTMLResponse)
+async def console_interactions(request: Request) -> HTMLResponse:
+    del request
+    return HTMLResponse(render_console_page("/console/interactions"))
+
+
+@app.get("/console/tape", response_class=HTMLResponse)
+async def console_tape(request: Request) -> HTMLResponse:
+    del request
+    return HTMLResponse(render_console_page("/console/tape"))
+
+
+@app.get("/console/context", response_class=HTMLResponse)
+async def console_context(request: Request) -> HTMLResponse:
+    del request
+    return HTMLResponse(render_console_page("/console/context"))
+
+
+@app.get("/console/memory", response_class=HTMLResponse)
+async def console_memory(request: Request) -> HTMLResponse:
+    del request
+    return HTMLResponse(render_console_page("/console/memory"))
+
+
+@app.get("/console/actions", response_class=HTMLResponse)
+async def console_actions(request: Request) -> HTMLResponse:
+    del request
+    return HTMLResponse(render_console_page("/console/actions"))
+
+
+@app.get("/console/observability", response_class=HTMLResponse)
+async def console_observability(request: Request) -> HTMLResponse:
+    del request
+    return HTMLResponse(render_console_page("/console/observability"))
+
+
+@app.get("/console/release", response_class=HTMLResponse)
+async def console_release(request: Request) -> HTMLResponse:
+    del request
+    return HTMLResponse(render_console_page("/console/release"))
 
 
 def _session_to_dict(session: Session) -> dict[str, Any]:
