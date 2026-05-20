@@ -289,6 +289,11 @@ class RuntimeStoreProtocol(Protocol):
         record: AgentInteractionRecord,
     ) -> AgentInteractionRecord: ...
 
+    async def list_agent_interactions(
+        self,
+        run_id: str,
+    ) -> list[AgentInteractionRecord]: ...
+
     async def resolve_agent_interaction(
         self,
         interaction_id: str,
@@ -798,6 +803,13 @@ class SessionManager:
     async def list_runtime_runs(self, session_id: str) -> list[AgentRunRecord]:
         store = self._require_runtime_store()
         return await store.list_agent_runs(session_id)
+
+    async def list_runtime_interactions(
+        self,
+        run_id: str,
+    ) -> list[AgentInteractionRecord]:
+        store = self._require_runtime_store()
+        return await store.list_agent_interactions(run_id)
 
     async def load_runtime_message_snapshot(
         self,

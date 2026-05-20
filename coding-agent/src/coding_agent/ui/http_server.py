@@ -61,15 +61,18 @@ from coding_agent.observability import (
 from coding_agent.ui.binding_resolver import DefaultBindingResolver
 from coding_agent.ui.developer_console import (
     ConsoleEventSummary,
+    ConsoleInteractionSummary,
     ConsoleRunDetail,
     ConsoleRunSummary,
     ConsoleSessionSummary,
     ConsoleSnapshotSummary,
     message_label,
     render_console_page,
+    render_console_interactions_page,
     render_console_run_detail_page,
     render_console_runs_page,
     render_console_sessions_page,
+    safe_id_value,
     safe_key_tuple,
     safe_error_summary,
 )
@@ -1064,9 +1067,47 @@ async def console_run_detail(
 
 
 @app.get("/console/interactions", response_class=HTMLResponse)
-async def console_interactions(request: Request) -> HTMLResponse:
+async def console_interactions(
+    request: Request,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> HTMLResponse:
     del request
-    return HTMLResponse(render_console_page("/console/interactions"))
+    interactions: list[ConsoleInteractionSummary] = []
+    for session_id in await session_manager.list_sessions_async():
+        try:
+            session = await session_manager.get_session_async(session_id)
+        except KeyError:
+            continue
+        if not _auth_context_can_access_session(auth_context, session):
+            continue
+        try:
+            runs = await session_manager.list_runtime_runs(session_id)
+        except RuntimeError:
+            runs = []
+        for run in runs:
+            try:
+                run_interactions = await session_manager.list_runtime_interactions(
+                    run.run_id
+                )
+            except RuntimeError:
+                run_interactions = []
+            for interaction in run_interactions:
+                interactions.append(
+                    ConsoleInteractionSummary(
+                        interaction_id=interaction.interaction_id,
+                        run_id=interaction.run_id,
+                        session_id=run.session_id,
+                        tool_call_id=safe_id_value(
+                            interaction.metadata.get("tool_call_id")
+                        ),
+                        interaction_kind=interaction.interaction_kind,
+                        status=interaction.status,
+                        created_at=interaction.created_at,
+                        resolved_at=interaction.resolved_at,
+                    )
+                )
+    interactions.sort(key=lambda item: item.created_at, reverse=True)
+    return HTMLResponse(render_console_interactions_page(interactions))
 
 
 @app.get("/console/tape", response_class=HTMLResponse)

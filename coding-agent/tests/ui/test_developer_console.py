@@ -57,6 +57,7 @@ class _ConsoleRuntimeStore:
         self.runs = {run.run_id: run for run in runs or []}
         self.events: dict[str, list[RuntimeEventRecord]] = {}
         self.snapshots: dict[str, RunMessageSnapshotRecord] = {}
+        self.interactions: dict[str, AgentInteractionRecord] = {}
 
     async def create_agent_run(self, record: AgentRunRecord) -> AgentRunRecord:
         self.runs[record.run_id] = record
@@ -140,6 +141,7 @@ class _ConsoleRuntimeStore:
         self,
         record: AgentInteractionRecord,
     ) -> AgentInteractionRecord:
+        self.interactions.setdefault(record.interaction_id, record)
         return record
 
     async def resolve_agent_interaction(
@@ -150,13 +152,30 @@ class _ConsoleRuntimeStore:
         response_payload: dict[str, object],
         resolved_at: datetime,
     ) -> AgentInteractionRecord:
-        raise KeyError(interaction_id)
+        current = self.interactions[interaction_id]
+        resolved = AgentInteractionRecord(
+            interaction_id=current.interaction_id,
+            run_id=current.run_id,
+            interaction_kind=current.interaction_kind,
+            status=status,
+            request_payload=current.request_payload,
+            response_payload=response_payload,
+            metadata=current.metadata,
+            created_at=current.created_at,
+            resolved_at=resolved_at,
+        )
+        self.interactions[interaction_id] = resolved
+        return resolved
 
     async def list_agent_interactions(
         self,
         run_id: str,
     ) -> list[AgentInteractionRecord]:
-        return []
+        return [
+            interaction
+            for interaction in self.interactions.values()
+            if interaction.run_id == run_id
+        ]
 
 
 @pytest.fixture(autouse=True)
@@ -236,6 +255,35 @@ def _runtime_event(
         },
         created_at=datetime(2026, 5, 20, 2, 0, sequence, tzinfo=UTC),
         sequence=sequence,
+    )
+
+
+def _interaction(
+    interaction_id: str,
+    run_id: str,
+    *,
+    status: str,
+    resolved: bool = False,
+) -> AgentInteractionRecord:
+    created_at = datetime(2026, 5, 20, 2, 2, 0, tzinfo=UTC)
+    return AgentInteractionRecord(
+        interaction_id=interaction_id,
+        run_id=run_id,
+        interaction_kind="approval",
+        status=status,
+        request_payload={
+            "tool_call": {"id": "tool-secret"},
+            "prompt": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT",
+        },
+        response_payload={"content": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT"},
+        metadata={
+            "session_id": "session-alpha",
+            "tool_call_id": "tool-call-visible",
+            "tool_name": "bash_run",
+            "secret": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT",
+        },
+        created_at=created_at,
+        resolved_at=(datetime(2026, 5, 20, 2, 3, 0, tzinfo=UTC) if resolved else None),
     )
 
 
@@ -354,6 +402,74 @@ async def test_console_sessions_list_renders_fixture_data_without_raw_content() 
     assert "running" in response.text
     assert "2026-05-20T01:02:03+00:00" in response.text
     assert "approval-secret-payload" not in response.text
+    for forbidden in FORBIDDEN_RENDERED_TEXT:
+        assert forbidden not in response.text
+
+
+@pytest.mark.asyncio
+async def test_console_interactions_renders_pending_and_resolved_lists() -> None:
+    _register_console_session("session-alpha")
+    store = _ConsoleRuntimeStore(
+        [_runtime_run("run-alpha", "session-alpha", status="running")]
+    )
+    await store.create_agent_interaction(
+        _interaction("interaction-pending", "run-alpha", status="pending")
+    )
+    await store.create_agent_interaction(
+        _interaction(
+            "interaction-approved",
+            "run-alpha",
+            status="approved",
+            resolved=True,
+        )
+    )
+    session_manager.configure_runtime_store(store)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/console/interactions")
+
+    assert response.status_code == 200
+    assert "Pending Interactions" in response.text
+    assert "Resolved Interactions" in response.text
+    assert "interaction-pending" in response.text
+    assert "interaction-approved" in response.text
+    assert "run-alpha" in response.text
+    assert "session-alpha" in response.text
+    assert "approval" in response.text
+    assert "pending" in response.text
+    assert "approved" in response.text
+    assert "tool-call-visible" in response.text
+    assert 'href="/console/runs/run-alpha"' in response.text
+    assert "tool-secret" not in response.text
+    for forbidden in FORBIDDEN_RENDERED_TEXT:
+        assert forbidden not in response.text
+
+
+@pytest.mark.asyncio
+async def test_console_interactions_displays_terminal_duplicate_state_safely() -> None:
+    _register_console_session("session-alpha")
+    store = _ConsoleRuntimeStore(
+        [_runtime_run("run-alpha", "session-alpha", status="completed")]
+    )
+    await store.create_agent_interaction(
+        _interaction(
+            "interaction-terminal",
+            "run-alpha",
+            status="duplicate_terminal",
+            resolved=True,
+        )
+    )
+    session_manager.configure_runtime_store(store)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/console/interactions")
+
+    assert response.status_code == 200
+    assert "interaction-terminal" in response.text
+    assert "duplicate_terminal" in response.text
+    assert "Resolved Interactions" in response.text
     for forbidden in FORBIDDEN_RENDERED_TEXT:
         assert forbidden not in response.text
 
