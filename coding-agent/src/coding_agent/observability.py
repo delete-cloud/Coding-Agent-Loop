@@ -5,9 +5,11 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import re
 import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from threading import RLock
 from typing import Any
 
 import httpx
@@ -29,6 +31,98 @@ _SENSITIVE_ATTRIBUTE_PARTS = frozenset(
         "text",
     }
 )
+_SENSITIVE_PROMETHEUS_VALUE_PARTS = frozenset(
+    {
+        "content",
+        "env",
+        "message",
+        "output",
+        "prompt",
+        "result",
+        "secret",
+        "stderr",
+        "stdout",
+        "text",
+    }
+)
+_FORBIDDEN_PROMETHEUS_LABELS = frozenset(
+    {
+        "run_id",
+        "session_id",
+        "trace_id",
+        "event_id",
+        "interaction_id",
+        "tool_call_id",
+        "file_path",
+        "prompt",
+        "message",
+        "content",
+        "command_output",
+        "secret",
+    }
+)
+_PROMETHEUS_ALLOWED_ATTRIBUTE_LABELS = frozenset(
+    {
+        "action_kind",
+        "error_type",
+        "model",
+        "policy_decision",
+        "provider",
+        "risk_level",
+        "stage",
+        "status",
+        "tool_name",
+    }
+)
+_PROMETHEUS_RESERVED_LABELS = frozenset({"event", "span", "status"})
+_PROMETHEUS_KNOWN_SPAN_NAMES = frozenset(
+    {
+        "action.execute",
+        "context_pack.build",
+        "kb.index_failure",
+        "kb.index_repo",
+        "kb.query",
+        "llm.generation",
+        "runtime.stage.apply_directives",
+        "runtime.stage.build_context",
+        "runtime.stage.dispatch",
+        "runtime.stage.load_state",
+        "runtime.stage.render",
+        "runtime.stage.run_model",
+        "runtime.stage.save_state",
+        "tool.call",
+    }
+)
+_PROMETHEUS_KNOWN_EVENT_NAMES = frozenset(
+    {
+        "action.completed",
+        "action.failed",
+        "action.started",
+        "runtime.started",
+        "tool.call.completed",
+    }
+)
+_PROMETHEUS_LABEL_VALUE_ALLOWLISTS = {
+    "action_kind": frozenset(
+        {"approval", "command_policy", "patch", "restore", "validation"}
+    ),
+    "policy_decision": frozenset({"allow", "approval_required", "deny"}),
+    "risk_level": frozenset({"low", "medium", "high"}),
+    "stage": frozenset(
+        {
+            "apply_directives",
+            "build_context",
+            "dispatch",
+            "load_state",
+            "render",
+            "run_model",
+            "save_state",
+        }
+    ),
+    "status": frozenset({"ok", "error", "started", "completed", "failed"}),
+}
+_PROMETHEUS_HISTOGRAM_BUCKETS = (5.0, 10.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 5000.0)
+_LABEL_VALUE_PATTERN = re.compile(r"[^a-zA-Z0-9_.:-]+")
 
 
 def _otlp_endpoint(endpoint: str) -> str:
@@ -41,6 +135,66 @@ def _otlp_endpoint(endpoint: str) -> str:
 def _attribute_allowed(key: str) -> bool:
     key_folded = key.casefold()
     return not any(part in key_folded for part in _SENSITIVE_ATTRIBUTE_PARTS)
+
+
+def _prometheus_label_allowed(key: str) -> bool:
+    key_folded = key.casefold()
+    if key_folded in _FORBIDDEN_PROMETHEUS_LABELS:
+        return False
+    if not _attribute_allowed(key):
+        return False
+    return key in _PROMETHEUS_ALLOWED_ATTRIBUTE_LABELS
+
+
+def _prometheus_label_value(value: Any) -> str:
+    if isinstance(value, bool):
+        raw = "true" if value else "false"
+    elif isinstance(value, int | float) and not isinstance(value, bool):
+        raw = str(value)
+    else:
+        raw = str(value)
+    normalized = _LABEL_VALUE_PATTERN.sub("_", raw.strip())[:80].strip("_")
+    return normalized or "unknown"
+
+
+def _prometheus_allowed_label_value(key: str, value: Any) -> str:
+    normalized = _prometheus_label_value(value)
+    normalized_tokens = {
+        token for token in re.split(r"[_.:-]+", normalized.casefold()) if token
+    }
+    if normalized_tokens & _SENSITIVE_PROMETHEUS_VALUE_PARTS:
+        return "unknown"
+    allowed_values = _PROMETHEUS_LABEL_VALUE_ALLOWLISTS.get(key)
+    if allowed_values is not None and normalized not in allowed_values:
+        return "unknown"
+    return normalized
+
+
+def _prometheus_metric_part(value: str, allowed_values: frozenset[str]) -> str:
+    normalized = _LABEL_VALUE_PATTERN.sub("_", value.strip())[:80].strip("_")
+    if normalized not in allowed_values:
+        return "unknown"
+    return normalized or "unknown"
+
+
+def _prometheus_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
+
+
+def _prometheus_labels(
+    attributes: Mapping[str, Any],
+    *,
+    reserved: frozenset[str] = frozenset(),
+) -> dict[str, str]:
+    labels: dict[str, str] = {}
+    for key, value in attributes.items():
+        if key in reserved:
+            continue
+        if not _prometheus_label_allowed(key):
+            continue
+        if isinstance(value, bool | int | float | str):
+            labels[key] = _prometheus_allowed_label_value(key, value)
+    return labels
 
 
 def _otlp_value(value: Any) -> dict[str, Any]:
@@ -123,15 +277,222 @@ class CompositeObservationSink:
 
 @dataclass
 class PrometheusMetricsObservationSink:
-    """Prometheus metrics exporter placeholder expanded by the G49 registry work."""
+    """Observation sink that records low-cardinality Prometheus metrics."""
 
-    enabled: bool = True
+    recorder: "PrometheusMetricsRecorder" = field(
+        default_factory=lambda: _DEFAULT_PROMETHEUS_RECORDER
+    )
 
     def record_span(self, span: SpanRecord) -> None:
-        del span
+        try:
+            self.recorder.record_span(span)
+        except Exception:
+            return
 
     def record_event(self, event: ObservationEvent) -> None:
-        del event
+        try:
+            self.recorder.record_event(event)
+        except Exception:
+            return
+
+
+@dataclass
+class PrometheusMetricsRecorder:
+    """Small deterministic Prometheus registry for Coding Agent observations."""
+
+    _counters: dict[tuple[str, tuple[tuple[str, str], ...]], float] = field(
+        default_factory=dict
+    )
+    _gauges: dict[tuple[str, tuple[tuple[str, str], ...]], float] = field(
+        default_factory=dict
+    )
+    _histograms: dict[tuple[str, tuple[tuple[str, str], ...]], list[float]] = field(
+        default_factory=dict
+    )
+    _lock: RLock = field(default_factory=RLock)
+
+    def record_span(self, span: SpanRecord) -> None:
+        labels = {
+            "span": _prometheus_metric_part(span.name, _PROMETHEUS_KNOWN_SPAN_NAMES),
+            "status": _prometheus_label_value(span.status),
+        }
+        labels.update(
+            _prometheus_labels(span.attributes, reserved=_PROMETHEUS_RESERVED_LABELS)
+        )
+        if span.error_type:
+            labels["error_type"] = _prometheus_allowed_label_value(
+                "error_type",
+                span.error_type,
+            )
+        with self._lock:
+            self._inc("coding_agent_observation_spans_total", labels)
+            self._observe(
+                "coding_agent_observation_span_duration_ms",
+                labels,
+                max(0.0, float(span.duration_ms)),
+            )
+
+    def record_event(self, event: ObservationEvent) -> None:
+        labels = {
+            "event": _prometheus_metric_part(event.name, _PROMETHEUS_KNOWN_EVENT_NAMES)
+        }
+        labels.update(
+            _prometheus_labels(event.attributes, reserved=frozenset({"event"}))
+        )
+        with self._lock:
+            self._inc("coding_agent_observation_events_total", labels)
+            self._set(
+                "coding_agent_observation_last_event_timestamp_seconds",
+                labels,
+                float(event.timestamp),
+            )
+
+    def exposition_text(self) -> str:
+        lines: list[str] = []
+        with self._lock:
+            span_counters = self._span_counters
+            event_counters = self._event_counters
+            if span_counters:
+                lines.extend(
+                    (
+                        "# HELP coding_agent_observation_spans_total Observation spans recorded.",
+                        "# TYPE coding_agent_observation_spans_total counter",
+                    )
+                )
+                lines.extend(
+                    self._format_metric(
+                        "coding_agent_observation_spans_total", span_counters
+                    )
+                )
+            if self._histograms:
+                lines.extend(
+                    (
+                        "# HELP coding_agent_observation_span_duration_ms Observation span duration in milliseconds.",
+                        "# TYPE coding_agent_observation_span_duration_ms histogram",
+                    )
+                )
+                lines.extend(self._format_histograms())
+            if event_counters:
+                lines.extend(
+                    (
+                        "# HELP coding_agent_observation_events_total Observation events recorded.",
+                        "# TYPE coding_agent_observation_events_total counter",
+                    )
+                )
+                lines.extend(
+                    self._format_metric(
+                        "coding_agent_observation_events_total",
+                        event_counters,
+                    )
+                )
+            if self._gauges:
+                lines.extend(
+                    (
+                        "# HELP coding_agent_observation_last_event_timestamp_seconds Last observation event timestamp.",
+                        "# TYPE coding_agent_observation_last_event_timestamp_seconds gauge",
+                    )
+                )
+                lines.extend(
+                    self._format_metric(
+                        "coding_agent_observation_last_event_timestamp_seconds",
+                        self._gauges,
+                    )
+                )
+        return "\n".join(lines) + ("\n" if lines else "")
+
+    def reset(self) -> None:
+        with self._lock:
+            self._counters.clear()
+            self._gauges.clear()
+            self._histograms.clear()
+
+    @property
+    def _span_counters(self) -> dict[tuple[str, tuple[tuple[str, str], ...]], float]:
+        return {
+            key: value
+            for key, value in self._counters.items()
+            if key[0] == "coding_agent_observation_spans_total"
+        }
+
+    @property
+    def _event_counters(self) -> dict[tuple[str, tuple[tuple[str, str], ...]], float]:
+        return {
+            key: value
+            for key, value in self._counters.items()
+            if key[0] == "coding_agent_observation_events_total"
+        }
+
+    def _inc(self, metric: str, labels: Mapping[str, str], amount: float = 1.0) -> None:
+        key = (metric, tuple(sorted(labels.items())))
+        self._counters[key] = self._counters.get(key, 0.0) + amount
+
+    def _set(self, metric: str, labels: Mapping[str, str], value: float) -> None:
+        key = (metric, tuple(sorted(labels.items())))
+        self._gauges[key] = value
+
+    def _observe(self, metric: str, labels: Mapping[str, str], value: float) -> None:
+        key = (metric, tuple(sorted(labels.items())))
+        self._histograms.setdefault(key, []).append(value)
+
+    def _format_metric(
+        self,
+        expected_metric: str,
+        values: Mapping[tuple[str, tuple[tuple[str, str], ...]], float],
+    ) -> list[str]:
+        lines: list[str] = []
+        for (metric, labels), value in sorted(values.items()):
+            if metric != expected_metric:
+                continue
+            lines.append(f"{metric}{_format_labels(labels)} {_format_number(value)}")
+        return lines
+
+    def _format_histograms(self) -> list[str]:
+        lines: list[str] = []
+        for (_metric, labels), values in sorted(self._histograms.items()):
+            sorted_values = sorted(values)
+            base_labels = dict(labels)
+            count_so_far = 0
+            for bucket in _PROMETHEUS_HISTOGRAM_BUCKETS:
+                count_so_far = sum(1 for value in sorted_values if value <= bucket)
+                bucket_labels = tuple(
+                    sorted({**base_labels, "le": _format_number(bucket)}.items())
+                )
+                lines.append(
+                    "coding_agent_observation_span_duration_ms_bucket"
+                    f"{_format_labels(bucket_labels)} {count_so_far}"
+                )
+            inf_labels = tuple(sorted({**base_labels, "le": "+Inf"}.items()))
+            lines.append(
+                "coding_agent_observation_span_duration_ms_bucket"
+                f"{_format_labels(inf_labels)} {len(values)}"
+            )
+            lines.append(
+                "coding_agent_observation_span_duration_ms_count"
+                f"{_format_labels(labels)} {len(values)}"
+            )
+            lines.append(
+                "coding_agent_observation_span_duration_ms_sum"
+                f"{_format_labels(labels)} {_format_number(sum(values))}"
+            )
+        return lines
+
+
+def _format_number(value: float) -> str:
+    if value == int(value):
+        return str(int(value))
+    return f"{value:.6f}".rstrip("0").rstrip(".")
+
+
+def _format_labels(labels: tuple[tuple[str, str], ...]) -> str:
+    if not labels:
+        return ""
+    formatted = ",".join(
+        f'{key}="{_prometheus_escape(value)}"' for key, value in labels
+    )
+    return "{" + formatted + "}"
+
+
+_DEFAULT_PROMETHEUS_RECORDER = PrometheusMetricsRecorder()
 
 
 @dataclass

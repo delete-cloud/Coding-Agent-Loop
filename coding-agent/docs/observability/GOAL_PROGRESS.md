@@ -143,7 +143,7 @@ Status: merged via PR #253.
 
 ## G48 Observability Factory And Composite Sink
 
-Status: passed local verification; pending PR.
+Status: merged via PR #254.
 
 ### Intended Files
 
@@ -206,3 +206,63 @@ Status: passed local verification; pending PR.
 - G48 adds the additive factory/composite shape and a metrics exporter type.
   The real Prometheus registry, metric mapping, label normalization, and text
   exposition are still G49-G50 work.
+
+## G49 Prometheus Metrics Registry And Sink
+
+Status: passed local verification; pending PR.
+
+### Intended Files
+
+- `src/coding_agent/observability.py`
+- `tests/coding_agent/test_observability.py`
+- `docs/observability/GOAL_PROGRESS.md`
+
+### Verification Commands
+
+- `uv run pytest tests/coding_agent/test_observability.py -v`
+- `uv run pytest tests/coding_agent/test_release_observability_contract.py -v`
+- `uv run pytest tests/coding_agent/test_bootstrap.py -k "observation_sink or observability" -v`
+- `uv run ruff format --check src/coding_agent/observability.py tests/coding_agent/test_observability.py tests/coding_agent/test_bootstrap.py`
+- `uv run ruff check src/coding_agent/observability.py tests/coding_agent/test_observability.py tests/coding_agent/test_bootstrap.py`
+- `git diff --check -- .`
+
+### Stop Criteria
+
+- Stop if Prometheus metrics require high-cardinality labels.
+- Stop if deterministic local metrics tests require an external Prometheus
+  server or hosted service.
+- Stop if metrics write failures cannot fail open.
+
+### Changed Files
+
+- `src/coding_agent/observability.py`
+- `tests/coding_agent/test_observability.py`
+- `docs/observability/GOAL_PROGRESS.md`
+
+### Tests Run
+
+- `uv run pytest tests/coding_agent/test_observability.py -v`
+- `uv run pytest tests/coding_agent/test_release_observability_contract.py -v`
+- `uv run pytest tests/coding_agent/test_bootstrap.py -k "observation_sink or observability" -v`
+- `uv run ruff format --check src/coding_agent/observability.py tests/coding_agent/test_observability.py tests/coding_agent/test_bootstrap.py`
+- `uv run ruff check src/coding_agent/observability.py tests/coding_agent/test_observability.py tests/coding_agent/test_bootstrap.py`
+- `git diff --check -- .`
+
+### Results
+
+- Observability tests passed: 20 passed.
+- Release observability contract tests passed: 3 passed.
+- Bootstrap observability tests passed: 4 passed, 18 deselected.
+- Scoped ruff format/check passed.
+- `git diff --check -- .` passed.
+- Local review found unsafe allowed-label value leakage and event-only
+  exposition metadata noise. The recorder now prevents attributes from
+  overwriting intrinsic labels, maps unknown span/event names to `unknown`,
+  normalizes unsafe label values to `unknown`, and emits span HELP/TYPE only
+  when span samples exist.
+
+### Remaining Risks
+
+- G49 provides the local Prometheus recorder, sink, label filtering, and text
+  exposition. The HTTP `/metrics` route and HTTP request metrics are still G50
+  work.
