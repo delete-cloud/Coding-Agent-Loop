@@ -583,6 +583,57 @@ async def _configure_run_detail_fixture(
     return store
 
 
+async def _configure_console_e2e_fixture() -> None:
+    _register_console_session("session-alpha")
+    session_manager._tape_store = _ConsoleTapeStore(["session-alpha-tape"])
+    store = _ConsoleRuntimeStore(
+        [_runtime_run("run-alpha", "session-alpha", status="completed")]
+    )
+    await store.save_message_snapshot(
+        RunMessageSnapshotRecord(
+            snapshot_id="run-alpha:latest",
+            run_id="run-alpha",
+            messages=[
+                {
+                    "role": "user",
+                    "content": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT",
+                },
+                {
+                    "role": "assistant",
+                    "content": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT",
+                },
+            ],
+            metadata={"snapshot_kind": "latest_context"},
+            created_at=datetime(2026, 5, 20, 2, 0, 10, tzinfo=UTC),
+        )
+    )
+    await store.append_runtime_event(
+        _runtime_event(
+            "event-alpha-1",
+            "run-alpha",
+            event_kind="wire.StreamDelta",
+            sequence=1,
+        )
+    )
+    await store.append_runtime_event(
+        _runtime_event(
+            "event-alpha-2",
+            "run-alpha",
+            event_kind="wire.TurnEnd",
+            sequence=2,
+        )
+    )
+    await store.create_agent_interaction(
+        _interaction("interaction-pending", "run-alpha", status="pending")
+    )
+    await store.create_agent_interaction(
+        _interaction(
+            "interaction-approved", "run-alpha", status="approved", resolved=True
+        )
+    )
+    session_manager.configure_runtime_store(store)
+
+
 @pytest.mark.asyncio
 async def test_console_shell_routes_render_navigation_without_secrets() -> None:
     transport = ASGITransport(app=app)
@@ -624,6 +675,71 @@ async def test_console_placeholder_pages_render_empty_states() -> None:
             assert response.status_code == 200, route
             assert f"<h1>{title}</h1>" in response.text
             assert "No data loaded yet." in response.text
+
+
+@pytest.mark.asyncio
+async def test_developer_console_e2e_smoke_covers_debug_chain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _configure_console_e2e_fixture()
+    monkeypatch.setattr(
+        http_server,
+        "_load_observability_config",
+        lambda: {
+            "enabled": True,
+            "tracing": {
+                "enabled": True,
+                "backend": "langfuse",
+                "public_url": "https://langfuse.example.test/project/demo",
+            },
+            "metrics": {
+                "enabled": True,
+                "endpoint_enabled": True,
+                "backend": "prometheus",
+                "grafana_url": "http://localhost:3000/d/coding-agent-observability",
+            },
+        },
+    )
+    pages = {
+        "/console": ("Console Overview",),
+        "/console/sessions": ("session-alpha",),
+        "/console/runs": ("run-alpha", "completed"),
+        "/console/runs/run-alpha": (
+            "Run Metadata",
+            "Runtime Events",
+            "Message Snapshot",
+        ),
+        "/console/interactions": ("interaction-pending", "interaction-approved"),
+        "/console/tape?tape_id=session-alpha-tape": ("Tape Info", "Tape Search"),
+        "/console/context?run_id=run-alpha": ("Context Inspector", "Auth module"),
+        "/console/memory?run_id=run-alpha": ("Memory Evidence", "memory-auth-policy"),
+        "/console/actions?run_id=run-alpha": (
+            "Action Executions",
+            "Validation Results",
+            "action-alpha",
+        ),
+        "/console/observability?run_id=run-alpha": (
+            "Trace Correlation",
+            "retrieval-alpha",
+            "Langfuse",
+            "Grafana",
+        ),
+        "/console/release": ("Health / Readiness", "durable-runtime-smoke"),
+    }
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        for path, expected_text in pages.items():
+            response = await client.get(path)
+
+            assert response.status_code == 200, path
+            for text in expected_text:
+                assert text in response.text, path
+            for label, href in NAV_LINKS.items():
+                assert label in response.text
+                assert f'href="{href}"' in response.text
+            for forbidden in FORBIDDEN_RENDERED_TEXT:
+                assert forbidden not in response.text
 
 
 @pytest.mark.asyncio
