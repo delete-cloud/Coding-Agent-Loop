@@ -167,3 +167,56 @@ Status: passed local verification; in PR #278.
     metadata while binding deserialization rejected it on reload. Schema
     validation now rejects blank-after-strip metadata and `/sessions` has a
     regression test for both provider metadata fields.
+
+## G71_ACTION_ROUTING_THROUGH_WORKSPACE_PROVIDERS
+
+### Before
+
+- Goal id: G71_ACTION_ROUTING_THROUGH_WORKSPACE_PROVIDERS
+- Intended files:
+  - `docs/workspace_provider/GOAL_PROGRESS.md`
+  - `tests/coding_agent/test_workspace_action_routing.py`
+- Verification commands:
+  - Run from `coding-agent/`.
+  - `uv run pytest tests/coding_agent/test_workspace_action_routing.py -v`
+  - `uv run pytest tests/ui/test_session_manager_runtime.py -k "cloud_environment_from_execution_binding" -v`
+  - `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Action routing requires rewriting AgentKit Core or changing action safety
+    semantics.
+  - File, patch, or shell routing cannot be verified without Docker, hosted
+    services, production credentials, or raw command/file content in durable
+    records, metrics, traces, or docs.
+  - Validation requires changing `ValidationRunner` semantics instead of
+    preserving the existing local subprocess validation contract.
+
+### After
+
+Status: passed local verification; in PR #279.
+
+- Changed files:
+  - `docs/workspace_provider/GOAL_PROGRESS.md`
+  - `tests/coding_agent/test_workspace_action_routing.py`
+- Tests run:
+  - Run from `coding-agent/`.
+  - `uv run pytest tests/coding_agent/test_workspace_action_routing.py -v`
+  - `uv run pytest tests/ui/test_session_manager_runtime.py -k "cloud_environment_from_execution_binding" -v`
+  - `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+  - `uv run ruff format --check tests/coding_agent/test_workspace_action_routing.py`
+  - `uv run ruff check tests/coding_agent/test_workspace_action_routing.py`
+  - `git diff --check -- .`
+- Results:
+  - All commands passed.
+  - The new contract test verifies the selected `CloudWorkspaceBinding` is
+    resolved to a workspace client and that file read/write/replace, glob, grep,
+    patch, and shell command tools execute against that selected client.
+- Remaining risks:
+  - ValidationRunner still executes local subprocess commands directly by
+    design; G71 preserves that action-safety behavior instead of routing
+    validation through provider clients.
+- Review notes:
+  - Local review found the first test only proved direct environment injection
+    and that the ledger overclaimed validation routing. The test now starts from
+    `CloudWorkspaceBinding` resolution, and the ledger explicitly scopes
+    validation out of provider-client routing for this goal.
