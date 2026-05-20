@@ -335,7 +335,7 @@ Status: merged via PR #256.
 
 ## G51 Runtime Context Action Metrics
 
-Status: passed local verification; pending PR.
+Status: merged via PR #257.
 
 ### Intended Files
 
@@ -395,3 +395,66 @@ Status: passed local verification; pending PR.
 - G51 provides representative low-cardinality metrics for existing spans and
   explicit eval/HITL/storage recorder hooks. It does not attempt exhaustive
   instrumentation of every storage or evaluation call path in this phase.
+
+## G52 Prometheus Grafana Local Stack And Alerts
+
+Status: passed local verification; pending PR.
+
+### Intended Files
+
+- `docs/observability/local/prometheus.yml`
+- `docs/observability/local/alert-rules.yml`
+- `docs/observability/local/docker-compose.yml`
+- `docs/observability/local/grafana/provisioning/datasources/prometheus.yml`
+- `docs/observability/local/grafana/provisioning/dashboards/coding-agent.yml`
+- `docs/observability/local/grafana/dashboards/coding-agent-observability.json`
+- `docs/observability/LOCAL_STACK.md`
+- `tests/coding_agent/test_observability_local_stack.py`
+- `docs/observability/GOAL_PROGRESS.md`
+
+### Verification Commands
+
+- `uv run pytest tests/coding_agent/test_observability_local_stack.py -v`
+- `uv run ruff format --check tests/coding_agent/test_observability_local_stack.py`
+- `uv run ruff check tests/coding_agent/test_observability_local_stack.py`
+- `git diff --check -- .`
+
+### Stop Criteria
+
+- Stop if local Prometheus/Grafana setup requires production credentials,
+  hosted services, Loki, Tempo, Kubernetes, or a full LGTM stack.
+- Stop if dashboard or alert expressions need forbidden high-cardinality
+  labels.
+- Stop if config verification cannot be deterministic without external
+  services.
+
+### Changed Files
+
+- `docs/observability/local/prometheus.yml`
+- `docs/observability/local/alert-rules.yml`
+- `docs/observability/local/docker-compose.yml`
+- `docs/observability/local/grafana/provisioning/datasources/prometheus.yml`
+- `docs/observability/local/grafana/provisioning/dashboards/coding-agent.yml`
+- `docs/observability/local/grafana/dashboards/coding-agent-observability.json`
+- `docs/observability/LOCAL_STACK.md`
+- `tests/coding_agent/test_observability_local_stack.py`
+- `docs/observability/GOAL_PROGRESS.md`
+
+### Tests Run
+
+- `uv run pytest tests/coding_agent/test_observability_local_stack.py -v`
+- `uv run ruff format --check tests/coding_agent/test_observability_local_stack.py`
+- `uv run ruff check tests/coding_agent/test_observability_local_stack.py`
+- `git diff --check -- .`
+
+### Results
+
+- Local stack contract tests passed: 5 passed.
+- Scoped ruff format/check passed.
+- `git diff --check -- .` passed.
+
+### Remaining Risks
+
+- G52 adds local Prometheus/Grafana config, dashboard provisioning, alert
+  rules, docs, and deterministic config tests. It does not start containers or
+  require Docker as part of CI-style verification.
