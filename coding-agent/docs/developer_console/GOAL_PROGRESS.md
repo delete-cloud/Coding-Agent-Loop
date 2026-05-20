@@ -571,7 +571,7 @@ Status: merged via PR #269.
 
 ## G62 Observability Release Integration
 
-Status: passed local verification; pending PR.
+Status: merged via PR #270.
 
 ### Intended Files
 
@@ -638,3 +638,75 @@ Status: passed local verification; pending PR.
   configured safe links and local status, keeping external services optional.
 - Release verification page displays the deterministic manifest commands but
   does not execute the release gate suite from the browser.
+
+## G63 Developer Console E2E Smoke And Docs
+
+Status: passed local verification; pending PR.
+
+### Intended Files
+
+- `tests/ui/test_developer_console.py`
+- `docs/developer_console/USAGE.md`
+- `docs/developer_console/IMPLEMENTATION_REPORT.md`
+- `docs/developer_console/GOAL_PROGRESS.md`
+
+### Verification Commands
+
+- `uv run pytest tests/ui/test_developer_console.py -v`
+- `uv run pytest tests/integration/test_durable_runtime_smoke.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+- `uv run pytest tests/coding_agent/test_observability.py tests/coding_agent/test_observability_local_stack.py tests/coding_agent/test_release_observability_contract.py -v`
+- `uv run pytest tests/coding_agent/evaluation/ -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check tests/ui/test_developer_console.py`
+- `uv run ruff check tests/ui/test_developer_console.py`
+- `git diff --check -- .`
+
+### Stop Criteria
+
+- Stop if final smoke requires new console features instead of only fixing
+  regressions in the already implemented G54-G62 surface.
+- Stop if prior smoke tests require external hosted services, production
+  credentials, real LLM calls, or G00-G53 behavior changes.
+- Stop if no deterministic fixture can demonstrate runtime, context, action,
+  HITL, observability, release, and no-leak behavior together.
+
+### Changed Files
+
+- `tests/ui/test_developer_console.py`
+- `docs/developer_console/USAGE.md`
+- `docs/developer_console/IMPLEMENTATION_REPORT.md`
+- `docs/developer_console/GOAL_PROGRESS.md`
+
+### Tests Run
+
+- `uv run pytest tests/ui/test_developer_console.py -v`
+- `uv run pytest tests/integration/test_durable_runtime_smoke.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+- `uv run pytest tests/coding_agent/test_observability.py tests/coding_agent/test_observability_local_stack.py tests/coding_agent/test_release_observability_contract.py -v`
+- `uv run pytest tests/coding_agent/evaluation/ -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run ruff format --check tests/ui/test_developer_console.py`
+- `uv run ruff check tests/ui/test_developer_console.py`
+- `git diff --check -- .`
+
+### Results
+
+- Added a deterministic Developer Console E2E smoke test covering sessions,
+  runs, run detail, HITL interactions, tape, context, memory, actions,
+  validation, observability, release, navigation, and no-leak assertions.
+- Added usage documentation for local route access, page purposes, privacy
+  rules, and local observability links.
+- Added final implementation report with G54-G63 landed goals, route inventory,
+  acceptance audit, verification commands, and remaining risks.
+- Prior durable runtime, context system, action safety, observability, release
+  contract, evaluation, and AgentKit context/runtime span checks passed where
+  practical.
+
+### Remaining Risks
+
+- G63 is a smoke/docs goal and intentionally adds no new runtime behavior.
+- Full repository ruff remains outside the scoped console verification; touched
+  files and whitespace checks passed.
