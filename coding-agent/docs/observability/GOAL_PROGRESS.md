@@ -398,7 +398,7 @@ Status: merged via PR #257.
 
 ## G52 Prometheus Grafana Local Stack And Alerts
 
-Status: passed local verification; pending PR.
+Status: merged via PR #258.
 
 ### Intended Files
 
@@ -458,3 +458,86 @@ Status: passed local verification; pending PR.
 - G52 adds local Prometheus/Grafana config, dashboard provisioning, alert
   rules, docs, and deterministic config tests. It does not start containers or
   require Docker as part of CI-style verification.
+
+## G53 Observability E2E Smoke And Report
+
+Status: passed local verification; pending PR #259.
+
+### Intended Files
+
+- `tests/coding_agent/test_observability_platform_smoke.py`
+- `src/coding_agent/observability.py`
+- `tests/coding_agent/test_release_observability_contract.py`
+- `docs/observability/IMPLEMENTATION_REPORT.md`
+- `docs/observability/GOAL_PROGRESS.md`
+
+### Verification Commands
+
+- `uv run pytest tests/coding_agent/test_observability_platform_smoke.py -v`
+- `uv run pytest tests/coding_agent/test_observability.py tests/coding_agent/test_release_observability_contract.py tests/coding_agent/test_observability_local_stack.py -v`
+- `uv run pytest tests/ui/test_http_server.py -k "metrics" -v`
+- `uv run pytest tests/integration/test_durable_runtime_smoke.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+- `uv run pytest tests/coding_agent/evaluation/ -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run pytest tests/coding_agent/test_release_verification_manifest.py tests/coding_agent/test_package_import_contract.py tests/cli/test_entrypoint_contract.py tests/coding_agent/test_release_documentation_contract.py tests/coding_agent/test_release_observability_contract.py tests/coding_agent/test_release_package_jsonl_contract.py -v`
+- `uv run ruff format --check src/coding_agent/observability.py tests/coding_agent/test_observability_platform_smoke.py tests/coding_agent/test_release_observability_contract.py`
+- `uv run ruff check src/coding_agent/observability.py tests/coding_agent/test_observability_platform_smoke.py tests/coding_agent/test_release_observability_contract.py`
+- `git diff --check -- .`
+
+### Stop Criteria
+
+- Stop if final smoke requires external hosted services, production
+  credentials, or real LLM calls.
+- Stop if no-leak checks require accepting forbidden high-cardinality labels.
+- Stop if preserving prior durable runtime, context, action safety, evaluation,
+  or release smoke behavior requires changing G00-G45 semantics.
+
+### Changed Files
+
+- `src/coding_agent/observability.py`
+- `tests/coding_agent/test_observability_platform_smoke.py`
+- `tests/coding_agent/test_release_observability_contract.py`
+- `docs/observability/IMPLEMENTATION_REPORT.md`
+- `docs/observability/GOAL_PROGRESS.md`
+
+### Tests Run
+
+- `uv run pytest tests/coding_agent/test_observability_platform_smoke.py -v`
+- `uv run pytest tests/coding_agent/test_observability.py tests/coding_agent/test_release_observability_contract.py tests/coding_agent/test_observability_local_stack.py -v`
+- `uv run pytest tests/ui/test_http_server.py -k "metrics" -v`
+- `uv run pytest tests/integration/test_durable_runtime_smoke.py -v`
+- `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+- `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+- `uv run pytest tests/coding_agent/evaluation/ -v`
+- `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+- `uv run pytest tests/coding_agent/test_release_verification_manifest.py tests/coding_agent/test_package_import_contract.py tests/cli/test_entrypoint_contract.py tests/coding_agent/test_release_documentation_contract.py tests/coding_agent/test_release_observability_contract.py tests/coding_agent/test_release_package_jsonl_contract.py -v`
+- `uv run ruff format --check src/coding_agent/observability.py tests/coding_agent/test_observability_platform_smoke.py tests/coding_agent/test_release_observability_contract.py`
+- `uv run ruff check src/coding_agent/observability.py tests/coding_agent/test_observability_platform_smoke.py tests/coding_agent/test_release_observability_contract.py`
+- `git diff --check -- .`
+
+### Results
+
+- Observability platform smoke passed: 2 passed.
+- Observability, release observability, and local stack tests passed:
+  32 passed.
+- HTTP metrics endpoint tests passed: 4 passed, 207 deselected.
+- Durable runtime smoke passed: 6 passed.
+- Context system smoke passed: 1 passed.
+- Action safety smoke passed: 1 passed.
+- Evaluation suite passed: 20 passed.
+- AgentKit runtime context/span regression passed: 8 passed, 29 deselected.
+- Release verification manifest command group passed: 19 passed.
+- Scoped ruff format/check passed.
+- `git diff --check -- .` passed.
+- G53 smoke found that OTLP trace attribute filtering did not drop
+  `command_output`-style keys. The exporter now also filters keys containing
+  `env`, `output`, `stdout`, or `stderr`, and the release observability
+  contract covers those cases.
+
+### Remaining Risks
+
+- G53 does not run a live Docker Prometheus/Grafana stack; G52 keeps that
+  config deterministic through YAML/JSON contract tests.
+- G53 is pending PR #259 merge and final main cleanup.
