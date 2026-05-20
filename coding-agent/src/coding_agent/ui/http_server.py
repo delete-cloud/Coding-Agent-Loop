@@ -1377,6 +1377,34 @@ def _workspace_record_summary_response(
     )
 
 
+async def _local_workspace_record_for_provider_operation(
+    workspace_id: str,
+) -> WorkspaceRecord:
+    record = await session_manager.load_workspace_record_by_workspace_id(workspace_id)
+    if record is None:
+        raise HTTPException(
+            status_code=404, detail=f"Workspace not found: {workspace_id}"
+        )
+    local_provider_instance_id = _configured_provider_instance_id()
+    if local_provider_instance_id is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "cloud_workspace.provider_instance_id is required for "
+                "provider-local workspace operations"
+            ),
+        )
+    if record.provider_instance_id != local_provider_instance_id:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Workspace belongs to a different provider instance and cannot "
+                "be operated by this server"
+            ),
+        )
+    return record
+
+
 def _retention_expires_at(
     *,
     retention_policy: WorkspaceRetentionPolicy,
@@ -2545,6 +2573,58 @@ async def cleanup_workspace(
 ) -> WorkspaceCleanupResponse:
     del request
     _require_admin_context(auth_context)
+    if _remote_retention_enabled():
+        record = await _local_workspace_record_for_provider_operation(workspace_id)
+        await session_manager.update_workspace_record_status(
+            record.workspace_record_id,
+            status="cleaning",
+            cleanup_error=None,
+        )
+        try:
+            entry = await asyncio.to_thread(
+                cleanup_cloud_workspace_from_config,
+                _load_cloud_workspace_config(),
+                workspace_id,
+                active_workspace_ids=await _active_cloud_workspace_ids(),
+            )
+        except KeyError as exc:
+            await session_manager.update_workspace_record_status(
+                record.workspace_record_id,
+                status="lost",
+                cleanup_error=str(exc),
+            )
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            await session_manager.update_workspace_record_status(
+                record.workspace_record_id,
+                status="cleanup_failed",
+                cleanup_error=str(exc),
+            )
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.exception(
+                "Cloud workspace cleanup failed workspace_id=%s", workspace_id
+            )
+            await session_manager.update_workspace_record_status(
+                record.workspace_record_id,
+                status="cleanup_failed",
+                cleanup_error=str(exc) or "workspace cleanup failed",
+            )
+            response.status_code = 500
+            return WorkspaceCleanupResponse(
+                workspace_id=workspace_id,
+                status="cleanup_failed",
+                error=str(exc),
+            )
+        await session_manager.update_workspace_record_status(
+            record.workspace_record_id,
+            status="cleaned",
+            cleanup_error=None,
+        )
+        return WorkspaceCleanupResponse(
+            workspace_id=entry.workspace_id,
+            status="cleaned",
+        )
     try:
         entry = await asyncio.to_thread(
             cleanup_cloud_workspace_from_config,
@@ -2579,6 +2659,8 @@ async def get_workspace_archive_manifest_by_id(
 ) -> WorkspaceArchiveManifestResponse:
     del request
     _require_admin_context(auth_context)
+    if _remote_retention_enabled():
+        _ = await _local_workspace_record_for_provider_operation(workspace_id)
     try:
         manifest = await asyncio.to_thread(
             workspace_archive_manifest_from_config,
@@ -2604,6 +2686,8 @@ async def get_workspace_archive_by_id(
 ) -> WorkspaceArchiveResponse:
     del request
     _require_admin_context(auth_context)
+    if _remote_retention_enabled():
+        _ = await _local_workspace_record_for_provider_operation(workspace_id)
     try:
         archive_base64 = await asyncio.to_thread(
             export_workspace_archive_by_id_from_config,

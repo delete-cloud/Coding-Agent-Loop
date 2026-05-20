@@ -273,3 +273,55 @@ Status: passed local verification; in PR #280.
 - Remaining risks:
   - G73 must apply provider-instance fail-closed semantics to lifecycle APIs and
     durable metadata paths.
+
+## G73_WORKSPACE_LIFECYCLE_API_AND_DURABLE_METADATA_HARDENING
+
+### Before
+
+- Goal id: G73_WORKSPACE_LIFECYCLE_API_AND_DURABLE_METADATA_HARDENING
+- Intended files:
+  - `docs/workspace_provider/GOAL_PROGRESS.md`
+  - `src/coding_agent/ui/http_server.py`
+  - `tests/ui/test_http_server.py`
+- Verification commands:
+  - Run from `coding-agent/`.
+  - `uv run pytest tests/ui/test_http_server.py -k "foreign_provider_instance or local_durable_record or provider_404 or durable_cloud_workspace_gc" -v`
+  - `uv run pytest tests/ui/test_session_manager_runtime.py -k "workspace" -v`
+  - `uv run ruff format --check src/coding_agent/ui/http_server.py tests/ui/test_http_server.py`
+  - `uv run ruff check src/coding_agent/ui/http_server.py tests/ui/test_http_server.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Lifecycle hardening requires changing durable runtime semantics or bypassing
+    existing admin/session authorization.
+  - Provider-local cleanup/archive behavior cannot fail closed for non-local
+    provider instances without requiring Docker or hosted services.
+
+### After
+
+Status: passed local verification; in PR #281.
+
+- Changed files:
+  - `docs/workspace_provider/GOAL_PROGRESS.md`
+  - `src/coding_agent/ui/http_server.py`
+  - `tests/ui/test_http_server.py`
+- Tests run:
+  - Run from `coding-agent/`.
+  - `uv run pytest tests/ui/test_http_server.py -k "foreign_provider_instance or local_durable_record or durable_cloud_workspace_gc" -v`
+  - `uv run pytest tests/ui/test_session_manager_runtime.py -k "workspace" -v`
+  - `uv run ruff format --check src/coding_agent/ui/http_server.py tests/ui/test_http_server.py`
+  - `uv run ruff check src/coding_agent/ui/http_server.py tests/ui/test_http_server.py`
+  - `git diff --check -- .`
+- Results:
+  - All commands passed.
+  - Durable-retention workspace cleanup and workspace-scoped archive endpoints
+    now load the durable workspace record and fail closed when the record belongs
+    to a different provider instance.
+  - Provider 404 during durable workspace cleanup marks the durable record
+    `lost` instead of leaving it in `cleaning`.
+- Remaining risks:
+  - G74 still needs safe console/observability workspace visibility, including
+    avoiding workspace ids in Prometheus labels.
+- Review notes:
+  - Local review found that provider 404 after the `cleaning` transition could
+    strand a durable record. The KeyError path now marks the record `lost` and a
+    focused regression covers it.
