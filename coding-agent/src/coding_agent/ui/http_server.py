@@ -3268,6 +3268,10 @@ async def _console_schedules_page(
         triggers: list[ScheduleTriggerRecord] = []
         for schedule in schedules[:100]:
             triggers.extend(await store.list_triggers(schedule.schedule_id, limit=25))
+        for signal in signals[:100]:
+            triggers.extend(
+                await store.list_triggers(f"signal:{signal.signal_id}", limit=25)
+            )
     except Exception:
         logger.exception(
             "Console scheduled run store failed; rendering empty schedule page"

@@ -745,10 +745,12 @@ def _schedule_record(schedule_id: str = "schedule-alpha") -> ScheduleRecord:
 
 def _schedule_trigger_record(
     trigger_id: str = "trigger-alpha",
+    *,
+    schedule_id: str = "schedule-alpha",
 ) -> ScheduleTriggerRecord:
     return ScheduleTriggerRecord(
         trigger_id=trigger_id,
-        schedule_id="schedule-alpha",
+        schedule_id=schedule_id,
         signal_id="signal-alpha",
         topic_id="topic-auth",
         run_id="run-alpha",
@@ -1317,7 +1319,13 @@ async def test_console_schedules_render_schedules_triggers_and_signals_safely(
         "_console_scheduled_run_store",
         lambda: _ConsoleScheduledRunStore(
             [_schedule_record()],
-            triggers=[_schedule_trigger_record()],
+            triggers=[
+                _schedule_trigger_record(),
+                _schedule_trigger_record(
+                    "signal-trigger-alpha",
+                    schedule_id="signal:signal-alpha",
+                ),
+            ],
             signals=[_proactive_signal_record()],
         ),
     )
@@ -1332,6 +1340,7 @@ async def test_console_schedules_render_schedules_triggers_and_signals_safely(
     assert "Proactive Signals" in response.text
     assert "schedule-alpha" in response.text
     assert "trigger-alpha" in response.text
+    assert "signal-trigger-alpha" in response.text
     assert "signal-alpha" in response.text
     assert "Repository activity detected" in response.text
     assert 'href="/console/runs/run-alpha"' in response.text
