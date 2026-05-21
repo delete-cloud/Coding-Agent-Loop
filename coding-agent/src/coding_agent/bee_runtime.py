@@ -39,6 +39,9 @@ _TASK_FINAL_STATUSES: Final[frozenset[str]] = frozenset(
 _RESERVED_ANCHOR_METADATA_KEYS: Final[frozenset[str]] = frozenset(
     {"encoded_anchor_type", "product_anchor_type", "task_status"}
 )
+_LAUNCH_ID_METADATA_KEYS: Final[frozenset[str]] = frozenset(
+    {"task_id", "node_id", "topic_id", "session_id"}
+)
 _FORBIDDEN_KEY_PARTS: Final[frozenset[str]] = frozenset(
     {
         "api_key",
@@ -864,6 +867,90 @@ def _node_dependencies_ready(
     completed_node_ids: set[str],
 ) -> bool:
     return all(dependency_id in completed_node_ids for dependency_id in node.depends_on)
+
+
+def build_bee_launch_metadata(
+    *,
+    manifest: BeeTaskManifest,
+    intent: BeeNodeLaunchIntent,
+) -> JSONObject:
+    """Build safe metadata for converting a Bee launch intent into a normal run."""
+
+    node = _manifest_node_for_intent(manifest=manifest, intent=intent)
+    metadata: JSONObject = {
+        "bee_runtime": "task_launch",
+        "launch_kind": "durable_run",
+        "task_id": intent.task_id,
+        "node_id": intent.node_id,
+        "topic_id": intent.topic_id,
+        "session_id": intent.session_id,
+        "task_kind": intent.task_kind,
+        "task_profile": intent.task_profile,
+        "node_kind": intent.node_kind,
+        "node_profile": intent.node_profile,
+        "approval_policy": "existing_runtime_policy",
+        "action_policy": "existing_action_safety",
+        "workspace_binding": "existing_workspace_provider",
+    }
+    if manifest.workspace_policy is not None:
+        metadata["workspace_policy"] = manifest.workspace_policy
+    context_profile = node.context_profile or manifest.context_profile
+    if context_profile is not None:
+        metadata["context_profile"] = context_profile
+        metadata["context_reference"] = "profile_only"
+    validation_profile = node.validation_profile or manifest.validation_profile
+    if validation_profile is not None:
+        metadata["validation_profile"] = validation_profile
+        metadata["validation_reference"] = "profile_only"
+    _require_safe_launch_metadata(metadata)
+    return metadata
+
+
+def _manifest_node_for_intent(
+    *,
+    manifest: BeeTaskManifest,
+    intent: BeeNodeLaunchIntent,
+) -> BeeNodeManifest:
+    if manifest.topic.session_id != intent.session_id:
+        raise ValueError(
+            f"Bee launch session mismatch: {manifest.topic.session_id} != {intent.session_id}"
+        )
+    if (
+        manifest.topic.topic_id is not None
+        and manifest.topic.topic_id != intent.topic_id
+    ):
+        raise ValueError(
+            f"Bee launch topic mismatch: {manifest.topic.topic_id} != {intent.topic_id}"
+        )
+    if manifest.kind != intent.task_kind:
+        raise ValueError(f"Bee launch task kind mismatch: {manifest.kind}")
+    if manifest.profile != intent.task_profile:
+        raise ValueError(f"Bee launch task profile mismatch: {manifest.profile}")
+    for node in manifest.nodes:
+        if node.node_id != intent.node_id:
+            continue
+        if node.kind != intent.node_kind:
+            raise ValueError(f"Bee launch node kind mismatch: {node.kind}")
+        if node.profile != intent.node_profile:
+            raise ValueError(f"Bee launch node profile mismatch: {node.profile}")
+        return node
+    raise ValueError(f"Bee manifest node not found for launch: {intent.node_id}")
+
+
+def _require_safe_launch_metadata(metadata: JSONObject) -> None:
+    for key, value in metadata.items():
+        _reject_forbidden_key("bee launch metadata", key)
+        if key in _LAUNCH_ID_METADATA_KEYS:
+            if not isinstance(value, str):
+                raise TypeError(f"bee launch metadata.{key} must be a string")
+            _require_non_empty(f"bee launch metadata.{key}", value)
+            if len(value) > _MAX_METADATA_STRING_CHARS:
+                raise ValueError(
+                    f"bee launch metadata.{key} exceeds maximum "
+                    f"{_MAX_METADATA_STRING_CHARS} chars"
+                )
+            continue
+        _validate_safe_json(f"bee launch metadata.{key}", value)
 
 
 def _append_anchor(tape: Tape, anchor: Anchor) -> int:
