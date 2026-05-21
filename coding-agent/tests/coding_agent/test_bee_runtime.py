@@ -550,6 +550,15 @@ async def test_bee_topic_lifecycle_rejects_reserved_anchor_metadata() -> None:
             metadata={"product_anchor_type": "topic_finalized"},
         )
 
+    with pytest.raises(ValueError, match="reserved key: task_status"):
+        await lifecycle.finalize_task(
+            tape=Tape(tape_id="tape-alpha"),
+            topic=_topic_record(now),
+            task=replace(_task_record(now), status="completed"),
+            status="completed",
+            metadata={"task_status": "running"},
+        )
+
 
 def _safe_manifest() -> JSONObject:
     return {
