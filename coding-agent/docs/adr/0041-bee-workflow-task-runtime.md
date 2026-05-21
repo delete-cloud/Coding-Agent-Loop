@@ -83,7 +83,7 @@ Keep the following explicitly out of scope:
 - [x] `test_bee_store_create_update_list_task_and_nodes`
 - [x] `test_bee_topic_lifecycle_writes_safe_task_anchors`
 - [x] `test_bee_topic_lifecycle_accounts_for_legacy_topic_plugin_boundary`
-- [ ] `test_bee_planner_returns_bounded_launch_intents_without_execution`
+- [x] `test_bee_planner_returns_bounded_launch_intents_without_execution`
 - [ ] `test_bee_launch_metadata_preserves_approval_and_workspace_policy`
 - [ ] `test_bee_context_and_validation_metadata_is_reference_only`
 - [ ] `test_bee_metrics_allow_low_cardinality_labels_without_task_or_node_ids`

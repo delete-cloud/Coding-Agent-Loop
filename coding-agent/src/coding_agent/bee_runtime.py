@@ -79,6 +79,28 @@ class BeeTopicAnchorStore(Protocol):
     ) -> TopicAnchorRecord: ...
 
 
+class BeeTaskPlannerStore(Protocol):
+    async def list_tasks(
+        self,
+        *,
+        session_id: str | None = None,
+        topic_id: str | None = None,
+        status: BeeTaskStatus | None = None,
+        limit: int = 100,
+    ) -> list[BeeTaskRecord]: ...
+
+    async def list_nodes(self, task_id: str) -> list[BeeNodeRecord]: ...
+
+    async def claim_ready_node(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        updated_at: datetime,
+        metadata: JSONObject,
+    ) -> BeeNodeRecord | None: ...
+
+
 @dataclass(frozen=True)
 class BeeTaskRecord:
     task_id: str
@@ -141,6 +163,34 @@ class BeeNodeRecord:
             _require_datetime("started_at", self.started_at)
         if self.finished_at is not None:
             _require_datetime("finished_at", self.finished_at)
+        _require_safe_json_object("metadata", self.metadata)
+
+
+@dataclass(frozen=True)
+class BeeNodeLaunchIntent:
+    task_id: str
+    node_id: str
+    topic_id: str
+    session_id: str
+    task_kind: str
+    task_profile: str
+    node_kind: str
+    node_profile: str
+    reason: str
+    planned_at: datetime
+    metadata: JSONObject = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _require_non_empty("task_id", self.task_id)
+        _require_non_empty("node_id", self.node_id)
+        _require_non_empty("topic_id", self.topic_id)
+        _require_non_empty("session_id", self.session_id)
+        _require_safe_label("task_kind", self.task_kind)
+        _require_safe_label("task_profile", self.task_profile)
+        _require_safe_label("node_kind", self.node_kind)
+        _require_safe_label("node_profile", self.node_profile)
+        _require_safe_label("reason", self.reason)
+        _require_datetime("planned_at", self.planned_at)
         _require_safe_json_object("metadata", self.metadata)
 
 
@@ -425,6 +475,17 @@ class PGBeeTaskStore:
     WHERE task_id = $1 AND node_id = $2
     RETURNING *
     """
+    _CLAIM_READY_NODE_SQL: Final[str] = """
+    UPDATE bee_task_nodes
+    SET status = 'ready',
+        run_id = NULL,
+        updated_at = $3,
+        started_at = NULL,
+        finished_at = NULL,
+        metadata = $4::jsonb
+    WHERE task_id = $1 AND node_id = $2 AND status = 'pending'
+    RETURNING *
+    """
 
     def __init__(self, *, pool: PGPool) -> None:
         self._pool = pool
@@ -604,6 +665,30 @@ class PGBeeTaskStore:
             raise KeyError(f"Bee node not found: {task_id}/{node_id}")
         return _bee_node_from_row(row)
 
+    async def claim_ready_node(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        updated_at: datetime,
+        metadata: JSONObject,
+    ) -> BeeNodeRecord | None:
+        _require_non_empty("task_id", task_id)
+        _require_non_empty("node_id", node_id)
+        _require_datetime("updated_at", updated_at)
+        _require_safe_json_object("metadata", metadata)
+        pool = await self._ensure_schema()
+        row = await pool.fetchrow(
+            self._CLAIM_READY_NODE_SQL,
+            task_id,
+            node_id,
+            updated_at,
+            metadata,
+        )
+        if row is None:
+            return None
+        return _bee_node_from_row(row)
+
 
 class BeeTaskLifecycle:
     def __init__(self, *, anchor_store: BeeTopicAnchorStore) -> None:
@@ -697,6 +782,88 @@ class BeeTaskLifecycle:
         except Exception:
             _remove_anchor_by_id(tape, entry_id=anchor.id)
             raise
+
+
+class BeeTaskPlanner:
+    def __init__(self, *, store: BeeTaskPlannerStore) -> None:
+        self._store = store
+
+    async def plan_ready_nodes(
+        self,
+        *,
+        now: datetime,
+        max_nodes: int,
+        max_tasks: int = 100,
+        session_id: str | None = None,
+        topic_id: str | None = None,
+    ) -> list[BeeNodeLaunchIntent]:
+        _require_datetime("now", now)
+        _require_positive_int("max_nodes", max_nodes)
+        _require_positive_int("max_tasks", max_tasks)
+        if session_id is not None:
+            _require_non_empty("session_id", session_id)
+        if topic_id is not None:
+            _require_non_empty("topic_id", topic_id)
+
+        tasks = await self._store.list_tasks(
+            session_id=session_id,
+            topic_id=topic_id,
+            status="running",
+            limit=max_tasks,
+        )
+        intents: list[BeeNodeLaunchIntent] = []
+        for task in tasks:
+            nodes = await self._store.list_nodes(task.task_id)
+            completed_node_ids = {
+                node.node_id for node in nodes if node.status == "completed"
+            }
+            for node in nodes:
+                if len(intents) >= max_nodes:
+                    return intents
+                if node.status != "pending":
+                    continue
+                if not _node_dependencies_ready(node, completed_node_ids):
+                    continue
+                updated_node = await self._store.claim_ready_node(
+                    task_id=node.task_id,
+                    node_id=node.node_id,
+                    updated_at=now,
+                    metadata={
+                        **node.metadata,
+                        "planner_state": "ready",
+                        "planner_reason": "dependencies_ready",
+                    },
+                )
+                if updated_node is None:
+                    continue
+                intents.append(
+                    BeeNodeLaunchIntent(
+                        task_id=task.task_id,
+                        node_id=updated_node.node_id,
+                        topic_id=task.topic_id,
+                        session_id=task.session_id,
+                        task_kind=task.kind,
+                        task_profile=task.profile,
+                        node_kind=updated_node.kind,
+                        node_profile=updated_node.profile,
+                        reason="dependencies_ready",
+                        planned_at=now,
+                        metadata={
+                            "task_kind": task.kind,
+                            "task_profile": task.profile,
+                            "node_kind": updated_node.kind,
+                            "node_profile": updated_node.profile,
+                        },
+                    )
+                )
+        return intents
+
+
+def _node_dependencies_ready(
+    node: BeeNodeRecord,
+    completed_node_ids: set[str],
+) -> bool:
+    return all(dependency_id in completed_node_ids for dependency_id in node.depends_on)
 
 
 def _append_anchor(tape: Tape, anchor: Anchor) -> int:

@@ -11,9 +11,10 @@ from coding_agent.bee_runtime import (
     BEE_TASK_ABORTED,
     BEE_TASK_FINALIZED,
     BEE_TASK_STARTED,
-    BeeTaskLifecycle,
     BeeNodeRecord,
+    BeeTaskLifecycle,
     BeeTaskManifest,
+    BeeTaskPlanner,
     BeeTaskRecord,
     PGBeeTaskStore,
     parse_bee_task_manifest,
@@ -55,6 +56,8 @@ class FakeBeePool:
             key = (cast(str, row["task_id"]), cast(str, row["node_id"]))
             self.nodes[key] = row
             return row
+        if "AND status = 'pending'" in query:
+            return self._claim_ready_node(args)
         if "UPDATE bee_task_nodes" in query:
             return self._update_node(args)
         raise AssertionError(f"unexpected fetchrow query: {query}")
@@ -133,6 +136,23 @@ class FakeBeePool:
                 "updated_at": updated_at,
                 "started_at": started_at,
                 "finished_at": finished_at,
+                "metadata": metadata,
+            }
+        )
+        return row
+
+    def _claim_ready_node(self, args: tuple[object, ...]) -> dict[str, object] | None:
+        task_id, node_id, updated_at, metadata = args
+        row = self.nodes.get((cast(str, task_id), cast(str, node_id)))
+        if row is None or row["status"] != "pending":
+            return None
+        row.update(
+            {
+                "status": "ready",
+                "run_id": None,
+                "updated_at": updated_at,
+                "started_at": None,
+                "finished_at": None,
                 "metadata": metadata,
             }
         )
@@ -558,6 +578,218 @@ async def test_bee_topic_lifecycle_rejects_reserved_anchor_metadata() -> None:
             status="completed",
             metadata={"task_status": "running"},
         )
+
+
+@pytest.mark.asyncio
+async def test_bee_planner_returns_bounded_launch_intents_without_execution() -> None:
+    pool = FakeBeePool()
+    store = PGBeeTaskStore(pool=pool)  # type: ignore[arg-type]
+    planner = BeeTaskPlanner(store=store)
+    now = datetime(2026, 5, 22, 9, tzinfo=UTC)
+    planned_at = now + timedelta(minutes=10)
+
+    await store.upsert_task(replace(_task_record(now), status="running"))
+    await store.upsert_node(
+        replace(_node_record(now, node_id="node-plan"), status="completed")
+    )
+    await store.upsert_node(
+        _node_record(
+            now + timedelta(minutes=1),
+            node_id="node-validate",
+            kind="validation",
+            depends_on=("node-plan",),
+        )
+    )
+    await store.upsert_node(
+        _node_record(
+            now + timedelta(minutes=2),
+            node_id="node-report",
+            kind="report",
+        )
+    )
+
+    intents = await planner.plan_ready_nodes(now=planned_at, max_nodes=1)
+
+    assert [intent.node_id for intent in intents] == ["node-validate"]
+    assert intents[0].task_id == "bee-task-alpha"
+    assert intents[0].topic_id == "topic-alpha"
+    assert intents[0].session_id == "session-alpha"
+    assert intents[0].node_kind == "validation"
+    assert intents[0].reason == "dependencies_ready"
+    assert intents[0].planned_at == planned_at
+    assert intents[0].metadata == {
+        "task_kind": "maintenance",
+        "task_profile": "local",
+        "node_kind": "validation",
+        "node_profile": "default",
+    }
+    updated_nodes = await store.list_nodes("bee-task-alpha")
+    node_by_id = {node.node_id: node for node in updated_nodes}
+    assert node_by_id["node-validate"].status == "ready"
+    assert node_by_id["node-validate"].run_id is None
+    assert node_by_id["node-validate"].started_at is None
+    assert node_by_id["node-validate"].finished_at is None
+    assert node_by_id["node-validate"].metadata == {
+        "source": "fixture",
+        "planner_state": "ready",
+        "planner_reason": "dependencies_ready",
+    }
+    assert node_by_id["node-report"].status == "pending"
+    assert all("runtime_runs" not in query for query, _ in pool.executed)
+
+
+@pytest.mark.asyncio
+async def test_bee_planner_skips_blocked_non_pending_and_non_running_tasks() -> None:
+    pool = FakeBeePool()
+    store = PGBeeTaskStore(pool=pool)  # type: ignore[arg-type]
+    planner = BeeTaskPlanner(store=store)
+    now = datetime(2026, 5, 22, 9, tzinfo=UTC)
+
+    await store.upsert_task(replace(_task_record(now), status="running"))
+    await store.upsert_node(
+        replace(_node_record(now, node_id="node-plan"), status="running")
+    )
+    await store.upsert_node(
+        _node_record(
+            now + timedelta(minutes=1),
+            node_id="node-validate",
+            kind="validation",
+            depends_on=("node-plan",),
+        )
+    )
+    await store.upsert_node(
+        replace(
+            _node_record(
+                now + timedelta(minutes=2),
+                node_id="node-ready",
+                kind="validation",
+            ),
+            status="ready",
+        )
+    )
+    await store.upsert_task(
+        replace(
+            _task_record(now + timedelta(minutes=3)),
+            task_id="bee-task-beta",
+            topic_id="topic-beta",
+            session_id="session-beta",
+            status="pending",
+        )
+    )
+    await store.upsert_node(
+        replace(
+            _node_record(now + timedelta(minutes=3), node_id="node-beta"),
+            task_id="bee-task-beta",
+        )
+    )
+
+    assert (
+        await planner.plan_ready_nodes(
+            now=now + timedelta(minutes=10),
+            max_nodes=10,
+        )
+        == []
+    )
+    assert [
+        (node.node_id, node.status) for node in await store.list_nodes("bee-task-alpha")
+    ] == [
+        ("node-plan", "running"),
+        ("node-validate", "pending"),
+        ("node-ready", "ready"),
+    ]
+    assert [node.status for node in await store.list_nodes("bee-task-beta")] == [
+        "pending"
+    ]
+
+    await store.update_task_status(
+        "bee-task-beta",
+        status="running",
+        summary=None,
+        updated_at=now + timedelta(minutes=11),
+        metadata={"source": "fixture"},
+    )
+    assert (
+        await planner.plan_ready_nodes(
+            now=now + timedelta(minutes=12),
+            max_nodes=1,
+            max_tasks=1,
+        )
+        == []
+    )
+
+    beta_intents = await planner.plan_ready_nodes(
+        now=now + timedelta(minutes=13),
+        max_nodes=1,
+        max_tasks=2,
+    )
+    assert [(intent.task_id, intent.node_id) for intent in beta_intents] == [
+        ("bee-task-beta", "node-beta")
+    ]
+    assert [node.status for node in await store.list_nodes("bee-task-beta")] == [
+        "ready"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_bee_planner_atomically_claims_ready_node_once() -> None:
+    class RaceStore:
+        def __init__(self) -> None:
+            self.task = replace(_task_record(now), status="running")
+            self.node = _node_record(now, node_id="node-plan")
+            self.claims = 0
+
+        async def list_tasks(
+            self,
+            *,
+            session_id: str | None = None,
+            topic_id: str | None = None,
+            status: str | None = None,
+            limit: int = 100,
+        ) -> list[BeeTaskRecord]:
+            assert session_id is None
+            assert topic_id is None
+            assert status == "running"
+            assert limit == 100
+            return [self.task]
+
+        async def list_nodes(self, task_id: str) -> list[BeeNodeRecord]:
+            assert task_id == "bee-task-alpha"
+            return [replace(self.node, status="pending")]
+
+        async def claim_ready_node(
+            self,
+            *,
+            task_id: str,
+            node_id: str,
+            updated_at: datetime,
+            metadata: JSONObject,
+        ) -> BeeNodeRecord | None:
+            assert task_id == "bee-task-alpha"
+            assert node_id == "node-plan"
+            assert updated_at == planned_at
+            assert metadata["planner_reason"] == "dependencies_ready"
+            self.claims += 1
+            if self.claims > 1:
+                return None
+            self.node = replace(
+                self.node,
+                status="ready",
+                updated_at=updated_at,
+                metadata=dict(metadata),
+            )
+            return self.node
+
+    now = datetime(2026, 5, 22, 9, tzinfo=UTC)
+    planned_at = now + timedelta(minutes=10)
+    store = RaceStore()
+    planner = BeeTaskPlanner(store=store)
+
+    first = await planner.plan_ready_nodes(now=planned_at, max_nodes=1)
+    second = await planner.plan_ready_nodes(now=planned_at, max_nodes=1)
+
+    assert [intent.node_id for intent in first] == ["node-plan"]
+    assert second == []
+    assert store.claims == 2
 
 
 def _safe_manifest() -> JSONObject:
