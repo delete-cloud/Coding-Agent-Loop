@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import pytest
@@ -11,6 +11,7 @@ from coding_agent.scheduled_runs import (
     ProactiveSignalRecord,
     ScheduleRecord,
     ScheduleTriggerRecord,
+    ScheduledRunPlanner,
 )
 
 
@@ -52,6 +53,23 @@ class FakeScheduledPool:
     async def fetch(self, query: str, *args: object) -> list[dict[str, object]]:
         self.executed.append((query, args))
         if "SELECT * FROM scheduled_runs" in query:
+            if "next_due_at <= $1" in query:
+                due_at_or_before, limit = args
+                rows = [
+                    row
+                    for row in self.schedules.values()
+                    if row["status"] == "active"
+                    and row["next_due_at"] is not None
+                    and cast(datetime, row["next_due_at"])
+                    <= cast(datetime, due_at_or_before)
+                ]
+                rows.sort(
+                    key=lambda row: (
+                        cast(datetime, row["next_due_at"]),
+                        row["schedule_id"],
+                    )
+                )
+                return rows[: cast(int, limit)]
             session_id, topic_id, status, limit = args
             rows = [
                 row
@@ -61,7 +79,10 @@ class FakeScheduledPool:
                 and (status is None or row["status"] == status)
             ]
             rows.sort(
-                key=lambda row: (cast(datetime, row["updated_at"]), row["schedule_id"])
+                key=lambda row: (
+                    cast(datetime, row["next_due_at"] or row["updated_at"]),
+                    row["schedule_id"],
+                )
             )
             return rows[: cast(int, limit)]
         if "SELECT * FROM scheduled_run_triggers" in query:
@@ -176,6 +197,30 @@ def _schedule(schedule_id: str = "schedule-1") -> ScheduleRecord:
         owner="local",
         title="Daily safe check",
         next_due_at=_dt(10),
+        last_triggered_at=None,
+        created_at=_dt(9),
+        updated_at=_dt(9),
+        metadata={"profile": "local"},
+    )
+
+
+def _schedule_with_due(
+    schedule_id: str,
+    *,
+    next_due_at: datetime | None,
+    cadence: str = "daily",
+    status: str = "active",
+) -> ScheduleRecord:
+    return ScheduleRecord(
+        schedule_id=schedule_id,
+        session_id="session-1",
+        topic_id="topic-1",
+        kind="interval",
+        status=status,
+        cadence=cadence,
+        owner="local",
+        title="Daily safe check",
+        next_due_at=next_due_at,
         last_triggered_at=None,
         created_at=_dt(9),
         updated_at=_dt(9),
@@ -415,3 +460,83 @@ def test_schedule_records_reject_sensitive_metadata_and_summary() -> None:
             observed_at=_dt(9),
             summary="Repository activity signal",
         )
+
+
+@pytest.mark.asyncio
+async def test_schedule_planner_returns_bounded_due_launch_intents(
+    store: PGScheduledRunStore,
+) -> None:
+    await store.create_schedule(_schedule_with_due("schedule-1", next_due_at=_dt(8)))
+    await store.create_schedule(_schedule_with_due("schedule-2", next_due_at=_dt(8)))
+    await store.create_schedule(_schedule_with_due("schedule-3", next_due_at=_dt(12)))
+
+    planner = ScheduledRunPlanner(
+        store=store,
+        trigger_id_factory=lambda schedule, _now: f"trigger-{schedule.schedule_id}",
+    )
+
+    intents = await planner.plan_due_schedules(now=_dt(10), max_due=1)
+
+    assert [intent.schedule_id for intent in intents] == ["schedule-1"]
+    assert intents[0].trigger_id == "trigger-schedule-1"
+    assert intents[0].session_id == "session-1"
+    assert intents[0].topic_id == "topic-1"
+    assert intents[0].reason == "schedule_due"
+    assert await store.list_triggers("schedule-1") == [
+        ScheduleTriggerRecord(
+            trigger_id="trigger-schedule-1",
+            schedule_id="schedule-1",
+            signal_id=None,
+            topic_id="topic-1",
+            run_id=None,
+            status="planned",
+            due_at=_dt(8),
+            planned_at=_dt(10),
+            reason="schedule_due",
+            metadata={"trigger_kind": "schedule", "schedule_kind": "interval"},
+        )
+    ]
+    assert (await store.load_schedule("schedule-1")).next_due_at == _dt(10) + timedelta(
+        days=1
+    )
+
+
+@pytest.mark.asyncio
+async def test_schedule_planner_skips_inactive_and_not_due_without_execution(
+    store: PGScheduledRunStore,
+) -> None:
+    await store.create_schedule(
+        _schedule_with_due("schedule-paused", next_due_at=_dt(8), status="paused")
+    )
+    await store.create_schedule(
+        _schedule_with_due("schedule-future", next_due_at=_dt(12))
+    )
+
+    planner = ScheduledRunPlanner(store=store)
+
+    intents = await planner.plan_due_schedules(now=_dt(10), max_due=5)
+
+    assert intents == []
+    assert await store.list_triggers("schedule-paused") == []
+    assert await store.list_triggers("schedule-future") == []
+
+
+@pytest.mark.asyncio
+async def test_schedule_planner_does_not_starve_due_rows_behind_null_due(
+    store: PGScheduledRunStore,
+) -> None:
+    await store.create_schedule(_schedule_with_due("schedule-null", next_due_at=None))
+    await store.create_schedule(_schedule_with_due("schedule-due", next_due_at=_dt(8)))
+
+    planner = ScheduledRunPlanner(
+        store=store,
+        trigger_id_factory=lambda schedule, _now: f"trigger-{schedule.schedule_id}",
+    )
+
+    intents = await planner.plan_due_schedules(now=_dt(10), max_due=1)
+
+    assert [intent.schedule_id for intent in intents] == ["schedule-due"]
+    assert await store.list_triggers("schedule-null") == []
+    assert [
+        trigger.schedule_id for trigger in await store.list_triggers("schedule-due")
+    ] == ["schedule-due"]
