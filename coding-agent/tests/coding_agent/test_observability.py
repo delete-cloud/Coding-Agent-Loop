@@ -318,6 +318,80 @@ def test_prometheus_metrics_normalize_unlisted_topic_kind_to_unknown() -> None:
     assert "customer_auth_cleanup_123" not in text
 
 
+def test_bee_metrics_allow_low_cardinality_labels_without_task_or_node_ids() -> None:
+    recorder = PrometheusMetricsRecorder()
+    sink = PrometheusMetricsObservationSink(recorder=recorder)
+
+    sink.record_span(
+        SpanRecord(
+            name="runtime.stage.dispatch",
+            status="ok",
+            attributes={
+                "task_id": "bee-task-alpha",
+                "node_id": "node-validate",
+                "topic_id": "topic-auth",
+                "run_id": "run-bee",
+                "session_id": "session-alpha",
+                "task_kind": "maintenance",
+                "task_profile": "local",
+                "task_status": "running",
+                "node_kind": "validation",
+                "node_profile": "default",
+                "node_status": "ready",
+            },
+            duration_ms=1,
+        )
+    )
+
+    text = recorder.exposition_text()
+
+    assert 'task_kind="maintenance"' in text
+    assert 'task_profile="local"' in text
+    assert 'task_status="running"' in text
+    assert 'node_kind="validation"' in text
+    assert 'node_profile="default"' in text
+    assert 'node_status="ready"' in text
+    for forbidden in (
+        "task_id",
+        "node_id",
+        "topic_id",
+        "run_id",
+        "session_id",
+        "bee-task-alpha",
+        "node-validate",
+        "topic-auth",
+        "run-bee",
+        "session-alpha",
+    ):
+        assert forbidden not in text
+
+
+def test_bee_metrics_normalize_unlisted_task_and_node_labels() -> None:
+    recorder = PrometheusMetricsRecorder()
+    sink = PrometheusMetricsObservationSink(recorder=recorder)
+
+    sink.record_span(
+        SpanRecord(
+            name="runtime.stage.dispatch",
+            status="ok",
+            attributes={
+                "task_kind": "customer_specific_task",
+                "node_kind": "raw_prompt_node",
+                "node_status": "ready",
+            },
+            duration_ms=1,
+        )
+    )
+
+    text = recorder.exposition_text()
+
+    assert 'task_kind="unknown"' in text
+    assert 'node_kind="unknown"' in text
+    assert 'node_status="ready"' in text
+    assert "customer_specific_task" not in text
+    assert "raw_prompt_node" not in text
+
+
 def test_prometheus_metrics_normalize_unsafe_allowed_values_and_reserved_labels() -> (
     None
 ):

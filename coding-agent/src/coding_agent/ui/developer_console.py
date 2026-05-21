@@ -289,6 +289,44 @@ class ConsoleSchedulesPage:
 
 
 @dataclass(frozen=True)
+class ConsoleBeeTaskSummary:
+    task_id: str
+    topic_id: str | None
+    session_id: str | None
+    kind: str
+    profile: str
+    status: str
+    node_count: int
+    run_count: int
+
+
+@dataclass(frozen=True)
+class ConsoleBeeNodeSummary:
+    task_id: str
+    node_id: str
+    run_id: str | None
+    topic_id: str | None
+    session_id: str | None
+    task_kind: str
+    task_profile: str
+    kind: str
+    profile: str
+    status: str
+    context_profile: str | None
+    validation_profile: str | None
+    workspace_policy: str | None
+    approval_policy: str | None
+    action_policy: str | None
+    workspace_binding: str | None
+
+
+@dataclass(frozen=True)
+class ConsoleBeePage:
+    tasks: tuple[ConsoleBeeTaskSummary, ...]
+    nodes: tuple[ConsoleBeeNodeSummary, ...]
+
+
+@dataclass(frozen=True)
 class ConsoleObservabilitySummary:
     correlation: ConsoleCorrelationSummary | None
     metrics_enabled: bool
@@ -407,6 +445,12 @@ CONSOLE_PAGES: tuple[ConsolePage, ...] = (
         title="Schedules",
         nav_label="Schedules",
         description="Topic-aware scheduled runs and proactive signals will appear here.",
+    ),
+    ConsolePage(
+        path="/console/bee",
+        title="Bee Tasks",
+        nav_label="Bee Tasks",
+        description="Bee task manifests, node launch references, and policy bindings will appear here.",
     ),
     ConsolePage(
         path="/console/workspaces",
@@ -604,6 +648,17 @@ def render_console_schedules_page(page_summary: ConsoleSchedulesPage) -> str:
         f"{_schedule_table(page_summary.schedules)}"
         f"{_schedule_trigger_table(page_summary.triggers)}"
         f"{_proactive_signal_table(page_summary.signals)}"
+    )
+    return _html_document(title=page.title, body=body, active_path=page.path)
+
+
+def render_console_bee_page(page_summary: ConsoleBeePage) -> str:
+    page = _PAGE_BY_PATH["/console/bee"]
+    body = (
+        f"<h1>{escape(page.title)}</h1>"
+        f'<p class="lede">{escape(page.description)}</p>'
+        f"{_bee_task_table(page_summary.tasks)}"
+        f"{_bee_node_table(page_summary.nodes)}"
     )
     return _html_document(title=page.title, body=body, active_path=page.path)
 
@@ -1295,6 +1350,80 @@ def _proactive_signal_table(
         "<thead><tr><th>Signal ID</th><th>Session ID</th><th>Topic ID</th>"
         "<th>Kind</th><th>Status</th><th>Observed</th><th>Cooldown Until</th>"
         "<th>Summary</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+        "</section>"
+    )
+
+
+def _bee_task_table(tasks: tuple[ConsoleBeeTaskSummary, ...]) -> str:
+    if not tasks:
+        return _empty_state(
+            "Bee Task List", "No data loaded yet. No Bee tasks are available."
+        )
+    rows = []
+    for task in tasks:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(task.task_id)}</td>"
+            f"<td>{escape(task.topic_id or '-')}</td>"
+            f"<td>{escape(task.session_id or '-')}</td>"
+            f"<td>{escape(task.kind)}</td>"
+            f"<td>{escape(task.profile)}</td>"
+            f'<td class="status">{escape(task.status)}</td>'
+            f"<td>{task.node_count}</td>"
+            f"<td>{task.run_count}</td>"
+            "</tr>"
+        )
+    return (
+        '<section aria-label="Bee task list">'
+        "<h2>Bee Task List</h2>"
+        '<table aria-label="Developer Console Bee tasks">'
+        "<thead><tr><th>Task ID</th><th>Topic ID</th><th>Session ID</th>"
+        "<th>Kind</th><th>Profile</th><th>Status</th><th>Nodes</th><th>Runs</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+        "</section>"
+    )
+
+
+def _bee_node_table(nodes: tuple[ConsoleBeeNodeSummary, ...]) -> str:
+    if not nodes:
+        return _empty_state(
+            "Bee Node Launches",
+            "No data loaded yet. No Bee node launch references are available.",
+        )
+    rows = []
+    for node in nodes:
+        run_cell = (
+            f'<a href="/console/runs/{escape(node.run_id)}">{escape(node.run_id)}</a>'
+            if node.run_id
+            else "-"
+        )
+        rows.append(
+            "<tr>"
+            f"<td>{escape(node.task_id)}</td>"
+            f"<td>{escape(node.node_id)}</td>"
+            f"<td>{run_cell}</td>"
+            f"<td>{escape(node.kind)}</td>"
+            f"<td>{escape(node.profile)}</td>"
+            f'<td class="status">{escape(node.status)}</td>'
+            f"<td>{escape(node.context_profile or '-')}</td>"
+            f"<td>{escape(node.validation_profile or '-')}</td>"
+            f"<td>{escape(node.workspace_policy or '-')}</td>"
+            f"<td>{escape(node.approval_policy or '-')}</td>"
+            f"<td>{escape(node.action_policy or '-')}</td>"
+            f"<td>{escape(node.workspace_binding or '-')}</td>"
+            "</tr>"
+        )
+    return (
+        '<section aria-label="Bee node launches">'
+        "<h2>Bee Node Launches</h2>"
+        '<table aria-label="Developer Console Bee nodes">'
+        "<thead><tr><th>Task ID</th><th>Node ID</th><th>Run ID</th>"
+        "<th>Kind</th><th>Profile</th><th>Status</th><th>Context</th>"
+        "<th>Validation</th><th>Workspace Policy</th><th>Approval Policy</th>"
+        "<th>Action Policy</th><th>Workspace Binding</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
         "</section>"

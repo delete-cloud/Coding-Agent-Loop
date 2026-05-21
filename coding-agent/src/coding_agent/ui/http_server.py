@@ -80,6 +80,9 @@ from coding_agent.ui.binding_resolver import DefaultBindingResolver
 from coding_agent.ui.developer_console import (
     ConsoleActionSummary,
     ConsoleActionValidationSummary,
+    ConsoleBeeNodeSummary,
+    ConsoleBeePage,
+    ConsoleBeeTaskSummary,
     ConsoleCorrelationSummary,
     ConsoleContextEvidence,
     ConsoleContextSectionSummary,
@@ -111,6 +114,7 @@ from coding_agent.ui.developer_console import (
     ConsoleSnapshotSummary,
     message_label,
     render_console_actions_page,
+    render_console_bee_page,
     render_console_page,
     render_console_context_page,
     render_console_interactions_page,
@@ -1358,6 +1362,15 @@ async def console_schedules(
     return HTMLResponse(
         render_console_schedules_page(await _console_schedules_page(auth_context))
     )
+
+
+@app.get("/console/bee", response_class=HTMLResponse)
+async def console_bee(
+    request: Request,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> HTMLResponse:
+    del request
+    return HTMLResponse(render_console_bee_page(await _console_bee_page(auth_context)))
 
 
 @app.get("/console/workspaces", response_class=HTMLResponse)
@@ -3288,6 +3301,84 @@ async def _console_schedules_page(
             _proactive_signal_summary_from_record(signal) for signal in signals
         ),
     )
+
+
+async def _console_bee_page(auth_context: AuthContext | None) -> ConsoleBeePage:
+    runs = await _visible_console_runs(auth_context)
+    nodes = tuple(node for run in runs for node in _bee_node_summaries_from_run(run))
+    tasks_by_id: dict[str, ConsoleBeeTaskSummary] = {}
+    for node in nodes:
+        current = tasks_by_id.get(node.task_id)
+        if current is None:
+            tasks_by_id[node.task_id] = ConsoleBeeTaskSummary(
+                task_id=node.task_id,
+                topic_id=node.topic_id,
+                session_id=node.session_id,
+                kind=node.task_kind,
+                profile=node.task_profile,
+                status=node.status,
+                node_count=1,
+                run_count=1 if node.run_id else 0,
+            )
+            continue
+        tasks_by_id[node.task_id] = ConsoleBeeTaskSummary(
+            task_id=current.task_id,
+            topic_id=current.topic_id,
+            session_id=current.session_id,
+            kind=current.kind,
+            profile=current.profile,
+            status=_combined_bee_status(current.status, node.status),
+            node_count=current.node_count + 1,
+            run_count=current.run_count + (1 if node.run_id else 0),
+        )
+    return ConsoleBeePage(
+        tasks=tuple(sorted(tasks_by_id.values(), key=lambda item: item.task_id)),
+        nodes=tuple(sorted(nodes, key=lambda item: (item.task_id, item.node_id))),
+    )
+
+
+def _bee_node_summaries_from_run(
+    run: AgentRunRecord,
+) -> tuple[ConsoleBeeNodeSummary, ...]:
+    metadata = run.metadata
+    if metadata.get("bee_runtime") != "task_launch":
+        return ()
+    task_id = safe_id_value(metadata.get("task_id"))
+    node_id = safe_id_value(metadata.get("node_id"))
+    if task_id is None or node_id is None:
+        return ()
+    return (
+        ConsoleBeeNodeSummary(
+            task_id=task_id,
+            node_id=node_id,
+            run_id=safe_id_value(run.run_id),
+            topic_id=safe_id_value(metadata.get("topic_id")),
+            session_id=safe_id_value(metadata.get("session_id")),
+            task_kind=safe_label_value(metadata.get("task_kind")) or "unknown",
+            task_profile=safe_label_value(metadata.get("task_profile")) or "unknown",
+            kind=safe_label_value(metadata.get("node_kind")) or "unknown",
+            profile=safe_label_value(metadata.get("node_profile")) or "unknown",
+            status=safe_label_value(run.status) or "unknown",
+            context_profile=safe_label_value(metadata.get("context_profile")),
+            validation_profile=safe_label_value(metadata.get("validation_profile")),
+            workspace_policy=safe_label_value(metadata.get("workspace_policy")),
+            approval_policy=safe_label_value(metadata.get("approval_policy")),
+            action_policy=safe_label_value(metadata.get("action_policy")),
+            workspace_binding=safe_label_value(metadata.get("workspace_binding")),
+        ),
+    )
+
+
+def _combined_bee_status(current: str, next_status: str) -> str:
+    if current == next_status:
+        return current
+    if "failed" in {current, next_status}:
+        return "failed"
+    if "running" in {current, next_status}:
+        return "running"
+    if "completed" in {current, next_status}:
+        return "completed"
+    return current
 
 
 def _console_scheduled_run_store() -> PGScheduledRunStore | None:
