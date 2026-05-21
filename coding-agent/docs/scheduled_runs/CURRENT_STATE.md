@@ -19,8 +19,9 @@ Important existing functions and classes:
 
 - `SessionManager.create_session(...)` creates a session with an approval policy, provider configuration, and execution binding.
 - `SessionManager._run_metadata_for_session(...)` builds safe durable run metadata.
-- `SessionManager._persist_run_start(...)` creates an `AgentRunRecord`.
-- `SessionManager._persist_run_end(...)` updates run status, result, error, and metadata.
+- `SessionManager._create_runtime_agent_run(...)` creates a queued `AgentRunRecord`.
+- `SessionManager._update_runtime_agent_run(...)` updates run status, result, error, and metadata.
+- `SessionManager._finish_runtime_agent_run(...)` finalizes completed, failed, or interrupted runtime runs.
 - `SessionManager._build_session_runtime(...)` restores the stable tape, resolves workspace execution binding, creates the normal runtime pipeline, and maps approval policy to runtime configuration.
 - `SessionManager._make_session_consumer(...)`, approval interaction helpers, and `submit_approval_response(...)` preserve HITL behavior.
 
