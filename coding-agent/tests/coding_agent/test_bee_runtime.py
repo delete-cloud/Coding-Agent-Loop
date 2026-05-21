@@ -6,14 +6,20 @@ from typing import cast
 
 import pytest
 
+from agentkit.tape.tape import Tape
 from coding_agent.bee_runtime import (
+    BEE_TASK_ABORTED,
+    BEE_TASK_FINALIZED,
+    BEE_TASK_STARTED,
+    BeeTaskLifecycle,
     BeeNodeRecord,
     BeeTaskManifest,
     BeeTaskRecord,
     PGBeeTaskStore,
     parse_bee_task_manifest,
 )
-from coding_agent.topic_store import JSONObject
+from coding_agent.topic_lifecycle import find_topic_anchors
+from coding_agent.topic_store import JSONObject, TopicAnchorRecord, TopicRecord
 
 
 class FakeBeePool:
@@ -131,6 +137,18 @@ class FakeBeePool:
             }
         )
         return row
+
+
+class FakeBeeTopicAnchorStore:
+    def __init__(self) -> None:
+        self.anchors: list[TopicAnchorRecord] = []
+
+    async def record_topic_anchor(
+        self,
+        record: TopicAnchorRecord,
+    ) -> TopicAnchorRecord:
+        self.anchors.append(record)
+        return record
 
 
 def test_bee_manifest_parses_safe_fixture() -> None:
@@ -294,12 +312,12 @@ async def test_bee_store_create_update_list_task_and_nodes() -> None:
 
     stored_task = await store.upsert_task(task)
     assert stored_task == task
-    assert await store.load_task("task-alpha") == task
+    assert await store.load_task("bee-task-alpha") == task
     assert await store.list_tasks(session_id="session-alpha") == [task]
     assert await store.list_tasks(topic_id="topic-alpha", status="pending") == [task]
 
     running = await store.update_task_status(
-        "task-alpha",
+        "bee-task-alpha",
         status="running",
         summary="Task is active",
         updated_at=now + timedelta(minutes=2),
@@ -311,10 +329,10 @@ async def test_bee_store_create_update_list_task_and_nodes() -> None:
 
     assert await store.upsert_node(plan_node) == plan_node
     assert await store.upsert_node(validate_node) == validate_node
-    assert await store.list_nodes("task-alpha") == [plan_node, validate_node]
+    assert await store.list_nodes("bee-task-alpha") == [plan_node, validate_node]
 
     launched = await store.update_node_status(
-        task_id="task-alpha",
+        task_id="bee-task-alpha",
         node_id="node-plan",
         status="running",
         run_id="run-alpha",
@@ -372,6 +390,117 @@ def test_bee_node_record_rejects_invalid_status_and_self_dependency() -> None:
         )
 
 
+@pytest.mark.asyncio
+async def test_bee_topic_lifecycle_writes_safe_task_anchors() -> None:
+    now = datetime(2026, 5, 22, 9, tzinfo=UTC)
+    tape = Tape(tape_id="tape-alpha")
+    topic = _topic_record(now)
+    task = _task_record(now)
+    store = FakeBeeTopicAnchorStore()
+    lifecycle = BeeTaskLifecycle(anchor_store=store)
+
+    started = await lifecycle.start_task(
+        tape=tape,
+        topic=topic,
+        task=task,
+        metadata={"task_kind": "maintenance"},
+    )
+    finalized = await lifecycle.finalize_task(
+        tape=tape,
+        topic=topic,
+        task=replace(task, status="completed"),
+        status="completed",
+        metadata={"final_state": "completed"},
+    )
+
+    assert [record.anchor_type for record in store.anchors] == [
+        BEE_TASK_STARTED,
+        BEE_TASK_FINALIZED,
+    ]
+    assert started.metadata == {
+        "encoded_anchor_type": "context",
+        "product_anchor_type": BEE_TASK_STARTED,
+        "task_kind": "maintenance",
+    }
+    assert finalized.metadata["task_status"] == "completed"
+
+    anchors = find_topic_anchors(tape)
+    assert [anchor.product_anchor_type for anchor in anchors] == [
+        BEE_TASK_STARTED,
+        BEE_TASK_FINALIZED,
+    ]
+    entries = tape.snapshot()
+    assert entries[0].payload == {"label": "Bee task started"}
+    assert entries[1].payload == {"label": "Bee task completed"}
+    assert entries[0].meta["skip"] is True
+    rendered = repr([entry.to_dict() for entry in entries]).lower()
+    for forbidden in (
+        "prompt",
+        "message",
+        "content",
+        "command_output",
+        "stdout",
+        "stderr",
+        "secret",
+    ):
+        assert forbidden not in rendered
+
+
+@pytest.mark.asyncio
+async def test_bee_topic_lifecycle_accounts_for_legacy_topic_plugin_boundary() -> None:
+    now = datetime(2026, 5, 22, 9, tzinfo=UTC)
+    tape = Tape(tape_id="tape-alpha")
+    topic = _topic_record(now)
+    task = _task_record(now)
+    store = FakeBeeTopicAnchorStore()
+    lifecycle = BeeTaskLifecycle(anchor_store=store)
+
+    await lifecycle.start_task(tape=tape, topic=topic, task=task)
+    await lifecycle.finalize_task(
+        tape=tape,
+        topic=topic,
+        task=replace(task, status="cancelled"),
+        status="cancelled",
+    )
+
+    entries = tape.snapshot()
+    assert [entry.anchor_type for entry in entries] == ["context", "context"]
+    assert [entry.meta["product_anchor_type"] for entry in entries] == [
+        BEE_TASK_STARTED,
+        BEE_TASK_ABORTED,
+    ]
+    assert all(
+        entry.anchor_type not in {"topic_start", "topic_end"} for entry in entries
+    )
+    assert [record.metadata["encoded_anchor_type"] for record in store.anchors] == [
+        "context",
+        "context",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_bee_topic_lifecycle_rolls_back_tape_anchor_on_store_failure() -> None:
+    class FailingAnchorStore(FakeBeeTopicAnchorStore):
+        async def record_topic_anchor(
+            self,
+            record: TopicAnchorRecord,
+        ) -> TopicAnchorRecord:
+            raise RuntimeError("anchor store unavailable")
+
+    now = datetime(2026, 5, 22, 9, tzinfo=UTC)
+    tape = Tape(tape_id="tape-alpha")
+    lifecycle = BeeTaskLifecycle(anchor_store=FailingAnchorStore())
+
+    with pytest.raises(RuntimeError, match="anchor store unavailable"):
+        await lifecycle.start_task(
+            tape=tape,
+            topic=_topic_record(now),
+            task=_task_record(now),
+        )
+
+    assert tape.snapshot() == ()
+
+
 def _safe_manifest() -> JSONObject:
     return {
         "version": 1,
@@ -415,7 +544,7 @@ def _safe_manifest() -> JSONObject:
 
 def _task_record(now: datetime) -> BeeTaskRecord:
     return BeeTaskRecord(
-        task_id="task-alpha",
+        task_id="bee-task-alpha",
         topic_id="topic-alpha",
         session_id="session-alpha",
         kind="maintenance",
@@ -429,6 +558,24 @@ def _task_record(now: datetime) -> BeeTaskRecord:
     )
 
 
+def _topic_record(now: datetime) -> TopicRecord:
+    return TopicRecord(
+        topic_id="topic-alpha",
+        tape_id="tape-alpha",
+        session_id="session-alpha",
+        kind="coding",
+        status="open",
+        title="Release docs",
+        summary=None,
+        owner=None,
+        topic_initial_seq=0,
+        topic_finalized_seq=None,
+        created_at=now,
+        finalized_at=None,
+        metadata={"source": "fixture"},
+    )
+
+
 def _node_record(
     now: datetime,
     *,
@@ -438,7 +585,7 @@ def _node_record(
 ) -> BeeNodeRecord:
     return BeeNodeRecord(
         node_id=node_id,
-        task_id="task-alpha",
+        task_id="bee-task-alpha",
         kind=kind,
         profile="default",
         status="pending",

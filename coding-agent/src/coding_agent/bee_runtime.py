@@ -10,9 +10,17 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Final
+from typing import Protocol
 
 from agentkit.storage.pg import AsyncPGPool, PGPool
-from coding_agent.topic_store import JSONObject, JSONValue
+from agentkit.tape.anchor import Anchor
+from agentkit.tape.tape import Tape
+from coding_agent.topic_store import (
+    JSONObject,
+    JSONValue,
+    TopicAnchorRecord,
+    TopicRecord,
+)
 
 _MANIFEST_VERSION: Final[int] = 1
 _MAX_SAFE_LABEL_CHARS: Final[int] = 128
@@ -51,6 +59,18 @@ _FORBIDDEN_KEY_PARTS: Final[frozenset[str]] = frozenset(
 
 BeeTaskStatus = str
 BeeNodeStatus = str
+
+BEE_TASK_STARTED = "bee_task_started"
+BEE_TASK_FINALIZED = "bee_task_finalized"
+BEE_TASK_ABORTED = "bee_task_aborted"
+_BEE_ENCODED_ANCHOR_TYPE = "context"
+
+
+class BeeTopicAnchorStore(Protocol):
+    async def record_topic_anchor(
+        self,
+        record: TopicAnchorRecord,
+    ) -> TopicAnchorRecord: ...
 
 
 @dataclass(frozen=True)
@@ -579,6 +599,93 @@ class PGBeeTaskStore:
         return _bee_node_from_row(row)
 
 
+class BeeTaskLifecycle:
+    def __init__(self, *, anchor_store: BeeTopicAnchorStore) -> None:
+        self._anchor_store = anchor_store
+
+    async def start_task(
+        self,
+        *,
+        tape: Tape,
+        topic: TopicRecord,
+        task: BeeTaskRecord,
+        metadata: JSONObject | None = None,
+    ) -> TopicAnchorRecord:
+        return await self._write_task_anchor(
+            tape=tape,
+            topic=topic,
+            task=task,
+            product_anchor_type=BEE_TASK_STARTED,
+            label="Bee task started",
+            metadata=dict(metadata or {}),
+        )
+
+    async def finalize_task(
+        self,
+        *,
+        tape: Tape,
+        topic: TopicRecord,
+        task: BeeTaskRecord,
+        status: BeeTaskStatus,
+        metadata: JSONObject | None = None,
+    ) -> TopicAnchorRecord:
+        _require_status("task status", status, _TASK_STATUSES)
+        product_anchor_type = (
+            BEE_TASK_ABORTED if status == "cancelled" else BEE_TASK_FINALIZED
+        )
+        return await self._write_task_anchor(
+            tape=tape,
+            topic=topic,
+            task=task,
+            product_anchor_type=product_anchor_type,
+            label=f"Bee task {status}",
+            metadata={"task_status": status, **dict(metadata or {})},
+        )
+
+    async def _write_task_anchor(
+        self,
+        *,
+        tape: Tape,
+        topic: TopicRecord,
+        task: BeeTaskRecord,
+        product_anchor_type: str,
+        label: str,
+        metadata: JSONObject,
+    ) -> TopicAnchorRecord:
+        _require_matching_topic(tape=tape, topic=topic, task=task)
+        _require_safe_label("product_anchor_type", product_anchor_type)
+        _require_safe_json_object("metadata", metadata)
+        anchor = Anchor(
+            anchor_type=_BEE_ENCODED_ANCHOR_TYPE,
+            payload={"label": label},
+            meta={
+                "topic_id": topic.topic_id,
+                "task_id": task.task_id,
+                "product_anchor_type": product_anchor_type,
+                "skip": True,
+            },
+        )
+        seq = _append_anchor(tape, anchor)
+        try:
+            return await self._anchor_store.record_topic_anchor(
+                TopicAnchorRecord(
+                    topic_id=topic.topic_id,
+                    tape_id=topic.tape_id,
+                    seq=seq,
+                    anchor_type=product_anchor_type,
+                    entry_id=anchor.id,
+                    metadata={
+                        "encoded_anchor_type": _BEE_ENCODED_ANCHOR_TYPE,
+                        "product_anchor_type": product_anchor_type,
+                        **metadata,
+                    },
+                )
+            )
+        except Exception:
+            _remove_anchor(tape, seq=seq, entry_id=anchor.id)
+            raise
+
+
 def _parse_topic_binding(raw: JSONObject) -> BeeTopicBinding:
     return BeeTopicBinding(
         session_id=_require_string(raw, "session_id"),
@@ -587,6 +694,38 @@ def _parse_topic_binding(raw: JSONObject) -> BeeTopicBinding:
         title_hint=_optional_string(raw, "title_hint"),
         metadata=dict(_optional_object(raw, "metadata")),
     )
+
+
+def _require_matching_topic(
+    *,
+    tape: Tape,
+    topic: TopicRecord,
+    task: BeeTaskRecord,
+) -> None:
+    if tape.tape_id != topic.tape_id:
+        raise ValueError(f"topic {topic.topic_id} belongs to tape {topic.tape_id}")
+    if task.topic_id != topic.topic_id:
+        raise ValueError(f"task {task.task_id} belongs to topic {task.topic_id}")
+    if task.session_id != topic.session_id:
+        raise ValueError(f"task {task.task_id} belongs to session {task.session_id}")
+    if topic.status not in {"open", "finalized", "aborted"}:
+        raise ValueError(f"unsupported topic status: {topic.status}")
+
+
+def _append_anchor(tape: Tape, anchor: Anchor) -> int:
+    with tape._lock:
+        seq = len(tape._entries)
+        tape._entries.append(anchor)
+        return seq
+
+
+def _remove_anchor(tape: Tape, *, seq: int, entry_id: str) -> None:
+    with tape._lock:
+        if seq >= len(tape._entries):
+            return
+        entry = tape._entries[seq]
+        if entry.id == entry_id:
+            del tape._entries[seq]
 
 
 def _required_row(
