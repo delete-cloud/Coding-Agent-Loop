@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Final
 
+from agentkit.storage.pg import AsyncPGPool, PGPool
 from coding_agent.topic_store import JSONObject, JSONValue
 
 _MANIFEST_VERSION: Final[int] = 1
@@ -17,6 +19,12 @@ _MAX_SAFE_LABEL_CHARS: Final[int] = 128
 _MAX_DISPLAY_TEXT_CHARS: Final[int] = 256
 _MAX_METADATA_STRING_CHARS: Final[int] = 256
 _MAX_NODES: Final[int] = 64
+_TASK_STATUSES: Final[frozenset[str]] = frozenset(
+    {"pending", "running", "completed", "failed", "cancelled"}
+)
+_NODE_STATUSES: Final[frozenset[str]] = frozenset(
+    {"pending", "ready", "running", "completed", "failed", "skipped"}
+)
 _FORBIDDEN_KEY_PARTS: Final[frozenset[str]] = frozenset(
     {
         "api_key",
@@ -40,6 +48,76 @@ _FORBIDDEN_KEY_PARTS: Final[frozenset[str]] = frozenset(
         "token",
     }
 )
+
+BeeTaskStatus = str
+BeeNodeStatus = str
+
+
+@dataclass(frozen=True)
+class BeeTaskRecord:
+    task_id: str
+    topic_id: str
+    session_id: str
+    kind: str
+    profile: str
+    status: BeeTaskStatus
+    title: str
+    created_at: datetime
+    updated_at: datetime
+    summary: str | None = None
+    metadata: JSONObject = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _require_non_empty("task_id", self.task_id)
+        _require_non_empty("topic_id", self.topic_id)
+        _require_non_empty("session_id", self.session_id)
+        _require_safe_label("kind", self.kind)
+        _require_safe_label("profile", self.profile)
+        _require_status("task status", self.status, _TASK_STATUSES)
+        _require_display_text("title", self.title)
+        _require_optional_display_text("summary", self.summary)
+        _require_datetime("created_at", self.created_at)
+        _require_datetime("updated_at", self.updated_at)
+        _require_safe_json_object("metadata", self.metadata)
+
+
+@dataclass(frozen=True)
+class BeeNodeRecord:
+    node_id: str
+    task_id: str
+    kind: str
+    profile: str
+    status: BeeNodeStatus
+    title: str
+    created_at: datetime
+    updated_at: datetime
+    depends_on: tuple[str, ...] = ()
+    run_id: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    metadata: JSONObject = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _require_non_empty("node_id", self.node_id)
+        _require_non_empty("task_id", self.task_id)
+        _require_safe_label("kind", self.kind)
+        _require_safe_label("profile", self.profile)
+        _require_status("node status", self.status, _NODE_STATUSES)
+        _require_display_text("title", self.title)
+        for dependency in self.depends_on:
+            _require_non_empty("depends_on", dependency)
+        if self.node_id in self.depends_on:
+            raise ValueError(f"Bee node cannot depend on itself: {self.node_id}")
+        _require_optional_id("run_id", self.run_id)
+        _require_datetime("created_at", self.created_at)
+        _require_datetime("updated_at", self.updated_at)
+        if self.started_at is not None:
+            _require_datetime("started_at", self.started_at)
+        if self.finished_at is not None:
+            _require_datetime("finished_at", self.finished_at)
+        _require_safe_json_object("metadata", self.metadata)
+
+
 _FORBIDDEN_EXECUTABLE_KEYS: Final[frozenset[str]] = frozenset(
     {
         "args",
@@ -165,6 +243,292 @@ def parse_bee_task_manifest(raw: JSONObject) -> BeeTaskManifest:
     )
 
 
+class PGBeeTaskStore:
+    _CREATE_SCHEMA_SQL: Final[str] = """
+    CREATE TABLE IF NOT EXISTS bee_tasks (
+        task_id TEXT PRIMARY KEY,
+        topic_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        profile TEXT NOT NULL,
+        status TEXT NOT NULL,
+        title TEXT NOT NULL,
+        summary TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+    );
+
+    CREATE INDEX IF NOT EXISTS bee_tasks_session_status_created_idx
+        ON bee_tasks (session_id, status, created_at, task_id);
+
+    CREATE INDEX IF NOT EXISTS bee_tasks_topic_status_created_idx
+        ON bee_tasks (topic_id, status, created_at, task_id);
+
+    CREATE TABLE IF NOT EXISTS bee_task_nodes (
+        node_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        profile TEXT NOT NULL,
+        status TEXT NOT NULL,
+        title TEXT NOT NULL,
+        depends_on JSONB NOT NULL DEFAULT '[]'::jsonb,
+        run_id TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        started_at TIMESTAMPTZ,
+        finished_at TIMESTAMPTZ,
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+        PRIMARY KEY (task_id, node_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS bee_task_nodes_task_status_idx
+        ON bee_task_nodes (task_id, status, node_id);
+    """
+    _UPSERT_TASK_SQL: Final[str] = """
+    INSERT INTO bee_tasks (
+        task_id,
+        topic_id,
+        session_id,
+        kind,
+        profile,
+        status,
+        title,
+        summary,
+        created_at,
+        updated_at,
+        metadata
+    )
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+    ON CONFLICT (task_id)
+    DO UPDATE SET
+        topic_id = EXCLUDED.topic_id,
+        session_id = EXCLUDED.session_id,
+        kind = EXCLUDED.kind,
+        profile = EXCLUDED.profile,
+        status = EXCLUDED.status,
+        title = EXCLUDED.title,
+        summary = EXCLUDED.summary,
+        updated_at = EXCLUDED.updated_at,
+        metadata = EXCLUDED.metadata
+    RETURNING *
+    """
+    _SELECT_TASK_SQL: Final[str] = "SELECT * FROM bee_tasks WHERE task_id = $1"
+    _LIST_TASKS_SQL: Final[str] = """
+    SELECT * FROM bee_tasks
+    WHERE ($1::text IS NULL OR session_id = $1)
+      AND ($2::text IS NULL OR topic_id = $2)
+      AND ($3::text IS NULL OR status = $3)
+    ORDER BY created_at, task_id
+    LIMIT $4
+    """
+    _UPDATE_TASK_STATUS_SQL: Final[str] = """
+    UPDATE bee_tasks
+    SET status = $2,
+        summary = $3,
+        updated_at = $4,
+        metadata = $5::jsonb
+    WHERE task_id = $1
+    RETURNING *
+    """
+    _UPSERT_NODE_SQL: Final[str] = """
+    INSERT INTO bee_task_nodes (
+        node_id,
+        task_id,
+        kind,
+        profile,
+        status,
+        title,
+        depends_on,
+        run_id,
+        created_at,
+        updated_at,
+        started_at,
+        finished_at,
+        metadata
+    )
+    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13::jsonb)
+    ON CONFLICT (task_id, node_id)
+    DO UPDATE SET
+        kind = EXCLUDED.kind,
+        profile = EXCLUDED.profile,
+        status = EXCLUDED.status,
+        title = EXCLUDED.title,
+        depends_on = EXCLUDED.depends_on,
+        run_id = EXCLUDED.run_id,
+        updated_at = EXCLUDED.updated_at,
+        started_at = EXCLUDED.started_at,
+        finished_at = EXCLUDED.finished_at,
+        metadata = EXCLUDED.metadata
+    RETURNING *
+    """
+    _LIST_NODES_SQL: Final[str] = """
+    SELECT * FROM bee_task_nodes
+    WHERE task_id = $1
+    ORDER BY created_at, node_id
+    """
+    _UPDATE_NODE_STATUS_SQL: Final[str] = """
+    UPDATE bee_task_nodes
+    SET status = $3,
+        run_id = $4,
+        updated_at = $5,
+        started_at = $6,
+        finished_at = $7,
+        metadata = $8::jsonb
+    WHERE task_id = $1 AND node_id = $2
+    RETURNING *
+    """
+
+    def __init__(self, *, pool: PGPool) -> None:
+        self._pool = pool
+        self._schema_ready = False
+
+    async def _ensure_schema(self) -> AsyncPGPool:
+        pool = await self._pool.get_pool()
+        if not self._schema_ready:
+            _ = await pool.execute(self._CREATE_SCHEMA_SQL)
+            self._schema_ready = True
+        return pool
+
+    async def upsert_task(self, record: BeeTaskRecord) -> BeeTaskRecord:
+        pool = await self._ensure_schema()
+        row = await pool.fetchrow(
+            self._UPSERT_TASK_SQL,
+            record.task_id,
+            record.topic_id,
+            record.session_id,
+            record.kind,
+            record.profile,
+            record.status,
+            record.title,
+            record.summary,
+            record.created_at,
+            record.updated_at,
+            record.metadata,
+        )
+        return _bee_task_from_row(_required_row(row, "bee task upsert"))
+
+    async def load_task(self, task_id: str) -> BeeTaskRecord | None:
+        _require_non_empty("task_id", task_id)
+        pool = await self._ensure_schema()
+        row = await pool.fetchrow(self._SELECT_TASK_SQL, task_id)
+        if row is None:
+            return None
+        return _bee_task_from_row(row)
+
+    async def list_tasks(
+        self,
+        *,
+        session_id: str | None = None,
+        topic_id: str | None = None,
+        status: BeeTaskStatus | None = None,
+        limit: int = 100,
+    ) -> list[BeeTaskRecord]:
+        if session_id is not None:
+            _require_non_empty("session_id", session_id)
+        if topic_id is not None:
+            _require_non_empty("topic_id", topic_id)
+        if status is not None:
+            _require_status("task status", status, _TASK_STATUSES)
+        _require_positive_int("limit", limit)
+        pool = await self._ensure_schema()
+        rows = await pool.fetch(
+            self._LIST_TASKS_SQL, session_id, topic_id, status, limit
+        )
+        return [_bee_task_from_row(row) for row in rows]
+
+    async def update_task_status(
+        self,
+        task_id: str,
+        *,
+        status: BeeTaskStatus,
+        summary: str | None,
+        updated_at: datetime,
+        metadata: JSONObject,
+    ) -> BeeTaskRecord:
+        _require_non_empty("task_id", task_id)
+        _require_status("task status", status, _TASK_STATUSES)
+        _require_optional_display_text("summary", summary)
+        _require_datetime("updated_at", updated_at)
+        _require_safe_json_object("metadata", metadata)
+        pool = await self._ensure_schema()
+        row = await pool.fetchrow(
+            self._UPDATE_TASK_STATUS_SQL,
+            task_id,
+            status,
+            summary,
+            updated_at,
+            metadata,
+        )
+        if row is None:
+            raise KeyError(f"Bee task not found: {task_id}")
+        return _bee_task_from_row(row)
+
+    async def upsert_node(self, record: BeeNodeRecord) -> BeeNodeRecord:
+        pool = await self._ensure_schema()
+        row = await pool.fetchrow(
+            self._UPSERT_NODE_SQL,
+            record.node_id,
+            record.task_id,
+            record.kind,
+            record.profile,
+            record.status,
+            record.title,
+            list(record.depends_on),
+            record.run_id,
+            record.created_at,
+            record.updated_at,
+            record.started_at,
+            record.finished_at,
+            record.metadata,
+        )
+        return _bee_node_from_row(_required_row(row, "bee node upsert"))
+
+    async def list_nodes(self, task_id: str) -> list[BeeNodeRecord]:
+        _require_non_empty("task_id", task_id)
+        pool = await self._ensure_schema()
+        rows = await pool.fetch(self._LIST_NODES_SQL, task_id)
+        return [_bee_node_from_row(row) for row in rows]
+
+    async def update_node_status(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        status: BeeNodeStatus,
+        run_id: str | None,
+        updated_at: datetime,
+        started_at: datetime | None,
+        finished_at: datetime | None,
+        metadata: JSONObject,
+    ) -> BeeNodeRecord:
+        _require_non_empty("task_id", task_id)
+        _require_non_empty("node_id", node_id)
+        _require_status("node status", status, _NODE_STATUSES)
+        _require_optional_id("run_id", run_id)
+        _require_datetime("updated_at", updated_at)
+        if started_at is not None:
+            _require_datetime("started_at", started_at)
+        if finished_at is not None:
+            _require_datetime("finished_at", finished_at)
+        _require_safe_json_object("metadata", metadata)
+        pool = await self._ensure_schema()
+        row = await pool.fetchrow(
+            self._UPDATE_NODE_STATUS_SQL,
+            task_id,
+            node_id,
+            status,
+            run_id,
+            updated_at,
+            started_at,
+            finished_at,
+            metadata,
+        )
+        if row is None:
+            raise KeyError(f"Bee node not found: {task_id}/{node_id}")
+        return _bee_node_from_row(row)
+
+
 def _parse_topic_binding(raw: JSONObject) -> BeeTopicBinding:
     return BeeTopicBinding(
         session_id=_require_string(raw, "session_id"),
@@ -172,6 +536,53 @@ def _parse_topic_binding(raw: JSONObject) -> BeeTopicBinding:
         tape_id=_optional_string(raw, "tape_id"),
         title_hint=_optional_string(raw, "title_hint"),
         metadata=dict(_optional_object(raw, "metadata")),
+    )
+
+
+def _required_row(
+    row: dict[str, object] | None,
+    context: str,
+) -> dict[str, object]:
+    if row is None:
+        raise RuntimeError(f"postgres {context} returned no row")
+    return row
+
+
+def _bee_task_from_row(row: dict[str, object]) -> BeeTaskRecord:
+    return BeeTaskRecord(
+        task_id=_required_str(row, "task_id", context="bee task row"),
+        topic_id=_required_str(row, "topic_id", context="bee task row"),
+        session_id=_required_str(row, "session_id", context="bee task row"),
+        kind=_required_str(row, "kind", context="bee task row"),
+        profile=_required_str(row, "profile", context="bee task row"),
+        status=_required_str(row, "status", context="bee task row"),
+        title=_required_str(row, "title", context="bee task row"),
+        summary=_optional_str(row, "summary", context="bee task row"),
+        created_at=_required_datetime(row, "created_at", context="bee task row"),
+        updated_at=_required_datetime(row, "updated_at", context="bee task row"),
+        metadata=_required_json_object(row, "metadata", context="bee task row"),
+    )
+
+
+def _bee_node_from_row(row: dict[str, object]) -> BeeNodeRecord:
+    return BeeNodeRecord(
+        node_id=_required_str(row, "node_id", context="bee node row"),
+        task_id=_required_str(row, "task_id", context="bee node row"),
+        kind=_required_str(row, "kind", context="bee node row"),
+        profile=_required_str(row, "profile", context="bee node row"),
+        status=_required_str(row, "status", context="bee node row"),
+        title=_required_str(row, "title", context="bee node row"),
+        depends_on=_required_string_tuple(
+            row,
+            "depends_on",
+            context="bee node row",
+        ),
+        run_id=_optional_str(row, "run_id", context="bee node row"),
+        created_at=_required_datetime(row, "created_at", context="bee node row"),
+        updated_at=_required_datetime(row, "updated_at", context="bee node row"),
+        started_at=_optional_datetime(row, "started_at", context="bee node row"),
+        finished_at=_optional_datetime(row, "finished_at", context="bee node row"),
+        metadata=_required_json_object(row, "metadata", context="bee node row"),
     )
 
 
@@ -356,6 +767,21 @@ def _require_int(raw: JSONObject, key: str) -> int:
     return value
 
 
+def _require_status(name: str, value: str, allowed: frozenset[str]) -> None:
+    if value not in allowed:
+        raise ValueError(f"{name} must be one of {sorted(allowed)}")
+
+
+def _require_datetime(name: str, value: datetime) -> None:
+    if not isinstance(value, datetime):
+        raise TypeError(f"{name} must be a datetime")
+
+
+def _require_positive_int(name: str, value: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{name} must be a positive int")
+
+
 def _require_non_empty(name: str, value: str) -> None:
     if not value.strip():
         raise ValueError(f"{name} must not be empty")
@@ -388,3 +814,70 @@ def _require_display_text(name: str, value: str) -> None:
 def _require_optional_display_text(name: str, value: str | None) -> None:
     if value is not None:
         _require_display_text(name, value)
+
+
+def _required_str(row: dict[str, object], key: str, *, context: str) -> str:
+    value = row.get(key)
+    if not isinstance(value, str):
+        raise TypeError(f"postgres {context} must include string {key}")
+    return value
+
+
+def _optional_str(row: dict[str, object], key: str, *, context: str) -> str | None:
+    value = row.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError(f"postgres {context} must include string or None {key}")
+    return value
+
+
+def _required_datetime(row: dict[str, object], key: str, *, context: str) -> datetime:
+    value = row.get(key)
+    if not isinstance(value, datetime):
+        raise TypeError(f"postgres {context} must include datetime {key}")
+    return value
+
+
+def _optional_datetime(
+    row: dict[str, object],
+    key: str,
+    *,
+    context: str,
+) -> datetime | None:
+    value = row.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, datetime):
+        raise TypeError(f"postgres {context} must include datetime or None {key}")
+    return value
+
+
+def _required_json_object(
+    row: dict[str, object],
+    key: str,
+    *,
+    context: str,
+) -> JSONObject:
+    value = row.get(key)
+    if not isinstance(value, dict):
+        raise TypeError(f"postgres {context} must include object {key}")
+    _require_safe_json_object(key, value)
+    return dict(value)
+
+
+def _required_string_tuple(
+    row: dict[str, object],
+    key: str,
+    *,
+    context: str,
+) -> tuple[str, ...]:
+    value = row.get(key)
+    if not isinstance(value, list):
+        raise TypeError(f"postgres {context} must include list {key}")
+    result: list[str] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, str):
+            raise TypeError(f"postgres {context} must include string {key}[{index}]")
+        result.append(item)
+    return tuple(result)

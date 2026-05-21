@@ -155,3 +155,46 @@ This ledger tracks G93-G101 for the Bee-style Workflow Template / Task Manifest 
   - Sanitizer now splits camelCase before token matching, so `runCommand`, `shellCommand`, `commandSpec`, and `preCommands` are rejected.
 - Remaining risks:
   - This remains G95-scoped; durable storage and runtime planning are deferred to G96-G101.
+
+## G96_BEE_TASK_STORE_AND_SCHEMA
+
+### Before
+
+- Goal id: G96_BEE_TASK_STORE_AND_SCHEMA
+- Intended files:
+  - `docs/bee_runtime/GOAL_PROGRESS.md`
+  - `docs/adr/0041-bee-workflow-task-runtime.md`
+  - `src/coding_agent/bee_runtime.py`
+  - `tests/coding_agent/test_bee_runtime.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -v`
+  - `uv run ruff format --check src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `uv run ruff check src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Durable Bee task/node schema initialization is idempotent.
+  - Store can create, load, list, and update task records.
+  - Store can create, list, and update node records.
+  - Records reject unsafe metadata and invalid status values.
+  - No topic anchors, planner, action execution, external executor, or AgentKit Core change is introduced.
+
+### After
+
+- Status: passed local verification; pending PR.
+- Changed files:
+  - `docs/bee_runtime/GOAL_PROGRESS.md`
+  - `docs/adr/0041-bee-workflow-task-runtime.md`
+  - `src/coding_agent/bee_runtime.py`
+  - `tests/coding_agent/test_bee_runtime.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -v`
+  - `uv run ruff format --check src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `uv run ruff check src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `git diff --check -- .`
+- Results:
+  - Added durable Bee task and node records with status, datetime, dependency, and safe metadata validation.
+  - Added `PGBeeTaskStore` with idempotent schema creation, task create/load/list/update, and node create/list/update APIs.
+  - Fake-pool tests cover schema initialization and task/node store behavior without external services.
+  - Target Bee runtime tests passed after two fix iterations: one syntax placement fix and one fake-pool protocol fix.
+- Remaining risks:
+  - G96 does not write topic anchors, plan launch intents, route actions, expose console pages, or record metrics; those remain deferred to G97-G101.
