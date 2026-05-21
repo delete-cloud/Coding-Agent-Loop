@@ -37,7 +37,7 @@ _TASK_FINAL_STATUSES: Final[frozenset[str]] = frozenset(
     {"completed", "failed", "cancelled"}
 )
 _RESERVED_ANCHOR_METADATA_KEYS: Final[frozenset[str]] = frozenset(
-    {"encoded_anchor_type", "product_anchor_type"}
+    {"encoded_anchor_type", "product_anchor_type", "task_status"}
 )
 _FORBIDDEN_KEY_PARTS: Final[frozenset[str]] = frozenset(
     {
@@ -617,13 +617,15 @@ class BeeTaskLifecycle:
         task: BeeTaskRecord,
         metadata: JSONObject | None = None,
     ) -> TopicAnchorRecord:
+        caller_metadata = dict(metadata or {})
+        _reject_reserved_anchor_metadata(caller_metadata)
         return await self._write_task_anchor(
             tape=tape,
             topic=topic,
             task=task,
             product_anchor_type=BEE_TASK_STARTED,
             label="Bee task started",
-            metadata=dict(metadata or {}),
+            metadata=caller_metadata,
         )
 
     async def finalize_task(
@@ -643,13 +645,15 @@ class BeeTaskLifecycle:
         product_anchor_type = (
             BEE_TASK_ABORTED if status == "cancelled" else BEE_TASK_FINALIZED
         )
+        caller_metadata = dict(metadata or {})
+        _reject_reserved_anchor_metadata(caller_metadata)
         return await self._write_task_anchor(
             tape=tape,
             topic=topic,
             task=task,
             product_anchor_type=product_anchor_type,
             label=f"Bee task {status}",
-            metadata={"task_status": status, **dict(metadata or {})},
+            metadata={**caller_metadata, "task_status": status},
         )
 
     async def _write_task_anchor(
@@ -665,7 +669,6 @@ class BeeTaskLifecycle:
         _require_matching_topic(tape=tape, topic=topic, task=task)
         _require_safe_label("product_anchor_type", product_anchor_type)
         _require_safe_json_object("metadata", metadata)
-        _reject_reserved_anchor_metadata(metadata)
         anchor = Anchor(
             anchor_type=_BEE_ENCODED_ANCHOR_TYPE,
             payload={"label": label},
@@ -676,27 +679,39 @@ class BeeTaskLifecycle:
                 "skip": True,
             },
         )
-        with tape._lock:
-            seq = len(tape._entries)
-            tape._entries.append(anchor)
-            try:
-                return await self._anchor_store.record_topic_anchor(
-                    TopicAnchorRecord(
-                        topic_id=topic.topic_id,
-                        tape_id=topic.tape_id,
-                        seq=seq,
-                        anchor_type=product_anchor_type,
-                        entry_id=anchor.id,
-                        metadata={
-                            **metadata,
-                            "encoded_anchor_type": _BEE_ENCODED_ANCHOR_TYPE,
-                            "product_anchor_type": product_anchor_type,
-                        },
-                    )
-                )
-            except Exception:
-                del tape._entries[seq]
-                raise
+        seq = _append_anchor(tape, anchor)
+        record = TopicAnchorRecord(
+            topic_id=topic.topic_id,
+            tape_id=topic.tape_id,
+            seq=seq,
+            anchor_type=product_anchor_type,
+            entry_id=anchor.id,
+            metadata={
+                **metadata,
+                "encoded_anchor_type": _BEE_ENCODED_ANCHOR_TYPE,
+                "product_anchor_type": product_anchor_type,
+            },
+        )
+        try:
+            return await self._anchor_store.record_topic_anchor(record)
+        except Exception:
+            _remove_anchor_by_id(tape, entry_id=anchor.id)
+            raise
+
+
+def _append_anchor(tape: Tape, anchor: Anchor) -> int:
+    with tape._lock:
+        seq = len(tape._entries)
+        tape._entries.append(anchor)
+        return seq
+
+
+def _remove_anchor_by_id(tape: Tape, *, entry_id: str) -> None:
+    with tape._lock:
+        for index, entry in enumerate(tape._entries):
+            if entry.id == entry_id:
+                del tape._entries[index]
+                return
 
 
 def _parse_topic_binding(raw: JSONObject) -> BeeTopicBinding:

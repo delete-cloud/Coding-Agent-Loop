@@ -303,3 +303,24 @@ This ledger tracks G93-G101 for the Bee-style Workflow Template / Task Manifest 
   - Tape append, store record, and rollback now execute under the tape lock.
 - Remaining risks:
   - This remains G97-scoped; planner/execution integration is deferred to G98-G101.
+
+### Local Review Follow-up 2
+
+- Status: passed local verification; pending PR.
+- Changed files:
+  - `src/coding_agent/bee_runtime.py`
+  - `tests/coding_agent/test_bee_runtime.py`
+  - `docs/bee_runtime/GOAL_PROGRESS.md`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -v`
+  - `uv run pytest tests/coding_agent/test_topic_lifecycle.py tests/coding_agent/plugins/test_topic.py -v`
+  - `uv run ruff format src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `uv run ruff check src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `git diff --check -- .`
+- Results:
+  - Local review found that G97 follow-up held a synchronous tape lock across an awaited store call and still let caller metadata override `task_status`.
+  - Tape append and rollback now use short synchronous lock sections and never hold `tape._lock` across an await.
+  - `task_status` is now a reserved lifecycle-owned metadata key.
+  - Debug note: the reserved metadata fix required separating caller metadata validation from lifecycle-owned metadata injection; `_write_task_anchor()` now receives already-validated metadata.
+- Remaining risks:
+  - This remains G97-scoped; planner/execution integration is deferred to G98-G101.
