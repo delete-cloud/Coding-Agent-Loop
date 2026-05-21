@@ -88,11 +88,11 @@ Keep the following explicitly out of scope:
 - [x] `test_bee_context_and_validation_metadata_is_reference_only`
 - [x] `test_bee_metrics_allow_low_cardinality_labels_without_task_or_node_ids`
 - [x] `test_console_bee_renders_safe_task_and_node_summaries`
-- [ ] `test_bee_runtime_smoke_manifest_topic_launch_console_metrics`
+- [x] `test_bee_runtime_smoke_manifest_topic_launch_console_metrics`
 - [x] `uv run pytest tests/coding_agent/test_bee_runtime.py -v`
 - [x] `uv run pytest tests/ui/test_developer_console.py -v`
 - [x] `uv run pytest tests/coding_agent/test_observability.py -v`
-- [ ] `git diff --check -- .`
+- [x] `git diff --check -- .`
 
 ## References
 

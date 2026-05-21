@@ -6,6 +6,7 @@ from typing import cast
 
 import pytest
 
+from agentkit.observability import SpanRecord
 from agentkit.tape.tape import Tape
 from coding_agent.bee_runtime import (
     BEE_TASK_ABORTED,
@@ -20,6 +21,15 @@ from coding_agent.bee_runtime import (
     PGBeeTaskStore,
     build_bee_launch_metadata,
     parse_bee_task_manifest,
+)
+from coding_agent.observability import (
+    PrometheusMetricsObservationSink,
+    PrometheusMetricsRecorder,
+)
+from coding_agent.ui.developer_console import (
+    ConsoleBeeNodeSummary,
+    ConsoleBeePage,
+    render_console_bee_page,
 )
 from coding_agent.topic_lifecycle import find_topic_anchors
 from coding_agent.topic_store import JSONObject, TopicAnchorRecord, TopicRecord
@@ -334,12 +344,12 @@ async def test_bee_store_create_update_list_task_and_nodes() -> None:
 
     stored_task = await store.upsert_task(task)
     assert stored_task == task
-    assert await store.load_task("bee-alpha") == task
+    assert await store.load_task("bee-task-alpha") == task
     assert await store.list_tasks(session_id="session-alpha") == [task]
     assert await store.list_tasks(topic_id="topic-alpha", status="pending") == [task]
 
     running = await store.update_task_status(
-        "bee-alpha",
+        "bee-task-alpha",
         status="running",
         summary="Task is active",
         updated_at=now + timedelta(minutes=2),
@@ -351,10 +361,10 @@ async def test_bee_store_create_update_list_task_and_nodes() -> None:
 
     assert await store.upsert_node(plan_node) == plan_node
     assert await store.upsert_node(validate_node) == validate_node
-    assert await store.list_nodes("bee-alpha") == [plan_node, validate_node]
+    assert await store.list_nodes("bee-task-alpha") == [plan_node, validate_node]
 
     launched = await store.update_node_status(
-        task_id="bee-alpha",
+        task_id="bee-task-alpha",
         node_id="node-plan",
         status="running",
         run_id="run-alpha",
@@ -613,7 +623,7 @@ async def test_bee_planner_returns_bounded_launch_intents_without_execution() ->
     intents = await planner.plan_ready_nodes(now=planned_at, max_nodes=1)
 
     assert [intent.node_id for intent in intents] == ["node-validate"]
-    assert intents[0].task_id == "bee-alpha"
+    assert intents[0].task_id == "bee-task-alpha"
     assert intents[0].topic_id == "topic-alpha"
     assert intents[0].session_id == "session-alpha"
     assert intents[0].node_kind == "validation"
@@ -625,7 +635,7 @@ async def test_bee_planner_returns_bounded_launch_intents_without_execution() ->
         "node_kind": "validation",
         "node_profile": "default",
     }
-    updated_nodes = await store.list_nodes("bee-alpha")
+    updated_nodes = await store.list_nodes("bee-task-alpha")
     node_by_id = {node.node_id: node for node in updated_nodes}
     assert node_by_id["node-validate"].status == "ready"
     assert node_by_id["node-validate"].run_id is None
@@ -693,7 +703,7 @@ async def test_bee_planner_skips_blocked_non_pending_and_non_running_tasks() -> 
         == []
     )
     assert [
-        (node.node_id, node.status) for node in await store.list_nodes("bee-alpha")
+        (node.node_id, node.status) for node in await store.list_nodes("bee-task-alpha")
     ] == [
         ("node-plan", "running"),
         ("node-validate", "pending"),
@@ -751,7 +761,7 @@ async def test_bee_planner_atomically_claims_ready_node_once() -> None:
             return [self.task]
 
         async def list_nodes(self, task_id: str) -> list[BeeNodeRecord]:
-            assert task_id == "bee-alpha"
+            assert task_id == "bee-task-alpha"
             return [replace(self.node, status="pending")]
 
         async def claim_ready_node(
@@ -762,7 +772,7 @@ async def test_bee_planner_atomically_claims_ready_node_once() -> None:
             updated_at: datetime,
             metadata: JSONObject,
         ) -> BeeNodeRecord | None:
-            assert task_id == "bee-alpha"
+            assert task_id == "bee-task-alpha"
             assert node_id == "node-plan"
             assert updated_at == planned_at
             assert metadata["planner_reason"] == "dependencies_ready"
@@ -867,6 +877,149 @@ def test_bee_launch_metadata_rejects_mismatched_manifest_and_intent(
         build_bee_launch_metadata(manifest=manifest, intent=intent)
 
 
+@pytest.mark.asyncio
+async def test_bee_runtime_smoke_manifest_topic_launch_console_metrics() -> None:
+    manifest = parse_bee_task_manifest(_safe_manifest())
+    now = datetime(2026, 5, 22, 9, tzinfo=UTC)
+    tape = Tape(tape_id="tape-alpha")
+    topic = _topic_record(now)
+    task = _task_record(now)
+    bee_pool = FakeBeePool()
+    bee_store = PGBeeTaskStore(pool=bee_pool)  # type: ignore[arg-type]
+    anchor_store = FakeBeeTopicAnchorStore()
+    lifecycle = BeeTaskLifecycle(anchor_store=anchor_store)
+
+    await bee_store.upsert_task(replace(task, status="running"))
+    await bee_store.upsert_node(
+        replace(_node_record(now, node_id="node-plan"), status="completed")
+    )
+    await bee_store.upsert_node(
+        _node_record(
+            now + timedelta(minutes=1),
+            node_id="node-validate",
+            kind="validation",
+            depends_on=("node-plan",),
+        )
+    )
+    started_anchor = await lifecycle.start_task(
+        tape=tape,
+        topic=topic,
+        task=task,
+        metadata={"task_kind": "maintenance"},
+    )
+
+    intents = await BeeTaskPlanner(store=bee_store).plan_ready_nodes(
+        now=now + timedelta(minutes=2),
+        max_nodes=1,
+    )
+    launch_metadata = build_bee_launch_metadata(
+        manifest=manifest,
+        intent=intents[0],
+    )
+    completed_task = replace(task, status="completed")
+    finalized_anchor = await lifecycle.finalize_task(
+        tape=tape,
+        topic=topic,
+        task=completed_task,
+        status="completed",
+    )
+
+    console_html = render_console_bee_page(
+        ConsoleBeePage(
+            tasks=(),
+            nodes=(
+                ConsoleBeeNodeSummary(
+                    task_id=str(launch_metadata["task_id"]),
+                    node_id=str(launch_metadata["node_id"]),
+                    run_id="run-bee",
+                    topic_id=str(launch_metadata["topic_id"]),
+                    session_id=str(launch_metadata["session_id"]),
+                    task_kind=str(launch_metadata["task_kind"]),
+                    task_profile=str(launch_metadata["task_profile"]),
+                    kind=str(launch_metadata["node_kind"]),
+                    profile=str(launch_metadata["node_profile"]),
+                    status="completed",
+                    context_profile=str(launch_metadata["context_profile"]),
+                    validation_profile=str(launch_metadata["validation_profile"]),
+                    workspace_policy=str(launch_metadata["workspace_policy"]),
+                    approval_policy=str(launch_metadata["approval_policy"]),
+                    action_policy=str(launch_metadata["action_policy"]),
+                    workspace_binding=str(launch_metadata["workspace_binding"]),
+                ),
+            ),
+        )
+    )
+    recorder = PrometheusMetricsRecorder()
+    PrometheusMetricsObservationSink(recorder=recorder).record_span(
+        SpanRecord(
+            name="runtime.stage.dispatch",
+            status="ok",
+            attributes={
+                "task_id": str(launch_metadata["task_id"]),
+                "node_id": str(launch_metadata["node_id"]),
+                "topic_id": str(launch_metadata["topic_id"]),
+                "run_id": "run-bee",
+                "session_id": str(launch_metadata["session_id"]),
+                "task_kind": str(launch_metadata["task_kind"]),
+                "task_profile": str(launch_metadata["task_profile"]),
+                "task_status": completed_task.status,
+                "node_kind": str(launch_metadata["node_kind"]),
+                "node_profile": str(launch_metadata["node_profile"]),
+                "node_status": "completed",
+            },
+            duration_ms=1,
+        )
+    )
+    metrics_text = recorder.exposition_text()
+
+    assert [record.anchor_type for record in anchor_store.anchors] == [
+        BEE_TASK_STARTED,
+        BEE_TASK_FINALIZED,
+    ]
+    assert [anchor.product_anchor_type for anchor in find_topic_anchors(tape)] == [
+        BEE_TASK_STARTED,
+        BEE_TASK_FINALIZED,
+    ]
+    assert started_anchor.metadata["task_kind"] == "maintenance"
+    assert finalized_anchor.metadata["task_status"] == "completed"
+    assert [intent.node_id for intent in intents] == ["node-validate"]
+    assert launch_metadata["approval_policy"] == "existing_runtime_policy"
+    assert launch_metadata["action_policy"] == "existing_action_safety"
+    assert launch_metadata["workspace_binding"] == "existing_workspace_provider"
+    assert "Bee Node Launches" in console_html
+    assert "bee-task-alpha" in console_html
+    assert "node-validate" in console_html
+    assert "existing_action_safety" in console_html
+    assert 'task_kind="maintenance"' in metrics_text
+    assert 'task_profile="local"' in metrics_text
+    assert 'task_status="completed"' in metrics_text
+    assert 'node_kind="validation"' in metrics_text
+    assert 'node_profile="default"' in metrics_text
+    assert 'node_status="completed"' in metrics_text
+    for forbidden in (
+        "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT",
+        "raw prompt",
+        "raw message",
+        "command_output",
+        "stdout",
+        "stderr",
+    ):
+        assert forbidden not in console_html
+    for forbidden in (
+        "task_id",
+        "node_id",
+        "topic_id",
+        "run_id",
+        "session_id",
+        "bee-task-alpha",
+        "node-validate",
+        "topic-alpha",
+        "run-bee",
+        "session-alpha",
+    ):
+        assert forbidden not in metrics_text
+
+
 def _safe_manifest() -> JSONObject:
     return {
         "version": 1,
@@ -910,7 +1063,7 @@ def _safe_manifest() -> JSONObject:
 
 def _task_record(now: datetime) -> BeeTaskRecord:
     return BeeTaskRecord(
-        task_id="bee-alpha",
+        task_id="bee-task-alpha",
         topic_id="topic-alpha",
         session_id="session-alpha",
         kind="maintenance",
@@ -951,7 +1104,7 @@ def _node_record(
 ) -> BeeNodeRecord:
     return BeeNodeRecord(
         node_id=node_id,
-        task_id="bee-alpha",
+        task_id="bee-task-alpha",
         kind=kind,
         profile="default",
         status="pending",
