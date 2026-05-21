@@ -78,21 +78,22 @@ Define observability and console boundaries.
 
 Implementation of G87-G92 should add executable tests covering these contracts:
 
-- [ ] `test_schedule_store_schema_is_idempotent`
-- [ ] `test_schedule_store_create_update_list_and_record_trigger`
-- [ ] `test_proactive_signal_store_deduplicates_signals`
-- [ ] `test_schedule_planner_returns_bounded_due_launch_intents`
-- [ ] `test_schedule_planner_uses_fake_clock_without_external_services`
-- [ ] `test_topic_aware_launch_creates_topic_when_missing`
-- [ ] `test_topic_aware_launch_continues_open_topic`
-- [ ] `test_scheduled_launch_preserves_approval_policy_and_workspace_binding`
-- [ ] `test_proactive_signal_cooldown_prevents_unbounded_loop`
-- [ ] `test_schedule_metrics_do_not_use_schedule_id_topic_id_or_run_id_labels`
-- [ ] `test_console_schedules_render_safe_summaries`
-- [ ] `test_scheduled_runs_smoke_topic_signal_launch_console`
-- [ ] `uv run pytest tests/coding_agent/test_scheduled_runs.py -v`
-- [ ] `uv run pytest tests/ui/test_developer_console.py -v`
-- [ ] `git diff --check -- .`
+- [x] `test_schedule_store_schema_is_idempotent`
+- [x] `test_schedule_store_create_update_list_and_record_trigger`
+- [x] `test_proactive_signal_store_deduplicates_signals`
+- [x] `test_schedule_planner_returns_bounded_due_launch_intents`
+- [x] `test_schedule_planner_skips_inactive_and_not_due_without_execution`
+- [x] `test_topic_aware_launch_creates_topic_when_missing`
+- [x] `test_topic_aware_launch_continues_open_topic`
+- [x] `test_topic_aware_launch_rejects_closed_explicit_topic`
+- [x] `test_scheduled_launch_metadata_is_additive_to_policy_and_workspace_binding`
+- [x] `test_proactive_signal_planner_skips_cooldown_without_looping`
+- [x] `test_prometheus_metrics_allow_low_cardinality_scheduled_run_labels`
+- [x] `test_console_schedules_render_schedules_triggers_and_signals_safely`
+- [x] `test_scheduled_runs_smoke_topic_signal_launch_console`
+- [x] `uv run pytest tests/coding_agent/test_scheduled_runs.py -v`
+- [x] `uv run pytest tests/ui/test_developer_console.py -v`
+- [x] `git diff --check -- .`
 
 ## References
 

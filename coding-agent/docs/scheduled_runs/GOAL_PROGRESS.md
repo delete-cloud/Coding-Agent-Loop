@@ -251,7 +251,7 @@ This ledger tracks G85-G92 for the Topic-aware Scheduled Runs / Proactive Signal
 
 ### After
 
-- Status: passed local verification; pending PR.
+- Status: merged via PR #300.
 - Changed files:
   - `docs/scheduled_runs/GOAL_PROGRESS.md`
   - `src/coding_agent/ui/developer_console.py`
@@ -274,3 +274,72 @@ This ledger tracks G85-G92 for the Topic-aware Scheduled Runs / Proactive Signal
   - whitespace diff check: passed.
 - Remaining risks:
   - G91 exposes read-only console and metrics-label integration only. Final cross-phase smoke tests and docs are deferred to G92.
+
+## G92_SCHEDULED_RUNS_E2E_SMOKE_AND_DOCS
+
+### Before
+
+- Goal id: G92_SCHEDULED_RUNS_E2E_SMOKE_AND_DOCS
+- Intended files:
+  - `docs/scheduled_runs/GOAL_PROGRESS.md`
+  - `docs/scheduled_runs/USAGE.md`
+  - `docs/scheduled_runs/IMPLEMENTATION_REPORT.md`
+  - `docs/adr/0040-topic-aware-scheduled-runs.md`
+  - `tests/coding_agent/test_scheduled_runs.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_scheduled_runs.py -v`
+  - `uv run pytest tests/coding_agent/test_topic_layer_smoke.py -v`
+  - `uv run pytest tests/ui/test_developer_console.py -v`
+  - `uv run pytest tests/coding_agent/test_observability.py tests/coding_agent/test_observability_platform_smoke.py -v`
+  - `uv run pytest tests/integration/test_durable_runtime_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+  - `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+  - `uv run pytest tests/coding_agent/evaluation/ -v`
+  - `uv run pytest tests/dogfood/test_local_dogfood_run.py tests/dogfood/test_workspace_provider_demo.py -v`
+  - `uv run ruff format --check tests/coding_agent/test_scheduled_runs.py`
+  - `uv run ruff check tests/coding_agent/test_scheduled_runs.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Final scheduled run smoke covers topic creation, schedule trigger planning, proactive signal planning, console rendering, and metrics no-leak behavior.
+  - `USAGE.md` and `IMPLEMENTATION_REPORT.md` exist.
+  - Prior durable runtime, context system, action safety, observability, console, dogfood, workspace, and topic smoke tests pass where practical.
+  - No Bee workflow runtime, DAG executor, desktop, bridge, proactive loop, external executor, or multi-agent task graph is introduced.
+
+### After
+
+- Status: passed local verification; pending PR.
+- Changed files:
+  - `docs/scheduled_runs/GOAL_PROGRESS.md`
+  - `docs/scheduled_runs/USAGE.md`
+  - `docs/scheduled_runs/IMPLEMENTATION_REPORT.md`
+  - `docs/adr/0040-topic-aware-scheduled-runs.md`
+  - `tests/coding_agent/test_scheduled_runs.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_scheduled_runs.py -v`
+  - `uv run pytest tests/coding_agent/test_topic_layer_smoke.py -v`
+  - `uv run pytest tests/ui/test_developer_console.py -v`
+  - `uv run pytest tests/coding_agent/test_observability.py tests/coding_agent/test_observability_platform_smoke.py -v`
+  - `uv run pytest tests/integration/test_durable_runtime_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+  - `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+  - `uv run pytest tests/coding_agent/evaluation/ -v`
+  - `uv run pytest tests/dogfood/test_local_dogfood_run.py tests/dogfood/test_workspace_provider_demo.py -v`
+  - `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+  - `uv run ruff format --check tests/coding_agent/test_scheduled_runs.py`
+  - `uv run ruff check tests/coding_agent/test_scheduled_runs.py`
+  - `git diff --check -- .`
+- Results:
+  - scheduled run tests: 16 passed.
+  - topic layer smoke: 1 passed.
+  - Developer Console tests: 34 passed.
+  - observability tests: 29 passed.
+  - durable runtime smoke: 6 passed.
+  - context system smoke: 1 passed.
+  - action safety smoke: 1 passed.
+  - evaluation tests: 20 passed.
+  - dogfood/workspace demo tests: 2 passed.
+  - AgentKit context pipeline release gate: 8 passed, 29 deselected.
+  - scoped ruff format/check: passed.
+  - whitespace diff check: passed.
+- Remaining risks:
+  - This phase intentionally stops at deterministic planning, topic launch preparation, console visibility, and smoke coverage. Production scheduler workers, Bee/DAG runtime, external executors, desktop, bridge, and multi-agent task graphs remain out of scope.
