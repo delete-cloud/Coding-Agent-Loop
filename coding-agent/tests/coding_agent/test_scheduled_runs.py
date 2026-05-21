@@ -6,7 +6,12 @@ from typing import cast
 import pytest
 
 from agentkit.storage.pg import AsyncPGPool, PGPool
+from agentkit.observability import SpanRecord
 from agentkit.tape.tape import Tape
+from coding_agent.observability import (
+    PrometheusMetricsObservationSink,
+    PrometheusMetricsRecorder,
+)
 from coding_agent.scheduled_runs import (
     PGScheduledRunStore,
     ProactiveSignalPlanner,
@@ -19,6 +24,14 @@ from coding_agent.scheduled_runs import (
 )
 from coding_agent.topic_lifecycle import TopicLifecycle
 from coding_agent.topic_store import JSONObject, TopicAnchorRecord, TopicRecord
+from coding_agent.ui.developer_console import (
+    ConsoleProactiveSignalSummary,
+    ConsoleScheduleSummary,
+    ConsoleSchedulesPage,
+    ConsoleScheduleTriggerSummary,
+    render_console_schedules_page,
+    safe_text_value,
+)
 
 
 class FakeScheduledPool:
@@ -843,3 +856,205 @@ async def test_proactive_signal_planner_requires_session_for_launch(
 
     assert (await store.load_signal("signal-no-session")).status == "new"
     assert await store.list_triggers("signal:signal-no-session") == []
+
+
+@pytest.mark.asyncio
+async def test_scheduled_runs_smoke_topic_signal_launch_console(
+    store: PGScheduledRunStore,
+) -> None:
+    now = _dt(10)
+    schedule = ScheduleRecord(
+        schedule_id="schedule-smoke",
+        session_id="session-1",
+        topic_id=None,
+        kind="interval",
+        status="active",
+        cadence="daily",
+        owner="local",
+        title="raw prompt title must redact",
+        next_due_at=_dt(9),
+        last_triggered_at=None,
+        created_at=_dt(8),
+        updated_at=_dt(8),
+        metadata={"profile": "local"},
+    )
+    await store.create_schedule(schedule)
+
+    scheduled_intents = await ScheduledRunPlanner(
+        store=store,
+        trigger_id_factory=lambda _schedule, _now: "trigger-smoke",
+    ).plan_due_schedules(now=now, max_due=1)
+
+    topic_store = FakeScheduledTopicStore()
+    tape = Tape(tape_id="tape-1")
+    prepared = await _preparer(topic_store).prepare(
+        intent=scheduled_intents[0],
+        tape=tape,
+    )
+
+    await store.record_signal(
+        ProactiveSignalRecord(
+            signal_id="signal-smoke",
+            dedupe_key="repo:smoke",
+            session_id="session-1",
+            topic_id=prepared.topic_id,
+            kind="repo_activity",
+            status="new",
+            observed_at=_dt(9, 45),
+            cooldown_until=None,
+            summary="raw message signal must redact",
+            metadata={"signal_kind": "repo_activity"},
+        )
+    )
+    signal_intents = await ProactiveSignalPlanner(
+        store=store,
+        cooldown=timedelta(minutes=15),
+    ).plan_new_signals(now=now, max_signals=1)
+
+    schedule_triggers = await store.list_triggers("schedule-smoke")
+    signal_triggers = await store.list_triggers("signal:signal-smoke")
+    signal = await store.load_signal("signal-smoke")
+
+    assert [intent.schedule_id for intent in scheduled_intents] == ["schedule-smoke"]
+    assert prepared.run_metadata == {
+        "scheduled_run": {
+            "schedule_id": "schedule-smoke",
+            "trigger_id": "trigger-smoke",
+            "reason": "schedule_due",
+            "planned_at": now.isoformat(),
+        },
+        "topic": {
+            "topic_id": "topic-created",
+            "tape_id": "tape-1",
+            "session_id": "session-1",
+            "kind": "coding",
+            "status": "open",
+            "topic_initial_seq": 0,
+            "topic_finalized_seq": None,
+        },
+    }
+    assert topic_store.anchors[0].anchor_type == "topic_initial"
+    assert tape[0].meta["product_anchor_type"] == "topic_initial"
+    assert [intent.schedule_id for intent in signal_intents] == ["signal:signal-smoke"]
+    assert signal.status == "planned"
+    assert signal.cooldown_until == _dt(10, 15)
+
+    rendered = render_console_schedules_page(
+        ConsoleSchedulesPage(
+            schedules=(
+                ConsoleScheduleSummary(
+                    schedule_id=schedule.schedule_id,
+                    session_id=schedule.session_id,
+                    topic_id=prepared.topic_id,
+                    kind=schedule.kind,
+                    status="active",
+                    cadence=schedule.cadence,
+                    title=safe_text_value(schedule.title),
+                    next_due_at=(
+                        await store.load_schedule("schedule-smoke")
+                    ).next_due_at,
+                    last_triggered_at=now,
+                ),
+            ),
+            triggers=tuple(
+                ConsoleScheduleTriggerSummary(
+                    trigger_id=trigger.trigger_id,
+                    schedule_id=trigger.schedule_id,
+                    signal_id=trigger.signal_id,
+                    topic_id=trigger.topic_id,
+                    run_id=trigger.run_id,
+                    status=trigger.status,
+                    due_at=trigger.due_at,
+                    planned_at=trigger.planned_at,
+                    reason=trigger.reason,
+                )
+                for trigger in [*schedule_triggers, *signal_triggers]
+            ),
+            signals=(
+                ConsoleProactiveSignalSummary(
+                    signal_id=signal.signal_id,
+                    session_id=signal.session_id,
+                    topic_id=signal.topic_id,
+                    kind=signal.kind,
+                    status=signal.status,
+                    observed_at=signal.observed_at,
+                    cooldown_until=signal.cooldown_until,
+                    summary=safe_text_value(signal.summary),
+                ),
+            ),
+        )
+    )
+    assert "Scheduled Runs" in rendered
+    assert "schedule-smoke" in rendered
+    assert "trigger-smoke" in rendered
+    assert "signal-trigger-signal-smoke" in rendered
+    assert "signal-smoke" in rendered
+    assert "redacted" in rendered
+    for forbidden in (
+        "raw prompt",
+        "raw message",
+        "raw content",
+        "command_output",
+        "stdout=",
+        "stderr=",
+        "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT",
+    ):
+        assert forbidden not in rendered
+
+    recorder = PrometheusMetricsRecorder()
+    PrometheusMetricsObservationSink(recorder=recorder).record_span(
+        SpanRecord(
+            name="runtime.stage.dispatch",
+            status="ok",
+            attributes={
+                "schedule_id": "schedule-smoke",
+                "signal_id": "signal-smoke",
+                "topic_id": prepared.topic_id,
+                "schedule_kind": "interval",
+                "schedule_status": "active",
+                "signal_kind": "repo_activity",
+                "signal_status": "planned",
+                "trigger_kind": "proactive_signal",
+            },
+            duration_ms=1,
+        )
+    )
+    metrics = recorder.exposition_text()
+    assert 'schedule_kind="interval"' in metrics
+    assert 'signal_status="planned"' in metrics
+    assert "schedule_id" not in metrics
+    assert "signal_id" not in metrics
+    assert "topic_id" not in metrics
+    assert "schedule-smoke" not in metrics
+    assert "signal-smoke" not in metrics
+    assert prepared.topic_id not in metrics
+
+
+@pytest.mark.asyncio
+async def test_scheduled_launch_metadata_is_additive_to_policy_and_workspace_binding() -> (
+    None
+):
+    topic_store = FakeScheduledTopicStore()
+    prepared = await _preparer(topic_store).prepare(
+        intent=_intent(None),
+        tape=Tape(tape_id="tape-1"),
+    )
+    existing_run_metadata = {
+        "approval_policy": "interactive",
+        "workspace_provider": "docker",
+        "provider_instance_id": "provider-local",
+        "workspace_host_label": "host-local",
+        "workspace_source_kind": "git",
+    }
+
+    merged_metadata = {**existing_run_metadata, **prepared.run_metadata}
+
+    assert merged_metadata["approval_policy"] == "interactive"
+    assert merged_metadata["workspace_provider"] == "docker"
+    assert merged_metadata["provider_instance_id"] == "provider-local"
+    assert merged_metadata["workspace_host_label"] == "host-local"
+    assert merged_metadata["workspace_source_kind"] == "git"
+    assert merged_metadata["scheduled_run"]["schedule_id"] == "schedule-1"
+    assert merged_metadata["topic"]["topic_id"] == "topic-created"
+    assert "approval_policy" not in prepared.run_metadata
+    assert "workspace_provider" not in prepared.run_metadata
