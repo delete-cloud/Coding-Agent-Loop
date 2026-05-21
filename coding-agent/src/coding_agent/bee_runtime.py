@@ -18,10 +18,18 @@ _MAX_METADATA_STRING_CHARS: Final[int] = 256
 _MAX_NODES: Final[int] = 64
 _FORBIDDEN_KEY_PARTS: Final[frozenset[str]] = frozenset(
     {
+        "api_key",
+        "apikey",
+        "bearer",
         "command_output",
+        "credential",
+        "credentials",
         "content",
         "env",
+        "environment",
+        "key",
         "message",
+        "password",
         "prompt",
         "result",
         "secret",
@@ -46,6 +54,10 @@ _FORBIDDEN_EXECUTABLE_KEYS: Final[frozenset[str]] = frozenset(
 _SECRET_VALUE_MARKERS: Final[tuple[str, ...]] = (
     "-----begin ",
     "akia",
+    "bearer ",
+    "gho_",
+    "ghp_",
+    "github_pat_",
     "password=",
     "secret=",
     "sk-",
@@ -213,8 +225,9 @@ def _reject_forbidden_key(path: str, key: str) -> None:
     for forbidden in _FORBIDDEN_KEY_PARTS:
         if _key_contains_token(normalized, forbidden):
             raise ValueError(f"{path}.{key} uses forbidden sensitive field")
-    if normalized in _FORBIDDEN_EXECUTABLE_KEYS:
-        raise ValueError(f"{path}.{key} uses forbidden executable field")
+    for forbidden in _FORBIDDEN_EXECUTABLE_KEYS:
+        if _key_contains_token(normalized, forbidden):
+            raise ValueError(f"{path}.{key} uses forbidden executable field")
 
 
 def _key_contains_token(normalized_key: str, forbidden: str) -> bool:
@@ -238,6 +251,8 @@ def _require_unique_node_ids(nodes: tuple[BeeNodeManifest, ...]) -> None:
         if node.node_id in seen:
             raise ValueError(f"duplicate Bee node id: {node.node_id}")
         seen.add(node.node_id)
+        if node.node_id in node.depends_on:
+            raise ValueError(f"Bee node cannot depend on itself: {node.node_id}")
     missing = {
         dependency
         for node in nodes
@@ -247,6 +262,27 @@ def _require_unique_node_ids(nodes: tuple[BeeNodeManifest, ...]) -> None:
     if missing:
         missing_list = ", ".join(sorted(missing))
         raise ValueError(f"Bee node dependencies not found: {missing_list}")
+    _reject_dependency_cycles(nodes)
+
+
+def _reject_dependency_cycles(nodes: tuple[BeeNodeManifest, ...]) -> None:
+    dependencies_by_node = {node.node_id: set(node.depends_on) for node in nodes}
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(node_id: str) -> None:
+        if node_id in visited:
+            return
+        if node_id in visiting:
+            raise ValueError(f"Bee node dependency cycle includes: {node_id}")
+        visiting.add(node_id)
+        for dependency_id in dependencies_by_node[node_id]:
+            visit(dependency_id)
+        visiting.remove(node_id)
+        visited.add(node_id)
+
+    for node in nodes:
+        visit(node.node_id)
 
 
 def _require_object(raw: JSONObject, key: str) -> JSONObject:

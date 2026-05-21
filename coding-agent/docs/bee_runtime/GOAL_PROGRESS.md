@@ -117,3 +117,22 @@ This ledger tracks G93-G101 for the Bee-style Workflow Template / Task Manifest 
   - Target manifest tests passed after one fix iteration for over-broad `content` key matching.
 - Remaining risks:
   - G95 does not add durable task storage, topic anchors, planning, launch metadata, console pages, or metrics; those remain deferred to G96-G101.
+
+### Local Review Follow-up
+
+- Status: passed local verification; pending PR.
+- Changed files:
+  - `src/coding_agent/bee_runtime.py`
+  - `tests/coding_agent/test_bee_runtime.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -v`
+  - `uv run ruff format src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `uv run ruff check src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `git diff --check -- .`
+- Results:
+  - Local review found that PR #305 still accepted common credential/env keys, command-like key variants, and cyclic node dependencies.
+  - Sanitizer now rejects nested environment/token/password/api-key fields and GitHub/token-like values.
+  - Executable key rejection now applies tokenized matching to `run_command`, `shell_command`, `command_spec`, and `pre_commands` without rejecting `context_profile`.
+  - Dependency validation now rejects self-dependencies and cycles.
+- Remaining risks:
+  - This follow-up remains G95-scoped; durable storage and runtime planning are deferred to G96-G101.
