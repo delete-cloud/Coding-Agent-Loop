@@ -104,3 +104,53 @@ This ledger tracks G77-G84 for the Topic Layer / Tape View Foundation phase.
   - whitespace diff check: passed.
 - Remaining risks:
   - G79 adds durable store primitives only. Writing lifecycle anchors to tape, migrating existing `TopicPlugin` behavior, recall context integration, topic observability, console pages, and final smoke tests are deferred to G80-G84.
+
+## G80_TOPIC_LIFECYCLE_ANCHORS
+
+### Before
+
+- Goal id: G80_TOPIC_LIFECYCLE_ANCHORS
+- Intended files:
+  - `docs/topic_layer/GOAL_PROGRESS.md`
+  - `src/coding_agent/topic_lifecycle.py`
+  - `tests/coding_agent/test_topic_lifecycle.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_topic_lifecycle.py -v`
+  - `uv run pytest tests/coding_agent/test_topic_store.py -v`
+  - `uv run pytest tests/coding_agent/plugins/test_topic.py -v`
+  - `uv run pytest tests/agentkit/tape/ -v`
+  - `uv run ruff format --check src/coding_agent/topic_lifecycle.py tests/coding_agent/test_topic_lifecycle.py`
+  - `uv run ruff check src/coding_agent/topic_lifecycle.py tests/coding_agent/test_topic_lifecycle.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Creating a topic writes a safe `topic_initial` product anchor encoded through existing tape anchor types.
+  - Finalizing a topic writes a safe `topic_finalized` product anchor and records the finalized sequence.
+  - Aborting a topic writes a safe `topic_aborted` product anchor or explicit aborted status.
+  - Topic range listing and product-anchor discovery work on fixture tapes.
+  - Old tapes without topic anchors still load and return no topic anchors.
+  - Existing topic plugin and tape tests still pass.
+
+### After
+
+- Status: passed local verification; pending PR.
+- Changed files:
+  - `docs/topic_layer/GOAL_PROGRESS.md`
+  - `src/coding_agent/topic_lifecycle.py`
+  - `tests/coding_agent/test_topic_lifecycle.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_topic_lifecycle.py -v`
+  - `uv run pytest tests/coding_agent/test_topic_store.py -v`
+  - `uv run pytest tests/coding_agent/plugins/test_topic.py -v`
+  - `uv run pytest tests/agentkit/tape/ -v`
+  - `uv run ruff format --check src/coding_agent/topic_lifecycle.py tests/coding_agent/test_topic_lifecycle.py`
+  - `uv run ruff check src/coding_agent/topic_lifecycle.py tests/coding_agent/test_topic_lifecycle.py`
+  - `git diff --check -- .`
+- Results:
+  - topic lifecycle tests: 8 passed.
+  - topic store tests: 9 passed.
+  - existing TopicPlugin tests: 11 passed.
+  - AgentKit tape tests: 100 passed.
+  - scoped ruff format/check: passed.
+  - whitespace diff check: passed.
+- Remaining risks:
+  - G80 adds a lifecycle helper but does not wire automatic durable topics into runtime execution. Topic recall, context integration, cost provenance, console views, and final smoke tests are deferred to G81-G84.
