@@ -55,7 +55,7 @@ This ledger tracks G85-G92 for the Topic-aware Scheduled Runs / Proactive Signal
 
 ### After
 
-- Status: passed local verification; pending PR.
+- Status: merged via PR #295.
 - Changed files:
   - `docs/scheduled_runs/GOAL_PROGRESS.md`
   - `docs/adr/0040-topic-aware-scheduled-runs.md`
@@ -68,3 +68,42 @@ This ledger tracks G85-G92 for the Topic-aware Scheduled Runs / Proactive Signal
   - whitespace diff check: passed.
 - Remaining risks:
   - G86 is ADR-only. Durable schema/store, trigger planning, topic-aware launch intents, proactive signal dedupe/cooldown, console/observability integration, and final smoke tests are deferred to G87-G92.
+
+## G87_SCHEDULED_RUNS_STORE_AND_SCHEMA
+
+### Before
+
+- Goal id: G87_SCHEDULED_RUNS_STORE_AND_SCHEMA
+- Intended files:
+  - `docs/scheduled_runs/GOAL_PROGRESS.md`
+  - `src/coding_agent/scheduled_runs.py`
+  - `tests/coding_agent/test_scheduled_runs.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_scheduled_runs.py -v`
+  - `uv run ruff format --check src/coding_agent/scheduled_runs.py tests/coding_agent/test_scheduled_runs.py`
+  - `uv run ruff check src/coding_agent/scheduled_runs.py tests/coding_agent/test_scheduled_runs.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Durable schedule/proactive signal schema initialization is idempotent.
+  - Store APIs cover schedule create/load/list/status updates, trigger records, signal record/load/list/status updates, and signal deduplication.
+  - Records reject unsafe metadata and raw sensitive display fields.
+  - No trigger planner, run execution, Bee workflow, desktop, bridge, external executor, or AgentKit Core changes are implemented.
+
+### After
+
+- Status: passed local verification; pending PR.
+- Changed files:
+  - `docs/scheduled_runs/GOAL_PROGRESS.md`
+  - `src/coding_agent/scheduled_runs.py`
+  - `tests/coding_agent/test_scheduled_runs.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_scheduled_runs.py -v`
+  - `uv run ruff format --check src/coding_agent/scheduled_runs.py tests/coding_agent/test_scheduled_runs.py`
+  - `uv run ruff check src/coding_agent/scheduled_runs.py tests/coding_agent/test_scheduled_runs.py`
+  - `git diff --check -- .`
+- Results:
+  - scheduled run store tests: 4 passed.
+  - scoped ruff format/check: passed.
+  - whitespace diff check: passed.
+- Remaining risks:
+  - G87 adds durable records and store APIs only. Trigger planning, topic-aware launch intents, proactive cooldown planning, console/observability integration, and final smoke tests are deferred to G88-G92.
