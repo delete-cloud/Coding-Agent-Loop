@@ -136,3 +136,22 @@ This ledger tracks G93-G101 for the Bee-style Workflow Template / Task Manifest 
   - Dependency validation now rejects self-dependencies and cycles.
 - Remaining risks:
   - This follow-up remains G95-scoped; durable storage and runtime planning are deferred to G96-G101.
+
+### Local Review Follow-up 2
+
+- Status: passed local verification; pending PR.
+- Changed files:
+  - `src/coding_agent/bee_runtime.py`
+  - `tests/coding_agent/test_bee_runtime.py`
+  - `docs/bee_runtime/GOAL_PROGRESS.md`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -v`
+  - `uv run ruff format src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `uv run ruff check src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `git diff --check -- .`
+- Results:
+  - Local review found that bare token keys and camelCase command-like keys were still accepted.
+  - Sanitizer now treats `token` as a forbidden sensitive key token, including `GITHUB_TOKEN` and `AWS_SESSION_TOKEN`.
+  - Sanitizer now splits camelCase before token matching, so `runCommand`, `shellCommand`, `commandSpec`, and `preCommands` are rejected.
+- Remaining risks:
+  - This remains G95-scoped; durable storage and runtime planning are deferred to G96-G101.
