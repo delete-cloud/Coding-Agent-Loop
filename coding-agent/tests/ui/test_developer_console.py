@@ -16,6 +16,11 @@ from coding_agent.runtime_store import (
     RunMessageSnapshotRecord,
     RuntimeEventRecord,
 )
+from coding_agent.scheduled_runs import (
+    ProactiveSignalRecord,
+    ScheduleRecord,
+    ScheduleTriggerRecord,
+)
 from coding_agent.topic_store import (
     TopicAnchorRecord,
     TopicCostRecord,
@@ -41,6 +46,7 @@ CONSOLE_ROUTES = (
     "/console/actions",
     "/console/observability",
     "/console/topics",
+    "/console/schedules",
     "/console/workspaces",
     "/console/release",
 )
@@ -55,6 +61,7 @@ NAV_LINKS = {
     "Actions / Validation": "/console/actions",
     "Observability": "/console/observability",
     "Topics": "/console/topics",
+    "Schedules": "/console/schedules",
     "Workspaces": "/console/workspaces",
     "Release / Health": "/console/release",
 }
@@ -403,6 +410,67 @@ class _ConsoleTopicStore:
         return self.costs.get(topic_id)
 
 
+class _ConsoleScheduledRunStore:
+    def __init__(
+        self,
+        schedules: list[ScheduleRecord],
+        *,
+        triggers: list[ScheduleTriggerRecord] | None = None,
+        signals: list[ProactiveSignalRecord] | None = None,
+    ) -> None:
+        self.schedules = schedules
+        self.triggers = triggers or []
+        self.signals = signals or []
+
+    async def list_schedules(
+        self,
+        *,
+        session_id: str | None = None,
+        topic_id: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[ScheduleRecord]:
+        schedules = []
+        for schedule in self.schedules:
+            if session_id is not None and schedule.session_id != session_id:
+                continue
+            if topic_id is not None and schedule.topic_id != topic_id:
+                continue
+            if status is not None and schedule.status != status:
+                continue
+            schedules.append(schedule)
+        return schedules[:limit]
+
+    async def list_triggers(
+        self,
+        schedule_id: str,
+        *,
+        limit: int = 100,
+    ) -> list[ScheduleTriggerRecord]:
+        return [
+            trigger for trigger in self.triggers if trigger.schedule_id == schedule_id
+        ][:limit]
+
+    async def list_signals(
+        self,
+        *,
+        status: str | None = None,
+        session_id: str | None = None,
+        topic_id: str | None = None,
+        limit: int = 100,
+    ) -> list[ProactiveSignalRecord]:
+        signals = []
+        for signal in self.signals:
+            if status is not None and signal.status != status:
+                continue
+            if session_id is not None and signal.session_id != session_id:
+                continue
+            if topic_id is not None and signal.topic_id != topic_id:
+                continue
+            signals.append(signal)
+        return signals[:limit]
+
+
 @pytest.fixture(autouse=True)
 async def clear_console_state() -> AsyncIterator[None]:
     session_manager.configure_runtime_store(None)
@@ -657,6 +725,56 @@ def _topic_record(topic_id: str = "topic-durable") -> TopicRecord:
     )
 
 
+def _schedule_record(schedule_id: str = "schedule-alpha") -> ScheduleRecord:
+    return ScheduleRecord(
+        schedule_id=schedule_id,
+        session_id="session-alpha",
+        topic_id="topic-auth",
+        kind="interval",
+        status="active",
+        cadence="daily",
+        owner="owner:fixture",
+        title="Daily topic check",
+        next_due_at=datetime(2026, 5, 21, 2, 0, 0, tzinfo=UTC),
+        last_triggered_at=datetime(2026, 5, 20, 2, 0, 0, tzinfo=UTC),
+        created_at=datetime(2026, 5, 19, 2, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 5, 20, 2, 0, 0, tzinfo=UTC),
+        metadata={"profile": "local"},
+    )
+
+
+def _schedule_trigger_record(
+    trigger_id: str = "trigger-alpha",
+) -> ScheduleTriggerRecord:
+    return ScheduleTriggerRecord(
+        trigger_id=trigger_id,
+        schedule_id="schedule-alpha",
+        signal_id="signal-alpha",
+        topic_id="topic-auth",
+        run_id="run-alpha",
+        status="planned",
+        due_at=datetime(2026, 5, 21, 2, 0, 0, tzinfo=UTC),
+        planned_at=datetime(2026, 5, 21, 2, 0, 1, tzinfo=UTC),
+        reason="proactive_signal",
+        metadata={"trigger_kind": "proactive_signal"},
+    )
+
+
+def _proactive_signal_record(signal_id: str = "signal-alpha") -> ProactiveSignalRecord:
+    return ProactiveSignalRecord(
+        signal_id=signal_id,
+        dedupe_key="repo_activity:auth",
+        session_id="session-alpha",
+        topic_id="topic-auth",
+        kind="repo_activity",
+        status="planned",
+        observed_at=datetime(2026, 5, 21, 1, 55, 0, tzinfo=UTC),
+        cooldown_until=datetime(2026, 5, 21, 2, 25, 0, tzinfo=UTC),
+        summary="Repository activity detected",
+        metadata={"source_kind": "repo_activity"},
+    )
+
+
 def _workspace_record(
     workspace_id: str,
     *,
@@ -897,6 +1015,7 @@ async def test_console_placeholder_pages_render_empty_states() -> None:
         "/console/memory": "Memory",
         "/console/actions": "Actions / Validation",
         "/console/topics": "Topics",
+        "/console/schedules": "Schedules",
     }
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -967,6 +1086,7 @@ async def test_developer_console_e2e_smoke_covers_debug_chain(
             "action-alpha",
             "pytest_auth",
         ),
+        "/console/schedules": ("Schedules",),
         "/console/release": ("Health / Readiness", "durable-runtime-smoke"),
     }
 
@@ -1185,6 +1305,78 @@ async def test_console_topics_do_not_emit_topic_ids_as_metric_labels(
     assert 'route="console_topics_detail"' in metrics
     assert "topic-auth" not in metrics
     assert "topic_id" not in metrics
+
+
+@pytest.mark.asyncio
+async def test_console_schedules_render_schedules_triggers_and_signals_safely(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _register_console_session("session-alpha")
+    monkeypatch.setattr(
+        http_server,
+        "_console_scheduled_run_store",
+        lambda: _ConsoleScheduledRunStore(
+            [_schedule_record()],
+            triggers=[_schedule_trigger_record()],
+            signals=[_proactive_signal_record()],
+        ),
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/console/schedules")
+
+    assert response.status_code == 200
+    assert "Scheduled Runs" in response.text
+    assert "Schedule Triggers" in response.text
+    assert "Proactive Signals" in response.text
+    assert "schedule-alpha" in response.text
+    assert "trigger-alpha" in response.text
+    assert "signal-alpha" in response.text
+    assert "Repository activity detected" in response.text
+    assert 'href="/console/runs/run-alpha"' in response.text
+    for forbidden in FORBIDDEN_RENDERED_TEXT:
+        assert forbidden not in response.text
+
+
+@pytest.mark.asyncio
+async def test_console_schedules_do_not_emit_schedule_or_signal_ids_as_metric_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _register_console_session("session-alpha")
+    monkeypatch.setattr(
+        http_server,
+        "_load_observability_config",
+        lambda: {
+            "enabled": True,
+            "metrics": {
+                "enabled": True,
+                "endpoint_enabled": True,
+                "backend": "prometheus",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        http_server,
+        "_console_scheduled_run_store",
+        lambda: _ConsoleScheduledRunStore(
+            [_schedule_record()],
+            triggers=[_schedule_trigger_record()],
+            signals=[_proactive_signal_record()],
+        ),
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/console/schedules")
+
+    assert response.status_code == 200
+    metrics = prometheus_metrics_text()
+    assert 'route="console_schedules"' in metrics
+    assert "schedule-alpha" not in metrics
+    assert "signal-alpha" not in metrics
+    assert "schedule_id" not in metrics
+    assert "signal_id" not in metrics
 
 
 @pytest.mark.asyncio

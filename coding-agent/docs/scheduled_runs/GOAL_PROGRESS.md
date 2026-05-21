@@ -208,7 +208,7 @@ This ledger tracks G85-G92 for the Topic-aware Scheduled Runs / Proactive Signal
 
 ### After
 
-- Status: passed local verification; pending PR.
+- Status: merged via PR #299.
 - Changed files:
   - `docs/scheduled_runs/GOAL_PROGRESS.md`
   - `src/coding_agent/scheduled_runs.py`
@@ -224,3 +224,53 @@ This ledger tracks G85-G92 for the Topic-aware Scheduled Runs / Proactive Signal
   - whitespace diff check: passed.
 - Remaining risks:
   - G90 only plans proactive signals into launch intents. Console/observability integration and final smoke tests are deferred to G91-G92.
+
+## G91_SCHEDULED_CONSOLE_AND_OBSERVABILITY
+
+### Before
+
+- Goal id: G91_SCHEDULED_CONSOLE_AND_OBSERVABILITY
+- Intended files:
+  - `docs/scheduled_runs/GOAL_PROGRESS.md`
+  - `src/coding_agent/ui/developer_console.py`
+  - `src/coding_agent/ui/http_server.py`
+  - `src/coding_agent/observability.py`
+  - `tests/ui/test_developer_console.py`
+  - `tests/coding_agent/test_observability.py`
+- Verification commands:
+  - `uv run pytest tests/ui/test_developer_console.py -v`
+  - `uv run pytest tests/coding_agent/test_observability.py -v`
+  - `uv run ruff format --check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py src/coding_agent/observability.py tests/ui/test_developer_console.py tests/coding_agent/test_observability.py`
+  - `uv run ruff check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py src/coding_agent/observability.py tests/ui/test_developer_console.py tests/coding_agent/test_observability.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Developer Console renders schedules, schedule triggers, and proactive signals from existing stores.
+  - Console pages remain read-only and do not bypass approval, action, command, workspace, or HITL policy.
+  - Prometheus allows only low-cardinality schedule/signal labels and rejects schedule_id/signal_id.
+  - Console and observability tests remain deterministic and do not require external services.
+
+### After
+
+- Status: passed local verification; pending PR.
+- Changed files:
+  - `docs/scheduled_runs/GOAL_PROGRESS.md`
+  - `src/coding_agent/ui/developer_console.py`
+  - `src/coding_agent/ui/http_server.py`
+  - `src/coding_agent/observability.py`
+  - `tests/ui/test_developer_console.py`
+  - `tests/coding_agent/test_observability.py`
+- Tests run:
+  - `uv run pytest tests/ui/test_developer_console.py -v`
+  - `uv run pytest tests/coding_agent/test_observability.py -v`
+  - `uv run pytest tests/coding_agent/test_scheduled_runs.py -v`
+  - `uv run ruff format --check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py src/coding_agent/observability.py tests/ui/test_developer_console.py tests/coding_agent/test_observability.py`
+  - `uv run ruff check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py src/coding_agent/observability.py tests/ui/test_developer_console.py tests/coding_agent/test_observability.py`
+  - `git diff --check -- .`
+- Results:
+  - Developer Console tests: 34 passed.
+  - observability tests: 27 passed.
+  - scheduled run tests: 15 passed.
+  - scoped ruff format/check: passed.
+  - whitespace diff check: passed.
+- Remaining risks:
+  - G91 exposes read-only console and metrics-label integration only. Final cross-phase smoke tests and docs are deferred to G92.
