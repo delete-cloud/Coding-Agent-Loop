@@ -20,7 +20,7 @@ This ledger tracks G77-G84 for the Topic Layer / Tape View Foundation phase.
 
 ### After
 
-- Status: passed local verification; pending PR.
+- Status: merged via PR #285.
 - Changed files:
   - `docs/topic_layer/GOAL_PROGRESS.md`
   - `docs/topic_layer/CURRENT_STATE.md`
@@ -52,7 +52,7 @@ This ledger tracks G77-G84 for the Topic Layer / Tape View Foundation phase.
 
 ### After
 
-- Status: passed local verification; pending PR.
+- Status: merged via PR #286.
 - Changed files:
   - `docs/topic_layer/GOAL_PROGRESS.md`
   - `docs/adr/0039-topic-layer-tape-view-boundaries.md`
@@ -88,7 +88,7 @@ This ledger tracks G77-G84 for the Topic Layer / Tape View Foundation phase.
 
 ### After
 
-- Status: passed local verification; pending PR.
+- Status: merged via PR #287.
 - Changed files:
   - `docs/topic_layer/GOAL_PROGRESS.md`
   - `src/coding_agent/topic_store.py`
@@ -132,7 +132,7 @@ This ledger tracks G77-G84 for the Topic Layer / Tape View Foundation phase.
 
 ### After
 
-- Status: passed local verification; pending PR.
+- Status: merged via PR #288.
 - Changed files:
   - `docs/topic_layer/GOAL_PROGRESS.md`
   - `src/coding_agent/topic_lifecycle.py`
@@ -183,7 +183,7 @@ This ledger tracks G77-G84 for the Topic Layer / Tape View Foundation phase.
 
 ### After
 
-- Status: passed local verification; pending PR.
+- Status: merged via PR #289.
 - Changed files:
   - `docs/topic_layer/GOAL_PROGRESS.md`
   - `src/coding_agent/context_pack.py`
@@ -237,7 +237,7 @@ This ledger tracks G77-G84 for the Topic Layer / Tape View Foundation phase.
 
 ### After
 
-- Status: passed local verification; pending PR.
+- Status: merged via PR #290.
 - Changed files:
   - `docs/topic_layer/GOAL_PROGRESS.md`
   - `src/coding_agent/observability.py`
@@ -291,7 +291,7 @@ This ledger tracks G77-G84 for the Topic Layer / Tape View Foundation phase.
 
 ### After
 
-- Status: passed local verification; pending PR.
+- Status: merged via PR #291.
 - Changed files:
   - `docs/topic_layer/GOAL_PROGRESS.md`
   - `src/coding_agent/observability.py`
@@ -316,3 +316,63 @@ This ledger tracks G77-G84 for the Topic Layer / Tape View Foundation phase.
   - whitespace diff check: passed.
 - Remaining risks:
   - G83 prefers durable `PGTopicStore` topic/anchor/recall/cost data when the HTTP server uses PG-backed storage, and falls back to existing sanitized run/topic metadata otherwise. Final E2E topic smoke and user docs remain deferred to G84.
+
+## G84_TOPIC_LAYER_E2E_SMOKE_AND_DOCS
+
+### Before
+
+- Goal id: G84_TOPIC_LAYER_E2E_SMOKE_AND_DOCS
+- Intended files:
+  - `docs/topic_layer/GOAL_PROGRESS.md`
+  - `docs/topic_layer/IMPLEMENTATION_REPORT.md`
+  - `docs/topic_layer/USAGE.md`
+  - `tests/coding_agent/test_topic_layer_smoke.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_topic_layer_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_topic_store.py tests/coding_agent/test_topic_lifecycle.py tests/coding_agent/test_topic_recall.py tests/coding_agent/test_topic_provenance.py -v`
+  - `uv run pytest tests/ui/test_developer_console.py -k "topic or e2e" -v`
+  - `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+  - `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_observability_platform_smoke.py -v`
+  - `uv run pytest tests/integration/test_durable_runtime_smoke.py -v`
+  - `uv run ruff format --check tests/coding_agent/test_topic_layer_smoke.py`
+  - `uv run ruff check tests/coding_agent/test_topic_layer_smoke.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Topic lifecycle smoke covers create, `topic_initial`, append/range inspection, finalize, and `topic_finalized`.
+  - Topic recall smoke covers finalized source topic, new topic, `recall_anchor`, and recall link.
+  - Context/memory/eval provenance smoke covers topic metadata where available.
+  - Console/observability smoke covers topic list/detail and safe metrics with no `topic_id` Prometheus label.
+  - Final usage and implementation report docs exist.
+
+### After
+
+- Status: in PR #292.
+- Changed files:
+  - `docs/topic_layer/GOAL_PROGRESS.md`
+  - `docs/topic_layer/IMPLEMENTATION_REPORT.md`
+  - `docs/topic_layer/USAGE.md`
+  - `tests/coding_agent/test_topic_layer_smoke.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_topic_layer_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_topic_store.py tests/coding_agent/test_topic_lifecycle.py tests/coding_agent/test_topic_recall.py tests/coding_agent/test_topic_provenance.py -v`
+  - `uv run pytest tests/ui/test_developer_console.py -k "topic or e2e" -v`
+  - `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+  - `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_observability_platform_smoke.py -v`
+  - `uv run pytest tests/integration/test_durable_runtime_smoke.py -v`
+  - `uv run ruff format --check tests/coding_agent/test_topic_layer_smoke.py`
+  - `uv run ruff check tests/coding_agent/test_topic_layer_smoke.py`
+  - `git diff --check -- .`
+- Results:
+  - topic layer smoke: 1 passed.
+  - topic unit/regression suite: 31 passed.
+  - developer console topic/e2e tests: 4 passed, 28 deselected.
+  - context system smoke: 1 passed.
+  - action safety smoke: 1 passed.
+  - observability platform smoke: 2 passed.
+  - durable runtime smoke: 6 passed.
+  - scoped ruff format/check: passed.
+  - whitespace diff check: passed.
+- Remaining risks:
+  - Full production PG verification still depends on a configured local PG environment. Deterministic G84 coverage uses fake stores and existing local fixtures.
