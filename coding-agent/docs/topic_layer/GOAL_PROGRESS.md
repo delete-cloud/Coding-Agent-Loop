@@ -208,3 +208,58 @@ This ledger tracks G77-G84 for the Topic Layer / Tape View Foundation phase.
   - whitespace diff check: passed.
 - Remaining risks:
   - G81 adds deterministic recall and context-pack helpers only. Topic summaries are guarded as reference-only context, and default recall ignores low-information kind-only matches. Runtime build_context wiring, topic cost/eval/memory provenance, console pages, and final smoke tests are deferred to G82-G84.
+
+## G82_TOPIC_COST_EVAL_MEMORY_PROVENANCE
+
+### Before
+
+- Goal id: G82_TOPIC_COST_EVAL_MEMORY_PROVENANCE
+- Intended files:
+  - `docs/topic_layer/GOAL_PROGRESS.md`
+  - `src/coding_agent/observability.py`
+  - `src/coding_agent/topic_provenance.py`
+  - `tests/coding_agent/test_topic_provenance.py`
+  - `tests/coding_agent/test_observability.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_topic_provenance.py -v`
+  - `uv run pytest tests/coding_agent/test_observability.py -k "topic or forbidden_high_cardinality_labels" -v`
+  - `uv run pytest tests/coding_agent/test_topic_store.py -v`
+  - `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+  - `uv run ruff format --check src/coding_agent/topic_provenance.py src/coding_agent/observability.py tests/coding_agent/test_topic_provenance.py tests/coding_agent/test_observability.py`
+  - `uv run ruff check src/coding_agent/topic_provenance.py src/coding_agent/observability.py tests/coding_agent/test_topic_provenance.py tests/coding_agent/test_observability.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Topic usage/action/validation/run/tool counts can be converted into `TopicCostRecord` deltas and persisted through the existing topic store aggregate API.
+  - Eval result provenance can reference `topic_id` and source entry ranges in deterministic metadata.
+  - Memory evidence provenance can reference `topic_id` and source entry ranges without turning memory into instructions.
+  - Prometheus accepts only low-cardinality topic labels such as `topic_kind`, `topic_status`, and `topic_profile`.
+  - Prometheus output never exposes `topic_id` as a label.
+
+### After
+
+- Status: passed local verification; pending PR.
+- Changed files:
+  - `docs/topic_layer/GOAL_PROGRESS.md`
+  - `src/coding_agent/observability.py`
+  - `src/coding_agent/topic_provenance.py`
+  - `tests/coding_agent/test_observability.py`
+  - `tests/coding_agent/test_topic_provenance.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_topic_provenance.py -v`
+  - `uv run pytest tests/coding_agent/test_observability.py -k "topic or forbidden_high_cardinality_labels" -v`
+  - `uv run pytest tests/coding_agent/test_topic_store.py -v`
+  - `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_observability_platform_smoke.py -v`
+  - `uv run ruff format --check src/coding_agent/topic_provenance.py src/coding_agent/observability.py tests/coding_agent/test_topic_provenance.py tests/coding_agent/test_observability.py`
+  - `uv run ruff check src/coding_agent/topic_provenance.py src/coding_agent/observability.py tests/coding_agent/test_topic_provenance.py tests/coding_agent/test_observability.py`
+  - `git diff --check -- .`
+- Results:
+  - topic provenance tests: 7 passed.
+  - scoped observability tests: 3 passed, 23 deselected.
+  - topic store tests: 9 passed.
+  - context system smoke: 1 passed.
+  - observability platform smoke: 2 passed.
+  - scoped ruff format/check: passed.
+  - whitespace diff check: passed.
+- Remaining risks:
+  - G82 adds deterministic provenance helpers and low-cardinality metric label support only. `topic_kind` is allowlisted and unknown values are normalized to `unknown`; `topic_id` remains excluded from Prometheus labels. Console topic views and end-to-end topic smoke docs remain deferred to G83-G84.

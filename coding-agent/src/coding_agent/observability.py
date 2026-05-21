@@ -83,6 +83,9 @@ _PROMETHEUS_ALLOWED_ATTRIBUTE_LABELS = frozenset(
         "status",
         "storage_status",
         "tool_name",
+        "topic_kind",
+        "topic_profile",
+        "topic_status",
     }
 )
 _PROMETHEUS_ATTRIBUTE_LABEL_ALIASES = {
@@ -172,6 +175,9 @@ _PROMETHEUS_LABEL_VALUE_ALLOWLISTS = {
     ),
     "status": frozenset({"ok", "error", "started", "completed", "failed"}),
     "storage_status": frozenset({"ok", "error"}),
+    "topic_kind": frozenset({"coding", "unknown"}),
+    "topic_profile": frozenset({"ci", "demo", "local", "unknown"}),
+    "topic_status": frozenset({"open", "finalized", "aborted"}),
 }
 _PROMETHEUS_HISTOGRAM_BUCKETS = (5.0, 10.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 5000.0)
 _PROMETHEUS_HTTP_HISTOGRAM_BUCKETS = (
