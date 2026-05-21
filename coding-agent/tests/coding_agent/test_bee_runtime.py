@@ -42,6 +42,10 @@ def test_bee_manifest_parses_safe_fixture() -> None:
         (("metadata", "nested", "message"), "raw message"),
         (("nodes", 0, "metadata", "stdout"), "raw output"),
         (("topic", "metadata", "secret_name"), "token"),
+        (("metadata", "environment", "GITHUB_TOKEN"), "ghp_example"),
+        (("metadata", "api_key"), "abc123"),
+        (("metadata", "password"), "abc123"),
+        (("metadata", "bearer_token"), "abc123"),
     ],
 )
 def test_bee_manifest_rejects_raw_sensitive_fields(
@@ -58,9 +62,10 @@ def test_bee_manifest_rejects_raw_sensitive_fields(
 @pytest.mark.parametrize(
     ("path", "value"),
     [
-        (("metadata", "credential_marker"), "token=abc123"),
+        (("metadata", "safe_marker"), "token=abc123"),
         (("nodes", 0, "metadata", "safe_label"), "sk-test-value"),
         (("topic", "title_hint"), "secret=hidden"),
+        (("metadata", "safe_token_marker"), "ghp_example"),
     ],
 )
 def test_bee_manifest_rejects_secret_like_values(
@@ -78,6 +83,10 @@ def test_bee_manifest_rejects_secret_like_values(
     ("path", "value"),
     [
         (("nodes", 0, "command"), "pytest"),
+        (("nodes", 0, "run_command"), "pytest"),
+        (("nodes", 0, "shell_command"), "pytest"),
+        (("nodes", 0, "command_spec"), "pytest"),
+        (("nodes", 0, "pre_commands"), "pytest"),
         (("nodes", 0, "metadata", "executor"), "local"),
         (("metadata", "script"), "run checks"),
     ],
@@ -98,6 +107,23 @@ def test_bee_manifest_rejects_unknown_node_dependencies() -> None:
     raw["nodes"][1]["depends_on"] = ["node-missing"]  # type: ignore[index]
 
     with pytest.raises(ValueError, match="dependencies not found: node-missing"):
+        parse_bee_task_manifest(raw)
+
+
+def test_bee_manifest_rejects_self_dependency() -> None:
+    raw = _safe_manifest()
+    raw["nodes"][0]["depends_on"] = ["node-plan"]  # type: ignore[index]
+
+    with pytest.raises(ValueError, match="cannot depend on itself: node-plan"):
+        parse_bee_task_manifest(raw)
+
+
+def test_bee_manifest_rejects_dependency_cycles() -> None:
+    raw = _safe_manifest()
+    raw["nodes"][0]["depends_on"] = ["node-validate"]  # type: ignore[index]
+    raw["nodes"][1]["depends_on"] = ["node-plan"]  # type: ignore[index]
+
+    with pytest.raises(ValueError, match="dependency cycle includes"):
         parse_bee_task_manifest(raw)
 
 
