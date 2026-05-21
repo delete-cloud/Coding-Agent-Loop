@@ -304,6 +304,27 @@ This ledger tracks G93-G101 for the Bee-style Workflow Template / Task Manifest 
 - Remaining risks:
   - This remains G97-scoped; planner/execution integration is deferred to G98-G101.
 
+### Local Review Follow-up 2
+
+- Status: passed local verification; pending PR.
+- Changed files:
+  - `src/coding_agent/bee_runtime.py`
+  - `tests/coding_agent/test_bee_runtime.py`
+  - `docs/bee_runtime/GOAL_PROGRESS.md`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -v`
+  - `uv run pytest tests/coding_agent/test_topic_lifecycle.py tests/coding_agent/plugins/test_topic.py -v`
+  - `uv run ruff format src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `uv run ruff check src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `git diff --check -- .`
+- Results:
+  - Local review found that G97 follow-up held a synchronous tape lock across an awaited store call and still let caller metadata override `task_status`.
+  - Tape append and rollback now use short synchronous lock sections and never hold `tape._lock` across an await.
+  - `task_status` is now a reserved lifecycle-owned metadata key.
+  - Debug note: the reserved metadata fix required separating caller metadata validation from lifecycle-owned metadata injection; `_write_task_anchor()` now receives already-validated metadata.
+- Remaining risks:
+  - This remains G97-scoped; planner/execution integration is deferred to G98-G101.
+
 ## G98_BEE_TASK_PLANNER
 
 ### Before
@@ -345,23 +366,46 @@ This ledger tracks G93-G101 for the Bee-style Workflow Template / Task Manifest 
 - Remaining risks:
   - G98 only prepares launch intents. Converting launch intents into normal durable run metadata with workspace/action/context/validation policy preservation is deferred to G99.
 
-### Local Review Follow-up 2
+## G99_BEE_LAUNCH_METADATA_AND_POLICY_REFERENCES
+
+### Before
+
+- Goal id: G99_BEE_LAUNCH_METADATA_AND_POLICY_REFERENCES
+- Intended files:
+  - `docs/bee_runtime/GOAL_PROGRESS.md`
+  - `docs/adr/0041-bee-workflow-task-runtime.md`
+  - `src/coding_agent/bee_runtime.py`
+  - `tests/coding_agent/test_bee_runtime.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -v`
+  - `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+  - `uv run ruff format --check src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `uv run ruff check src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Bee launch metadata preserves existing approval/action/workspace policy routing as references only.
+  - Context and validation profiles are reference-only metadata and do not contain raw prompt/content/message/result/secret/text/command output/stdout/stderr/env.
+  - Launch metadata validates task, topic, session, and node consistency.
+  - No durable run creation, action execution, command execution, external executor, homelab template, Docker, Kubernetes, Argo, desktop, bridge, or multi-agent behavior is introduced.
+
+### After
 
 - Status: passed local verification; pending PR.
 - Changed files:
+  - `docs/bee_runtime/GOAL_PROGRESS.md`
+  - `docs/adr/0041-bee-workflow-task-runtime.md`
   - `src/coding_agent/bee_runtime.py`
   - `tests/coding_agent/test_bee_runtime.py`
-  - `docs/bee_runtime/GOAL_PROGRESS.md`
 - Tests run:
   - `uv run pytest tests/coding_agent/test_bee_runtime.py -v`
-  - `uv run pytest tests/coding_agent/test_topic_lifecycle.py tests/coding_agent/plugins/test_topic.py -v`
-  - `uv run ruff format src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+  - `uv run ruff format --check src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
   - `uv run ruff check src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
   - `git diff --check -- .`
 - Results:
-  - Local review found that G97 follow-up held a synchronous tape lock across an awaited store call and still let caller metadata override `task_status`.
-  - Tape append and rollback now use short synchronous lock sections and never hold `tape._lock` across an await.
-  - `task_status` is now a reserved lifecycle-owned metadata key.
-  - Debug note: the reserved metadata fix required separating caller metadata validation from lifecycle-owned metadata injection; `_write_task_anchor()` now receives already-validated metadata.
+  - Added `build_bee_launch_metadata()` to convert a Bee launch intent and validated manifest into safe reference metadata for a later normal durable run launch.
+  - Metadata carries task/node/topic/session correlation IDs, low-cardinality kind/profile fields, and explicit references to existing approval, action safety, and workspace provider policy paths.
+  - Context and validation profiles are included as profile-only references, not raw content or command output.
+  - Target Bee runtime tests passed after one fix iteration: launch metadata now treats task/node/topic/session IDs as allowed correlation fields while still applying no-leak validation to ordinary metadata values.
 - Remaining risks:
-  - This remains G97-scoped; planner/execution integration is deferred to G98-G101.
+  - G99 does not create durable runs or execute nodes. Console and observability rendering of Bee task/node metadata remains deferred to G100.

@@ -11,12 +11,14 @@ from coding_agent.bee_runtime import (
     BEE_TASK_ABORTED,
     BEE_TASK_FINALIZED,
     BEE_TASK_STARTED,
+    BeeNodeLaunchIntent,
     BeeNodeRecord,
     BeeTaskLifecycle,
     BeeTaskManifest,
     BeeTaskPlanner,
     BeeTaskRecord,
     PGBeeTaskStore,
+    build_bee_launch_metadata,
     parse_bee_task_manifest,
 )
 from coding_agent.topic_lifecycle import find_topic_anchors
@@ -332,12 +334,12 @@ async def test_bee_store_create_update_list_task_and_nodes() -> None:
 
     stored_task = await store.upsert_task(task)
     assert stored_task == task
-    assert await store.load_task("bee-task-alpha") == task
+    assert await store.load_task("bee-alpha") == task
     assert await store.list_tasks(session_id="session-alpha") == [task]
     assert await store.list_tasks(topic_id="topic-alpha", status="pending") == [task]
 
     running = await store.update_task_status(
-        "bee-task-alpha",
+        "bee-alpha",
         status="running",
         summary="Task is active",
         updated_at=now + timedelta(minutes=2),
@@ -349,10 +351,10 @@ async def test_bee_store_create_update_list_task_and_nodes() -> None:
 
     assert await store.upsert_node(plan_node) == plan_node
     assert await store.upsert_node(validate_node) == validate_node
-    assert await store.list_nodes("bee-task-alpha") == [plan_node, validate_node]
+    assert await store.list_nodes("bee-alpha") == [plan_node, validate_node]
 
     launched = await store.update_node_status(
-        task_id="bee-task-alpha",
+        task_id="bee-alpha",
         node_id="node-plan",
         status="running",
         run_id="run-alpha",
@@ -611,7 +613,7 @@ async def test_bee_planner_returns_bounded_launch_intents_without_execution() ->
     intents = await planner.plan_ready_nodes(now=planned_at, max_nodes=1)
 
     assert [intent.node_id for intent in intents] == ["node-validate"]
-    assert intents[0].task_id == "bee-task-alpha"
+    assert intents[0].task_id == "bee-alpha"
     assert intents[0].topic_id == "topic-alpha"
     assert intents[0].session_id == "session-alpha"
     assert intents[0].node_kind == "validation"
@@ -623,7 +625,7 @@ async def test_bee_planner_returns_bounded_launch_intents_without_execution() ->
         "node_kind": "validation",
         "node_profile": "default",
     }
-    updated_nodes = await store.list_nodes("bee-task-alpha")
+    updated_nodes = await store.list_nodes("bee-alpha")
     node_by_id = {node.node_id: node for node in updated_nodes}
     assert node_by_id["node-validate"].status == "ready"
     assert node_by_id["node-validate"].run_id is None
@@ -670,7 +672,7 @@ async def test_bee_planner_skips_blocked_non_pending_and_non_running_tasks() -> 
     await store.upsert_task(
         replace(
             _task_record(now + timedelta(minutes=3)),
-            task_id="bee-task-beta",
+            task_id="bee-beta",
             topic_id="topic-beta",
             session_id="session-beta",
             status="pending",
@@ -679,7 +681,7 @@ async def test_bee_planner_skips_blocked_non_pending_and_non_running_tasks() -> 
     await store.upsert_node(
         replace(
             _node_record(now + timedelta(minutes=3), node_id="node-beta"),
-            task_id="bee-task-beta",
+            task_id="bee-beta",
         )
     )
 
@@ -691,18 +693,16 @@ async def test_bee_planner_skips_blocked_non_pending_and_non_running_tasks() -> 
         == []
     )
     assert [
-        (node.node_id, node.status) for node in await store.list_nodes("bee-task-alpha")
+        (node.node_id, node.status) for node in await store.list_nodes("bee-alpha")
     ] == [
         ("node-plan", "running"),
         ("node-validate", "pending"),
         ("node-ready", "ready"),
     ]
-    assert [node.status for node in await store.list_nodes("bee-task-beta")] == [
-        "pending"
-    ]
+    assert [node.status for node in await store.list_nodes("bee-beta")] == ["pending"]
 
     await store.update_task_status(
-        "bee-task-beta",
+        "bee-beta",
         status="running",
         summary=None,
         updated_at=now + timedelta(minutes=11),
@@ -723,11 +723,9 @@ async def test_bee_planner_skips_blocked_non_pending_and_non_running_tasks() -> 
         max_tasks=2,
     )
     assert [(intent.task_id, intent.node_id) for intent in beta_intents] == [
-        ("bee-task-beta", "node-beta")
+        ("bee-beta", "node-beta")
     ]
-    assert [node.status for node in await store.list_nodes("bee-task-beta")] == [
-        "ready"
-    ]
+    assert [node.status for node in await store.list_nodes("bee-beta")] == ["ready"]
 
 
 @pytest.mark.asyncio
@@ -753,7 +751,7 @@ async def test_bee_planner_atomically_claims_ready_node_once() -> None:
             return [self.task]
 
         async def list_nodes(self, task_id: str) -> list[BeeNodeRecord]:
-            assert task_id == "bee-task-alpha"
+            assert task_id == "bee-alpha"
             return [replace(self.node, status="pending")]
 
         async def claim_ready_node(
@@ -764,7 +762,7 @@ async def test_bee_planner_atomically_claims_ready_node_once() -> None:
             updated_at: datetime,
             metadata: JSONObject,
         ) -> BeeNodeRecord | None:
-            assert task_id == "bee-task-alpha"
+            assert task_id == "bee-alpha"
             assert node_id == "node-plan"
             assert updated_at == planned_at
             assert metadata["planner_reason"] == "dependencies_ready"
@@ -790,6 +788,83 @@ async def test_bee_planner_atomically_claims_ready_node_once() -> None:
     assert [intent.node_id for intent in first] == ["node-plan"]
     assert second == []
     assert store.claims == 2
+
+
+def test_bee_launch_metadata_preserves_approval_and_workspace_policy() -> None:
+    manifest = parse_bee_task_manifest(_safe_manifest())
+    intent = _launch_intent(manifest, node_id="node-validate")
+
+    metadata = build_bee_launch_metadata(manifest=manifest, intent=intent)
+
+    assert metadata == {
+        "bee_runtime": "task_launch",
+        "launch_kind": "durable_run",
+        "task_id": "bee-task-alpha",
+        "node_id": "node-validate",
+        "topic_id": "topic-alpha",
+        "session_id": "session-alpha",
+        "task_kind": "maintenance",
+        "task_profile": "local",
+        "node_kind": "validation",
+        "node_profile": "default",
+        "approval_policy": "existing_runtime_policy",
+        "action_policy": "existing_action_safety",
+        "workspace_binding": "existing_workspace_provider",
+        "workspace_policy": "default",
+        "context_profile": "repo",
+        "context_reference": "profile_only",
+        "validation_profile": "pytest",
+        "validation_reference": "profile_only",
+    }
+
+
+def test_bee_context_and_validation_metadata_is_reference_only() -> None:
+    manifest = parse_bee_task_manifest(_safe_manifest())
+    intent = _launch_intent(manifest, node_id="node-plan")
+
+    metadata = build_bee_launch_metadata(manifest=manifest, intent=intent)
+
+    assert metadata["context_profile"] == "repo"
+    assert metadata["context_reference"] == "profile_only"
+    assert metadata["validation_profile"] == "pytest"
+    assert metadata["validation_reference"] == "profile_only"
+    for forbidden in (
+        "prompt",
+        "message",
+        "content",
+        "command_output",
+        "stdout",
+        "stderr",
+        "secret",
+        "text",
+    ):
+        assert forbidden not in metadata
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("session_id", "session-other", "session mismatch"),
+        ("topic_id", "topic-other", "topic mismatch"),
+        ("task_kind", "ops", "task kind mismatch"),
+        ("task_profile", "remote", "task profile mismatch"),
+        ("node_kind", "analysis", "node kind mismatch"),
+        ("node_profile", "remote", "node profile mismatch"),
+        ("node_id", "node-missing", "node not found"),
+    ],
+)
+def test_bee_launch_metadata_rejects_mismatched_manifest_and_intent(
+    field: str,
+    value: str,
+    match: str,
+) -> None:
+    manifest = parse_bee_task_manifest(_safe_manifest())
+    intent = replace(
+        _launch_intent(manifest, node_id="node-validate"), **{field: value}
+    )
+
+    with pytest.raises(ValueError, match=match):
+        build_bee_launch_metadata(manifest=manifest, intent=intent)
 
 
 def _safe_manifest() -> JSONObject:
@@ -835,7 +910,7 @@ def _safe_manifest() -> JSONObject:
 
 def _task_record(now: datetime) -> BeeTaskRecord:
     return BeeTaskRecord(
-        task_id="bee-task-alpha",
+        task_id="bee-alpha",
         topic_id="topic-alpha",
         session_id="session-alpha",
         kind="maintenance",
@@ -876,7 +951,7 @@ def _node_record(
 ) -> BeeNodeRecord:
     return BeeNodeRecord(
         node_id=node_id,
-        task_id="bee-task-alpha",
+        task_id="bee-alpha",
         kind=kind,
         profile="default",
         status="pending",
@@ -885,6 +960,27 @@ def _node_record(
         created_at=now,
         updated_at=now,
         metadata={"source": "fixture"},
+    )
+
+
+def _launch_intent(
+    manifest: BeeTaskManifest,
+    *,
+    node_id: str,
+) -> BeeNodeLaunchIntent:
+    node_by_id = {node.node_id: node for node in manifest.nodes}
+    node = node_by_id[node_id]
+    return BeeNodeLaunchIntent(
+        task_id="bee-task-alpha",
+        node_id=node.node_id,
+        topic_id="topic-alpha",
+        session_id=manifest.topic.session_id,
+        task_kind=manifest.kind,
+        task_profile=manifest.profile,
+        node_kind=node.kind,
+        node_profile=node.profile,
+        reason="dependencies_ready",
+        planned_at=datetime(2026, 5, 22, 9, tzinfo=UTC),
     )
 
 
