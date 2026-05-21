@@ -501,6 +501,56 @@ async def test_bee_topic_lifecycle_rolls_back_tape_anchor_on_store_failure() -> 
     assert tape.snapshot() == ()
 
 
+@pytest.mark.asyncio
+async def test_bee_topic_lifecycle_rejects_closed_topic() -> None:
+    now = datetime(2026, 5, 22, 9, tzinfo=UTC)
+    topic = replace(_topic_record(now), status="finalized", topic_finalized_seq=0)
+    lifecycle = BeeTaskLifecycle(anchor_store=FakeBeeTopicAnchorStore())
+
+    with pytest.raises(ValueError, match="require an open topic"):
+        await lifecycle.start_task(
+            tape=Tape(tape_id="tape-alpha"),
+            topic=topic,
+            task=_task_record(now),
+        )
+
+
+@pytest.mark.asyncio
+async def test_bee_topic_lifecycle_rejects_non_final_or_mismatched_status() -> None:
+    now = datetime(2026, 5, 22, 9, tzinfo=UTC)
+    lifecycle = BeeTaskLifecycle(anchor_store=FakeBeeTopicAnchorStore())
+
+    with pytest.raises(ValueError, match="final task status"):
+        await lifecycle.finalize_task(
+            tape=Tape(tape_id="tape-alpha"),
+            topic=_topic_record(now),
+            task=replace(_task_record(now), status="running"),
+            status="running",
+        )
+
+    with pytest.raises(ValueError, match="does not match completed"):
+        await lifecycle.finalize_task(
+            tape=Tape(tape_id="tape-alpha"),
+            topic=_topic_record(now),
+            task=replace(_task_record(now), status="pending"),
+            status="completed",
+        )
+
+
+@pytest.mark.asyncio
+async def test_bee_topic_lifecycle_rejects_reserved_anchor_metadata() -> None:
+    now = datetime(2026, 5, 22, 9, tzinfo=UTC)
+    lifecycle = BeeTaskLifecycle(anchor_store=FakeBeeTopicAnchorStore())
+
+    with pytest.raises(ValueError, match="reserved key: product_anchor_type"):
+        await lifecycle.start_task(
+            tape=Tape(tape_id="tape-alpha"),
+            topic=_topic_record(now),
+            task=_task_record(now),
+            metadata={"product_anchor_type": "topic_finalized"},
+        )
+
+
 def _safe_manifest() -> JSONObject:
     return {
         "version": 1,

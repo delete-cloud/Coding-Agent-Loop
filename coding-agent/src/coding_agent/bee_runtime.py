@@ -33,6 +33,12 @@ _TASK_STATUSES: Final[frozenset[str]] = frozenset(
 _NODE_STATUSES: Final[frozenset[str]] = frozenset(
     {"pending", "ready", "running", "completed", "failed", "skipped"}
 )
+_TASK_FINAL_STATUSES: Final[frozenset[str]] = frozenset(
+    {"completed", "failed", "cancelled"}
+)
+_RESERVED_ANCHOR_METADATA_KEYS: Final[frozenset[str]] = frozenset(
+    {"encoded_anchor_type", "product_anchor_type"}
+)
 _FORBIDDEN_KEY_PARTS: Final[frozenset[str]] = frozenset(
     {
         "api_key",
@@ -629,7 +635,11 @@ class BeeTaskLifecycle:
         status: BeeTaskStatus,
         metadata: JSONObject | None = None,
     ) -> TopicAnchorRecord:
-        _require_status("task status", status, _TASK_STATUSES)
+        _require_status("final task status", status, _TASK_FINAL_STATUSES)
+        if task.status != status:
+            raise ValueError(
+                f"task {task.task_id} status {task.status} does not match {status}"
+            )
         product_anchor_type = (
             BEE_TASK_ABORTED if status == "cancelled" else BEE_TASK_FINALIZED
         )
@@ -655,6 +665,7 @@ class BeeTaskLifecycle:
         _require_matching_topic(tape=tape, topic=topic, task=task)
         _require_safe_label("product_anchor_type", product_anchor_type)
         _require_safe_json_object("metadata", metadata)
+        _reject_reserved_anchor_metadata(metadata)
         anchor = Anchor(
             anchor_type=_BEE_ENCODED_ANCHOR_TYPE,
             payload={"label": label},
@@ -665,25 +676,27 @@ class BeeTaskLifecycle:
                 "skip": True,
             },
         )
-        seq = _append_anchor(tape, anchor)
-        try:
-            return await self._anchor_store.record_topic_anchor(
-                TopicAnchorRecord(
-                    topic_id=topic.topic_id,
-                    tape_id=topic.tape_id,
-                    seq=seq,
-                    anchor_type=product_anchor_type,
-                    entry_id=anchor.id,
-                    metadata={
-                        "encoded_anchor_type": _BEE_ENCODED_ANCHOR_TYPE,
-                        "product_anchor_type": product_anchor_type,
-                        **metadata,
-                    },
+        with tape._lock:
+            seq = len(tape._entries)
+            tape._entries.append(anchor)
+            try:
+                return await self._anchor_store.record_topic_anchor(
+                    TopicAnchorRecord(
+                        topic_id=topic.topic_id,
+                        tape_id=topic.tape_id,
+                        seq=seq,
+                        anchor_type=product_anchor_type,
+                        entry_id=anchor.id,
+                        metadata={
+                            **metadata,
+                            "encoded_anchor_type": _BEE_ENCODED_ANCHOR_TYPE,
+                            "product_anchor_type": product_anchor_type,
+                        },
+                    )
                 )
-            )
-        except Exception:
-            _remove_anchor(tape, seq=seq, entry_id=anchor.id)
-            raise
+            except Exception:
+                del tape._entries[seq]
+                raise
 
 
 def _parse_topic_binding(raw: JSONObject) -> BeeTopicBinding:
@@ -708,24 +721,14 @@ def _require_matching_topic(
         raise ValueError(f"task {task.task_id} belongs to topic {task.topic_id}")
     if task.session_id != topic.session_id:
         raise ValueError(f"task {task.task_id} belongs to session {task.session_id}")
-    if topic.status not in {"open", "finalized", "aborted"}:
-        raise ValueError(f"unsupported topic status: {topic.status}")
+    if topic.status != "open":
+        raise ValueError(f"Bee task anchors require an open topic: {topic.topic_id}")
 
 
-def _append_anchor(tape: Tape, anchor: Anchor) -> int:
-    with tape._lock:
-        seq = len(tape._entries)
-        tape._entries.append(anchor)
-        return seq
-
-
-def _remove_anchor(tape: Tape, *, seq: int, entry_id: str) -> None:
-    with tape._lock:
-        if seq >= len(tape._entries):
-            return
-        entry = tape._entries[seq]
-        if entry.id == entry_id:
-            del tape._entries[seq]
+def _reject_reserved_anchor_metadata(metadata: JSONObject) -> None:
+    for key in metadata:
+        if key in _RESERVED_ANCHOR_METADATA_KEYS:
+            raise ValueError(f"Bee anchor metadata uses reserved key: {key}")
 
 
 def _required_row(
