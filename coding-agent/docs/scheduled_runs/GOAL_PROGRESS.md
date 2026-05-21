@@ -169,7 +169,7 @@ This ledger tracks G85-G92 for the Topic-aware Scheduled Runs / Proactive Signal
 
 ### After
 
-- Status: passed local verification; pending PR.
+- Status: merged via PR #298.
 - Changed files:
   - `docs/scheduled_runs/GOAL_PROGRESS.md`
   - `src/coding_agent/scheduled_runs.py`
@@ -180,8 +180,47 @@ This ledger tracks G85-G92 for the Topic-aware Scheduled Runs / Proactive Signal
   - `uv run ruff check src/coding_agent/scheduled_runs.py tests/coding_agent/test_scheduled_runs.py`
   - `git diff --check -- .`
 - Results:
-  - scheduled run and topic lifecycle tests: 18 passed.
+  - scheduled run and topic lifecycle tests: 20 passed.
   - scoped ruff format/check: passed.
   - whitespace diff check: passed.
 - Remaining risks:
   - G89 prepares topic-aware launch metadata only. Proactive signal cooldown planning, console/observability integration, and final smoke tests are deferred to G90-G92.
+
+## G90_PROACTIVE_SIGNAL_PLANNER
+
+### Before
+
+- Goal id: G90_PROACTIVE_SIGNAL_PLANNER
+- Intended files:
+  - `docs/scheduled_runs/GOAL_PROGRESS.md`
+  - `src/coding_agent/scheduled_runs.py`
+  - `tests/coding_agent/test_scheduled_runs.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_scheduled_runs.py -v`
+  - `uv run ruff format --check src/coding_agent/scheduled_runs.py tests/coding_agent/test_scheduled_runs.py`
+  - `uv run ruff check src/coding_agent/scheduled_runs.py tests/coding_agent/test_scheduled_runs.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Proactive signal planner consumes only bounded `new` signals.
+  - Planner skips signals in cooldown and does not create unbounded loops.
+  - Planner marks planned/skipped signals deterministically and returns launch intents without executing runs.
+  - Signal metadata and launch intent metadata remain safe and bounded.
+
+### After
+
+- Status: passed local verification; pending PR.
+- Changed files:
+  - `docs/scheduled_runs/GOAL_PROGRESS.md`
+  - `src/coding_agent/scheduled_runs.py`
+  - `tests/coding_agent/test_scheduled_runs.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_scheduled_runs.py -v`
+  - `uv run ruff format --check src/coding_agent/scheduled_runs.py tests/coding_agent/test_scheduled_runs.py`
+  - `uv run ruff check src/coding_agent/scheduled_runs.py tests/coding_agent/test_scheduled_runs.py`
+  - `git diff --check -- .`
+- Results:
+  - scheduled run tests: 15 passed.
+  - scoped ruff format/check: passed.
+  - whitespace diff check: passed.
+- Remaining risks:
+  - G90 only plans proactive signals into launch intents. Console/observability integration and final smoke tests are deferred to G91-G92.

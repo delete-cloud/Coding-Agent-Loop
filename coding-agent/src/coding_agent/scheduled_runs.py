@@ -210,6 +210,31 @@ class ScheduledRunPlannerStore(Protocol):
     ) -> ScheduleTriggerRecord: ...
 
 
+class ProactiveSignalPlannerStore(Protocol):
+    async def list_signals(
+        self,
+        *,
+        status: SignalStatus | None = None,
+        session_id: str | None = None,
+        topic_id: str | None = None,
+        limit: int = 100,
+    ) -> list[ProactiveSignalRecord]: ...
+
+    async def update_signal_status(
+        self,
+        signal_id: str,
+        *,
+        status: SignalStatus,
+        cooldown_until: datetime | None,
+        metadata: JSONObject,
+    ) -> ProactiveSignalRecord: ...
+
+    async def record_trigger(
+        self,
+        record: ScheduleTriggerRecord,
+    ) -> ScheduleTriggerRecord: ...
+
+
 class ScheduledRunPlanner:
     def __init__(
         self,
@@ -276,6 +301,84 @@ class ScheduledRunPlanner:
                     due_at=trigger.due_at,
                     planned_at=trigger.planned_at,
                     metadata={"schedule_kind": schedule.kind},
+                )
+            )
+        return intents
+
+
+class ProactiveSignalPlanner:
+    def __init__(
+        self,
+        *,
+        store: ProactiveSignalPlannerStore,
+        cooldown: timedelta = timedelta(minutes=30),
+    ) -> None:
+        if cooldown.total_seconds() <= 0:
+            raise ValueError("cooldown must be positive")
+        self._store = store
+        self._cooldown = cooldown
+
+    async def plan_new_signals(
+        self,
+        *,
+        now: datetime,
+        max_signals: int,
+    ) -> list[ScheduledLaunchIntent]:
+        _require_datetime("now", now)
+        _require_positive_int("max_signals", max_signals)
+        signals = await self._store.list_signals(status="new", limit=max_signals)
+        intents: list[ScheduledLaunchIntent] = []
+        for signal in signals:
+            if len(intents) >= max_signals:
+                break
+            if signal.cooldown_until is not None and signal.cooldown_until > now:
+                await self._store.update_signal_status(
+                    signal.signal_id,
+                    status="ignored",
+                    cooldown_until=signal.cooldown_until,
+                    metadata={
+                        **signal.metadata,
+                        "skip_reason": "cooldown",
+                    },
+                )
+                continue
+            session_id = _required_signal_session(signal)
+            cooldown_until = now + self._cooldown
+            updated = await self._store.update_signal_status(
+                signal.signal_id,
+                status="planned",
+                cooldown_until=cooldown_until,
+                metadata={
+                    **signal.metadata,
+                    "planned_reason": "proactive_signal",
+                },
+            )
+            trigger = await self._store.record_trigger(
+                ScheduleTriggerRecord(
+                    trigger_id=f"signal-trigger-{updated.signal_id}",
+                    schedule_id=f"signal:{updated.signal_id}",
+                    signal_id=updated.signal_id,
+                    topic_id=updated.topic_id,
+                    status="planned",
+                    due_at=updated.observed_at,
+                    planned_at=now,
+                    reason="proactive_signal",
+                    metadata={
+                        "trigger_kind": "proactive_signal",
+                        "signal_kind": updated.kind,
+                    },
+                )
+            )
+            intents.append(
+                ScheduledLaunchIntent(
+                    trigger_id=trigger.trigger_id,
+                    schedule_id=trigger.schedule_id,
+                    session_id=session_id,
+                    topic_id=updated.topic_id,
+                    reason="proactive_signal",
+                    due_at=trigger.due_at,
+                    planned_at=trigger.planned_at,
+                    metadata={"signal_kind": updated.kind},
                 )
             )
         return intents
@@ -942,6 +1045,12 @@ def _safe_metadata_label(value: object) -> str:
         return "unknown"
     _require_safe_label("metadata_label", value)
     return value
+
+
+def _required_signal_session(signal: ProactiveSignalRecord) -> str:
+    if signal.session_id is None:
+        raise ValueError("proactive signal requires session_id for launch planning")
+    return signal.session_id
 
 
 def _required_str(row: dict[str, object], key: str, *, context: str) -> str:
