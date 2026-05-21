@@ -236,3 +236,48 @@ This ledger tracks G93-G101 for the Bee-style Workflow Template / Task Manifest 
   - FK backfill now uses `NOT VALID`, while store-level checks still reject new orphan node writes.
 - Remaining risks:
   - Legacy orphan cleanup and constraint validation are deferred to a future explicit migration goal.
+
+## G97_TOPIC_BOUND_BEE_LIFECYCLE_ANCHORS
+
+### Before
+
+- Goal id: G97_TOPIC_BOUND_BEE_LIFECYCLE_ANCHORS
+- Intended files:
+  - `docs/bee_runtime/GOAL_PROGRESS.md`
+  - `docs/adr/0041-bee-workflow-task-runtime.md`
+  - `src/coding_agent/bee_runtime.py`
+  - `tests/coding_agent/test_bee_runtime.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -v`
+  - `uv run pytest tests/coding_agent/test_topic_lifecycle.py tests/coding_agent/plugins/test_topic.py -v`
+  - `uv run ruff format --check src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `uv run ruff check src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Bee task start/finalize lifecycle writes safe product anchors inside an existing Topic tape.
+  - Anchors are recorded through the existing topic anchor store shape.
+  - Bee anchors do not use legacy `topic_start` / `topic_end` encoded anchor types and do not store raw prompt/message/content/command output.
+  - Existing topic lifecycle and legacy topic plugin tests still pass.
+
+### After
+
+- Status: passed local verification; pending PR.
+- Changed files:
+  - `docs/bee_runtime/GOAL_PROGRESS.md`
+  - `docs/adr/0041-bee-workflow-task-runtime.md`
+  - `src/coding_agent/bee_runtime.py`
+  - `tests/coding_agent/test_bee_runtime.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -v`
+  - `uv run pytest tests/coding_agent/test_topic_lifecycle.py tests/coding_agent/plugins/test_topic.py -v`
+  - `uv run ruff format --check src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `uv run ruff check src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `git diff --check -- .`
+- Results:
+  - Added `BeeTaskLifecycle` to append safe task lifecycle product anchors to the existing Topic tape.
+  - Bee anchors use encoded anchor type `context`, not legacy `topic_start` / `topic_end`, while recording product anchor types in metadata.
+  - Anchor payloads contain safe labels only, with no prompt/message/content/command output.
+  - Store failure rolls back the appended tape anchor.
+  - Target tests passed after two fix iterations: fixture IDs avoiding legacy secret marker collisions and a safe metadata key replacement.
+- Remaining risks:
+  - G97 does not add launch planning, action routing, context/validation metadata, console views, or metrics; those remain deferred to G98-G101.

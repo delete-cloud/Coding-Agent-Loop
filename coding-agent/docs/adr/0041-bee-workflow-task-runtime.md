@@ -81,8 +81,8 @@ Keep the following explicitly out of scope:
 - [x] `test_bee_manifest_rejects_raw_sensitive_fields`
 - [x] `test_bee_store_schema_is_idempotent`
 - [x] `test_bee_store_create_update_list_task_and_nodes`
-- [ ] `test_bee_topic_lifecycle_writes_safe_task_anchors`
-- [ ] `test_bee_topic_lifecycle_accounts_for_legacy_topic_plugin_boundary`
+- [x] `test_bee_topic_lifecycle_writes_safe_task_anchors`
+- [x] `test_bee_topic_lifecycle_accounts_for_legacy_topic_plugin_boundary`
 - [ ] `test_bee_planner_returns_bounded_launch_intents_without_execution`
 - [ ] `test_bee_launch_metadata_preserves_approval_and_workspace_policy`
 - [ ] `test_bee_context_and_validation_metadata_is_reference_only`
