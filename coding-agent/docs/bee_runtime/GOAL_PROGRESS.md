@@ -76,3 +76,44 @@ This ledger tracks G93-G101 for the Bee-style Workflow Template / Task Manifest 
   - whitespace diff check passed.
 - Remaining risks:
   - G94 is ADR-only. Manifest parser, durable store, topic anchors, planning, console/observability integration, and final smoke coverage are deferred to G95-G101.
+
+## G95_TASK_MANIFEST_PARSER_AND_SANITIZER
+
+### Before
+
+- Goal id: G95_TASK_MANIFEST_PARSER_AND_SANITIZER
+- Intended files:
+  - `docs/bee_runtime/GOAL_PROGRESS.md`
+  - `src/coding_agent/bee_runtime.py`
+  - `tests/coding_agent/test_bee_runtime.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -k "manifest" -v`
+  - `uv run ruff format --check src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `uv run ruff check src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Safe fixture manifest parses into immutable task/node records.
+  - Parser rejects raw sensitive fields and secret-like values recursively.
+  - Parser rejects executable command/executor/script fields.
+  - No store, planner, action execution, external executor, homelab template, or AgentKit Core change is introduced.
+
+### After
+
+- Status: passed local verification; pending PR.
+- Changed files:
+  - `docs/bee_runtime/GOAL_PROGRESS.md`
+  - `docs/adr/0041-bee-workflow-task-runtime.md`
+  - `src/coding_agent/bee_runtime.py`
+  - `tests/coding_agent/test_bee_runtime.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -k "manifest" -v`
+  - `uv run ruff format src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `uv run ruff check src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `git diff --check -- .`
+- Results:
+  - Safe Bee task manifest fixture parses into immutable task/topic/node dataclasses.
+  - Parser recursively rejects forbidden sensitive fields, secret-like values, and executable command/executor/script fields.
+  - Node dependency validation rejects missing dependencies.
+  - Target manifest tests passed after one fix iteration for over-broad `content` key matching.
+- Remaining risks:
+  - G95 does not add durable task storage, topic anchors, planning, launch metadata, console pages, or metrics; those remain deferred to G96-G101.
