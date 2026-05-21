@@ -41,6 +41,9 @@ class FakeBeePool:
             return self.tasks.get(cast(str, args[0]))
         if "UPDATE bee_tasks" in query:
             return self._update_task(args)
+        if "SELECT * FROM bee_task_nodes" in query and "node_id = $2" in query:
+            task_id, node_id = args
+            return self.nodes.get((cast(str, task_id), cast(str, node_id)))
         if "INSERT INTO bee_task_nodes" in query:
             row = _node_row(*args)
             key = (cast(str, row["task_id"]), cast(str, row["node_id"]))
@@ -271,6 +274,7 @@ async def test_bee_store_schema_is_idempotent() -> None:
         if "CREATE TABLE IF NOT EXISTS bee_tasks" in query
     ]
     assert len(schema_calls) == 1
+    assert "ALTER TABLE bee_task_nodes" in schema_calls[0]
 
 
 @pytest.mark.asyncio
@@ -321,6 +325,27 @@ async def test_bee_store_create_update_list_task_and_nodes() -> None:
     assert launched.status == "running"
     assert launched.run_id == "run-alpha"
     assert launched.metadata == {"launch_kind": "manual"}
+
+
+@pytest.mark.asyncio
+async def test_bee_store_rejects_orphan_nodes_and_missing_dependencies() -> None:
+    pool = FakeBeePool()
+    store = PGBeeTaskStore(pool=pool)  # type: ignore[arg-type]
+    now = datetime(2026, 5, 22, 9, tzinfo=UTC)
+
+    with pytest.raises(KeyError, match="Bee task not found for node"):
+        await store.upsert_node(_node_record(now, node_id="node-orphan"))
+
+    await store.upsert_task(_task_record(now))
+    with pytest.raises(ValueError, match="dependencies not found: node-missing"):
+        await store.upsert_node(
+            _node_record(
+                now,
+                node_id="node-validate",
+                kind="validation",
+                depends_on=("node-missing",),
+            )
+        )
 
 
 def test_bee_task_record_rejects_invalid_status_and_unsafe_metadata() -> None:
