@@ -307,7 +307,7 @@ This ledger tracks G85-G92 for the Topic-aware Scheduled Runs / Proactive Signal
 
 ### After
 
-- Status: passed local verification; pending PR.
+- Status: merged via PR #301.
 - Changed files:
   - `docs/scheduled_runs/GOAL_PROGRESS.md`
   - `docs/scheduled_runs/USAGE.md`
