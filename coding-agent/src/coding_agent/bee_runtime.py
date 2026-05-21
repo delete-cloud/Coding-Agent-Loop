@@ -79,6 +79,32 @@ class BeeTopicAnchorStore(Protocol):
     ) -> TopicAnchorRecord: ...
 
 
+class BeeTaskPlannerStore(Protocol):
+    async def list_tasks(
+        self,
+        *,
+        session_id: str | None = None,
+        topic_id: str | None = None,
+        status: BeeTaskStatus | None = None,
+        limit: int = 100,
+    ) -> list[BeeTaskRecord]: ...
+
+    async def list_nodes(self, task_id: str) -> list[BeeNodeRecord]: ...
+
+    async def update_node_status(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        status: BeeNodeStatus,
+        run_id: str | None,
+        updated_at: datetime,
+        started_at: datetime | None,
+        finished_at: datetime | None,
+        metadata: JSONObject,
+    ) -> BeeNodeRecord: ...
+
+
 @dataclass(frozen=True)
 class BeeTaskRecord:
     task_id: str
@@ -141,6 +167,34 @@ class BeeNodeRecord:
             _require_datetime("started_at", self.started_at)
         if self.finished_at is not None:
             _require_datetime("finished_at", self.finished_at)
+        _require_safe_json_object("metadata", self.metadata)
+
+
+@dataclass(frozen=True)
+class BeeNodeLaunchIntent:
+    task_id: str
+    node_id: str
+    topic_id: str
+    session_id: str
+    task_kind: str
+    task_profile: str
+    node_kind: str
+    node_profile: str
+    reason: str
+    planned_at: datetime
+    metadata: JSONObject = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _require_non_empty("task_id", self.task_id)
+        _require_non_empty("node_id", self.node_id)
+        _require_non_empty("topic_id", self.topic_id)
+        _require_non_empty("session_id", self.session_id)
+        _require_safe_label("task_kind", self.task_kind)
+        _require_safe_label("task_profile", self.task_profile)
+        _require_safe_label("node_kind", self.node_kind)
+        _require_safe_label("node_profile", self.node_profile)
+        _require_safe_label("reason", self.reason)
+        _require_datetime("planned_at", self.planned_at)
         _require_safe_json_object("metadata", self.metadata)
 
 
@@ -697,6 +751,90 @@ class BeeTaskLifecycle:
         except Exception:
             _remove_anchor_by_id(tape, entry_id=anchor.id)
             raise
+
+
+class BeeTaskPlanner:
+    def __init__(self, *, store: BeeTaskPlannerStore) -> None:
+        self._store = store
+
+    async def plan_ready_nodes(
+        self,
+        *,
+        now: datetime,
+        max_nodes: int,
+        max_tasks: int = 100,
+        session_id: str | None = None,
+        topic_id: str | None = None,
+    ) -> list[BeeNodeLaunchIntent]:
+        _require_datetime("now", now)
+        _require_positive_int("max_nodes", max_nodes)
+        _require_positive_int("max_tasks", max_tasks)
+        if session_id is not None:
+            _require_non_empty("session_id", session_id)
+        if topic_id is not None:
+            _require_non_empty("topic_id", topic_id)
+
+        tasks = await self._store.list_tasks(
+            session_id=session_id,
+            topic_id=topic_id,
+            status="running",
+            limit=max_tasks,
+        )
+        intents: list[BeeNodeLaunchIntent] = []
+        for task in tasks:
+            nodes = await self._store.list_nodes(task.task_id)
+            completed_node_ids = {
+                node.node_id for node in nodes if node.status == "completed"
+            }
+            for node in nodes:
+                if len(intents) >= max_nodes:
+                    return intents
+                if node.status != "pending":
+                    continue
+                if not _node_dependencies_ready(node, completed_node_ids):
+                    continue
+                updated_node = await self._store.update_node_status(
+                    task_id=node.task_id,
+                    node_id=node.node_id,
+                    status="ready",
+                    run_id=None,
+                    updated_at=now,
+                    started_at=None,
+                    finished_at=None,
+                    metadata={
+                        **node.metadata,
+                        "planner_state": "ready",
+                        "planner_reason": "dependencies_ready",
+                    },
+                )
+                intents.append(
+                    BeeNodeLaunchIntent(
+                        task_id=task.task_id,
+                        node_id=updated_node.node_id,
+                        topic_id=task.topic_id,
+                        session_id=task.session_id,
+                        task_kind=task.kind,
+                        task_profile=task.profile,
+                        node_kind=updated_node.kind,
+                        node_profile=updated_node.profile,
+                        reason="dependencies_ready",
+                        planned_at=now,
+                        metadata={
+                            "task_kind": task.kind,
+                            "task_profile": task.profile,
+                            "node_kind": updated_node.kind,
+                            "node_profile": updated_node.profile,
+                        },
+                    )
+                )
+        return intents
+
+
+def _node_dependencies_ready(
+    node: BeeNodeRecord,
+    completed_node_ids: set[str],
+) -> bool:
+    return all(dependency_id in completed_node_ids for dependency_id in node.depends_on)
 
 
 def _append_anchor(tape: Tape, anchor: Anchor) -> int:

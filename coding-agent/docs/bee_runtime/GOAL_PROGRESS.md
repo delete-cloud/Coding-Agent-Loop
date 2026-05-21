@@ -304,6 +304,47 @@ This ledger tracks G93-G101 for the Bee-style Workflow Template / Task Manifest 
 - Remaining risks:
   - This remains G97-scoped; planner/execution integration is deferred to G98-G101.
 
+## G98_BEE_TASK_PLANNER
+
+### Before
+
+- Goal id: G98_BEE_TASK_PLANNER
+- Intended files:
+  - `docs/bee_runtime/GOAL_PROGRESS.md`
+  - `docs/adr/0041-bee-workflow-task-runtime.md`
+  - `src/coding_agent/bee_runtime.py`
+  - `tests/coding_agent/test_bee_runtime.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -v`
+  - `uv run ruff format --check src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `uv run ruff check src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Planner returns deterministic, bounded launch intents for dependency-ready pending Bee nodes.
+  - Planner marks planned nodes as `ready` without creating durable runs or executing tools.
+  - Planner accepts an explicit clock plus max task and max node bounds.
+  - Blocked, already-ready, running, completed, failed, or skipped nodes are not relaunched.
+  - No AgentKit Core, runtime pipeline, action execution, external executor, homelab template, Docker, Kubernetes, Argo, desktop, bridge, or multi-agent behavior is introduced.
+
+### After
+
+- Status: passed local verification; pending PR.
+- Changed files:
+  - `docs/bee_runtime/GOAL_PROGRESS.md`
+  - `docs/adr/0041-bee-workflow-task-runtime.md`
+  - `src/coding_agent/bee_runtime.py`
+  - `tests/coding_agent/test_bee_runtime.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -v`
+  - `uv run ruff format src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+- Results:
+  - Added `BeeTaskPlanner` and `BeeNodeLaunchIntent`.
+  - Planner uses explicit `now`, `max_tasks`, and `max_nodes`, reads running Bee tasks, marks dependency-ready pending nodes as `ready`, and returns bounded launch intents.
+  - Planner does not create durable runs, call tools, invoke external executors, or bypass action/runtime policy.
+  - Target Bee runtime tests passed after two test-fixture fix iterations: blocked-node fixture initially contained a valid ready pending node, then one assertion still expected its old status.
+- Remaining risks:
+  - G98 only prepares launch intents. Converting launch intents into normal durable run metadata with workspace/action/context/validation policy preservation is deferred to G99.
+
 ### Local Review Follow-up 2
 
 - Status: passed local verification; pending PR.
