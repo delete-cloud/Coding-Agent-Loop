@@ -244,6 +244,51 @@ class ConsoleTopicDetail:
 
 
 @dataclass(frozen=True)
+class ConsoleScheduleSummary:
+    schedule_id: str
+    session_id: str
+    topic_id: str | None
+    kind: str
+    status: str
+    cadence: str
+    title: str | None
+    next_due_at: datetime | None
+    last_triggered_at: datetime | None
+
+
+@dataclass(frozen=True)
+class ConsoleScheduleTriggerSummary:
+    trigger_id: str
+    schedule_id: str
+    signal_id: str | None
+    topic_id: str | None
+    run_id: str | None
+    status: str
+    due_at: datetime
+    planned_at: datetime
+    reason: str | None
+
+
+@dataclass(frozen=True)
+class ConsoleProactiveSignalSummary:
+    signal_id: str
+    session_id: str | None
+    topic_id: str | None
+    kind: str
+    status: str
+    observed_at: datetime
+    cooldown_until: datetime | None
+    summary: str | None
+
+
+@dataclass(frozen=True)
+class ConsoleSchedulesPage:
+    schedules: tuple[ConsoleScheduleSummary, ...]
+    triggers: tuple[ConsoleScheduleTriggerSummary, ...]
+    signals: tuple[ConsoleProactiveSignalSummary, ...]
+
+
+@dataclass(frozen=True)
 class ConsoleObservabilitySummary:
     correlation: ConsoleCorrelationSummary | None
     metrics_enabled: bool
@@ -356,6 +401,12 @@ CONSOLE_PAGES: tuple[ConsolePage, ...] = (
         title="Topics",
         nav_label="Topics",
         description="Topic ranges, recalls, costs, and related run metadata will appear here.",
+    ),
+    ConsolePage(
+        path="/console/schedules",
+        title="Schedules",
+        nav_label="Schedules",
+        description="Topic-aware scheduled runs and proactive signals will appear here.",
     ),
     ConsolePage(
         path="/console/workspaces",
@@ -543,6 +594,18 @@ def render_console_topic_detail_page(detail: ConsoleTopicDetail) -> str:
         f"{_topic_related_validations_section(detail.validations, run_id=_first_run_id(detail.runs))}"
     )
     return _html_document(title=title, body=body, active_path="/console/topics")
+
+
+def render_console_schedules_page(page_summary: ConsoleSchedulesPage) -> str:
+    page = _PAGE_BY_PATH["/console/schedules"]
+    body = (
+        f"<h1>{escape(page.title)}</h1>"
+        f'<p class="lede">{escape(page.description)}</p>'
+        f"{_schedule_table(page_summary.schedules)}"
+        f"{_schedule_trigger_table(page_summary.triggers)}"
+        f"{_proactive_signal_table(page_summary.signals)}"
+    )
+    return _html_document(title=page.title, body=body, active_path=page.path)
 
 
 def render_console_workspaces_page(
@@ -1123,6 +1186,117 @@ def _topic_cost_section(cost: ConsoleTopicCostSummary | None) -> str:
         f"<dt>Validations</dt><dd>{cost.validation_count}</dd>"
         f"<dt>Tool Calls</dt><dd>{cost.tool_call_count}</dd>"
         "</dl>"
+        "</section>"
+    )
+
+
+def _schedule_table(schedules: tuple[ConsoleScheduleSummary, ...]) -> str:
+    if not schedules:
+        return _empty_state(
+            "Scheduled Runs",
+            "No data loaded yet. No schedules are available.",
+        )
+    rows = []
+    for schedule in schedules:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(schedule.schedule_id)}</td>"
+            f"<td>{escape(schedule.session_id)}</td>"
+            f"<td>{escape(schedule.topic_id or '-')}</td>"
+            f"<td>{escape(schedule.kind)}</td>"
+            f'<td class="status">{escape(schedule.status)}</td>'
+            f"<td>{escape(schedule.cadence)}</td>"
+            f"<td>{escape(schedule.title or '-')}</td>"
+            f"<td>{escape(_format_optional_datetime(schedule.next_due_at))}</td>"
+            f"<td>{escape(_format_optional_datetime(schedule.last_triggered_at))}</td>"
+            "</tr>"
+        )
+    return (
+        '<section aria-label="Scheduled runs">'
+        "<h2>Scheduled Runs</h2>"
+        '<table aria-label="Developer Console schedules">'
+        "<thead><tr><th>Schedule ID</th><th>Session ID</th><th>Topic ID</th>"
+        "<th>Kind</th><th>Status</th><th>Cadence</th><th>Title</th>"
+        "<th>Next Due</th><th>Last Triggered</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+        "</section>"
+    )
+
+
+def _schedule_trigger_table(
+    triggers: tuple[ConsoleScheduleTriggerSummary, ...],
+) -> str:
+    if not triggers:
+        return _empty_state(
+            "Schedule Triggers",
+            "No data loaded yet. No schedule triggers are available.",
+        )
+    rows = []
+    for trigger in triggers:
+        run_cell = (
+            f'<a href="/console/runs/{escape(trigger.run_id)}">'
+            f"{escape(trigger.run_id)}</a>"
+            if trigger.run_id
+            else "-"
+        )
+        rows.append(
+            "<tr>"
+            f"<td>{escape(trigger.trigger_id)}</td>"
+            f"<td>{escape(trigger.schedule_id)}</td>"
+            f"<td>{escape(trigger.signal_id or '-')}</td>"
+            f"<td>{escape(trigger.topic_id or '-')}</td>"
+            f"<td>{run_cell}</td>"
+            f'<td class="status">{escape(trigger.status)}</td>'
+            f"<td>{escape(trigger.reason or '-')}</td>"
+            f"<td>{escape(_format_datetime(trigger.due_at))}</td>"
+            f"<td>{escape(_format_datetime(trigger.planned_at))}</td>"
+            "</tr>"
+        )
+    return (
+        '<section aria-label="Schedule triggers">'
+        "<h2>Schedule Triggers</h2>"
+        '<table aria-label="Developer Console schedule triggers">'
+        "<thead><tr><th>Trigger ID</th><th>Schedule ID</th><th>Signal ID</th>"
+        "<th>Topic ID</th><th>Run ID</th><th>Status</th><th>Reason</th>"
+        "<th>Due</th><th>Planned</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+        "</section>"
+    )
+
+
+def _proactive_signal_table(
+    signals: tuple[ConsoleProactiveSignalSummary, ...],
+) -> str:
+    if not signals:
+        return _empty_state(
+            "Proactive Signals",
+            "No data loaded yet. No proactive signals are available.",
+        )
+    rows = []
+    for signal in signals:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(signal.signal_id)}</td>"
+            f"<td>{escape(signal.session_id or '-')}</td>"
+            f"<td>{escape(signal.topic_id or '-')}</td>"
+            f"<td>{escape(signal.kind)}</td>"
+            f'<td class="status">{escape(signal.status)}</td>'
+            f"<td>{escape(_format_datetime(signal.observed_at))}</td>"
+            f"<td>{escape(_format_optional_datetime(signal.cooldown_until))}</td>"
+            f"<td>{escape(signal.summary or '-')}</td>"
+            "</tr>"
+        )
+    return (
+        '<section aria-label="Proactive signals">'
+        "<h2>Proactive Signals</h2>"
+        '<table aria-label="Developer Console proactive signals">'
+        "<thead><tr><th>Signal ID</th><th>Session ID</th><th>Topic ID</th>"
+        "<th>Kind</th><th>Status</th><th>Observed</th><th>Cooldown Until</th>"
+        "<th>Summary</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
         "</section>"
     )
 

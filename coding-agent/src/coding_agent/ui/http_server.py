@@ -35,6 +35,12 @@ from coding_agent.runtime_store import (
     RunMessageSnapshotRecord,
     RuntimeEventRecord,
 )
+from coding_agent.scheduled_runs import (
+    PGScheduledRunStore,
+    ProactiveSignalRecord,
+    ScheduleRecord,
+    ScheduleTriggerRecord,
+)
 from coding_agent.topic_store import (
     PGTopicStore,
     TopicAnchorRecord,
@@ -87,6 +93,10 @@ from coding_agent.ui.developer_console import (
     ConsoleReleaseSummary,
     ConsoleRunDetail,
     ConsoleRunSummary,
+    ConsoleProactiveSignalSummary,
+    ConsoleScheduleSummary,
+    ConsoleSchedulesPage,
+    ConsoleScheduleTriggerSummary,
     ConsoleSessionSummary,
     ConsoleTapeEntrySummary,
     ConsoleTapeInfo,
@@ -109,6 +119,7 @@ from coding_agent.ui.developer_console import (
     render_console_release_page,
     render_console_run_detail_page,
     render_console_runs_page,
+    render_console_schedules_page,
     render_console_sessions_page,
     render_console_tape_page,
     render_console_topic_detail_page,
@@ -1336,6 +1347,17 @@ async def console_topic_detail(
     if detail is None:
         raise HTTPException(status_code=404, detail="Topic not found")
     return HTMLResponse(render_console_topic_detail_page(detail))
+
+
+@app.get("/console/schedules", response_class=HTMLResponse)
+async def console_schedules(
+    request: Request,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> HTMLResponse:
+    del request
+    return HTMLResponse(
+        render_console_schedules_page(await _console_schedules_page(auth_context))
+    )
 
 
 @app.get("/console/workspaces", response_class=HTMLResponse)
@@ -3226,6 +3248,65 @@ async def _console_topic_detail_from_store(
     )
 
 
+async def _console_schedules_page(
+    auth_context: AuthContext | None,
+) -> ConsoleSchedulesPage:
+    store = _console_scheduled_run_store()
+    if store is None:
+        return ConsoleSchedulesPage(schedules=(), triggers=(), signals=())
+    try:
+        visible_session_ids = await _visible_console_session_ids(auth_context)
+        if auth_context is None or auth_context.scope == "admin":
+            schedules = await store.list_schedules(limit=100)
+            signals = await store.list_signals(limit=100)
+        else:
+            schedules = []
+            signals = []
+            for session_id in visible_session_ids:
+                schedules.extend(await store.list_schedules(session_id=session_id))
+                signals.extend(await store.list_signals(session_id=session_id))
+        triggers: list[ScheduleTriggerRecord] = []
+        for schedule in schedules[:100]:
+            triggers.extend(await store.list_triggers(schedule.schedule_id, limit=25))
+        for signal in signals[:100]:
+            triggers.extend(
+                await store.list_triggers(f"signal:{signal.signal_id}", limit=25)
+            )
+    except Exception:
+        logger.exception(
+            "Console scheduled run store failed; rendering empty schedule page"
+        )
+        return ConsoleSchedulesPage(schedules=(), triggers=(), signals=())
+    return ConsoleSchedulesPage(
+        schedules=tuple(
+            _schedule_summary_from_record(schedule) for schedule in schedules
+        ),
+        triggers=tuple(
+            _schedule_trigger_summary_from_record(trigger) for trigger in triggers
+        ),
+        signals=tuple(
+            _proactive_signal_summary_from_record(signal) for signal in signals
+        ),
+    )
+
+
+def _console_scheduled_run_store() -> PGScheduledRunStore | None:
+    try:
+        storage_config = _load_storage_config()
+    except Exception:
+        logger.exception(
+            "Unable to load storage config for console scheduled run store"
+        )
+        return None
+    if not _storage_uses_pg_http_sessions(storage_config):
+        return None
+    try:
+        return PGScheduledRunStore(pool=session_manager.pg_pool)
+    except Exception:
+        logger.exception("Unable to initialize console scheduled run store")
+        return None
+
+
 def _console_topic_store() -> PGTopicStore | None:
     try:
         storage_config = _load_storage_config()
@@ -3278,6 +3359,51 @@ def _topic_summary_from_record(
         topic_finalized_seq=topic.topic_finalized_seq,
         run_count=cost.run_count if cost is not None else 0,
         cost_total_tokens=cost.total_tokens if cost is not None else None,
+    )
+
+
+def _schedule_summary_from_record(schedule: ScheduleRecord) -> ConsoleScheduleSummary:
+    return ConsoleScheduleSummary(
+        schedule_id=safe_id_value(schedule.schedule_id) or "redacted",
+        session_id=safe_id_value(schedule.session_id) or "redacted",
+        topic_id=safe_id_value(schedule.topic_id),
+        kind=safe_label_value(schedule.kind) or "unknown",
+        status=safe_label_value(schedule.status) or "unknown",
+        cadence=safe_label_value(schedule.cadence) or "unknown",
+        title=safe_text_value(schedule.title),
+        next_due_at=schedule.next_due_at,
+        last_triggered_at=schedule.last_triggered_at,
+    )
+
+
+def _schedule_trigger_summary_from_record(
+    trigger: ScheduleTriggerRecord,
+) -> ConsoleScheduleTriggerSummary:
+    return ConsoleScheduleTriggerSummary(
+        trigger_id=safe_id_value(trigger.trigger_id) or "redacted",
+        schedule_id=safe_id_value(trigger.schedule_id) or "redacted",
+        signal_id=safe_id_value(trigger.signal_id),
+        topic_id=safe_id_value(trigger.topic_id),
+        run_id=safe_id_value(trigger.run_id),
+        status=safe_label_value(trigger.status) or "unknown",
+        due_at=trigger.due_at,
+        planned_at=trigger.planned_at,
+        reason=safe_label_value(trigger.reason),
+    )
+
+
+def _proactive_signal_summary_from_record(
+    signal: ProactiveSignalRecord,
+) -> ConsoleProactiveSignalSummary:
+    return ConsoleProactiveSignalSummary(
+        signal_id=safe_id_value(signal.signal_id) or "redacted",
+        session_id=safe_id_value(signal.session_id),
+        topic_id=safe_id_value(signal.topic_id),
+        kind=safe_label_value(signal.kind) or "unknown",
+        status=safe_label_value(signal.status) or "unknown",
+        observed_at=signal.observed_at,
+        cooldown_until=signal.cooldown_until,
+        summary=safe_text_value(signal.summary),
     )
 
 

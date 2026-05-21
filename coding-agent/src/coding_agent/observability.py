@@ -52,7 +52,9 @@ _SENSITIVE_PROMETHEUS_VALUE_PARTS = frozenset(
 _FORBIDDEN_PROMETHEUS_LABELS = frozenset(
     {
         "run_id",
+        "schedule_id",
         "session_id",
+        "signal_id",
         "trace_id",
         "topic_id",
         "event_id",
@@ -79,6 +81,10 @@ _PROMETHEUS_ALLOWED_ATTRIBUTE_LABELS = frozenset(
         "policy_decision",
         "provider",
         "risk_level",
+        "schedule_kind",
+        "schedule_status",
+        "signal_kind",
+        "signal_status",
         "source_kind",
         "stage",
         "status",
@@ -87,6 +93,7 @@ _PROMETHEUS_ALLOWED_ATTRIBUTE_LABELS = frozenset(
         "topic_kind",
         "topic_profile",
         "topic_status",
+        "trigger_kind",
     }
 )
 _PROMETHEUS_ATTRIBUTE_LABEL_ALIASES = {
@@ -162,6 +169,10 @@ _PROMETHEUS_LABEL_VALUE_ALLOWLISTS = {
     ),
     "policy_decision": frozenset({"allow", "approval_required", "deny"}),
     "risk_level": frozenset({"low", "medium", "high"}),
+    "schedule_kind": frozenset({"interval", "manual", "once", "unknown"}),
+    "schedule_status": frozenset({"active", "completed", "disabled", "paused"}),
+    "signal_kind": frozenset({"repo_activity", "unknown"}),
+    "signal_status": frozenset({"consumed", "ignored", "new", "planned"}),
     "source_kind": frozenset({"kb", "kb_chunk", "repo_file", "test_failure"}),
     "stage": frozenset(
         {
@@ -179,6 +190,7 @@ _PROMETHEUS_LABEL_VALUE_ALLOWLISTS = {
     "topic_kind": frozenset({"coding", "unknown"}),
     "topic_profile": frozenset({"ci", "demo", "local", "unknown"}),
     "topic_status": frozenset({"open", "finalized", "aborted"}),
+    "trigger_kind": frozenset({"proactive_signal", "schedule", "unknown"}),
 }
 _PROMETHEUS_HISTOGRAM_BUCKETS = (5.0, 10.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 5000.0)
 _PROMETHEUS_HTTP_HISTOGRAM_BUCKETS = (

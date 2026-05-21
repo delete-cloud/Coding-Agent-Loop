@@ -184,7 +184,9 @@ def test_prometheus_metrics_drop_forbidden_high_cardinality_labels() -> None:
             attributes={
                 "stage": "dispatch",
                 "run_id": "run-1",
+                "schedule_id": "schedule-1",
                 "session_id": "session-1",
+                "signal_id": "signal-1",
                 "trace_id": "trace-1",
                 "topic_id": "topic-1",
                 "event_id": "event-1",
@@ -206,7 +208,9 @@ def test_prometheus_metrics_drop_forbidden_high_cardinality_labels() -> None:
     assert 'stage="dispatch"' in text
     for forbidden in (
         "run_id",
+        "schedule_id",
         "session_id",
+        "signal_id",
         "trace_id",
         "topic_id",
         "event_id",
@@ -224,8 +228,43 @@ def test_prometheus_metrics_drop_forbidden_high_cardinality_labels() -> None:
         "raw output",
         "raw secret",
         "src/secret.py",
+        "schedule-1",
+        "signal-1",
     ):
         assert forbidden not in text
+
+
+def test_prometheus_metrics_allow_low_cardinality_scheduled_run_labels() -> None:
+    recorder = PrometheusMetricsRecorder()
+    sink = PrometheusMetricsObservationSink(recorder=recorder)
+
+    sink.record_event(
+        ObservationEvent(
+            name="runtime.started",
+            attributes={
+                "schedule_id": "schedule-daily-auth",
+                "signal_id": "signal-repo-auth",
+                "schedule_kind": "interval",
+                "schedule_status": "active",
+                "signal_kind": "repo_activity",
+                "signal_status": "planned",
+                "trigger_kind": "proactive_signal",
+            },
+            timestamp=123,
+        )
+    )
+
+    text = recorder.exposition_text()
+
+    assert 'schedule_kind="interval"' in text
+    assert 'schedule_status="active"' in text
+    assert 'signal_kind="repo_activity"' in text
+    assert 'signal_status="planned"' in text
+    assert 'trigger_kind="proactive_signal"' in text
+    assert "schedule_id" not in text
+    assert "signal_id" not in text
+    assert "schedule-daily-auth" not in text
+    assert "signal-repo-auth" not in text
 
 
 def test_prometheus_metrics_allow_low_cardinality_topic_labels_without_topic_id() -> (
