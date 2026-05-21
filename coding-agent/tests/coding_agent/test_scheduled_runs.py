@@ -9,6 +9,7 @@ from agentkit.storage.pg import AsyncPGPool, PGPool
 from agentkit.tape.tape import Tape
 from coding_agent.scheduled_runs import (
     PGScheduledRunStore,
+    ProactiveSignalPlanner,
     ProactiveSignalRecord,
     ScheduleRecord,
     ScheduleTriggerRecord,
@@ -317,6 +318,27 @@ def _signal(
         status="new",
         observed_at=_dt(9, 15),
         cooldown_until=None,
+        summary="Repository activity signal",
+        metadata={"signal_kind": "repo_activity"},
+    )
+
+
+def _signal_with_state(
+    signal_id: str,
+    *,
+    status: str = "new",
+    cooldown_until: datetime | None = None,
+    session_id: str | None = "session-1",
+) -> ProactiveSignalRecord:
+    return ProactiveSignalRecord(
+        signal_id=signal_id,
+        dedupe_key=f"repo:{signal_id}",
+        session_id=session_id,
+        topic_id="topic-1",
+        kind="repo_activity",
+        status=status,
+        observed_at=_dt(9, 15),
+        cooldown_until=cooldown_until,
         summary="Repository activity signal",
         metadata={"signal_kind": "repo_activity"},
     )
@@ -750,3 +772,74 @@ async def test_topic_aware_launch_rejects_missing_explicit_topic() -> None:
         )
 
     assert topic_store.topics == {}
+
+
+@pytest.mark.asyncio
+async def test_proactive_signal_planner_returns_bounded_launch_intents(
+    store: PGScheduledRunStore,
+) -> None:
+    await store.record_signal(_signal_with_state("signal-1"))
+    await store.record_signal(_signal_with_state("signal-2"))
+
+    planner = ProactiveSignalPlanner(store=store, cooldown=timedelta(minutes=15))
+
+    intents = await planner.plan_new_signals(now=_dt(10), max_signals=1)
+
+    assert [intent.schedule_id for intent in intents] == ["signal:signal-1"]
+    assert intents[0].trigger_id == "signal-trigger-signal-1"
+    assert intents[0].reason == "proactive_signal"
+    assert intents[0].session_id == "session-1"
+    assert intents[0].topic_id == "topic-1"
+    assert await store.list_triggers("signal:signal-1") == [
+        ScheduleTriggerRecord(
+            trigger_id="signal-trigger-signal-1",
+            schedule_id="signal:signal-1",
+            signal_id="signal-1",
+            topic_id="topic-1",
+            run_id=None,
+            status="planned",
+            due_at=_dt(9, 15),
+            planned_at=_dt(10),
+            reason="proactive_signal",
+            metadata={
+                "trigger_kind": "proactive_signal",
+                "signal_kind": "repo_activity",
+            },
+        )
+    ]
+    assert (await store.load_signal("signal-1")).status == "planned"
+    assert (await store.load_signal("signal-1")).cooldown_until == _dt(10, 15)
+    assert (await store.load_signal("signal-2")).status == "new"
+
+
+@pytest.mark.asyncio
+async def test_proactive_signal_planner_skips_cooldown_without_looping(
+    store: PGScheduledRunStore,
+) -> None:
+    await store.record_signal(
+        _signal_with_state("signal-cooldown", cooldown_until=_dt(11))
+    )
+
+    planner = ProactiveSignalPlanner(store=store, cooldown=timedelta(minutes=15))
+
+    intents = await planner.plan_new_signals(now=_dt(10), max_signals=5)
+
+    signal = await store.load_signal("signal-cooldown")
+    assert intents == []
+    assert signal.status == "ignored"
+    assert signal.cooldown_until == _dt(11)
+    assert signal.metadata["skip_reason"] == "cooldown"
+
+
+@pytest.mark.asyncio
+async def test_proactive_signal_planner_requires_session_for_launch(
+    store: PGScheduledRunStore,
+) -> None:
+    await store.record_signal(_signal_with_state("signal-no-session", session_id=None))
+    planner = ProactiveSignalPlanner(store=store, cooldown=timedelta(minutes=15))
+
+    with pytest.raises(ValueError, match="requires session_id"):
+        await planner.plan_new_signals(now=_dt(10), max_signals=1)
+
+    assert (await store.load_signal("signal-no-session")).status == "new"
+    assert await store.list_triggers("signal:signal-no-session") == []
