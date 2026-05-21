@@ -154,3 +154,57 @@ This ledger tracks G77-G84 for the Topic Layer / Tape View Foundation phase.
   - whitespace diff check: passed.
 - Remaining risks:
   - G80 adds a lifecycle helper but does not wire automatic durable topics into runtime execution. Topic recall, context integration, cost provenance, console views, and final smoke tests are deferred to G81-G84.
+
+## G81_TOPIC_RECALL_AND_CONTEXT_VIEW
+
+### Before
+
+- Goal id: G81_TOPIC_RECALL_AND_CONTEXT_VIEW
+- Intended files:
+  - `docs/topic_layer/GOAL_PROGRESS.md`
+  - `src/coding_agent/context_pack.py`
+  - `src/coding_agent/topic_recall.py`
+  - `tests/coding_agent/test_topic_recall.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_topic_recall.py -v`
+  - `uv run pytest tests/coding_agent/test_topic_lifecycle.py -v`
+  - `uv run pytest tests/coding_agent/test_topic_store.py -v`
+  - `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_context_pack.py -v`
+  - `uv run ruff format --check src/coding_agent/context_pack.py src/coding_agent/topic_recall.py tests/coding_agent/test_topic_recall.py tests/coding_agent/test_context_pack.py`
+  - `uv run ruff check src/coding_agent/context_pack.py src/coding_agent/topic_recall.py tests/coding_agent/test_topic_recall.py tests/coding_agent/test_context_pack.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Historical topic summaries can be recalled with deterministic matching.
+  - Recording recall writes a safe `recall_anchor` encoded through an existing generic tape anchor and persists a topic recall link.
+  - ContextPack helpers include recalled topic metadata such as source topic ids and entry ranges when enabled.
+  - Disabled mode returns no topic recall context and preserves old context behavior.
+  - Memory remains reference-only and is not converted into instructions.
+
+### After
+
+- Status: passed local verification; pending PR.
+- Changed files:
+  - `docs/topic_layer/GOAL_PROGRESS.md`
+  - `src/coding_agent/context_pack.py`
+  - `src/coding_agent/topic_recall.py`
+  - `tests/coding_agent/test_topic_recall.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_topic_recall.py -v`
+  - `uv run pytest tests/coding_agent/test_topic_lifecycle.py -v`
+  - `uv run pytest tests/coding_agent/test_topic_store.py -v`
+  - `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_context_pack.py -v`
+  - `uv run ruff format --check src/coding_agent/context_pack.py src/coding_agent/topic_recall.py tests/coding_agent/test_topic_recall.py tests/coding_agent/test_context_pack.py`
+  - `uv run ruff check src/coding_agent/context_pack.py src/coding_agent/topic_recall.py tests/coding_agent/test_topic_recall.py tests/coding_agent/test_context_pack.py`
+  - `git diff --check -- .`
+- Results:
+  - topic recall tests: 7 passed.
+  - topic lifecycle tests: 8 passed.
+  - topic store tests: 9 passed.
+  - context system smoke: 1 passed.
+  - context pack tests: 5 passed.
+  - scoped ruff format/check: passed.
+  - whitespace diff check: passed.
+- Remaining risks:
+  - G81 adds deterministic recall and context-pack helpers only. Topic summaries are guarded as reference-only context, and default recall ignores low-information kind-only matches. Runtime build_context wiring, topic cost/eval/memory provenance, console pages, and final smoke tests are deferred to G82-G84.
