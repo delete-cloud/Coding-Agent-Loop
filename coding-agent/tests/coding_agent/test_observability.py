@@ -226,6 +226,57 @@ def test_prometheus_metrics_drop_forbidden_high_cardinality_labels() -> None:
         assert forbidden not in text
 
 
+def test_prometheus_metrics_allow_low_cardinality_topic_labels_without_topic_id() -> (
+    None
+):
+    recorder = PrometheusMetricsRecorder()
+    sink = PrometheusMetricsObservationSink(recorder=recorder)
+
+    sink.record_span(
+        SpanRecord(
+            name="context_pack.build",
+            status="ok",
+            attributes={
+                "topic_id": "topic-auth",
+                "topic_kind": "coding",
+                "topic_status": "finalized",
+                "topic_profile": "local",
+            },
+            duration_ms=1,
+        )
+    )
+
+    text = recorder.exposition_text()
+
+    assert 'topic_kind="coding"' in text
+    assert 'topic_status="finalized"' in text
+    assert 'topic_profile="local"' in text
+    assert "topic_id" not in text
+    assert "topic-auth" not in text
+
+
+def test_prometheus_metrics_normalize_unlisted_topic_kind_to_unknown() -> None:
+    recorder = PrometheusMetricsRecorder()
+    sink = PrometheusMetricsObservationSink(recorder=recorder)
+
+    sink.record_span(
+        SpanRecord(
+            name="context_pack.build",
+            status="ok",
+            attributes={
+                "topic_kind": "customer_auth_cleanup_123",
+                "topic_status": "finalized",
+            },
+            duration_ms=1,
+        )
+    )
+
+    text = recorder.exposition_text()
+
+    assert 'topic_kind="unknown"' in text
+    assert "customer_auth_cleanup_123" not in text
+
+
 def test_prometheus_metrics_normalize_unsafe_allowed_values_and_reserved_labels() -> (
     None
 ):
