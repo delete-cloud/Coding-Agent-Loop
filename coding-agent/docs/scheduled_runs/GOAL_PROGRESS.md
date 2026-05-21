@@ -130,7 +130,7 @@ This ledger tracks G85-G92 for the Topic-aware Scheduled Runs / Proactive Signal
 
 ### After
 
-- Status: passed local verification; pending PR.
+- Status: merged via PR #297.
 - Changed files:
   - `docs/scheduled_runs/GOAL_PROGRESS.md`
   - `src/coding_agent/scheduled_runs.py`
@@ -141,8 +141,47 @@ This ledger tracks G85-G92 for the Topic-aware Scheduled Runs / Proactive Signal
   - `uv run ruff check src/coding_agent/scheduled_runs.py tests/coding_agent/test_scheduled_runs.py`
   - `git diff --check -- .`
 - Results:
-  - scheduled run tests: 6 passed.
+  - scheduled run tests: 7 passed.
   - scoped ruff format/check: passed.
   - whitespace diff check: passed.
 - Remaining risks:
   - G88 only plans due schedules. Topic-aware launch preparation, proactive signal cooldown planning, console/observability integration, and final smoke tests are deferred to G89-G92.
+
+## G89_TOPIC_AWARE_LAUNCH_PREPARATION
+
+### Before
+
+- Goal id: G89_TOPIC_AWARE_LAUNCH_PREPARATION
+- Intended files:
+  - `docs/scheduled_runs/GOAL_PROGRESS.md`
+  - `src/coding_agent/scheduled_runs.py`
+  - `tests/coding_agent/test_scheduled_runs.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_scheduled_runs.py tests/coding_agent/test_topic_lifecycle.py -v`
+  - `uv run ruff format --check src/coding_agent/scheduled_runs.py tests/coding_agent/test_scheduled_runs.py`
+  - `uv run ruff check src/coding_agent/scheduled_runs.py tests/coding_agent/test_scheduled_runs.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Launch preparation continues an existing open topic when present.
+  - Launch preparation creates a safe new topic when no topic is provided or loadable.
+  - Launch preparation returns safe run metadata and does not execute runs or bypass approval/workspace/action policy.
+  - Existing topic lifecycle tests still pass.
+
+### After
+
+- Status: passed local verification; pending PR.
+- Changed files:
+  - `docs/scheduled_runs/GOAL_PROGRESS.md`
+  - `src/coding_agent/scheduled_runs.py`
+  - `tests/coding_agent/test_scheduled_runs.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_scheduled_runs.py tests/coding_agent/test_topic_lifecycle.py -v`
+  - `uv run ruff format --check src/coding_agent/scheduled_runs.py tests/coding_agent/test_scheduled_runs.py`
+  - `uv run ruff check src/coding_agent/scheduled_runs.py tests/coding_agent/test_scheduled_runs.py`
+  - `git diff --check -- .`
+- Results:
+  - scheduled run and topic lifecycle tests: 18 passed.
+  - scoped ruff format/check: passed.
+  - whitespace diff check: passed.
+- Remaining risks:
+  - G89 prepares topic-aware launch metadata only. Proactive signal cooldown planning, console/observability integration, and final smoke tests are deferred to G90-G92.
