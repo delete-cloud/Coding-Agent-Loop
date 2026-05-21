@@ -275,6 +275,7 @@ async def test_bee_store_schema_is_idempotent() -> None:
     ]
     assert len(schema_calls) == 1
     assert "ALTER TABLE bee_task_nodes" in schema_calls[0]
+    assert "NOT VALID" in schema_calls[0]
 
 
 @pytest.mark.asyncio

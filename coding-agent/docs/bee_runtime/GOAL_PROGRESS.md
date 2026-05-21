@@ -218,3 +218,21 @@ This ledger tracks G93-G101 for the Bee-style Workflow Template / Task Manifest 
   - `upsert_node()` now rejects missing task records and missing dependency nodes before insert/update.
 - Remaining risks:
   - This remains G96-scoped. Batch node insertion for forward references is intentionally deferred until planner/lifecycle needs it.
+
+### Local Review Follow-up 2
+
+- Status: passed local verification; pending PR.
+- Changed files:
+  - `src/coding_agent/bee_runtime.py`
+  - `tests/coding_agent/test_bee_runtime.py`
+  - `docs/bee_runtime/GOAL_PROGRESS.md`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -v`
+  - `uv run ruff format src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `uv run ruff check src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `git diff --check -- .`
+- Results:
+  - Local review found the FK backfill could fail on upgraded databases that already contain legacy orphan node rows.
+  - FK backfill now uses `NOT VALID`, while store-level checks still reject new orphan node writes.
+- Remaining risks:
+  - Legacy orphan cleanup and constraint validation are deferred to a future explicit migration goal.
