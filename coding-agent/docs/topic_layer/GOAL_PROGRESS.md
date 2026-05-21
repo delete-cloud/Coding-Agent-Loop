@@ -347,7 +347,7 @@ This ledger tracks G77-G84 for the Topic Layer / Tape View Foundation phase.
 
 ### After
 
-- Status: in PR #292.
+- Status: merged via PR #292.
 - Changed files:
   - `docs/topic_layer/GOAL_PROGRESS.md`
   - `docs/topic_layer/IMPLEMENTATION_REPORT.md`
