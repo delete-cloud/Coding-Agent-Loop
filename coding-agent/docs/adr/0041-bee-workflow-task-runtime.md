@@ -77,8 +77,8 @@ Keep the following explicitly out of scope:
 
 ## Acceptance Criteria
 
-- [ ] `test_bee_manifest_parses_safe_fixture`
-- [ ] `test_bee_manifest_rejects_raw_sensitive_fields`
+- [x] `test_bee_manifest_parses_safe_fixture`
+- [x] `test_bee_manifest_rejects_raw_sensitive_fields`
 - [ ] `test_bee_store_schema_is_idempotent`
 - [ ] `test_bee_store_create_update_list_task_and_nodes`
 - [ ] `test_bee_topic_lifecycle_writes_safe_task_anchors`
@@ -89,7 +89,7 @@ Keep the following explicitly out of scope:
 - [ ] `test_bee_metrics_allow_low_cardinality_labels_without_task_or_node_ids`
 - [ ] `test_console_bee_renders_safe_task_and_node_summaries`
 - [ ] `test_bee_runtime_smoke_manifest_topic_launch_console_metrics`
-- [ ] `uv run pytest tests/coding_agent/test_bee_runtime.py -v`
+- [x] `uv run pytest tests/coding_agent/test_bee_runtime.py -v`
 - [ ] `uv run pytest tests/ui/test_developer_console.py -v`
 - [ ] `uv run pytest tests/coding_agent/test_observability.py -v`
 - [ ] `git diff --check -- .`
