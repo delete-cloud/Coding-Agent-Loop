@@ -198,3 +198,23 @@ This ledger tracks G93-G101 for the Bee-style Workflow Template / Task Manifest 
   - Target Bee runtime tests passed after two fix iterations: one syntax placement fix and one fake-pool protocol fix.
 - Remaining risks:
   - G96 does not write topic anchors, plan launch intents, route actions, expose console pages, or record metrics; those remain deferred to G97-G101.
+
+### Local Review Follow-up
+
+- Status: passed local verification; pending PR.
+- Changed files:
+  - `src/coding_agent/bee_runtime.py`
+  - `tests/coding_agent/test_bee_runtime.py`
+  - `docs/bee_runtime/GOAL_PROGRESS.md`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -v`
+  - `uv run ruff format src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `uv run ruff check src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `git diff --check -- .`
+- Results:
+  - Local review found that G96 allowed orphan nodes and dependencies pointing to nonexistent nodes.
+  - Schema now declares `bee_task_nodes.task_id` as a foreign key to `bee_tasks.task_id`.
+  - Schema setup now includes an idempotent FK backfill block for databases that created `bee_task_nodes` before the FK existed.
+  - `upsert_node()` now rejects missing task records and missing dependency nodes before insert/update.
+- Remaining risks:
+  - This remains G96-scoped. Batch node insertion for forward references is intentionally deferred until planner/lifecycle needs it.

@@ -279,8 +279,24 @@ class PGBeeTaskStore:
         started_at TIMESTAMPTZ,
         finished_at TIMESTAMPTZ,
         metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-        PRIMARY KEY (task_id, node_id)
+        PRIMARY KEY (task_id, node_id),
+        FOREIGN KEY (task_id) REFERENCES bee_tasks(task_id) ON DELETE CASCADE
     );
+
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'bee_task_nodes_task_id_fkey'
+        ) THEN
+            ALTER TABLE bee_task_nodes
+                ADD CONSTRAINT bee_task_nodes_task_id_fkey
+                FOREIGN KEY (task_id)
+                REFERENCES bee_tasks(task_id)
+                ON DELETE CASCADE;
+        END IF;
+    END
+    $$;
 
     CREATE INDEX IF NOT EXISTS bee_task_nodes_task_status_idx
         ON bee_task_nodes (task_id, status, node_id);
@@ -366,6 +382,10 @@ class PGBeeTaskStore:
     SELECT * FROM bee_task_nodes
     WHERE task_id = $1
     ORDER BY created_at, node_id
+    """
+    _SELECT_NODE_SQL: Final[str] = """
+    SELECT * FROM bee_task_nodes
+    WHERE task_id = $1 AND node_id = $2
     """
     _UPDATE_NODE_STATUS_SQL: Final[str] = """
     UPDATE bee_task_nodes
@@ -466,6 +486,8 @@ class PGBeeTaskStore:
 
     async def upsert_node(self, record: BeeNodeRecord) -> BeeNodeRecord:
         pool = await self._ensure_schema()
+        await self._require_task_exists(pool, record.task_id)
+        await self._require_dependencies_exist(pool, record)
         row = await pool.fetchrow(
             self._UPSERT_NODE_SQL,
             record.node_id,
@@ -483,6 +505,33 @@ class PGBeeTaskStore:
             record.metadata,
         )
         return _bee_node_from_row(_required_row(row, "bee node upsert"))
+
+    async def _require_task_exists(
+        self,
+        pool: AsyncPGPool,
+        task_id: str,
+    ) -> None:
+        row = await pool.fetchrow(self._SELECT_TASK_SQL, task_id)
+        if row is None:
+            raise KeyError(f"Bee task not found for node: {task_id}")
+
+    async def _require_dependencies_exist(
+        self,
+        pool: AsyncPGPool,
+        record: BeeNodeRecord,
+    ) -> None:
+        missing: list[str] = []
+        for dependency_id in record.depends_on:
+            row = await pool.fetchrow(
+                self._SELECT_NODE_SQL,
+                record.task_id,
+                dependency_id,
+            )
+            if row is None:
+                missing.append(dependency_id)
+        if missing:
+            missing_list = ", ".join(sorted(missing))
+            raise ValueError(f"Bee node dependencies not found: {missing_list}")
 
     async def list_nodes(self, task_id: str) -> list[BeeNodeRecord]:
         _require_non_empty("task_id", task_id)
