@@ -281,3 +281,25 @@ This ledger tracks G93-G101 for the Bee-style Workflow Template / Task Manifest 
   - Target tests passed after two fix iterations: fixture IDs avoiding legacy secret marker collisions and a safe metadata key replacement.
 - Remaining risks:
   - G97 does not add launch planning, action routing, context/validation metadata, console views, or metrics; those remain deferred to G98-G101.
+
+### Local Review Follow-up
+
+- Status: passed local verification; pending PR.
+- Changed files:
+  - `src/coding_agent/bee_runtime.py`
+  - `tests/coding_agent/test_bee_runtime.py`
+  - `docs/bee_runtime/GOAL_PROGRESS.md`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -v`
+  - `uv run pytest tests/coding_agent/test_topic_lifecycle.py tests/coding_agent/plugins/test_topic.py -v`
+  - `uv run ruff format src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `uv run ruff check src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `git diff --check -- .`
+- Results:
+  - Local review found G97 could append task anchors outside closed topic ranges, finalize non-final task statuses, let caller metadata override reserved anchor metadata, and leave a concurrency window between tape append and anchor-store write.
+  - Bee task anchors now require an open Topic.
+  - Finalize now only accepts completed/failed/cancelled statuses and requires the passed status to match `task.status`.
+  - Caller metadata cannot set reserved anchor metadata keys.
+  - Tape append, store record, and rollback now execute under the tape lock.
+- Remaining risks:
+  - This remains G97-scoped; planner/execution integration is deferred to G98-G101.
