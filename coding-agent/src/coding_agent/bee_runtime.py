@@ -6,6 +6,7 @@ parses sanitized task intent; it does not execute nodes or bypass action safety.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Final
 
@@ -36,6 +37,7 @@ _FORBIDDEN_KEY_PARTS: Final[frozenset[str]] = frozenset(
         "stderr",
         "stdout",
         "text",
+        "token",
     }
 )
 _FORBIDDEN_EXECUTABLE_KEYS: Final[frozenset[str]] = frozenset(
@@ -221,13 +223,19 @@ def _validate_safe_json(path: str, value: JSONValue) -> None:
 
 
 def _reject_forbidden_key(path: str, key: str) -> None:
-    normalized = key.strip().lower().replace("-", "_")
+    normalized = _normalize_manifest_key(key)
     for forbidden in _FORBIDDEN_KEY_PARTS:
         if _key_contains_token(normalized, forbidden):
             raise ValueError(f"{path}.{key} uses forbidden sensitive field")
     for forbidden in _FORBIDDEN_EXECUTABLE_KEYS:
         if _key_contains_token(normalized, forbidden):
             raise ValueError(f"{path}.{key} uses forbidden executable field")
+
+
+def _normalize_manifest_key(key: str) -> str:
+    with_separators = key.strip().replace("-", "_")
+    with_separators = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", with_separators)
+    return with_separators.lower()
 
 
 def _key_contains_token(normalized_key: str, forbidden: str) -> bool:

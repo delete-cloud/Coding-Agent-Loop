@@ -46,6 +46,8 @@ def test_bee_manifest_parses_safe_fixture() -> None:
         (("metadata", "api_key"), "abc123"),
         (("metadata", "password"), "abc123"),
         (("metadata", "bearer_token"), "abc123"),
+        (("metadata", "GITHUB_TOKEN"), "abc123"),
+        (("metadata", "AWS_SESSION_TOKEN"), "abc123"),
     ],
 )
 def test_bee_manifest_rejects_raw_sensitive_fields(
@@ -65,7 +67,7 @@ def test_bee_manifest_rejects_raw_sensitive_fields(
         (("metadata", "safe_marker"), "token=abc123"),
         (("nodes", 0, "metadata", "safe_label"), "sk-test-value"),
         (("topic", "title_hint"), "secret=hidden"),
-        (("metadata", "safe_token_marker"), "ghp_example"),
+        (("metadata", "safe_marker_2"), "ghp_example"),
     ],
 )
 def test_bee_manifest_rejects_secret_like_values(
@@ -84,9 +86,13 @@ def test_bee_manifest_rejects_secret_like_values(
     [
         (("nodes", 0, "command"), "pytest"),
         (("nodes", 0, "run_command"), "pytest"),
+        (("nodes", 0, "runCommand"), "pytest"),
         (("nodes", 0, "shell_command"), "pytest"),
+        (("nodes", 0, "shellCommand"), "pytest"),
         (("nodes", 0, "command_spec"), "pytest"),
+        (("nodes", 0, "commandSpec"), "pytest"),
         (("nodes", 0, "pre_commands"), "pytest"),
+        (("nodes", 0, "preCommands"), "pytest"),
         (("nodes", 0, "metadata", "executor"), "local"),
         (("metadata", "script"), "run checks"),
     ],
