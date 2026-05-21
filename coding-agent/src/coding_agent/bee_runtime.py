@@ -293,7 +293,8 @@ class PGBeeTaskStore:
                 ADD CONSTRAINT bee_task_nodes_task_id_fkey
                 FOREIGN KEY (task_id)
                 REFERENCES bee_tasks(task_id)
-                ON DELETE CASCADE;
+                ON DELETE CASCADE
+                NOT VALID;
         END IF;
     END
     $$;
