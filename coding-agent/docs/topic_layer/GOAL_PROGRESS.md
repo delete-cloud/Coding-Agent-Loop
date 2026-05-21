@@ -263,3 +263,56 @@ This ledger tracks G77-G84 for the Topic Layer / Tape View Foundation phase.
   - whitespace diff check: passed.
 - Remaining risks:
   - G82 adds deterministic provenance helpers and low-cardinality metric label support only. `topic_kind` is allowlisted and unknown values are normalized to `unknown`; `topic_id` remains excluded from Prometheus labels. Console topic views and end-to-end topic smoke docs remain deferred to G83-G84.
+
+## G83_TOPIC_CONSOLE_AND_OBSERVABILITY
+
+### Before
+
+- Goal id: G83_TOPIC_CONSOLE_AND_OBSERVABILITY
+- Intended files:
+  - `docs/topic_layer/GOAL_PROGRESS.md`
+  - `src/coding_agent/ui/developer_console.py`
+  - `src/coding_agent/ui/http_server.py`
+  - `tests/ui/test_developer_console.py`
+  - `tests/coding_agent/test_observability.py`
+- Verification commands:
+  - `uv run pytest tests/ui/test_developer_console.py -k "topic or observability or e2e" -v`
+  - `uv run pytest tests/coding_agent/test_observability.py -k "topic or forbidden_high_cardinality_labels" -v`
+  - `uv run pytest tests/ui/test_developer_console.py -v`
+  - `uv run ruff format --check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/ui/test_developer_console.py tests/coding_agent/test_observability.py`
+  - `uv run ruff check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/ui/test_developer_console.py tests/coding_agent/test_observability.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Developer Console navigation includes Topics.
+  - `/console/topics` renders a topic list using existing run/topic metadata and empty state.
+  - `/console/topics/{topic_id}` renders topic range summary, anchors, recall links, cost, and related runs/actions/validations where available.
+  - Observability correlation can display safe `topic_id` as trace correlation metadata.
+  - No raw sensitive content is rendered, and Prometheus still rejects `topic_id` labels.
+
+### After
+
+- Status: passed local verification; pending PR.
+- Changed files:
+  - `docs/topic_layer/GOAL_PROGRESS.md`
+  - `src/coding_agent/observability.py`
+  - `src/coding_agent/ui/developer_console.py`
+  - `src/coding_agent/ui/http_server.py`
+  - `tests/coding_agent/test_observability.py`
+  - `tests/ui/test_developer_console.py`
+- Tests run:
+  - `uv run pytest tests/ui/test_developer_console.py -k "topic or observability or e2e" -v`
+  - `uv run pytest tests/coding_agent/test_observability.py -k "topic or forbidden_high_cardinality_labels" -v`
+  - `uv run pytest tests/ui/test_developer_console.py -v`
+  - `uv run pytest tests/coding_agent/test_observability_platform_smoke.py -v`
+  - `uv run ruff format --check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py src/coding_agent/observability.py tests/ui/test_developer_console.py tests/coding_agent/test_observability.py`
+  - `uv run ruff check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py src/coding_agent/observability.py tests/ui/test_developer_console.py tests/coding_agent/test_observability.py`
+  - `git diff --check -- .`
+- Results:
+  - targeted console topic/observability tests: 6 passed, 26 deselected.
+  - scoped observability no-label tests: 3 passed, 23 deselected.
+  - full developer console tests: 32 passed.
+  - observability platform smoke: 2 passed.
+  - scoped ruff format/check: passed.
+  - whitespace diff check: passed.
+- Remaining risks:
+  - G83 prefers durable `PGTopicStore` topic/anchor/recall/cost data when the HTTP server uses PG-backed storage, and falls back to existing sanitized run/topic metadata otherwise. Final E2E topic smoke and user docs remain deferred to G84.

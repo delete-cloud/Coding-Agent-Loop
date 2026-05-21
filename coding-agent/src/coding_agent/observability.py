@@ -54,6 +54,7 @@ _FORBIDDEN_PROMETHEUS_LABELS = frozenset(
         "run_id",
         "session_id",
         "trace_id",
+        "topic_id",
         "event_id",
         "interaction_id",
         "tool_call_id",

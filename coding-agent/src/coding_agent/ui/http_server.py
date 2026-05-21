@@ -35,6 +35,13 @@ from coding_agent.runtime_store import (
     RunMessageSnapshotRecord,
     RuntimeEventRecord,
 )
+from coding_agent.topic_store import (
+    PGTopicStore,
+    TopicAnchorRecord,
+    TopicCostRecord,
+    TopicRecallLinkRecord,
+    TopicRecord,
+)
 from coding_agent.verification.release_manifest import (
     load_release_verification_manifest,
 )
@@ -83,6 +90,11 @@ from coding_agent.ui.developer_console import (
     ConsoleSessionSummary,
     ConsoleTapeEntrySummary,
     ConsoleTapeInfo,
+    ConsoleTopicAnchorSummary,
+    ConsoleTopicCostSummary,
+    ConsoleTopicDetail,
+    ConsoleTopicRecallSummary,
+    ConsoleTopicSummary,
     ConsoleValidationOutcomeSummary,
     ConsoleWorkspaceCapabilitySummary,
     ConsoleWorkspaceSummary,
@@ -99,6 +111,8 @@ from coding_agent.ui.developer_console import (
     render_console_runs_page,
     render_console_sessions_page,
     render_console_tape_page,
+    render_console_topic_detail_page,
+    render_console_topics_page,
     render_console_workspaces_page,
     safe_label_value,
     safe_id_value,
@@ -955,6 +969,7 @@ async def _record_http_metrics(request: Request, call_next):
             route_label = getattr(route, "path", None)
             if not isinstance(route_label, str) or not route_label:
                 route_label = "unmatched"
+            route_label = _http_metrics_route_label(route_label)
             record_http_request_metric(
                 method=request.method,
                 route=route_label,
@@ -1299,6 +1314,30 @@ async def console_observability(
     )
 
 
+@app.get("/console/topics", response_class=HTMLResponse)
+async def console_topics(
+    request: Request,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> HTMLResponse:
+    del request
+    return HTMLResponse(
+        render_console_topics_page(await _console_topic_summaries(auth_context))
+    )
+
+
+@app.get("/console/topics/{topic_id}", response_class=HTMLResponse)
+async def console_topic_detail(
+    request: Request,
+    topic_id: str,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> HTMLResponse:
+    del request
+    detail = await _console_topic_detail(topic_id, auth_context)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Topic not found")
+    return HTMLResponse(render_console_topic_detail_page(detail))
+
+
 @app.get("/console/workspaces", response_class=HTMLResponse)
 async def console_workspaces(
     request: Request,
@@ -1318,6 +1357,12 @@ async def console_workspaces(
 async def console_release(request: Request) -> HTMLResponse:
     del request
     return HTMLResponse(render_console_release_page(await _release_summary()))
+
+
+def _http_metrics_route_label(route_label: str) -> str:
+    if route_label == "/console/topics/{topic_id}":
+        return "/console/topics/detail"
+    return route_label
 
 
 def _session_to_dict(session: Session) -> dict[str, Any]:
@@ -2983,6 +3028,7 @@ def _correlation_summary_from_run(run: AgentRunRecord) -> ConsoleCorrelationSumm
         session_id=safe_id_value(run.session_id),
         run_id=safe_id_value(run.run_id),
         tape_id=safe_id_value(run.tape_id),
+        topic_id=_topic_id_from_run(run),
         retrieval_id=safe_id_value(
             run.metadata.get("retrieval_id") or run.metadata.get("context_retrieval_id")
         ),
@@ -3003,6 +3049,413 @@ def _correlation_summary_from_run(run: AgentRunRecord) -> ConsoleCorrelationSumm
             if action is not None
             else safe_id_value(run.metadata.get("interaction_id"))
         ),
+    )
+
+
+async def _console_topic_summaries(
+    auth_context: AuthContext | None,
+) -> list[ConsoleTopicSummary]:
+    store_summaries = await _console_topic_summaries_from_store(auth_context)
+    if store_summaries:
+        return store_summaries
+    runs = await _visible_console_runs(auth_context)
+    summaries_by_topic: dict[str, ConsoleTopicSummary] = {}
+    run_counts: dict[str, int] = {}
+    for run in runs:
+        summary = _topic_summary_from_run(run)
+        if summary is None:
+            continue
+        run_counts[summary.topic_id] = run_counts.get(summary.topic_id, 0) + 1
+        if summary.topic_id not in summaries_by_topic:
+            summaries_by_topic[summary.topic_id] = summary
+    summaries = [
+        ConsoleTopicSummary(
+            topic_id=summary.topic_id,
+            tape_id=summary.tape_id,
+            session_id=summary.session_id,
+            kind=summary.kind,
+            status=summary.status,
+            title=summary.title,
+            summary=summary.summary,
+            topic_initial_seq=summary.topic_initial_seq,
+            topic_finalized_seq=summary.topic_finalized_seq,
+            run_count=run_counts[summary.topic_id],
+            cost_total_tokens=summary.cost_total_tokens,
+        )
+        for summary in summaries_by_topic.values()
+    ]
+    summaries.sort(key=lambda item: (item.session_id or "", item.topic_id))
+    return summaries
+
+
+async def _console_topic_detail(
+    topic_id: str,
+    auth_context: AuthContext | None,
+) -> ConsoleTopicDetail | None:
+    safe_topic_id = safe_id_value(topic_id)
+    if safe_topic_id is None:
+        return None
+    store_detail = await _console_topic_detail_from_store(safe_topic_id, auth_context)
+    if store_detail is not None:
+        return store_detail
+    runs = [
+        run
+        for run in await _visible_console_runs(auth_context)
+        if _topic_id_from_run(run) == safe_topic_id
+    ]
+    if not runs:
+        return None
+    base_summary = _topic_summary_from_run(runs[0])
+    if base_summary is None:
+        return None
+    summary = ConsoleTopicSummary(
+        topic_id=base_summary.topic_id,
+        tape_id=base_summary.tape_id,
+        session_id=base_summary.session_id,
+        kind=base_summary.kind,
+        status=base_summary.status,
+        title=base_summary.title,
+        summary=base_summary.summary,
+        topic_initial_seq=base_summary.topic_initial_seq,
+        topic_finalized_seq=base_summary.topic_finalized_seq,
+        run_count=len(runs),
+        cost_total_tokens=base_summary.cost_total_tokens,
+    )
+    actions: list[ConsoleActionSummary] = []
+    validations: list[ConsoleValidationOutcomeSummary] = []
+    run_summaries: list[ConsoleRunSummary] = []
+    for run in runs:
+        run_summaries.append(_console_run_summary_from_run(run))
+        action_summary = _action_validation_summary_from_run(run)
+        actions.extend(action_summary.actions)
+        validations.extend(action_summary.validations)
+    return ConsoleTopicDetail(
+        summary=summary,
+        anchors=tuple(
+            anchor for run in runs for anchor in _topic_anchor_summaries_from_run(run)
+        ),
+        recalls=tuple(
+            recall for run in runs for recall in _topic_recall_summaries_from_run(run)
+        ),
+        cost=_topic_cost_summary_from_run(runs[0]),
+        runs=tuple(run_summaries),
+        actions=tuple(actions),
+        validations=tuple(validations),
+    )
+
+
+async def _console_topic_summaries_from_store(
+    auth_context: AuthContext | None,
+) -> list[ConsoleTopicSummary]:
+    store = _console_topic_store()
+    if store is None:
+        return []
+    topics: list[TopicRecord] = []
+    try:
+        if auth_context is None or auth_context.scope == "admin":
+            topics = await store.list_topics(limit=100)
+        else:
+            for session_id in await _visible_console_session_ids(auth_context):
+                topics.extend(await store.list_topics(session_id=session_id, limit=100))
+    except Exception:
+        logger.exception(
+            "Console topic store list failed; falling back to run metadata"
+        )
+        return []
+    summaries = [
+        _topic_summary_from_record(topic, await store.load_topic_cost(topic.topic_id))
+        for topic in topics
+    ]
+    summaries.sort(key=lambda item: (item.session_id or "", item.topic_id))
+    return summaries
+
+
+async def _console_topic_detail_from_store(
+    topic_id: str,
+    auth_context: AuthContext | None,
+) -> ConsoleTopicDetail | None:
+    store = _console_topic_store()
+    if store is None:
+        return None
+    try:
+        topic = await store.load_topic(topic_id)
+    except Exception:
+        logger.exception(
+            "Console topic store load failed; falling back to run metadata"
+        )
+        return None
+    if topic is None:
+        return None
+    if not await _auth_context_can_access_topic(auth_context, topic):
+        return None
+    try:
+        anchors = tuple(
+            _topic_anchor_summary_from_record(anchor)
+            for anchor in await store.list_topic_anchors(topic.topic_id)
+        )
+        recalls = tuple(
+            _topic_recall_summary_from_record(recall)
+            for recall in await store.list_recall_links(topic.topic_id)
+        )
+        cost = await store.load_topic_cost(topic.topic_id)
+    except Exception:
+        logger.exception(
+            "Console topic store detail failed; falling back to run metadata"
+        )
+        return None
+    runs = [
+        run
+        for run in await _visible_console_runs(auth_context)
+        if _topic_id_from_run(run) == topic.topic_id
+    ]
+    run_summaries = tuple(_console_run_summary_from_run(run) for run in runs)
+    actions: list[ConsoleActionSummary] = []
+    validations: list[ConsoleValidationOutcomeSummary] = []
+    for run in runs:
+        action_summary = _action_validation_summary_from_run(run)
+        actions.extend(action_summary.actions)
+        validations.extend(action_summary.validations)
+    return ConsoleTopicDetail(
+        summary=_topic_summary_from_record(topic, cost),
+        anchors=anchors,
+        recalls=recalls,
+        cost=_topic_cost_summary_from_record(cost),
+        runs=run_summaries,
+        actions=tuple(actions),
+        validations=tuple(validations),
+    )
+
+
+def _console_topic_store() -> PGTopicStore | None:
+    try:
+        storage_config = _load_storage_config()
+    except Exception:
+        logger.exception("Unable to load storage config for console topic store")
+        return None
+    if not _storage_uses_pg_http_sessions(storage_config):
+        return None
+    try:
+        return PGTopicStore(pool=session_manager.pg_pool)
+    except Exception:
+        logger.exception("Unable to initialize console topic store")
+        return None
+
+
+async def _auth_context_can_access_topic(
+    auth_context: AuthContext | None,
+    topic: TopicRecord,
+) -> bool:
+    if auth_context is None or auth_context.scope == "admin":
+        return True
+    return topic.session_id in await _visible_console_session_ids(auth_context)
+
+
+async def _visible_console_session_ids(auth_context: AuthContext | None) -> list[str]:
+    session_ids: list[str] = []
+    for session_id in await session_manager.list_sessions_async():
+        try:
+            session = await session_manager.get_session_async(session_id)
+        except KeyError:
+            continue
+        if _auth_context_can_access_session(auth_context, session):
+            session_ids.append(session_id)
+    return session_ids
+
+
+def _topic_summary_from_record(
+    topic: TopicRecord,
+    cost: TopicCostRecord | None,
+) -> ConsoleTopicSummary:
+    return ConsoleTopicSummary(
+        topic_id=safe_id_value(topic.topic_id) or "redacted",
+        tape_id=safe_id_value(topic.tape_id),
+        session_id=safe_id_value(topic.session_id),
+        kind=safe_label_value(topic.kind) or "unknown",
+        status=safe_label_value(topic.status) or "unknown",
+        title=safe_text_value(topic.title),
+        summary=safe_text_value(topic.summary),
+        topic_initial_seq=topic.topic_initial_seq,
+        topic_finalized_seq=topic.topic_finalized_seq,
+        run_count=cost.run_count if cost is not None else 0,
+        cost_total_tokens=cost.total_tokens if cost is not None else None,
+    )
+
+
+def _topic_anchor_summary_from_record(
+    anchor: TopicAnchorRecord,
+) -> ConsoleTopicAnchorSummary:
+    return ConsoleTopicAnchorSummary(
+        seq=anchor.seq,
+        anchor_type=safe_label_value(anchor.anchor_type) or "unknown",
+        entry_id=safe_id_value(anchor.entry_id),
+    )
+
+
+def _topic_recall_summary_from_record(
+    recall: TopicRecallLinkRecord,
+) -> ConsoleTopicRecallSummary:
+    return ConsoleTopicRecallSummary(
+        recalled_topic_id=safe_id_value(recall.recalled_topic_id) or "redacted",
+        relation=safe_label_value(recall.relation) or "unknown",
+        anchor_seq=recall.anchor_seq,
+    )
+
+
+def _topic_cost_summary_from_record(
+    cost: TopicCostRecord | None,
+) -> ConsoleTopicCostSummary | None:
+    if cost is None:
+        return None
+    return ConsoleTopicCostSummary(
+        prompt_tokens=cost.prompt_tokens,
+        completion_tokens=cost.completion_tokens,
+        total_tokens=cost.total_tokens,
+        run_count=cost.run_count,
+        action_count=cost.action_count,
+        validation_count=cost.validation_count,
+        tool_call_count=cost.tool_call_count,
+    )
+
+
+async def _visible_console_runs(
+    auth_context: AuthContext | None,
+) -> list[AgentRunRecord]:
+    runs: list[AgentRunRecord] = []
+    for session_id in await session_manager.list_sessions_async():
+        try:
+            session = await session_manager.get_session_async(session_id)
+        except KeyError:
+            continue
+        if not _auth_context_can_access_session(auth_context, session):
+            continue
+        try:
+            runs.extend(await session_manager.list_runtime_runs(session_id))
+        except RuntimeError:
+            continue
+    return runs
+
+
+def _console_run_summary_from_run(run: AgentRunRecord) -> ConsoleRunSummary:
+    return ConsoleRunSummary(
+        run_id=run.run_id,
+        session_id=run.session_id,
+        status=run.status,
+        started_at=run.started_at,
+        ended_at=run.ended_at,
+        error_summary=safe_error_summary(run.error),
+    )
+
+
+def _topic_summary_from_run(run: AgentRunRecord) -> ConsoleTopicSummary | None:
+    topic = _topic_metadata(run)
+    topic_id = _topic_id_from_run(run)
+    if topic_id is None:
+        return None
+    cost = _safe_dict(topic.get("cost") or run.metadata.get("topic_cost"))
+    return ConsoleTopicSummary(
+        topic_id=topic_id,
+        tape_id=safe_id_value(topic.get("tape_id") or run.tape_id),
+        session_id=safe_id_value(topic.get("session_id") or run.session_id),
+        kind=safe_label_value(topic.get("kind") or run.metadata.get("topic_kind"))
+        or "unknown",
+        status=safe_label_value(topic.get("status") or run.metadata.get("topic_status"))
+        or "unknown",
+        title=safe_text_value(topic.get("title")),
+        summary=safe_text_value(topic.get("summary")),
+        topic_initial_seq=_optional_int(
+            _first_present(topic, run.metadata, "topic_initial_seq")
+        ),
+        topic_finalized_seq=_optional_int(
+            _first_present(topic, run.metadata, "topic_finalized_seq")
+        ),
+        run_count=1,
+        cost_total_tokens=_optional_int(cost.get("total_tokens")),
+    )
+
+
+def _topic_metadata(run: AgentRunRecord) -> dict[str, object]:
+    return _safe_dict(run.metadata.get("topic"))
+
+
+def _topic_id_from_run(run: AgentRunRecord) -> str | None:
+    topic = _topic_metadata(run)
+    return safe_id_value(topic.get("topic_id") or run.metadata.get("topic_id"))
+
+
+def _first_present(
+    primary: dict[str, object],
+    secondary: dict[str, object],
+    key: str,
+) -> object:
+    if key in primary:
+        return primary[key]
+    return secondary.get(key)
+
+
+def _topic_anchor_summaries_from_run(
+    run: AgentRunRecord,
+) -> tuple[ConsoleTopicAnchorSummary, ...]:
+    topic = _topic_metadata(run)
+    anchors = _metadata_lists(
+        {"items": topic.get("anchors") or run.metadata.get("topic_anchors")},
+        ("items",),
+    )
+    summaries = []
+    for anchor in anchors:
+        anchor_type = safe_label_value(
+            anchor.get("anchor_type") or anchor.get("product_anchor_type")
+        )
+        if anchor_type is None:
+            continue
+        summaries.append(
+            ConsoleTopicAnchorSummary(
+                seq=_optional_int(anchor.get("seq")),
+                anchor_type=anchor_type,
+                entry_id=safe_id_value(anchor.get("entry_id")),
+            )
+        )
+    return tuple(summaries)
+
+
+def _topic_recall_summaries_from_run(
+    run: AgentRunRecord,
+) -> tuple[ConsoleTopicRecallSummary, ...]:
+    topic = _topic_metadata(run)
+    recalls = _metadata_lists(
+        {"items": topic.get("recall_links") or run.metadata.get("topic_recall_links")},
+        ("items",),
+    )
+    summaries = []
+    for recall in recalls:
+        recalled_topic_id = safe_id_value(
+            recall.get("recalled_topic_id") or recall.get("target_topic_id")
+        )
+        relation = safe_label_value(recall.get("relation")) or "unknown"
+        if recalled_topic_id is None:
+            continue
+        summaries.append(
+            ConsoleTopicRecallSummary(
+                recalled_topic_id=recalled_topic_id,
+                relation=relation,
+                anchor_seq=_optional_int(recall.get("anchor_seq")),
+            )
+        )
+    return tuple(summaries)
+
+
+def _topic_cost_summary_from_run(run: AgentRunRecord) -> ConsoleTopicCostSummary | None:
+    topic = _topic_metadata(run)
+    cost = _safe_dict(topic.get("cost") or run.metadata.get("topic_cost"))
+    if not cost:
+        return None
+    return ConsoleTopicCostSummary(
+        prompt_tokens=_optional_int(cost.get("prompt_tokens")) or 0,
+        completion_tokens=_optional_int(cost.get("completion_tokens")) or 0,
+        total_tokens=_optional_int(cost.get("total_tokens")) or 0,
+        run_count=_optional_int(cost.get("run_count")) or 0,
+        action_count=_optional_int(cost.get("action_count")) or 0,
+        validation_count=_optional_int(cost.get("validation_count")) or 0,
+        tool_call_count=_optional_int(cost.get("tool_call_count")) or 0,
     )
 
 

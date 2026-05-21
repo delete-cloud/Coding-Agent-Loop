@@ -16,6 +16,12 @@ from coding_agent.runtime_store import (
     RunMessageSnapshotRecord,
     RuntimeEventRecord,
 )
+from coding_agent.topic_store import (
+    TopicAnchorRecord,
+    TopicCostRecord,
+    TopicRecallLinkRecord,
+    TopicRecord,
+)
 from coding_agent.core.config import settings
 from coding_agent.observability import prometheus_metrics_text, reset_prometheus_metrics
 from coding_agent.ui import http_server
@@ -34,6 +40,7 @@ CONSOLE_ROUTES = (
     "/console/memory",
     "/console/actions",
     "/console/observability",
+    "/console/topics",
     "/console/workspaces",
     "/console/release",
 )
@@ -47,6 +54,7 @@ NAV_LINKS = {
     "Memory": "/console/memory",
     "Actions / Validation": "/console/actions",
     "Observability": "/console/observability",
+    "Topics": "/console/topics",
     "Workspaces": "/console/workspaces",
     "Release / Health": "/console/release",
 }
@@ -342,6 +350,59 @@ class _ConsoleWorkspaceStore:
         return None
 
 
+class _ConsoleTopicStore:
+    def __init__(
+        self,
+        topics: list[TopicRecord],
+        *,
+        anchors: list[TopicAnchorRecord] | None = None,
+        recalls: list[TopicRecallLinkRecord] | None = None,
+        costs: list[TopicCostRecord] | None = None,
+    ) -> None:
+        self.topics = {topic.topic_id: topic for topic in topics}
+        self.anchors = anchors or []
+        self.recalls = recalls or []
+        self.costs = {cost.topic_id: cost for cost in costs or []}
+
+    async def list_topics(
+        self,
+        *,
+        session_id: str | None = None,
+        tape_id: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[TopicRecord]:
+        topics = []
+        for topic in self.topics.values():
+            if session_id is not None and topic.session_id != session_id:
+                continue
+            if tape_id is not None and topic.tape_id != tape_id:
+                continue
+            if status is not None and topic.status != status:
+                continue
+            topics.append(topic)
+        return topics[:limit]
+
+    async def load_topic(self, topic_id: str) -> TopicRecord | None:
+        return self.topics.get(topic_id)
+
+    async def list_topic_anchors(self, topic_id: str) -> list[TopicAnchorRecord]:
+        return [anchor for anchor in self.anchors if anchor.topic_id == topic_id]
+
+    async def list_recall_links(
+        self,
+        source_topic_id: str,
+    ) -> list[TopicRecallLinkRecord]:
+        return [
+            recall
+            for recall in self.recalls
+            if recall.source_topic_id == source_topic_id
+        ]
+
+    async def load_topic_cost(self, topic_id: str) -> TopicCostRecord | None:
+        return self.costs.get(topic_id)
+
+
 @pytest.fixture(autouse=True)
 async def clear_console_state() -> AsyncIterator[None]:
     session_manager.configure_runtime_store(None)
@@ -520,6 +581,82 @@ def _runtime_run(
     )
 
 
+def _topic_runtime_run(run_id: str = "run-alpha") -> AgentRunRecord:
+    base = _runtime_run(run_id, "session-alpha", status="completed")
+    metadata = dict(base.metadata)
+    metadata["topic_id"] = "topic-auth"
+    metadata["topic"] = {
+        "topic_id": "topic-auth",
+        "tape_id": "session-alpha-tape",
+        "session_id": "session-alpha",
+        "kind": "coding",
+        "status": "finalized",
+        "title": "Auth topic",
+        "summary": "JWT validation moved safely",
+        "topic_initial_seq": 0,
+        "topic_finalized_seq": 9,
+        "anchors": [
+            {
+                "seq": 0,
+                "anchor_type": "topic_initial",
+                "entry_id": "entry-topic-start",
+            },
+            {
+                "seq": 9,
+                "anchor_type": "topic_finalized",
+                "entry_id": "entry-topic-end",
+            },
+        ],
+        "recall_links": [
+            {
+                "recalled_topic_id": "topic-prior",
+                "relation": "summary_recall",
+                "anchor_seq": 4,
+            }
+        ],
+        "cost": {
+            "prompt_tokens": 10,
+            "completion_tokens": 7,
+            "total_tokens": 17,
+            "run_count": 1,
+            "action_count": 1,
+            "validation_count": 1,
+            "tool_call_count": 2,
+        },
+    }
+    return AgentRunRecord(
+        run_id=base.run_id,
+        session_id=base.session_id,
+        tape_id=base.tape_id,
+        parent_run_id=base.parent_run_id,
+        agent_id=base.agent_id,
+        status=base.status,
+        started_at=base.started_at,
+        ended_at=base.ended_at,
+        metadata=metadata,
+        result=base.result,
+        error=base.error,
+    )
+
+
+def _topic_record(topic_id: str = "topic-durable") -> TopicRecord:
+    return TopicRecord(
+        topic_id=topic_id,
+        tape_id="session-alpha-tape",
+        session_id="session-alpha",
+        kind="coding",
+        status="finalized",
+        title="Durable topic",
+        summary="Durable topic summary",
+        owner="local",
+        topic_initial_seq=2,
+        topic_finalized_seq=11,
+        created_at=datetime(2026, 5, 20, 2, 0, 0, tzinfo=UTC),
+        finalized_at=datetime(2026, 5, 20, 2, 1, 0, tzinfo=UTC),
+        metadata={"profile": "local"},
+    )
+
+
 def _workspace_record(
     workspace_id: str,
     *,
@@ -681,9 +818,7 @@ async def _configure_run_detail_fixture(
 async def _configure_console_e2e_fixture() -> None:
     _register_console_session("session-alpha")
     session_manager._tape_store = _ConsoleTapeStore(["session-alpha-tape"])
-    store = _ConsoleRuntimeStore(
-        [_runtime_run("run-alpha", "session-alpha", status="completed")]
-    )
+    store = _ConsoleRuntimeStore([_topic_runtime_run()])
     await store.save_message_snapshot(
         RunMessageSnapshotRecord(
             snapshot_id="run-alpha:latest",
@@ -761,6 +896,7 @@ async def test_console_placeholder_pages_render_empty_states() -> None:
         "/console/context": "Context",
         "/console/memory": "Memory",
         "/console/actions": "Actions / Validation",
+        "/console/topics": "Topics",
     }
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -815,9 +951,21 @@ async def test_developer_console_e2e_smoke_covers_debug_chain(
         ),
         "/console/observability?run_id=run-alpha": (
             "Trace Correlation",
+            "topic-auth",
             "retrieval-alpha",
             "Langfuse",
             "Grafana",
+        ),
+        "/console/topics": ("Topic List", "topic-auth", "finalized"),
+        "/console/topics/topic-auth": (
+            "Topic Range Summary",
+            "Topic Anchors",
+            "Recall Links",
+            "Topic Cost",
+            "summary_recall",
+            "topic-prior",
+            "action-alpha",
+            "pytest_auth",
         ),
         "/console/release": ("Health / Readiness", "durable-runtime-smoke"),
     }
@@ -918,6 +1066,125 @@ async def test_console_observability_degrades_without_links(
     assert "grafana.example.test" not in response.text
     for forbidden in FORBIDDEN_RENDERED_TEXT:
         assert forbidden not in response.text
+
+
+@pytest.mark.asyncio
+async def test_console_topics_render_list_detail_and_safe_provenance() -> None:
+    await _configure_console_e2e_fixture()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        list_response = await client.get("/console/topics")
+        detail_response = await client.get("/console/topics/topic-auth")
+
+    assert list_response.status_code == 200
+    assert "Topic List" in list_response.text
+    assert "topic-auth" in list_response.text
+    assert "finalized" in list_response.text
+    assert "0-9" in list_response.text
+    assert detail_response.status_code == 200
+    assert "Topic Range Summary" in detail_response.text
+    assert "Topic Anchors" in detail_response.text
+    assert "topic_initial" in detail_response.text
+    assert "topic_finalized" in detail_response.text
+    assert "Recall Links" in detail_response.text
+    assert "topic-prior" in detail_response.text
+    assert "Topic Cost" in detail_response.text
+    assert "Total Tokens" in detail_response.text
+    assert "action-alpha" in detail_response.text
+    assert "pytest_auth" in detail_response.text
+    assert 'href="/console/context?run_id=run-alpha"' in detail_response.text
+    for rendered in (list_response.text, detail_response.text):
+        for forbidden in FORBIDDEN_RENDERED_TEXT:
+            assert forbidden not in rendered
+
+
+@pytest.mark.asyncio
+async def test_console_topics_prefer_durable_topic_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _register_console_session("session-alpha")
+    topic = _topic_record()
+    monkeypatch.setattr(
+        http_server,
+        "_console_topic_store",
+        lambda: _ConsoleTopicStore(
+            [topic],
+            anchors=[
+                TopicAnchorRecord(
+                    topic_id=topic.topic_id,
+                    tape_id=topic.tape_id,
+                    seq=2,
+                    anchor_type="topic_initial",
+                    entry_id="entry-durable-start",
+                )
+            ],
+            recalls=[
+                TopicRecallLinkRecord(
+                    source_topic_id=topic.topic_id,
+                    recalled_topic_id="topic-older",
+                    relation="summary_recall",
+                    anchor_seq=6,
+                )
+            ],
+            costs=[
+                TopicCostRecord(
+                    topic_id=topic.topic_id,
+                    prompt_tokens=20,
+                    completion_tokens=8,
+                    total_tokens=28,
+                    run_count=3,
+                    action_count=2,
+                    validation_count=1,
+                    tool_call_count=4,
+                )
+            ],
+        ),
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        list_response = await client.get("/console/topics")
+        detail_response = await client.get("/console/topics/topic-durable")
+
+    assert list_response.status_code == 200
+    assert "topic-durable" in list_response.text
+    assert "Durable topic" in list_response.text
+    assert "28" in list_response.text
+    assert detail_response.status_code == 200
+    assert "entry-durable-start" in detail_response.text
+    assert "topic-older" in detail_response.text
+    assert "Prompt Tokens" in detail_response.text
+    assert "20" in detail_response.text
+
+
+@pytest.mark.asyncio
+async def test_console_topics_do_not_emit_topic_ids_as_metric_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _configure_console_e2e_fixture()
+    monkeypatch.setattr(
+        http_server,
+        "_load_observability_config",
+        lambda: {
+            "enabled": True,
+            "metrics": {
+                "enabled": True,
+                "endpoint_enabled": True,
+                "backend": "prometheus",
+            },
+        },
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/console/topics/topic-auth")
+
+    assert response.status_code == 200
+    metrics = prometheus_metrics_text()
+    assert 'route="console_topics_detail"' in metrics
+    assert "topic-auth" not in metrics
+    assert "topic_id" not in metrics
 
 
 @pytest.mark.asyncio
