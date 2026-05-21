@@ -91,18 +91,14 @@ class BeeTaskPlannerStore(Protocol):
 
     async def list_nodes(self, task_id: str) -> list[BeeNodeRecord]: ...
 
-    async def update_node_status(
+    async def claim_ready_node(
         self,
         *,
         task_id: str,
         node_id: str,
-        status: BeeNodeStatus,
-        run_id: str | None,
         updated_at: datetime,
-        started_at: datetime | None,
-        finished_at: datetime | None,
         metadata: JSONObject,
-    ) -> BeeNodeRecord: ...
+    ) -> BeeNodeRecord | None: ...
 
 
 @dataclass(frozen=True)
@@ -479,6 +475,17 @@ class PGBeeTaskStore:
     WHERE task_id = $1 AND node_id = $2
     RETURNING *
     """
+    _CLAIM_READY_NODE_SQL: Final[str] = """
+    UPDATE bee_task_nodes
+    SET status = 'ready',
+        run_id = NULL,
+        updated_at = $3,
+        started_at = NULL,
+        finished_at = NULL,
+        metadata = $4::jsonb
+    WHERE task_id = $1 AND node_id = $2 AND status = 'pending'
+    RETURNING *
+    """
 
     def __init__(self, *, pool: PGPool) -> None:
         self._pool = pool
@@ -658,6 +665,30 @@ class PGBeeTaskStore:
             raise KeyError(f"Bee node not found: {task_id}/{node_id}")
         return _bee_node_from_row(row)
 
+    async def claim_ready_node(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        updated_at: datetime,
+        metadata: JSONObject,
+    ) -> BeeNodeRecord | None:
+        _require_non_empty("task_id", task_id)
+        _require_non_empty("node_id", node_id)
+        _require_datetime("updated_at", updated_at)
+        _require_safe_json_object("metadata", metadata)
+        pool = await self._ensure_schema()
+        row = await pool.fetchrow(
+            self._CLAIM_READY_NODE_SQL,
+            task_id,
+            node_id,
+            updated_at,
+            metadata,
+        )
+        if row is None:
+            return None
+        return _bee_node_from_row(row)
+
 
 class BeeTaskLifecycle:
     def __init__(self, *, anchor_store: BeeTopicAnchorStore) -> None:
@@ -793,20 +824,18 @@ class BeeTaskPlanner:
                     continue
                 if not _node_dependencies_ready(node, completed_node_ids):
                     continue
-                updated_node = await self._store.update_node_status(
+                updated_node = await self._store.claim_ready_node(
                     task_id=node.task_id,
                     node_id=node.node_id,
-                    status="ready",
-                    run_id=None,
                     updated_at=now,
-                    started_at=None,
-                    finished_at=None,
                     metadata={
                         **node.metadata,
                         "planner_state": "ready",
                         "planner_reason": "dependencies_ready",
                     },
                 )
+                if updated_node is None:
+                    continue
                 intents.append(
                     BeeNodeLaunchIntent(
                         task_id=task.task_id,
