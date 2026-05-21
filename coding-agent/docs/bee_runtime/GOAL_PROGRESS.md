@@ -458,3 +458,65 @@ This ledger tracks G93-G101 for the Bee-style Workflow Template / Task Manifest 
   - Developer Console and observability target tests passed.
 - Remaining risks:
   - G100 does not add Bee runtime execution or external executor behavior. Final end-to-end Bee smoke and docs remain deferred to G101.
+
+## G101_BEE_RUNTIME_E2E_SMOKE_AND_DOCS
+
+### Before
+
+- Goal id: G101_BEE_RUNTIME_E2E_SMOKE_AND_DOCS
+- Intended files:
+  - `docs/bee_runtime/GOAL_PROGRESS.md`
+  - `docs/bee_runtime/USAGE.md`
+  - `docs/bee_runtime/IMPLEMENTATION_REPORT.md`
+  - `docs/adr/0041-bee-workflow-task-runtime.md`
+  - `tests/coding_agent/test_bee_runtime.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -v`
+  - `uv run pytest tests/ui/test_developer_console.py -v`
+  - `uv run pytest tests/coding_agent/test_observability.py -v`
+  - `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_topic_layer_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_scheduled_runs.py -v`
+  - `uv run pytest tests/coding_agent/test_observability_platform_smoke.py -v`
+  - `uv run ruff format --check tests/coding_agent/test_bee_runtime.py`
+  - `uv run ruff check tests/coding_agent/test_bee_runtime.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Final Bee runtime smoke covers manifest parsing, topic/task lifecycle anchors, bounded planning, launch metadata, console rendering, and safe metrics.
+  - `docs/bee_runtime/USAGE.md` exists.
+  - `docs/bee_runtime/IMPLEMENTATION_REPORT.md` exists.
+  - Prior relevant smoke tests pass where practical.
+  - No external executor, homelab template, Docker, Kubernetes, Argo, desktop, bridge, multi-agent graph, production credentials, hosted services, or real LLM calls are introduced.
+
+### After
+
+- Status: passed local verification; pending PR.
+- Changed files:
+  - `docs/bee_runtime/GOAL_PROGRESS.md`
+  - `docs/bee_runtime/USAGE.md`
+  - `docs/bee_runtime/IMPLEMENTATION_REPORT.md`
+  - `docs/adr/0041-bee-workflow-task-runtime.md`
+  - `tests/coding_agent/test_bee_runtime.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -v`
+  - `uv run pytest tests/ui/test_developer_console.py -v`
+  - `uv run pytest tests/coding_agent/test_observability.py -v`
+  - `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_topic_layer_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_scheduled_runs.py -v`
+  - `uv run pytest tests/coding_agent/test_observability_platform_smoke.py -v`
+  - `uv run pytest tests/integration/test_durable_runtime_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+  - `uv run pytest tests/coding_agent/evaluation/ -v`
+  - `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+  - `uv run ruff format tests/coding_agent/test_bee_runtime.py`
+  - `uv run ruff format --check tests/coding_agent/test_bee_runtime.py`
+  - `uv run ruff check tests/coding_agent/test_bee_runtime.py`
+  - `git diff --check -- .`
+- Results:
+  - Added final Bee runtime smoke covering safe manifest parsing, durable task/node storage, topic-bound lifecycle anchors, bounded planning, launch metadata, Console Bee rendering, and safe Prometheus labels.
+  - Added Bee runtime usage documentation and final implementation report.
+  - Bee runtime target tests passed after one assertion fix for HTML viewport `content=` being unrelated to business content leakage.
+  - Prior durable runtime, context, action safety, topic, scheduled runs, observability, Developer Console, evaluation, and AgentKit pipeline smoke/target checks passed.
+- Remaining risks:
+  - G101 remains smoke/docs only. Automatic conversion of launch intents into live durable runs remains future work through existing runtime/session paths.
