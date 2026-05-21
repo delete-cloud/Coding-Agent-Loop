@@ -185,10 +185,62 @@ class ConsoleCorrelationSummary:
     session_id: str | None
     run_id: str | None
     tape_id: str | None
+    topic_id: str | None
     retrieval_id: str | None
     action_id: str | None
     validation_id: str | None
     interaction_id: str | None
+
+
+@dataclass(frozen=True)
+class ConsoleTopicSummary:
+    topic_id: str
+    tape_id: str | None
+    session_id: str | None
+    kind: str
+    status: str
+    title: str | None
+    summary: str | None
+    topic_initial_seq: int | None
+    topic_finalized_seq: int | None
+    run_count: int
+    cost_total_tokens: int | None
+
+
+@dataclass(frozen=True)
+class ConsoleTopicAnchorSummary:
+    seq: int | None
+    anchor_type: str
+    entry_id: str | None
+
+
+@dataclass(frozen=True)
+class ConsoleTopicRecallSummary:
+    recalled_topic_id: str
+    relation: str
+    anchor_seq: int | None
+
+
+@dataclass(frozen=True)
+class ConsoleTopicCostSummary:
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    run_count: int
+    action_count: int
+    validation_count: int
+    tool_call_count: int
+
+
+@dataclass(frozen=True)
+class ConsoleTopicDetail:
+    summary: ConsoleTopicSummary
+    anchors: tuple[ConsoleTopicAnchorSummary, ...]
+    recalls: tuple[ConsoleTopicRecallSummary, ...]
+    cost: ConsoleTopicCostSummary | None
+    runs: tuple[ConsoleRunSummary, ...]
+    actions: tuple[ConsoleActionSummary, ...]
+    validations: tuple[ConsoleValidationOutcomeSummary, ...]
 
 
 @dataclass(frozen=True)
@@ -298,6 +350,12 @@ CONSOLE_PAGES: tuple[ConsolePage, ...] = (
         title="Observability",
         nav_label="Observability",
         description="Metrics, trace, and dashboard links will appear here.",
+    ),
+    ConsolePage(
+        path="/console/topics",
+        title="Topics",
+        nav_label="Topics",
+        description="Topic ranges, recalls, costs, and related run metadata will appear here.",
     ),
     ConsolePage(
         path="/console/workspaces",
@@ -459,6 +517,32 @@ def render_console_observability_page(
         f"{_observability_backend_section(summary)}"
     )
     return _html_document(title=page.title, body=body, active_path=page.path)
+
+
+def render_console_topics_page(topics: list[ConsoleTopicSummary]) -> str:
+    page = _PAGE_BY_PATH["/console/topics"]
+    body = (
+        f"<h1>{escape(page.title)}</h1>"
+        f'<p class="lede">{escape(page.description)}</p>'
+        f"{_topic_table(topics)}"
+    )
+    return _html_document(title=page.title, body=body, active_path=page.path)
+
+
+def render_console_topic_detail_page(detail: ConsoleTopicDetail) -> str:
+    title = "Topic Detail"
+    body = (
+        f"<h1>{title}</h1>"
+        '<p class="lede">Tape range and provenance summary for a single topic.</p>'
+        f"{_topic_detail_metadata(detail.summary)}"
+        f"{_topic_anchor_table(detail.anchors)}"
+        f"{_topic_recall_table(detail.recalls)}"
+        f"{_topic_cost_section(detail.cost)}"
+        f"{_topic_related_runs_section(detail.runs)}"
+        f"{_topic_related_actions_section(detail.actions)}"
+        f"{_topic_related_validations_section(detail.validations, run_id=_first_run_id(detail.runs))}"
+    )
+    return _html_document(title=title, body=body, active_path="/console/topics")
 
 
 def render_console_workspaces_page(
@@ -890,6 +974,7 @@ def _correlation_section(correlation: ConsoleCorrelationSummary | None) -> str:
         f"<dt>Session ID</dt><dd>{escape(correlation.session_id or '-')}</dd>"
         f"<dt>Run ID</dt><dd>{escape(correlation.run_id or '-')}</dd>"
         f"<dt>Tape ID</dt><dd>{escape(correlation.tape_id or '-')}</dd>"
+        f"<dt>Topic ID</dt><dd>{escape(correlation.topic_id or '-')}</dd>"
         f"<dt>Retrieval ID</dt><dd>{escape(correlation.retrieval_id or '-')}</dd>"
         f"<dt>Action ID</dt><dd>{escape(correlation.action_id or '-')}</dd>"
         f"<dt>Validation ID</dt><dd>{escape(correlation.validation_id or '-')}</dd>"
@@ -924,6 +1009,166 @@ def _observability_backend_section(summary: ConsoleObservabilitySummary) -> str:
         "</dl>"
         "</section>"
     )
+
+
+def _topic_table(topics: list[ConsoleTopicSummary]) -> str:
+    if not topics:
+        return _empty_state("Topics", "No data loaded yet. No topics are available.")
+    rows = []
+    for topic in topics:
+        rows.append(
+            "<tr>"
+            f'<td><a href="/console/topics/{escape(topic.topic_id)}">'
+            f"{escape(topic.topic_id)}</a></td>"
+            f"<td>{escape(topic.session_id or '-')}</td>"
+            f"<td>{escape(topic.tape_id or '-')}</td>"
+            f"<td>{escape(topic.kind)}</td>"
+            f'<td class="status">{escape(topic.status)}</td>'
+            f"<td>{escape(topic.title or '-')}</td>"
+            f"<td>{escape(_line_range(topic.topic_initial_seq, topic.topic_finalized_seq))}</td>"
+            f"<td>{topic.run_count}</td>"
+            f"<td>{escape('-' if topic.cost_total_tokens is None else str(topic.cost_total_tokens))}</td>"
+            "</tr>"
+        )
+    return (
+        '<section aria-label="Topic list">'
+        "<h2>Topic List</h2>"
+        '<table aria-label="Developer Console topics">'
+        "<thead><tr><th>Topic ID</th><th>Session ID</th><th>Tape ID</th>"
+        "<th>Kind</th><th>Status</th><th>Title</th><th>Range</th>"
+        "<th>Runs</th><th>Total Tokens</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+        "</section>"
+    )
+
+
+def _topic_detail_metadata(topic: ConsoleTopicSummary) -> str:
+    return (
+        '<section aria-label="Topic range summary">'
+        "<h2>Topic Range Summary</h2>"
+        "<dl>"
+        f"<dt>Topic ID</dt><dd>{escape(topic.topic_id)}</dd>"
+        f"<dt>Session ID</dt><dd>{escape(topic.session_id or '-')}</dd>"
+        f"<dt>Tape ID</dt><dd>{escape(topic.tape_id or '-')}</dd>"
+        f"<dt>Kind</dt><dd>{escape(topic.kind)}</dd>"
+        f"<dt>Status</dt><dd>{escape(topic.status)}</dd>"
+        f"<dt>Title</dt><dd>{escape(topic.title or '-')}</dd>"
+        f"<dt>Summary</dt><dd>{escape(topic.summary or '-')}</dd>"
+        f"<dt>Range</dt><dd>{escape(_line_range(topic.topic_initial_seq, topic.topic_finalized_seq))}</dd>"
+        "</dl>"
+        "</section>"
+    )
+
+
+def _topic_anchor_table(anchors: tuple[ConsoleTopicAnchorSummary, ...]) -> str:
+    if not anchors:
+        return _empty_state("Topic Anchors", "No topic anchors are available.")
+    rows = []
+    for anchor in anchors:
+        rows.append(
+            "<tr>"
+            f"<td>{escape('-' if anchor.seq is None else str(anchor.seq))}</td>"
+            f"<td>{escape(anchor.anchor_type)}</td>"
+            f"<td>{escape(anchor.entry_id or '-')}</td>"
+            "</tr>"
+        )
+    return (
+        '<section aria-label="Topic anchors">'
+        "<h2>Topic Anchors</h2>"
+        '<table aria-label="Topic anchors">'
+        "<thead><tr><th>Seq</th><th>Anchor Type</th><th>Entry ID</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+        "</section>"
+    )
+
+
+def _topic_recall_table(recalls: tuple[ConsoleTopicRecallSummary, ...]) -> str:
+    if not recalls:
+        return _empty_state("Recall Links", "No topic recall links are available.")
+    rows = []
+    for recall in recalls:
+        rows.append(
+            "<tr>"
+            f'<td><a href="/console/topics/{escape(recall.recalled_topic_id)}">'
+            f"{escape(recall.recalled_topic_id)}</a></td>"
+            f"<td>{escape(recall.relation)}</td>"
+            f"<td>{escape('-' if recall.anchor_seq is None else str(recall.anchor_seq))}</td>"
+            "</tr>"
+        )
+    return (
+        '<section aria-label="Topic recall links">'
+        "<h2>Recall Links</h2>"
+        '<table aria-label="Topic recall links">'
+        "<thead><tr><th>Recalled Topic</th><th>Relation</th><th>Anchor Seq</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+        "</section>"
+    )
+
+
+def _topic_cost_section(cost: ConsoleTopicCostSummary | None) -> str:
+    if cost is None:
+        return _empty_state("Topic Cost", "No topic cost aggregate is available.")
+    return (
+        '<section aria-label="Topic cost">'
+        "<h2>Topic Cost</h2>"
+        "<dl>"
+        f"<dt>Prompt Tokens</dt><dd>{cost.prompt_tokens}</dd>"
+        f"<dt>Completion Tokens</dt><dd>{cost.completion_tokens}</dd>"
+        f"<dt>Total Tokens</dt><dd>{cost.total_tokens}</dd>"
+        f"<dt>Runs</dt><dd>{cost.run_count}</dd>"
+        f"<dt>Actions</dt><dd>{cost.action_count}</dd>"
+        f"<dt>Validations</dt><dd>{cost.validation_count}</dd>"
+        f"<dt>Tool Calls</dt><dd>{cost.tool_call_count}</dd>"
+        "</dl>"
+        "</section>"
+    )
+
+
+def _topic_related_runs_section(runs: tuple[ConsoleRunSummary, ...]) -> str:
+    if not runs:
+        return _empty_state("Runs Under Topic", "No related runs are available.")
+    return (
+        '<section aria-label="Runs under topic"><h2>Runs Under Topic</h2>'
+        + _run_table(list(runs))
+        + "</section>"
+    )
+
+
+def _topic_related_actions_section(
+    actions: tuple[ConsoleActionSummary, ...],
+) -> str:
+    return _action_summary_section(
+        ConsoleActionValidationSummary(
+            run_id=None,
+            actions=actions,
+            validation_status=None,
+            validations=(),
+        )
+    )
+
+
+def _topic_related_validations_section(
+    validations: tuple[ConsoleValidationOutcomeSummary, ...],
+    *,
+    run_id: str | None,
+) -> str:
+    return _validation_summary_section(
+        ConsoleActionValidationSummary(
+            run_id=run_id,
+            actions=(),
+            validation_status=None,
+            validations=validations,
+        )
+    )
+
+
+def _first_run_id(runs: tuple[ConsoleRunSummary, ...]) -> str | None:
+    if not runs:
+        return None
+    return runs[0].run_id
 
 
 def _workspace_capability_section(
@@ -1105,10 +1350,14 @@ def _run_events_section(run_id: str, events: tuple[ConsoleEventSummary, ...]) ->
 
 
 def _run_detail_links(detail: ConsoleRunDetail) -> str:
+    topic_link = ""
+    if detail.metadata_keys and "topic_id" in detail.metadata_keys:
+        topic_link = '<li><a href="/console/topics">Topics</a></li>'
     return (
         '<section aria-label="Related console links">'
         "<h2>Related Views</h2>"
         '<ul class="pill-list">'
+        f"{topic_link}"
         f'<li><a href="/console/tape">Tape {escape(detail.tape_id or "-")}</a></li>'
         f'<li><a href="/console/context?run_id={escape(detail.run_id)}">Context</a></li>'
         f'<li><a href="/console/actions?run_id={escape(detail.run_id)}">Actions</a></li>'
