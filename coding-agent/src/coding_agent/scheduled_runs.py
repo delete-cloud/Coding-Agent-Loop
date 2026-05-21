@@ -8,7 +8,10 @@ from datetime import datetime, timedelta
 from typing import Final, Protocol
 
 from agentkit.storage.pg import AsyncPGPool, PGPool
+from agentkit.tape.tape import Tape
+from coding_agent.topic_lifecycle import TopicLifecycle
 from coding_agent.topic_store import JSONObject
+from coding_agent.topic_store import TopicRecord
 
 ScheduleStatus = str
 SignalStatus = str
@@ -166,6 +169,22 @@ class ScheduledLaunchIntent:
         _require_json_object("metadata", self.metadata)
 
 
+@dataclass(frozen=True)
+class PreparedScheduledRun:
+    trigger_id: str
+    schedule_id: str
+    session_id: str
+    topic_id: str
+    run_metadata: JSONObject
+
+    def __post_init__(self) -> None:
+        _require_non_empty("trigger_id", self.trigger_id)
+        _require_non_empty("schedule_id", self.schedule_id)
+        _require_non_empty("session_id", self.session_id)
+        _require_non_empty("topic_id", self.topic_id)
+        _require_json_object("run_metadata", self.run_metadata)
+
+
 class ScheduledRunPlannerStore(Protocol):
     async def list_due_schedules(
         self,
@@ -260,6 +279,99 @@ class ScheduledRunPlanner:
                 )
             )
         return intents
+
+
+class ScheduledTopicStore(Protocol):
+    async def load_topic(self, topic_id: str) -> TopicRecord | None: ...
+
+    async def find_open_topic(
+        self,
+        *,
+        session_id: str,
+        tape_id: str,
+    ) -> TopicRecord | None: ...
+
+
+class ScheduledRunLaunchPreparer:
+    def __init__(
+        self,
+        *,
+        topic_store: ScheduledTopicStore,
+        topic_lifecycle: TopicLifecycle,
+    ) -> None:
+        self._topic_store = topic_store
+        self._topic_lifecycle = topic_lifecycle
+
+    async def prepare(
+        self,
+        *,
+        intent: ScheduledLaunchIntent,
+        tape: Tape,
+    ) -> PreparedScheduledRun:
+        topic = await self._resolve_topic(intent=intent, tape=tape)
+        metadata: JSONObject = {
+            "scheduled_run": {
+                "schedule_id": intent.schedule_id,
+                "trigger_id": intent.trigger_id,
+                "reason": intent.reason,
+                "planned_at": intent.planned_at.isoformat(),
+            },
+            "topic": {
+                "topic_id": topic.topic_id,
+                "tape_id": topic.tape_id,
+                "session_id": topic.session_id,
+                "kind": topic.kind,
+                "status": topic.status,
+                "topic_initial_seq": topic.topic_initial_seq,
+                "topic_finalized_seq": topic.topic_finalized_seq,
+            },
+        }
+        return PreparedScheduledRun(
+            trigger_id=intent.trigger_id,
+            schedule_id=intent.schedule_id,
+            session_id=intent.session_id,
+            topic_id=topic.topic_id,
+            run_metadata=metadata,
+        )
+
+    async def _resolve_topic(
+        self,
+        *,
+        intent: ScheduledLaunchIntent,
+        tape: Tape,
+    ) -> TopicRecord:
+        if intent.topic_id is not None:
+            topic = await self._topic_store.load_topic(intent.topic_id)
+            if topic is not None and topic.status == "open":
+                _require_topic_matches_intent(topic=topic, intent=intent, tape=tape)
+                return topic
+            raise ValueError("scheduled topic is not open")
+        open_topic = await self._topic_store.find_open_topic(
+            session_id=intent.session_id,
+            tape_id=tape.tape_id,
+        )
+        if open_topic is not None:
+            return open_topic
+        return await self._create_scheduled_topic(intent=intent, tape=tape)
+
+    async def _create_scheduled_topic(
+        self,
+        *,
+        intent: ScheduledLaunchIntent,
+        tape: Tape,
+    ) -> TopicRecord:
+        metadata: JSONObject = {
+            "source": "scheduled_run",
+            "schedule_kind": _safe_metadata_label(intent.metadata.get("schedule_kind")),
+        }
+        return await self._topic_lifecycle.create_topic(
+            tape=tape,
+            session_id=intent.session_id,
+            kind="coding",
+            title="Scheduled run",
+            owner=None,
+            metadata=metadata,
+        )
 
 
 class PGScheduledRunStore:
@@ -811,6 +923,25 @@ def _next_due_at(schedule: ScheduleRecord, now: datetime) -> datetime | None:
     if schedule.cadence == "daily":
         return now + timedelta(days=1)
     return None
+
+
+def _require_topic_matches_intent(
+    *,
+    topic: TopicRecord,
+    intent: ScheduledLaunchIntent,
+    tape: Tape,
+) -> None:
+    if topic.session_id != intent.session_id:
+        raise ValueError("scheduled topic session does not match launch intent")
+    if topic.tape_id != tape.tape_id:
+        raise ValueError("scheduled topic tape does not match launch tape")
+
+
+def _safe_metadata_label(value: object) -> str:
+    if not isinstance(value, str):
+        return "unknown"
+    _require_safe_label("metadata_label", value)
+    return value
 
 
 def _required_str(row: dict[str, object], key: str, *, context: str) -> str:

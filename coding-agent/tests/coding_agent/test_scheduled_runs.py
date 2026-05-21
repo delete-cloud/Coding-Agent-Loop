@@ -6,13 +6,18 @@ from typing import cast
 import pytest
 
 from agentkit.storage.pg import AsyncPGPool, PGPool
+from agentkit.tape.tape import Tape
 from coding_agent.scheduled_runs import (
     PGScheduledRunStore,
     ProactiveSignalRecord,
     ScheduleRecord,
     ScheduleTriggerRecord,
+    ScheduledLaunchIntent,
+    ScheduledRunLaunchPreparer,
     ScheduledRunPlanner,
 )
+from coding_agent.topic_lifecycle import TopicLifecycle
+from coding_agent.topic_store import JSONObject, TopicAnchorRecord, TopicRecord
 
 
 class FakeScheduledPool:
@@ -167,6 +172,63 @@ class FakeScheduledPool:
         return row
 
 
+class FakeScheduledTopicStore:
+    def __init__(self) -> None:
+        self.topics: dict[str, TopicRecord] = {}
+        self.anchors: list[TopicAnchorRecord] = []
+
+    async def create_topic(self, record: TopicRecord) -> TopicRecord:
+        self.topics[record.topic_id] = record
+        return record
+
+    async def load_topic(self, topic_id: str) -> TopicRecord | None:
+        return self.topics.get(topic_id)
+
+    async def find_open_topic(
+        self,
+        *,
+        session_id: str,
+        tape_id: str,
+    ) -> TopicRecord | None:
+        for topic in self.topics.values():
+            if (
+                topic.session_id == session_id
+                and topic.tape_id == tape_id
+                and topic.status == "open"
+            ):
+                return topic
+        return None
+
+    async def finalize_topic(
+        self,
+        topic_id: str,
+        *,
+        summary: str | None,
+        topic_finalized_seq: int,
+        finalized_at: datetime,
+        metadata: JSONObject,
+    ) -> TopicRecord:
+        raise AssertionError("scheduled launch preparation must not finalize topics")
+
+    async def abort_topic(
+        self,
+        topic_id: str,
+        *,
+        summary: str | None,
+        topic_finalized_seq: int | None,
+        finalized_at: datetime,
+        metadata: JSONObject,
+    ) -> TopicRecord:
+        raise AssertionError("scheduled launch preparation must not abort topics")
+
+    async def record_topic_anchor(
+        self,
+        record: TopicAnchorRecord,
+    ) -> TopicAnchorRecord:
+        self.anchors.append(record)
+        return record
+
+
 @pytest.fixture
 def fake_pool() -> FakeScheduledPool:
     return FakeScheduledPool()
@@ -257,6 +319,70 @@ def _signal(
         cooldown_until=None,
         summary="Repository activity signal",
         metadata={"signal_kind": "repo_activity"},
+    )
+
+
+def _intent(topic_id: str | None = "topic-1") -> ScheduledLaunchIntent:
+    return ScheduledLaunchIntent(
+        trigger_id="trigger-1",
+        schedule_id="schedule-1",
+        session_id="session-1",
+        topic_id=topic_id,
+        reason="schedule_due",
+        due_at=_dt(10),
+        planned_at=_dt(9, 30),
+        metadata={"schedule_kind": "interval"},
+    )
+
+
+def _topic(topic_id: str = "topic-1", *, tape_id: str = "tape-1") -> TopicRecord:
+    return TopicRecord(
+        topic_id=topic_id,
+        tape_id=tape_id,
+        session_id="session-1",
+        kind="coding",
+        status="open",
+        title="Existing topic",
+        summary=None,
+        owner="local",
+        topic_initial_seq=0,
+        topic_finalized_seq=None,
+        created_at=_dt(8),
+        finalized_at=None,
+        metadata={"profile": "local"},
+    )
+
+
+def _closed_topic(
+    topic_id: str = "topic-closed", *, tape_id: str = "tape-1"
+) -> TopicRecord:
+    return TopicRecord(
+        topic_id=topic_id,
+        tape_id=tape_id,
+        session_id="session-1",
+        kind="coding",
+        status="finalized",
+        title="Closed topic",
+        summary="Closed safely",
+        owner="local",
+        topic_initial_seq=0,
+        topic_finalized_seq=1,
+        created_at=_dt(8),
+        finalized_at=_dt(8, 30),
+        metadata={"profile": "local"},
+    )
+
+
+def _preparer(topic_store: FakeScheduledTopicStore) -> ScheduledRunLaunchPreparer:
+    ids = iter(("topic-created",))
+    lifecycle = TopicLifecycle(
+        store=topic_store,
+        now=lambda: _dt(9),
+        topic_id_factory=lambda: next(ids),
+    )
+    return ScheduledRunLaunchPreparer(
+        topic_store=topic_store,
+        topic_lifecycle=lifecycle,
     )
 
 
@@ -540,3 +666,87 @@ async def test_schedule_planner_does_not_starve_due_rows_behind_null_due(
     assert [
         trigger.schedule_id for trigger in await store.list_triggers("schedule-due")
     ] == ["schedule-due"]
+
+
+@pytest.mark.asyncio
+async def test_topic_aware_launch_continues_open_topic() -> None:
+    topic_store = FakeScheduledTopicStore()
+    topic_store.topics["topic-1"] = _topic()
+    tape = Tape(tape_id="tape-1")
+
+    prepared = await _preparer(topic_store).prepare(intent=_intent(), tape=tape)
+
+    assert prepared.topic_id == "topic-1"
+    assert prepared.run_metadata["scheduled_run"] == {
+        "schedule_id": "schedule-1",
+        "trigger_id": "trigger-1",
+        "reason": "schedule_due",
+        "planned_at": _dt(9, 30).isoformat(),
+    }
+    assert prepared.run_metadata["topic"] == {
+        "topic_id": "topic-1",
+        "tape_id": "tape-1",
+        "session_id": "session-1",
+        "kind": "coding",
+        "status": "open",
+        "topic_initial_seq": 0,
+        "topic_finalized_seq": None,
+    }
+    assert topic_store.anchors == []
+
+
+@pytest.mark.asyncio
+async def test_topic_aware_launch_creates_topic_when_missing() -> None:
+    topic_store = FakeScheduledTopicStore()
+    tape = Tape(tape_id="tape-1")
+
+    prepared = await _preparer(topic_store).prepare(intent=_intent(None), tape=tape)
+
+    assert prepared.topic_id == "topic-created"
+    assert prepared.run_metadata["topic"]["topic_id"] == "topic-created"
+    assert topic_store.topics["topic-created"].metadata == {
+        "source": "scheduled_run",
+        "schedule_kind": "interval",
+    }
+    assert topic_store.anchors[0].topic_id == "topic-created"
+    assert len(tape) == 1
+
+
+@pytest.mark.asyncio
+async def test_topic_aware_launch_rejects_topic_tape_mismatch() -> None:
+    topic_store = FakeScheduledTopicStore()
+    topic_store.topics["topic-1"] = _topic(tape_id="other-tape")
+    tape = Tape(tape_id="tape-1")
+
+    with pytest.raises(ValueError, match="tape does not match"):
+        await _preparer(topic_store).prepare(intent=_intent(), tape=tape)
+
+
+@pytest.mark.asyncio
+async def test_topic_aware_launch_rejects_closed_explicit_topic() -> None:
+    topic_store = FakeScheduledTopicStore()
+    topic_store.topics["topic-closed"] = _closed_topic("topic-closed")
+    topic_store.topics["topic-open"] = _topic("topic-open")
+    tape = Tape(tape_id="tape-1")
+
+    with pytest.raises(ValueError, match="scheduled topic is not open"):
+        await _preparer(topic_store).prepare(
+            intent=_intent("topic-closed"),
+            tape=tape,
+        )
+
+    assert "topic-created" not in topic_store.topics
+
+
+@pytest.mark.asyncio
+async def test_topic_aware_launch_rejects_missing_explicit_topic() -> None:
+    topic_store = FakeScheduledTopicStore()
+    tape = Tape(tape_id="tape-1")
+
+    with pytest.raises(ValueError, match="scheduled topic is not open"):
+        await _preparer(topic_store).prepare(
+            intent=_intent("topic-missing"),
+            tape=tape,
+        )
+
+    assert topic_store.topics == {}
