@@ -47,6 +47,7 @@ CONSOLE_ROUTES = (
     "/console/observability",
     "/console/topics",
     "/console/schedules",
+    "/console/bee",
     "/console/workspaces",
     "/console/release",
 )
@@ -62,6 +63,7 @@ NAV_LINKS = {
     "Observability": "/console/observability",
     "Topics": "/console/topics",
     "Schedules": "/console/schedules",
+    "Bee Tasks": "/console/bee",
     "Workspaces": "/console/workspaces",
     "Release / Health": "/console/release",
 }
@@ -707,6 +709,48 @@ def _topic_runtime_run(run_id: str = "run-alpha") -> AgentRunRecord:
     )
 
 
+def _bee_runtime_run(run_id: str = "run-bee") -> AgentRunRecord:
+    base = _runtime_run(run_id, "session-alpha", status="completed")
+    metadata = dict(base.metadata)
+    metadata.update(
+        {
+            "bee_runtime": "task_launch",
+            "launch_kind": "durable_run",
+            "task_id": "bee-task-alpha",
+            "node_id": "node-validate",
+            "topic_id": "topic-auth",
+            "session_id": "session-alpha",
+            "task_kind": "maintenance",
+            "task_profile": "local",
+            "node_kind": "validation",
+            "node_profile": "default",
+            "approval_policy": "existing_runtime_policy",
+            "action_policy": "existing_action_safety",
+            "workspace_binding": "existing_workspace_provider",
+            "workspace_policy": "default",
+            "context_profile": "repo",
+            "context_reference": "profile_only",
+            "validation_profile": "pytest",
+            "validation_reference": "profile_only",
+            "prompt": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT",
+            "command_output": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT",
+        }
+    )
+    return AgentRunRecord(
+        run_id=base.run_id,
+        session_id=base.session_id,
+        tape_id=base.tape_id,
+        parent_run_id=base.parent_run_id,
+        agent_id=base.agent_id,
+        status=base.status,
+        started_at=base.started_at,
+        ended_at=base.ended_at,
+        metadata=metadata,
+        result=base.result,
+        error=base.error,
+    )
+
+
 def _topic_record(topic_id: str = "topic-durable") -> TopicRecord:
     return TopicRecord(
         topic_id=topic_id,
@@ -938,7 +982,7 @@ async def _configure_run_detail_fixture(
 async def _configure_console_e2e_fixture() -> None:
     _register_console_session("session-alpha")
     session_manager._tape_store = _ConsoleTapeStore(["session-alpha-tape"])
-    store = _ConsoleRuntimeStore([_topic_runtime_run()])
+    store = _ConsoleRuntimeStore([_topic_runtime_run(), _bee_runtime_run()])
     await store.save_message_snapshot(
         RunMessageSnapshotRecord(
             snapshot_id="run-alpha:latest",
@@ -1018,6 +1062,7 @@ async def test_console_placeholder_pages_render_empty_states() -> None:
         "/console/actions": "Actions / Validation",
         "/console/topics": "Topics",
         "/console/schedules": "Schedules",
+        "/console/bee": "Bee Tasks",
     }
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -1089,6 +1134,13 @@ async def test_developer_console_e2e_smoke_covers_debug_chain(
             "pytest_auth",
         ),
         "/console/schedules": ("Schedules",),
+        "/console/bee": (
+            "Bee Task List",
+            "Bee Node Launches",
+            "bee-task-alpha",
+            "node-validate",
+            "existing_action_safety",
+        ),
         "/console/release": ("Health / Readiness", "durable-runtime-smoke"),
     }
 
@@ -1386,6 +1438,63 @@ async def test_console_schedules_do_not_emit_schedule_or_signal_ids_as_metric_la
     assert "signal-alpha" not in metrics
     assert "schedule_id" not in metrics
     assert "signal_id" not in metrics
+
+
+@pytest.mark.asyncio
+async def test_console_bee_renders_safe_task_and_node_summaries() -> None:
+    _register_console_session("session-alpha")
+    session_manager.configure_runtime_store(_ConsoleRuntimeStore([_bee_runtime_run()]))
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/console/bee")
+
+    assert response.status_code == 200
+    assert "Bee Task List" in response.text
+    assert "Bee Node Launches" in response.text
+    assert "bee-task-alpha" in response.text
+    assert "node-validate" in response.text
+    assert "topic-auth" in response.text
+    assert "maintenance" in response.text
+    assert "validation" in response.text
+    assert "existing_runtime_policy" in response.text
+    assert "existing_action_safety" in response.text
+    assert "existing_workspace_provider" in response.text
+    assert 'href="/console/runs/run-bee"' in response.text
+    for forbidden in FORBIDDEN_RENDERED_TEXT:
+        assert forbidden not in response.text
+
+
+@pytest.mark.asyncio
+async def test_console_bee_does_not_emit_task_or_node_ids_as_metric_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _register_console_session("session-alpha")
+    session_manager.configure_runtime_store(_ConsoleRuntimeStore([_bee_runtime_run()]))
+    monkeypatch.setattr(
+        http_server,
+        "_load_observability_config",
+        lambda: {
+            "enabled": True,
+            "metrics": {
+                "enabled": True,
+                "endpoint_enabled": True,
+                "backend": "prometheus",
+            },
+        },
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/console/bee")
+
+    assert response.status_code == 200
+    metrics = prometheus_metrics_text()
+    assert 'route="console_bee"' in metrics
+    assert "bee-task-alpha" not in metrics
+    assert "node-validate" not in metrics
+    assert "task_id" not in metrics
+    assert "node_id" not in metrics
 
 
 @pytest.mark.asyncio

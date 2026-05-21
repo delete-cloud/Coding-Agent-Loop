@@ -409,3 +409,52 @@ This ledger tracks G93-G101 for the Bee-style Workflow Template / Task Manifest 
   - Target Bee runtime tests passed after one fix iteration: launch metadata now treats task/node/topic/session IDs as allowed correlation fields while still applying no-leak validation to ordinary metadata values.
 - Remaining risks:
   - G99 does not create durable runs or execute nodes. Console and observability rendering of Bee task/node metadata remains deferred to G100.
+
+## G100_BEE_CONSOLE_AND_OBSERVABILITY
+
+### Before
+
+- Goal id: G100_BEE_CONSOLE_AND_OBSERVABILITY
+- Intended files:
+  - `docs/bee_runtime/GOAL_PROGRESS.md`
+  - `docs/adr/0041-bee-workflow-task-runtime.md`
+  - `src/coding_agent/observability.py`
+  - `src/coding_agent/ui/developer_console.py`
+  - `src/coding_agent/ui/http_server.py`
+  - `tests/coding_agent/test_observability.py`
+  - `tests/ui/test_developer_console.py`
+- Verification commands:
+  - `uv run pytest tests/ui/test_developer_console.py -v`
+  - `uv run pytest tests/coding_agent/test_observability.py -v`
+  - `uv run ruff format --check src/coding_agent/observability.py src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/coding_agent/test_observability.py tests/ui/test_developer_console.py`
+  - `uv run ruff check src/coding_agent/observability.py src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/coding_agent/test_observability.py tests/ui/test_developer_console.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Developer Console renders safe Bee task and node summaries.
+  - Console route availability and navigation include Bee without exposing raw prompt/content/message/result/secret/text/command output/stdout/stderr/env.
+  - Prometheus permits only low-cardinality Bee task/node kind/status/profile labels.
+  - Prometheus drops `task_id`, `node_id`, `topic_id`, `run_id`, and `session_id` labels and values.
+  - No Bee execution, external executor, homelab template, Docker, Kubernetes, Argo, desktop, bridge, or multi-agent behavior is introduced.
+
+### After
+
+- Status: passed local verification; pending PR.
+- Changed files:
+  - `docs/bee_runtime/GOAL_PROGRESS.md`
+  - `docs/adr/0041-bee-workflow-task-runtime.md`
+  - `src/coding_agent/observability.py`
+  - `src/coding_agent/ui/developer_console.py`
+  - `src/coding_agent/ui/http_server.py`
+  - `tests/coding_agent/test_observability.py`
+  - `tests/ui/test_developer_console.py`
+- Tests run:
+  - `uv run pytest tests/ui/test_developer_console.py -v`
+  - `uv run pytest tests/coding_agent/test_observability.py -v`
+  - `uv run ruff format src/coding_agent/observability.py src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/coding_agent/test_observability.py tests/ui/test_developer_console.py`
+- Results:
+  - Added `/console/bee` route, navigation item, Bee task summary table, and Bee node launch-reference table.
+  - Console Bee view derives from existing durable run metadata and renders safe IDs, kind/profile/status fields, policy references, and run links without raw content or command output.
+  - Prometheus now permits low-cardinality Bee task/node kind/status/profile labels and continues to drop task/node/topic/run/session IDs.
+  - Developer Console and observability target tests passed.
+- Remaining risks:
+  - G100 does not add Bee runtime execution or external executor behavior. Final end-to-end Bee smoke and docs remain deferred to G101.
