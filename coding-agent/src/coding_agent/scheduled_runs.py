@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Final
+from datetime import datetime, timedelta
+from typing import Final, Protocol
 
 from agentkit.storage.pg import AsyncPGPool, PGPool
 from coding_agent.topic_store import JSONObject
@@ -142,6 +143,125 @@ class ProactiveSignalRecord:
         _require_json_object("metadata", self.metadata)
 
 
+@dataclass(frozen=True)
+class ScheduledLaunchIntent:
+    trigger_id: str
+    schedule_id: str
+    session_id: str
+    topic_id: str | None
+    reason: str
+    due_at: datetime
+    planned_at: datetime
+    metadata: JSONObject = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _require_non_empty("trigger_id", self.trigger_id)
+        _require_non_empty("schedule_id", self.schedule_id)
+        _require_non_empty("session_id", self.session_id)
+        if self.topic_id is not None:
+            _require_non_empty("topic_id", self.topic_id)
+        _require_safe_label("reason", self.reason)
+        _require_datetime("due_at", self.due_at)
+        _require_datetime("planned_at", self.planned_at)
+        _require_json_object("metadata", self.metadata)
+
+
+class ScheduledRunPlannerStore(Protocol):
+    async def list_due_schedules(
+        self,
+        *,
+        due_at_or_before: datetime,
+        limit: int,
+    ) -> list[ScheduleRecord]: ...
+
+    async def update_schedule_status(
+        self,
+        schedule_id: str,
+        *,
+        status: ScheduleStatus,
+        next_due_at: datetime | None,
+        last_triggered_at: datetime | None,
+        updated_at: datetime,
+        metadata: JSONObject,
+    ) -> ScheduleRecord: ...
+
+    async def record_trigger(
+        self,
+        record: ScheduleTriggerRecord,
+    ) -> ScheduleTriggerRecord: ...
+
+
+class ScheduledRunPlanner:
+    def __init__(
+        self,
+        *,
+        store: ScheduledRunPlannerStore,
+        trigger_id_factory: Callable[[ScheduleRecord, datetime], str] | None = None,
+    ) -> None:
+        self._store = store
+        self._trigger_id_factory = trigger_id_factory or _default_trigger_id
+
+    async def plan_due_schedules(
+        self,
+        *,
+        now: datetime,
+        max_due: int,
+    ) -> list[ScheduledLaunchIntent]:
+        _require_datetime("now", now)
+        _require_positive_int("max_due", max_due)
+        schedules = await self._store.list_due_schedules(
+            due_at_or_before=now,
+            limit=max_due,
+        )
+        intents: list[ScheduledLaunchIntent] = []
+        for schedule in schedules:
+            if len(intents) >= max_due:
+                break
+            if schedule.next_due_at is None or schedule.next_due_at > now:
+                continue
+            trigger_id = self._trigger_id_factory(schedule, now)
+            trigger = await self._store.record_trigger(
+                ScheduleTriggerRecord(
+                    trigger_id=trigger_id,
+                    schedule_id=schedule.schedule_id,
+                    topic_id=schedule.topic_id,
+                    status="planned",
+                    due_at=schedule.next_due_at,
+                    planned_at=now,
+                    reason="schedule_due",
+                    metadata={
+                        "trigger_kind": "schedule",
+                        "schedule_kind": schedule.kind,
+                    },
+                )
+            )
+            next_due_at = _next_due_at(schedule, now)
+            await self._store.update_schedule_status(
+                schedule.schedule_id,
+                status="active",
+                next_due_at=next_due_at,
+                last_triggered_at=now,
+                updated_at=now,
+                metadata={
+                    **schedule.metadata,
+                    "last_trigger_status": "planned",
+                },
+            )
+            intents.append(
+                ScheduledLaunchIntent(
+                    trigger_id=trigger.trigger_id,
+                    schedule_id=schedule.schedule_id,
+                    session_id=schedule.session_id,
+                    topic_id=schedule.topic_id,
+                    reason="schedule_due",
+                    due_at=trigger.due_at,
+                    planned_at=trigger.planned_at,
+                    metadata={"schedule_kind": schedule.kind},
+                )
+            )
+        return intents
+
+
 class PGScheduledRunStore:
     _CREATE_SCHEMA_SQL: Final[str] = """
     CREATE TABLE IF NOT EXISTS scheduled_runs (
@@ -240,6 +360,14 @@ class PGScheduledRunStore:
       AND ($3::text IS NULL OR status = $3)
     ORDER BY COALESCE(next_due_at, updated_at), schedule_id
     LIMIT $4
+    """
+    _LIST_DUE_SCHEDULES_SQL: Final[str] = """
+    SELECT * FROM scheduled_runs
+    WHERE status = 'active'
+      AND next_due_at IS NOT NULL
+      AND next_due_at <= $1
+    ORDER BY next_due_at, schedule_id
+    LIMIT $2
     """
     _UPDATE_SCHEDULE_STATUS_SQL: Final[str] = """
     UPDATE scheduled_runs
@@ -380,6 +508,18 @@ class PGScheduledRunStore:
         rows = await pool.fetch(
             self._LIST_SCHEDULES_SQL, session_id, topic_id, status, limit
         )
+        return [_schedule_from_row(row) for row in rows]
+
+    async def list_due_schedules(
+        self,
+        *,
+        due_at_or_before: datetime,
+        limit: int = 100,
+    ) -> list[ScheduleRecord]:
+        _require_datetime("due_at_or_before", due_at_or_before)
+        _require_positive_int("limit", limit)
+        pool = await self._ensure_schema()
+        rows = await pool.fetch(self._LIST_DUE_SCHEDULES_SQL, due_at_or_before, limit)
         return [_schedule_from_row(row) for row in rows]
 
     async def update_schedule_status(
@@ -656,6 +796,21 @@ def _reject_secret_shaped_value(field_name: str, value: str) -> None:
     folded = value.casefold()
     if any(marker in folded for marker in _SECRET_VALUE_MARKERS):
         raise ValueError(f"{field_name} must not contain secret-shaped values")
+
+
+def _default_trigger_id(schedule: ScheduleRecord, now: datetime) -> str:
+    safe_time = now.isoformat().replace(":", "").replace("+", "_")
+    return f"trigger-{schedule.schedule_id}-{safe_time}"
+
+
+def _next_due_at(schedule: ScheduleRecord, now: datetime) -> datetime | None:
+    if schedule.cadence == "once":
+        return None
+    if schedule.cadence == "hourly":
+        return now + timedelta(hours=1)
+    if schedule.cadence == "daily":
+        return now + timedelta(days=1)
+    return None
 
 
 def _required_str(row: dict[str, object], key: str, *, context: str) -> str:
