@@ -360,12 +360,26 @@ class ConsoleBeeCommandIntentSummary:
 
 
 @dataclass(frozen=True)
+class ConsoleBeeLaunchSummary:
+    launch_id: str
+    source: str
+    status: str
+    template_id: str | None
+    task_id: str | None
+    topic_id: str | None
+    schedule_id: str | None = None
+    signal_id: str | None = None
+    error_summary: str | None = None
+
+
+@dataclass(frozen=True)
 class ConsoleBeePage:
     tasks: tuple[ConsoleBeeTaskSummary, ...]
     nodes: tuple[ConsoleBeeNodeSummary, ...]
     templates: tuple[ConsoleBeeTemplateSummary, ...] = ()
     run_artifacts: tuple[ConsoleBeeRunArtifactSummary, ...] = ()
     commands: tuple[ConsoleBeeCommandIntentSummary, ...] = ()
+    launches: tuple[ConsoleBeeLaunchSummary, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -704,6 +718,7 @@ def render_console_bee_page(page_summary: ConsoleBeePage) -> str:
         f"{_bee_template_table(page_summary.templates)}"
         f"{_bee_run_artifact_table(page_summary.run_artifacts)}"
         f"{_bee_command_intent_table(page_summary.commands)}"
+        f"{_bee_launch_table(page_summary.launches)}"
     )
     return _html_document(title=page.title, body=body, active_path=page.path)
 
@@ -1575,6 +1590,40 @@ def _bee_command_intent_table(
         "<thead><tr><th>Template ID</th><th>Name</th><th>Profile</th>"
         "<th>Policy</th><th>Category</th><th>Validation</th>"
         "<th>Status</th><th>Bridge</th><th>Approval</th><th>Evidence</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+        "</section>"
+    )
+
+
+def _bee_launch_table(launches: tuple[ConsoleBeeLaunchSummary, ...]) -> str:
+    if not launches:
+        return _empty_state(
+            "Bee Launches",
+            "No data loaded yet. No Bee launches are available.",
+        )
+    rows = []
+    for launch in launches:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(launch.launch_id)}</td>"
+            f"<td>{escape(launch.source)}</td>"
+            f'<td class="status">{escape(launch.status)}</td>'
+            f"<td>{escape(launch.template_id or '-')}</td>"
+            f"<td>{escape(launch.task_id or '-')}</td>"
+            f"<td>{escape(launch.topic_id or '-')}</td>"
+            f"<td>{escape(launch.schedule_id or '-')}</td>"
+            f"<td>{escape(launch.signal_id or '-')}</td>"
+            f"<td>{escape(launch.error_summary or '-')}</td>"
+            "</tr>"
+        )
+    return (
+        '<section aria-label="Bee launches">'
+        "<h2>Bee Launches</h2>"
+        '<table aria-label="Developer Console Bee launches">'
+        "<thead><tr><th>Launch ID</th><th>Source</th><th>Status</th>"
+        "<th>Template ID</th><th>Task ID</th><th>Topic ID</th>"
+        "<th>Schedule ID</th><th>Signal ID</th><th>Error</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
         "</section>"

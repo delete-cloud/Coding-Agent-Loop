@@ -21,6 +21,7 @@ from coding_agent.bee_launch import (
     build_bee_launch_plan,
 )
 from coding_agent.bee_runtime import BeeNodeRecord, BeeTaskLifecycle, BeeTaskRecord
+from coding_agent.observability import prometheus_metrics_text, reset_prometheus_metrics
 from coding_agent.scheduled_runs import ScheduledLaunchIntent, ScheduleTriggerRecord
 from coding_agent.topic_lifecycle import TopicLifecycle
 from coding_agent.topic_store import JSONObject, TopicAnchorRecord, TopicRecord
@@ -1401,6 +1402,109 @@ async def test_proactive_signal_bee_launch_rejects_existing_launch_mismatch(
         )
 
     assert trigger_store.triggers == {}
+
+
+@pytest.mark.asyncio
+async def test_bee_launch_e2e_smoke(tmp_path: Path) -> None:
+    reset_prometheus_metrics()
+    _write_template(tmp_path, template_id="template-alpha")
+    launch_store = PGBeeLaunchStore(pool=FakeBeeLaunchPool())  # type: ignore[arg-type]
+    task_store = FakeBeeTaskStore()
+    topic_store = FakeTopicStore()
+    trigger_store = FakeScheduleTriggerStore()
+    clock = FakeClock()
+    launcher = BeeLaunchOrchestrator(
+        launch_store=launch_store,
+        task_store=task_store,
+        topic_store=topic_store,
+        topic_lifecycle=TopicLifecycle(
+            store=topic_store,
+            now=clock,
+            topic_id_factory=lambda: f"topic-{len(topic_store.topics) + 1}",
+        ),
+        now=clock,
+        task_id_factory=lambda plan, topic: f"bee-task-{plan.launch_id}",
+    )
+    scheduled_launcher = ScheduledBeeLaunchOrchestrator(
+        launcher=launcher,
+        trigger_store=trigger_store,
+        launch_id_factory=lambda intent: f"launch-{intent.trigger_id}",
+    )
+    signal_launcher = ProactiveBeeLaunchOrchestrator(
+        launcher=launcher,
+        trigger_store=trigger_store,
+        launch_id_factory=lambda intent: f"launch-{intent.trigger_id}",
+    )
+    tape = Tape(tape_id="tape-alpha")
+
+    manual = await launcher.launch_manual(
+        BeeLaunchRequest(
+            launch_id="launch-manual",
+            source="manual",
+            template_id="template-alpha",
+            workspace_root=tmp_path,
+            inputs={"region": "us-test-1"},
+            workspace_policy={"artifact_mode": "enabled"},
+            requested_at=_dt(9),
+        ),
+        tape=tape,
+        write_workspace_artifacts=True,
+    )
+    scheduled = await scheduled_launcher.launch_due(
+        _scheduled_intent(topic_id=None),
+        template_id="template-alpha",
+        workspace_root=tmp_path,
+        tape=tape,
+        inputs={"region": "us-test-1"},
+    )
+    proactive = await signal_launcher.launch_signal(
+        _signal_intent(topic_id=None),
+        template_id="template-alpha",
+        workspace_root=tmp_path,
+        tape=tape,
+        inputs={"region": "us-test-1"},
+    )
+
+    launches = await launch_store.list_launches()
+    assert {launch.source for launch in launches} == {
+        "manual",
+        "schedule",
+        "proactive_signal",
+    }
+    assert all(launch.status == "launched" for launch in launches)
+    assert manual.task_id in task_store.tasks
+    assert scheduled.task_id in task_store.tasks
+    assert proactive.task_id in task_store.tasks
+    assert trigger_store.triggers["trigger-1"].metadata["launch_id"] == (
+        scheduled.launch_id
+    )
+    assert trigger_store.triggers["signal-trigger-signal-1"].metadata["launch_id"] == (
+        proactive.launch_id
+    )
+    assert (tmp_path / ".bee" / "runs" / manual.task_id / "task.json").exists()
+    for task_id in (manual.task_id, scheduled.task_id, proactive.task_id):
+        nodes = await task_store.list_nodes(task_id)
+        assert [node.status for node in nodes] == ["pending"]
+    metrics = prometheus_metrics_text()
+    assert 'bee_launches_total{source="manual",status="launched"} 1' in metrics
+    assert 'bee_launches_total{source="schedule",status="launched"} 1' in metrics
+    assert (
+        'bee_launches_total{source="proactive_signal",status="launched"} 1' in metrics
+    )
+    assert 'scheduled_bee_launches_total{status="launched"} 1' in metrics
+    assert 'proactive_bee_launches_total{kind="unknown",status="launched"} 1' in metrics
+    for forbidden in (
+        "launch_id",
+        "task_id",
+        "topic_id",
+        "run_id",
+        "session_id",
+        "schedule_id",
+        "signal_id",
+        "node_id",
+    ):
+        assert forbidden not in metrics
+    reset_prometheus_metrics()
 
 
 @pytest.mark.asyncio

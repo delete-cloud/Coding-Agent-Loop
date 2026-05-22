@@ -558,3 +558,85 @@ This ledger tracks G118-G126 for the Bee Launch / Scheduled Bee Task Integration
   - Proactive replay validates existing launch source, signal_id, session_id, and topic_id before returning an existing result.
 - Remaining risks:
   - Console launch views and launch metrics remain pending.
+
+## G126_BEE_LAUNCH_CONSOLE_OBSERVABILITY_E2E
+
+### Before
+
+- Goal id: G126_BEE_LAUNCH_CONSOLE_OBSERVABILITY_E2E
+- Intended files:
+  - `docs/bee_launch/GOAL_PROGRESS.md`
+  - `docs/bee_launch/IMPLEMENTATION_REPORT.md`
+  - `docs/bee_launch/USAGE.md`
+  - `docs/adr/0044-bee-launch-surfaces.md`
+  - `src/coding_agent/bee_launch.py`
+  - `src/coding_agent/observability.py`
+  - `src/coding_agent/ui/developer_console.py`
+  - `src/coding_agent/ui/http_server.py`
+  - `tests/coding_agent/test_bee_launch.py`
+  - `tests/coding_agent/test_observability_platform_smoke.py`
+  - `tests/ui/test_developer_console.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -v`
+  - `uv run pytest tests/coding_agent/test_observability_platform_smoke.py -v`
+  - `uv run pytest tests/ui/test_developer_console.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_command_bridge.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -v`
+  - `uv run pytest tests/coding_agent/test_scheduled_runs.py -v`
+  - `uv run pytest tests/coding_agent/test_topic_layer_smoke.py -v`
+  - `uv run pytest tests/integration/test_durable_runtime_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+  - `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+  - `uv run ruff format --check src/coding_agent/bee_launch.py src/coding_agent/observability.py src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/coding_agent/test_bee_launch.py tests/coding_agent/test_observability_platform_smoke.py tests/ui/test_developer_console.py`
+  - `uv run ruff check src/coding_agent/bee_launch.py src/coding_agent/observability.py src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/coding_agent/test_bee_launch.py tests/coding_agent/test_observability_platform_smoke.py tests/ui/test_developer_console.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Console Bee page renders safe launch list/detail summary with launch source, status, and linked template/task/topic/schedule/signal fields.
+  - Prometheus launch metrics use only low-cardinality source/status/kind labels.
+  - Manual, scheduled, proactive, lifecycle, and safety smoke coverage remains deterministic.
+  - Final implementation and usage docs exist.
+  - No external executor, homelab-specific, Argo/K8s, nmem, desktop, bridge, or multi-agent work is introduced.
+
+### After
+
+- Changed files:
+  - `docs/bee_launch/GOAL_PROGRESS.md`
+  - `docs/bee_launch/IMPLEMENTATION_REPORT.md`
+  - `docs/bee_launch/USAGE.md`
+  - `docs/adr/0044-bee-launch-surfaces.md`
+  - `src/coding_agent/bee_launch.py`
+  - `src/coding_agent/observability.py`
+  - `src/coding_agent/ui/developer_console.py`
+  - `src/coding_agent/ui/http_server.py`
+  - `tests/coding_agent/test_bee_launch.py`
+  - `tests/coding_agent/test_observability_platform_smoke.py`
+  - `tests/ui/test_developer_console.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -q`
+  - `uv run pytest tests/coding_agent/test_observability_platform_smoke.py -q`
+  - `uv run pytest tests/ui/test_developer_console.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_command_bridge.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run pytest tests/coding_agent/test_scheduled_runs.py -q`
+  - `uv run pytest tests/coding_agent/test_topic_layer_smoke.py -q`
+  - `uv run pytest tests/integration/test_durable_runtime_smoke.py -q`
+  - `uv run pytest tests/coding_agent/test_context_system_smoke.py -q`
+  - `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -q`
+  - `uv run pytest tests/coding_agent/evaluation/ -q`
+  - `uv run pytest tests/dogfood/test_workspace_provider_demo.py -q`
+  - `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -q`
+  - `uv run pytest tests/coding_agent/test_observability.py -q`
+  - `uv run pytest tests/coding_agent/test_observability_local_stack.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_launch.py src/coding_agent/observability.py src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/coding_agent/test_bee_launch.py tests/coding_agent/test_observability_platform_smoke.py tests/ui/test_developer_console.py`
+  - `uv run ruff check src/coding_agent/bee_launch.py src/coding_agent/observability.py src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/coding_agent/test_bee_launch.py tests/coding_agent/test_observability_platform_smoke.py tests/ui/test_developer_console.py`
+  - `git diff --check -- .`
+- Results:
+  - Console Bee page now renders Bee launch summaries from the durable Bee launch store, with run metadata as fallback, including launch source, status, template, task, topic, schedule, signal, and safe error fields.
+  - Launch orchestration records fail-open Prometheus launch metrics, and Prometheus exposes `bee_launches_total`, `bee_launch_duration_seconds`, `scheduled_bee_launches_total`, and `proactive_bee_launches_total` using only low-cardinality labels.
+  - Added final Bee launch smoke coverage across manual, scheduled, and proactive launch paths.
+  - Added final Bee launch usage and implementation report documentation.
+- Remaining risks:
+  - Console launch visibility is list-oriented; a deeper per-launch detail route can be added later without changing launch semantics.
+  - External executor adapters remain intentionally deferred.

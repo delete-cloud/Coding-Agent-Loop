@@ -10,6 +10,7 @@ from agentkit.storage.protocols import TapeInfo, TapeSearchResult
 from httpx import ASGITransport, AsyncClient
 
 from coding_agent.environment import WorkspaceProviderCapabilities
+from coding_agent.bee_launch import BeeLaunchRecord
 from coding_agent.bee_workspace import (
     BeeWorkspaceRunArtifacts,
     BeeWorkspaceRunNode,
@@ -478,6 +479,33 @@ class _ConsoleScheduledRunStore:
         return signals[:limit]
 
 
+class _ConsoleBeeLaunchStore:
+    def __init__(self, launches: list[BeeLaunchRecord]) -> None:
+        self.launches = launches
+
+    async def list_launches(
+        self,
+        *,
+        source: str | None = None,
+        status: str | None = None,
+        session_id: str | None = None,
+        topic_id: str | None = None,
+        limit: int = 100,
+    ) -> list[BeeLaunchRecord]:
+        launches = []
+        for launch in self.launches:
+            if source is not None and launch.source != source:
+                continue
+            if status is not None and launch.status != status:
+                continue
+            if session_id is not None and launch.session_id != session_id:
+                continue
+            if topic_id is not None and launch.topic_id != topic_id:
+                continue
+            launches.append(launch)
+        return launches[:limit]
+
+
 @pytest.fixture(autouse=True)
 async def clear_console_state() -> AsyncIterator[None]:
     session_manager.configure_runtime_store(None)
@@ -720,11 +748,16 @@ def _bee_runtime_run(run_id: str = "run-bee") -> AgentRunRecord:
     metadata.update(
         {
             "bee_runtime": "task_launch",
+            "launch_id": "launch-alpha",
+            "launch_source": "schedule",
+            "launch_status": "launched",
             "launch_kind": "durable_run",
             "task_id": "bee-task-alpha",
             "node_id": "node-validate",
             "topic_id": "topic-auth",
             "session_id": "session-alpha",
+            "template_id": "launch-blueprint-alpha",
+            "schedule_id": "schedule-alpha",
             "task_kind": "maintenance",
             "task_profile": "local",
             "node_kind": "validation",
@@ -1539,6 +1572,97 @@ async def test_console_bee_renders_safe_task_and_node_summaries() -> None:
 
 
 @pytest.mark.asyncio
+async def test_console_bee_launch_renders_safe_launch_summary() -> None:
+    _register_console_session("session-alpha")
+    session_manager.configure_runtime_store(_ConsoleRuntimeStore([_bee_runtime_run()]))
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/console/bee")
+
+    assert response.status_code == 200
+    assert "Bee Launches" in response.text
+    assert "launch-alpha" in response.text
+    assert "schedule" in response.text
+    assert "launched" in response.text
+    assert "launch-blueprint-alpha" in response.text
+    assert "bee-task-alpha" in response.text
+    assert "topic-auth" in response.text
+    assert "schedule-alpha" in response.text
+    for forbidden in FORBIDDEN_RENDERED_TEXT:
+        assert forbidden not in response.text
+
+
+@pytest.mark.asyncio
+async def test_console_bee_launch_renders_durable_launch_store_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _register_console_session("session-alpha")
+    session_manager.configure_runtime_store(_ConsoleRuntimeStore([]))
+    monkeypatch.setattr(
+        http_server,
+        "_console_bee_launch_store",
+        lambda: _ConsoleBeeLaunchStore(
+            [
+                BeeLaunchRecord(
+                    launch_id="launch-manual",
+                    source="manual",
+                    template_id="template-manual",
+                    status="launched",
+                    requested_at=datetime(2026, 5, 20, 1, 0, tzinfo=UTC),
+                    task_id="bee-task-manual",
+                    topic_id="topic-manual",
+                    session_id="session-alpha",
+                    launched_at=datetime(2026, 5, 20, 1, 1, tzinfo=UTC),
+                ),
+                BeeLaunchRecord(
+                    launch_id="launch-scheduled",
+                    source="schedule",
+                    template_id="template-scheduled",
+                    status="launched",
+                    requested_at=datetime(2026, 5, 20, 2, 0, tzinfo=UTC),
+                    task_id="bee-task-scheduled",
+                    topic_id="topic-scheduled",
+                    session_id="session-alpha",
+                    schedule_id="schedule-alpha",
+                    launched_at=datetime(2026, 5, 20, 2, 1, tzinfo=UTC),
+                ),
+                BeeLaunchRecord(
+                    launch_id="launch-signal",
+                    source="proactive_signal",
+                    template_id="template-signal",
+                    status="failed",
+                    requested_at=datetime(2026, 5, 20, 3, 0, tzinfo=UTC),
+                    topic_id="topic-signal",
+                    session_id="session-alpha",
+                    signal_id="signal-alpha",
+                    error_type="policy_denied",
+                    error_message="safe policy denied",
+                ),
+            ]
+        ),
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/console/bee")
+
+    assert response.status_code == 200
+    assert "Bee Launches" in response.text
+    assert "launch-manual" in response.text
+    assert "launch-scheduled" in response.text
+    assert "launch-signal" in response.text
+    assert "manual" in response.text
+    assert "schedule" in response.text
+    assert "proactive_signal" in response.text
+    assert "schedule-alpha" in response.text
+    assert "signal-alpha" in response.text
+    assert "safe policy denied" in response.text
+    for forbidden in FORBIDDEN_RENDERED_TEXT:
+        assert forbidden not in response.text
+
+
+@pytest.mark.asyncio
 async def test_console_bee_renders_workspace_template_artifacts_and_commands(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1595,8 +1719,10 @@ async def test_console_bee_does_not_emit_task_or_node_ids_as_metric_labels(
     assert response.status_code == 200
     metrics = prometheus_metrics_text()
     assert 'route="console_bee"' in metrics
+    assert "launch-alpha" not in metrics
     assert "bee-task-alpha" not in metrics
     assert "node-validate" not in metrics
+    assert "launch_id" not in metrics
     assert "task_id" not in metrics
     assert "node_id" not in metrics
 

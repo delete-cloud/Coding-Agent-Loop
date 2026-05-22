@@ -10,7 +10,7 @@ import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from threading import RLock
-from typing import Any
+from typing import Any, Final
 
 import httpx
 
@@ -221,6 +221,15 @@ _PROMETHEUS_LABEL_VALUE_ALLOWLISTS = {
     "topic_status": frozenset({"open", "finalized", "aborted"}),
     "trigger_kind": frozenset({"proactive_signal", "schedule", "unknown"}),
 }
+_BEE_LAUNCH_SOURCES: Final[frozenset[str]] = frozenset(
+    {"manual", "schedule", "proactive_signal"}
+)
+_BEE_LAUNCH_STATUSES: Final[frozenset[str]] = frozenset(
+    {"planned", "launching", "launched", "failed", "cancelled"}
+)
+_BEE_PROACTIVE_SIGNAL_KINDS: Final[frozenset[str]] = frozenset(
+    {"repo_activity", "unknown"}
+)
 _PROMETHEUS_HISTOGRAM_BUCKETS = (5.0, 10.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 5000.0)
 _PROMETHEUS_HTTP_HISTOGRAM_BUCKETS = (
     1.0,
@@ -535,6 +544,39 @@ class PrometheusMetricsRecorder:
                 max(0.0, float(duration_ms)),
             )
 
+    def record_bee_launch(
+        self,
+        *,
+        source: str,
+        status: str,
+        duration_ms: float,
+        proactive_kind: str = "unknown",
+    ) -> None:
+        labels = {
+            "source": _prometheus_metric_part(source, _BEE_LAUNCH_SOURCES),
+            "status": _prometheus_metric_part(status, _BEE_LAUNCH_STATUSES),
+        }
+        with self._lock:
+            self._inc("bee_launches_total", labels)
+            self._observe(
+                "bee_launch_duration_seconds",
+                labels,
+                max(0.0, float(duration_ms)) / 1000.0,
+            )
+            if source == "schedule":
+                self._inc("scheduled_bee_launches_total", {"status": labels["status"]})
+            elif source == "proactive_signal":
+                self._inc(
+                    "proactive_bee_launches_total",
+                    {
+                        "kind": _prometheus_metric_part(
+                            proactive_kind,
+                            _BEE_PROACTIVE_SIGNAL_KINDS,
+                        ),
+                        "status": labels["status"],
+                    },
+                )
+
     def exposition_text(self) -> str:
         lines: list[str] = []
         with self._lock:
@@ -669,6 +711,56 @@ class PrometheusMetricsRecorder:
                         buckets=_PROMETHEUS_HISTOGRAM_BUCKETS,
                     )
                 )
+            bee_launch_counters = self._bee_launch_counters
+            bee_launch_histograms = self._bee_launch_histograms
+            if bee_launch_counters:
+                lines.extend(
+                    (
+                        "# HELP bee_launches_total Bee launches by source and status.",
+                        "# TYPE bee_launches_total counter",
+                    )
+                )
+                lines.extend(
+                    self._format_metric("bee_launches_total", bee_launch_counters)
+                )
+                lines.extend(
+                    (
+                        "# HELP scheduled_bee_launches_total Scheduled Bee launches.",
+                        "# TYPE scheduled_bee_launches_total counter",
+                    )
+                )
+                lines.extend(
+                    self._format_metric(
+                        "scheduled_bee_launches_total",
+                        bee_launch_counters,
+                    )
+                )
+                lines.extend(
+                    (
+                        "# HELP proactive_bee_launches_total Proactive Bee launches.",
+                        "# TYPE proactive_bee_launches_total counter",
+                    )
+                )
+                lines.extend(
+                    self._format_metric(
+                        "proactive_bee_launches_total",
+                        bee_launch_counters,
+                    )
+                )
+            if bee_launch_histograms:
+                lines.extend(
+                    (
+                        "# HELP bee_launch_duration_seconds Bee launch duration in seconds.",
+                        "# TYPE bee_launch_duration_seconds histogram",
+                    )
+                )
+                lines.extend(
+                    self._format_histograms(
+                        histograms=bee_launch_histograms,
+                        metric_name="bee_launch_duration_seconds",
+                        buckets=_PROMETHEUS_HISTOGRAM_BUCKETS,
+                    )
+                )
         return "\n".join(lines) + ("\n" if lines else "")
 
     def reset(self) -> None:
@@ -746,6 +838,31 @@ class PrometheusMetricsRecorder:
             key: value
             for key, value in self._histograms.items()
             if key[0] == "coding_agent_storage_operation_duration_ms"
+        }
+
+    @property
+    def _bee_launch_counters(
+        self,
+    ) -> dict[tuple[str, tuple[tuple[str, str], ...]], float]:
+        return {
+            key: value
+            for key, value in self._counters.items()
+            if key[0]
+            in {
+                "bee_launches_total",
+                "scheduled_bee_launches_total",
+                "proactive_bee_launches_total",
+            }
+        }
+
+    @property
+    def _bee_launch_histograms(
+        self,
+    ) -> dict[tuple[str, tuple[tuple[str, str], ...]], list[float]]:
+        return {
+            key: value
+            for key, value in self._histograms.items()
+            if key[0] == "bee_launch_duration_seconds"
         }
 
     def _inc(self, metric: str, labels: Mapping[str, str], amount: float = 1.0) -> None:
@@ -872,6 +989,24 @@ def record_storage_operation_metric(
             operation=operation,
             status=status,
             duration_ms=duration_ms,
+        )
+    except Exception:
+        return
+
+
+def record_bee_launch_metric(
+    *,
+    source: str,
+    status: str,
+    duration_ms: float,
+    proactive_kind: str = "unknown",
+) -> None:
+    try:
+        _DEFAULT_PROMETHEUS_RECORDER.record_bee_launch(
+            source=source,
+            status=status,
+            duration_ms=duration_ms,
+            proactive_kind=proactive_kind,
         )
     except Exception:
         return

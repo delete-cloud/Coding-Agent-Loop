@@ -11,6 +11,7 @@ from coding_agent.observability import (
     CompositeObservationSink,
     OtlpHttpObservationSink,
     PrometheusMetricsObservationSink,
+    record_bee_launch_metric,
     prometheus_metrics_text,
     record_evaluation_case_metric,
     record_hitl_interaction_metric,
@@ -27,7 +28,12 @@ FORBIDDEN_PROMETHEUS_PARTS = (
     "trace_id",
     "event_id",
     "interaction_id",
+    "launch_id",
+    "node_id",
+    "schedule_id",
     "tool_call_id",
+    "task_id",
+    "topic_id",
     "file_path",
     "prompt",
     "message",
@@ -170,6 +176,35 @@ def test_observability_platform_composite_tracing_and_metrics_smoke() -> None:
     assert SENSITIVE_SENTINEL not in serialized_trace_payloads
     for forbidden in ("prompt", "message", "content", "command_output", "secret"):
         assert forbidden not in serialized_trace_payloads
+    reset_prometheus_metrics()
+
+
+def test_observability_platform_bee_launch_metrics_are_low_cardinality() -> None:
+    reset_prometheus_metrics()
+
+    record_bee_launch_metric(source="manual", status="launched", duration_ms=1200)
+    record_bee_launch_metric(source="schedule", status="launched", duration_ms=250)
+    record_bee_launch_metric(
+        source="proactive_signal",
+        status="failed",
+        duration_ms=10,
+        proactive_kind="repo_activity",
+    )
+
+    metrics = prometheus_metrics_text()
+    assert 'bee_launches_total{source="manual",status="launched"} 1' in metrics
+    assert 'bee_launches_total{source="schedule",status="launched"} 1' in metrics
+    assert 'bee_launches_total{source="proactive_signal",status="failed"} 1' in metrics
+    assert 'scheduled_bee_launches_total{status="launched"} 1' in metrics
+    assert (
+        'proactive_bee_launches_total{kind="repo_activity",status="failed"} 1'
+        in metrics
+    )
+    assert (
+        'bee_launch_duration_seconds_count{source="manual",status="launched"} 1'
+        in metrics
+    )
+    _assert_no_prometheus_leak(metrics)
     reset_prometheus_metrics()
 
 
