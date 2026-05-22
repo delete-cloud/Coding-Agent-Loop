@@ -7,6 +7,8 @@ import pytest
 
 from coding_agent.action_safety import ValidationStatus
 from coding_agent.bee_command_bridge import (
+    BeeNodeCompletionEvidence,
+    complete_bee_node_from_bridge_result,
     plan_bee_command_intent,
     resolve_bee_command_intent,
     run_bee_validation_node,
@@ -395,6 +397,177 @@ def test_bee_validation_runner_preserves_local_only_validation_policy(
             cwd="/workspace",
             environment_kind="cloud",
         )
+
+
+def test_bee_node_completion_requires_evidence(tmp_path: Path) -> None:
+    template = _write_template_with_commands(
+        tmp_path,
+        command_ref="pytest_smoke",
+        intent_status="declared",
+    )
+    manifest = build_bee_manifest_from_workspace_template(template)
+
+    decision = complete_bee_node_from_bridge_result(node=manifest.nodes[0])
+
+    assert decision.status == "evidence_required"
+    assert decision.will_complete is False
+    assert decision.evidence == ()
+    assert decision.reason == "Bee node completion requires evidence"
+
+
+def test_bee_node_completion_accepts_passed_validation_evidence(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    template = _write_template_with_commands(
+        workspace,
+        command_ref="pytest_smoke",
+        intent_status="declared",
+    )
+    manifest = build_bee_manifest_from_workspace_template(template)
+    bridge_result = run_bee_validation_node(
+        template=template,
+        node=manifest.nodes[0],
+        command='python -c "raise SystemExit(0)"',
+        workspace_root=workspace,
+        cwd=workspace,
+    )
+
+    decision = complete_bee_node_from_bridge_result(
+        node=manifest.nodes[0],
+        bridge_result=bridge_result,
+    )
+
+    assert decision.status == "completed"
+    assert decision.will_complete is True
+    assert decision.evidence == (
+        BeeNodeCompletionEvidence(
+            evidence_kind="validation_report",
+            evidence_ref="node-validate:passed:pytest_smoke",
+            status="passed",
+        ),
+    )
+    serialized = json.dumps(decision.to_safe_dict(), sort_keys=True)
+    assert "evidence_ref_hash" in serialized
+    assert "node-validate:passed:pytest_smoke" not in serialized
+    assert "python -c" not in serialized
+    assert "raise SystemExit" not in serialized
+
+
+def test_bee_node_completion_rejects_failed_validation_evidence(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    template = _write_template_with_commands(
+        workspace,
+        command_ref="pytest_smoke",
+        intent_status="declared",
+    )
+    manifest = build_bee_manifest_from_workspace_template(template)
+    bridge_result = run_bee_validation_node(
+        template=template,
+        node=manifest.nodes[0],
+        command='python -c "raise SystemExit(3)"',
+        workspace_root=workspace,
+        cwd=workspace,
+    )
+
+    decision = complete_bee_node_from_bridge_result(
+        node=manifest.nodes[0],
+        bridge_result=bridge_result,
+    )
+
+    assert decision.status == "evidence_failed"
+    assert decision.will_complete is False
+    assert decision.evidence[0].status == "failed"
+
+
+def test_bee_node_completion_rejects_policy_only_ready_plan(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    template = _write_template_with_commands(
+        workspace,
+        command_ref="pytest_smoke",
+        intent_status="declared",
+    )
+    manifest = build_bee_manifest_from_workspace_template(template)
+    plan = plan_bee_command_intent(
+        template=template,
+        node=manifest.nodes[0],
+        command="pytest -q",
+        workspace_root=workspace,
+        cwd=workspace,
+    )
+
+    decision = complete_bee_node_from_bridge_result(node=manifest.nodes[0])
+
+    assert plan.status == "ready"
+    assert decision.status == "evidence_required"
+    assert decision.will_complete is False
+
+
+def test_bee_node_completion_rejects_model_text_evidence() -> None:
+    with pytest.raises(ValueError, match="evidence kind"):
+        BeeNodeCompletionEvidence(
+            evidence_kind="model_text",
+            evidence_ref="looks done",
+            status="accepted",
+        )
+
+
+def test_bee_node_completion_rejects_failed_caller_evidence(tmp_path: Path) -> None:
+    template = _write_template_with_commands(
+        tmp_path,
+        command_ref="pytest_smoke",
+        intent_status="declared",
+    )
+    manifest = build_bee_manifest_from_workspace_template(template)
+
+    decision = complete_bee_node_from_bridge_result(
+        node=manifest.nodes[0],
+        evidence=(
+            BeeNodeCompletionEvidence(
+                evidence_kind="validation_report",
+                evidence_ref="node-validate:failed:pytest_smoke",
+                status="failed",
+            ),
+        ),
+    )
+
+    assert decision.status == "evidence_failed"
+    assert decision.will_complete is False
+
+
+def test_bee_node_completion_safe_summary_hashes_evidence_ref(
+    tmp_path: Path,
+) -> None:
+    template = _write_template_with_commands(
+        tmp_path,
+        command_ref="pytest_smoke",
+        intent_status="declared",
+    )
+    manifest = build_bee_manifest_from_workspace_template(template)
+
+    decision = complete_bee_node_from_bridge_result(
+        node=manifest.nodes[0],
+        evidence=(
+            BeeNodeCompletionEvidence(
+                evidence_kind="sanitized_artifact",
+                evidence_ref="python -c print-secret",
+                status="accepted",
+            ),
+        ),
+    )
+
+    assert decision.status == "completed"
+    serialized = json.dumps(decision.to_safe_dict(), sort_keys=True)
+    assert "evidence_ref_hash" in serialized
+    assert "python -c" not in serialized
+    assert "print-secret" not in serialized
 
 
 def _write_template_with_commands(

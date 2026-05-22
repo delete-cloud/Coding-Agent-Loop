@@ -7,6 +7,7 @@ It does not execute commands or grant policy permissions.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
 from typing import Any
 from typing import Literal
@@ -24,6 +25,7 @@ from coding_agent.action_safety.command_policy import (
 from coding_agent.action_safety.validation_runner import (
     ValidationCommandSpec,
     ValidationReport,
+    ValidationStatus,
     ValidationRunner,
 )
 from coding_agent.bee_runtime import BeeNodeManifest
@@ -56,6 +58,18 @@ BeeValidationBridgeStatus = Literal[
     "policy_denied",
     "approval_required",
 ]
+BeeNodeCompletionStatus = Literal[
+    "completed",
+    "evidence_required",
+    "evidence_failed",
+]
+_ALLOWED_COMPLETION_EVIDENCE_KINDS = frozenset(
+    {
+        "action_record",
+        "sanitized_artifact",
+        "validation_report",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -119,6 +133,50 @@ class BeeValidationBridgeResult:
         if self.report is not None:
             payload["validation_report"] = self.report.to_safe_dict()
         return payload
+
+
+@dataclass(frozen=True)
+class BeeNodeCompletionEvidence:
+    evidence_kind: str
+    evidence_ref: str
+    status: str
+
+    def __post_init__(self) -> None:
+        if not self.evidence_kind.strip():
+            raise ValueError("Bee completion evidence kind must not be empty")
+        if not self.evidence_ref.strip():
+            raise ValueError("Bee completion evidence ref must not be empty")
+        if not self.status.strip():
+            raise ValueError("Bee completion evidence status must not be empty")
+        if self.evidence_kind not in _ALLOWED_COMPLETION_EVIDENCE_KINDS:
+            raise ValueError(
+                f"Bee completion evidence kind is not supported: {self.evidence_kind}"
+            )
+
+    def to_safe_dict(self) -> dict[str, str]:
+        return {
+            "evidence_kind": self.evidence_kind,
+            "evidence_ref_hash": _safe_ref_hash(self.evidence_ref),
+            "status": self.status,
+        }
+
+
+@dataclass(frozen=True)
+class BeeNodeCompletionDecision:
+    status: BeeNodeCompletionStatus
+    node_id: str
+    evidence: tuple[BeeNodeCompletionEvidence, ...] = ()
+    reason: str | None = None
+    will_complete: bool = False
+
+    def to_safe_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "node_id": self.node_id,
+            "evidence": [item.to_safe_dict() for item in self.evidence],
+            "reason": self.reason,
+            "will_complete": self.will_complete,
+        }
 
 
 def resolve_bee_command_intent(
@@ -283,6 +341,64 @@ def run_bee_validation_node(
     )
 
 
+def complete_bee_node_from_bridge_result(
+    *,
+    node: BeeNodeManifest,
+    bridge_result: BeeValidationBridgeResult | None = None,
+    evidence: tuple[BeeNodeCompletionEvidence, ...] = (),
+) -> BeeNodeCompletionDecision:
+    """Decide whether a Bee node may complete from evidence-backed results."""
+
+    collected_evidence = list(evidence)
+    failed_evidence = tuple(
+        item for item in collected_evidence if item.status not in {"accepted", "passed"}
+    )
+    if failed_evidence:
+        return BeeNodeCompletionDecision(
+            status="evidence_failed",
+            node_id=node.node_id,
+            evidence=tuple(collected_evidence),
+            reason="completion evidence did not pass",
+        )
+    if bridge_result is not None:
+        report = bridge_result.report
+        if bridge_result.status != "completed" or report is None:
+            return BeeNodeCompletionDecision(
+                status="evidence_required",
+                node_id=node.node_id,
+                evidence=tuple(collected_evidence),
+                reason="bridge result did not produce completion evidence",
+            )
+        collected_evidence.append(
+            BeeNodeCompletionEvidence(
+                evidence_kind="validation_report",
+                evidence_ref=_validation_evidence_ref(node, report),
+                status=report.status.value,
+            )
+        )
+        if report.status != ValidationStatus.PASSED:
+            return BeeNodeCompletionDecision(
+                status="evidence_failed",
+                node_id=node.node_id,
+                evidence=tuple(collected_evidence),
+                reason="validation evidence did not pass",
+            )
+
+    if not collected_evidence:
+        return BeeNodeCompletionDecision(
+            status="evidence_required",
+            node_id=node.node_id,
+            reason="Bee node completion requires evidence",
+        )
+    return BeeNodeCompletionDecision(
+        status="completed",
+        node_id=node.node_id,
+        evidence=tuple(collected_evidence),
+        reason="Bee node completion evidence accepted",
+        will_complete=True,
+    )
+
+
 def _intent_safe_dict(intent: BeeWorkspaceCommandIntent) -> dict[str, Any]:
     return {
         "name": intent.name,
@@ -292,3 +408,15 @@ def _intent_safe_dict(intent: BeeWorkspaceCommandIntent) -> dict[str, Any]:
         "validation_label": intent.validation_label,
         "status": intent.status,
     }
+
+
+def _validation_evidence_ref(
+    node: BeeNodeManifest,
+    report: ValidationReport,
+) -> str:
+    labels = "-".join(outcome.label for outcome in report.outcomes)
+    return f"{node.node_id}:{report.status.value}:{labels}"
+
+
+def _safe_ref_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
