@@ -224,6 +224,97 @@ This ledger tracks G118-G126 for the Bee Launch / Scheduled Bee Task Integration
   - G123 still needs resume, retry, cancel, and abort lifecycle controls.
   - Scheduled launch, proactive launch, console launch views, and launch metrics remain pending.
 
+## G123_BEE_TASK_LIFECYCLE_CONTROLS
+
+### Before
+
+- Goal id: G123_BEE_TASK_LIFECYCLE_CONTROLS
+- Intended files:
+  - `docs/bee_launch/GOAL_PROGRESS.md`
+  - `docs/adr/0044-bee-launch-surfaces.md`
+  - `src/coding_agent/bee_launch.py`
+  - `tests/coding_agent/test_bee_launch.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -q`
+  - `uv run pytest tests/coding_agent/test_topic_layer_smoke.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_launch.py tests/coding_agent/test_bee_launch.py`
+  - `uv run ruff check src/coding_agent/bee_launch.py tests/coding_agent/test_bee_launch.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Resume recomputes ready state for incomplete nodes without duplicating completed node attempts.
+  - Retry only applies to failed node attempts and preserves previous metadata/evidence.
+  - Retry of completed nodes is rejected.
+  - Cancel and abort record terminal task status, with abort writing a Bee task abort anchor where topic/tape context is provided.
+  - Lifecycle controls do not execute nodes or bypass command/workspace/HITL policy.
+
+### After
+
+- Changed files:
+  - `docs/bee_launch/GOAL_PROGRESS.md`
+  - `docs/adr/0044-bee-launch-surfaces.md`
+  - `src/coding_agent/bee_launch.py`
+  - `tests/coding_agent/test_bee_launch.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -q`
+  - `uv run pytest tests/coding_agent/test_topic_layer_smoke.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_launch.py tests/coding_agent/test_bee_launch.py`
+  - `uv run ruff check src/coding_agent/bee_launch.py tests/coding_agent/test_bee_launch.py`
+  - `git diff --check -- .`
+- Results:
+  - Added `BeeTaskLifecycleController` for resume, retry, cancel, and abort controls over existing durable Bee tasks/nodes.
+  - Resume resets incomplete failed/running nodes to pending without incrementing attempt counts or touching completed nodes.
+  - Retry is limited to failed nodes, increments attempt count, and preserves prior evidence metadata.
+  - Cancel records terminal task status and skips incomplete nodes; abort can additionally write a `bee_task_aborted` anchor through the Bee task lifecycle.
+  - Lifecycle controls only mutate task/node lifecycle state and do not execute command intents or bypass Bee command bridge policy.
+- Remaining risks:
+  - Scheduled launch, proactive launch, console launch views, and launch metrics remain pending.
+
+### Post-Review Lifecycle Fix
+
+- Changed files:
+  - `src/coding_agent/bee_launch.py`
+  - `tests/coding_agent/test_bee_launch.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -q`
+  - `uv run pytest tests/coding_agent/test_topic_layer_smoke.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_launch.py tests/coding_agent/test_bee_launch.py`
+  - `uv run ruff check src/coding_agent/bee_launch.py tests/coding_agent/test_bee_launch.py`
+  - `git diff --check -- .`
+- Results:
+  - Resume now leaves already-claimed `ready` nodes unchanged to avoid duplicate claim/execution paths.
+  - Abort validates anchor context and writes the abort anchor before durable task/node closure, so anchor failures do not leave the task cancelled without abort evidence.
+  - Cancel/abort now clear active run timing/linkage from skipped nodes and record a terminal timestamp.
+- Remaining risks:
+  - Close-plus-anchor is still not a single database transaction because tape anchors and Bee task rows use separate product abstractions.
+  - Scheduled launch, proactive launch, console launch views, and launch metrics remain pending.
+
+### Post-Review Skipped Node Cleanup Fix
+
+- Changed files:
+  - `src/coding_agent/bee_launch.py`
+  - `tests/coding_agent/test_bee_launch.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -k lifecycle -q`
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -q`
+  - `uv run pytest tests/coding_agent/test_topic_layer_smoke.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_launch.py tests/coding_agent/test_bee_launch.py`
+  - `uv run ruff check src/coding_agent/bee_launch.py tests/coding_agent/test_bee_launch.py`
+  - `git diff --check -- .`
+- Results:
+  - Cancel/abort cleanup now also normalizes stale skipped nodes that still carry active run linkage.
+  - Added regression coverage for a skipped node with stale `run_id` and `started_at`.
+- Remaining risks:
+  - Close-plus-anchor is still not a single database transaction because tape anchors and Bee task rows use separate product abstractions.
+  - Scheduled launch, proactive launch, console launch views, and launch metrics remain pending.
+
 ### Post-Review Artifact Gate Fix
 
 - Changed files:

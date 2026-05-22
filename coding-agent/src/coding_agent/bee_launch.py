@@ -6,17 +6,22 @@ tasks, execute nodes, or grant command execution rights.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-import uuid
-from collections.abc import Callable
-from typing import Protocol
 from typing import Final
+from typing import Protocol
+import uuid
 
 from agentkit.storage.pg import AsyncPGPool, PGPool
 from agentkit.tape.tape import Tape
-from coding_agent.bee_runtime import BeeNodeRecord, BeeTaskManifest, BeeTaskRecord
+from coding_agent.bee_runtime import (
+    BeeNodeRecord,
+    BeeTaskLifecycle,
+    BeeTaskManifest,
+    BeeTaskRecord,
+)
 from coding_agent.bee_workspace import (
     BeeWorkspaceTemplate,
     BeeWorkspaceRunArtifacts,
@@ -138,9 +143,36 @@ class BeeLaunchStore(Protocol):
 
 
 class BeeTaskLaunchStore(Protocol):
+    async def load_task(self, task_id: str) -> BeeTaskRecord | None: ...
+
+    async def list_nodes(self, task_id: str) -> list[BeeNodeRecord]: ...
+
     async def upsert_task(self, record: BeeTaskRecord) -> BeeTaskRecord: ...
 
     async def upsert_node(self, record: BeeNodeRecord) -> BeeNodeRecord: ...
+
+    async def update_task_status(
+        self,
+        task_id: str,
+        *,
+        status: str,
+        summary: str | None,
+        updated_at: datetime,
+        metadata: JSONObject,
+    ) -> BeeTaskRecord: ...
+
+    async def update_node_status(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        status: str,
+        run_id: str | None,
+        updated_at: datetime,
+        started_at: datetime | None,
+        finished_at: datetime | None,
+        metadata: JSONObject,
+    ) -> BeeNodeRecord: ...
 
 
 class BeeLaunchTopicStore(Protocol):
@@ -735,6 +767,152 @@ class BeeLaunchOrchestrator:
         raise ValueError(f"unsupported Bee topic policy mode: {mode}")
 
 
+class BeeTaskLifecycleController:
+    def __init__(
+        self,
+        *,
+        store: BeeTaskLaunchStore,
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._store = store
+        self._now = now or (lambda: datetime.now(UTC))
+
+    async def resume_task(self, task_id: str) -> BeeTaskRecord:
+        task = await self._require_task(task_id)
+        if task.status in {"completed", "cancelled"}:
+            raise ValueError(f"Bee task cannot be resumed from {task.status}")
+        now = self._now()
+        resumed_task = await self._store.update_task_status(
+            task_id,
+            status="running",
+            summary=task.summary,
+            updated_at=now,
+            metadata={**task.metadata, "lifecycle_state": "resumed"},
+        )
+        for node in await self._store.list_nodes(task_id):
+            if node.status in {"completed", "skipped", "pending", "ready"}:
+                continue
+            await self._store.update_node_status(
+                task_id=node.task_id,
+                node_id=node.node_id,
+                status="pending",
+                run_id=None,
+                updated_at=now,
+                started_at=None,
+                finished_at=None,
+                metadata={
+                    **node.metadata,
+                    "resume_reason": "manual_resume",
+                    "previous_status": node.status,
+                },
+            )
+        return resumed_task
+
+    async def retry_node(self, *, task_id: str, node_id: str) -> BeeNodeRecord:
+        await self._require_task(task_id)
+        node = await self._require_node(task_id=task_id, node_id=node_id)
+        if node.status != "failed":
+            raise ValueError("only failed Bee nodes can be retried")
+        now = self._now()
+        attempt_count = _metadata_int(node.metadata, "attempt_count", default=1) + 1
+        return await self._store.update_node_status(
+            task_id=task_id,
+            node_id=node_id,
+            status="pending",
+            run_id=None,
+            updated_at=now,
+            started_at=None,
+            finished_at=None,
+            metadata={
+                **node.metadata,
+                "attempt_count": attempt_count,
+                "previous_status": node.status,
+                "retry_reason": "manual_retry",
+            },
+        )
+
+    async def cancel_task(self, task_id: str) -> BeeTaskRecord:
+        return await self._close_task(task_id, reason="cancelled")
+
+    async def abort_task(
+        self,
+        task_id: str,
+        *,
+        tape: Tape | None = None,
+        topic: TopicRecord | None = None,
+        task_lifecycle: BeeTaskLifecycle | None = None,
+    ) -> BeeTaskRecord:
+        if tape is not None or topic is not None or task_lifecycle is not None:
+            if tape is None or topic is None or task_lifecycle is None:
+                raise ValueError(
+                    "abort anchor requires tape, topic, and task_lifecycle"
+                )
+            task = await self._require_task(task_id)
+            if task.status in {"completed", "cancelled"}:
+                raise ValueError(f"Bee task already terminal: {task.status}")
+            await task_lifecycle.finalize_task(
+                tape=tape,
+                topic=topic,
+                task=replace(task, status="cancelled"),
+                status="cancelled",
+                metadata={"lifecycle_state": "aborted"},
+            )
+        closed = await self._close_task(task_id, reason="aborted")
+        return closed
+
+    async def _close_task(
+        self,
+        task_id: str,
+        *,
+        reason: str,
+    ) -> BeeTaskRecord:
+        task = await self._require_task(task_id)
+        if task.status in {"completed", "cancelled"}:
+            raise ValueError(f"Bee task already terminal: {task.status}")
+        now = self._now()
+        closed = await self._store.update_task_status(
+            task_id,
+            status="cancelled",
+            summary=task.summary,
+            updated_at=now,
+            metadata={**task.metadata, "lifecycle_state": reason},
+        )
+        for node in await self._store.list_nodes(task_id):
+            if node.status == "completed":
+                continue
+            metadata = dict(node.metadata)
+            metadata.setdefault("terminal_reason", closed.status)
+            if node.status == "skipped" and (
+                node.run_id is None and node.started_at is None
+            ):
+                continue
+            await self._store.update_node_status(
+                task_id=node.task_id,
+                node_id=node.node_id,
+                status="skipped",
+                run_id=None,
+                updated_at=now,
+                started_at=None,
+                finished_at=now,
+                metadata=metadata,
+            )
+        return closed
+
+    async def _require_task(self, task_id: str) -> BeeTaskRecord:
+        _require_non_empty("task_id", task_id)
+        task = await self._store.load_task(task_id)
+        if task is None:
+            raise KeyError(f"Bee task not found: {task_id}")
+        return task
+
+    async def _require_node(self, *, task_id: str, node_id: str) -> BeeNodeRecord:
+        _require_non_empty("node_id", node_id)
+        for node in await self._store.list_nodes(task_id):
+            if node.node_id == node_id:
+                return node
+        raise KeyError(f"Bee node not found: {task_id}/{node_id}")
+
+
 def _bind_launch_inputs(
     *,
     provided: JSONObject,
@@ -829,6 +1007,20 @@ def _node_metadata(plan: BeeLaunchPlan, command_ref: str | None) -> JSONObject:
     if command_ref is not None:
         metadata["command_ref"] = command_ref
     return metadata
+
+
+def _metadata_int(
+    metadata: JSONObject,
+    key: str,
+    *,
+    default: int,
+) -> int:
+    value = metadata.get(key)
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    return default
 
 
 def _default_task_id(plan: BeeLaunchPlan, topic: TopicRecord) -> str:

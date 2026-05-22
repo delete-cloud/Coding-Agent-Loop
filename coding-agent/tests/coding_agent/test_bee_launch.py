@@ -10,6 +10,7 @@ import pytest
 from agentkit.tape.tape import Tape
 from coding_agent.bee_launch import (
     BeeInputBinding,
+    BeeTaskLifecycleController,
     BeeLaunchOrchestrator,
     BeeLaunchRecord,
     BeeLaunchRequest,
@@ -17,7 +18,7 @@ from coding_agent.bee_launch import (
     PGBeeLaunchStore,
     build_bee_launch_plan,
 )
-from coding_agent.bee_runtime import BeeNodeRecord, BeeTaskRecord
+from coding_agent.bee_runtime import BeeNodeRecord, BeeTaskLifecycle, BeeTaskRecord
 from coding_agent.topic_lifecycle import TopicLifecycle
 from coding_agent.topic_store import JSONObject, TopicAnchorRecord, TopicRecord
 
@@ -225,6 +226,55 @@ class FakeBeeTaskStore:
             for (row_task_id, _), node in self.nodes.items()
             if row_task_id == task_id
         ]
+
+    async def update_task_status(
+        self,
+        task_id: str,
+        *,
+        status: str,
+        summary: str | None,
+        updated_at: datetime,
+        metadata: JSONObject,
+    ) -> BeeTaskRecord:
+        task = self.tasks.get(task_id)
+        if task is None:
+            raise KeyError(f"Bee task not found: {task_id}")
+        updated = replace(
+            task,
+            status=status,
+            summary=summary,
+            updated_at=updated_at,
+            metadata=metadata,
+        )
+        self.tasks[task_id] = updated
+        return updated
+
+    async def update_node_status(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        status: str,
+        run_id: str | None,
+        updated_at: datetime,
+        started_at: datetime | None,
+        finished_at: datetime | None,
+        metadata: JSONObject,
+    ) -> BeeNodeRecord:
+        node = self.nodes.get((task_id, node_id))
+        if node is None:
+            raise KeyError(f"Bee node not found: {task_id}/{node_id}")
+        updated = replace(
+            node,
+            status=status,
+            run_id=run_id,
+            updated_at=updated_at,
+            started_at=started_at,
+            finished_at=finished_at,
+            metadata=metadata,
+        )
+        self.nodes[(task_id, node_id)] = updated
+        return updated
 
 
 class FakeClock:
@@ -880,6 +930,210 @@ async def test_manual_bee_launch_does_not_execute_command_intents(
     assert nodes[0].metadata["command_ref"] == "shellcheck"
 
 
+@pytest.mark.asyncio
+async def test_bee_task_lifecycle_resume_partially_completed_task() -> None:
+    store = _lifecycle_task_store()
+    controller = BeeTaskLifecycleController(store=store, now=FakeClock())
+
+    result = await controller.resume_task("bee-task-alpha")
+
+    assert result.status == "running"
+    nodes = {node.node_id: node for node in await store.list_nodes("bee-task-alpha")}
+    assert nodes["node-plan"].status == "completed"
+    assert nodes["node-validate"].status == "pending"
+    assert nodes["node-validate"].run_id is None
+    assert nodes["node-validate"].metadata["resume_reason"] == "manual_resume"
+
+
+@pytest.mark.asyncio
+async def test_bee_task_lifecycle_resume_does_not_requeue_ready_node() -> None:
+    store = _lifecycle_task_store()
+    ready = store.nodes[("bee-task-alpha", "node-validate")]
+    store.nodes[("bee-task-alpha", "node-validate")] = replace(
+        ready,
+        status="ready",
+        run_id="run-ready",
+    )
+    controller = BeeTaskLifecycleController(store=store, now=FakeClock())
+
+    await controller.resume_task("bee-task-alpha")
+
+    node = store.nodes[("bee-task-alpha", "node-validate")]
+    assert node.status == "ready"
+    assert node.run_id == "run-ready"
+    assert "resume_reason" not in node.metadata
+
+
+@pytest.mark.asyncio
+async def test_bee_task_lifecycle_duplicate_resume_does_not_duplicate_attempts() -> (
+    None
+):
+    store = _lifecycle_task_store()
+    controller = BeeTaskLifecycleController(store=store, now=FakeClock())
+
+    await controller.resume_task("bee-task-alpha")
+    await controller.resume_task("bee-task-alpha")
+
+    nodes = {node.node_id: node for node in await store.list_nodes("bee-task-alpha")}
+    assert nodes["node-plan"].metadata["attempt_count"] == 1
+    assert nodes["node-validate"].metadata["attempt_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_bee_task_lifecycle_retry_failed_node() -> None:
+    store = _lifecycle_task_store()
+    controller = BeeTaskLifecycleController(store=store, now=FakeClock())
+
+    retried = await controller.retry_node(
+        task_id="bee-task-alpha",
+        node_id="node-validate",
+    )
+
+    assert retried.status == "pending"
+    assert retried.run_id is None
+    assert retried.started_at is None
+    assert retried.finished_at is None
+    assert retried.metadata["attempt_count"] == 3
+    assert retried.metadata["previous_status"] == "failed"
+    assert retried.metadata["evidence_ref"] == "evidence-node-validate"
+
+
+@pytest.mark.asyncio
+async def test_bee_task_lifecycle_retry_completed_node_rejected() -> None:
+    store = _lifecycle_task_store()
+    controller = BeeTaskLifecycleController(store=store, now=FakeClock())
+
+    with pytest.raises(ValueError, match="only failed Bee nodes can be retried"):
+        await controller.retry_node(
+            task_id="bee-task-alpha",
+            node_id="node-plan",
+        )
+
+
+@pytest.mark.asyncio
+async def test_bee_task_lifecycle_cancel_task() -> None:
+    store = _lifecycle_task_store()
+    controller = BeeTaskLifecycleController(store=store, now=FakeClock())
+
+    cancelled = await controller.cancel_task("bee-task-alpha")
+
+    assert cancelled.status == "cancelled"
+    nodes = {node.node_id: node for node in await store.list_nodes("bee-task-alpha")}
+    assert nodes["node-plan"].status == "completed"
+    assert nodes["node-validate"].status == "skipped"
+    assert nodes["node-validate"].run_id is None
+    assert nodes["node-validate"].started_at is None
+    assert nodes["node-validate"].finished_at == _dt(9)
+    assert nodes["node-validate"].metadata["terminal_reason"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_bee_task_lifecycle_cancel_cleans_stale_skipped_run_linkage() -> None:
+    store = _lifecycle_task_store()
+    skipped = store.nodes[("bee-task-alpha", "node-validate")]
+    store.nodes[("bee-task-alpha", "node-validate")] = replace(
+        skipped,
+        status="skipped",
+        run_id="run-stale",
+        started_at=_dt(8),
+        finished_at=None,
+        metadata={"attempt_count": 2},
+    )
+    controller = BeeTaskLifecycleController(store=store, now=FakeClock())
+
+    await controller.cancel_task("bee-task-alpha")
+
+    node = store.nodes[("bee-task-alpha", "node-validate")]
+    assert node.status == "skipped"
+    assert node.run_id is None
+    assert node.started_at is None
+    assert node.finished_at == _dt(9)
+    assert node.metadata["terminal_reason"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_bee_task_lifecycle_abort_partial_anchor_context_rejected_before_close() -> (
+    None
+):
+    store = _lifecycle_task_store()
+    controller = BeeTaskLifecycleController(store=store, now=FakeClock())
+
+    with pytest.raises(ValueError, match="abort anchor requires"):
+        await controller.abort_task("bee-task-alpha", tape=Tape(tape_id="tape-alpha"))
+
+    assert store.tasks["bee-task-alpha"].status == "running"
+    assert store.nodes[("bee-task-alpha", "node-validate")].status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_bee_task_lifecycle_abort_anchor_failure_rejected_before_close() -> None:
+    store = _lifecycle_task_store()
+    topic = TopicRecord(
+        topic_id="topic-alpha",
+        tape_id="tape-alpha",
+        session_id="session-alpha",
+        kind="maintenance",
+        status="open",
+        title="Topic alpha",
+        summary=None,
+        owner=None,
+        topic_initial_seq=0,
+        topic_finalized_seq=None,
+        created_at=_dt(8),
+    )
+    controller = BeeTaskLifecycleController(store=store, now=FakeClock())
+
+    with pytest.raises(RuntimeError, match="anchor unavailable"):
+        await controller.abort_task(
+            "bee-task-alpha",
+            tape=Tape(tape_id="tape-alpha"),
+            topic=topic,
+            task_lifecycle=FailingBeeTaskLifecycle(),  # type: ignore[arg-type]
+        )
+
+    assert store.tasks["bee-task-alpha"].status == "running"
+    assert store.nodes[("bee-task-alpha", "node-validate")].status == "failed"
+    assert store.nodes[("bee-task-alpha", "node-validate")].run_id == "run-validate"
+
+
+@pytest.mark.asyncio
+async def test_bee_task_lifecycle_abort_task_writes_anchor() -> None:
+    store = _lifecycle_task_store()
+    anchor_store = FakeTopicStore()
+    topic = TopicRecord(
+        topic_id="topic-alpha",
+        tape_id="tape-alpha",
+        session_id="session-alpha",
+        kind="maintenance",
+        status="open",
+        title="Topic alpha",
+        summary=None,
+        owner=None,
+        topic_initial_seq=0,
+        topic_finalized_seq=None,
+        created_at=_dt(8),
+    )
+    anchor_store.topics[topic.topic_id] = topic
+    tape = Tape(tape_id="tape-alpha")
+    controller = BeeTaskLifecycleController(store=store, now=FakeClock())
+
+    aborted = await controller.abort_task(
+        "bee-task-alpha",
+        tape=tape,
+        topic=topic,
+        task_lifecycle=BeeTaskLifecycle(anchor_store=anchor_store),
+    )
+
+    assert aborted.status == "cancelled"
+    assert anchor_store.anchors[-1].anchor_type == "bee_task_aborted"
+    assert tape.snapshot()[-1].meta["product_anchor_type"] == "bee_task_aborted"
+
+
+class FailingBeeTaskLifecycle:
+    async def finalize_task(self, **_kwargs: object) -> None:
+        raise RuntimeError("anchor unavailable")
+
+
 def _launch(
     launch_id: str = "launch-1",
     *,
@@ -947,6 +1201,53 @@ def _launch_row(*args: object) -> dict[str, object]:
         "error_message": error_message,
         "metadata": metadata,
     }
+
+
+def _lifecycle_task_store() -> FakeBeeTaskStore:
+    store = FakeBeeTaskStore()
+    now = _dt(9)
+    task = BeeTaskRecord(
+        task_id="bee-task-alpha",
+        topic_id="topic-alpha",
+        session_id="session-alpha",
+        kind="maintenance",
+        profile="local",
+        status="running",
+        title="Lifecycle task",
+        summary=None,
+        created_at=now,
+        updated_at=now,
+        metadata={"launch_source": "manual"},
+    )
+    store.tasks[task.task_id] = task
+    store.nodes[(task.task_id, "node-plan")] = BeeNodeRecord(
+        node_id="node-plan",
+        task_id=task.task_id,
+        kind="analysis",
+        profile="default",
+        status="completed",
+        title="Plan",
+        created_at=now,
+        updated_at=now,
+        finished_at=now,
+        metadata={"attempt_count": 1, "evidence_ref": "evidence-node-plan"},
+    )
+    store.nodes[(task.task_id, "node-validate")] = BeeNodeRecord(
+        node_id="node-validate",
+        task_id=task.task_id,
+        kind="validation",
+        profile="default",
+        status="failed",
+        title="Validate",
+        depends_on=("node-plan",),
+        run_id="run-validate",
+        created_at=now,
+        updated_at=now,
+        started_at=now,
+        finished_at=now,
+        metadata={"attempt_count": 2, "evidence_ref": "evidence-node-validate"},
+    )
+    return store
 
 
 def _dt(hour: int) -> datetime:
