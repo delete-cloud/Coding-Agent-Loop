@@ -7,19 +7,27 @@ tasks, execute nodes, or grant command execution rights.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
+import uuid
+from collections.abc import Callable
+from typing import Protocol
 from typing import Final
 
 from agentkit.storage.pg import AsyncPGPool, PGPool
-from coding_agent.bee_runtime import BeeTaskManifest
+from agentkit.tape.tape import Tape
+from coding_agent.bee_runtime import BeeNodeRecord, BeeTaskManifest, BeeTaskRecord
 from coding_agent.bee_workspace import (
     BeeWorkspaceTemplate,
+    BeeWorkspaceRunArtifacts,
+    BeeWorkspaceRunNode,
     build_bee_manifest_from_workspace_template,
     load_bee_workspace_command_intents,
     load_bee_workspace_template,
+    write_bee_workspace_run_artifacts,
 )
-from coding_agent.topic_store import JSONObject, JSONValue
+from coding_agent.topic_lifecycle import TopicLifecycle
+from coding_agent.topic_store import JSONObject, JSONValue, TopicRecord
 
 BeeLaunchSource = str
 BeeLaunchStatus = str
@@ -100,6 +108,50 @@ _SECRET_VALUE_MARKERS: Final[tuple[str, ...]] = (
     "secret=",
     "token=",
 )
+
+
+class BeeLaunchStore(Protocol):
+    async def create_launch(self, record: BeeLaunchRecord) -> BeeLaunchRecord: ...
+
+    async def update_launch_status(
+        self,
+        launch_id: str,
+        *,
+        status: BeeLaunchStatus,
+        launched_at: datetime | None,
+        finished_at: datetime | None,
+        error_type: str | None,
+        error_message: str | None,
+        metadata: JSONObject,
+    ) -> BeeLaunchRecord: ...
+
+    async def attach_launch_result(
+        self,
+        launch_id: str,
+        *,
+        task_id: str,
+        topic_id: str,
+        session_id: str,
+        launched_at: datetime,
+        metadata: JSONObject,
+    ) -> BeeLaunchRecord: ...
+
+
+class BeeTaskLaunchStore(Protocol):
+    async def upsert_task(self, record: BeeTaskRecord) -> BeeTaskRecord: ...
+
+    async def upsert_node(self, record: BeeNodeRecord) -> BeeNodeRecord: ...
+
+
+class BeeLaunchTopicStore(Protocol):
+    async def load_topic(self, topic_id: str) -> TopicRecord | None: ...
+
+    async def find_open_topic(
+        self,
+        *,
+        session_id: str,
+        tape_id: str,
+    ) -> TopicRecord | None: ...
 
 
 @dataclass(frozen=True)
@@ -219,6 +271,24 @@ class BeeLaunchPlan:
         _require_json_object("topic_policy", self.topic_policy)
         _require_json_object("workspace_policy", self.workspace_policy)
         _require_json_object("metadata", self.metadata)
+
+
+@dataclass(frozen=True)
+class BeeLaunchResult:
+    launch_id: str
+    task_id: str
+    topic_id: str
+    session_id: str
+    source: BeeLaunchSource
+    status: BeeLaunchStatus
+
+    def __post_init__(self) -> None:
+        _require_non_empty("launch_id", self.launch_id)
+        _require_non_empty("task_id", self.task_id)
+        _require_non_empty("topic_id", self.topic_id)
+        _require_non_empty("session_id", self.session_id)
+        _require_status("launch source", self.source, _LAUNCH_SOURCES)
+        _require_status("launch status", self.status, _LAUNCH_STATUSES)
 
 
 class PGBeeLaunchStore:
@@ -503,6 +573,167 @@ def build_bee_launch_plan(request: BeeLaunchRequest) -> BeeLaunchPlan:
     )
 
 
+class BeeLaunchOrchestrator:
+    def __init__(
+        self,
+        *,
+        launch_store: BeeLaunchStore,
+        task_store: BeeTaskLaunchStore,
+        topic_store: BeeLaunchTopicStore,
+        topic_lifecycle: TopicLifecycle,
+        now: Callable[[], datetime] | None = None,
+        task_id_factory: Callable[[BeeLaunchPlan, TopicRecord], str] | None = None,
+    ) -> None:
+        self._launch_store = launch_store
+        self._task_store = task_store
+        self._topic_store = topic_store
+        self._topic_lifecycle = topic_lifecycle
+        self._now = now or (lambda: datetime.now(UTC))
+        self._task_id_factory = task_id_factory or _default_task_id
+
+    async def launch_manual(
+        self,
+        request: BeeLaunchRequest,
+        *,
+        tape: Tape,
+        write_workspace_artifacts: bool = False,
+    ) -> BeeLaunchResult:
+        if request.source != "manual":
+            raise ValueError("manual Bee launch requires source='manual'")
+        plan = build_bee_launch_plan(request)
+        await self._launch_store.create_launch(
+            BeeLaunchRecord(
+                launch_id=plan.launch_id,
+                source=plan.source,
+                template_id=plan.template.template_id,
+                status="planned",
+                requested_at=plan.requested_at,
+                workspace_ref=_workspace_ref(plan),
+                metadata=_launch_record_metadata(plan),
+            )
+        )
+        launch_started_at = self._now()
+        await self._launch_store.update_launch_status(
+            plan.launch_id,
+            status="launching",
+            launched_at=None,
+            finished_at=None,
+            error_type=None,
+            error_message=None,
+            metadata={"phase": "manual_launch"},
+        )
+        topic = await self._resolve_topic(plan, tape=tape)
+        task_id = self._task_id_factory(plan, topic)
+        await self._task_store.upsert_task(
+            BeeTaskRecord(
+                task_id=task_id,
+                topic_id=topic.topic_id,
+                session_id=topic.session_id,
+                kind=plan.manifest.kind,
+                profile=plan.manifest.profile,
+                status="pending",
+                title=plan.manifest.title,
+                summary=plan.manifest.summary,
+                created_at=launch_started_at,
+                updated_at=launch_started_at,
+                metadata={
+                    "template_id": plan.template.template_id,
+                    "launch_id": plan.launch_id,
+                    "launch_source": plan.source,
+                },
+            )
+        )
+        nodes: list[BeeNodeRecord] = []
+        for manifest_node in plan.manifest.nodes:
+            node = BeeNodeRecord(
+                node_id=manifest_node.node_id,
+                task_id=task_id,
+                kind=manifest_node.kind,
+                profile=manifest_node.profile,
+                status="pending",
+                title=manifest_node.title,
+                created_at=launch_started_at,
+                updated_at=launch_started_at,
+                depends_on=manifest_node.depends_on,
+                metadata=_node_metadata(plan, manifest_node.command_ref),
+            )
+            nodes.append(await self._task_store.upsert_node(node))
+        if write_workspace_artifacts:
+            _require_workspace_artifacts_enabled(plan)
+            write_bee_workspace_run_artifacts(
+                plan.template.template_dir.parents[2],
+                BeeWorkspaceRunArtifacts(
+                    task_id=task_id,
+                    template_id=plan.template.template_id,
+                    topic_id=topic.topic_id,
+                    status="pending",
+                    nodes=tuple(
+                        BeeWorkspaceRunNode(
+                            node_id=node.node_id,
+                            status=node.status,
+                        )
+                        for node in nodes
+                    ),
+                    report_title=f"{plan.manifest.title} launch",
+                    report_summary="Manual Bee launch created sanitized task artifacts.",
+                ),
+            )
+        attached = await self._launch_store.attach_launch_result(
+            plan.launch_id,
+            task_id=task_id,
+            topic_id=topic.topic_id,
+            session_id=topic.session_id,
+            launched_at=launch_started_at,
+            metadata={"phase": "task_created", "node_count": len(nodes)},
+        )
+        return BeeLaunchResult(
+            launch_id=attached.launch_id,
+            task_id=task_id,
+            topic_id=topic.topic_id,
+            session_id=topic.session_id,
+            source=attached.source,
+            status=attached.status,
+        )
+
+    async def _resolve_topic(
+        self,
+        plan: BeeLaunchPlan,
+        *,
+        tape: Tape,
+    ) -> TopicRecord:
+        mode = plan.topic_policy.get("mode", "create")
+        if mode == "continue":
+            topic_id = plan.topic_policy.get("topic_id") or plan.manifest.topic.topic_id
+            if isinstance(topic_id, str):
+                topic = await self._topic_store.load_topic(topic_id)
+                if topic is None:
+                    raise KeyError(f"Bee launch topic not found: {topic_id}")
+                if topic.status != "open":
+                    raise ValueError(f"Bee launch topic is not open: {topic_id}")
+                _require_topic_matches_launch(topic=topic, plan=plan, tape=tape)
+                return topic
+            open_topic = await self._topic_store.find_open_topic(
+                session_id=plan.manifest.topic.session_id,
+                tape_id=tape.tape_id,
+            )
+            if open_topic is None:
+                raise KeyError("Bee launch open topic not found")
+            return open_topic
+        if mode == "create":
+            return await self._topic_lifecycle.create_topic(
+                tape=tape,
+                session_id=plan.manifest.topic.session_id,
+                kind=plan.manifest.kind,
+                title=plan.manifest.topic.title_hint or plan.manifest.title,
+                metadata={
+                    "profile": plan.manifest.profile,
+                    "template_id": plan.template.template_id,
+                    "launch_id": plan.launch_id,
+                },
+            )
+        raise ValueError(f"unsupported Bee topic policy mode: {mode}")
+
+
 def _bind_launch_inputs(
     *,
     provided: JSONObject,
@@ -560,6 +791,60 @@ def _input_defaults(value: object) -> JSONObject:
     for key in defaults:
         _require_optional_label("input_name", key)
     return defaults
+
+
+def _workspace_ref(plan: BeeLaunchPlan) -> str | None:
+    value = plan.workspace_policy.get("workspace_ref")
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError("workspace_policy.workspace_ref must be a string")
+    _require_optional_label("workspace_ref", value)
+    return value
+
+
+def _require_workspace_artifacts_enabled(plan: BeeLaunchPlan) -> None:
+    artifact_mode = plan.workspace_policy.get("artifact_mode")
+    if artifact_mode != "enabled":
+        raise ValueError(
+            "workspace artifacts require workspace_policy.artifact_mode='enabled'"
+        )
+
+
+def _launch_record_metadata(plan: BeeLaunchPlan) -> JSONObject:
+    return {
+        "launch_mode": "manual",
+        "template_kind": plan.resolution.template_kind,
+        "template_profile": plan.resolution.template_profile,
+        "input_names": list(sorted(plan.input_binding.inputs)),
+    }
+
+
+def _node_metadata(plan: BeeLaunchPlan, command_ref: str | None) -> JSONObject:
+    metadata: JSONObject = {
+        "template_id": plan.template.template_id,
+        "launch_id": plan.launch_id,
+    }
+    if command_ref is not None:
+        metadata["command_ref"] = command_ref
+    return metadata
+
+
+def _default_task_id(plan: BeeLaunchPlan, topic: TopicRecord) -> str:
+    suffix = uuid.uuid4().hex[:12]
+    return f"bee-task-{plan.template.template_id}-{topic.topic_id}-{suffix}"
+
+
+def _require_topic_matches_launch(
+    *,
+    topic: TopicRecord,
+    plan: BeeLaunchPlan,
+    tape: Tape,
+) -> None:
+    if topic.session_id != plan.manifest.topic.session_id:
+        raise ValueError("Bee launch topic session does not match template")
+    if topic.tape_id != tape.tape_id:
+        raise ValueError("Bee launch topic tape does not match launch tape")
 
 
 def _required_row(

@@ -174,6 +174,56 @@ This ledger tracks G118-G126 for the Bee Launch / Scheduled Bee Task Integration
   - G122 still needs manual launch to create topic/task/task.json through the product surface.
   - Scheduled launch, proactive launch, lifecycle controls, console launch views, and launch metrics remain pending.
 
+## G122_MANUAL_BEE_LAUNCH_API_OR_CLI
+
+### Before
+
+- Goal id: G122_MANUAL_BEE_LAUNCH_API_OR_CLI
+- Intended files:
+  - `docs/bee_launch/GOAL_PROGRESS.md`
+  - `docs/adr/0044-bee-launch-surfaces.md`
+  - `src/coding_agent/bee_launch.py`
+  - `tests/coding_agent/test_bee_launch.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -q`
+  - `uv run pytest tests/coding_agent/test_topic_layer_smoke.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_launch.py tests/coding_agent/test_bee_launch.py`
+  - `uv run ruff check src/coding_agent/bee_launch.py tests/coding_agent/test_bee_launch.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Manual launch service creates a Bee launch record, resolves template/inputs, creates or continues a Topic, creates durable BeeTask/nodes, and optionally writes workspace task.json artifacts.
+  - Manual launch returns launch_id, task_id, topic_id, and status.
+  - Manual launch does not execute nodes, commands.yaml, or arbitrary commands.
+  - Missing template and invalid inputs fail deterministically.
+  - Existing Bee runtime/workspace/topic smoke tests still pass.
+
+### After
+
+- Changed files:
+  - `docs/bee_launch/GOAL_PROGRESS.md`
+  - `docs/adr/0044-bee-launch-surfaces.md`
+  - `src/coding_agent/bee_launch.py`
+  - `tests/coding_agent/test_bee_launch.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -q`
+  - `uv run pytest tests/coding_agent/test_topic_layer_smoke.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_launch.py tests/coding_agent/test_bee_launch.py`
+  - `uv run ruff check src/coding_agent/bee_launch.py tests/coding_agent/test_bee_launch.py`
+  - `git diff --check -- .`
+- Results:
+  - Added `BeeLaunchOrchestrator` and `BeeLaunchResult` as the manual launch product-layer service.
+  - Manual launch creates a durable launch record, resolves template/input binding, creates or continues an open Topic, creates durable BeeTask/node records, attaches launch result IDs, and can write sanitized workspace task artifacts.
+  - Missing templates and invalid inputs fail before durable launch records are created.
+  - Command intent metadata remains non-executing; launched nodes stay pending for the Bee command bridge.
+  - Bee launch, Bee runtime, Bee workspace, and Topic smoke tests passed.
+- Remaining risks:
+  - G123 still needs resume, retry, cancel, and abort lifecycle controls.
+  - Scheduled launch, proactive launch, console launch views, and launch metrics remain pending.
+
 ### Post-Review Label Fix
 
 - Changed files:
