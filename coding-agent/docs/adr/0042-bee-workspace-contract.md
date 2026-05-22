@@ -84,7 +84,7 @@ Define observability and console boundaries:
 
 - [x] `test_bee_workspace_discovers_template_metadata`
 - [x] `test_bee_workspace_rejects_sensitive_template_fields`
-- [ ] `test_bee_workspace_builds_manifest_with_existing_parser`
+- [x] `test_bee_workspace_builds_manifest_with_existing_parser`
 - [ ] `test_bee_workspace_writes_safe_task_json`
 - [ ] `test_bee_workspace_rejects_raw_report_and_memory_candidate_fields`
 - [ ] `test_bee_workspace_commands_yaml_is_non_executing_intent`
