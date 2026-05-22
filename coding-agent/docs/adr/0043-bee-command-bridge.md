@@ -80,14 +80,14 @@ Keep out of scope:
 - [x] `test_bee_command_bridge_returns_approval_required_without_execution`
 - [x] `test_bee_validation_node_uses_validation_runner`
 - [x] `test_bee_node_completion_requires_evidence`
-- [ ] `test_console_bee_command_bridge_renders_safe_execution_summary`
-- [ ] `test_bee_command_bridge_metrics_omit_high_cardinality_ids`
-- [ ] `test_bee_command_bridge_smoke`
-- [ ] `uv run pytest tests/coding_agent/test_bee_runtime.py -v`
-- [ ] `uv run pytest tests/coding_agent/test_bee_workspace.py -v`
-- [ ] `uv run pytest tests/coding_agent/test_bee_command_bridge.py -v`
-- [ ] `uv run pytest tests/ui/test_developer_console.py -v`
-- [ ] `git diff --check -- .`
+- [x] `test_console_bee_command_bridge_renders_safe_execution_summary`
+- [x] `test_bee_command_bridge_metrics_omit_high_cardinality_ids`
+- [x] `test_bee_command_bridge_smoke`
+- [x] `uv run pytest tests/coding_agent/test_bee_runtime.py -v`
+- [x] `uv run pytest tests/coding_agent/test_bee_workspace.py -v`
+- [x] `uv run pytest tests/coding_agent/test_bee_command_bridge.py -v`
+- [x] `uv run pytest tests/ui/test_developer_console.py -v`
+- [x] `git diff --check -- .`
 
 ## References
 

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from agentkit.observability import SpanRecord
 from coding_agent.action_safety import ValidationStatus
 from coding_agent.bee_command_bridge import (
     BeeNodeCompletionEvidence,
@@ -16,6 +17,15 @@ from coding_agent.bee_command_bridge import (
 from coding_agent.bee_workspace import (
     build_bee_manifest_from_workspace_template,
     load_bee_workspace_template,
+)
+from coding_agent.observability import (
+    PrometheusMetricsObservationSink,
+    PrometheusMetricsRecorder,
+)
+from coding_agent.ui.developer_console import (
+    ConsoleBeeCommandIntentSummary,
+    ConsoleBeePage,
+    render_console_bee_page,
 )
 
 
@@ -568,6 +578,154 @@ def test_bee_node_completion_safe_summary_hashes_evidence_ref(
     assert "evidence_ref_hash" in serialized
     assert "python -c" not in serialized
     assert "print-secret" not in serialized
+
+
+def test_console_bee_command_bridge_renders_safe_execution_summary(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    template = _write_template_with_commands(
+        workspace,
+        command_ref="pytest_smoke",
+        intent_status="declared",
+    )
+    manifest = build_bee_manifest_from_workspace_template(template)
+    bridge_result = run_bee_validation_node(
+        template=template,
+        node=manifest.nodes[0],
+        command='python -c "raise SystemExit(0)"',
+        workspace_root=workspace,
+        cwd=workspace,
+    )
+    completion = complete_bee_node_from_bridge_result(
+        node=manifest.nodes[0],
+        bridge_result=bridge_result,
+    )
+
+    html = render_console_bee_page(
+        ConsoleBeePage(
+            tasks=(),
+            nodes=(),
+            commands=(
+                ConsoleBeeCommandIntentSummary(
+                    template_id=template.template_id,
+                    name="pytest_smoke",
+                    profile="validation",
+                    policy="existing_command_policy",
+                    category="validation",
+                    validation_label="pytest_smoke",
+                    status="declared",
+                    bridge_status=bridge_result.status,
+                    approval_route=bridge_result.plan.approval_route.route
+                    if bridge_result.plan.approval_route is not None
+                    else None,
+                    evidence_status=completion.status,
+                ),
+            ),
+        )
+    )
+
+    assert "Bee Workspace Command Intents" in html
+    assert "completed" in html
+    assert "allow" in html
+    for forbidden in (
+        "python -c",
+        "raise SystemExit",
+        "command_output",
+        "stdout",
+        "stderr",
+        "prompt",
+        "message",
+    ):
+        assert forbidden not in html
+
+
+def test_bee_command_bridge_metrics_omit_high_cardinality_ids(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    template = _write_template_with_commands(
+        workspace,
+        command_ref="pytest_smoke",
+        intent_status="declared",
+    )
+    manifest = build_bee_manifest_from_workspace_template(template)
+    bridge_result = run_bee_validation_node(
+        template=template,
+        node=manifest.nodes[0],
+        command='python -c "raise SystemExit(0)"',
+        workspace_root=workspace,
+        cwd=workspace,
+    )
+    completion = complete_bee_node_from_bridge_result(
+        node=manifest.nodes[0],
+        bridge_result=bridge_result,
+    )
+    recorder = PrometheusMetricsRecorder()
+    PrometheusMetricsObservationSink(recorder=recorder).record_span(
+        SpanRecord(
+            name="runtime.stage.dispatch",
+            status="ok",
+            attributes={
+                "node_kind": manifest.nodes[0].kind,
+                "node_profile": manifest.nodes[0].profile,
+                "node_status": completion.status,
+                "command_category": "validation",
+                "command_policy": "existing_command_policy",
+                "command_status": "declared",
+                "task_id": "bee-task-alpha",
+                "node_id": manifest.nodes[0].node_id,
+                "command": "python -c raw",
+            },
+            duration_ms=1,
+        )
+    )
+    metrics = recorder.exposition_text()
+
+    assert 'node_kind="validation"' in metrics
+    assert 'command_category="validation"' in metrics
+    assert 'command_status="declared"' in metrics
+    for forbidden in (
+        "task_id",
+        "node_id",
+        "command=",
+        "bee-task-alpha",
+        "node-validate",
+        "python -c",
+    ):
+        assert forbidden not in metrics
+
+
+def test_bee_command_bridge_smoke(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    template = _write_template_with_commands(
+        workspace,
+        command_ref="pytest_smoke",
+        intent_status="declared",
+    )
+    manifest = build_bee_manifest_from_workspace_template(template)
+
+    bridge_result = run_bee_validation_node(
+        template=template,
+        node=manifest.nodes[0],
+        command='python -c "raise SystemExit(0)"',
+        workspace_root=workspace,
+        cwd=workspace,
+    )
+    completion = complete_bee_node_from_bridge_result(
+        node=manifest.nodes[0],
+        bridge_result=bridge_result,
+    )
+
+    assert bridge_result.status == "completed"
+    assert bridge_result.plan.status == "ready"
+    assert bridge_result.report is not None
+    assert bridge_result.report.status == ValidationStatus.PASSED
+    assert completion.status == "completed"
+    assert completion.will_complete is True
 
 
 def _write_template_with_commands(

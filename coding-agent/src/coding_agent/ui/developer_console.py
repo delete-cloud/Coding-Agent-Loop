@@ -354,6 +354,9 @@ class ConsoleBeeCommandIntentSummary:
     category: str
     validation_label: str | None
     status: str
+    bridge_status: str | None = None
+    approval_route: str | None = None
+    evidence_status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1560,6 +1563,9 @@ def _bee_command_intent_table(
             f"<td>{escape(command.category)}</td>"
             f"<td>{escape(command.validation_label or '-')}</td>"
             f'<td class="status">{escape(command.status)}</td>'
+            f'<td class="status">{escape(command.bridge_status or "-")}</td>'
+            f"<td>{escape(command.approval_route or '-')}</td>"
+            f'<td class="status">{escape(command.evidence_status or "-")}</td>'
             "</tr>"
         )
     return (
@@ -1568,7 +1574,7 @@ def _bee_command_intent_table(
         '<table aria-label="Developer Console Bee workspace command intents">'
         "<thead><tr><th>Template ID</th><th>Name</th><th>Profile</th>"
         "<th>Policy</th><th>Category</th><th>Validation</th>"
-        "<th>Status</th></tr></thead>"
+        "<th>Status</th><th>Bridge</th><th>Approval</th><th>Evidence</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
         "</section>"
