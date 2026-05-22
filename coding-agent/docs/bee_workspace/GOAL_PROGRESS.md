@@ -296,3 +296,66 @@ This ledger tracks G102-G109 for the Bee Workspace Contract / Local Template Dog
 - Remaining risks:
   - `commands.yaml` remains a non-executing contract; future execution must still route through existing action safety gates.
   - G109 still needs final local dogfood smoke documentation and prior smoke verification.
+
+## G109_BEE_WORKSPACE_E2E_SMOKE_AND_DOCS
+
+### Before
+
+- Goal id: G109_BEE_WORKSPACE_E2E_SMOKE_AND_DOCS
+- Intended files:
+  - `docs/bee_workspace/GOAL_PROGRESS.md`
+  - `docs/bee_workspace/USAGE.md`
+  - `docs/bee_workspace/IMPLEMENTATION_REPORT.md`
+  - `docs/adr/0042-bee-workspace-contract.md`
+  - `tests/coding_agent/test_bee_workspace.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -v`
+  - `uv run pytest tests/integration/test_durable_runtime_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+  - `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+  - `uv run pytest tests/coding_agent/evaluation/ -v`
+  - `uv run pytest tests/ui/test_developer_console.py -v`
+  - `uv run pytest tests/coding_agent/test_topic_layer_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_scheduled_runs.py -v`
+  - `uv run pytest tests/coding_agent/test_observability.py tests/coding_agent/test_observability_platform_smoke.py -v`
+  - `uv run ruff format --check tests/coding_agent/test_bee_workspace.py`
+  - `uv run ruff check tests/coding_agent/test_bee_workspace.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Final local dogfood smoke covers template discovery, manifest building, command intent parsing, sanitized run artifact writing/reading, console rendering, and low-cardinality metrics.
+  - Usage and implementation report documents exist.
+  - Prior smoke tests pass where practical.
+  - No new feature work, external executor, hosted service, Docker/Kubernetes/Argo/nmem integration, desktop, bridge, or multi-agent behavior is introduced.
+
+### After
+
+- Changed files:
+  - `docs/bee_workspace/GOAL_PROGRESS.md`
+  - `docs/bee_workspace/USAGE.md`
+  - `docs/bee_workspace/IMPLEMENTATION_REPORT.md`
+  - `docs/adr/0042-bee-workspace-contract.md`
+  - `tests/coding_agent/test_bee_workspace.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -v`
+  - `uv run pytest tests/ui/test_developer_console.py -v`
+  - `uv run pytest tests/integration/test_durable_runtime_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+  - `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+  - `uv run pytest tests/coding_agent/evaluation/ -v`
+  - `uv run pytest tests/coding_agent/test_topic_layer_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_scheduled_runs.py -v`
+  - `uv run pytest tests/coding_agent/test_observability.py tests/coding_agent/test_observability_platform_smoke.py -v`
+  - `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+  - `uv run ruff format --check tests/coding_agent/test_bee_workspace.py`
+  - `uv run ruff check tests/coding_agent/test_bee_workspace.py`
+  - `git diff --check -- .`
+- Results:
+  - Final local dogfood smoke passed and covers template discovery, manifest building, command intent parsing, sanitized artifact writing/reading, console rendering, and metrics no-leak checks.
+  - `docs/bee_workspace/USAGE.md` and `docs/bee_workspace/IMPLEMENTATION_REPORT.md` exist.
+  - Prior durable runtime, context system, action safety, evaluation, Developer Console, Topic, scheduled runs, observability, Bee runtime, and release-manifest smoke checks passed.
+  - Scoped formatting, lint, and whitespace checks passed.
+- Remaining risks:
+  - Workspace `commands.yaml` remains intentionally non-executing.
+  - Future execution integration must route command intents through durable runs/actions, HITL, command policy, workspace policy, validation, and action safety.
