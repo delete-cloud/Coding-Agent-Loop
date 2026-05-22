@@ -3,9 +3,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
+from coding_agent.action_safety import ValidationStatus
 from coding_agent.bee_command_bridge import (
     plan_bee_command_intent,
     resolve_bee_command_intent,
+    run_bee_validation_node,
 )
 from coding_agent.bee_workspace import (
     build_bee_manifest_from_workspace_template,
@@ -232,12 +236,176 @@ def test_bee_command_bridge_safe_summary_omits_intent_metadata(
     assert "build" not in serialized
 
 
+def test_bee_validation_node_uses_validation_runner(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    template = _write_template_with_commands(
+        workspace,
+        command_ref="pytest_smoke",
+        intent_status="declared",
+    )
+    manifest = build_bee_manifest_from_workspace_template(template)
+
+    result = run_bee_validation_node(
+        template=template,
+        node=manifest.nodes[0],
+        command='python -c "raise SystemExit(0)"',
+        workspace_root=workspace,
+        cwd=workspace,
+    )
+
+    assert result.status == "completed"
+    assert result.report is not None
+    assert result.report.status == ValidationStatus.PASSED
+    assert result.report.outcomes[0].label == "pytest_smoke"
+    assert result.report.outcomes[0].policy.decision == "allow"
+    assert result.will_execute is False
+    serialized = json.dumps(result.to_safe_dict(), sort_keys=True)
+    assert "python -c" not in serialized
+    assert "raise SystemExit" not in serialized
+
+
+def test_bee_validation_node_does_not_execute_denied_command(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    marker = workspace / "marker"
+    template = _write_template_with_commands(
+        workspace,
+        command_ref="pytest_smoke",
+        intent_status="declared",
+    )
+    manifest = build_bee_manifest_from_workspace_template(template)
+
+    result = run_bee_validation_node(
+        template=template,
+        node=manifest.nodes[0],
+        command=f'python -c "print(1)" > {marker}',
+        workspace_root=workspace,
+        cwd=workspace,
+    )
+
+    assert result.status == "policy_denied"
+    assert result.report is None
+    assert result.will_execute is False
+    assert not marker.exists()
+
+
+def test_bee_validation_node_does_not_execute_approval_required_command(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    template = _write_template_with_commands(
+        workspace,
+        command_ref="pytest_smoke",
+        intent_status="declared",
+    )
+    manifest = build_bee_manifest_from_workspace_template(template)
+
+    result = run_bee_validation_node(
+        template=template,
+        node=manifest.nodes[0],
+        command="rm -rf build",
+        workspace_root=workspace,
+        cwd=workspace,
+    )
+
+    assert result.status == "approval_required"
+    assert result.report is None
+    assert result.will_execute is False
+
+
+def test_bee_validation_runner_rejects_non_validation_node(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    template = _write_template_with_commands(
+        workspace,
+        command_ref="pytest_smoke",
+        intent_status="declared",
+        node_kind="analysis",
+        intent_category="analysis",
+        validation_label=None,
+    )
+    manifest = build_bee_manifest_from_workspace_template(template)
+
+    result = run_bee_validation_node(
+        template=template,
+        node=manifest.nodes[0],
+        command="pytest -q",
+        workspace_root=workspace,
+        cwd=workspace,
+    )
+
+    assert result.status == "not_validation_node"
+    assert result.report is None
+    assert result.will_execute is False
+
+
+def test_bee_validation_runner_rejects_non_validation_node_with_validation_intent(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    marker = workspace / "marker"
+    template = _write_template_with_commands(
+        workspace,
+        command_ref="pytest_smoke",
+        intent_status="declared",
+        node_kind="analysis",
+        intent_category="validation",
+    )
+    manifest = build_bee_manifest_from_workspace_template(template)
+
+    result = run_bee_validation_node(
+        template=template,
+        node=manifest.nodes[0],
+        command=f'python -c "from pathlib import Path; Path({str(marker)!r}).touch()"',
+        workspace_root=workspace,
+        cwd=workspace,
+    )
+
+    assert result.status == "not_validation_node"
+    assert result.report is None
+    assert result.will_execute is False
+    assert not marker.exists()
+
+
+def test_bee_validation_runner_preserves_local_only_validation_policy(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    template = _write_template_with_commands(
+        workspace,
+        command_ref="pytest_smoke",
+        intent_status="declared",
+    )
+    manifest = build_bee_manifest_from_workspace_template(template)
+
+    with pytest.raises(ValueError, match="local execution"):
+        run_bee_validation_node(
+            template=template,
+            node=manifest.nodes[0],
+            command="pytest -q",
+            workspace_root="/workspace",
+            cwd="/workspace",
+            environment_kind="cloud",
+        )
+
+
 def _write_template_with_commands(
     tmp_path: Path,
     *,
     command_ref: str | None,
     intent_status: str,
     metadata_owner: str = "local",
+    node_kind: str = "validation",
+    intent_category: str = "validation",
+    validation_label: str | None = "pytest_smoke",
 ):
     template_dir = tmp_path / ".bee" / "templates" / "template-alpha"
     feature_dir = template_dir / "features"
@@ -259,7 +427,7 @@ def _write_template_with_commands(
         "workspace_policy: local",
         "nodes:",
         "  - node_id: node-validate",
-        "    kind: validation",
+        f"    kind: {node_kind}",
         "    profile: smoke",
         "    title: Run smoke validation",
     ]
@@ -274,20 +442,24 @@ def _write_template_with_commands(
         "Feature: safe local template\n",
         encoding="utf-8",
     )
+    command_lines = [
+        "commands:",
+        "  - name: pytest_smoke",
+        "    profile: validation",
+        "    policy: existing_command_policy",
+        f"    category: {intent_category}",
+    ]
+    if validation_label is not None:
+        command_lines.append(f"    validation_label: {validation_label}")
+    command_lines.extend(
+        [
+            f"    status: {intent_status}",
+            "    metadata:",
+            f"      owner: {metadata_owner}",
+        ]
+    )
     (template_dir / "commands.yaml").write_text(
-        "\n".join(
-            [
-                "commands:",
-                "  - name: pytest_smoke",
-                "    profile: validation",
-                "    policy: existing_command_policy",
-                "    category: validation",
-                "    validation_label: pytest_smoke",
-                f"    status: {intent_status}",
-                "    metadata:",
-                f"      owner: {metadata_owner}",
-            ]
-        ),
+        "\n".join(command_lines),
         encoding="utf-8",
     )
     return load_bee_workspace_template(tmp_path, "template-alpha")

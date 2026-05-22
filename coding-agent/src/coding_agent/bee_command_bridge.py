@@ -21,6 +21,11 @@ from coding_agent.action_safety.command_policy import (
     EnvironmentKind,
     evaluate_command_policy,
 )
+from coding_agent.action_safety.validation_runner import (
+    ValidationCommandSpec,
+    ValidationReport,
+    ValidationRunner,
+)
 from coding_agent.bee_runtime import BeeNodeManifest
 from coding_agent.bee_workspace import (
     BeeWorkspaceCommandIntent,
@@ -41,6 +46,15 @@ BeeCommandIntentPlanStatus = Literal[
     "missing_command_ref",
     "unknown_command_ref",
     "disabled_intent",
+]
+BeeValidationBridgeStatus = Literal[
+    "completed",
+    "not_validation_node",
+    "missing_command_ref",
+    "unknown_command_ref",
+    "disabled_intent",
+    "policy_denied",
+    "approval_required",
 ]
 
 
@@ -86,6 +100,24 @@ class BeeCommandIntentPlan:
             payload["policy"] = self.policy.to_safe_dict()
         if self.approval_route is not None:
             payload["approval_route"] = self.approval_route.to_safe_dict()
+        return payload
+
+
+@dataclass(frozen=True)
+class BeeValidationBridgeResult:
+    status: BeeValidationBridgeStatus
+    plan: BeeCommandIntentPlan
+    report: ValidationReport | None = None
+    will_execute: bool = False
+
+    def to_safe_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "status": self.status,
+            "plan": self.plan.to_safe_dict(),
+            "will_execute": self.will_execute,
+        }
+        if self.report is not None:
+            payload["validation_report"] = self.report.to_safe_dict()
         return payload
 
 
@@ -192,6 +224,62 @@ def plan_bee_command_intent(
         resolution=resolution,
         policy=policy,
         approval_route=approval_route,
+    )
+
+
+def run_bee_validation_node(
+    *,
+    template: BeeWorkspaceTemplate,
+    node: BeeNodeManifest,
+    command: str,
+    workspace_root: Path | str,
+    cwd: Path | str | None = None,
+    environment_kind: EnvironmentKind = "local",
+    timeout_seconds: int = 120,
+    runner: ValidationRunner | None = None,
+) -> BeeValidationBridgeResult:
+    """Run a validation Bee node through the existing validation runner."""
+
+    resolution = resolve_bee_command_intent(template=template, node=node)
+    if node.kind != "validation":
+        return BeeValidationBridgeResult(
+            status="not_validation_node",
+            plan=BeeCommandIntentPlan(status=resolution.status, resolution=resolution),
+        )
+    plan = plan_bee_command_intent(
+        template=template,
+        node=node,
+        command=command,
+        workspace_root=workspace_root,
+        cwd=cwd,
+        environment_kind=environment_kind,
+        timeout_seconds=timeout_seconds,
+    )
+    if plan.status != "ready":
+        return BeeValidationBridgeResult(status=plan.status, plan=plan)
+    intent = plan.resolution.intent
+    if intent is None:
+        raise ValueError("ready Bee validation plan is missing intent metadata")
+    if intent.category != "validation":
+        return BeeValidationBridgeResult(status="not_validation_node", plan=plan)
+
+    validation_runner = runner if runner is not None else ValidationRunner()
+    report = validation_runner.run(
+        [
+            ValidationCommandSpec(
+                label=intent.validation_label or intent.name,
+                command=command,
+                cwd=cwd,
+                timeout_seconds=timeout_seconds,
+            )
+        ],
+        workspace_root=workspace_root,
+        environment_kind=environment_kind,
+    )
+    return BeeValidationBridgeResult(
+        status="completed",
+        plan=plan,
+        report=report,
     )
 
 
