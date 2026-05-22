@@ -311,3 +311,57 @@ This ledger tracks G110-G117 for the Bee Command Intent Execution Bridge / Local
 - Remaining risks:
   - G117 still needs console/metrics/docs/final smoke for the command bridge.
   - Completion decisions are product-layer decisions and do not directly mutate durable Bee node status in this goal.
+
+## G117_BEE_COMMAND_BRIDGE_FINAL_SMOKE_AND_REPORT
+
+### Before
+
+- Goal id: G117_BEE_COMMAND_BRIDGE_FINAL_SMOKE_AND_REPORT
+- Intended files:
+  - `docs/bee_command_bridge/GOAL_PROGRESS.md`
+  - `docs/bee_command_bridge/IMPLEMENTATION_REPORT.md`
+  - `docs/adr/0043-bee-command-bridge.md`
+  - `src/coding_agent/ui/developer_console.py`
+  - `tests/coding_agent/test_bee_command_bridge.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_bee_command_bridge.py -v`
+  - `uv run pytest tests/coding_agent/action_safety/test_validation_runner.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -q`
+  - `uv run pytest tests/ui/test_developer_console.py -q`
+  - `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_command_bridge.py tests/coding_agent/test_bee_command_bridge.py src/coding_agent/ui/developer_console.py`
+  - `uv run ruff check src/coding_agent/bee_command_bridge.py tests/coding_agent/test_bee_command_bridge.py src/coding_agent/ui/developer_console.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Final smoke covers resolver, policy plan, validation execution, evidence completion, console rendering, and metrics no-leak checks.
+  - `docs/bee_command_bridge/IMPLEMENTATION_REPORT.md` exists.
+  - Prior Bee/action/console checks still pass.
+
+### After
+
+- Changed files:
+  - `docs/bee_command_bridge/GOAL_PROGRESS.md`
+  - `docs/bee_command_bridge/IMPLEMENTATION_REPORT.md`
+  - `docs/adr/0043-bee-command-bridge.md`
+  - `src/coding_agent/ui/developer_console.py`
+  - `tests/coding_agent/test_bee_command_bridge.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_command_bridge.py -v`
+  - `uv run pytest tests/coding_agent/action_safety/test_validation_runner.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -q`
+  - `uv run pytest tests/ui/test_developer_console.py -q`
+  - `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_command_bridge.py tests/coding_agent/test_bee_command_bridge.py src/coding_agent/ui/developer_console.py`
+  - `uv run ruff check src/coding_agent/bee_command_bridge.py tests/coding_agent/test_bee_command_bridge.py src/coding_agent/ui/developer_console.py`
+  - `git diff --check -- .`
+- Results:
+  - Final command bridge smoke covers resolver, policy planning, validation execution, evidence completion, console rendering, and metrics no-leak checks.
+  - Developer Console Bee command intent rows can render bridge, approval, and evidence status.
+  - Prometheus smoke confirms Bee command bridge data uses low-cardinality labels and omits task IDs, node IDs, and raw command strings.
+  - Implementation report exists.
+  - Prior Bee/action/console checks passed.
+- Remaining risks:
+  - This phase does not add external executors, Docker, Kubernetes, Argo, desktop, bridge app, or multi-agent execution.
+  - Durable Bee node status persistence remains the responsibility of existing Bee runtime callers.
