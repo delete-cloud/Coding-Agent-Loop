@@ -37,20 +37,28 @@ _FORBIDDEN_METADATA_KEY_PARTS: Final[frozenset[str]] = frozenset(
     {
         "api_key",
         "apikey",
+        "args",
+        "argv",
         "bearer",
+        "cmd",
         "command",
+        "commands",
         "command_output",
         "content",
         "credential",
         "credentials",
         "env",
         "environment",
+        "exec",
+        "executor",
         "key",
         "message",
         "password",
         "prompt",
         "result",
+        "script",
         "secret",
+        "shell",
         "stderr",
         "stdout",
         "text",
@@ -438,6 +446,9 @@ def build_bee_launch_plan(request: BeeLaunchRequest) -> BeeLaunchPlan:
         raise ValueError(
             f"Bee launch workspace must be a directory: {request.workspace_root}"
         )
+    bee_root = request.workspace_root / ".bee"
+    if bee_root.is_symlink():
+        raise ValueError(f"Bee launch .bee root must not be a symlink: {bee_root}")
     template = load_bee_workspace_template(
         request.workspace_root,
         request.template_id,

@@ -394,6 +394,62 @@ def test_bee_launch_plan_rejects_missing_workspace(tmp_path: Path) -> None:
         )
 
 
+def test_bee_launch_plan_rejects_symlinked_bee_root(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    outside_root = tmp_path / "outside"
+    _write_template(outside_root, template_id="template-alpha")
+    (workspace_root / ".bee").symlink_to(
+        outside_root / ".bee", target_is_directory=True
+    )
+
+    with pytest.raises(ValueError, match="Bee launch .bee root must not be a symlink"):
+        build_bee_launch_plan(
+            BeeLaunchRequest(
+                launch_id="launch-1",
+                source="manual",
+                template_id="template-alpha",
+                workspace_root=workspace_root,
+                inputs={"region": "us-test-1"},
+                requested_at=_dt(9),
+            )
+        )
+
+
+def test_bee_launch_request_rejects_executable_shaped_input_values() -> None:
+    with pytest.raises(ValueError, match="forbidden metadata key"):
+        BeeLaunchRequest(
+            launch_id="launch-1",
+            source="manual",
+            template_id="template-alpha",
+            workspace_root=Path("."),
+            inputs={"region": {"cmd": "status"}},
+            requested_at=_dt(9),
+        )
+
+
+def test_bee_launch_plan_rejects_executable_shaped_template_defaults(
+    tmp_path: Path,
+) -> None:
+    _write_template(
+        tmp_path,
+        template_id="template-alpha",
+        input_defaults_extra="    script: status\n",
+    )
+
+    with pytest.raises(ValueError, match="forbidden executable field"):
+        build_bee_launch_plan(
+            BeeLaunchRequest(
+                launch_id="launch-1",
+                source="manual",
+                template_id="template-alpha",
+                workspace_root=tmp_path,
+                inputs={"region": "us-test-1"},
+                requested_at=_dt(9),
+            )
+        )
+
+
 def test_bee_launch_request_rejects_unsafe_inputs_and_policy() -> None:
     with pytest.raises(ValueError, match="forbidden metadata key"):
         BeeLaunchRequest(
@@ -494,6 +550,7 @@ def _write_template(
     *,
     template_id: str,
     metadata_extra: str = "",
+    input_defaults_extra: str = "",
 ) -> None:
     template_dir = workspace_root / ".bee" / "templates" / template_id
     feature_dir = template_dir / "features"
@@ -513,6 +570,7 @@ def _write_template(
                 "    - region",
                 "  defaults:",
                 "    severity: low",
+                input_defaults_extra.rstrip(),
                 "nodes:",
                 "  - node_id: node-plan",
                 "    kind: analysis",

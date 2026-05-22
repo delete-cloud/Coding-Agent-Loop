@@ -173,3 +173,24 @@ This ledger tracks G118-G126 for the Bee Launch / Scheduled Bee Task Integration
 - Remaining risks:
   - G122 still needs manual launch to create topic/task/task.json through the product surface.
   - Scheduled launch, proactive launch, lifecycle controls, console launch views, and launch metrics remain pending.
+
+### Post-Review Safety Fix
+
+- Changed files:
+  - `docs/bee_launch/GOAL_PROGRESS.md`
+  - `src/coding_agent/bee_launch.py`
+  - `tests/coding_agent/test_bee_launch.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_launch.py tests/coding_agent/test_bee_launch.py`
+  - `uv run ruff check src/coding_agent/bee_launch.py tests/coding_agent/test_bee_launch.py`
+  - `git diff --check -- .`
+- Results:
+  - Rejected symlinked workspace `.bee` roots before resolving templates.
+  - Extended launch input/policy JSON validation to reject executable-shaped keys such as `cmd`, `args`, `argv`, `exec`, `executor`, `script`, and `shell`.
+  - Added regression coverage for symlinked `.bee` roots, nested executable-shaped request inputs, and executable-shaped template defaults.
+- Remaining risks:
+  - G122 still needs manual launch to create topic/task/task.json through the product surface.
+  - Scheduled launch, proactive launch, lifecycle controls, console launch views, and launch metrics remain pending.
