@@ -40,3 +40,40 @@ This ledger tracks G118-G126 for the Bee Launch / Scheduled Bee Task Integration
 - Remaining risks:
   - G119 still needs ADR-backed launch boundaries.
   - No launch model, store, manual launch, scheduled launch, proactive launch, lifecycle controls, console launch view, or launch metrics exist yet.
+
+## G119_BEE_LAUNCH_ADR
+
+### Before
+
+- Goal id: G119_BEE_LAUNCH_ADR
+- Intended files:
+  - `docs/bee_launch/GOAL_PROGRESS.md`
+  - `docs/adr/0044-bee-launch-surfaces.md`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_bee_command_bridge.py -q`
+  - `uv run pytest tests/coding_agent/test_scheduled_runs.py -q`
+  - `git diff --check -- .`
+- Stop criteria:
+  - ADR exists and is accepted.
+  - It defines Bee launch request/plan/source/policy/template/input/topic/workspace/result boundaries.
+  - It states launch creates or continues Topic, creates durable BeeTask and task.json when enabled, does not execute arbitrary commands, schedules/signals cannot bypass safety policy, and external executors are deferred.
+  - No production code changes are made.
+
+### After
+
+- Changed files:
+  - `docs/bee_launch/GOAL_PROGRESS.md`
+  - `docs/adr/0044-bee-launch-surfaces.md`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_command_bridge.py -q`
+  - `uv run pytest tests/coding_agent/test_scheduled_runs.py -q`
+  - `git diff --check -- .`
+- Results:
+  - ADR-0044 exists and is accepted.
+  - It defines Bee launch sources, request, template resolution, input binding, topic/workspace/launch policy, launch plan, launch result, durable records, console/observability boundaries, and deferred work.
+  - Bee command bridge and scheduled run baselines passed.
+  - Whitespace diff check passed.
+  - Production code unchanged.
+- Remaining risks:
+  - G120 still needs durable launch records and store APIs.
+  - Launch planning, manual/scheduled/proactive launch flows, lifecycle controls, console launch views, and launch metrics remain pending.
