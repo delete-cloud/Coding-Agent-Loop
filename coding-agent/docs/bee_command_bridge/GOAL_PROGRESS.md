@@ -116,3 +116,49 @@ This ledger tracks G110-G117 for the Bee Command Intent Execution Bridge / Local
 - Remaining risks:
   - G113 still needs the non-executing bridge resolver.
   - No command intent execution occurs yet.
+
+## G113_BEE_COMMAND_INTENT_RESOLVER
+
+### Before
+
+- Goal id: G113_BEE_COMMAND_INTENT_RESOLVER
+- Intended files:
+  - `docs/bee_command_bridge/GOAL_PROGRESS.md`
+  - `docs/adr/0043-bee-command-bridge.md`
+  - `src/coding_agent/bee_command_bridge.py`
+  - `tests/coding_agent/test_bee_command_bridge.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_bee_command_bridge.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_command_bridge.py tests/coding_agent/test_bee_command_bridge.py`
+  - `uv run ruff check src/coding_agent/bee_command_bridge.py tests/coding_agent/test_bee_command_bridge.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Bridge resolver can resolve a Bee node `command_ref` to a declared workspace command intent.
+  - Missing, unknown, or disabled command refs fail closed.
+  - Resolver does not execute commands or grant permissions.
+  - Existing Bee runtime and workspace behavior remains compatible.
+
+### After
+
+- Changed files:
+  - `docs/bee_command_bridge/GOAL_PROGRESS.md`
+  - `docs/adr/0043-bee-command-bridge.md`
+  - `src/coding_agent/bee_command_bridge.py`
+  - `tests/coding_agent/test_bee_command_bridge.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_command_bridge.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_command_bridge.py tests/coding_agent/test_bee_command_bridge.py`
+  - `uv run ruff check src/coding_agent/bee_command_bridge.py tests/coding_agent/test_bee_command_bridge.py`
+  - `git diff --check -- .`
+- Results:
+  - Command bridge resolver resolves declared workspace command intents without execution.
+  - Missing, unknown, and disabled intents fail closed with explicit statuses.
+  - Bee runtime and Bee workspace regression tests passed.
+  - Scoped formatting, lint, and whitespace checks passed after formatting one new test file.
+- Remaining risks:
+  - G114 still needs command policy denial/approval-required bridge decisions.
+  - No command execution, validation execution, evidence completion, console, or metrics integration occurs yet.
