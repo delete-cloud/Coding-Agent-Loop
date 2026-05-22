@@ -65,6 +65,29 @@ _FORBIDDEN_METADATA_KEY_PARTS: Final[frozenset[str]] = frozenset(
         "token",
     }
 )
+_FORBIDDEN_LABEL_VALUE_PARTS: Final[frozenset[str]] = frozenset(
+    {
+        "api_key",
+        "apikey",
+        "bearer",
+        "command_output",
+        "content",
+        "credential",
+        "credentials",
+        "env",
+        "environment",
+        "key",
+        "message",
+        "password",
+        "prompt",
+        "result",
+        "secret",
+        "stderr",
+        "stdout",
+        "text",
+        "token",
+    }
+)
 _SECRET_VALUE_MARKERS: Final[tuple[str, ...]] = (
     "-----begin ",
     "akia",
@@ -589,7 +612,7 @@ def _require_optional_label(field_name: str, value: str | None) -> None:
             f"{field_name} must be at most {_MAX_SAFE_LABEL_CHARS} characters"
         )
     folded = value.casefold()
-    if any(part in folded for part in _FORBIDDEN_METADATA_KEY_PARTS):
+    if any(part in folded for part in _FORBIDDEN_LABEL_VALUE_PARTS):
         raise ValueError(f"{field_name} must not contain sensitive label text")
     _reject_secret_shaped_value(field_name, value)
 

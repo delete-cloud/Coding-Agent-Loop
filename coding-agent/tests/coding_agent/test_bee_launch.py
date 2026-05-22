@@ -450,6 +450,45 @@ def test_bee_launch_plan_rejects_executable_shaped_template_defaults(
         )
 
 
+def test_bee_launch_plan_accepts_safe_command_intent_names_with_tool_words(
+    tmp_path: Path,
+) -> None:
+    _write_template(tmp_path, template_id="template-alpha")
+    commands_path = tmp_path / ".bee" / "templates" / "template-alpha" / "commands.yaml"
+    commands_path.write_text(
+        "\n".join(
+            [
+                "commands:",
+                "  - name: shellcheck",
+                "    profile: lint",
+                "    policy: local_readonly",
+                "    category: validation",
+                "  - name: exec-validation",
+                "    profile: lint",
+                "    policy: local_readonly",
+                "    category: validation",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    plan = build_bee_launch_plan(
+        BeeLaunchRequest(
+            launch_id="launch-1",
+            source="manual",
+            template_id="template-alpha",
+            workspace_root=tmp_path,
+            inputs={"region": "us-test-1"},
+            requested_at=_dt(9),
+        )
+    )
+
+    assert plan.resolution.command_intent_names == (
+        "shellcheck",
+        "exec-validation",
+    )
+
+
 def test_bee_launch_request_rejects_unsafe_inputs_and_policy() -> None:
     with pytest.raises(ValueError, match="forbidden metadata key"):
         BeeLaunchRequest(
