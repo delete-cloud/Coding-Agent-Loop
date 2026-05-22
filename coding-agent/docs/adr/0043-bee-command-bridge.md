@@ -76,8 +76,8 @@ Keep out of scope:
 - [x] `test_bee_node_manifest_accepts_safe_command_ref`
 - [x] `test_bee_manifest_rejects_executable_fields`
 - [x] `test_bee_command_bridge_resolves_declared_intent_without_executing_yaml`
-- [ ] `test_bee_command_bridge_denies_policy_blocked_intent`
-- [ ] `test_bee_command_bridge_returns_approval_required_without_execution`
+- [x] `test_bee_command_bridge_denies_policy_blocked_intent`
+- [x] `test_bee_command_bridge_returns_approval_required_without_execution`
 - [ ] `test_bee_validation_node_uses_validation_runner`
 - [ ] `test_bee_node_completion_requires_evidence`
 - [ ] `test_console_bee_command_bridge_renders_safe_execution_summary`

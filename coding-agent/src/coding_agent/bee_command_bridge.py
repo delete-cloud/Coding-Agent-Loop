@@ -7,8 +7,20 @@ It does not execute commands or grant policy permissions.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 from typing import Literal
 
+from coding_agent.action_safety.approval_routing import (
+    ActionApprovalRoute,
+    ActionApprovalRoutingResult,
+    route_command_action,
+)
+from coding_agent.action_safety.command_policy import (
+    CommandPolicyVerdict,
+    EnvironmentKind,
+    evaluate_command_policy,
+)
 from coding_agent.bee_runtime import BeeNodeManifest
 from coding_agent.bee_workspace import (
     BeeWorkspaceCommandIntent,
@@ -18,6 +30,14 @@ from coding_agent.bee_workspace import (
 
 BeeCommandIntentResolutionStatus = Literal[
     "resolved",
+    "missing_command_ref",
+    "unknown_command_ref",
+    "disabled_intent",
+]
+BeeCommandIntentPlanStatus = Literal[
+    "ready",
+    "policy_denied",
+    "approval_required",
     "missing_command_ref",
     "unknown_command_ref",
     "disabled_intent",
@@ -33,6 +53,40 @@ class BeeCommandIntentResolution:
     intent: BeeWorkspaceCommandIntent | None = None
     reason: str | None = None
     will_execute: bool = False
+
+    def to_safe_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "status": self.status,
+            "template_id": self.template_id,
+            "node_id": self.node_id,
+            "command_ref": self.command_ref,
+            "reason": self.reason,
+            "will_execute": self.will_execute,
+        }
+        if self.intent is not None:
+            payload["intent"] = _intent_safe_dict(self.intent)
+        return payload
+
+
+@dataclass(frozen=True)
+class BeeCommandIntentPlan:
+    status: BeeCommandIntentPlanStatus
+    resolution: BeeCommandIntentResolution
+    policy: CommandPolicyVerdict | None = None
+    approval_route: ActionApprovalRoutingResult | None = None
+    will_execute: bool = False
+
+    def to_safe_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "status": self.status,
+            "resolution": self.resolution.to_safe_dict(),
+            "will_execute": self.will_execute,
+        }
+        if self.policy is not None:
+            payload["policy"] = self.policy.to_safe_dict()
+        if self.approval_route is not None:
+            payload["approval_route"] = self.approval_route.to_safe_dict()
+        return payload
 
 
 def resolve_bee_command_intent(
@@ -79,5 +133,74 @@ def resolve_bee_command_intent(
         node_id=node.node_id,
         command_ref=command_ref,
         intent=intent,
-        reason="command_ref resolved to workspace intent metadata",
+        reason="command_ref resolved to workspace intent",
     )
+
+
+def plan_bee_command_intent(
+    *,
+    template: BeeWorkspaceTemplate,
+    node: BeeNodeManifest,
+    command: str,
+    workspace_root: Path | str,
+    cwd: Path | str | None = None,
+    environment_kind: EnvironmentKind = "local",
+    timeout_seconds: int = 120,
+) -> BeeCommandIntentPlan:
+    """Evaluate a resolved Bee command intent through existing policy gates.
+
+    The command candidate is supplied by the caller and is never read from
+    commands.yaml. This function only returns a policy plan; it never executes.
+    """
+
+    resolution = resolve_bee_command_intent(template=template, node=node)
+    if resolution.status != "resolved":
+        return BeeCommandIntentPlan(status=resolution.status, resolution=resolution)
+
+    intent = resolution.intent
+    if intent is None:
+        raise ValueError("resolved Bee command intent is missing intent metadata")
+    policy = evaluate_command_policy(
+        command,
+        environment_kind=environment_kind,
+        workspace_root=workspace_root,
+        cwd=cwd,
+        timeout_seconds=timeout_seconds,
+        validation_command=(
+            node.kind == "validation"
+            or intent.category == "validation"
+            or intent.profile == "validation"
+        ),
+    )
+    approval_route = route_command_action(policy)
+    if approval_route.route == ActionApprovalRoute.DENY:
+        return BeeCommandIntentPlan(
+            status="policy_denied",
+            resolution=resolution,
+            policy=policy,
+            approval_route=approval_route,
+        )
+    if approval_route.route == ActionApprovalRoute.APPROVAL_REQUIRED:
+        return BeeCommandIntentPlan(
+            status="approval_required",
+            resolution=resolution,
+            policy=policy,
+            approval_route=approval_route,
+        )
+    return BeeCommandIntentPlan(
+        status="ready",
+        resolution=resolution,
+        policy=policy,
+        approval_route=approval_route,
+    )
+
+
+def _intent_safe_dict(intent: BeeWorkspaceCommandIntent) -> dict[str, Any]:
+    return {
+        "name": intent.name,
+        "profile": intent.profile,
+        "policy": intent.policy,
+        "category": intent.category,
+        "validation_label": intent.validation_label,
+        "status": intent.status,
+    }

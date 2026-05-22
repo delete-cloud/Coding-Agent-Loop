@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
-from coding_agent.bee_command_bridge import resolve_bee_command_intent
+from coding_agent.bee_command_bridge import (
+    plan_bee_command_intent,
+    resolve_bee_command_intent,
+)
 from coding_agent.bee_workspace import (
     build_bee_manifest_from_workspace_template,
     load_bee_workspace_template,
@@ -105,11 +109,135 @@ def test_bee_command_bridge_fails_closed_for_disabled_intent(
     assert resolution.will_execute is False
 
 
+def test_bee_command_bridge_denies_policy_blocked_intent(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    template = _write_template_with_commands(
+        workspace,
+        command_ref="pytest_smoke",
+        intent_status="declared",
+    )
+    manifest = build_bee_manifest_from_workspace_template(template)
+
+    plan = plan_bee_command_intent(
+        template=template,
+        node=manifest.nodes[0],
+        command="echo hello && rm -rf /",
+        workspace_root=workspace,
+        cwd=workspace,
+    )
+
+    assert plan.status == "policy_denied"
+    assert plan.policy is not None
+    assert plan.policy.decision == "deny"
+    assert plan.approval_route is not None
+    assert plan.approval_route.route == "deny"
+    assert plan.will_execute is False
+    safe_payload = plan.to_safe_dict()
+    serialized = json.dumps(safe_payload, sort_keys=True)
+    assert safe_payload["policy"]["decision"] == "deny"
+    assert "echo hello" not in serialized
+    assert "rm -rf" not in serialized
+
+
+def test_bee_command_bridge_returns_approval_required_without_execution(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    template = _write_template_with_commands(
+        workspace,
+        command_ref="pytest_smoke",
+        intent_status="declared",
+    )
+    manifest = build_bee_manifest_from_workspace_template(template)
+
+    plan = plan_bee_command_intent(
+        template=template,
+        node=manifest.nodes[0],
+        command="rm -rf build",
+        workspace_root=workspace,
+        cwd=workspace,
+    )
+
+    assert plan.status == "approval_required"
+    assert plan.policy is not None
+    assert plan.policy.decision == "approval_required"
+    assert plan.approval_route is not None
+    assert plan.approval_route.route == "approval_required"
+    assert plan.will_execute is False
+    safe_payload = plan.to_safe_dict()
+    serialized = json.dumps(safe_payload, sort_keys=True)
+    assert safe_payload["approval_route"]["route"] == "approval_required"
+    assert "rm -rf" not in serialized
+    assert "build" not in serialized
+
+
+def test_bee_command_bridge_ready_plan_still_does_not_execute(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    template = _write_template_with_commands(
+        workspace,
+        command_ref="pytest_smoke",
+        intent_status="declared",
+    )
+    manifest = build_bee_manifest_from_workspace_template(template)
+
+    plan = plan_bee_command_intent(
+        template=template,
+        node=manifest.nodes[0],
+        command="pytest -q",
+        workspace_root=workspace,
+        cwd=workspace,
+    )
+
+    assert plan.status == "ready"
+    assert plan.policy is not None
+    assert plan.policy.decision == "allow"
+    assert plan.approval_route is not None
+    assert plan.approval_route.route == "allow"
+    assert plan.will_execute is False
+
+
+def test_bee_command_bridge_safe_summary_omits_intent_metadata(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    template = _write_template_with_commands(
+        workspace,
+        command_ref="pytest_smoke",
+        intent_status="declared",
+        metadata_owner="rm -rf build",
+    )
+    manifest = build_bee_manifest_from_workspace_template(template)
+
+    plan = plan_bee_command_intent(
+        template=template,
+        node=manifest.nodes[0],
+        command="pytest -q",
+        workspace_root=workspace,
+        cwd=workspace,
+    )
+
+    assert plan.resolution.intent is not None
+    assert plan.resolution.intent.metadata == {"owner": "rm -rf build"}
+    serialized = json.dumps(plan.to_safe_dict(), sort_keys=True)
+    assert "metadata" not in serialized
+    assert "rm -rf" not in serialized
+    assert "build" not in serialized
+
+
 def _write_template_with_commands(
     tmp_path: Path,
     *,
     command_ref: str | None,
     intent_status: str,
+    metadata_owner: str = "local",
 ):
     template_dir = tmp_path / ".bee" / "templates" / "template-alpha"
     feature_dir = template_dir / "features"
@@ -157,7 +285,7 @@ def _write_template_with_commands(
                 "    validation_label: pytest_smoke",
                 f"    status: {intent_status}",
                 "    metadata:",
-                "      owner: local",
+                f"      owner: {metadata_owner}",
             ]
         ),
         encoding="utf-8",
