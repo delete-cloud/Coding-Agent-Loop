@@ -321,9 +321,48 @@ class ConsoleBeeNodeSummary:
 
 
 @dataclass(frozen=True)
+class ConsoleBeeTemplateSummary:
+    template_id: str
+    kind: str
+    profile: str
+    title: str
+    feature_count: int
+    has_commands: bool
+    command_count: int
+
+
+@dataclass(frozen=True)
+class ConsoleBeeRunArtifactSummary:
+    task_id: str
+    template_id: str
+    topic_id: str
+    status: str
+    node_count: int
+    run_count: int
+    action_count: int
+    validation_count: int
+    has_report: bool
+    has_memory_candidates: bool
+
+
+@dataclass(frozen=True)
+class ConsoleBeeCommandIntentSummary:
+    template_id: str
+    name: str
+    profile: str
+    policy: str
+    category: str
+    validation_label: str | None
+    status: str
+
+
+@dataclass(frozen=True)
 class ConsoleBeePage:
     tasks: tuple[ConsoleBeeTaskSummary, ...]
     nodes: tuple[ConsoleBeeNodeSummary, ...]
+    templates: tuple[ConsoleBeeTemplateSummary, ...] = ()
+    run_artifacts: tuple[ConsoleBeeRunArtifactSummary, ...] = ()
+    commands: tuple[ConsoleBeeCommandIntentSummary, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -659,6 +698,9 @@ def render_console_bee_page(page_summary: ConsoleBeePage) -> str:
         f'<p class="lede">{escape(page.description)}</p>'
         f"{_bee_task_table(page_summary.tasks)}"
         f"{_bee_node_table(page_summary.nodes)}"
+        f"{_bee_template_table(page_summary.templates)}"
+        f"{_bee_run_artifact_table(page_summary.run_artifacts)}"
+        f"{_bee_command_intent_table(page_summary.commands)}"
     )
     return _html_document(title=page.title, body=body, active_path=page.path)
 
@@ -1424,6 +1466,109 @@ def _bee_node_table(nodes: tuple[ConsoleBeeNodeSummary, ...]) -> str:
         "<th>Kind</th><th>Profile</th><th>Status</th><th>Context</th>"
         "<th>Validation</th><th>Workspace Policy</th><th>Approval Policy</th>"
         "<th>Action Policy</th><th>Workspace Binding</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+        "</section>"
+    )
+
+
+def _bee_template_table(templates: tuple[ConsoleBeeTemplateSummary, ...]) -> str:
+    if not templates:
+        return _empty_state(
+            "Bee Workspace Templates",
+            "No data loaded yet. No workspace Bee templates are available.",
+        )
+    rows = []
+    for template in templates:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(template.template_id)}</td>"
+            f"<td>{escape(template.kind)}</td>"
+            f"<td>{escape(template.profile)}</td>"
+            f"<td>{escape(template.title)}</td>"
+            f"<td>{template.feature_count}</td>"
+            f"<td>{'yes' if template.has_commands else 'no'}</td>"
+            f"<td>{template.command_count}</td>"
+            "</tr>"
+        )
+    return (
+        '<section aria-label="Bee workspace templates">'
+        "<h2>Bee Workspace Templates</h2>"
+        '<table aria-label="Developer Console Bee workspace templates">'
+        "<thead><tr><th>Template ID</th><th>Kind</th><th>Profile</th>"
+        "<th>Title</th><th>Features</th><th>Commands File</th>"
+        "<th>Command Intents</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+        "</section>"
+    )
+
+
+def _bee_run_artifact_table(
+    artifacts: tuple[ConsoleBeeRunArtifactSummary, ...],
+) -> str:
+    if not artifacts:
+        return _empty_state(
+            "Bee Workspace Run Artifacts",
+            "No data loaded yet. No workspace Bee run artifacts are available.",
+        )
+    rows = []
+    for artifact in artifacts:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(artifact.task_id)}</td>"
+            f"<td>{escape(artifact.template_id)}</td>"
+            f"<td>{escape(artifact.topic_id)}</td>"
+            f'<td class="status">{escape(artifact.status)}</td>'
+            f"<td>{artifact.node_count}</td>"
+            f"<td>{artifact.run_count}</td>"
+            f"<td>{artifact.action_count}</td>"
+            f"<td>{artifact.validation_count}</td>"
+            f"<td>{'yes' if artifact.has_report else 'no'}</td>"
+            f"<td>{'yes' if artifact.has_memory_candidates else 'no'}</td>"
+            "</tr>"
+        )
+    return (
+        '<section aria-label="Bee workspace run artifacts">'
+        "<h2>Bee Workspace Run Artifacts</h2>"
+        '<table aria-label="Developer Console Bee workspace run artifacts">'
+        "<thead><tr><th>Task ID</th><th>Template ID</th><th>Topic ID</th>"
+        "<th>Status</th><th>Nodes</th><th>Runs</th><th>Actions</th>"
+        "<th>Validations</th><th>Report</th><th>Memory Candidates</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+        "</section>"
+    )
+
+
+def _bee_command_intent_table(
+    commands: tuple[ConsoleBeeCommandIntentSummary, ...],
+) -> str:
+    if not commands:
+        return _empty_state(
+            "Bee Workspace Command Intents",
+            "No data loaded yet. No workspace Bee command intents are available.",
+        )
+    rows = []
+    for command in commands:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(command.template_id)}</td>"
+            f"<td>{escape(command.name)}</td>"
+            f"<td>{escape(command.profile)}</td>"
+            f"<td>{escape(command.policy)}</td>"
+            f"<td>{escape(command.category)}</td>"
+            f"<td>{escape(command.validation_label or '-')}</td>"
+            f'<td class="status">{escape(command.status)}</td>'
+            "</tr>"
+        )
+    return (
+        '<section aria-label="Bee workspace command intents">'
+        "<h2>Bee Workspace Command Intents</h2>"
+        '<table aria-label="Developer Console Bee workspace command intents">'
+        "<thead><tr><th>Template ID</th><th>Name</th><th>Profile</th>"
+        "<th>Policy</th><th>Category</th><th>Validation</th>"
+        "<th>Status</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
         "</section>"

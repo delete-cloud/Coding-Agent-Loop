@@ -55,6 +55,7 @@ _FORBIDDEN_PROMETHEUS_LABELS = frozenset(
         "schedule_id",
         "session_id",
         "signal_id",
+        "template_id",
         "node_id",
         "task_id",
         "trace_id",
@@ -94,6 +95,11 @@ _PROMETHEUS_ALLOWED_ATTRIBUTE_LABELS = frozenset(
         "task_kind",
         "task_profile",
         "task_status",
+        "template_kind",
+        "template_profile",
+        "command_category",
+        "command_policy",
+        "command_status",
         "tool_name",
         "node_kind",
         "node_profile",
@@ -200,6 +206,11 @@ _PROMETHEUS_LABEL_VALUE_ALLOWLISTS = {
     "task_status": frozenset(
         {"pending", "running", "completed", "failed", "cancelled"}
     ),
+    "template_kind": frozenset({"maintenance", "unknown"}),
+    "template_profile": frozenset({"ci", "demo", "local", "unknown"}),
+    "command_category": frozenset({"analysis", "report", "validation", "unknown"}),
+    "command_policy": frozenset({"existing_command_policy", "unknown"}),
+    "command_status": frozenset({"declared", "disabled", "unknown"}),
     "node_kind": frozenset({"analysis", "report", "validation", "unknown"}),
     "node_profile": frozenset({"ci", "demo", "default", "local", "unknown"}),
     "node_status": frozenset(

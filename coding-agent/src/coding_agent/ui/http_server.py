@@ -30,6 +30,14 @@ from agentkit.result.reducers import result_from_turn_trace
 from agentkit.tape.extract import TurnTrace, extract_turns
 from agentkit.tape.tape import Tape
 from coding_agent.approval import ApprovalPolicy
+from coding_agent.bee_workspace import (
+    BeeWorkspaceCommandIntent,
+    BeeWorkspaceRunArtifactRecord,
+    BeeWorkspaceTemplate,
+    discover_bee_workspace_run_artifacts,
+    discover_bee_workspace_templates,
+    load_bee_workspace_command_intents,
+)
 from coding_agent.runtime_store import (
     AgentRunRecord,
     RunMessageSnapshotRecord,
@@ -82,7 +90,10 @@ from coding_agent.ui.developer_console import (
     ConsoleActionValidationSummary,
     ConsoleBeeNodeSummary,
     ConsoleBeePage,
+    ConsoleBeeCommandIntentSummary,
+    ConsoleBeeRunArtifactSummary,
     ConsoleBeeTaskSummary,
+    ConsoleBeeTemplateSummary,
     ConsoleCorrelationSummary,
     ConsoleContextEvidence,
     ConsoleContextSectionSummary,
@@ -306,6 +317,10 @@ def _load_server_config() -> dict[str, Any]:
 
 def _load_observability_config() -> dict[str, Any]:
     return _load_agent_config_section("observability")
+
+
+def _load_bee_workspace_config() -> dict[str, Any]:
+    return _load_agent_config_section("bee_workspace")
 
 
 def _prometheus_metrics_enabled() -> bool:
@@ -3331,9 +3346,150 @@ async def _console_bee_page(auth_context: AuthContext | None) -> ConsoleBeePage:
             node_count=current.node_count + 1,
             run_count=current.run_count + (1 if node.run_id else 0),
         )
+    can_view_workspace_artifacts = _can_view_global_console_artifacts(auth_context)
     return ConsoleBeePage(
         tasks=tuple(sorted(tasks_by_id.values(), key=lambda item: item.task_id)),
         nodes=tuple(sorted(nodes, key=lambda item: (item.task_id, item.node_id))),
+        templates=(
+            _console_bee_workspace_template_summaries()
+            if can_view_workspace_artifacts
+            else ()
+        ),
+        run_artifacts=(
+            _console_bee_workspace_run_artifact_summaries()
+            if can_view_workspace_artifacts
+            else ()
+        ),
+        commands=(
+            _console_bee_workspace_command_summaries()
+            if can_view_workspace_artifacts
+            else ()
+        ),
+    )
+
+
+def _can_view_global_console_artifacts(auth_context: AuthContext | None) -> bool:
+    return auth_context is None or auth_context.scope == "admin"
+
+
+def _console_bee_workspace_root() -> Path | None:
+    config = _load_bee_workspace_config()
+    root = config.get("workspace_root")
+    if not isinstance(root, str) or not root.strip():
+        return None
+    return Path(root).expanduser().resolve()
+
+
+def _console_bee_workspace_templates() -> tuple[BeeWorkspaceTemplate, ...]:
+    workspace_root = _console_bee_workspace_root()
+    if workspace_root is None:
+        return ()
+    try:
+        return tuple(discover_bee_workspace_templates(workspace_root))
+    except (OSError, ValueError, TypeError, FileNotFoundError) as exc:
+        logger.warning(
+            "Console Bee workspace template discovery failed; rendering empty summaries",
+            exc_info=exc,
+        )
+        return ()
+
+
+def _console_bee_workspace_template_summaries() -> tuple[
+    ConsoleBeeTemplateSummary, ...
+]:
+    summaries = []
+    for template in _console_bee_workspace_templates():
+        intents = _safe_bee_workspace_command_intents(template)
+        summaries.append(
+            ConsoleBeeTemplateSummary(
+                template_id=template.template_id,
+                kind=safe_label_value(template.metadata.get("kind")) or "unknown",
+                profile=safe_label_value(template.metadata.get("profile")) or "unknown",
+                title=safe_label_value(template.metadata.get("title")) or "untitled",
+                feature_count=len(template.feature_paths),
+                has_commands=template.commands_path is not None,
+                command_count=len(intents),
+            )
+        )
+    return tuple(sorted(summaries, key=lambda item: item.template_id))
+
+
+def _console_bee_workspace_run_artifact_summaries() -> tuple[
+    ConsoleBeeRunArtifactSummary, ...
+]:
+    workspace_root = _console_bee_workspace_root()
+    if workspace_root is None:
+        return ()
+    try:
+        records = discover_bee_workspace_run_artifacts(workspace_root)
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+        FileNotFoundError,
+        json.JSONDecodeError,
+    ) as exc:
+        logger.warning(
+            "Console Bee workspace run artifact discovery failed; rendering empty summaries",
+            exc_info=exc,
+        )
+        return ()
+    return tuple(_console_bee_run_artifact_summary(record) for record in records)
+
+
+def _console_bee_run_artifact_summary(
+    record: BeeWorkspaceRunArtifactRecord,
+) -> ConsoleBeeRunArtifactSummary:
+    return ConsoleBeeRunArtifactSummary(
+        task_id=record.task_id,
+        template_id=record.template_id,
+        topic_id=record.topic_id,
+        status=record.status,
+        node_count=record.node_count,
+        run_count=record.run_count,
+        action_count=record.action_count,
+        validation_count=record.validation_count,
+        has_report=record.has_report,
+        has_memory_candidates=record.has_memory_candidates,
+    )
+
+
+def _console_bee_workspace_command_summaries() -> tuple[
+    ConsoleBeeCommandIntentSummary, ...
+]:
+    summaries = []
+    for template in _console_bee_workspace_templates():
+        for intent in _safe_bee_workspace_command_intents(template):
+            summaries.append(_console_bee_command_summary(template.template_id, intent))
+    return tuple(sorted(summaries, key=lambda item: (item.template_id, item.name)))
+
+
+def _safe_bee_workspace_command_intents(
+    template: BeeWorkspaceTemplate,
+) -> tuple[BeeWorkspaceCommandIntent, ...]:
+    try:
+        return load_bee_workspace_command_intents(template)
+    except (OSError, ValueError, TypeError) as exc:
+        logger.warning(
+            "Console Bee workspace command intent discovery failed for %s",
+            template.template_id,
+            exc_info=exc,
+        )
+        return ()
+
+
+def _console_bee_command_summary(
+    template_id: str,
+    intent: BeeWorkspaceCommandIntent,
+) -> ConsoleBeeCommandIntentSummary:
+    return ConsoleBeeCommandIntentSummary(
+        template_id=template_id,
+        name=intent.name,
+        profile=intent.profile,
+        policy=intent.policy,
+        category=intent.category,
+        validation_label=intent.validation_label,
+        status=intent.status,
     )
 
 

@@ -237,3 +237,62 @@ This ledger tracks G102-G109 for the Bee Workspace Contract / Local Template Dog
 - Remaining risks:
   - G108 still needs console/observability summaries for workspace templates, run artifacts, and command intents.
   - Any future command execution still must route through existing action safety gates.
+
+## G108_BEE_WORKSPACE_CONSOLE_AND_OBSERVABILITY
+
+### Before
+
+- Goal id: G108_BEE_WORKSPACE_CONSOLE_AND_OBSERVABILITY
+- Intended files:
+  - `docs/bee_workspace/GOAL_PROGRESS.md`
+  - `docs/adr/0042-bee-workspace-contract.md`
+  - `src/coding_agent/bee_workspace.py`
+  - `src/coding_agent/observability.py`
+  - `src/coding_agent/ui/developer_console.py`
+  - `src/coding_agent/ui/http_server.py`
+  - `tests/coding_agent/test_bee_workspace.py`
+  - `tests/coding_agent/test_observability.py`
+  - `tests/ui/test_developer_console.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -v`
+  - `uv run pytest tests/coding_agent/test_observability.py -v`
+  - `uv run pytest tests/ui/test_developer_console.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_workspace.py src/coding_agent/observability.py src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/coding_agent/test_bee_workspace.py tests/coding_agent/test_observability.py tests/ui/test_developer_console.py`
+  - `uv run ruff check src/coding_agent/bee_workspace.py src/coding_agent/observability.py src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/coding_agent/test_bee_workspace.py tests/coding_agent/test_observability.py tests/ui/test_developer_console.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Developer Console Bee page can render workspace template summaries, run artifact summaries, and non-executing command intent summaries.
+  - Prometheus metrics allow only low-cardinality Bee workspace labels and reject `template_id`/task/node identifiers.
+  - Console rendering does not expose raw prompt/content/message/result/secret/text/command output/stdout/stderr/env.
+  - No command executor, external service, hosted credential, Docker, Argo, nmem, AgentKit Core, or action-safety bypass is introduced.
+
+### After
+
+- Changed files:
+  - `docs/bee_workspace/GOAL_PROGRESS.md`
+  - `docs/adr/0042-bee-workspace-contract.md`
+  - `src/coding_agent/bee_workspace.py`
+  - `src/coding_agent/observability.py`
+  - `src/coding_agent/ui/developer_console.py`
+  - `src/coding_agent/ui/http_server.py`
+  - `tests/coding_agent/test_bee_workspace.py`
+  - `tests/coding_agent/test_observability.py`
+  - `tests/ui/test_developer_console.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -v`
+  - `uv run pytest tests/coding_agent/test_observability.py -v`
+  - `uv run pytest tests/ui/test_developer_console.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_workspace.py src/coding_agent/observability.py src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/coding_agent/test_bee_workspace.py tests/coding_agent/test_observability.py tests/ui/test_developer_console.py`
+  - `uv run ruff check src/coding_agent/bee_workspace.py src/coding_agent/observability.py src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/coding_agent/test_bee_workspace.py tests/coding_agent/test_observability.py tests/ui/test_developer_console.py`
+  - `git diff --check -- .`
+- Results:
+  - Workspace template, run artifact, and command intent summaries render on the Developer Console Bee page.
+  - Workspace-backed Bee artifact summaries are hidden from user-scoped console tokens and visible only to admin/local console contexts.
+  - Bee workspace metrics expose only low-cardinality template/command labels and omit `template_id`, task IDs, node IDs, run IDs, session IDs, and topic IDs.
+  - Bee workspace, observability, console, and Bee runtime focused tests passed.
+  - Scoped formatting, lint, and whitespace checks passed.
+- Remaining risks:
+  - `commands.yaml` remains a non-executing contract; future execution must still route through existing action safety gates.
+  - G109 still needs final local dogfood smoke documentation and prior smoke verification.
