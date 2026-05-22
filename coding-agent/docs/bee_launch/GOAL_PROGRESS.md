@@ -77,3 +77,51 @@ This ledger tracks G118-G126 for the Bee Launch / Scheduled Bee Task Integration
 - Remaining risks:
   - G120 still needs durable launch records and store APIs.
   - Launch planning, manual/scheduled/proactive launch flows, lifecycle controls, console launch views, and launch metrics remain pending.
+
+## G120_BEE_LAUNCH_MODEL_AND_STORE
+
+### Before
+
+- Goal id: G120_BEE_LAUNCH_MODEL_AND_STORE
+- Intended files:
+  - `docs/bee_launch/GOAL_PROGRESS.md`
+  - `docs/adr/0044-bee-launch-surfaces.md`
+  - `src/coding_agent/bee_launch.py`
+  - `tests/coding_agent/test_bee_launch.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run pytest tests/coding_agent/test_scheduled_runs.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_launch.py tests/coding_agent/test_bee_launch.py`
+  - `uv run ruff check src/coding_agent/bee_launch.py tests/coding_agent/test_bee_launch.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Durable Bee launch record model exists with manual, schedule, and proactive signal sources.
+  - Store can create, load, list, update status, attach task/topic/session, and link schedule/signal identifiers.
+  - Schema initialization is idempotent and does not mutate existing Bee task, schedule, or topic semantics.
+  - Store APIs are tested with deterministic fake/local storage.
+  - Launch records do not create tasks or execute nodes.
+
+### After
+
+- Changed files:
+  - `docs/bee_launch/GOAL_PROGRESS.md`
+  - `docs/adr/0044-bee-launch-surfaces.md`
+  - `src/coding_agent/bee_launch.py`
+  - `tests/coding_agent/test_bee_launch.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run pytest tests/coding_agent/test_scheduled_runs.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_launch.py tests/coding_agent/test_bee_launch.py`
+  - `uv run ruff check src/coding_agent/bee_launch.py tests/coding_agent/test_bee_launch.py`
+  - `git diff --check -- .`
+- Results:
+  - Added `BeeLaunchRecord` with manual, schedule, and proactive signal sources plus planned, launching, launched, failed, and cancelled statuses.
+  - Added `PGBeeLaunchStore` with idempotent schema initialization, create/load/list/status-update/result-attach APIs, and schedule/signal linkage fields.
+  - Added deterministic fake-pool tests for schema idempotency, CRUD/list behavior, status updates, task/topic/session attach, schedule/signal links, no-leak validation, and missing-row failures.
+  - Bee runtime and scheduled run regression tests passed.
+  - Scoped format/lint and whitespace diff checks passed.
+- Remaining risks:
+  - G121 still needs template resolution and input binding.
+  - Manual launch, scheduled launch, proactive launch, lifecycle controls, console launch views, and launch metrics remain pending.
