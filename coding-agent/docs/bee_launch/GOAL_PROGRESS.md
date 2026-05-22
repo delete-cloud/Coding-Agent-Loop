@@ -125,3 +125,51 @@ This ledger tracks G118-G126 for the Bee Launch / Scheduled Bee Task Integration
 - Remaining risks:
   - G121 still needs template resolution and input binding.
   - Manual launch, scheduled launch, proactive launch, lifecycle controls, console launch views, and launch metrics remain pending.
+
+## G121_BEE_TEMPLATE_RESOLUTION_AND_INPUT_BINDING
+
+### Before
+
+- Goal id: G121_BEE_TEMPLATE_RESOLUTION_AND_INPUT_BINDING
+- Intended files:
+  - `docs/bee_launch/GOAL_PROGRESS.md`
+  - `docs/adr/0044-bee-launch-surfaces.md`
+  - `src/coding_agent/bee_launch.py`
+  - `tests/coding_agent/test_bee_launch.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_launch.py tests/coding_agent/test_bee_launch.py`
+  - `uv run ruff check src/coding_agent/bee_launch.py tests/coding_agent/test_bee_launch.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Launch request and plan models exist for template resolution/input binding.
+  - Template resolution uses workspace-local `.bee/templates` and existing Bee workspace parsers.
+  - Required/default inputs, unknown input policy, workspace policy, and topic policy are validated safely.
+  - Invalid or missing templates and unsafe inputs fail deterministically.
+  - No BeeTask is created and no node/command execution occurs.
+
+### After
+
+- Changed files:
+  - `docs/bee_launch/GOAL_PROGRESS.md`
+  - `docs/adr/0044-bee-launch-surfaces.md`
+  - `src/coding_agent/bee_launch.py`
+  - `tests/coding_agent/test_bee_launch.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_launch.py tests/coding_agent/test_bee_launch.py`
+  - `uv run ruff check src/coding_agent/bee_launch.py tests/coding_agent/test_bee_launch.py`
+  - `git diff --check -- .`
+- Results:
+  - Added `BeeLaunchRequest`, `BeeTemplateResolution`, `BeeInputBinding`, and `BeeLaunchPlan`.
+  - `build_bee_launch_plan()` resolves workspace-local `.bee/templates` through existing Bee workspace parsing and manifest validation.
+  - Launch input binding validates required inputs, applies defaults, rejects unknown inputs by default, validates workspace existence, and rejects unsafe input/policy metadata.
+  - The launch plan path does not create Bee tasks, write artifacts, or execute commands.
+  - Bee launch, workspace, and runtime tests passed.
+- Remaining risks:
+  - G122 still needs manual launch to create topic/task/task.json through the product surface.
+  - Scheduled launch, proactive launch, lifecycle controls, console launch views, and launch metrics remain pending.

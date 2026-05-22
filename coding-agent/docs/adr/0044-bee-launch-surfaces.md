@@ -140,8 +140,8 @@ Keep deferred:
 
 - [x] `test_bee_launch_store_schema_is_idempotent`
 - [x] `test_bee_launch_store_create_load_list_update_and_attach`
-- [ ] `test_bee_launch_plan_resolves_workspace_template`
-- [ ] `test_bee_launch_plan_rejects_missing_template`
+- [x] `test_bee_launch_plan_resolves_workspace_template`
+- [x] `test_bee_launch_plan_rejects_missing_template`
 - [ ] `test_manual_bee_launch_creates_topic_task_and_artifact`
 - [ ] `test_bee_task_lifecycle_resume_retry_cancel_abort`
 - [ ] `test_scheduled_bee_launch_creates_task_and_links_schedule`
