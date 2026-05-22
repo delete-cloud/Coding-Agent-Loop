@@ -108,3 +108,46 @@ This ledger tracks G102-G109 for the Bee Workspace Contract / Local Template Dog
 - Remaining risks:
   - G105 still needs the explicit template-to-manifest builder API.
   - `commands.yaml` is only detected as a path in G104; its safe non-executing contract parser remains G107.
+
+## G105_BEE_WORKSPACE_MANIFEST_BUILDER
+
+### Before
+
+- Goal id: G105_BEE_WORKSPACE_MANIFEST_BUILDER
+- Intended files:
+  - `docs/bee_workspace/GOAL_PROGRESS.md`
+  - `docs/adr/0042-bee-workspace-contract.md`
+  - `src/coding_agent/bee_workspace.py`
+  - `tests/coding_agent/test_bee_workspace.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_workspace.py tests/coding_agent/test_bee_workspace.py`
+  - `uv run ruff check src/coding_agent/bee_workspace.py tests/coding_agent/test_bee_workspace.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Workspace templates can be converted to the existing `BeeTaskManifest` object without introducing a second manifest model.
+  - `template_id` is recorded only as safe manifest metadata.
+  - Template-to-manifest conversion preserves existing Bee parser validation and no-leak rules.
+  - No run artifact writer, command parser/executor, external service, or AgentKit Core change is introduced.
+
+### After
+
+- Changed files:
+  - `docs/bee_workspace/GOAL_PROGRESS.md`
+  - `docs/adr/0042-bee-workspace-contract.md`
+  - `src/coding_agent/bee_workspace.py`
+  - `tests/coding_agent/test_bee_workspace.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_workspace.py tests/coding_agent/test_bee_workspace.py`
+  - `uv run ruff check src/coding_agent/bee_workspace.py tests/coding_agent/test_bee_workspace.py`
+  - `git diff --check -- .`
+- Results:
+  - Workspace template-to-manifest builder tests passed.
+  - Bee runtime baseline passed.
+  - Scoped formatting, lint, and whitespace checks passed.
+- Remaining risks:
+  - G106 still needs safe `.bee/runs/<task>/task.json` and report artifact writing.
+  - `commands.yaml` remains path-only until the G107 non-executing contract parser.

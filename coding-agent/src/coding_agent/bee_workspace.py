@@ -14,7 +14,7 @@ from typing import Final, cast
 
 import yaml
 
-from coding_agent.bee_runtime import parse_bee_task_manifest
+from coding_agent.bee_runtime import BeeTaskManifest, parse_bee_task_manifest
 from coding_agent.topic_store import JSONObject
 
 _BEE_DIR: Final[str] = ".bee"
@@ -89,6 +89,18 @@ def load_bee_workspace_template(
     if not template_dir.is_dir():
         raise FileNotFoundError(f"Bee template not found: {template_id}")
     return _load_template_dir(template_dir, templates_root=templates_root)
+
+
+def build_bee_manifest_from_workspace_template(
+    template: BeeWorkspaceTemplate,
+) -> BeeTaskManifest:
+    """Build the existing Bee manifest shape from a workspace template."""
+
+    metadata = dict(template.metadata)
+    manifest_metadata = dict(metadata.get("metadata", {}))
+    manifest_metadata["template_id"] = template.template_id
+    metadata["metadata"] = manifest_metadata
+    return parse_bee_task_manifest(metadata)
 
 
 def _templates_root(workspace_root: Path) -> Path:

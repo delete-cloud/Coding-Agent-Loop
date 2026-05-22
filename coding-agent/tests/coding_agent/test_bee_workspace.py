@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from coding_agent.bee_workspace import (
+    build_bee_manifest_from_workspace_template,
     discover_bee_workspace_templates,
     load_bee_workspace_template,
 )
@@ -93,6 +94,21 @@ def test_bee_workspace_loads_json_metadata(tmp_path: Path) -> None:
     assert template.template_id == "json-template"
     assert template.metadata_path == template_dir / "metadata.json"
     assert template.commands_path is None
+
+
+def test_bee_workspace_builds_manifest_with_existing_parser(tmp_path: Path) -> None:
+    template_dir = tmp_path / ".bee" / "templates" / "template-alpha"
+    _write_safe_template(template_dir, template_id="template-alpha")
+
+    template = load_bee_workspace_template(tmp_path, "template-alpha")
+    manifest = build_bee_manifest_from_workspace_template(template)
+
+    assert manifest.kind == "maintenance"
+    assert manifest.profile == "local"
+    assert manifest.title == "Local template"
+    assert manifest.topic.session_id == "session-alpha"
+    assert manifest.nodes[0].node_id == "node-plan"
+    assert manifest.metadata["template_id"] == "template-alpha"
 
 
 @pytest.mark.parametrize(
