@@ -34,17 +34,59 @@ _SAFE_TEMPLATE_ID_RE: Final[re.Pattern[str]] = re.compile(
 )
 _FORBIDDEN_ARTIFACT_KEY_PARTS: Final[frozenset[str]] = frozenset(
     {
+        "api_key",
+        "apikey",
+        "args",
+        "argv",
+        "cmd",
+        "command",
         "command_output",
+        "credential",
+        "credentials",
         "content",
         "env",
+        "environment",
+        "exec",
+        "executor",
+        "bearer",
+        "key",
         "message",
         "password",
         "prompt",
         "result",
+        "script",
         "secret",
+        "shell",
         "stderr",
         "stdout",
         "text",
+        "token",
+    }
+)
+_COMPACT_FORBIDDEN_ARTIFACT_KEY_PARTS: Final[frozenset[str]] = frozenset(
+    {
+        "api_key",
+        "apikey",
+        "args",
+        "argv",
+        "cmd",
+        "command",
+        "command_output",
+        "credential",
+        "credentials",
+        "env",
+        "environment",
+        "exec",
+        "executor",
+        "bearer",
+        "key",
+        "password",
+        "prompt",
+        "script",
+        "secret",
+        "shell",
+        "stderr",
+        "stdout",
         "token",
     }
 )
@@ -490,15 +532,27 @@ def _validate_artifact_json(path: str, value: object) -> None:
 
 
 def _reject_forbidden_artifact_key(path: str, key: str) -> None:
-    normalized = key.strip().replace("-", "_").lower()
+    normalized = _normalize_artifact_key(key)
+    compact = re.sub(r"[^a-z0-9]", "", key.lower())
     for forbidden in _FORBIDDEN_ARTIFACT_KEY_PARTS:
+        compact_forbidden = re.sub(r"[^a-z0-9]", "", forbidden)
         if (
             normalized == forbidden
             or normalized.startswith(f"{forbidden}_")
             or normalized.endswith(f"_{forbidden}")
             or f"_{forbidden}_" in normalized
+            or (
+                forbidden in _COMPACT_FORBIDDEN_ARTIFACT_KEY_PARTS
+                and compact_forbidden in compact
+            )
         ):
             raise ValueError(f"{path}.{key} uses forbidden sensitive field")
+
+
+def _normalize_artifact_key(key: str) -> str:
+    with_separators = key.strip().replace("-", "_")
+    with_separators = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", with_separators)
+    return with_separators.lower()
 
 
 def _require_safe_report_value(name: str, value: str) -> None:

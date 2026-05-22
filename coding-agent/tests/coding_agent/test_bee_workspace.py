@@ -108,6 +108,32 @@ def test_bee_workspace_commands_yaml_is_non_executing_intent(
     assert intents[0].metadata == {"owner": "local"}
 
 
+def test_bee_workspace_commands_yaml_allows_safe_context_metadata(
+    tmp_path: Path,
+) -> None:
+    template_dir = tmp_path / ".bee" / "templates" / "template-alpha"
+    _write_safe_template(template_dir, template_id="template-alpha")
+    (template_dir / "commands.yaml").write_text(
+        "\n".join(
+            [
+                "commands:",
+                "  - name: smoke",
+                "    profile: validation",
+                "    policy: existing_command_policy",
+                "    category: validation",
+                "    metadata:",
+                "      contextProfile: default",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    template = load_bee_workspace_template(tmp_path, "template-alpha")
+
+    intents = load_bee_workspace_command_intents(template)
+
+    assert intents[0].metadata == {"contextProfile": "default"}
+
+
 @pytest.mark.parametrize("field", ["command", "cmd", "shell", "script", "argv"])
 def test_bee_workspace_commands_yaml_rejects_executable_fields(
     tmp_path: Path,
@@ -131,6 +157,58 @@ def test_bee_workspace_commands_yaml_rejects_executable_fields(
     template = load_bee_workspace_template(tmp_path, "template-alpha")
 
     with pytest.raises(ValueError, match="forbidden sensitive field|not supported"):
+        load_bee_workspace_command_intents(template)
+
+
+@pytest.mark.parametrize(
+    "metadata_key",
+    [
+        "metadata.command",
+        "metadata.apiKey",
+        "metadata.args",
+        "metadata.accessKey",
+        "metadata.bearer",
+        "metadata.argv",
+        "metadata.cmd",
+        "metadata.shell",
+        "metadata.script",
+        "metadata.executor",
+        "metadata.commandOutput",
+        "metadata.credentials",
+        "metadata.COMMANDOutput",
+        "metadata.stdoutText",
+        "metadata.STDOUTText",
+        "metadata.promptText",
+        "metadata.privateKey",
+        "metadata.AWSSecretAccessKey",
+        "metadata.secretToken",
+        "metadata.environment",
+    ],
+)
+def test_bee_workspace_commands_yaml_rejects_nested_sensitive_metadata_keys(
+    tmp_path: Path,
+    metadata_key: str,
+) -> None:
+    template_dir = tmp_path / ".bee" / "templates" / "template-alpha"
+    _write_safe_template(template_dir, template_id="template-alpha")
+    parent, child = metadata_key.split(".")
+    (template_dir / "commands.yaml").write_text(
+        "\n".join(
+            [
+                "commands:",
+                "  - name: unsafe",
+                "    profile: validation",
+                "    policy: existing_command_policy",
+                "    category: validation",
+                f"    {parent}:",
+                f"      {child}: local",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    template = load_bee_workspace_template(tmp_path, "template-alpha")
+
+    with pytest.raises(ValueError, match="forbidden sensitive field"):
         load_bee_workspace_command_intents(template)
 
 
