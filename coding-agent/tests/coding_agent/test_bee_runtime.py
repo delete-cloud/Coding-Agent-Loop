@@ -209,7 +209,17 @@ def test_bee_manifest_parses_safe_fixture() -> None:
     ]
     assert manifest.nodes[1].depends_on == ("node-plan",)
     assert manifest.nodes[1].validation_profile == "pytest"
+    assert manifest.nodes[1].command_ref == "pytest_smoke"
     assert manifest.nodes[1].metadata == {"expected_policy": "validation"}
+
+
+def test_bee_node_manifest_accepts_safe_command_ref() -> None:
+    raw = _safe_manifest()
+    raw["nodes"][0]["command_ref"] = "plan_check"  # type: ignore[index]
+
+    manifest = parse_bee_task_manifest(raw)
+
+    assert manifest.nodes[0].command_ref == "plan_check"
 
 
 @pytest.mark.parametrize(
@@ -268,6 +278,7 @@ def test_bee_manifest_rejects_secret_like_values(
         (("nodes", 0, "shellCommand"), "pytest"),
         (("nodes", 0, "command_spec"), "pytest"),
         (("nodes", 0, "commandSpec"), "pytest"),
+        (("nodes", 0, "commands"), ["pytest"]),
         (("nodes", 0, "pre_commands"), "pytest"),
         (("nodes", 0, "preCommands"), "pytest"),
         (("nodes", 0, "metadata", "executor"), "local"),
@@ -825,6 +836,8 @@ def test_bee_launch_metadata_preserves_approval_and_workspace_policy() -> None:
         "context_reference": "profile_only",
         "validation_profile": "pytest",
         "validation_reference": "profile_only",
+        "command_ref": "pytest_smoke",
+        "command_reference": "workspace_intent_only",
     }
 
 
@@ -1054,6 +1067,7 @@ def _safe_manifest() -> JSONObject:
                 "title": "Run validation",
                 "depends_on": ["node-plan"],
                 "validation_profile": "pytest",
+                "command_ref": "pytest_smoke",
                 "metadata": {"expected_policy": "validation"},
             },
         ],

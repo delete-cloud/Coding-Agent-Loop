@@ -71,3 +71,48 @@ This ledger tracks G110-G117 for the Bee Command Intent Execution Bridge / Local
 - Remaining risks:
   - G112 still needs `command_ref` manifest support.
   - Bridge implementation, validation execution, evidence completion, console, metrics, and final smoke remain pending.
+
+## G112_BEE_NODE_COMMAND_REF
+
+### Before
+
+- Goal id: G112_BEE_NODE_COMMAND_REF
+- Intended files:
+  - `docs/bee_command_bridge/GOAL_PROGRESS.md`
+  - `docs/adr/0043-bee-command-bridge.md`
+  - `src/coding_agent/bee_runtime.py`
+  - `tests/coding_agent/test_bee_runtime.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `uv run ruff check src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - `BeeNodeManifest` supports safe `command_ref`.
+  - `command_ref` is parsed, validated, and propagated as safe launch metadata.
+  - Raw executable fields such as `command` and `commands` remain rejected.
+  - No command execution bridge is introduced in this goal.
+
+### After
+
+- Changed files:
+  - `docs/bee_command_bridge/GOAL_PROGRESS.md`
+  - `docs/adr/0043-bee-command-bridge.md`
+  - `src/coding_agent/bee_runtime.py`
+  - `tests/coding_agent/test_bee_runtime.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `uv run ruff check src/coding_agent/bee_runtime.py tests/coding_agent/test_bee_runtime.py`
+  - `git diff --check -- .`
+- Results:
+  - `command_ref` parses as a safe Bee node reference.
+  - `command_ref` appears in launch metadata as workspace-intent-only reference data.
+  - Raw executable command fields remain rejected.
+  - Bee runtime and Bee workspace tests passed.
+  - Scoped formatting, lint, and whitespace checks passed.
+- Remaining risks:
+  - G113 still needs the non-executing bridge resolver.
+  - No command intent execution occurs yet.
