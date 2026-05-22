@@ -261,3 +261,53 @@ This ledger tracks G110-G117 for the Bee Command Intent Execution Bridge / Local
 - Remaining risks:
   - G116 still needs evidence-backed node completion semantics.
   - Validation bridge returns reports but does not yet mark Bee nodes complete.
+
+## G116_BEE_NODE_EVIDENCE_COMPLETION
+
+### Before
+
+- Goal id: G116_BEE_NODE_EVIDENCE_COMPLETION
+- Intended files:
+  - `docs/bee_command_bridge/GOAL_PROGRESS.md`
+  - `docs/adr/0043-bee-command-bridge.md`
+  - `src/coding_agent/bee_command_bridge.py`
+  - `tests/coding_agent/test_bee_command_bridge.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_bee_command_bridge.py -v`
+  - `uv run pytest tests/coding_agent/action_safety/test_validation_runner.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_command_bridge.py tests/coding_agent/test_bee_command_bridge.py`
+  - `uv run ruff check src/coding_agent/bee_command_bridge.py tests/coding_agent/test_bee_command_bridge.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Bee node completion requires explicit evidence.
+  - Passed validation reports can produce completion evidence.
+  - Failed validation reports do not complete a node.
+  - Policy-only ready plans and model text alone do not complete a node.
+
+### After
+
+- Changed files:
+  - `docs/bee_command_bridge/GOAL_PROGRESS.md`
+  - `docs/adr/0043-bee-command-bridge.md`
+  - `src/coding_agent/bee_command_bridge.py`
+  - `tests/coding_agent/test_bee_command_bridge.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_command_bridge.py -v`
+  - `uv run pytest tests/coding_agent/action_safety/test_validation_runner.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_command_bridge.py tests/coding_agent/test_bee_command_bridge.py`
+  - `uv run ruff check src/coding_agent/bee_command_bridge.py tests/coding_agent/test_bee_command_bridge.py`
+  - `git diff --check -- .`
+- Results:
+  - Bee node completion decisions now require explicit evidence.
+  - Passed validation reports produce safe completion evidence.
+  - Failed validation reports and policy-only ready plans do not complete nodes.
+  - Safe completion summaries omit raw command strings and command output.
+  - Validation runner, Bee runtime, and Bee workspace regression tests passed.
+  - Scoped formatting, lint, and whitespace checks passed.
+- Remaining risks:
+  - G117 still needs console/metrics/docs/final smoke for the command bridge.
+  - Completion decisions are product-layer decisions and do not directly mutate durable Bee node status in this goal.
