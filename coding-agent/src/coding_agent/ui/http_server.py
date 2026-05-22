@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, cast
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Iterable, Mapping
 from urllib.parse import urlsplit
 
 import httpx
@@ -38,6 +38,7 @@ from coding_agent.bee_workspace import (
     discover_bee_workspace_templates,
     load_bee_workspace_command_intents,
 )
+from coding_agent.bee_launch import BeeLaunchRecord, PGBeeLaunchStore
 from coding_agent.runtime_store import (
     AgentRunRecord,
     RunMessageSnapshotRecord,
@@ -88,6 +89,7 @@ from coding_agent.ui.binding_resolver import DefaultBindingResolver
 from coding_agent.ui.developer_console import (
     ConsoleActionSummary,
     ConsoleActionValidationSummary,
+    ConsoleBeeLaunchSummary,
     ConsoleBeeNodeSummary,
     ConsoleBeePage,
     ConsoleBeeCommandIntentSummary,
@@ -3321,6 +3323,7 @@ async def _console_schedules_page(
 async def _console_bee_page(auth_context: AuthContext | None) -> ConsoleBeePage:
     runs = await _visible_console_runs(auth_context)
     nodes = tuple(node for run in runs for node in _bee_node_summaries_from_run(run))
+    launch_summaries = await _bee_launch_summaries(auth_context, runs)
     tasks_by_id: dict[str, ConsoleBeeTaskSummary] = {}
     for node in nodes:
         current = tasks_by_id.get(node.task_id)
@@ -3350,6 +3353,7 @@ async def _console_bee_page(auth_context: AuthContext | None) -> ConsoleBeePage:
     return ConsoleBeePage(
         tasks=tuple(sorted(tasks_by_id.values(), key=lambda item: item.task_id)),
         nodes=tuple(sorted(nodes, key=lambda item: (item.task_id, item.node_id))),
+        launches=launch_summaries,
         templates=(
             _console_bee_workspace_template_summaries()
             if can_view_workspace_artifacts
@@ -3366,6 +3370,84 @@ async def _console_bee_page(auth_context: AuthContext | None) -> ConsoleBeePage:
             else ()
         ),
     )
+
+
+async def _bee_launch_summaries(
+    auth_context: AuthContext | None,
+    runs: Iterable[AgentRunRecord],
+) -> tuple[ConsoleBeeLaunchSummary, ...]:
+    launch_summaries = {
+        launch.launch_id: launch
+        for launch in await _bee_launch_summaries_from_store(auth_context)
+    }
+    for launch in _bee_launch_summaries_from_runs(runs):
+        launch_summaries.setdefault(launch.launch_id, launch)
+    return tuple(sorted(launch_summaries.values(), key=lambda item: item.launch_id))
+
+
+async def _bee_launch_summaries_from_store(
+    auth_context: AuthContext | None,
+) -> tuple[ConsoleBeeLaunchSummary, ...]:
+    store = _console_bee_launch_store()
+    if store is None:
+        return ()
+    launches: list[BeeLaunchRecord] = []
+    try:
+        if auth_context is None or auth_context.scope == "admin":
+            launches = await store.list_launches(limit=100)
+        else:
+            for session_id in await _visible_console_session_ids(auth_context):
+                launches.extend(
+                    await store.list_launches(session_id=session_id, limit=100)
+                )
+    except Exception:
+        logger.exception(
+            "Console Bee launch store list failed; falling back to run metadata"
+        )
+        return ()
+    return tuple(_bee_launch_summary_from_record(launch) for launch in launches)
+
+
+def _bee_launch_summary_from_record(
+    launch: BeeLaunchRecord,
+) -> ConsoleBeeLaunchSummary:
+    return ConsoleBeeLaunchSummary(
+        launch_id=safe_id_value(launch.launch_id),
+        source=safe_label_value(launch.source),
+        status=safe_label_value(launch.status),
+        template_id=safe_id_value(launch.template_id),
+        task_id=safe_id_value(launch.task_id),
+        topic_id=safe_id_value(launch.topic_id),
+        schedule_id=safe_id_value(launch.schedule_id),
+        signal_id=safe_id_value(launch.signal_id),
+        error_summary=safe_error_summary(launch.error_message or launch.error_type),
+    )
+
+
+def _bee_launch_summaries_from_runs(
+    runs: Iterable[AgentRunRecord],
+) -> tuple[ConsoleBeeLaunchSummary, ...]:
+    launches: dict[str, ConsoleBeeLaunchSummary] = {}
+    for run in runs:
+        metadata = run.metadata
+        launch_id = safe_id_value(metadata.get("launch_id"))
+        if not launch_id:
+            continue
+        launch_source = safe_label_value(metadata.get("launch_source"))
+        if launch_source not in {"manual", "schedule", "proactive_signal"}:
+            continue
+        launches[launch_id] = ConsoleBeeLaunchSummary(
+            launch_id=launch_id,
+            source=launch_source,
+            status=safe_label_value(metadata.get("launch_status")) or run.status,
+            template_id=safe_id_value(metadata.get("template_id")),
+            task_id=safe_id_value(metadata.get("task_id")),
+            topic_id=safe_id_value(metadata.get("topic_id")),
+            schedule_id=safe_id_value(metadata.get("schedule_id")),
+            signal_id=safe_id_value(metadata.get("signal_id")),
+            error_summary=safe_error_summary(metadata.get("launch_error")),
+        )
+    return tuple(sorted(launches.values(), key=lambda item: item.launch_id))
 
 
 def _can_view_global_console_artifacts(auth_context: AuthContext | None) -> bool:
@@ -3566,6 +3648,21 @@ def _console_topic_store() -> PGTopicStore | None:
         return PGTopicStore(pool=session_manager.pg_pool)
     except Exception:
         logger.exception("Unable to initialize console topic store")
+        return None
+
+
+def _console_bee_launch_store() -> PGBeeLaunchStore | None:
+    try:
+        storage_config = _load_storage_config()
+    except Exception:
+        logger.exception("Unable to load storage config for console Bee launch store")
+        return None
+    if not _storage_uses_pg_http_sessions(storage_config):
+        return None
+    try:
+        return PGBeeLaunchStore(pool=session_manager.pg_pool)
+    except Exception:
+        logger.exception("Unable to initialize console Bee launch store")
         return None
 
 

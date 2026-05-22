@@ -31,6 +31,7 @@ from coding_agent.bee_workspace import (
     load_bee_workspace_template,
     write_bee_workspace_run_artifacts,
 )
+from coding_agent.observability import record_bee_launch_metric
 from coding_agent.scheduled_runs import ScheduledLaunchIntent, ScheduleTriggerRecord
 from coding_agent.topic_lifecycle import TopicLifecycle
 from coding_agent.topic_store import JSONObject, JSONValue, TopicRecord
@@ -799,6 +800,15 @@ class BeeLaunchOrchestrator:
             session_id=topic.session_id,
             launched_at=launch_started_at,
             metadata={"phase": "task_created", "node_count": len(nodes)},
+        )
+        record_bee_launch_metric(
+            source=attached.source,
+            status=attached.status,
+            duration_ms=max(
+                0.0,
+                (launch_started_at - plan.requested_at).total_seconds() * 1000.0,
+            ),
+            proactive_kind="unknown",
         )
         return BeeLaunchResult(
             launch_id=attached.launch_id,
