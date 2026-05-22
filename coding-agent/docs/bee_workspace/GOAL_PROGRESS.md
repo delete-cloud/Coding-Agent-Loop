@@ -65,3 +65,46 @@ This ledger tracks G102-G109 for the Bee Workspace Contract / Local Template Dog
 - Remaining risks:
   - Acceptance criteria remain unchecked until G104-G109 implement and verify the contract.
   - `commands.yaml` support must remain non-executing until routed through existing safety gates.
+
+## G104_BEE_WORKSPACE_TEMPLATE_DISCOVERY
+
+### Before
+
+- Goal id: G104_BEE_WORKSPACE_TEMPLATE_DISCOVERY
+- Intended files:
+  - `docs/bee_workspace/GOAL_PROGRESS.md`
+  - `docs/adr/0042-bee-workspace-contract.md`
+  - `src/coding_agent/bee_workspace.py`
+  - `tests/coding_agent/test_bee_workspace.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_workspace.py tests/coding_agent/test_bee_workspace.py`
+  - `uv run ruff check src/coding_agent/bee_workspace.py tests/coding_agent/test_bee_workspace.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - `.bee/templates/<template_id>/metadata.yaml|json` can be discovered and parsed from a local workspace.
+  - `SKILL.md`, `features/*.feature`, and optional `commands.yaml` paths are recognized without reading or executing command content.
+  - Sensitive/executable metadata fields are rejected through existing Bee manifest safety validation.
+  - No manifest builder, run artifact writer, command executor, external service, or AgentKit Core change is introduced.
+
+### After
+
+- Changed files:
+  - `docs/bee_workspace/GOAL_PROGRESS.md`
+  - `docs/adr/0042-bee-workspace-contract.md`
+  - `src/coding_agent/bee_workspace.py`
+  - `tests/coding_agent/test_bee_workspace.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_workspace.py tests/coding_agent/test_bee_workspace.py`
+  - `uv run ruff check src/coding_agent/bee_workspace.py tests/coding_agent/test_bee_workspace.py`
+  - `git diff --check -- .`
+- Results:
+  - Workspace template discovery and metadata parser tests passed.
+  - Bee runtime baseline passed.
+  - Scoped formatting, lint, and whitespace checks passed.
+- Remaining risks:
+  - G105 still needs the explicit template-to-manifest builder API.
+  - `commands.yaml` is only detected as a path in G104; its safe non-executing contract parser remains G107.
