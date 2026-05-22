@@ -73,8 +73,8 @@ Keep out of scope:
 
 ## Acceptance Criteria
 
-- [ ] `test_bee_node_manifest_accepts_safe_command_ref`
-- [ ] `test_bee_node_manifest_rejects_command_ref_with_raw_command_fields`
+- [x] `test_bee_node_manifest_accepts_safe_command_ref`
+- [x] `test_bee_manifest_rejects_executable_fields`
 - [ ] `test_bee_command_bridge_resolves_declared_intent_without_executing_yaml`
 - [ ] `test_bee_command_bridge_denies_policy_blocked_intent`
 - [ ] `test_bee_command_bridge_returns_approval_required_without_execution`

@@ -210,6 +210,9 @@ _FORBIDDEN_EXECUTABLE_KEYS: Final[frozenset[str]] = frozenset(
         "shell",
     }
 )
+_ALLOWED_COMMAND_REFERENCE_KEYS: Final[frozenset[str]] = frozenset(
+    {"command_ref", "command_reference"}
+)
 _SECRET_VALUE_MARKERS: Final[tuple[str, ...]] = (
     "-----begin ",
     "akia",
@@ -249,6 +252,7 @@ class BeeNodeManifest:
     depends_on: tuple[str, ...] = ()
     context_profile: str | None = None
     validation_profile: str | None = None
+    command_ref: str | None = None
     metadata: JSONObject = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -260,6 +264,7 @@ class BeeNodeManifest:
             _require_non_empty("depends_on", dependency)
         _require_optional_safe_label("context_profile", self.context_profile)
         _require_optional_safe_label("validation_profile", self.validation_profile)
+        _require_optional_safe_label("command_ref", self.command_ref)
         _require_safe_json_object("metadata", self.metadata)
 
 
@@ -902,6 +907,9 @@ def build_bee_launch_metadata(
     if validation_profile is not None:
         metadata["validation_profile"] = validation_profile
         metadata["validation_reference"] = "profile_only"
+    if node.command_ref is not None:
+        metadata["command_ref"] = node.command_ref
+        metadata["command_reference"] = "workspace_intent_only"
     _require_safe_launch_metadata(metadata)
     return metadata
 
@@ -1060,6 +1068,7 @@ def _parse_node_manifest(raw_value: JSONValue, index: int) -> BeeNodeManifest:
         depends_on=depends_on,
         context_profile=_optional_string(raw, "context_profile"),
         validation_profile=_optional_string(raw, "validation_profile"),
+        command_ref=_optional_string(raw, "command_ref"),
         metadata=dict(_optional_object(raw, "metadata")),
     )
 
@@ -1096,6 +1105,8 @@ def _validate_safe_json(path: str, value: JSONValue) -> None:
 
 def _reject_forbidden_key(path: str, key: str) -> None:
     normalized = _normalize_manifest_key(key)
+    if normalized in _ALLOWED_COMMAND_REFERENCE_KEYS:
+        return
     for forbidden in _FORBIDDEN_KEY_PARTS:
         if _key_contains_token(normalized, forbidden):
             raise ValueError(f"{path}.{key} uses forbidden sensitive field")
