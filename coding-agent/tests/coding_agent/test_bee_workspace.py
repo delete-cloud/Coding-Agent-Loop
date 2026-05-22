@@ -9,6 +9,7 @@ from coding_agent.bee_workspace import (
     BeeWorkspaceRunArtifacts,
     BeeWorkspaceRunNode,
     build_bee_manifest_from_workspace_template,
+    discover_bee_workspace_run_artifacts,
     discover_bee_workspace_templates,
     load_bee_workspace_command_intents,
     load_bee_workspace_template,
@@ -166,6 +167,7 @@ def test_bee_workspace_commands_yaml_rejects_executable_fields(
         "metadata.command",
         "metadata.apiKey",
         "metadata.args",
+        "metadata.commands",
         "metadata.accessKey",
         "metadata.bearer",
         "metadata.argv",
@@ -330,6 +332,51 @@ def test_bee_workspace_writes_safe_task_json(tmp_path: Path) -> None:
     assert paths.evidence_dir.is_dir()
     assert paths.memory_candidates_path is not None
     assert "memory-alpha" in paths.memory_candidates_path.read_text(encoding="utf-8")
+
+
+def test_bee_workspace_discovers_run_artifact_summaries(tmp_path: Path) -> None:
+    write_bee_workspace_run_artifacts(
+        tmp_path,
+        BeeWorkspaceRunArtifacts(
+            task_id="bee-task-alpha",
+            template_id="template-alpha",
+            topic_id="topic-alpha",
+            status="completed",
+            nodes=(
+                BeeWorkspaceRunNode(
+                    node_id="node-plan",
+                    status="completed",
+                    run_id="run-alpha",
+                    action_ids=("action-alpha",),
+                    validation_ids=("validation-alpha",),
+                    attempts=1,
+                ),
+            ),
+            run_ids=("run-alpha",),
+            action_ids=("action-alpha",),
+            validation_ids=("validation-alpha",),
+            report_title="Local Bee task completed",
+            report_summary="Validation passed with sanitized evidence.",
+            memory_candidates=(
+                {"candidate_id": "memory-alpha", "status": "pending_review"},
+            ),
+        ),
+    )
+
+    records = discover_bee_workspace_run_artifacts(tmp_path)
+
+    assert len(records) == 1
+    record = records[0]
+    assert record.task_id == "bee-task-alpha"
+    assert record.template_id == "template-alpha"
+    assert record.topic_id == "topic-alpha"
+    assert record.status == "completed"
+    assert record.node_count == 1
+    assert record.run_count == 1
+    assert record.action_count == 1
+    assert record.validation_count == 1
+    assert record.has_report is True
+    assert record.has_memory_candidates is True
 
 
 @pytest.mark.parametrize(

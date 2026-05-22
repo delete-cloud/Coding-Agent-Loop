@@ -40,6 +40,7 @@ _FORBIDDEN_ARTIFACT_KEY_PARTS: Final[frozenset[str]] = frozenset(
         "argv",
         "cmd",
         "command",
+        "commands",
         "command_output",
         "credential",
         "credentials",
@@ -71,6 +72,7 @@ _COMPACT_FORBIDDEN_ARTIFACT_KEY_PARTS: Final[frozenset[str]] = frozenset(
         "argv",
         "cmd",
         "command",
+        "commands",
         "command_output",
         "credential",
         "credentials",
@@ -177,6 +179,20 @@ class BeeWorkspaceRunArtifactPaths:
 
 
 @dataclass(frozen=True)
+class BeeWorkspaceRunArtifactRecord:
+    task_id: str
+    template_id: str
+    topic_id: str
+    status: str
+    node_count: int
+    run_count: int
+    action_count: int
+    validation_count: int
+    has_report: bool
+    has_memory_candidates: bool
+
+
+@dataclass(frozen=True)
 class BeeWorkspaceCommandIntent:
     name: str
     profile: str
@@ -272,6 +288,27 @@ def load_bee_workspace_command_intents(
     if len(set(names)) != len(names):
         raise ValueError("Bee commands.yaml command names must be unique")
     return intents
+
+
+def discover_bee_workspace_run_artifacts(
+    workspace_root: Path | str,
+) -> tuple[BeeWorkspaceRunArtifactRecord, ...]:
+    """Read sanitized workspace-local Bee run artifact summaries."""
+
+    runs_root = Path(workspace_root) / _BEE_DIR / _RUNS_DIR
+    if not runs_root.exists():
+        return ()
+    runs_root = _require_directory_in_root(runs_root, runs_root, label="Bee runs root")
+    if not runs_root.is_dir():
+        raise ValueError(f"Bee runs path is not a directory: {runs_root}")
+    records = []
+    for run_dir in sorted(path for path in runs_root.iterdir() if path.is_dir()):
+        if run_dir.is_symlink():
+            raise ValueError(f"Bee run path must not be a symlink: {run_dir.name}")
+        records.append(_load_run_artifact_record(run_dir, runs_root))
+    for symlink in sorted(path for path in runs_root.iterdir() if path.is_symlink()):
+        raise ValueError(f"Bee run path must not be a symlink: {symlink.name}")
+    return tuple(records)
 
 
 def write_bee_workspace_run_artifacts(
@@ -464,6 +501,101 @@ def _task_json_payload(
     if has_memory:
         payload["memory_candidates_path"] = _MEMORY_CANDIDATES_FILE
     return payload
+
+
+def _load_run_artifact_record(
+    run_dir: Path,
+    runs_root: Path,
+) -> BeeWorkspaceRunArtifactRecord:
+    safe_run_dir = _require_child_path_in_root(
+        run_dir,
+        runs_root,
+        label="Bee run path",
+        expected_kind="directory",
+    )
+    task_json_path = _require_child_path_in_root(
+        safe_run_dir / _TASK_JSON_FILE,
+        runs_root,
+        label="Bee run task manifest",
+        expected_kind="file",
+    )
+    raw = json.loads(task_json_path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise TypeError(f"Bee run task.json must be an object: {task_json_path}")
+    _reject_forbidden_artifact_keys("task_json", raw)
+    return BeeWorkspaceRunArtifactRecord(
+        task_id=_required_task_json_id(raw, "task_id", task_json_path),
+        template_id=_required_task_json_id(raw, "template_id", task_json_path),
+        topic_id=_required_task_json_id(raw, "topic_id", task_json_path),
+        status=_required_task_json_id(raw, "status", task_json_path),
+        node_count=_count_task_json_nodes(raw, task_json_path),
+        run_count=len(_task_json_id_sequence(raw, "run_ids", task_json_path)),
+        action_count=len(_task_json_id_sequence(raw, "action_ids", task_json_path)),
+        validation_count=len(
+            _task_json_id_sequence(
+                raw,
+                "validation_ids",
+                task_json_path,
+            )
+        ),
+        has_report=(safe_run_dir / _REPORT_FILE).is_file(),
+        has_memory_candidates=(safe_run_dir / _MEMORY_CANDIDATES_FILE).is_file(),
+    )
+
+
+def _reject_forbidden_artifact_keys(path: str, value: object) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError(f"{path} keys must be strings")
+            _reject_forbidden_artifact_key(path, key)
+            _reject_forbidden_artifact_keys(f"{path}.{key}", item)
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _reject_forbidden_artifact_keys(f"{path}[{index}]", item)
+
+
+def _count_task_json_nodes(raw: dict[object, object], path: Path) -> int:
+    value = raw.get("nodes", ())
+    if not isinstance(value, list):
+        raise TypeError(f"Bee run task.json nodes must be a list: {path}")
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise TypeError(
+                f"Bee run task.json nodes[{index}] must be an object: {path}"
+            )
+        _required_task_json_id(item, "node_id", path)
+        _required_task_json_id(item, "status", path)
+        if item.get("run_id") is not None:
+            _required_task_json_id(item, "run_id", path)
+        _task_json_id_sequence(item, "action_ids", path)
+        _task_json_id_sequence(item, "validation_ids", path)
+    return len(value)
+
+
+def _task_json_id_sequence(
+    raw: dict[object, object],
+    key: str,
+    path: Path,
+) -> tuple[str, ...]:
+    value = raw.get(key, ())
+    if not isinstance(value, list):
+        raise TypeError(f"Bee run task.json {key} must be a list: {path}")
+    ids = []
+    for item in value:
+        if not isinstance(item, str):
+            raise TypeError(f"Bee run task.json {key} entries must be strings: {path}")
+        _require_safe_template_id(item)
+        ids.append(item)
+    return tuple(ids)
+
+
+def _required_task_json_id(raw: dict[object, object], key: str, path: Path) -> str:
+    value = raw.get(key)
+    if not isinstance(value, str):
+        raise TypeError(f"Bee run task.json {key} must be a string: {path}")
+    _require_safe_template_id(value)
+    return value
 
 
 def _report_markdown(artifacts: BeeWorkspaceRunArtifacts) -> str:

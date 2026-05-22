@@ -388,6 +388,42 @@ def test_bee_metrics_normalize_unlisted_task_and_node_labels() -> None:
     assert 'task_kind="unknown"' in text
     assert 'node_kind="unknown"' in text
     assert 'node_status="ready"' in text
+
+
+def test_bee_workspace_metrics_allow_low_cardinality_labels_without_template_id() -> (
+    None
+):
+    recorder = PrometheusMetricsRecorder()
+    sink = PrometheusMetricsObservationSink(recorder=recorder)
+
+    sink.record_span(
+        SpanRecord(
+            name="runtime.stage.dispatch",
+            status="ok",
+            attributes={
+                "template_id": "template-alpha",
+                "task_id": "bee-task-alpha",
+                "template_kind": "maintenance",
+                "template_profile": "local",
+                "command_category": "validation",
+                "command_policy": "existing_command_policy",
+                "command_status": "declared",
+            },
+            duration_ms=1,
+        )
+    )
+
+    text = recorder.exposition_text()
+
+    assert 'template_kind="maintenance"' in text
+    assert 'template_profile="local"' in text
+    assert 'command_category="validation"' in text
+    assert 'command_policy="existing_command_policy"' in text
+    assert 'command_status="declared"' in text
+    assert "template-alpha" not in text
+    assert "bee-task-alpha" not in text
+    assert "template_id" not in text
+    assert "task_id" not in text
     assert "customer_specific_task" not in text
     assert "raw_prompt_node" not in text
 

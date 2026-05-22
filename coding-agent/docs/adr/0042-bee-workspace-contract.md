@@ -88,8 +88,8 @@ Define observability and console boundaries:
 - [x] `test_bee_workspace_writes_safe_task_json`
 - [x] `test_bee_workspace_rejects_raw_report_and_memory_candidate_fields`
 - [x] `test_bee_workspace_commands_yaml_is_non_executing_intent`
-- [ ] `test_console_bee_workspace_renders_safe_artifact_summary`
-- [ ] `test_bee_workspace_metrics_do_not_use_template_or_task_ids`
+- [x] `test_console_bee_renders_workspace_template_artifacts_and_commands`
+- [x] `test_bee_workspace_metrics_allow_low_cardinality_labels_without_template_id`
 - [ ] `test_bee_workspace_local_dogfood_smoke`
 - [ ] `uv run pytest tests/coding_agent/test_bee_workspace.py -v`
 - [ ] `uv run pytest tests/coding_agent/test_bee_runtime.py -v`

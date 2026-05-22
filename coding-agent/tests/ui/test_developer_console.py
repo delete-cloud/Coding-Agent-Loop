@@ -10,6 +10,11 @@ from agentkit.storage.protocols import TapeInfo, TapeSearchResult
 from httpx import ASGITransport, AsyncClient
 
 from coding_agent.environment import WorkspaceProviderCapabilities
+from coding_agent.bee_workspace import (
+    BeeWorkspaceRunArtifacts,
+    BeeWorkspaceRunNode,
+    write_bee_workspace_run_artifacts,
+)
 from coding_agent.runtime_store import (
     AgentInteractionRecord,
     AgentRunRecord,
@@ -751,6 +756,74 @@ def _bee_runtime_run(run_id: str = "run-bee") -> AgentRunRecord:
     )
 
 
+def _write_console_bee_workspace_fixture(workspace_root: Path) -> None:
+    template_dir = workspace_root / ".bee" / "templates" / "template-alpha"
+    feature_dir = template_dir / "features"
+    feature_dir.mkdir(parents=True)
+    (template_dir / "metadata.yaml").write_text(
+        "\n".join(
+            [
+                "version: 1",
+                "template_id: template-alpha",
+                "kind: maintenance",
+                "profile: local",
+                "title: Local template",
+                "topic:",
+                "  session_id: session-alpha",
+                "nodes:",
+                "  - node_id: node-plan",
+                "    kind: analysis",
+                "    profile: default",
+                "    title: Plan local task",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (template_dir / "SKILL.md").write_text("# Template Skill\n", encoding="utf-8")
+    (feature_dir / "acceptance.feature").write_text(
+        "Feature: safe console template\n", encoding="utf-8"
+    )
+    (template_dir / "commands.yaml").write_text(
+        "\n".join(
+            [
+                "commands:",
+                "  - name: smoke",
+                "    profile: validation",
+                "    policy: existing_command_policy",
+                "    category: validation",
+                "    validation_label: pytest_smoke",
+                "    metadata:",
+                "      owner: local",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    write_bee_workspace_run_artifacts(
+        workspace_root,
+        BeeWorkspaceRunArtifacts(
+            task_id="bee-task-alpha",
+            template_id="template-alpha",
+            topic_id="topic-auth",
+            status="completed",
+            nodes=(
+                BeeWorkspaceRunNode(
+                    node_id="node-validate",
+                    status="completed",
+                    run_id="run-bee",
+                    action_ids=("action-alpha",),
+                    validation_ids=("validation-alpha",),
+                    attempts=1,
+                ),
+            ),
+            run_ids=("run-bee",),
+            action_ids=("action-alpha",),
+            validation_ids=("validation-alpha",),
+            report_title="Local Bee task completed",
+            report_summary="Validation passed with sanitized evidence.",
+        ),
+    )
+
+
 def _topic_record(topic_id: str = "topic-durable") -> TopicRecord:
     return TopicRecord(
         topic_id=topic_id,
@@ -1466,6 +1539,37 @@ async def test_console_bee_renders_safe_task_and_node_summaries() -> None:
 
 
 @pytest.mark.asyncio
+async def test_console_bee_renders_workspace_template_artifacts_and_commands(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _register_console_session("session-alpha")
+    session_manager.configure_runtime_store(_ConsoleRuntimeStore([_bee_runtime_run()]))
+    _write_console_bee_workspace_fixture(tmp_path)
+    monkeypatch.setattr(
+        http_server,
+        "_load_bee_workspace_config",
+        lambda: {"workspace_root": str(tmp_path)},
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/console/bee")
+
+    assert response.status_code == 200
+    assert "Bee Workspace Templates" in response.text
+    assert "Bee Workspace Run Artifacts" in response.text
+    assert "Bee Workspace Command Intents" in response.text
+    assert "template-alpha" in response.text
+    assert "bee-task-alpha" in response.text
+    assert "topic-auth" in response.text
+    assert "pytest_smoke" in response.text
+    assert "existing_command_policy" in response.text
+    for forbidden in FORBIDDEN_RENDERED_TEXT:
+        assert forbidden not in response.text
+
+
+@pytest.mark.asyncio
 async def test_console_bee_does_not_emit_task_or_node_ids_as_metric_labels(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1495,6 +1599,90 @@ async def test_console_bee_does_not_emit_task_or_node_ids_as_metric_labels(
     assert "node-validate" not in metrics
     assert "task_id" not in metrics
     assert "node_id" not in metrics
+
+
+@pytest.mark.asyncio
+async def test_console_bee_does_not_emit_workspace_ids_as_metric_labels(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _register_console_session("session-alpha")
+    session_manager.configure_runtime_store(_ConsoleRuntimeStore([_bee_runtime_run()]))
+    _write_console_bee_workspace_fixture(tmp_path)
+    monkeypatch.setattr(
+        http_server,
+        "_load_bee_workspace_config",
+        lambda: {"workspace_root": str(tmp_path)},
+    )
+    monkeypatch.setattr(
+        http_server,
+        "_load_observability_config",
+        lambda: {
+            "enabled": True,
+            "metrics": {
+                "enabled": True,
+                "endpoint_enabled": True,
+                "backend": "prometheus",
+            },
+        },
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/console/bee")
+
+    assert response.status_code == 200
+    metrics = prometheus_metrics_text()
+    assert 'route="console_bee"' in metrics
+    assert "template-alpha" not in metrics
+    assert "bee-task-alpha" not in metrics
+    assert "template_id" not in metrics
+    assert "task_id" not in metrics
+
+
+@pytest.mark.asyncio
+async def test_console_bee_workspace_artifacts_require_admin_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv(
+        "CODING_AGENT_SERVER_CONFIG",
+        str(_write_console_auth_config(tmp_path)),
+    )
+    monkeypatch.setattr(settings, "http_api_key", None)
+    _register_console_session(
+        "session-alpha",
+        owner_label=_owner_label("user-token-a"),
+    )
+    session_manager.configure_runtime_store(_ConsoleRuntimeStore([_bee_runtime_run()]))
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    _write_console_bee_workspace_fixture(workspace_root)
+    monkeypatch.setattr(
+        http_server,
+        "_load_bee_workspace_config",
+        lambda: {"workspace_root": str(workspace_root)},
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        user_response = await client.get(
+            "/console/bee",
+            headers={"Authorization": "Bearer user-token-a"},
+        )
+        admin_response = await client.get(
+            "/console/bee",
+            headers={"Authorization": "Bearer admin-token"},
+        )
+
+    assert user_response.status_code == 200
+    assert "Bee Task List" in user_response.text
+    assert "Bee Workspace Templates" in user_response.text
+    assert "template-alpha" not in user_response.text
+    assert "pytest_smoke" not in user_response.text
+    assert admin_response.status_code == 200
+    assert "template-alpha" in admin_response.text
+    assert "pytest_smoke" in admin_response.text
 
 
 @pytest.mark.asyncio
