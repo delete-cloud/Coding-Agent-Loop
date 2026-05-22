@@ -601,6 +601,8 @@ class BeeLaunchOrchestrator:
         if request.source != "manual":
             raise ValueError("manual Bee launch requires source='manual'")
         plan = build_bee_launch_plan(request)
+        if write_workspace_artifacts:
+            _require_workspace_artifacts_enabled(plan)
         await self._launch_store.create_launch(
             BeeLaunchRecord(
                 launch_id=plan.launch_id,
@@ -659,7 +661,6 @@ class BeeLaunchOrchestrator:
             )
             nodes.append(await self._task_store.upsert_node(node))
         if write_workspace_artifacts:
-            _require_workspace_artifacts_enabled(plan)
             write_bee_workspace_run_artifacts(
                 plan.template.template_dir.parents[2],
                 BeeWorkspaceRunArtifacts(

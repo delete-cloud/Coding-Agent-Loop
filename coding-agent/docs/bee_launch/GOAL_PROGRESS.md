@@ -224,6 +224,28 @@ This ledger tracks G118-G126 for the Bee Launch / Scheduled Bee Task Integration
   - G123 still needs resume, retry, cancel, and abort lifecycle controls.
   - Scheduled launch, proactive launch, console launch views, and launch metrics remain pending.
 
+### Post-Review Artifact Gate Fix
+
+- Changed files:
+  - `docs/bee_launch/GOAL_PROGRESS.md`
+  - `src/coding_agent/bee_launch.py`
+  - `tests/coding_agent/test_bee_launch.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -q`
+  - `uv run pytest tests/coding_agent/test_topic_layer_smoke.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_launch.py tests/coding_agent/test_bee_launch.py`
+  - `uv run ruff check src/coding_agent/bee_launch.py tests/coding_agent/test_bee_launch.py`
+  - `git diff --check -- .`
+- Results:
+  - Moved workspace artifact policy enforcement before launch records, topic creation, task creation, and node creation.
+  - Added regression coverage that denied artifact writes leave no launch, topic, task, node, or `.bee/runs` side effects.
+  - Bee launch, Bee runtime, Bee workspace, and Topic smoke tests passed.
+- Remaining risks:
+  - G123 still needs resume, retry, cancel, and abort lifecycle controls.
+  - Scheduled launch, proactive launch, console launch views, and launch metrics remain pending.
+
 ### Post-Review Label Fix
 
 - Changed files:

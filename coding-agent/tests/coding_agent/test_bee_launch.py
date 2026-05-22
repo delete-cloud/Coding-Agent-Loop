@@ -807,12 +807,15 @@ async def test_manual_bee_launch_rejects_artifact_write_without_policy(
     tmp_path: Path,
 ) -> None:
     _write_template(tmp_path, template_id="template-alpha")
+    launch_store = PGBeeLaunchStore(pool=FakeBeeLaunchPool())  # type: ignore[arg-type]
+    task_store = FakeBeeTaskStore()
+    topic_store = FakeTopicStore()
     launcher = BeeLaunchOrchestrator(
-        launch_store=PGBeeLaunchStore(pool=FakeBeeLaunchPool()),  # type: ignore[arg-type]
-        task_store=FakeBeeTaskStore(),
-        topic_store=FakeTopicStore(),
+        launch_store=launch_store,
+        task_store=task_store,
+        topic_store=topic_store,
         topic_lifecycle=TopicLifecycle(
-            store=FakeTopicStore(),
+            store=topic_store,
             now=FakeClock(),
             topic_id_factory=lambda: "topic-launch",
         ),
@@ -835,6 +838,10 @@ async def test_manual_bee_launch_rejects_artifact_write_without_policy(
         )
 
     assert not (tmp_path / ".bee" / "runs").exists()
+    assert await launch_store.load_launch("launch-1") is None
+    assert topic_store.topics == {}
+    assert task_store.tasks == {}
+    assert task_store.nodes == {}
 
 
 @pytest.mark.asyncio
