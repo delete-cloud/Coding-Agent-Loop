@@ -138,8 +138,8 @@ Keep deferred:
 
 ## Acceptance Criteria
 
-- [ ] `test_bee_launch_store_schema_is_idempotent`
-- [ ] `test_bee_launch_store_create_load_list_update_and_attach`
+- [x] `test_bee_launch_store_schema_is_idempotent`
+- [x] `test_bee_launch_store_create_load_list_update_and_attach`
 - [ ] `test_bee_launch_plan_resolves_workspace_template`
 - [ ] `test_bee_launch_plan_rejects_missing_template`
 - [ ] `test_manual_bee_launch_creates_topic_task_and_artifact`
@@ -149,7 +149,7 @@ Keep deferred:
 - [ ] `test_console_bee_launch_renders_safe_launch_summary`
 - [ ] `test_bee_launch_metrics_omit_high_cardinality_ids`
 - [ ] `test_bee_launch_e2e_smoke`
-- [ ] `uv run pytest tests/coding_agent/test_bee_launch.py -v`
+- [x] `uv run pytest tests/coding_agent/test_bee_launch.py -v`
 - [ ] `uv run pytest tests/coding_agent/test_scheduled_runs.py -v`
 - [ ] `uv run pytest tests/ui/test_developer_console.py -v`
 - [ ] `git diff --check -- .`
