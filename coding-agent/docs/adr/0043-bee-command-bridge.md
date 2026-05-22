@@ -78,7 +78,7 @@ Keep out of scope:
 - [x] `test_bee_command_bridge_resolves_declared_intent_without_executing_yaml`
 - [x] `test_bee_command_bridge_denies_policy_blocked_intent`
 - [x] `test_bee_command_bridge_returns_approval_required_without_execution`
-- [ ] `test_bee_validation_node_uses_validation_runner`
+- [x] `test_bee_validation_node_uses_validation_runner`
 - [ ] `test_bee_node_completion_requires_evidence`
 - [ ] `test_console_bee_command_bridge_renders_safe_execution_summary`
 - [ ] `test_bee_command_bridge_metrics_omit_high_cardinality_ids`

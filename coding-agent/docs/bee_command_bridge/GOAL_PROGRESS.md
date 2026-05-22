@@ -211,3 +211,53 @@ This ledger tracks G110-G117 for the Bee Command Intent Execution Bridge / Local
 - Remaining risks:
   - G115 still needs validation-node execution through `ValidationRunner`.
   - Ready bridge plans still do not execute commands or complete Bee nodes.
+
+## G115_BEE_VALIDATION_NODE_RUNNER
+
+### Before
+
+- Goal id: G115_BEE_VALIDATION_NODE_RUNNER
+- Intended files:
+  - `docs/bee_command_bridge/GOAL_PROGRESS.md`
+  - `docs/adr/0043-bee-command-bridge.md`
+  - `src/coding_agent/bee_command_bridge.py`
+  - `tests/coding_agent/test_bee_command_bridge.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_bee_command_bridge.py -v`
+  - `uv run pytest tests/coding_agent/action_safety/test_validation_runner.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_command_bridge.py tests/coding_agent/test_bee_command_bridge.py`
+  - `uv run ruff check src/coding_agent/bee_command_bridge.py tests/coding_agent/test_bee_command_bridge.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Validation Bee nodes can run through existing `ValidationRunner`.
+  - Non-validation nodes do not use the validation runner.
+  - Denied and approval-required validation commands do not execute.
+  - Safe validation summaries omit raw command strings and output.
+
+### After
+
+- Changed files:
+  - `docs/bee_command_bridge/GOAL_PROGRESS.md`
+  - `docs/adr/0043-bee-command-bridge.md`
+  - `src/coding_agent/bee_command_bridge.py`
+  - `tests/coding_agent/test_bee_command_bridge.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_command_bridge.py -v`
+  - `uv run pytest tests/coding_agent/action_safety/test_validation_runner.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_command_bridge.py tests/coding_agent/test_bee_command_bridge.py`
+  - `uv run ruff check src/coding_agent/bee_command_bridge.py tests/coding_agent/test_bee_command_bridge.py`
+  - `git diff --check -- .`
+- Results:
+  - Validation Bee nodes can run through existing `ValidationRunner`.
+  - Non-validation nodes do not enter the validation runner.
+  - Denied and approval-required validation commands return without execution.
+  - Safe validation summaries omit raw command strings and command output.
+  - Validation runner, Bee runtime, and Bee workspace regression tests passed.
+  - Scoped formatting, lint, and whitespace checks passed.
+- Remaining risks:
+  - G116 still needs evidence-backed node completion semantics.
+  - Validation bridge returns reports but does not yet mark Bee nodes complete.
