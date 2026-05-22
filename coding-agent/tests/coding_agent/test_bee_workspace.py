@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from agentkit.observability import SpanRecord
 from coding_agent.bee_workspace import (
     BeeWorkspaceRunArtifacts,
     BeeWorkspaceRunNode,
@@ -14,6 +15,17 @@ from coding_agent.bee_workspace import (
     load_bee_workspace_command_intents,
     load_bee_workspace_template,
     write_bee_workspace_run_artifacts,
+)
+from coding_agent.observability import (
+    PrometheusMetricsObservationSink,
+    PrometheusMetricsRecorder,
+)
+from coding_agent.ui.developer_console import (
+    ConsoleBeeCommandIntentSummary,
+    ConsoleBeePage,
+    ConsoleBeeRunArtifactSummary,
+    ConsoleBeeTemplateSummary,
+    render_console_bee_page,
 )
 
 
@@ -377,6 +389,141 @@ def test_bee_workspace_discovers_run_artifact_summaries(tmp_path: Path) -> None:
     assert record.validation_count == 1
     assert record.has_report is True
     assert record.has_memory_candidates is True
+
+
+def test_bee_workspace_local_dogfood_smoke(tmp_path: Path) -> None:
+    template_dir = tmp_path / ".bee" / "templates" / "template-alpha"
+    _write_safe_template(template_dir, template_id="template-alpha")
+    (template_dir / "commands.yaml").write_text(
+        "\n".join(
+            [
+                "commands:",
+                "  - name: smoke",
+                "    profile: validation",
+                "    policy: existing_command_policy",
+                "    category: validation",
+                "    validation_label: pytest_smoke",
+                "    metadata:",
+                "      owner: local",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    templates = discover_bee_workspace_templates(tmp_path)
+    template = templates[0]
+    manifest = build_bee_manifest_from_workspace_template(template)
+    command_intents = load_bee_workspace_command_intents(template)
+    write_bee_workspace_run_artifacts(
+        tmp_path,
+        BeeWorkspaceRunArtifacts(
+            task_id="bee-task-alpha",
+            template_id=manifest.metadata["template_id"],
+            topic_id="topic-alpha",
+            status="completed",
+            nodes=(
+                BeeWorkspaceRunNode(
+                    node_id="node-plan",
+                    status="completed",
+                    run_id="run-alpha",
+                    action_ids=("action-alpha",),
+                    validation_ids=("validation-alpha",),
+                    attempts=1,
+                ),
+            ),
+            run_ids=("run-alpha",),
+            action_ids=("action-alpha",),
+            validation_ids=("validation-alpha",),
+            report_title="Local Bee task completed",
+            report_summary="Validation passed with sanitized evidence.",
+        ),
+    )
+    artifact_records = discover_bee_workspace_run_artifacts(tmp_path)
+
+    html = render_console_bee_page(
+        ConsoleBeePage(
+            tasks=(),
+            nodes=(),
+            templates=(
+                ConsoleBeeTemplateSummary(
+                    template_id=template.template_id,
+                    kind=manifest.kind,
+                    profile=manifest.profile,
+                    title="redacted",
+                    feature_count=len(template.feature_paths),
+                    has_commands=template.commands_path is not None,
+                    command_count=len(command_intents),
+                ),
+            ),
+            run_artifacts=(
+                ConsoleBeeRunArtifactSummary(
+                    task_id=artifact_records[0].task_id,
+                    template_id=artifact_records[0].template_id,
+                    topic_id=artifact_records[0].topic_id,
+                    status=artifact_records[0].status,
+                    node_count=artifact_records[0].node_count,
+                    run_count=artifact_records[0].run_count,
+                    action_count=artifact_records[0].action_count,
+                    validation_count=artifact_records[0].validation_count,
+                    has_report=artifact_records[0].has_report,
+                    has_memory_candidates=artifact_records[0].has_memory_candidates,
+                ),
+            ),
+            commands=(
+                ConsoleBeeCommandIntentSummary(
+                    template_id=template.template_id,
+                    name=command_intents[0].name,
+                    profile=command_intents[0].profile,
+                    policy=command_intents[0].policy,
+                    category=command_intents[0].category,
+                    validation_label=command_intents[0].validation_label,
+                    status=command_intents[0].status,
+                ),
+            ),
+        )
+    )
+
+    recorder = PrometheusMetricsRecorder()
+    PrometheusMetricsObservationSink(recorder=recorder).record_span(
+        SpanRecord(
+            name="runtime.stage.dispatch",
+            status="ok",
+            attributes={
+                "template_id": template.template_id,
+                "task_id": artifact_records[0].task_id,
+                "node_id": "node-plan",
+                "template_kind": manifest.kind,
+                "template_profile": manifest.profile,
+                "command_category": command_intents[0].category,
+                "command_policy": command_intents[0].policy,
+                "command_status": command_intents[0].status,
+            },
+            duration_ms=1,
+        )
+    )
+    metrics = recorder.exposition_text()
+
+    assert manifest.metadata["template_id"] == "template-alpha"
+    assert command_intents[0].validation_label == "pytest_smoke"
+    assert artifact_records[0].run_count == 1
+    assert "Bee Workspace Templates" in html
+    assert "Bee Workspace Run Artifacts" in html
+    assert "Bee Workspace Command Intents" in html
+    assert "template-alpha" in html
+    assert "pytest_smoke" in html
+    assert 'template_kind="maintenance"' in metrics
+    assert 'command_category="validation"' in metrics
+    for forbidden in (
+        "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT",
+        "command_output",
+        "stdout",
+        "stderr",
+        "prompt",
+    ):
+        assert forbidden not in html
+        assert forbidden not in metrics
+    for high_cardinality in ("template_id", "task_id", "node_id"):
+        assert high_cardinality not in metrics
 
 
 @pytest.mark.parametrize(
