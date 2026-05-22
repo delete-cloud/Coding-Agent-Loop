@@ -276,6 +276,7 @@ class ScheduledRunPlanner:
                     metadata={
                         "trigger_kind": "schedule",
                         "schedule_kind": schedule.kind,
+                        **_schedule_bee_launch_metadata(schedule),
                     },
                 )
             )
@@ -300,7 +301,10 @@ class ScheduledRunPlanner:
                     reason="schedule_due",
                     due_at=trigger.due_at,
                     planned_at=trigger.planned_at,
-                    metadata={"schedule_kind": schedule.kind},
+                    metadata={
+                        "schedule_kind": schedule.kind,
+                        **_schedule_bee_launch_metadata(schedule),
+                    },
                 )
             )
         return intents
@@ -1009,7 +1013,9 @@ def _require_json_value(field_name: str, value: object) -> None:
 
 def _reject_secret_shaped_value(field_name: str, value: str) -> None:
     folded = value.casefold()
-    if any(marker in folded for marker in _SECRET_VALUE_MARKERS):
+    if any(
+        marker in folded for marker in _SECRET_VALUE_MARKERS if marker != "sk-"
+    ) or folded.startswith("sk-"):
         raise ValueError(f"{field_name} must not contain secret-shaped values")
 
 
@@ -1026,6 +1032,17 @@ def _next_due_at(schedule: ScheduleRecord, now: datetime) -> datetime | None:
     if schedule.cadence == "daily":
         return now + timedelta(days=1)
     return None
+
+
+def _schedule_bee_launch_metadata(schedule: ScheduleRecord) -> JSONObject:
+    value = schedule.metadata.get("bee_launch")
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise TypeError("schedule.metadata.bee_launch must be an object")
+    bee_launch = dict(value)
+    _require_json_object("schedule.metadata.bee_launch", bee_launch)
+    return {"bee_launch": bee_launch}
 
 
 def _require_topic_matches_intent(

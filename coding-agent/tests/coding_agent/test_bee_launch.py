@@ -16,9 +16,11 @@ from coding_agent.bee_launch import (
     BeeLaunchRequest,
     BeeTemplateResolution,
     PGBeeLaunchStore,
+    ScheduledBeeLaunchOrchestrator,
     build_bee_launch_plan,
 )
 from coding_agent.bee_runtime import BeeNodeRecord, BeeTaskLifecycle, BeeTaskRecord
+from coding_agent.scheduled_runs import ScheduledLaunchIntent, ScheduleTriggerRecord
 from coding_agent.topic_lifecycle import TopicLifecycle
 from coding_agent.topic_store import JSONObject, TopicAnchorRecord, TopicRecord
 
@@ -203,9 +205,11 @@ class FakeBeeTaskStore:
     def __init__(self) -> None:
         self.tasks: dict[str, BeeTaskRecord] = {}
         self.nodes: dict[tuple[str, str], BeeNodeRecord] = {}
+        self.upserted_task_ids: list[str] = []
 
     async def upsert_task(self, record: BeeTaskRecord) -> BeeTaskRecord:
         self.tasks[record.task_id] = record
+        self.upserted_task_ids.append(record.task_id)
         return record
 
     async def upsert_node(self, record: BeeNodeRecord) -> BeeNodeRecord:
@@ -275,6 +279,18 @@ class FakeBeeTaskStore:
         )
         self.nodes[(task_id, node_id)] = updated
         return updated
+
+
+class FakeScheduleTriggerStore:
+    def __init__(self) -> None:
+        self.triggers: dict[str, ScheduleTriggerRecord] = {}
+
+    async def record_trigger(
+        self,
+        record: ScheduleTriggerRecord,
+    ) -> ScheduleTriggerRecord:
+        self.triggers[record.trigger_id] = record
+        return record
 
 
 class FakeClock:
@@ -931,6 +947,248 @@ async def test_manual_bee_launch_does_not_execute_command_intents(
 
 
 @pytest.mark.asyncio
+async def test_scheduled_bee_launch_creates_task_and_links_schedule(
+    tmp_path: Path,
+) -> None:
+    _write_template(tmp_path, template_id="template-alpha")
+    launch_store = PGBeeLaunchStore(pool=FakeBeeLaunchPool())  # type: ignore[arg-type]
+    task_store = FakeBeeTaskStore()
+    topic_store = FakeTopicStore()
+    trigger_store = FakeScheduleTriggerStore()
+    launcher = BeeLaunchOrchestrator(
+        launch_store=launch_store,
+        task_store=task_store,
+        topic_store=topic_store,
+        topic_lifecycle=TopicLifecycle(
+            store=topic_store,
+            now=FakeClock(),
+            topic_id_factory=lambda: "topic-scheduled",
+        ),
+        now=FakeClock(),
+        task_id_factory=lambda plan, topic: f"bee-task-{plan.launch_id}",
+    )
+    scheduled_launcher = ScheduledBeeLaunchOrchestrator(
+        launcher=launcher,
+        trigger_store=trigger_store,
+        launch_id_factory=lambda intent: f"launch-{intent.trigger_id}",
+    )
+
+    result = await scheduled_launcher.launch_due(
+        _scheduled_intent(topic_id=None),
+        template_id="template-alpha",
+        workspace_root=tmp_path,
+        tape=Tape(tape_id="tape-alpha"),
+        inputs={"region": "us-test-1"},
+        workspace_policy={"artifact_mode": "enabled"},
+        write_workspace_artifacts=True,
+    )
+
+    launch = await launch_store.load_launch("launch-trigger-1")
+    trigger = trigger_store.triggers["trigger-1"]
+    assert result.source == "schedule"
+    assert result.task_id == "bee-task-launch-trigger-1"
+    assert result.topic_id == "topic-scheduled"
+    assert launch is not None
+    assert launch.schedule_id == "schedule-1"
+    assert launch.task_id == result.task_id
+    assert trigger.status == "launched"
+    assert trigger.topic_id == result.topic_id
+    assert trigger.metadata == {
+        "trigger_kind": "schedule",
+        "launch_id": result.launch_id,
+        "task_id": result.task_id,
+        "topic_id": result.topic_id,
+        "launch_status": "launched",
+    }
+    assert (tmp_path / ".bee" / "runs" / result.task_id / "task.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_scheduled_bee_launch_continues_topic_and_keeps_nodes_pending(
+    tmp_path: Path,
+) -> None:
+    _write_template_with_commands(tmp_path, template_id="template-alpha")
+    launch_store = PGBeeLaunchStore(pool=FakeBeeLaunchPool())  # type: ignore[arg-type]
+    task_store = FakeBeeTaskStore()
+    topic_store = FakeTopicStore()
+    lifecycle = TopicLifecycle(
+        store=topic_store,
+        now=FakeClock(),
+        topic_id_factory=lambda: "topic-existing",
+    )
+    tape = Tape(tape_id="tape-alpha")
+    topic = await lifecycle.create_topic(
+        tape=tape,
+        session_id="session-alpha",
+        kind="maintenance",
+        title="Existing scheduled topic",
+    )
+    launcher = BeeLaunchOrchestrator(
+        launch_store=launch_store,
+        task_store=task_store,
+        topic_store=topic_store,
+        topic_lifecycle=lifecycle,
+        now=FakeClock(),
+        task_id_factory=lambda plan, existing_topic: (
+            f"bee-task-{existing_topic.topic_id}"
+        ),
+    )
+    scheduled_launcher = ScheduledBeeLaunchOrchestrator(
+        launcher=launcher,
+        trigger_store=FakeScheduleTriggerStore(),
+        launch_id_factory=lambda intent: f"launch-{intent.trigger_id}",
+    )
+
+    result = await scheduled_launcher.launch_due(
+        _scheduled_intent(topic_id=topic.topic_id),
+        template_id="template-alpha",
+        workspace_root=tmp_path,
+        tape=tape,
+        inputs={"region": "us-test-1"},
+    )
+
+    nodes = await task_store.list_nodes(result.task_id)
+    assert result.topic_id == topic.topic_id
+    assert [node.status for node in nodes] == ["pending"]
+    assert nodes[0].metadata["command_ref"] == "shellcheck"
+    assert nodes[0].run_id is None
+
+
+@pytest.mark.asyncio
+async def test_scheduled_bee_launch_replay_returns_existing_launch_result(
+    tmp_path: Path,
+) -> None:
+    _write_template(tmp_path, template_id="template-alpha")
+    launch_store = PGBeeLaunchStore(pool=FakeBeeLaunchPool())  # type: ignore[arg-type]
+    task_store = FakeBeeTaskStore()
+    topic_store = FakeTopicStore()
+    launcher = BeeLaunchOrchestrator(
+        launch_store=launch_store,
+        task_store=task_store,
+        topic_store=topic_store,
+        topic_lifecycle=TopicLifecycle(
+            store=topic_store,
+            now=FakeClock(),
+            topic_id_factory=lambda: "topic-scheduled",
+        ),
+        now=FakeClock(),
+        task_id_factory=lambda plan, topic: f"bee-task-{len(task_store.tasks) + 1}",
+    )
+    scheduled_launcher = ScheduledBeeLaunchOrchestrator(
+        launcher=launcher,
+        trigger_store=FakeScheduleTriggerStore(),
+        launch_id_factory=lambda intent: f"launch-{intent.trigger_id}",
+    )
+    intent = _scheduled_intent(topic_id=None)
+
+    first = await scheduled_launcher.launch_due(
+        intent,
+        template_id="template-alpha",
+        workspace_root=tmp_path,
+        tape=Tape(tape_id="tape-alpha"),
+        inputs={"region": "us-test-1"},
+    )
+    replayed = await scheduled_launcher.launch_due(
+        intent,
+        template_id="template-alpha",
+        workspace_root=tmp_path,
+        tape=Tape(tape_id="tape-alpha"),
+        inputs={"region": "us-test-1"},
+    )
+
+    assert replayed == first
+    assert task_store.upserted_task_ids == ["bee-task-1"]
+    assert sorted(task_store.tasks) == ["bee-task-1"]
+
+
+@pytest.mark.asyncio
+async def test_scheduled_bee_launch_replay_rejects_in_progress_launch(
+    tmp_path: Path,
+) -> None:
+    _write_template(tmp_path, template_id="template-alpha")
+    launch_store = PGBeeLaunchStore(pool=FakeBeeLaunchPool())  # type: ignore[arg-type]
+    await launch_store.create_launch(
+        _launch(
+            "launch-trigger-1",
+            source="schedule",
+            schedule_id="schedule-1",
+            status="launching",
+        )
+    )
+    task_store = FakeBeeTaskStore()
+    launcher = BeeLaunchOrchestrator(
+        launch_store=launch_store,
+        task_store=task_store,
+        topic_store=FakeTopicStore(),
+        topic_lifecycle=TopicLifecycle(store=FakeTopicStore()),
+        now=FakeClock(),
+    )
+    scheduled_launcher = ScheduledBeeLaunchOrchestrator(
+        launcher=launcher,
+        trigger_store=FakeScheduleTriggerStore(),
+        launch_id_factory=lambda intent: f"launch-{intent.trigger_id}",
+    )
+
+    with pytest.raises(ValueError, match="already exists"):
+        await scheduled_launcher.launch_due(
+            _scheduled_intent(topic_id=None),
+            template_id="template-alpha",
+            workspace_root=tmp_path,
+            tape=Tape(tape_id="tape-alpha"),
+            inputs={"region": "us-test-1"},
+        )
+
+    assert task_store.tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_scheduled_bee_launch_rejects_mismatched_topic_policy(
+    tmp_path: Path,
+) -> None:
+    _write_template(tmp_path, template_id="template-alpha")
+    launcher = BeeLaunchOrchestrator(
+        launch_store=PGBeeLaunchStore(pool=FakeBeeLaunchPool()),  # type: ignore[arg-type]
+        task_store=FakeBeeTaskStore(),
+        topic_store=FakeTopicStore(),
+        topic_lifecycle=TopicLifecycle(store=FakeTopicStore()),
+        now=FakeClock(),
+    )
+    scheduled_launcher = ScheduledBeeLaunchOrchestrator(
+        launcher=launcher,
+        trigger_store=FakeScheduleTriggerStore(),
+        launch_id_factory=lambda intent: f"launch-{intent.trigger_id}",
+    )
+
+    with pytest.raises(ValueError, match="session_id must match intent"):
+        await scheduled_launcher.launch_due(
+            _scheduled_intent(topic_id="topic-intent"),
+            template_id="template-alpha",
+            workspace_root=tmp_path,
+            tape=Tape(tape_id="tape-alpha"),
+            inputs={"region": "us-test-1"},
+            topic_policy={"session_id": "other-session"},
+        )
+    with pytest.raises(ValueError, match="topic_id must match intent"):
+        await scheduled_launcher.launch_due(
+            _scheduled_intent(topic_id="topic-intent"),
+            template_id="template-alpha",
+            workspace_root=tmp_path,
+            tape=Tape(tape_id="tape-alpha"),
+            inputs={"region": "us-test-1"},
+            topic_policy={"topic_id": "other-topic"},
+        )
+    with pytest.raises(ValueError, match="mode must match intent"):
+        await scheduled_launcher.launch_due(
+            _scheduled_intent(topic_id="topic-intent"),
+            template_id="template-alpha",
+            workspace_root=tmp_path,
+            tape=Tape(tape_id="tape-alpha"),
+            inputs={"region": "us-test-1"},
+            topic_policy={"mode": "create"},
+        )
+
+
+@pytest.mark.asyncio
 async def test_bee_task_lifecycle_resume_partially_completed_task() -> None:
     store = _lifecycle_task_store()
     controller = BeeTaskLifecycleController(store=store, now=FakeClock())
@@ -1248,6 +1506,19 @@ def _lifecycle_task_store() -> FakeBeeTaskStore:
         metadata={"attempt_count": 2, "evidence_ref": "evidence-node-validate"},
     )
     return store
+
+
+def _scheduled_intent(topic_id: str | None) -> ScheduledLaunchIntent:
+    return ScheduledLaunchIntent(
+        trigger_id="trigger-1",
+        schedule_id="schedule-1",
+        session_id="session-alpha",
+        topic_id=topic_id,
+        reason="schedule_due",
+        due_at=_dt(8),
+        planned_at=_dt(9),
+        metadata={"schedule_kind": "interval"},
+    )
 
 
 def _dt(hour: int) -> datetime:

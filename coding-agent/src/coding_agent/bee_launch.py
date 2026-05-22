@@ -31,6 +31,7 @@ from coding_agent.bee_workspace import (
     load_bee_workspace_template,
     write_bee_workspace_run_artifacts,
 )
+from coding_agent.scheduled_runs import ScheduledLaunchIntent, ScheduleTriggerRecord
 from coding_agent.topic_lifecycle import TopicLifecycle
 from coding_agent.topic_store import JSONObject, JSONValue, TopicRecord
 
@@ -118,6 +119,8 @@ _SECRET_VALUE_MARKERS: Final[tuple[str, ...]] = (
 class BeeLaunchStore(Protocol):
     async def create_launch(self, record: BeeLaunchRecord) -> BeeLaunchRecord: ...
 
+    async def load_launch(self, launch_id: str) -> BeeLaunchRecord | None: ...
+
     async def update_launch_status(
         self,
         launch_id: str,
@@ -173,6 +176,13 @@ class BeeTaskLaunchStore(Protocol):
         finished_at: datetime | None,
         metadata: JSONObject,
     ) -> BeeNodeRecord: ...
+
+
+class BeeScheduleTriggerStore(Protocol):
+    async def record_trigger(
+        self,
+        record: ScheduleTriggerRecord,
+    ) -> ScheduleTriggerRecord: ...
 
 
 class BeeLaunchTopicStore(Protocol):
@@ -235,11 +245,15 @@ class BeeLaunchRequest:
     topic_policy: JSONObject = field(default_factory=dict)
     workspace_policy: JSONObject = field(default_factory=dict)
     metadata: JSONObject = field(default_factory=dict)
+    schedule_id: str | None = None
+    signal_id: str | None = None
 
     def __post_init__(self) -> None:
         _require_non_empty("launch_id", self.launch_id)
         _require_status("launch source", self.source, _LAUNCH_SOURCES)
         _require_non_empty("template_id", self.template_id)
+        _require_optional_id("schedule_id", self.schedule_id)
+        _require_optional_id("signal_id", self.signal_id)
         if not isinstance(self.workspace_root, Path):
             raise TypeError("workspace_root must be a Path")
         _require_datetime("requested_at", self.requested_at)
@@ -295,11 +309,15 @@ class BeeLaunchPlan:
     topic_policy: JSONObject
     workspace_policy: JSONObject
     metadata: JSONObject = field(default_factory=dict)
+    schedule_id: str | None = None
+    signal_id: str | None = None
 
     def __post_init__(self) -> None:
         _require_non_empty("launch_id", self.launch_id)
         _require_status("launch source", self.source, _LAUNCH_SOURCES)
         _require_datetime("requested_at", self.requested_at)
+        _require_optional_id("schedule_id", self.schedule_id)
+        _require_optional_id("signal_id", self.signal_id)
         _require_json_object("topic_policy", self.topic_policy)
         _require_json_object("workspace_policy", self.workspace_policy)
         _require_json_object("metadata", self.metadata)
@@ -602,6 +620,8 @@ def build_bee_launch_plan(request: BeeLaunchRequest) -> BeeLaunchPlan:
         topic_policy=dict(request.topic_policy),
         workspace_policy=dict(request.workspace_policy),
         metadata=dict(request.metadata),
+        schedule_id=request.schedule_id,
+        signal_id=request.signal_id,
     )
 
 
@@ -632,6 +652,45 @@ class BeeLaunchOrchestrator:
     ) -> BeeLaunchResult:
         if request.source != "manual":
             raise ValueError("manual Bee launch requires source='manual'")
+        return await self._launch(
+            request,
+            tape=tape,
+            write_workspace_artifacts=write_workspace_artifacts,
+        )
+
+    async def launch_scheduled(
+        self,
+        request: BeeLaunchRequest,
+        *,
+        tape: Tape,
+        write_workspace_artifacts: bool = False,
+    ) -> BeeLaunchResult:
+        if request.source != "schedule":
+            raise ValueError("scheduled Bee launch requires source='schedule'")
+        if request.schedule_id is None:
+            raise ValueError("scheduled Bee launch requires schedule_id")
+        return await self._launch(
+            request,
+            tape=tape,
+            write_workspace_artifacts=write_workspace_artifacts,
+        )
+
+    async def load_launch_result(self, launch_id: str) -> BeeLaunchResult | None:
+        launch = await self._launch_store.load_launch(launch_id)
+        if launch is None or launch.status != "launched":
+            return None
+        return _launch_result_from_record(launch)
+
+    async def load_launch(self, launch_id: str) -> BeeLaunchRecord | None:
+        return await self._launch_store.load_launch(launch_id)
+
+    async def _launch(
+        self,
+        request: BeeLaunchRequest,
+        *,
+        tape: Tape,
+        write_workspace_artifacts: bool,
+    ) -> BeeLaunchResult:
         plan = build_bee_launch_plan(request)
         if write_workspace_artifacts:
             _require_workspace_artifacts_enabled(plan)
@@ -643,6 +702,8 @@ class BeeLaunchOrchestrator:
                 status="planned",
                 requested_at=plan.requested_at,
                 workspace_ref=_workspace_ref(plan),
+                schedule_id=plan.schedule_id,
+                signal_id=plan.signal_id,
                 metadata=_launch_record_metadata(plan),
             )
         )
@@ -654,7 +715,7 @@ class BeeLaunchOrchestrator:
             finished_at=None,
             error_type=None,
             error_message=None,
-            metadata={"phase": "manual_launch"},
+            metadata={"phase": f"{plan.source}_launch"},
         )
         topic = await self._resolve_topic(plan, tape=tape)
         task_id = self._task_id_factory(plan, topic)
@@ -708,7 +769,10 @@ class BeeLaunchOrchestrator:
                         for node in nodes
                     ),
                     report_title=f"{plan.manifest.title} launch",
-                    report_summary="Manual Bee launch created sanitized task artifacts.",
+                    report_summary=(
+                        f"{_launch_mode(plan)} Bee launch created sanitized "
+                        "task artifacts."
+                    ),
                 ),
             )
         attached = await self._launch_store.attach_launch_result(
@@ -745,8 +809,9 @@ class BeeLaunchOrchestrator:
                     raise ValueError(f"Bee launch topic is not open: {topic_id}")
                 _require_topic_matches_launch(topic=topic, plan=plan, tape=tape)
                 return topic
+            session_id = _launch_session_id(plan)
             open_topic = await self._topic_store.find_open_topic(
-                session_id=plan.manifest.topic.session_id,
+                session_id=session_id,
                 tape_id=tape.tape_id,
             )
             if open_topic is None:
@@ -755,7 +820,7 @@ class BeeLaunchOrchestrator:
         if mode == "create":
             return await self._topic_lifecycle.create_topic(
                 tape=tape,
-                session_id=plan.manifest.topic.session_id,
+                session_id=_launch_session_id(plan),
                 kind=plan.manifest.kind,
                 title=plan.manifest.topic.title_hint or plan.manifest.title,
                 metadata={
@@ -765,6 +830,74 @@ class BeeLaunchOrchestrator:
                 },
             )
         raise ValueError(f"unsupported Bee topic policy mode: {mode}")
+
+
+class ScheduledBeeLaunchOrchestrator:
+    def __init__(
+        self,
+        *,
+        launcher: BeeLaunchOrchestrator,
+        trigger_store: BeeScheduleTriggerStore,
+        launch_id_factory: Callable[[ScheduledLaunchIntent], str] | None = None,
+    ) -> None:
+        self._launcher = launcher
+        self._trigger_store = trigger_store
+        self._launch_id_factory = launch_id_factory or _default_scheduled_launch_id
+
+    async def launch_due(
+        self,
+        intent: ScheduledLaunchIntent,
+        *,
+        template_id: str,
+        workspace_root: Path,
+        tape: Tape,
+        inputs: JSONObject | None = None,
+        topic_policy: JSONObject | None = None,
+        workspace_policy: JSONObject | None = None,
+        write_workspace_artifacts: bool = False,
+    ) -> BeeLaunchResult:
+        launch_id = self._launch_id_factory(intent)
+        resolved_topic_policy = _scheduled_topic_policy(intent, topic_policy)
+        existing = await self._launcher.load_launch(launch_id)
+        if existing is not None:
+            if existing.status == "launched":
+                return _launch_result_from_record(existing)
+            raise ValueError(f"scheduled Bee launch already exists: {launch_id}")
+        result = await self._launcher.launch_scheduled(
+            BeeLaunchRequest(
+                launch_id=launch_id,
+                source="schedule",
+                template_id=template_id,
+                workspace_root=workspace_root,
+                requested_at=intent.planned_at,
+                inputs=dict(inputs or {}),
+                topic_policy=resolved_topic_policy,
+                workspace_policy=dict(workspace_policy or {}),
+                metadata={"trigger_id": intent.trigger_id},
+                schedule_id=intent.schedule_id,
+            ),
+            tape=tape,
+            write_workspace_artifacts=write_workspace_artifacts,
+        )
+        await self._trigger_store.record_trigger(
+            ScheduleTriggerRecord(
+                trigger_id=intent.trigger_id,
+                schedule_id=intent.schedule_id,
+                topic_id=result.topic_id,
+                status="launched",
+                due_at=intent.due_at,
+                planned_at=intent.planned_at,
+                reason=intent.reason,
+                metadata={
+                    "trigger_kind": "schedule",
+                    "launch_id": result.launch_id,
+                    "task_id": result.task_id,
+                    "topic_id": result.topic_id,
+                    "launch_status": result.status,
+                },
+            )
+        )
+        return result
 
 
 class BeeTaskLifecycleController:
@@ -992,11 +1125,38 @@ def _require_workspace_artifacts_enabled(plan: BeeLaunchPlan) -> None:
 
 def _launch_record_metadata(plan: BeeLaunchPlan) -> JSONObject:
     return {
-        "launch_mode": "manual",
+        "launch_mode": _launch_mode(plan),
         "template_kind": plan.resolution.template_kind,
         "template_profile": plan.resolution.template_profile,
         "input_names": list(sorted(plan.input_binding.inputs)),
     }
+
+
+def _launch_result_from_record(launch: BeeLaunchRecord) -> BeeLaunchResult:
+    if launch.task_id is None or launch.topic_id is None or launch.session_id is None:
+        raise ValueError(f"Bee launch result is incomplete: {launch.launch_id}")
+    return BeeLaunchResult(
+        launch_id=launch.launch_id,
+        task_id=launch.task_id,
+        topic_id=launch.topic_id,
+        session_id=launch.session_id,
+        source=launch.source,
+        status=launch.status,
+    )
+
+
+def _launch_mode(plan: BeeLaunchPlan) -> str:
+    if plan.source == "schedule":
+        return "scheduled"
+    return plan.source
+
+
+def _launch_session_id(plan: BeeLaunchPlan) -> str:
+    value = plan.topic_policy.get("session_id")
+    if isinstance(value, str):
+        _require_non_empty("topic_policy.session_id", value)
+        return value
+    return plan.manifest.topic.session_id
 
 
 def _node_metadata(plan: BeeLaunchPlan, command_ref: str | None) -> JSONObject:
@@ -1028,13 +1188,46 @@ def _default_task_id(plan: BeeLaunchPlan, topic: TopicRecord) -> str:
     return f"bee-task-{plan.template.template_id}-{topic.topic_id}-{suffix}"
 
 
+def _default_scheduled_launch_id(intent: ScheduledLaunchIntent) -> str:
+    return f"bee-launch-{intent.trigger_id}"
+
+
+def _scheduled_topic_policy(
+    intent: ScheduledLaunchIntent,
+    topic_policy: JSONObject | None,
+) -> JSONObject:
+    policy = dict(topic_policy or {})
+    requested_session_id = policy.get("session_id")
+    if (
+        isinstance(requested_session_id, str)
+        and requested_session_id != intent.session_id
+    ):
+        raise ValueError("scheduled Bee launch session_id must match intent")
+    requested_topic_id = policy.get("topic_id")
+    if (
+        intent.topic_id is not None
+        and isinstance(requested_topic_id, str)
+        and requested_topic_id != intent.topic_id
+    ):
+        raise ValueError("scheduled Bee launch topic_id must match intent")
+    required_mode = "continue" if intent.topic_id is not None else "create"
+    requested_mode = policy.get("mode")
+    if isinstance(requested_mode, str) and requested_mode != required_mode:
+        raise ValueError("scheduled Bee launch mode must match intent")
+    policy["mode"] = required_mode
+    policy["session_id"] = intent.session_id
+    if intent.topic_id is not None:
+        policy["topic_id"] = intent.topic_id
+    return policy
+
+
 def _require_topic_matches_launch(
     *,
     topic: TopicRecord,
     plan: BeeLaunchPlan,
     tape: Tape,
 ) -> None:
-    if topic.session_id != plan.manifest.topic.session_id:
+    if topic.session_id != _launch_session_id(plan):
         raise ValueError("Bee launch topic session does not match template")
     if topic.tape_id != tape.tape_id:
         raise ValueError("Bee launch topic tape does not match launch tape")
