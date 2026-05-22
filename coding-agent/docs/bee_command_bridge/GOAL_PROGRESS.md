@@ -162,3 +162,52 @@ This ledger tracks G110-G117 for the Bee Command Intent Execution Bridge / Local
 - Remaining risks:
   - G114 still needs command policy denial/approval-required bridge decisions.
   - No command execution, validation execution, evidence completion, console, or metrics integration occurs yet.
+
+## G114_BEE_COMMAND_POLICY_DECISION
+
+### Before
+
+- Goal id: G114_BEE_COMMAND_POLICY_DECISION
+- Intended files:
+  - `docs/bee_command_bridge/GOAL_PROGRESS.md`
+  - `docs/adr/0043-bee-command-bridge.md`
+  - `src/coding_agent/bee_command_bridge.py`
+  - `tests/coding_agent/test_bee_command_bridge.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_bee_command_bridge.py -v`
+  - `uv run pytest tests/coding_agent/action_safety/test_command_policy.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_command_bridge.py tests/coding_agent/test_bee_command_bridge.py`
+  - `uv run ruff check src/coding_agent/bee_command_bridge.py tests/coding_agent/test_bee_command_bridge.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Bridge evaluates an explicit command candidate through existing command policy.
+  - Policy denied intents return a denied bridge plan without execution.
+  - Approval-required intents return an approval-required bridge plan without execution.
+  - Bridge safe summaries omit raw command strings and command output.
+
+### After
+
+- Changed files:
+  - `docs/bee_command_bridge/GOAL_PROGRESS.md`
+  - `docs/adr/0043-bee-command-bridge.md`
+  - `src/coding_agent/bee_command_bridge.py`
+  - `tests/coding_agent/test_bee_command_bridge.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_command_bridge.py -v`
+  - `uv run pytest tests/coding_agent/action_safety/test_command_policy.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_command_bridge.py tests/coding_agent/test_bee_command_bridge.py`
+  - `uv run ruff check src/coding_agent/bee_command_bridge.py tests/coding_agent/test_bee_command_bridge.py`
+  - `git diff --check -- .`
+- Results:
+  - Bridge plans now evaluate explicit command candidates through existing command policy and approval routing.
+  - Policy-denied and approval-required outcomes return non-executing bridge plans.
+  - Safe summaries omit raw command strings and command output.
+  - Command policy, Bee runtime, and Bee workspace regression tests passed.
+  - Scoped formatting, lint, and whitespace checks passed.
+- Remaining risks:
+  - G115 still needs validation-node execution through `ValidationRunner`.
+  - Ready bridge plans still do not execute commands or complete Bee nodes.
