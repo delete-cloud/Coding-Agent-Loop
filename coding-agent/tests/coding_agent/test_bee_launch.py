@@ -16,6 +16,7 @@ from coding_agent.bee_launch import (
     BeeLaunchRequest,
     BeeTemplateResolution,
     PGBeeLaunchStore,
+    ProactiveBeeLaunchOrchestrator,
     ScheduledBeeLaunchOrchestrator,
     build_bee_launch_plan,
 )
@@ -1189,6 +1190,220 @@ async def test_scheduled_bee_launch_rejects_mismatched_topic_policy(
 
 
 @pytest.mark.asyncio
+async def test_proactive_signal_bee_launch_creates_task_and_links_signal(
+    tmp_path: Path,
+) -> None:
+    _write_template(tmp_path, template_id="template-alpha")
+    launch_store = PGBeeLaunchStore(pool=FakeBeeLaunchPool())  # type: ignore[arg-type]
+    task_store = FakeBeeTaskStore()
+    topic_store = FakeTopicStore()
+    trigger_store = FakeScheduleTriggerStore()
+    launcher = BeeLaunchOrchestrator(
+        launch_store=launch_store,
+        task_store=task_store,
+        topic_store=topic_store,
+        topic_lifecycle=TopicLifecycle(
+            store=topic_store,
+            now=FakeClock(),
+            topic_id_factory=lambda: "topic-signal",
+        ),
+        now=FakeClock(),
+        task_id_factory=lambda plan, topic: f"bee-task-{plan.launch_id}",
+    )
+    signal_launcher = ProactiveBeeLaunchOrchestrator(
+        launcher=launcher,
+        trigger_store=trigger_store,
+        launch_id_factory=lambda intent: f"launch-{intent.trigger_id}",
+    )
+
+    result = await signal_launcher.launch_signal(
+        _signal_intent(topic_id=None),
+        template_id="template-alpha",
+        workspace_root=tmp_path,
+        tape=Tape(tape_id="tape-alpha"),
+        inputs={"region": "us-test-1"},
+    )
+
+    launch = await launch_store.load_launch("launch-signal-trigger-signal-1")
+    trigger = trigger_store.triggers["signal-trigger-signal-1"]
+    assert result.source == "proactive_signal"
+    assert result.task_id == "bee-task-launch-signal-trigger-signal-1"
+    assert result.topic_id == "topic-signal"
+    assert launch is not None
+    assert launch.signal_id == "signal-1"
+    assert launch.task_id == result.task_id
+    assert trigger.status == "launched"
+    assert trigger.signal_id == "signal-1"
+    assert trigger.topic_id == result.topic_id
+    assert trigger.metadata == {
+        "trigger_kind": "proactive_signal",
+        "launch_id": result.launch_id,
+        "task_id": result.task_id,
+        "topic_id": result.topic_id,
+        "launch_status": "launched",
+    }
+
+
+@pytest.mark.asyncio
+async def test_proactive_signal_bee_launch_replay_and_policy_guards(
+    tmp_path: Path,
+) -> None:
+    _write_template(tmp_path, template_id="template-alpha")
+    launch_store = PGBeeLaunchStore(pool=FakeBeeLaunchPool())  # type: ignore[arg-type]
+    task_store = FakeBeeTaskStore()
+    launcher = BeeLaunchOrchestrator(
+        launch_store=launch_store,
+        task_store=task_store,
+        topic_store=FakeTopicStore(),
+        topic_lifecycle=TopicLifecycle(
+            store=FakeTopicStore(),
+            now=FakeClock(),
+            topic_id_factory=lambda: "topic-signal",
+        ),
+        now=FakeClock(),
+        task_id_factory=lambda plan, topic: f"bee-task-{len(task_store.tasks) + 1}",
+    )
+    signal_launcher = ProactiveBeeLaunchOrchestrator(
+        launcher=launcher,
+        trigger_store=FakeScheduleTriggerStore(),
+        launch_id_factory=lambda intent: f"launch-{intent.trigger_id}",
+    )
+    intent = _signal_intent(topic_id=None)
+
+    first = await signal_launcher.launch_signal(
+        intent,
+        template_id="template-alpha",
+        workspace_root=tmp_path,
+        tape=Tape(tape_id="tape-alpha"),
+        inputs={"region": "us-test-1"},
+    )
+    replayed = await signal_launcher.launch_signal(
+        intent,
+        template_id="template-alpha",
+        workspace_root=tmp_path,
+        tape=Tape(tape_id="tape-alpha"),
+        inputs={"region": "us-test-1"},
+    )
+
+    assert replayed == first
+    assert task_store.upserted_task_ids == ["bee-task-1"]
+
+    with pytest.raises(ValueError, match="session_id must match intent"):
+        await signal_launcher.launch_signal(
+            _signal_intent(topic_id="topic-intent"),
+            template_id="template-alpha",
+            workspace_root=tmp_path,
+            tape=Tape(tape_id="tape-alpha"),
+            inputs={"region": "us-test-1"},
+            topic_policy={"session_id": "other-session"},
+        )
+    with pytest.raises(ValueError, match="mode must match intent"):
+        await signal_launcher.launch_signal(
+            _signal_intent(topic_id="topic-intent"),
+            template_id="template-alpha",
+            workspace_root=tmp_path,
+            tape=Tape(tape_id="tape-alpha"),
+            inputs={"region": "us-test-1"},
+            topic_policy={"mode": "create"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_proactive_signal_bee_launch_replay_repairs_trigger_link(
+    tmp_path: Path,
+) -> None:
+    _write_template(tmp_path, template_id="template-alpha")
+    launch_store = PGBeeLaunchStore(pool=FakeBeeLaunchPool())  # type: ignore[arg-type]
+    await launch_store.create_launch(
+        BeeLaunchRecord(
+            launch_id="launch-signal-trigger-signal-1",
+            source="proactive_signal",
+            template_id="template-alpha",
+            status="launched",
+            requested_at=_dt(9),
+            task_id="bee-task-existing",
+            topic_id="topic-signal",
+            session_id="session-alpha",
+            signal_id="signal-1",
+            launched_at=_dt(9),
+            metadata={"phase": "task_created"},
+        )
+    )
+    trigger_store = FakeScheduleTriggerStore()
+    launcher = BeeLaunchOrchestrator(
+        launch_store=launch_store,
+        task_store=FakeBeeTaskStore(),
+        topic_store=FakeTopicStore(),
+        topic_lifecycle=TopicLifecycle(store=FakeTopicStore()),
+        now=FakeClock(),
+    )
+    signal_launcher = ProactiveBeeLaunchOrchestrator(
+        launcher=launcher,
+        trigger_store=trigger_store,
+        launch_id_factory=lambda intent: f"launch-{intent.trigger_id}",
+    )
+
+    result = await signal_launcher.launch_signal(
+        _signal_intent(topic_id="topic-signal"),
+        template_id="template-alpha",
+        workspace_root=tmp_path,
+        tape=Tape(tape_id="tape-alpha"),
+        inputs={"region": "us-test-1"},
+    )
+
+    trigger = trigger_store.triggers["signal-trigger-signal-1"]
+    assert result.task_id == "bee-task-existing"
+    assert trigger.status == "launched"
+    assert trigger.signal_id == "signal-1"
+    assert trigger.metadata["task_id"] == "bee-task-existing"
+
+
+@pytest.mark.asyncio
+async def test_proactive_signal_bee_launch_rejects_existing_launch_mismatch(
+    tmp_path: Path,
+) -> None:
+    _write_template(tmp_path, template_id="template-alpha")
+    launch_store = PGBeeLaunchStore(pool=FakeBeeLaunchPool())  # type: ignore[arg-type]
+    await launch_store.create_launch(
+        BeeLaunchRecord(
+            launch_id="launch-signal-trigger-signal-1",
+            source="manual",
+            template_id="template-alpha",
+            status="launched",
+            requested_at=_dt(9),
+            task_id="bee-task-existing",
+            topic_id="topic-signal",
+            session_id="session-alpha",
+            signal_id="signal-1",
+            launched_at=_dt(9),
+        )
+    )
+    trigger_store = FakeScheduleTriggerStore()
+    signal_launcher = ProactiveBeeLaunchOrchestrator(
+        launcher=BeeLaunchOrchestrator(
+            launch_store=launch_store,
+            task_store=FakeBeeTaskStore(),
+            topic_store=FakeTopicStore(),
+            topic_lifecycle=TopicLifecycle(store=FakeTopicStore()),
+            now=FakeClock(),
+        ),
+        trigger_store=trigger_store,
+        launch_id_factory=lambda intent: f"launch-{intent.trigger_id}",
+    )
+
+    with pytest.raises(ValueError, match="source mismatch"):
+        await signal_launcher.launch_signal(
+            _signal_intent(topic_id="topic-signal"),
+            template_id="template-alpha",
+            workspace_root=tmp_path,
+            tape=Tape(tape_id="tape-alpha"),
+            inputs={"region": "us-test-1"},
+        )
+
+    assert trigger_store.triggers == {}
+
+
+@pytest.mark.asyncio
 async def test_bee_task_lifecycle_resume_partially_completed_task() -> None:
     store = _lifecycle_task_store()
     controller = BeeTaskLifecycleController(store=store, now=FakeClock())
@@ -1518,6 +1733,19 @@ def _scheduled_intent(topic_id: str | None) -> ScheduledLaunchIntent:
         due_at=_dt(8),
         planned_at=_dt(9),
         metadata={"schedule_kind": "interval"},
+    )
+
+
+def _signal_intent(topic_id: str | None) -> ScheduledLaunchIntent:
+    return ScheduledLaunchIntent(
+        trigger_id="signal-trigger-signal-1",
+        schedule_id="signal:signal-1",
+        session_id="session-alpha",
+        topic_id=topic_id,
+        reason="proactive_signal",
+        due_at=_dt(8),
+        planned_at=_dt(9),
+        metadata={"signal_kind": "repo_activity"},
     )
 
 

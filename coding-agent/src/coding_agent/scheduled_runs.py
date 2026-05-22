@@ -43,6 +43,37 @@ _FORBIDDEN_METADATA_KEY_PARTS: Final[frozenset[str]] = frozenset(
         "text",
     }
 )
+_FORBIDDEN_BEE_LAUNCH_KEY_PARTS: Final[frozenset[str]] = frozenset(
+    {
+        "api_key",
+        "apikey",
+        "args",
+        "argv",
+        "bearer",
+        "cmd",
+        "command",
+        "commands",
+        "command_output",
+        "content",
+        "credential",
+        "credentials",
+        "env",
+        "environment",
+        "exec",
+        "executor",
+        "message",
+        "password",
+        "prompt",
+        "result",
+        "script",
+        "secret",
+        "shell",
+        "stderr",
+        "stdout",
+        "text",
+        "token",
+    }
+)
 _SECRET_VALUE_MARKERS: Final[tuple[str, ...]] = (
     "-----begin ",
     "akia",
@@ -86,6 +117,11 @@ class ScheduleRecord:
         if self.last_triggered_at is not None:
             _require_datetime("last_triggered_at", self.last_triggered_at)
         _require_json_object("metadata", self.metadata)
+        if "bee_launch" in self.metadata:
+            _require_bee_launch_metadata_object(
+                "metadata.bee_launch",
+                self.metadata["bee_launch"],
+            )
 
 
 @dataclass(frozen=True)
@@ -144,6 +180,11 @@ class ProactiveSignalRecord:
         if self.cooldown_until is not None:
             _require_datetime("cooldown_until", self.cooldown_until)
         _require_json_object("metadata", self.metadata)
+        if "bee_launch" in self.metadata:
+            _require_bee_launch_metadata_object(
+                "metadata.bee_launch",
+                self.metadata["bee_launch"],
+            )
 
 
 @dataclass(frozen=True)
@@ -370,6 +411,7 @@ class ProactiveSignalPlanner:
                     metadata={
                         "trigger_kind": "proactive_signal",
                         "signal_kind": updated.kind,
+                        **_signal_bee_launch_metadata(updated),
                     },
                 )
             )
@@ -382,7 +424,10 @@ class ProactiveSignalPlanner:
                     reason="proactive_signal",
                     due_at=trigger.due_at,
                     planned_at=trigger.planned_at,
-                    metadata={"signal_kind": updated.kind},
+                    metadata={
+                        "signal_kind": updated.kind,
+                        **_signal_bee_launch_metadata(updated),
+                    },
                 )
             )
         return intents
@@ -1041,8 +1086,41 @@ def _schedule_bee_launch_metadata(schedule: ScheduleRecord) -> JSONObject:
     if not isinstance(value, dict):
         raise TypeError("schedule.metadata.bee_launch must be an object")
     bee_launch = dict(value)
-    _require_json_object("schedule.metadata.bee_launch", bee_launch)
+    _require_bee_launch_metadata_object("schedule.metadata.bee_launch", bee_launch)
     return {"bee_launch": bee_launch}
+
+
+def _signal_bee_launch_metadata(signal: ProactiveSignalRecord) -> JSONObject:
+    value = signal.metadata.get("bee_launch")
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise TypeError("signal.metadata.bee_launch must be an object")
+    bee_launch = dict(value)
+    _require_bee_launch_metadata_object("signal.metadata.bee_launch", bee_launch)
+    return {"bee_launch": bee_launch}
+
+
+def _require_bee_launch_metadata_object(
+    field_name: str,
+    value: JSONObject,
+) -> None:
+    _require_json_object(field_name, value)
+    for key, item in value.items():
+        key_folded = key.casefold()
+        if any(part in key_folded for part in _FORBIDDEN_BEE_LAUNCH_KEY_PARTS):
+            raise ValueError(
+                f"{field_name} contains forbidden Bee launch metadata key: {key}"
+            )
+        if isinstance(item, dict):
+            _require_bee_launch_metadata_object(f"{field_name}.{key}", item)
+        elif isinstance(item, list):
+            for index, nested in enumerate(item):
+                if isinstance(nested, dict):
+                    _require_bee_launch_metadata_object(
+                        f"{field_name}.{key}[{index}]",
+                        nested,
+                    )
 
 
 def _require_topic_matches_intent(

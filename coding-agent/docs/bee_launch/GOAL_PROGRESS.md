@@ -478,3 +478,83 @@ This ledger tracks G118-G126 for the Bee Launch / Scheduled Bee Task Integration
 - Remaining risks:
   - In-progress replay is fail-fast rather than retrying because full durable claim recovery is deferred.
   - Proactive signal Bee launch, console launch views, and launch metrics remain pending.
+
+## G125_PROACTIVE_SIGNAL_BEE_LAUNCH
+
+### Before
+
+- Goal id: G125_PROACTIVE_SIGNAL_BEE_LAUNCH
+- Intended files:
+  - `docs/bee_launch/GOAL_PROGRESS.md`
+  - `docs/adr/0044-bee-launch-surfaces.md`
+  - `src/coding_agent/bee_launch.py`
+  - `src/coding_agent/scheduled_runs.py`
+  - `tests/coding_agent/test_bee_launch.py`
+  - `tests/coding_agent/test_scheduled_runs.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -v`
+  - `uv run pytest tests/coding_agent/test_scheduled_runs.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -q`
+  - `uv run pytest tests/coding_agent/test_topic_layer_smoke.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_launch.py src/coding_agent/scheduled_runs.py tests/coding_agent/test_bee_launch.py tests/coding_agent/test_scheduled_runs.py`
+  - `uv run ruff check src/coding_agent/bee_launch.py src/coding_agent/scheduled_runs.py tests/coding_agent/test_bee_launch.py tests/coding_agent/test_scheduled_runs.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Proactive signal metadata can request Bee launch with validated template and inputs.
+  - Signal consume creates BeeLaunchRecord and BeeTask through the same launch flow.
+  - Signal launch links signal_id, launch_id, task_id, and topic_id.
+  - Duplicate signal consume remains idempotent/fail-fast and loop guard/cooldown remains enforced.
+  - Proactive Bee launch cannot execute nodes or bypass Bee command bridge/action safety policy.
+
+### After
+
+- Changed files:
+  - `docs/bee_launch/GOAL_PROGRESS.md`
+  - `docs/adr/0044-bee-launch-surfaces.md`
+  - `src/coding_agent/bee_launch.py`
+  - `src/coding_agent/scheduled_runs.py`
+  - `tests/coding_agent/test_bee_launch.py`
+  - `tests/coding_agent/test_scheduled_runs.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -v`
+  - `uv run pytest tests/coding_agent/test_scheduled_runs.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -q`
+  - `uv run pytest tests/coding_agent/test_topic_layer_smoke.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_launch.py src/coding_agent/scheduled_runs.py tests/coding_agent/test_bee_launch.py tests/coding_agent/test_scheduled_runs.py`
+  - `uv run ruff check src/coding_agent/bee_launch.py src/coding_agent/scheduled_runs.py tests/coding_agent/test_bee_launch.py tests/coding_agent/test_scheduled_runs.py`
+  - `git diff --check -- .`
+- Results:
+  - Added `ProactiveBeeLaunchOrchestrator` to launch proactive signal intents through the existing Bee launch flow.
+  - Proactive signal metadata can carry sanitized `bee_launch` launch metadata through planner intents and trigger records.
+  - Signal launch creates BeeLaunchRecord, Topic, BeeTask, and nodes while preserving command intent nodes as pending.
+  - Signal trigger records link signal_id, launch_id, task_id, topic_id, and launch status after launch.
+  - Duplicate signal consume returns an existing launched result, and in-progress replay is fail-fast before task creation.
+- Remaining risks:
+  - Console launch views and launch metrics remain pending.
+
+### Post-Review Signal Safety And Recovery Fix
+
+- Changed files:
+  - `src/coding_agent/bee_launch.py`
+  - `src/coding_agent/scheduled_runs.py`
+  - `tests/coding_agent/test_bee_launch.py`
+  - `tests/coding_agent/test_scheduled_runs.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -k proactive_signal_bee_launch -q`
+  - `uv run pytest tests/coding_agent/test_scheduled_runs.py -k proactive_signal -q`
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -q`
+  - `uv run pytest tests/coding_agent/test_scheduled_runs.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -q`
+  - `uv run pytest tests/coding_agent/test_topic_layer_smoke.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_launch.py src/coding_agent/scheduled_runs.py tests/coding_agent/test_bee_launch.py tests/coding_agent/test_scheduled_runs.py`
+  - `uv run ruff check src/coding_agent/bee_launch.py src/coding_agent/scheduled_runs.py tests/coding_agent/test_bee_launch.py tests/coding_agent/test_scheduled_runs.py`
+  - `git diff --check -- .`
+- Results:
+  - Proactive signal `bee_launch` metadata now uses stricter Bee launch key validation before it can be carried into trigger/intent metadata.
+  - Proactive replay now repairs a stale trigger link when the Bee launch already exists and is launched.
+  - Proactive replay validates existing launch source, signal_id, session_id, and topic_id before returning an existing result.
+- Remaining risks:
+  - Console launch views and launch metrics remain pending.

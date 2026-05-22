@@ -145,7 +145,7 @@ Keep deferred:
 - [x] `test_manual_bee_launch_creates_topic_task_and_artifact`
 - [x] `test_bee_task_lifecycle_resume_retry_cancel_abort`
 - [x] `test_scheduled_bee_launch_creates_task_and_links_schedule`
-- [ ] `test_proactive_signal_bee_launch_creates_task_and_links_signal`
+- [x] `test_proactive_signal_bee_launch_creates_task_and_links_signal`
 - [ ] `test_console_bee_launch_renders_safe_launch_summary`
 - [ ] `test_bee_launch_metrics_omit_high_cardinality_ids`
 - [ ] `test_bee_launch_e2e_smoke`
