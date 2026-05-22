@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import cast
 
 import pytest
 
-from coding_agent.bee_launch import BeeLaunchRecord, PGBeeLaunchStore
+from coding_agent.bee_launch import (
+    BeeInputBinding,
+    BeeLaunchRecord,
+    BeeLaunchRequest,
+    BeeTemplateResolution,
+    PGBeeLaunchStore,
+    build_bee_launch_plan,
+)
 
 
 class FakeBeeLaunchPool:
@@ -248,6 +256,166 @@ async def test_bee_launch_store_missing_rows_fail_fast(
         )
 
 
+def test_bee_launch_plan_resolves_workspace_template(tmp_path: Path) -> None:
+    _write_template(tmp_path, template_id="template-alpha")
+
+    plan = build_bee_launch_plan(
+        BeeLaunchRequest(
+            launch_id="launch-1",
+            source="manual",
+            template_id="template-alpha",
+            workspace_root=tmp_path,
+            inputs={"region": "us-test-1"},
+            topic_policy={"mode": "create", "session_id": "session-alpha"},
+            workspace_policy={"workspace_ref": "local", "artifact_mode": "enabled"},
+            requested_at=_dt(9),
+        )
+    )
+
+    assert plan.launch_id == "launch-1"
+    assert plan.source == "manual"
+    assert plan.template.template_id == "template-alpha"
+    assert plan.resolution == BeeTemplateResolution(
+        template_id="template-alpha",
+        template_kind="maintenance",
+        template_profile="local",
+        template_title="Local template",
+        node_ids=("node-plan",),
+        command_intent_names=(),
+    )
+    assert plan.input_binding == BeeInputBinding(
+        inputs={"region": "us-test-1", "severity": "low"},
+        required_input_names=("region",),
+        defaulted_input_names=("severity",),
+    )
+    assert plan.topic_policy == {"mode": "create", "session_id": "session-alpha"}
+    assert plan.workspace_policy == {
+        "workspace_ref": "local",
+        "artifact_mode": "enabled",
+    }
+
+
+def test_bee_launch_plan_rejects_missing_template(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError, match="Bee template not found"):
+        build_bee_launch_plan(
+            BeeLaunchRequest(
+                launch_id="launch-1",
+                source="manual",
+                template_id="missing-template",
+                workspace_root=tmp_path,
+                requested_at=_dt(9),
+            )
+        )
+
+
+def test_bee_launch_plan_rejects_invalid_template(tmp_path: Path) -> None:
+    template_dir = tmp_path / ".bee" / "templates" / "template-alpha"
+    _write_template(
+        tmp_path,
+        template_id="template-alpha",
+        metadata_extra="metadata:\n  prompt: unsafe\n",
+    )
+
+    with pytest.raises(ValueError, match="forbidden sensitive field"):
+        build_bee_launch_plan(
+            BeeLaunchRequest(
+                launch_id="launch-1",
+                source="manual",
+                template_id=template_dir.name,
+                workspace_root=tmp_path,
+                inputs={"region": "us-test-1"},
+                requested_at=_dt(9),
+            )
+        )
+
+
+def test_bee_launch_plan_rejects_missing_required_input(tmp_path: Path) -> None:
+    _write_template(tmp_path, template_id="template-alpha")
+
+    with pytest.raises(ValueError, match="missing required Bee launch inputs"):
+        build_bee_launch_plan(
+            BeeLaunchRequest(
+                launch_id="launch-1",
+                source="manual",
+                template_id="template-alpha",
+                workspace_root=tmp_path,
+                inputs={},
+                requested_at=_dt(9),
+            )
+        )
+
+
+def test_bee_launch_plan_binds_default_inputs(tmp_path: Path) -> None:
+    _write_template(tmp_path, template_id="template-alpha")
+
+    plan = build_bee_launch_plan(
+        BeeLaunchRequest(
+            launch_id="launch-1",
+            source="manual",
+            template_id="template-alpha",
+            workspace_root=tmp_path,
+            inputs={"region": "us-test-1"},
+            requested_at=_dt(9),
+        )
+    )
+
+    assert plan.input_binding.inputs == {"region": "us-test-1", "severity": "low"}
+    assert plan.input_binding.defaulted_input_names == ("severity",)
+
+
+def test_bee_launch_plan_rejects_unknown_input_by_default(tmp_path: Path) -> None:
+    _write_template(tmp_path, template_id="template-alpha")
+
+    with pytest.raises(ValueError, match="unknown Bee launch inputs"):
+        build_bee_launch_plan(
+            BeeLaunchRequest(
+                launch_id="launch-1",
+                source="manual",
+                template_id="template-alpha",
+                workspace_root=tmp_path,
+                inputs={"region": "us-test-1", "extra": "value"},
+                requested_at=_dt(9),
+            )
+        )
+
+
+def test_bee_launch_plan_rejects_missing_workspace(tmp_path: Path) -> None:
+    missing_workspace = tmp_path / "missing"
+
+    with pytest.raises(FileNotFoundError, match="Bee launch workspace not found"):
+        build_bee_launch_plan(
+            BeeLaunchRequest(
+                launch_id="launch-1",
+                source="manual",
+                template_id="template-alpha",
+                workspace_root=missing_workspace,
+                requested_at=_dt(9),
+            )
+        )
+
+
+def test_bee_launch_request_rejects_unsafe_inputs_and_policy() -> None:
+    with pytest.raises(ValueError, match="forbidden metadata key"):
+        BeeLaunchRequest(
+            launch_id="launch-1",
+            source="manual",
+            template_id="template-alpha",
+            workspace_root=Path("."),
+            inputs={"prompt": "do not store"},
+            requested_at=_dt(9),
+        )
+
+    with pytest.raises(ValueError, match="forbidden metadata key"):
+        BeeLaunchRequest(
+            launch_id="launch-1",
+            source="manual",
+            template_id="template-alpha",
+            workspace_root=Path("."),
+            topic_policy={"mode": "create", "token": "secret"},
+            requested_at=_dt(9),
+        )
+
+
 def _launch(
     launch_id: str = "launch-1",
     *,
@@ -319,3 +487,43 @@ def _launch_row(*args: object) -> dict[str, object]:
 
 def _dt(hour: int) -> datetime:
     return datetime(2026, 1, 2, hour, tzinfo=UTC)
+
+
+def _write_template(
+    workspace_root: Path,
+    *,
+    template_id: str,
+    metadata_extra: str = "",
+) -> None:
+    template_dir = workspace_root / ".bee" / "templates" / template_id
+    feature_dir = template_dir / "features"
+    feature_dir.mkdir(parents=True)
+    (template_dir / "metadata.yaml").write_text(
+        "\n".join(
+            [
+                "version: 1",
+                f"template_id: {template_id}",
+                "kind: maintenance",
+                "profile: local",
+                "title: Local template",
+                "topic:",
+                "  session_id: session-alpha",
+                "inputs:",
+                "  required:",
+                "    - region",
+                "  defaults:",
+                "    severity: low",
+                "nodes:",
+                "  - node_id: node-plan",
+                "    kind: analysis",
+                "    profile: default",
+                "    title: Plan local task",
+                metadata_extra,
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (template_dir / "SKILL.md").write_text("# Template Skill\n", encoding="utf-8")
+    (feature_dir / "acceptance.feature").write_text(
+        "Feature: safe local template\n", encoding="utf-8"
+    )

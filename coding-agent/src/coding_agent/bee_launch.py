@@ -8,9 +8,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Final
 
 from agentkit.storage.pg import AsyncPGPool, PGPool
+from coding_agent.bee_runtime import BeeTaskManifest
+from coding_agent.bee_workspace import (
+    BeeWorkspaceTemplate,
+    build_bee_manifest_from_workspace_template,
+    load_bee_workspace_command_intents,
+    load_bee_workspace_template,
+)
 from coding_agent.topic_store import JSONObject, JSONValue
 
 BeeLaunchSource = str
@@ -98,6 +106,87 @@ class BeeLaunchRecord:
         _require_optional_datetime("finished_at", self.finished_at)
         _require_optional_label("error_type", self.error_type)
         _require_optional_display_text("error_message", self.error_message)
+        _require_json_object("metadata", self.metadata)
+
+
+@dataclass(frozen=True)
+class BeeLaunchRequest:
+    launch_id: str
+    source: BeeLaunchSource
+    template_id: str
+    workspace_root: Path
+    requested_at: datetime
+    inputs: JSONObject = field(default_factory=dict)
+    topic_policy: JSONObject = field(default_factory=dict)
+    workspace_policy: JSONObject = field(default_factory=dict)
+    metadata: JSONObject = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _require_non_empty("launch_id", self.launch_id)
+        _require_status("launch source", self.source, _LAUNCH_SOURCES)
+        _require_non_empty("template_id", self.template_id)
+        if not isinstance(self.workspace_root, Path):
+            raise TypeError("workspace_root must be a Path")
+        _require_datetime("requested_at", self.requested_at)
+        _require_json_object("inputs", self.inputs)
+        _require_json_object("topic_policy", self.topic_policy)
+        _require_json_object("workspace_policy", self.workspace_policy)
+        _require_json_object("metadata", self.metadata)
+
+
+@dataclass(frozen=True)
+class BeeTemplateResolution:
+    template_id: str
+    template_kind: str
+    template_profile: str
+    template_title: str
+    node_ids: tuple[str, ...]
+    command_intent_names: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _require_non_empty("template_id", self.template_id)
+        _require_optional_label("template_kind", self.template_kind)
+        _require_optional_label("template_profile", self.template_profile)
+        _require_optional_display_text("template_title", self.template_title)
+        for node_id in self.node_ids:
+            _require_non_empty("node_id", node_id)
+        for command_intent_name in self.command_intent_names:
+            _require_optional_label("command_intent_name", command_intent_name)
+
+
+@dataclass(frozen=True)
+class BeeInputBinding:
+    inputs: JSONObject
+    required_input_names: tuple[str, ...] = ()
+    defaulted_input_names: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _require_json_object("inputs", self.inputs)
+        for input_name in self.required_input_names:
+            _require_optional_label("required_input_name", input_name)
+        for input_name in self.defaulted_input_names:
+            _require_optional_label("defaulted_input_name", input_name)
+
+
+@dataclass(frozen=True)
+class BeeLaunchPlan:
+    launch_id: str
+    source: BeeLaunchSource
+    requested_at: datetime
+    template: BeeWorkspaceTemplate
+    manifest: BeeTaskManifest
+    resolution: BeeTemplateResolution
+    input_binding: BeeInputBinding
+    topic_policy: JSONObject
+    workspace_policy: JSONObject
+    metadata: JSONObject = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _require_non_empty("launch_id", self.launch_id)
+        _require_status("launch source", self.source, _LAUNCH_SOURCES)
+        _require_datetime("requested_at", self.requested_at)
+        _require_json_object("topic_policy", self.topic_policy)
+        _require_json_object("workspace_policy", self.workspace_policy)
         _require_json_object("metadata", self.metadata)
 
 
@@ -332,6 +421,111 @@ class PGBeeLaunchStore:
         if row is None:
             raise KeyError(f"Bee launch not found: {launch_id}")
         return _launch_from_row(row)
+
+
+def build_bee_launch_plan(request: BeeLaunchRequest) -> BeeLaunchPlan:
+    """Resolve a Bee template and bind safe launch inputs without execution."""
+
+    if not request.workspace_root.exists():
+        raise FileNotFoundError(
+            f"Bee launch workspace not found: {request.workspace_root}"
+        )
+    if request.workspace_root.is_symlink():
+        raise ValueError(
+            f"Bee launch workspace must not be a symlink: {request.workspace_root}"
+        )
+    if not request.workspace_root.is_dir():
+        raise ValueError(
+            f"Bee launch workspace must be a directory: {request.workspace_root}"
+        )
+    template = load_bee_workspace_template(
+        request.workspace_root,
+        request.template_id,
+    )
+    manifest = build_bee_manifest_from_workspace_template(template)
+    command_intents = load_bee_workspace_command_intents(template)
+    input_binding = _bind_launch_inputs(
+        provided=request.inputs,
+        template_metadata=template.metadata,
+    )
+    return BeeLaunchPlan(
+        launch_id=request.launch_id,
+        source=request.source,
+        requested_at=request.requested_at,
+        template=template,
+        manifest=manifest,
+        resolution=BeeTemplateResolution(
+            template_id=template.template_id,
+            template_kind=manifest.kind,
+            template_profile=manifest.profile,
+            template_title=manifest.title,
+            node_ids=tuple(node.node_id for node in manifest.nodes),
+            command_intent_names=tuple(intent.name for intent in command_intents),
+        ),
+        input_binding=input_binding,
+        topic_policy=dict(request.topic_policy),
+        workspace_policy=dict(request.workspace_policy),
+        metadata=dict(request.metadata),
+    )
+
+
+def _bind_launch_inputs(
+    *,
+    provided: JSONObject,
+    template_metadata: JSONObject,
+) -> BeeInputBinding:
+    inputs_contract = template_metadata.get("inputs", {})
+    if inputs_contract is None:
+        inputs_contract = {}
+    if not isinstance(inputs_contract, dict):
+        raise TypeError("Bee template inputs must be an object")
+    required_names = _input_name_tuple(inputs_contract.get("required", ()))
+    defaults = _input_defaults(inputs_contract.get("defaults", {}))
+    allowed_names = set(required_names) | set(defaults)
+    unknown_names = sorted(name for name in provided if name not in allowed_names)
+    if unknown_names:
+        raise ValueError("unknown Bee launch inputs: " + ", ".join(unknown_names))
+    missing_names = sorted(name for name in required_names if name not in provided)
+    if missing_names:
+        raise ValueError(
+            "missing required Bee launch inputs: " + ", ".join(missing_names)
+        )
+    bound_inputs: JSONObject = dict(defaults)
+    bound_inputs.update(provided)
+    defaulted_names = tuple(name for name in defaults if name not in provided)
+    return BeeInputBinding(
+        inputs=bound_inputs,
+        required_input_names=required_names,
+        defaulted_input_names=defaulted_names,
+    )
+
+
+def _input_name_tuple(value: object) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise TypeError("Bee template inputs.required must be a list")
+    names: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise TypeError("Bee template required input names must be strings")
+        _require_optional_label("input_name", item)
+        names.append(item)
+    if len(set(names)) != len(names):
+        raise ValueError("Bee template required input names must be unique")
+    return tuple(names)
+
+
+def _input_defaults(value: object) -> JSONObject:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise TypeError("Bee template inputs.defaults must be an object")
+    defaults = dict(value)
+    _require_json_object("inputs.defaults", defaults)
+    for key in defaults:
+        _require_optional_label("input_name", key)
+    return defaults
 
 
 def _required_row(
