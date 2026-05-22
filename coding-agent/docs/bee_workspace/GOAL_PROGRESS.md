@@ -33,3 +33,35 @@ This ledger tracks G102-G109 for the Bee Workspace Contract / Local Template Dog
 - Remaining risks:
   - G103 must lock the workspace file contract before adding parser/writer code.
   - G104-G109 should keep workspace-local artifacts generic and avoid command execution.
+
+## G103_BEE_WORKSPACE_ADR
+
+### Before
+
+- Goal id: G103_BEE_WORKSPACE_ADR
+- Intended files:
+  - `docs/bee_workspace/GOAL_PROGRESS.md`
+  - `docs/adr/0042-bee-workspace-contract.md`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `git diff --check -- .`
+- Stop criteria:
+  - No production code changes are made.
+  - ADR defines `.bee/templates`, `.bee/runs`, `task.json`, report/evidence, memory candidate, and `commands.yaml` boundaries.
+  - ADR preserves existing Bee runtime, workspace provider, action safety, observability, and console contracts.
+
+### After
+
+- Changed files:
+  - `docs/bee_workspace/GOAL_PROGRESS.md`
+  - `docs/adr/0042-bee-workspace-contract.md`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `git diff --check -- .`
+- Results:
+  - Bee runtime baseline passed.
+  - Whitespace diff check passed.
+  - Production code unchanged.
+- Remaining risks:
+  - Acceptance criteria remain unchecked until G104-G109 implement and verify the contract.
+  - `commands.yaml` support must remain non-executing until routed through existing safety gates.
