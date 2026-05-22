@@ -24,9 +24,56 @@ _METADATA_YAML: Final[str] = "metadata.yaml"
 _SKILL_FILE: Final[str] = "SKILL.md"
 _FEATURES_DIR: Final[str] = "features"
 _COMMANDS_FILE: Final[str] = "commands.yaml"
+_RUNS_DIR: Final[str] = "runs"
+_TASK_JSON_FILE: Final[str] = "task.json"
+_REPORT_FILE: Final[str] = "report.md"
+_EVIDENCE_DIR: Final[str] = "evidence"
+_MEMORY_CANDIDATES_FILE: Final[str] = "memory_candidates.yaml"
 _SAFE_TEMPLATE_ID_RE: Final[re.Pattern[str]] = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
 )
+_FORBIDDEN_ARTIFACT_KEY_PARTS: Final[frozenset[str]] = frozenset(
+    {
+        "command_output",
+        "content",
+        "env",
+        "message",
+        "password",
+        "prompt",
+        "result",
+        "secret",
+        "stderr",
+        "stdout",
+        "text",
+        "token",
+    }
+)
+_FORBIDDEN_REPORT_VALUE_MARKERS: Final[tuple[str, ...]] = (
+    "command_output=",
+    "content=",
+    "env=",
+    "message=",
+    "prompt=",
+    "result=",
+    "secret=",
+    "stderr=",
+    "stdout=",
+    "text=",
+    "token=",
+)
+_SECRET_VALUE_MARKERS: Final[tuple[str, ...]] = (
+    "-----begin ",
+    "akia",
+    "bearer ",
+    "gho_",
+    "ghp_",
+    "github_pat_",
+    "password=",
+    "secret=",
+    "sk-",
+    "token=",
+)
+_MAX_ARTIFACT_TEXT_CHARS: Final[int] = 256
 
 
 @dataclass(frozen=True)
@@ -38,6 +85,41 @@ class BeeWorkspaceTemplate:
     skill_path: Path
     feature_paths: tuple[Path, ...]
     commands_path: Path | None = None
+
+
+@dataclass(frozen=True)
+class BeeWorkspaceRunNode:
+    node_id: str
+    status: str
+    run_id: str | None = None
+    action_ids: tuple[str, ...] = ()
+    validation_ids: tuple[str, ...] = ()
+    attempts: int = 0
+
+
+@dataclass(frozen=True)
+class BeeWorkspaceRunArtifacts:
+    task_id: str
+    template_id: str
+    topic_id: str
+    status: str
+    nodes: tuple[BeeWorkspaceRunNode, ...]
+    report_title: str
+    report_summary: str
+    run_ids: tuple[str, ...] = ()
+    action_ids: tuple[str, ...] = ()
+    validation_ids: tuple[str, ...] = ()
+    evidence_labels: tuple[str, ...] = ()
+    memory_candidates: tuple[JSONObject, ...] = ()
+
+
+@dataclass(frozen=True)
+class BeeWorkspaceRunArtifactPaths:
+    run_dir: Path
+    task_json_path: Path
+    report_path: Path
+    evidence_dir: Path
+    memory_candidates_path: Path | None = None
 
 
 def discover_bee_workspace_templates(
@@ -103,8 +185,220 @@ def build_bee_manifest_from_workspace_template(
     return parse_bee_task_manifest(metadata)
 
 
+def write_bee_workspace_run_artifacts(
+    workspace_root: Path | str,
+    artifacts: BeeWorkspaceRunArtifacts,
+) -> BeeWorkspaceRunArtifactPaths:
+    """Write sanitized workspace-local Bee run artifacts."""
+
+    _validate_run_artifacts(artifacts)
+    workspace_path = Path(workspace_root)
+    bee_root = workspace_path / _BEE_DIR
+    if bee_root.is_symlink():
+        raise ValueError(f"Bee workspace root must not be a symlink: {bee_root}")
+    if bee_root.exists():
+        bee_root = _require_child_path_in_root(
+            bee_root,
+            workspace_path.resolve(strict=True),
+            label="Bee workspace root",
+            expected_kind="directory",
+        )
+    runs_root = bee_root / _RUNS_DIR
+    if runs_root.is_symlink():
+        raise ValueError(f"Bee runs root must not be a symlink: {runs_root}")
+    runs_root.mkdir(parents=True, exist_ok=True)
+    runs_root = _require_directory_in_root(runs_root, runs_root, label="Bee runs root")
+    run_dir = _require_child_path_in_root(
+        runs_root / artifacts.task_id,
+        runs_root,
+        label="Bee run path",
+        expected_kind="directory",
+    )
+    if run_dir.exists() and not run_dir.is_dir():
+        raise ValueError(f"Bee run path must be a directory: {run_dir}")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    run_dir = _require_child_path_in_root(
+        run_dir,
+        runs_root,
+        label="Bee run path",
+        expected_kind="directory",
+    )
+
+    evidence_dir = run_dir / _EVIDENCE_DIR
+    if evidence_dir.exists() or evidence_dir.is_symlink():
+        evidence_dir = _require_child_path_in_root(
+            evidence_dir,
+            runs_root,
+            label="Bee run evidence",
+            expected_kind="directory",
+        )
+    evidence_dir.mkdir(exist_ok=True)
+    evidence_dir = _require_child_path_in_root(
+        evidence_dir,
+        runs_root,
+        label="Bee run evidence",
+        expected_kind="directory",
+    )
+
+    task_json_path = _writable_run_file(run_dir / _TASK_JSON_FILE, runs_root)
+    report_path = _writable_run_file(run_dir / _REPORT_FILE, runs_root)
+    memory_candidates_path = (
+        _writable_run_file(run_dir / _MEMORY_CANDIDATES_FILE, runs_root)
+        if artifacts.memory_candidates
+        else None
+    )
+    task_json = _task_json_payload(
+        artifacts, has_memory=memory_candidates_path is not None
+    )
+    task_json_path.write_text(
+        json.dumps(task_json, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    report_path.write_text(_report_markdown(artifacts), encoding="utf-8")
+    if memory_candidates_path is not None:
+        memory_candidates_path.write_text(
+            yaml.safe_dump(
+                list(artifacts.memory_candidates),
+                sort_keys=True,
+                allow_unicode=False,
+            ),
+            encoding="utf-8",
+        )
+    return BeeWorkspaceRunArtifactPaths(
+        run_dir=run_dir,
+        task_json_path=task_json_path,
+        report_path=report_path,
+        evidence_dir=evidence_dir,
+        memory_candidates_path=memory_candidates_path,
+    )
+
+
 def _templates_root(workspace_root: Path) -> Path:
     return workspace_root / _BEE_DIR / _TEMPLATES_DIR
+
+
+def _task_json_payload(
+    artifacts: BeeWorkspaceRunArtifacts,
+    *,
+    has_memory: bool,
+) -> JSONObject:
+    nodes = [
+        {
+            "node_id": node.node_id,
+            "status": node.status,
+            "run_id": node.run_id,
+            "action_ids": list(node.action_ids),
+            "validation_ids": list(node.validation_ids),
+            "attempts": node.attempts,
+        }
+        for node in artifacts.nodes
+    ]
+    payload: JSONObject = {
+        "artifact_role": "sanitized_mirror",
+        "source_of_truth": "durable_bee_stores",
+        "task_id": artifacts.task_id,
+        "template_id": artifacts.template_id,
+        "topic_id": artifacts.topic_id,
+        "status": artifacts.status,
+        "nodes": nodes,
+        "node_attempts": {node.node_id: node.attempts for node in artifacts.nodes},
+        "run_ids": list(artifacts.run_ids),
+        "action_ids": list(artifacts.action_ids),
+        "validation_ids": list(artifacts.validation_ids),
+        "report_path": _REPORT_FILE,
+    }
+    if has_memory:
+        payload["memory_candidates_path"] = _MEMORY_CANDIDATES_FILE
+    return payload
+
+
+def _report_markdown(artifacts: BeeWorkspaceRunArtifacts) -> str:
+    return (
+        f"# {artifacts.report_title}\n\n"
+        f"- task_id: {artifacts.task_id}\n"
+        f"- template_id: {artifacts.template_id}\n"
+        f"- topic_id: {artifacts.topic_id}\n"
+        f"- status: {artifacts.status}\n"
+        f"- summary: {artifacts.report_summary}\n"
+    )
+
+
+def _validate_run_artifacts(artifacts: BeeWorkspaceRunArtifacts) -> None:
+    _require_safe_template_id(artifacts.task_id)
+    _require_safe_template_id(artifacts.template_id)
+    _require_safe_template_id(artifacts.topic_id)
+    _require_safe_template_id(artifacts.status)
+    _require_safe_report_value("report_title", artifacts.report_title)
+    _require_safe_report_value("report_summary", artifacts.report_summary)
+    for value in artifacts.run_ids:
+        _require_safe_template_id(value)
+    for value in artifacts.action_ids:
+        _require_safe_template_id(value)
+    for value in artifacts.validation_ids:
+        _require_safe_template_id(value)
+    for value in artifacts.evidence_labels:
+        _require_safe_report_value("evidence_label", value)
+    for node in artifacts.nodes:
+        _validate_run_node(node)
+    for candidate in artifacts.memory_candidates:
+        _validate_artifact_json("memory_candidate", candidate)
+
+
+def _validate_run_node(node: BeeWorkspaceRunNode) -> None:
+    _require_safe_template_id(node.node_id)
+    _require_safe_template_id(node.status)
+    if node.run_id is not None:
+        _require_safe_template_id(node.run_id)
+    for value in node.action_ids:
+        _require_safe_template_id(value)
+    for value in node.validation_ids:
+        _require_safe_template_id(value)
+    if node.attempts < 0:
+        raise ValueError(f"Bee node attempts must be non-negative: {node.node_id}")
+
+
+def _validate_artifact_json(path: str, value: object) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError(f"{path} keys must be strings")
+            _reject_forbidden_artifact_key(path, key)
+            _validate_artifact_json(f"{path}.{key}", item)
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _validate_artifact_json(f"{path}[{index}]", item)
+        return
+    if isinstance(value, str):
+        _require_safe_report_value(path, value)
+        return
+    if isinstance(value, int | float | bool) or value is None:
+        return
+    raise TypeError(f"{path} contains unsupported JSON value")
+
+
+def _reject_forbidden_artifact_key(path: str, key: str) -> None:
+    normalized = key.strip().replace("-", "_").lower()
+    for forbidden in _FORBIDDEN_ARTIFACT_KEY_PARTS:
+        if (
+            normalized == forbidden
+            or normalized.startswith(f"{forbidden}_")
+            or normalized.endswith(f"_{forbidden}")
+            or f"_{forbidden}_" in normalized
+        ):
+            raise ValueError(f"{path}.{key} uses forbidden sensitive field")
+
+
+def _require_safe_report_value(name: str, value: str) -> None:
+    if not value:
+        raise ValueError(f"{name} must not be empty")
+    if len(value) > _MAX_ARTIFACT_TEXT_CHARS:
+        raise ValueError(f"{name} exceeds maximum {_MAX_ARTIFACT_TEXT_CHARS} chars")
+    normalized = value.strip().lower()
+    if any(marker in normalized for marker in _SECRET_VALUE_MARKERS):
+        raise ValueError(f"{name} contains secret-like value")
+    if any(marker in normalized for marker in _FORBIDDEN_REPORT_VALUE_MARKERS):
+        raise ValueError(f"{name} contains forbidden raw output marker")
 
 
 def _load_template_dir(
@@ -258,6 +552,56 @@ def _require_file_in_templates_root(
         label=label,
         expected_kind="file",
     )
+
+
+def _require_directory_in_root(path: Path, root: Path, *, label: str) -> Path:
+    return _require_child_path_in_root(
+        path,
+        root,
+        label=label,
+        expected_kind="directory",
+    )
+
+
+def _require_child_path_in_root(
+    path: Path,
+    root: Path,
+    *,
+    label: str,
+    expected_kind: str,
+) -> Path:
+    if path.is_symlink():
+        raise ValueError(f"{label} must not be a symlink: {path}")
+    if not path.exists():
+        resolved_parent = path.parent.resolve(strict=True)
+        resolved_root = root.resolve(strict=True)
+        if not resolved_parent.is_relative_to(resolved_root):
+            raise ValueError(f"{label} must stay under Bee runs root: {path}")
+        return path
+    resolved_root = root.resolve(strict=True)
+    resolved_path = path.resolve(strict=True)
+    if not resolved_path.is_relative_to(resolved_root):
+        raise ValueError(f"{label} must stay under Bee runs root: {path}")
+    if expected_kind == "directory" and not resolved_path.is_dir():
+        raise ValueError(f"{label} must be a directory: {path}")
+    if expected_kind == "file" and not resolved_path.is_file():
+        raise ValueError(f"{label} must be a file: {path}")
+    return resolved_path
+
+
+def _writable_run_file(path: Path, runs_root: Path) -> Path:
+    if path.exists() or path.is_symlink():
+        return _require_child_path_in_root(
+            path,
+            runs_root,
+            label="Bee run artifact",
+            expected_kind="file",
+        )
+    resolved_parent = path.parent.resolve(strict=True)
+    resolved_root = runs_root.resolve(strict=True)
+    if not resolved_parent.is_relative_to(resolved_root):
+        raise ValueError(f"Bee run artifact must stay under Bee runs root: {path}")
+    return path
 
 
 def _require_path_in_templates_root(

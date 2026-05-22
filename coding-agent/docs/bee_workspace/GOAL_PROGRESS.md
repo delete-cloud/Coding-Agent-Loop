@@ -151,3 +151,46 @@ This ledger tracks G102-G109 for the Bee Workspace Contract / Local Template Dog
 - Remaining risks:
   - G106 still needs safe `.bee/runs/<task>/task.json` and report artifact writing.
   - `commands.yaml` remains path-only until the G107 non-executing contract parser.
+
+## G106_BEE_WORKSPACE_RUN_ARTIFACTS
+
+### Before
+
+- Goal id: G106_BEE_WORKSPACE_RUN_ARTIFACTS
+- Intended files:
+  - `docs/bee_workspace/GOAL_PROGRESS.md`
+  - `docs/adr/0042-bee-workspace-contract.md`
+  - `src/coding_agent/bee_workspace.py`
+  - `tests/coding_agent/test_bee_workspace.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_workspace.py tests/coding_agent/test_bee_workspace.py`
+  - `uv run ruff check src/coding_agent/bee_workspace.py tests/coding_agent/test_bee_workspace.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - `.bee/runs/<task_id-or-slug>/task.json`, `report.md`, and `evidence/` can be written deterministically.
+  - `task.json` mirrors safe durable Bee identity fields and remains non-authoritative.
+  - Report and memory candidate fields reject sensitive/raw keys or secret-like values.
+  - No command parser/executor, external service, hosted credential, or AgentKit Core change is introduced.
+
+### After
+
+- Changed files:
+  - `docs/bee_workspace/GOAL_PROGRESS.md`
+  - `docs/adr/0042-bee-workspace-contract.md`
+  - `src/coding_agent/bee_workspace.py`
+  - `tests/coding_agent/test_bee_workspace.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_workspace.py tests/coding_agent/test_bee_workspace.py`
+  - `uv run ruff check src/coding_agent/bee_workspace.py tests/coding_agent/test_bee_workspace.py`
+  - `git diff --check -- .`
+- Results:
+  - Workspace run artifact writer tests passed.
+  - Bee runtime baseline passed.
+  - Scoped formatting, lint, and whitespace checks passed.
+- Remaining risks:
+  - G107 still needs the non-executing `commands.yaml` contract parser.
+  - G108 still needs console/observability summaries for workspace artifacts.
