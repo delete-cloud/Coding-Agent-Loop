@@ -378,3 +378,103 @@ This ledger tracks G118-G126 for the Bee Launch / Scheduled Bee Task Integration
 - Remaining risks:
   - G122 still needs manual launch to create topic/task/task.json through the product surface.
   - Scheduled launch, proactive launch, lifecycle controls, console launch views, and launch metrics remain pending.
+
+## G124_SCHEDULED_BEE_TASKS
+
+### Before
+
+- Goal id: G124_SCHEDULED_BEE_TASKS
+- Intended files:
+  - `docs/bee_launch/GOAL_PROGRESS.md`
+  - `docs/adr/0044-bee-launch-surfaces.md`
+  - `src/coding_agent/bee_launch.py`
+  - `src/coding_agent/scheduled_runs.py`
+  - `tests/coding_agent/test_bee_launch.py`
+  - `tests/coding_agent/test_scheduled_runs.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -v`
+  - `uv run pytest tests/coding_agent/test_scheduled_runs.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -q`
+  - `uv run pytest tests/coding_agent/test_topic_layer_smoke.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_launch.py src/coding_agent/scheduled_runs.py tests/coding_agent/test_bee_launch.py tests/coding_agent/test_scheduled_runs.py`
+  - `uv run ruff check src/coding_agent/bee_launch.py src/coding_agent/scheduled_runs.py tests/coding_agent/test_bee_launch.py tests/coding_agent/test_scheduled_runs.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Schedule metadata can specify Bee launch template, inputs, topic policy, workspace policy, and artifact mode.
+  - Due schedule creates a BeeLaunchRecord and BeeTask through the same launch flow used by manual launch.
+  - Scheduled Bee launch links schedule_id, launch_id, task_id, and topic_id in durable records.
+  - Duplicate due window prevention remains unchanged in the schedule planner.
+  - Scheduled Bee launch cannot execute nodes or bypass Bee command bridge/action safety policy.
+
+### After
+
+- Changed files:
+  - `docs/bee_launch/GOAL_PROGRESS.md`
+  - `docs/adr/0044-bee-launch-surfaces.md`
+  - `src/coding_agent/bee_launch.py`
+  - `src/coding_agent/scheduled_runs.py`
+  - `tests/coding_agent/test_bee_launch.py`
+  - `tests/coding_agent/test_scheduled_runs.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -v`
+  - `uv run pytest tests/coding_agent/test_scheduled_runs.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -q`
+  - `uv run pytest tests/coding_agent/test_topic_layer_smoke.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_launch.py src/coding_agent/scheduled_runs.py tests/coding_agent/test_bee_launch.py tests/coding_agent/test_scheduled_runs.py`
+  - `uv run ruff check src/coding_agent/bee_launch.py src/coding_agent/scheduled_runs.py tests/coding_agent/test_bee_launch.py tests/coding_agent/test_scheduled_runs.py`
+  - `git diff --check -- .`
+- Results:
+  - Added `ScheduledBeeLaunchOrchestrator` to launch due schedule intents through the existing Bee launch flow.
+  - Schedule metadata can carry sanitized `bee_launch` launch metadata through planner intents and trigger records.
+  - Scheduled launch creates BeeLaunchRecord, Topic, BeeTask, nodes, and optional task.json artifacts while preserving command intent nodes as pending.
+  - Scheduled trigger records link launch_id, task_id, topic_id, and launch status after launch.
+  - Existing schedule duplicate due-window behavior remains in the planner and existing scheduled run tests passed.
+- Remaining risks:
+  - Proactive signal Bee launch, console launch views, and launch metrics remain pending.
+
+### Post-Review Idempotency And Binding Fix
+
+- Changed files:
+  - `src/coding_agent/bee_launch.py`
+  - `tests/coding_agent/test_bee_launch.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -k scheduled_bee_launch -q`
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -q`
+  - `uv run pytest tests/coding_agent/test_scheduled_runs.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -q`
+  - `uv run pytest tests/coding_agent/test_topic_layer_smoke.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_launch.py src/coding_agent/scheduled_runs.py tests/coding_agent/test_bee_launch.py tests/coding_agent/test_scheduled_runs.py`
+  - `uv run ruff check src/coding_agent/bee_launch.py src/coding_agent/scheduled_runs.py tests/coding_agent/test_bee_launch.py tests/coding_agent/test_scheduled_runs.py`
+  - `git diff --check -- .`
+- Results:
+  - Scheduled launch replay now returns an existing launched result for the same launch_id/trigger instead of creating a second task.
+  - Scheduled topic policy now rejects mismatched caller-provided session_id/topic_id and derives authoritative binding from the schedule intent.
+  - Added regression coverage for replay idempotency and malicious/mismatched topic policy.
+- Remaining risks:
+  - Proactive signal Bee launch, console launch views, and launch metrics remain pending.
+
+### Second Post-Review Idempotency And Binding Fix
+
+- Changed files:
+  - `src/coding_agent/bee_launch.py`
+  - `tests/coding_agent/test_bee_launch.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -k scheduled_bee_launch -q`
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -q`
+  - `uv run pytest tests/coding_agent/test_scheduled_runs.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -q`
+  - `uv run pytest tests/coding_agent/test_topic_layer_smoke.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_launch.py src/coding_agent/scheduled_runs.py tests/coding_agent/test_bee_launch.py tests/coding_agent/test_scheduled_runs.py`
+  - `uv run ruff check src/coding_agent/bee_launch.py src/coding_agent/scheduled_runs.py tests/coding_agent/test_bee_launch.py tests/coding_agent/test_scheduled_runs.py`
+  - `git diff --check -- .`
+- Results:
+  - Scheduled launch now rejects replay while a launch record is planned/launching instead of creating another task.
+  - Scheduled topic policy now forces `mode` from the schedule intent, preventing `mode=create` from bypassing an intent-bound topic.
+  - Added regression coverage for in-progress replay and mismatched scheduled launch mode.
+- Remaining risks:
+  - In-progress replay is fail-fast rather than retrying because full durable claim recovery is deferred.
+  - Proactive signal Bee launch, console launch views, and launch metrics remain pending.

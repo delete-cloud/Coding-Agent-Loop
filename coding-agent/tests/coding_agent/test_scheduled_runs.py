@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
@@ -660,6 +661,55 @@ async def test_schedule_planner_returns_bounded_due_launch_intents(
     assert (await store.load_schedule("schedule-1")).next_due_at == _dt(10) + timedelta(
         days=1
     )
+
+
+@pytest.mark.asyncio
+async def test_schedule_planner_preserves_bee_launch_metadata(
+    store: PGScheduledRunStore,
+) -> None:
+    await store.create_schedule(
+        replace(
+            _schedule_with_due("schedule-bee", next_due_at=_dt(8), cadence="once"),
+            metadata={
+                "profile": "local",
+                "bee_launch": {
+                    "template_id": "template-alpha",
+                    "inputs": {"region": "us-test-1"},
+                    "topic_policy": {"mode": "continue"},
+                    "workspace_policy": {"artifact_mode": "enabled"},
+                    "launch_mode": "fixture",
+                },
+            },
+        )
+    )
+    planner = ScheduledRunPlanner(
+        store=store,
+        trigger_id_factory=lambda schedule, _now: f"trigger-{schedule.schedule_id}",
+    )
+
+    intents = await planner.plan_due_schedules(now=_dt(10), max_due=1)
+
+    assert intents[0].metadata == {
+        "schedule_kind": "interval",
+        "bee_launch": {
+            "template_id": "template-alpha",
+            "inputs": {"region": "us-test-1"},
+            "topic_policy": {"mode": "continue"},
+            "workspace_policy": {"artifact_mode": "enabled"},
+            "launch_mode": "fixture",
+        },
+    }
+    assert (await store.list_triggers("schedule-bee"))[0].metadata == {
+        "trigger_kind": "schedule",
+        "schedule_kind": "interval",
+        "bee_launch": {
+            "template_id": "template-alpha",
+            "inputs": {"region": "us-test-1"},
+            "topic_policy": {"mode": "continue"},
+            "workspace_policy": {"artifact_mode": "enabled"},
+            "launch_mode": "fixture",
+        },
+    }
 
 
 @pytest.mark.asyncio
