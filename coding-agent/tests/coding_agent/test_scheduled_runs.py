@@ -343,6 +343,7 @@ def _signal_with_state(
     status: str = "new",
     cooldown_until: datetime | None = None,
     session_id: str | None = "session-1",
+    metadata: dict[str, object] | None = None,
 ) -> ProactiveSignalRecord:
     return ProactiveSignalRecord(
         signal_id=signal_id,
@@ -354,7 +355,7 @@ def _signal_with_state(
         observed_at=_dt(9, 15),
         cooldown_until=cooldown_until,
         summary="Repository activity signal",
-        metadata={"signal_kind": "repo_activity"},
+        metadata={"signal_kind": "repo_activity"} if metadata is None else metadata,
     )
 
 
@@ -873,6 +874,63 @@ async def test_proactive_signal_planner_returns_bounded_launch_intents(
     assert (await store.load_signal("signal-1")).status == "planned"
     assert (await store.load_signal("signal-1")).cooldown_until == _dt(10, 15)
     assert (await store.load_signal("signal-2")).status == "new"
+
+
+@pytest.mark.asyncio
+async def test_proactive_signal_planner_preserves_bee_launch_metadata(
+    store: PGScheduledRunStore,
+) -> None:
+    await store.record_signal(
+        replace(
+            _signal_with_state("signal-bee"),
+            metadata={
+                "bee_launch": {
+                    "template_id": "template-alpha",
+                    "inputs": {"region": "us-test-1"},
+                    "topic_policy": {"mode": "continue"},
+                    "workspace_policy": {"artifact_mode": "enabled"},
+                },
+            },
+        )
+    )
+
+    intents = await ProactiveSignalPlanner(
+        store=store,
+        cooldown=timedelta(minutes=15),
+    ).plan_new_signals(now=_dt(10), max_signals=1)
+
+    assert intents[0].metadata == {
+        "signal_kind": "repo_activity",
+        "bee_launch": {
+            "template_id": "template-alpha",
+            "inputs": {"region": "us-test-1"},
+            "topic_policy": {"mode": "continue"},
+            "workspace_policy": {"artifact_mode": "enabled"},
+        },
+    }
+    assert (await store.list_triggers("signal:signal-bee"))[0].metadata == {
+        "trigger_kind": "proactive_signal",
+        "signal_kind": "repo_activity",
+        "bee_launch": {
+            "template_id": "template-alpha",
+            "inputs": {"region": "us-test-1"},
+            "topic_policy": {"mode": "continue"},
+            "workspace_policy": {"artifact_mode": "enabled"},
+        },
+    }
+
+
+def test_proactive_signal_rejects_unsafe_bee_launch_metadata() -> None:
+    with pytest.raises(ValueError, match="forbidden Bee launch metadata key"):
+        _signal_with_state(
+            "signal-unsafe",
+            metadata={
+                "bee_launch": {
+                    "template_id": "template-alpha",
+                    "inputs": {"github_token": "abc123"},
+                },
+            },
+        )
 
 
 @pytest.mark.asyncio

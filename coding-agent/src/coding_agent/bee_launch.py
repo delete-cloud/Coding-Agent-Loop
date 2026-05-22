@@ -675,6 +675,23 @@ class BeeLaunchOrchestrator:
             write_workspace_artifacts=write_workspace_artifacts,
         )
 
+    async def launch_proactive_signal(
+        self,
+        request: BeeLaunchRequest,
+        *,
+        tape: Tape,
+        write_workspace_artifacts: bool = False,
+    ) -> BeeLaunchResult:
+        if request.source != "proactive_signal":
+            raise ValueError("proactive Bee launch requires source='proactive_signal'")
+        if request.signal_id is None:
+            raise ValueError("proactive Bee launch requires signal_id")
+        return await self._launch(
+            request,
+            tape=tape,
+            write_workspace_artifacts=write_workspace_artifacts,
+        )
+
     async def load_launch_result(self, launch_id: str) -> BeeLaunchResult | None:
         launch = await self._launch_store.load_launch(launch_id)
         if launch is None or launch.status != "launched":
@@ -898,6 +915,100 @@ class ScheduledBeeLaunchOrchestrator:
             )
         )
         return result
+
+
+class ProactiveBeeLaunchOrchestrator:
+    def __init__(
+        self,
+        *,
+        launcher: BeeLaunchOrchestrator,
+        trigger_store: BeeScheduleTriggerStore,
+        launch_id_factory: Callable[[ScheduledLaunchIntent], str] | None = None,
+    ) -> None:
+        self._launcher = launcher
+        self._trigger_store = trigger_store
+        self._launch_id_factory = launch_id_factory or _default_scheduled_launch_id
+
+    async def launch_signal(
+        self,
+        intent: ScheduledLaunchIntent,
+        *,
+        template_id: str,
+        workspace_root: Path,
+        tape: Tape,
+        inputs: JSONObject | None = None,
+        topic_policy: JSONObject | None = None,
+        workspace_policy: JSONObject | None = None,
+        write_workspace_artifacts: bool = False,
+    ) -> BeeLaunchResult:
+        signal_id = _signal_id_from_intent(intent)
+        launch_id = self._launch_id_factory(intent)
+        resolved_topic_policy = _scheduled_topic_policy(intent, topic_policy)
+        existing = await self._launcher.load_launch(launch_id)
+        if existing is not None:
+            _require_existing_proactive_launch_matches_intent(
+                existing,
+                intent=intent,
+                signal_id=signal_id,
+            )
+            if existing.status == "launched":
+                result = _launch_result_from_record(existing)
+                await self._record_launched_trigger(
+                    intent=intent,
+                    signal_id=signal_id,
+                    result=result,
+                )
+                return result
+            raise ValueError(f"proactive Bee launch already exists: {launch_id}")
+        result = await self._launcher.launch_proactive_signal(
+            BeeLaunchRequest(
+                launch_id=launch_id,
+                source="proactive_signal",
+                template_id=template_id,
+                workspace_root=workspace_root,
+                requested_at=intent.planned_at,
+                inputs=dict(inputs or {}),
+                topic_policy=resolved_topic_policy,
+                workspace_policy=dict(workspace_policy or {}),
+                metadata={"trigger_id": intent.trigger_id},
+                signal_id=signal_id,
+            ),
+            tape=tape,
+            write_workspace_artifacts=write_workspace_artifacts,
+        )
+        await self._record_launched_trigger(
+            intent=intent,
+            signal_id=signal_id,
+            result=result,
+        )
+        return result
+
+    async def _record_launched_trigger(
+        self,
+        *,
+        intent: ScheduledLaunchIntent,
+        signal_id: str,
+        result: BeeLaunchResult,
+    ) -> ScheduleTriggerRecord:
+        return await self._trigger_store.record_trigger(
+            ScheduleTriggerRecord(
+                trigger_id=intent.trigger_id,
+                schedule_id=intent.schedule_id,
+                signal_id=signal_id,
+                topic_id=result.topic_id,
+                status="launched",
+                due_at=intent.due_at,
+                planned_at=intent.planned_at,
+                reason=intent.reason,
+                metadata={
+                    "trigger_kind": "proactive_signal",
+                    "launch_id": result.launch_id,
+                    "task_id": result.task_id,
+                    "topic_id": result.topic_id,
+                    "launch_status": result.status,
+                },
+            )
+        )
 
 
 class BeeTaskLifecycleController:
@@ -1190,6 +1301,35 @@ def _default_task_id(plan: BeeLaunchPlan, topic: TopicRecord) -> str:
 
 def _default_scheduled_launch_id(intent: ScheduledLaunchIntent) -> str:
     return f"bee-launch-{intent.trigger_id}"
+
+
+def _signal_id_from_intent(intent: ScheduledLaunchIntent) -> str:
+    prefix = "signal:"
+    if not intent.schedule_id.startswith(prefix):
+        raise ValueError("proactive Bee launch requires signal schedule_id")
+    signal_id = intent.schedule_id[len(prefix) :]
+    _require_non_empty("signal_id", signal_id)
+    return signal_id
+
+
+def _require_existing_proactive_launch_matches_intent(
+    launch: BeeLaunchRecord,
+    *,
+    intent: ScheduledLaunchIntent,
+    signal_id: str,
+) -> None:
+    if launch.source != "proactive_signal":
+        raise ValueError("existing proactive Bee launch source mismatch")
+    if launch.signal_id != signal_id:
+        raise ValueError("existing proactive Bee launch signal_id mismatch")
+    if launch.session_id is not None and launch.session_id != intent.session_id:
+        raise ValueError("existing proactive Bee launch session_id mismatch")
+    if (
+        intent.topic_id is not None
+        and launch.topic_id is not None
+        and launch.topic_id != intent.topic_id
+    ):
+        raise ValueError("existing proactive Bee launch topic_id mismatch")
 
 
 def _scheduled_topic_policy(
