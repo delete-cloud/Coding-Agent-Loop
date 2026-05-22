@@ -10,6 +10,7 @@ from coding_agent.bee_workspace import (
     BeeWorkspaceRunNode,
     build_bee_manifest_from_workspace_template,
     discover_bee_workspace_templates,
+    load_bee_workspace_command_intents,
     load_bee_workspace_template,
     write_bee_workspace_run_artifacts,
 )
@@ -47,7 +48,19 @@ def test_bee_workspace_discovers_template_metadata(tmp_path: Path) -> None:
         "Feature: safe local template\n", encoding="utf-8"
     )
     (template_dir / "commands.yaml").write_text(
-        "commands:\n  smoke:\n    profile: validation\n", encoding="utf-8"
+        "\n".join(
+            [
+                "commands:",
+                "  - name: smoke",
+                "    profile: validation",
+                "    policy: existing_command_policy",
+                "    category: validation",
+                "    validation_label: pytest_smoke",
+                "    metadata:",
+                "      owner: local",
+            ]
+        ),
+        encoding="utf-8",
     )
 
     templates = discover_bee_workspace_templates(tmp_path)
@@ -60,6 +73,65 @@ def test_bee_workspace_discovers_template_metadata(tmp_path: Path) -> None:
     assert template.commands_path == template_dir / "commands.yaml"
     assert template.metadata["kind"] == "maintenance"
     assert template.metadata["topic"] == {"session_id": "session-alpha"}
+
+
+def test_bee_workspace_commands_yaml_is_non_executing_intent(
+    tmp_path: Path,
+) -> None:
+    template_dir = tmp_path / ".bee" / "templates" / "template-alpha"
+    _write_safe_template(template_dir, template_id="template-alpha")
+    (template_dir / "commands.yaml").write_text(
+        "\n".join(
+            [
+                "commands:",
+                "  - name: smoke",
+                "    profile: validation",
+                "    policy: existing_command_policy",
+                "    category: validation",
+                "    validation_label: pytest_smoke",
+                "    metadata:",
+                "      owner: local",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    template = load_bee_workspace_template(tmp_path, "template-alpha")
+
+    intents = load_bee_workspace_command_intents(template)
+
+    assert len(intents) == 1
+    assert intents[0].name == "smoke"
+    assert intents[0].profile == "validation"
+    assert intents[0].policy == "existing_command_policy"
+    assert intents[0].category == "validation"
+    assert intents[0].validation_label == "pytest_smoke"
+    assert intents[0].metadata == {"owner": "local"}
+
+
+@pytest.mark.parametrize("field", ["command", "cmd", "shell", "script", "argv"])
+def test_bee_workspace_commands_yaml_rejects_executable_fields(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    template_dir = tmp_path / ".bee" / "templates" / "template-alpha"
+    _write_safe_template(template_dir, template_id="template-alpha")
+    (template_dir / "commands.yaml").write_text(
+        "\n".join(
+            [
+                "commands:",
+                "  - name: unsafe",
+                "    profile: validation",
+                "    policy: existing_command_policy",
+                "    category: validation",
+                f"    {field}: pytest",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    template = load_bee_workspace_template(tmp_path, "template-alpha")
+
+    with pytest.raises(ValueError, match="forbidden sensitive field|not supported"):
+        load_bee_workspace_command_intents(template)
 
 
 def test_bee_workspace_loads_json_metadata(tmp_path: Path) -> None:

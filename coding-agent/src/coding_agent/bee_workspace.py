@@ -74,6 +74,18 @@ _SECRET_VALUE_MARKERS: Final[tuple[str, ...]] = (
     "token=",
 )
 _MAX_ARTIFACT_TEXT_CHARS: Final[int] = 256
+_COMMAND_INTENT_STATUSES: Final[frozenset[str]] = frozenset({"declared", "disabled"})
+_ALLOWED_COMMAND_INTENT_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "name",
+        "profile",
+        "policy",
+        "category",
+        "validation_label",
+        "status",
+        "metadata",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -120,6 +132,17 @@ class BeeWorkspaceRunArtifactPaths:
     report_path: Path
     evidence_dir: Path
     memory_candidates_path: Path | None = None
+
+
+@dataclass(frozen=True)
+class BeeWorkspaceCommandIntent:
+    name: str
+    profile: str
+    policy: str
+    category: str
+    validation_label: str | None = None
+    status: str = "declared"
+    metadata: JSONObject | None = None
 
 
 def discover_bee_workspace_templates(
@@ -183,6 +206,30 @@ def build_bee_manifest_from_workspace_template(
     manifest_metadata["template_id"] = template.template_id
     metadata["metadata"] = manifest_metadata
     return parse_bee_task_manifest(metadata)
+
+
+def load_bee_workspace_command_intents(
+    template: BeeWorkspaceTemplate,
+) -> tuple[BeeWorkspaceCommandIntent, ...]:
+    """Load non-executing command intent metadata from commands.yaml."""
+
+    if template.commands_path is None:
+        return ()
+    loaded = yaml.safe_load(template.commands_path.read_text(encoding="utf-8"))
+    if not isinstance(loaded, dict):
+        raise TypeError(
+            f"Bee commands.yaml must be an object: {template.commands_path}"
+        )
+    commands = loaded.get("commands", ())
+    if not isinstance(commands, list):
+        raise TypeError("Bee commands.yaml commands must be a list")
+    intents = tuple(
+        _parse_command_intent(item, index) for index, item in enumerate(commands)
+    )
+    names = [intent.name for intent in intents]
+    if len(set(names)) != len(names):
+        raise ValueError("Bee commands.yaml command names must be unique")
+    return intents
 
 
 def write_bee_workspace_run_artifacts(
@@ -275,6 +322,71 @@ def write_bee_workspace_run_artifacts(
 
 def _templates_root(workspace_root: Path) -> Path:
     return workspace_root / _BEE_DIR / _TEMPLATES_DIR
+
+
+def _parse_command_intent(raw_value: object, index: int) -> BeeWorkspaceCommandIntent:
+    if not isinstance(raw_value, dict):
+        raise TypeError(f"commands[{index}] must be an object")
+    raw = dict(raw_value)
+    _reject_unknown_command_keys(raw, index)
+    _validate_artifact_json(f"commands[{index}]", raw)
+    name = _required_command_string(raw, "name", index)
+    profile = _required_command_string(raw, "profile", index)
+    policy = _required_command_string(raw, "policy", index)
+    category = _required_command_string(raw, "category", index)
+    validation_label = _optional_command_string(raw, "validation_label", index)
+    status = raw.get("status", "declared")
+    if not isinstance(status, str):
+        raise TypeError(f"commands[{index}].status must be a string")
+    if status not in _COMMAND_INTENT_STATUSES:
+        raise ValueError(f"commands[{index}].status is not supported: {status}")
+    metadata = raw.get("metadata")
+    if metadata is not None and not isinstance(metadata, dict):
+        raise TypeError(f"commands[{index}].metadata must be an object")
+    return BeeWorkspaceCommandIntent(
+        name=name,
+        profile=profile,
+        policy=policy,
+        category=category,
+        validation_label=validation_label,
+        status=status,
+        metadata=cast(JSONObject, dict(metadata)) if metadata is not None else None,
+    )
+
+
+def _reject_unknown_command_keys(raw: dict[object, object], index: int) -> None:
+    for key in raw:
+        if not isinstance(key, str):
+            raise TypeError(f"commands[{index}] keys must be strings")
+        if key not in _ALLOWED_COMMAND_INTENT_KEYS:
+            _reject_forbidden_artifact_key(f"commands[{index}]", key)
+            raise ValueError(f"commands[{index}].{key} is not supported")
+
+
+def _required_command_string(
+    raw: dict[object, object],
+    key: str,
+    index: int,
+) -> str:
+    value = raw.get(key)
+    if not isinstance(value, str):
+        raise TypeError(f"commands[{index}].{key} must be a string")
+    _require_safe_template_id(value)
+    return value
+
+
+def _optional_command_string(
+    raw: dict[object, object],
+    key: str,
+    index: int,
+) -> str | None:
+    value = raw.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError(f"commands[{index}].{key} must be a string")
+    _require_safe_template_id(value)
+    return value
 
 
 def _task_json_payload(

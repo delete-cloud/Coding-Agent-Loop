@@ -87,7 +87,7 @@ Define observability and console boundaries:
 - [x] `test_bee_workspace_builds_manifest_with_existing_parser`
 - [x] `test_bee_workspace_writes_safe_task_json`
 - [x] `test_bee_workspace_rejects_raw_report_and_memory_candidate_fields`
-- [ ] `test_bee_workspace_commands_yaml_is_non_executing_intent`
+- [x] `test_bee_workspace_commands_yaml_is_non_executing_intent`
 - [ ] `test_console_bee_workspace_renders_safe_artifact_summary`
 - [ ] `test_bee_workspace_metrics_do_not_use_template_or_task_ids`
 - [ ] `test_bee_workspace_local_dogfood_smoke`

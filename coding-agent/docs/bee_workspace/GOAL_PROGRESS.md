@@ -194,3 +194,46 @@ This ledger tracks G102-G109 for the Bee Workspace Contract / Local Template Dog
 - Remaining risks:
   - G107 still needs the non-executing `commands.yaml` contract parser.
   - G108 still needs console/observability summaries for workspace artifacts.
+
+## G107_BEE_WORKSPACE_COMMANDS_CONTRACT
+
+### Before
+
+- Goal id: G107_BEE_WORKSPACE_COMMANDS_CONTRACT
+- Intended files:
+  - `docs/bee_workspace/GOAL_PROGRESS.md`
+  - `docs/adr/0042-bee-workspace-contract.md`
+  - `src/coding_agent/bee_workspace.py`
+  - `tests/coding_agent/test_bee_workspace.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_workspace.py tests/coding_agent/test_bee_workspace.py`
+  - `uv run ruff check src/coding_agent/bee_workspace.py tests/coding_agent/test_bee_workspace.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - `commands.yaml` can be parsed as bounded command intent metadata.
+  - Parser rejects raw executable command fields and sensitive/raw fields.
+  - Parser does not execute commands, create actions, create runs, or bypass action safety.
+  - No external service, hosted credential, Docker, executor, or AgentKit Core change is introduced.
+
+### After
+
+- Changed files:
+  - `docs/bee_workspace/GOAL_PROGRESS.md`
+  - `docs/adr/0042-bee-workspace-contract.md`
+  - `src/coding_agent/bee_workspace.py`
+  - `tests/coding_agent/test_bee_workspace.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -q`
+  - `uv run ruff format --check src/coding_agent/bee_workspace.py tests/coding_agent/test_bee_workspace.py`
+  - `uv run ruff check src/coding_agent/bee_workspace.py tests/coding_agent/test_bee_workspace.py`
+  - `git diff --check -- .`
+- Results:
+  - Non-executing `commands.yaml` intent parser tests passed.
+  - Bee runtime baseline passed.
+  - Scoped formatting, lint, and whitespace checks passed.
+- Remaining risks:
+  - G108 still needs console/observability summaries for workspace templates, run artifacts, and command intents.
+  - Any future command execution still must route through existing action safety gates.
