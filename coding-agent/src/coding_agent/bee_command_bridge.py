@@ -6,7 +6,7 @@ It does not execute commands or grant policy permissions.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 from pathlib import Path
 from typing import Any
@@ -63,13 +63,12 @@ BeeNodeCompletionStatus = Literal[
     "evidence_required",
     "evidence_failed",
 ]
-_ALLOWED_COMPLETION_EVIDENCE_KINDS = frozenset(
-    {
-        "action_record",
-        "sanitized_artifact",
-        "validation_report",
-    }
-)
+_ALLOWED_COMPLETION_EVIDENCE_KINDS = frozenset({
+    "action_record",
+    "sanitized_artifact",
+    "validation_report",
+})
+_BEE_COMMAND_PLAN_AUTHORIZATION_TOKEN: object = object()
 
 
 @dataclass(frozen=True)
@@ -103,6 +102,10 @@ class BeeCommandIntentPlan:
     policy: CommandPolicyVerdict | None = None
     approval_route: ActionApprovalRoutingResult | None = None
     will_execute: bool = False
+    authorization_token: object | None = field(default=None, repr=False, compare=False)
+    authorization_signature: str | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     def to_safe_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -277,12 +280,57 @@ def plan_bee_command_intent(
             policy=policy,
             approval_route=approval_route,
         )
-    return BeeCommandIntentPlan(
-        status="ready",
-        resolution=resolution,
-        policy=policy,
-        approval_route=approval_route,
+    return _authorize_bee_command_plan(
+        BeeCommandIntentPlan(
+            status="ready",
+            resolution=resolution,
+            policy=policy,
+            approval_route=approval_route,
+            authorization_token=_BEE_COMMAND_PLAN_AUTHORIZATION_TOKEN,
+        )
     )
+
+
+def _authorize_bee_command_plan(plan: BeeCommandIntentPlan) -> BeeCommandIntentPlan:
+    object.__setattr__(
+        plan,
+        "authorization_signature",
+        _bee_command_plan_signature(plan),
+    )
+    return plan
+
+
+def is_authorized_bee_command_plan(plan: BeeCommandIntentPlan) -> bool:
+    return (
+        plan.authorization_token is _BEE_COMMAND_PLAN_AUTHORIZATION_TOKEN
+        and plan.authorization_signature == _bee_command_plan_signature(plan)
+    )
+
+
+def _bee_command_plan_signature(plan: BeeCommandIntentPlan) -> str:
+    intent = plan.resolution.intent
+    policy = plan.policy
+    approval_route = plan.approval_route
+    parts = (
+        plan.status,
+        plan.resolution.status,
+        plan.resolution.template_id,
+        plan.resolution.node_id,
+        plan.resolution.command_ref or "",
+        intent.name if intent is not None else "",
+        intent.profile if intent is not None else "",
+        intent.policy if intent is not None else "",
+        intent.category if intent is not None else "",
+        intent.validation_label if intent is not None else "",
+        intent.status if intent is not None else "",
+        policy.decision.value if policy is not None else "",
+        policy.command_name or "" if policy is not None else "",
+        policy.environment_kind if policy is not None else "",
+        str(policy.timeout_seconds) if policy is not None else "",
+        approval_route.route.value if approval_route is not None else "",
+        approval_route.policy_decision or "" if approval_route is not None else "",
+    )
+    return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
 
 
 def run_bee_validation_node(
