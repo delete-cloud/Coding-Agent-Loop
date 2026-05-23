@@ -132,3 +132,54 @@ phase.
 - Remaining risks:
   - G139 still needs topic-derived memory candidate generation from finalized
     topics and Bee task outputs.
+
+## G139_TOPIC_DERIVED_MEMORY_CANDIDATES
+
+### Before
+
+- Goal id: G139_TOPIC_DERIVED_MEMORY_CANDIDATES
+- Intended files:
+  - `docs/cross_topic_memory/GOAL_PROGRESS.md`
+  - `docs/adr/0046-cross-topic-memory-and-topic-range-search.md`
+  - `src/coding_agent/topic_range_index.py`
+  - `src/coding_agent/topic_memory.py`
+  - `tests/coding_agent/test_topic_memory.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_topic_memory.py -v`
+  - `uv run pytest tests/coding_agent/test_topic_range_index.py tests/coding_agent/plugins/test_memory.py -v`
+  - `uv run ruff format --check --preview docs/cross_topic_memory/GOAL_PROGRESS.md docs/adr/0046-cross-topic-memory-and-topic-range-search.md src/coding_agent/topic_range_index.py src/coding_agent/topic_memory.py tests/coding_agent/test_topic_memory.py`
+  - `uv run ruff check src/coding_agent/topic_range_index.py src/coding_agent/topic_memory.py tests/coding_agent/test_topic_memory.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Finalized topics can propose memory candidates.
+  - Bee task report/evidence and existing Bee memory candidate entries can
+    propose candidate memories.
+  - Candidate records include topic/task/run/evidence/report/source-range
+    provenance.
+  - Candidates start as `candidate` and remain reference-only.
+  - Raw logs/secret-like candidate content is rejected or skipped.
+
+### After
+
+- Changed files:
+  - `docs/cross_topic_memory/GOAL_PROGRESS.md`
+  - `docs/adr/0046-cross-topic-memory-and-topic-range-search.md`
+  - `src/coding_agent/topic_range_index.py`
+  - `src/coding_agent/topic_memory.py`
+  - `tests/coding_agent/test_topic_memory.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_topic_memory.py -v`
+  - `uv run pytest tests/coding_agent/test_topic_range_index.py tests/coding_agent/plugins/test_memory.py -v`
+  - `uv run ruff format --check --preview docs/cross_topic_memory/GOAL_PROGRESS.md docs/adr/0046-cross-topic-memory-and-topic-range-search.md src/coding_agent/topic_range_index.py src/coding_agent/topic_memory.py tests/coding_agent/test_topic_memory.py`
+  - `uv run ruff check src/coding_agent/topic_range_index.py src/coding_agent/topic_memory.py tests/coding_agent/test_topic_memory.py`
+  - `git diff --check -- .`
+- Results:
+  - Added topic-derived memory candidate models and helpers.
+  - Finalized topics and Bee run artifacts can propose reference-only candidate
+    memories with deterministic IDs and provenance.
+  - Existing Bee candidate entries are normalized when safe and skipped when
+    noisy or incomplete.
+  - Raw report/candidate text is rejected before candidate creation.
+- Remaining risks:
+  - G140 still needs durable candidate listing and accept/reject/archive review
+    behavior.
