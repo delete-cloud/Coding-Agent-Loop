@@ -75,3 +75,48 @@ remaining risks before continuing to the next goal.
   - Git whitespace check passed.
 - Remaining risks:
   - G147 still needs the production manifest schema/loader and tests.
+
+## G147_BEE_PACK_MANIFEST_SCHEMA_AND_LOADER
+
+### Before
+
+- Goal id: `G147_BEE_PACK_MANIFEST_SCHEMA_AND_LOADER`
+- Intended files:
+  - `docs/bee_template_pack/GOAL_PROGRESS.md`
+  - `src/coding_agent/bee_template_pack.py`
+  - `tests/coding_agent/test_bee_template_pack.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_bee_template_pack.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -v`
+  - `uv run ruff format --check --preview src/coding_agent/bee_template_pack.py tests/coding_agent/test_bee_template_pack.py docs/bee_template_pack/GOAL_PROGRESS.md`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Pack manifests load from `bee-pack.yaml`, `bee-pack.json`,
+    `.bee/pack.yaml`, or `.bee/pack.json`.
+  - `pack_id`, `name`, `version`, and referenced templates are validated.
+  - Template ids are unique.
+  - Missing manifest with safe `.bee/templates` becomes an implicit local pack.
+  - Loader does not execute commands or grant execution permission.
+  - Existing Bee workspace behavior remains unchanged.
+
+### After
+
+- Changed files:
+  - `docs/bee_template_pack/GOAL_PROGRESS.md`
+  - `src/coding_agent/bee_template_pack.py`
+  - `tests/coding_agent/test_bee_template_pack.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_template_pack.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -v`
+  - `uv run ruff format --check --preview src/coding_agent/bee_template_pack.py tests/coding_agent/test_bee_template_pack.py docs/bee_template_pack/GOAL_PROGRESS.md`
+  - `uv run ruff check --preview src/coding_agent/bee_template_pack.py tests/coding_agent/test_bee_template_pack.py`
+  - `git diff --check -- .`
+- Results:
+  - Focused pack manifest tests passed: 13 passed.
+  - Existing Bee workspace regression passed: 54 passed.
+  - Ruff format check, ruff check, and git whitespace check passed.
+  - Initial red test failed on missing `coding_agent.bee_template_pack`; first
+    fix iteration corrected an over-broad `description` key false positive.
+- Remaining risks:
+  - G148 still needs registry/discovery across multiple pack roots and explicit
+    provenance APIs.
