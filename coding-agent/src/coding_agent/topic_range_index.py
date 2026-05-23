@@ -316,3 +316,9 @@ def _require_safe_text(field_name: str, value: str) -> None:
     for marker in _FORBIDDEN_TEXT_MARKERS:
         if marker in normalized:
             raise ValueError(f"{field_name} contains forbidden raw content marker")
+
+
+def require_recall_safe_text(field_name: str, value: str) -> None:
+    """Validate bounded recall/memory text against no-leak markers."""
+
+    _require_safe_text(field_name, value)
