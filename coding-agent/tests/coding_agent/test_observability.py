@@ -19,6 +19,9 @@ from coding_agent.observability import (
     record_evaluation_case_metric,
     record_hitl_interaction_metric,
     record_http_request_metric,
+    record_memory_candidate_metric,
+    record_memory_review_metric,
+    record_topic_recall_metric,
     record_storage_operation_metric,
     reset_prometheus_metrics,
 )
@@ -535,6 +538,106 @@ def test_executor_metrics_record_on_default_recorder() -> None:
     )
 
 
+def test_recall_metrics_omit_high_cardinality_labels() -> None:
+    recorder = PrometheusMetricsRecorder()
+    sink = PrometheusMetricsObservationSink(recorder=recorder)
+
+    sink.record_span(
+        SpanRecord(
+            name="context_pack.build",
+            status="ok",
+            attributes={
+                "memory_id": "memory-alpha",
+                "topic_id": "topic-alpha",
+                "task_id": "task-alpha",
+                "run_id": "run-alpha",
+                "session_id": "session-alpha",
+                "recall_source": "topic_range",
+                "recall_status": "matched",
+                "memory_kind": "procedure",
+                "memory_status": "accepted",
+            },
+            duration_ms=1,
+        )
+    )
+    recorder.record_topic_recall_run(
+        source="topic_and_memory",
+        status="matched",
+        candidate_count=2,
+    )
+    recorder.record_memory_candidate(kind="procedure", status="candidate")
+    recorder.record_memory_review(status="accepted")
+
+    text = recorder.exposition_text()
+
+    assert 'recall_source="topic_range"' in text
+    assert 'recall_status="matched"' in text
+    assert 'memory_kind="procedure"' in text
+    assert 'memory_status="accepted"' in text
+    assert (
+        'topic_recall_runs_total{source="topic_and_memory",status="matched"} 1' in text
+    )
+    assert 'topic_recall_candidates_bucket{le="5",source="topic_and_memory"} 1' in text
+    assert 'memory_candidates_total{kind="procedure",status="candidate"} 1' in text
+    assert 'memory_reviews_total{status="accepted"} 1' in text
+    for forbidden in (
+        "memory_id",
+        "topic_id",
+        "task_id",
+        "run_id",
+        "session_id",
+        "memory-alpha",
+        "topic-alpha",
+        "task-alpha",
+        "run-alpha",
+        "session-alpha",
+    ):
+        assert forbidden not in text
+
+
+def test_recall_metrics_normalize_unlisted_values_and_raw_evidence_text() -> None:
+    recorder = PrometheusMetricsRecorder()
+
+    recorder.record_topic_recall_run(
+        source="customer_topic_alpha",
+        status="raw secret status",
+        candidate_count=3,
+    )
+    recorder.record_memory_candidate(kind="raw_prompt_memory", status="candidate")
+    recorder.record_memory_review(status="custom_review")
+
+    text = recorder.exposition_text()
+
+    assert 'source="unknown"' in text
+    assert 'status="unknown"' in text
+    assert 'kind="unknown"' in text
+    assert "customer_topic_alpha" not in text
+    assert "raw_prompt_memory" not in text
+    assert "raw_secret_status" not in text
+    assert "custom_review" not in text
+
+
+def test_recall_metrics_record_on_default_recorder() -> None:
+    reset_prometheus_metrics()
+
+    record_topic_recall_metric(
+        source="accepted_memory",
+        status="matched",
+        candidate_count=1,
+    )
+    record_memory_candidate_metric(kind="decision", status="candidate")
+    record_memory_review_metric(status="accepted")
+
+    text = prometheus_metrics_text()
+
+    assert (
+        'topic_recall_runs_total{source="accepted_memory",status="matched"} 1' in text
+    )
+    assert 'topic_recall_candidates_count{source="accepted_memory"} 1' in text
+    assert 'memory_candidates_total{kind="decision",status="candidate"} 1' in text
+    assert 'memory_reviews_total{status="accepted"} 1' in text
+
+
 def test_prometheus_metrics_normalize_unsafe_allowed_values_and_reserved_labels() -> (
     None
 ):
@@ -790,6 +893,42 @@ def test_otlp_sink_posts_span_without_prompt_or_output_content() -> None:
     assert {"content", "message", "prompt", "result", "secret", "text"}.isdisjoint(
         exported_keys
     )
+
+
+def test_otlp_sink_drops_raw_recall_and_memory_attribute_values() -> None:
+    transport = RecordingTransport()
+    sink = OtlpHttpObservationSink(
+        endpoint="https://otel.example.test/v1/traces",
+        client=httpx.Client(transport=httpx.MockTransport(transport.handler)),
+    )
+
+    sink.record_span(
+        SpanRecord(
+            name="context_pack.build",
+            status="ok",
+            attributes={
+                "recall_source": "secret: value",
+                "recall_status": "matched",
+                "memory_kind": "stdout: raw output",
+                "memory_status": "accepted",
+            },
+        )
+    )
+
+    body = transport.requests[0].read().decode()
+    span = _first_span(json.loads(body))
+    exported_keys = {
+        item["key"]
+        for item in span.get("attributes", [])
+        if isinstance(item, dict) and isinstance(item.get("key"), str)
+    }
+
+    assert "secret: value" not in body
+    assert "stdout: raw output" not in body
+    assert "recall_source" not in exported_keys
+    assert "memory_kind" not in exported_keys
+    assert "recall_status" in exported_keys
+    assert "memory_status" in exported_keys
 
 
 def test_otlp_sink_groups_spans_by_session_and_run() -> None:
