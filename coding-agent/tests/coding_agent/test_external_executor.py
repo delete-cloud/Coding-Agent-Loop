@@ -16,6 +16,7 @@ from coding_agent.bee_workspace import (
     load_bee_workspace_template,
 )
 from coding_agent.external_executor import (
+    DockerExecutorAdapter,
     ExecutorCapability,
     ExecutorEvidence,
     ExecutorPlan,
@@ -24,6 +25,7 @@ from coding_agent.external_executor import (
     ExecutorRunRecord,
     LocalExecutorAdapter,
     PGExecutorRunStore,
+    build_docker_executor_plan_from_local_plan,
     build_local_executor_plan_from_bee_command_plan,
     executor_result_completion_evidence,
 )
@@ -158,6 +160,14 @@ class FakeExecutor:
             status="succeeded",
             sanitized_summary=f"{plan.executor_kind} plan accepted",
         )
+
+
+class FakeDockerCapabilityClient:
+    def __init__(self, available: bool) -> None:
+        self._available = available
+
+    def available(self) -> bool:
+        return self._available
 
 
 @pytest.fixture
@@ -669,11 +679,11 @@ async def test_local_executor_rejects_unauthorized_or_missing_workspace_plan(
         metadata={"policy_decision": "allow", "approval_route": "allow"},
     )
 
-    with pytest.raises(ValueError, match="bridge-authorized"):
+    with pytest.raises(ValueError, match="authorized executor plan"):
         await adapter.submit(unauthorized)
     with pytest.raises(ValueError, match="executor_kind='local'"):
         await adapter.submit(wrong_kind)
-    with pytest.raises(ValueError, match="bridge-authorized"):
+    with pytest.raises(ValueError, match="authorized executor plan"):
         await adapter.submit(missing_workspace)
 
     assert calls == []
@@ -810,6 +820,97 @@ def test_executor_evidence_rejects_raw_command_ref() -> None:
         )
 
 
+def test_docker_executor_capability_detection_and_dry_run(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    local_plan = _approved_local_plan(workspace)
+    docker_plan = build_docker_executor_plan_from_local_plan(
+        local_plan,
+        executor_run_id="executor-run-docker",
+    )
+    disabled = DockerExecutorAdapter()
+    unavailable = DockerExecutorAdapter(
+        enabled=True,
+        capability_client=FakeDockerCapabilityClient(False),
+    )
+    available = DockerExecutorAdapter(
+        enabled=True,
+        capability_client=FakeDockerCapabilityClient(True),
+    )
+
+    disabled_capability = disabled.capability()
+    unavailable_capability = unavailable.capability()
+    available_capability = available.capability()
+    rendered = available.dry_run_render(docker_plan)
+
+    assert disabled_capability.enabled is False
+    assert disabled_capability.available is False
+    assert disabled_capability.status == "disabled"
+    assert unavailable_capability.enabled is True
+    assert unavailable_capability.available is False
+    assert unavailable_capability.status == "unavailable"
+    assert available_capability.available is True
+    assert available_capability.status == "available"
+    assert rendered["executor_kind"] == "docker"
+    assert rendered["mode"] == "dry_run"
+    assert rendered["intent_category"] == "validation"
+    assert rendered["intent_profile"] == "validation"
+    assert rendered["timeout_seconds"] == 120
+    serialized = str(rendered)
+    for forbidden in (
+        "task-1",
+        "node-validate",
+        "workspace-alpha",
+        "pytest",
+        "command",
+        "stdout",
+        "stderr",
+        "secret",
+    ):
+        assert forbidden not in serialized
+
+
+def test_docker_executor_rejects_denied_or_forged_plan(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    adapter = DockerExecutorAdapter(
+        enabled=True,
+        capability_client=FakeDockerCapabilityClient(True),
+    )
+    local_plan = _approved_local_plan(workspace)
+    docker_plan = build_docker_executor_plan_from_local_plan(local_plan)
+    forged_kind = replace(docker_plan, executor_kind="local")
+    forged_signature = replace(docker_plan, node_id="forged-node")
+    unsigned = ExecutorPlan(
+        executor_kind="docker",
+        task_id="task-1",
+        node_id="node-validate",
+        workspace_ref="workspace-alpha",
+        requested_at=_dt(9),
+        metadata={"policy_decision": "allow", "approval_route": "allow"},
+    )
+
+    with pytest.raises(ValueError, match="executor_kind='docker'"):
+        adapter.dry_run_render(forged_kind)
+    with pytest.raises(ValueError, match="signed executor plan"):
+        adapter.dry_run_render(forged_signature)
+    with pytest.raises(ValueError, match="authorized executor plan"):
+        adapter.dry_run_render(unsigned)
+
+
+@pytest.mark.asyncio
+async def test_docker_executor_submit_is_deferred(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    plan = build_docker_executor_plan_from_local_plan(_approved_local_plan(workspace))
+
+    with pytest.raises(RuntimeError, match="deferred"):
+        await DockerExecutorAdapter(
+            enabled=True,
+            capability_client=FakeDockerCapabilityClient(True),
+        ).submit(plan)
+
+
 def _run_row(*args: object) -> dict[str, object]:
     (
         executor_run_id,
@@ -932,3 +1033,22 @@ def _write_template_with_commands(tmp_path: Path):
         encoding="utf-8",
     )
     return load_bee_workspace_template(tmp_path, "template-alpha")
+
+
+def _approved_local_plan(workspace: Path) -> ExecutorPlan:
+    template = _write_template_with_commands(workspace)
+    manifest = build_bee_manifest_from_workspace_template(template)
+    command_plan = plan_bee_command_intent(
+        template=template,
+        node=manifest.nodes[0],
+        command="pytest -q",
+        workspace_root=workspace,
+        cwd=workspace,
+    )
+    return build_local_executor_plan_from_bee_command_plan(
+        command_plan=command_plan,
+        task_id="task-1",
+        workspace_ref="workspace-alpha",
+        approved_workspace_root=workspace,
+        requested_at=_dt(9),
+    )
