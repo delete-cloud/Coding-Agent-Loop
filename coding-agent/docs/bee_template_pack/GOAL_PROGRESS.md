@@ -311,3 +311,61 @@ remaining risks before continuing to the next goal.
 - Remaining risks:
   - G152 still needs console and low-cardinality observability surfaces for
     pack validation, template status, and dry-run plans.
+
+## G152_BEE_PACK_CONSOLE_AND_OBSERVABILITY
+
+### Before
+
+- Goal id: `G152_BEE_PACK_CONSOLE_AND_OBSERVABILITY`
+- Intended files:
+  - `docs/bee_template_pack/GOAL_PROGRESS.md`
+  - `src/coding_agent/ui/developer_console.py`
+  - `src/coding_agent/ui/http_server.py`
+  - `src/coding_agent/observability.py`
+  - `tests/ui/test_developer_console.py`
+  - `tests/coding_agent/test_observability.py`
+- Verification commands:
+  - `uv run pytest tests/ui/test_developer_console.py -v`
+  - `uv run pytest tests/coding_agent/test_observability.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_template_pack.py -v`
+  - `uv run ruff format --check --preview src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py src/coding_agent/observability.py tests/ui/test_developer_console.py tests/coding_agent/test_observability.py docs/bee_template_pack/GOAL_PROGRESS.md`
+  - `uv run ruff check --preview src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py src/coding_agent/observability.py tests/ui/test_developer_console.py tests/coding_agent/test_observability.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Console renders pack list, pack templates, compatibility reports, and dry-run previews.
+  - Console output excludes raw prompt/content/message/result/secret/text/command_output/stdout/stderr/env fields.
+  - Pack observability records low-cardinality metrics only.
+  - Existing Developer Console, observability, and Bee template pack tests pass.
+
+### After
+
+- Changed files:
+  - `docs/bee_template_pack/GOAL_PROGRESS.md`
+  - `src/coding_agent/ui/developer_console.py`
+  - `src/coding_agent/ui/http_server.py`
+  - `src/coding_agent/observability.py`
+  - `tests/ui/test_developer_console.py`
+  - `tests/coding_agent/test_observability.py`
+- Tests run:
+  - `uv run pytest tests/ui/test_developer_console.py -v`
+  - `uv run pytest tests/coding_agent/test_observability.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_template_pack.py -v`
+  - `uv run ruff format --check --preview src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py src/coding_agent/observability.py tests/ui/test_developer_console.py tests/coding_agent/test_observability.py docs/bee_template_pack/GOAL_PROGRESS.md`
+  - `uv run ruff check --preview tests/ui/test_developer_console.py tests/coding_agent/test_observability.py`
+  - `uv run ruff check --preview --select I src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py src/coding_agent/observability.py`
+  - `git diff --check -- .`
+- Results:
+  - Developer Console tests passed: 45 passed.
+  - Observability tests passed: 38 passed.
+  - Bee template pack tests passed: 32 passed.
+  - Ruff format check, test-file ruff check, production import-order ruff
+    check, and git whitespace check passed.
+  - Initial red tests failed on missing console pack sections and missing Bee
+    pack metrics recorder methods; implementation added read-only pack
+    summaries, compatibility/dry-run previews, and low-cardinality counters.
+- Remaining risks:
+  - Full `ruff check --preview` on the touched production modules still reports
+    pre-existing broad lint debt in `observability.py` and `http_server.py`
+    unrelated to this goal. G153 should keep verification scoped unless that
+    debt is intentionally scheduled.
+  - G153 still needs final end-to-end smoke tests and user-facing pack docs.

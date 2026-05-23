@@ -6,17 +6,19 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from agentkit.storage.protocols import TapeInfo, TapeSearchResult
 from httpx import ASGITransport, AsyncClient
 
-from coding_agent.environment import WorkspaceProviderCapabilities
+from agentkit.storage.protocols import TapeInfo, TapeSearchResult
 from coding_agent.bee_launch import BeeLaunchRecord
 from coding_agent.bee_workspace import (
     BeeWorkspaceRunArtifacts,
     BeeWorkspaceRunNode,
     write_bee_workspace_run_artifacts,
 )
+from coding_agent.core.config import settings
+from coding_agent.environment import WorkspaceProviderCapabilities
 from coding_agent.external_executor import ExecutorRunRecord
+from coding_agent.observability import prometheus_metrics_text, reset_prometheus_metrics
 from coding_agent.runtime_store import (
     AgentInteractionRecord,
     AgentRunRecord,
@@ -34,13 +36,10 @@ from coding_agent.topic_store import (
     TopicRecallLinkRecord,
     TopicRecord,
 )
-from coding_agent.core.config import settings
-from coding_agent.observability import prometheus_metrics_text, reset_prometheus_metrics
 from coding_agent.ui import http_server
 from coding_agent.ui.http_server import app, session_manager
 from coding_agent.ui.session_manager import Session
 from coding_agent.ui.workspace_store import WorkspaceRecord
-
 
 CONSOLE_ROUTES = (
     "/console",
@@ -886,24 +885,43 @@ def _bee_runtime_run(run_id: str = "run-bee") -> AgentRunRecord:
 
 
 def _write_console_bee_workspace_fixture(workspace_root: Path) -> None:
+    (workspace_root / "bee-pack.yaml").write_text(
+        """pack_id: pack-alpha
+name: Alpha Pack
+version: 1.0.0
+domain_profile: maintenance
+tags:
+  - local
+templates:
+  - template-alpha
+""",
+        encoding="utf-8",
+    )
     template_dir = workspace_root / ".bee" / "templates" / "template-alpha"
     feature_dir = template_dir / "features"
     feature_dir.mkdir(parents=True)
     (template_dir / "metadata.yaml").write_text(
-        "\n".join([
-            "version: 1",
-            "template_id: template-alpha",
-            "kind: maintenance",
-            "profile: local",
-            "title: Local template",
-            "topic:",
-            "  session_id: session-alpha",
-            "nodes:",
-            "  - node_id: node-plan",
-            "    kind: analysis",
-            "    profile: default",
-            "    title: Plan local task",
-        ]),
+        """version: 1
+template_id: template-alpha
+kind: maintenance
+profile: local
+title: Local template
+topic:
+  session_id: session-alpha
+inputs:
+  required: []
+  defaults: {}
+metadata:
+  risk_profile: low
+  report_output_contract: sanitized_markdown
+  memory_candidates:
+    review_required: true
+nodes:
+  - node_id: node-plan
+    kind: analysis
+    profile: default
+    title: Plan local task
+""",
         encoding="utf-8",
     )
     (template_dir / "SKILL.md").write_text("# Template Skill\n", encoding="utf-8")
@@ -911,16 +929,15 @@ def _write_console_bee_workspace_fixture(workspace_root: Path) -> None:
         "Feature: safe console template\n", encoding="utf-8"
     )
     (template_dir / "commands.yaml").write_text(
-        "\n".join([
-            "commands:",
-            "  - name: smoke",
-            "    profile: validation",
-            "    policy: existing_command_policy",
-            "    category: validation",
-            "    validation_label: pytest_smoke",
-            "    metadata:",
-            "      owner: local",
-        ]),
+        """commands:
+  - name: smoke
+    profile: validation
+    policy: existing_command_policy
+    category: validation
+    validation_label: pytest_smoke
+    metadata:
+      owner: local
+""",
         encoding="utf-8",
     )
     write_bee_workspace_run_artifacts(
@@ -1826,6 +1843,89 @@ async def test_console_bee_renders_workspace_template_artifacts_and_commands(
     assert "existing_command_policy" in response.text
     for forbidden in FORBIDDEN_RENDERED_TEXT:
         assert forbidden not in response.text
+
+
+@pytest.mark.asyncio
+async def test_console_bee_renders_pack_compatibility_and_dry_run_plan(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _register_console_session("session-alpha")
+    session_manager.configure_runtime_store(_ConsoleRuntimeStore([_bee_runtime_run()]))
+    _write_console_bee_workspace_fixture(tmp_path)
+    monkeypatch.setattr(
+        http_server,
+        "_load_bee_workspace_config",
+        lambda: {"workspace_root": str(tmp_path)},
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/console/bee")
+
+    assert response.status_code == 200
+    assert "Bee Template Packs" in response.text
+    assert "Bee Pack Templates" in response.text
+    assert "Bee Pack Compatibility" in response.text
+    assert "Bee Pack Dry-Run Plans" in response.text
+    assert "pack-alpha" in response.text
+    assert "Alpha Pack" in response.text
+    assert "maintenance" in response.text
+    assert "compatible" in response.text
+    assert ".bee/runs/dry-run-task-pack-alpha-template-alpha/task.json" in response.text
+    assert "report.md" in response.text
+    assert "memory_candidates.yaml" in response.text
+    for forbidden in FORBIDDEN_RENDERED_TEXT:
+        assert forbidden not in response.text
+
+
+@pytest.mark.asyncio
+async def test_console_bee_pack_metrics_use_low_cardinality_labels(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _register_console_session("session-alpha")
+    session_manager.configure_runtime_store(_ConsoleRuntimeStore([_bee_runtime_run()]))
+    _write_console_bee_workspace_fixture(tmp_path)
+    monkeypatch.setattr(
+        http_server,
+        "_load_bee_workspace_config",
+        lambda: {"workspace_root": str(tmp_path)},
+    )
+    monkeypatch.setattr(
+        http_server,
+        "_load_observability_config",
+        lambda: {
+            "enabled": True,
+            "metrics": {
+                "enabled": True,
+                "endpoint_enabled": True,
+                "backend": "prometheus",
+            },
+        },
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/console/bee")
+
+    assert response.status_code == 200
+    metrics = prometheus_metrics_text()
+    assert (
+        'bee_pack_validations_total{source_type="local_workspace",status="compatible"}'
+        in metrics
+    )
+    assert (
+        'bee_pack_templates_total{source_type="local_workspace",status="compatible"}'
+        in metrics
+    )
+    assert 'bee_pack_dry_runs_total{status="ready"}' in metrics
+    assert "pack-alpha" not in metrics
+    assert "template-alpha" not in metrics
+    assert "pack_id" not in metrics
+    assert "template_id" not in metrics
+    assert "task_id" not in metrics
+    assert "topic_id" not in metrics
 
 
 @pytest.mark.asyncio

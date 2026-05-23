@@ -332,6 +332,21 @@ _MEMORY_REVIEW_STATUSES: Final[frozenset[str]] = frozenset({
     "archived",
     "rejected",
 })
+_BEE_PACK_SOURCE_TYPES: Final[frozenset[str]] = frozenset({
+    "fixture",
+    "imported",
+    "local_workspace",
+})
+_BEE_PACK_COMPATIBILITY_STATUSES: Final[frozenset[str]] = frozenset({
+    "compatible",
+    "incompatible",
+    "warning",
+})
+_BEE_PACK_DRY_RUN_STATUSES: Final[frozenset[str]] = frozenset({
+    "ready",
+    "rejected",
+    "warning",
+})
 _PROMETHEUS_HISTOGRAM_BUCKETS = (5.0, 10.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 5000.0)
 _PROMETHEUS_HTTP_HISTOGRAM_BUCKETS = (
     1.0,
@@ -761,6 +776,39 @@ class PrometheusMetricsRecorder:
         with self._lock:
             self._inc("memory_reviews_total", labels)
 
+    def record_bee_pack_validation(self, *, status: str, source_type: str) -> None:
+        labels = {
+            "source_type": _prometheus_metric_part(
+                source_type,
+                _BEE_PACK_SOURCE_TYPES,
+            ),
+            "status": _prometheus_metric_part(
+                status,
+                _BEE_PACK_COMPATIBILITY_STATUSES,
+            ),
+        }
+        with self._lock:
+            self._inc("bee_pack_validations_total", labels)
+
+    def record_bee_pack_template(self, *, status: str, source_type: str) -> None:
+        labels = {
+            "source_type": _prometheus_metric_part(
+                source_type,
+                _BEE_PACK_SOURCE_TYPES,
+            ),
+            "status": _prometheus_metric_part(
+                status,
+                _BEE_PACK_COMPATIBILITY_STATUSES,
+            ),
+        }
+        with self._lock:
+            self._inc("bee_pack_templates_total", labels)
+
+    def record_bee_pack_dry_run(self, *, status: str) -> None:
+        labels = {"status": _prometheus_metric_part(status, _BEE_PACK_DRY_RUN_STATUSES)}
+        with self._lock:
+            self._inc("bee_pack_dry_runs_total", labels)
+
     def exposition_text(self) -> str:
         lines: list[str] = []
         with self._lock:
@@ -998,6 +1046,38 @@ class PrometheusMetricsRecorder:
                         memory_counters,
                     )
                 )
+            bee_pack_counters = self._bee_pack_counters
+            if bee_pack_counters:
+                lines.extend((
+                    "# HELP bee_pack_validations_total Bee template pack compatibility validations.",
+                    "# TYPE bee_pack_validations_total counter",
+                ))
+                lines.extend(
+                    self._format_metric(
+                        "bee_pack_validations_total",
+                        bee_pack_counters,
+                    )
+                )
+                lines.extend((
+                    "# HELP bee_pack_templates_total Bee template pack templates by compatibility status.",
+                    "# TYPE bee_pack_templates_total counter",
+                ))
+                lines.extend(
+                    self._format_metric(
+                        "bee_pack_templates_total",
+                        bee_pack_counters,
+                    )
+                )
+                lines.extend((
+                    "# HELP bee_pack_dry_runs_total Bee template pack dry-run plans.",
+                    "# TYPE bee_pack_dry_runs_total counter",
+                ))
+                lines.extend(
+                    self._format_metric(
+                        "bee_pack_dry_runs_total",
+                        bee_pack_counters,
+                    )
+                )
         return "\n".join(lines) + ("\n" if lines else "")
 
     def reset(self) -> None:
@@ -1160,6 +1240,21 @@ class PrometheusMetricsRecorder:
             key: value
             for key, value in self._counters.items()
             if key[0] in {"memory_candidates_total", "memory_reviews_total"}
+        }
+
+    @property
+    def _bee_pack_counters(
+        self,
+    ) -> dict[tuple[str, tuple[tuple[str, str], ...]], float]:
+        return {
+            key: value
+            for key, value in self._counters.items()
+            if key[0]
+            in {
+                "bee_pack_validations_total",
+                "bee_pack_templates_total",
+                "bee_pack_dry_runs_total",
+            }
         }
 
     def _inc(self, metric: str, labels: Mapping[str, str], amount: float = 1.0) -> None:
@@ -1368,6 +1463,33 @@ def record_memory_candidate_metric(*, kind: str, status: str) -> None:
 def record_memory_review_metric(*, status: str) -> None:
     try:
         _DEFAULT_PROMETHEUS_RECORDER.record_memory_review(status=status)
+    except Exception:
+        return
+
+
+def record_bee_pack_validation_metric(*, status: str, source_type: str) -> None:
+    try:
+        _DEFAULT_PROMETHEUS_RECORDER.record_bee_pack_validation(
+            status=status,
+            source_type=source_type,
+        )
+    except Exception:
+        return
+
+
+def record_bee_pack_template_metric(*, status: str, source_type: str) -> None:
+    try:
+        _DEFAULT_PROMETHEUS_RECORDER.record_bee_pack_template(
+            status=status,
+            source_type=source_type,
+        )
+    except Exception:
+        return
+
+
+def record_bee_pack_dry_run_metric(*, status: str) -> None:
+    try:
+        _DEFAULT_PROMETHEUS_RECORDER.record_bee_pack_dry_run(status=status)
     except Exception:
         return
 

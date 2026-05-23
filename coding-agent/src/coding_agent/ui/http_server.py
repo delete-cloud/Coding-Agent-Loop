@@ -10,17 +10,18 @@ import re
 import socket
 import time
 import uuid
+from collections.abc import AsyncIterator, Iterable, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, cast
-from collections.abc import AsyncIterator, Iterable, Mapping
 from urllib.parse import urlsplit
 
 import httpx
-from fastapi import FastAPI, HTTPException, Depends, Query, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, PlainTextResponse
+from slowapi.errors import RateLimitExceeded
 from sse_starlette.sse import EventSourceResponse
 
 from agentkit.config.loader import load_config as load_agent_toml
@@ -30,6 +31,13 @@ from agentkit.result.reducers import result_from_turn_trace
 from agentkit.tape.extract import TurnTrace, extract_turns
 from agentkit.tape.tape import Tape
 from coding_agent.approval import ApprovalPolicy
+from coding_agent.bee_launch import BeeLaunchRecord, PGBeeLaunchStore
+from coding_agent.bee_template_pack import (
+    BeePackRegistry,
+    BeeTemplatePackSource,
+    build_bee_pack_dry_run_plan,
+    validate_bee_pack_compatibility,
+)
 from coding_agent.bee_workspace import (
     BeeWorkspaceCommandIntent,
     BeeWorkspaceRunArtifactRecord,
@@ -38,8 +46,35 @@ from coding_agent.bee_workspace import (
     discover_bee_workspace_templates,
     load_bee_workspace_command_intents,
 )
-from coding_agent.bee_launch import BeeLaunchRecord, PGBeeLaunchStore
+from coding_agent.environment import (
+    WorkspaceArchiveManifest,
+    WorkspaceBranchPublication,
+    WorkspaceInventoryEntry,
+    WorkspaceProviderCapabilities,
+    cleanup_cloud_binding_from_config,
+    cleanup_cloud_workspace_from_config,
+    cleanup_stale_cloud_workspaces_from_config,
+    cloud_client_factory_from_config,
+    cloud_workspace_ready_from_config,
+    export_workspace_archive_by_id_from_config,
+    export_workspace_archive_from_config,
+    get_cloud_workspace_from_config,
+    list_cloud_workspaces_from_config,
+    provision_cloud_binding_from_config,
+    publish_workspace_branch_from_config,
+    workspace_archive_manifest_from_config,
+    workspace_diff_from_config,
+    workspace_patch_from_config,
+    workspace_provider_capabilities_from_config,
+)
 from coding_agent.external_executor import ExecutorRunRecord, PGExecutorRunStore
+from coding_agent.observability import (
+    prometheus_metrics_text,
+    record_bee_pack_dry_run_metric,
+    record_bee_pack_template_metric,
+    record_bee_pack_validation_metric,
+    record_http_request_metric,
+)
 from coding_agent.runtime_store import (
     AgentRunRecord,
     RunMessageSnapshotRecord,
@@ -58,65 +93,43 @@ from coding_agent.topic_store import (
     TopicRecallLinkRecord,
     TopicRecord,
 )
-from coding_agent.verification.release_manifest import (
-    load_release_verification_manifest,
-)
-from coding_agent.environment import (
-    cleanup_cloud_binding_from_config,
-    cleanup_cloud_workspace_from_config,
-    cleanup_stale_cloud_workspaces_from_config,
-    cloud_client_factory_from_config,
-    cloud_workspace_ready_from_config,
-    WorkspaceProviderCapabilities,
-    WorkspaceArchiveManifest,
-    WorkspaceBranchPublication,
-    WorkspaceInventoryEntry,
-    export_workspace_archive_by_id_from_config,
-    export_workspace_archive_from_config,
-    get_cloud_workspace_from_config,
-    list_cloud_workspaces_from_config,
-    publish_workspace_branch_from_config,
-    provision_cloud_binding_from_config,
-    workspace_provider_capabilities_from_config,
-    workspace_archive_manifest_from_config,
-    workspace_diff_from_config,
-    workspace_patch_from_config,
-)
-from coding_agent.observability import (
-    prometheus_metrics_text,
-    record_http_request_metric,
-)
+from coding_agent.ui.auth import AuthContext, auth_context_from_headers, verify_api_key
 from coding_agent.ui.binding_resolver import DefaultBindingResolver
 from coding_agent.ui.developer_console import (
     ConsoleActionSummary,
     ConsoleActionValidationSummary,
+    ConsoleBeeCommandIntentSummary,
     ConsoleBeeLaunchSummary,
     ConsoleBeeNodeSummary,
+    ConsoleBeePackCompatibilitySummary,
+    ConsoleBeePackDryRunSummary,
+    ConsoleBeePackSummary,
+    ConsoleBeePackTemplateSummary,
     ConsoleBeePage,
-    ConsoleBeeCommandIntentSummary,
     ConsoleBeeRunArtifactSummary,
     ConsoleBeeTaskSummary,
     ConsoleBeeTemplateSummary,
-    ConsoleExecutorRunSummary,
-    ConsoleCorrelationSummary,
     ConsoleContextEvidence,
     ConsoleContextSectionSummary,
     ConsoleContextSummary,
+    ConsoleCorrelationSummary,
     ConsoleEventSummary,
+    ConsoleExecutorRunSummary,
     ConsoleInteractionSummary,
     ConsoleMemoryEvidence,
     ConsoleMemoryReviewSummary,
     ConsoleMemorySummary,
     ConsoleObservabilitySummary,
+    ConsoleProactiveSignalSummary,
     ConsoleReleaseGateSummary,
     ConsoleReleaseSummary,
     ConsoleRunDetail,
     ConsoleRunSummary,
-    ConsoleProactiveSignalSummary,
-    ConsoleScheduleSummary,
     ConsoleSchedulesPage,
+    ConsoleScheduleSummary,
     ConsoleScheduleTriggerSummary,
     ConsoleSessionSummary,
+    ConsoleSnapshotSummary,
     ConsoleTapeEntrySummary,
     ConsoleTapeInfo,
     ConsoleTopicAnchorSummary,
@@ -127,15 +140,14 @@ from coding_agent.ui.developer_console import (
     ConsoleValidationOutcomeSummary,
     ConsoleWorkspaceCapabilitySummary,
     ConsoleWorkspaceSummary,
-    ConsoleSnapshotSummary,
     message_label,
     render_console_actions_page,
     render_console_bee_page,
-    render_console_page,
     render_console_context_page,
     render_console_interactions_page,
     render_console_memory_page,
     render_console_observability_page,
+    render_console_page,
     render_console_release_page,
     render_console_run_detail_page,
     render_console_runs_page,
@@ -145,65 +157,69 @@ from coding_agent.ui.developer_console import (
     render_console_topic_detail_page,
     render_console_topics_page,
     render_console_workspaces_page,
-    safe_label_value,
+    safe_error_summary,
     safe_id_value,
     safe_key_tuple,
-    safe_error_summary,
+    safe_label_value,
     safe_text_value,
 )
-from coding_agent.ui.session_manager import Session, SessionManager
-from coding_agent.ui.session_owner_store import (
-    SessionOwnerStore,
-    SessionOwnershipConflictError,
-    SessionOwnershipConflictReason,
-)
-from coding_agent.ui.workspace_store import PGWorkspaceMetadataStore
-from coding_agent.ui.workspace_store import JSONValue, WorkspaceRecord
-from coding_agent.ui.schemas import (
-    PromptRequest,
-    CreateSessionRequest,
-    ApproveRequest,
-    CheckpointCaptureRequest,
-    SessionResponse,
-    CheckpointListResponse,
-    CheckpointMetadataResponse,
-    CheckpointRestoreResponse,
-    ApprovalResponseSchema,
-    CancelSessionResponse,
-    CloseSessionResponse,
-    HealthResponse,
-    ReadinessResponse,
-    SessionListResponse,
-    SessionResultResponse,
-    SessionSummaryResponse,
-    RuntimeEventResponse,
-    RuntimeEventsResponse,
-    RuntimeMessageSnapshotResponse,
-    RuntimeRunResponse,
-    PublishSessionRequest,
-    PublishSessionResponse,
-    WorkspaceArchiveResponse,
-    WorkspaceArchiveManifestResponse,
-    WorkspaceCleanupResponse,
-    WorkspaceDiffResponse,
-    WorkspaceDiffFileSchema,
-    WorkspaceGcResponse,
-    WorkspaceListResponse,
-    WorkspacePatchResponse,
-    WorkspaceRetentionRequest,
-    WorkspaceRetentionResponse,
-    WorkspaceRetentionPolicy,
-    WorkspaceSummarySchema,
-    WorkspaceUnpinRequest,
-)
-from coding_agent.ui.auth import AuthContext, auth_context_from_headers, verify_api_key
 from coding_agent.ui.execution_binding import (
     CloudWorkspaceBinding,
     ExecutionBinding,
     LocalExecutionBinding,
 )
-from coding_agent.ui.rate_limit import limiter, RateLimits
-from slowapi.errors import RateLimitExceeded
+from coding_agent.ui.rate_limit import RateLimits, limiter
+from coding_agent.ui.schemas import (
+    ApprovalResponseSchema,
+    ApproveRequest,
+    CancelSessionResponse,
+    CheckpointCaptureRequest,
+    CheckpointListResponse,
+    CheckpointMetadataResponse,
+    CheckpointRestoreResponse,
+    CloseSessionResponse,
+    CreateSessionRequest,
+    HealthResponse,
+    PromptRequest,
+    PublishSessionRequest,
+    PublishSessionResponse,
+    ReadinessResponse,
+    RuntimeEventResponse,
+    RuntimeEventsResponse,
+    RuntimeMessageSnapshotResponse,
+    RuntimeRunResponse,
+    SessionListResponse,
+    SessionResponse,
+    SessionResultResponse,
+    SessionSummaryResponse,
+    WorkspaceArchiveManifestResponse,
+    WorkspaceArchiveResponse,
+    WorkspaceCleanupResponse,
+    WorkspaceDiffFileSchema,
+    WorkspaceDiffResponse,
+    WorkspaceGcResponse,
+    WorkspaceListResponse,
+    WorkspacePatchResponse,
+    WorkspaceRetentionPolicy,
+    WorkspaceRetentionRequest,
+    WorkspaceRetentionResponse,
+    WorkspaceSummarySchema,
+    WorkspaceUnpinRequest,
+)
+from coding_agent.ui.session_manager import Session, SessionManager
+from coding_agent.ui.session_owner_store import (
+    SessionOwnershipConflictError,
+    SessionOwnershipConflictReason,
+    SessionOwnerStore,
+)
+from coding_agent.ui.workspace_store import (
+    JSONValue,
+    PGWorkspaceMetadataStore,
+    WorkspaceRecord,
+)
+from coding_agent.verification.release_manifest import (
+    load_release_verification_manifest,
+)
 from coding_agent.wire import (
     ApprovalRequest,
     ApprovalResponse,
@@ -218,8 +234,7 @@ from coding_agent.wire import (
     TurnEnd,
     WireMessage,
 )
-from coding_agent.wire.protocol import ToolResultDelta
-from coding_agent.wire.protocol import ThinkingDelta, TurnStatusDelta
+from coding_agent.wire.protocol import ThinkingDelta, ToolResultDelta, TurnStatusDelta
 
 logger = logging.getLogger(__name__)
 
@@ -3405,6 +3420,22 @@ async def _console_bee_page(auth_context: AuthContext | None) -> ConsoleBeePage:
         nodes=tuple(sorted(nodes, key=lambda item: (item.task_id, item.node_id))),
         launches=launch_summaries,
         executor_runs=await _executor_run_summaries(auth_context, runs),
+        packs=(_console_bee_pack_summaries() if can_view_workspace_artifacts else ()),
+        pack_templates=(
+            _console_bee_pack_template_summaries()
+            if can_view_workspace_artifacts
+            else ()
+        ),
+        pack_compatibility=(
+            _console_bee_pack_compatibility_summaries()
+            if can_view_workspace_artifacts
+            else ()
+        ),
+        pack_dry_runs=(
+            _console_bee_pack_dry_run_summaries()
+            if can_view_workspace_artifacts
+            else ()
+        ),
         templates=(
             _console_bee_workspace_template_summaries()
             if can_view_workspace_artifacts
@@ -3600,6 +3631,155 @@ def _console_bee_workspace_templates() -> tuple[BeeWorkspaceTemplate, ...]:
             exc_info=exc,
         )
         return ()
+
+
+def _console_bee_pack_registry() -> BeePackRegistry | None:
+    workspace_root = _console_bee_workspace_root()
+    if workspace_root is None:
+        return None
+    try:
+        return BeePackRegistry.discover(
+            (workspace_root,),
+            source=BeeTemplatePackSource.LOCAL_WORKSPACE,
+        )
+    except (OSError, ValueError, TypeError, FileNotFoundError) as exc:
+        logger.warning(
+            "Console Bee template pack discovery failed; rendering empty summaries",
+            exc_info=exc,
+        )
+        return None
+
+
+def _console_bee_pack_summaries() -> tuple[ConsoleBeePackSummary, ...]:
+    registry = _console_bee_pack_registry()
+    if registry is None:
+        return ()
+    return tuple(
+        ConsoleBeePackSummary(
+            pack_id=summary.pack_id,
+            name=safe_text_value(summary.name) or "untitled",
+            version=safe_label_value(summary.version) or "unknown",
+            source_type=summary.source.value,
+            domain_profile=safe_label_value(summary.domain_profile),
+            tags=tuple(
+                tag
+                for tag in (safe_label_value(tag) for tag in summary.tags)
+                if tag is not None
+            ),
+            template_count=summary.template_count,
+        )
+        for summary in registry.list_packs()
+    )
+
+
+def _console_bee_pack_template_summaries() -> tuple[ConsoleBeePackTemplateSummary, ...]:
+    registry = _console_bee_pack_registry()
+    if registry is None:
+        return ()
+    summaries: list[ConsoleBeePackTemplateSummary] = []
+    for pack in registry.list_packs():
+        for template in registry.list_templates(pack.pack_id):
+            summaries.append(
+                ConsoleBeePackTemplateSummary(
+                    pack_id=template.pack_id,
+                    template_id=template.template_id,
+                    source_type=template.source.value,
+                    kind=safe_label_value(template.template_kind) or "unknown",
+                    profile=safe_label_value(template.template_profile) or "unknown",
+                    title=safe_text_value(template.title) or "untitled",
+                )
+            )
+    return tuple(sorted(summaries, key=lambda item: (item.pack_id, item.template_id)))
+
+
+def _console_bee_pack_compatibility_summaries() -> tuple[
+    ConsoleBeePackCompatibilitySummary, ...
+]:
+    workspace_root = _console_bee_workspace_root()
+    if workspace_root is None:
+        return ()
+    try:
+        report = validate_bee_pack_compatibility(
+            workspace_root,
+            source=BeeTemplatePackSource.LOCAL_WORKSPACE,
+        )
+    except (OSError, ValueError, TypeError, FileNotFoundError) as exc:
+        logger.warning(
+            "Console Bee template pack compatibility failed; rendering empty summaries",
+            exc_info=exc,
+        )
+        return ()
+    record_bee_pack_validation_metric(
+        status=report.status,
+        source_type=report.source.value,
+    )
+    for template in report.templates:
+        record_bee_pack_template_metric(
+            status=template.status,
+            source_type=report.source.value,
+        )
+    return (
+        ConsoleBeePackCompatibilitySummary(
+            pack_id=safe_id_value(report.pack_id),
+            source_type=report.source.value,
+            status=safe_label_value(report.status) or "unknown",
+            check_count=len(report.checks),
+            finding_count=len(report.findings),
+            template_count=len(report.templates),
+            recommended_fixes=tuple(
+                fix
+                for fix in (
+                    safe_text_value(finding.recommended_fix)
+                    for finding in report.findings[:5]
+                )
+                if fix is not None
+            ),
+        ),
+    )
+
+
+def _console_bee_pack_dry_run_summaries() -> tuple[ConsoleBeePackDryRunSummary, ...]:
+    registry = _console_bee_pack_registry()
+    if registry is None:
+        return ()
+    summaries: list[ConsoleBeePackDryRunSummary] = []
+    for pack in registry.list_packs():
+        for template in registry.list_templates(pack.pack_id):
+            try:
+                plan = build_bee_pack_dry_run_plan(
+                    registry,
+                    pack_id=pack.pack_id,
+                    template_id=template.template_id,
+                    inputs={},
+                )
+            except (OSError, ValueError, TypeError, FileNotFoundError) as exc:
+                logger.warning(
+                    "Console Bee template pack dry-run failed for %s/%s",
+                    pack.pack_id,
+                    template.template_id,
+                    exc_info=exc,
+                )
+                record_bee_pack_dry_run_metric(status="rejected")
+                continue
+            record_bee_pack_dry_run_metric(status=plan.status)
+            summaries.append(
+                ConsoleBeePackDryRunSummary(
+                    pack_id=plan.pack_id,
+                    template_id=plan.template_id,
+                    source_type=plan.source.value,
+                    status=safe_label_value(plan.status) or "unknown",
+                    task_json_path=safe_text_value(plan.task_json_path) or "-",
+                    report_path=safe_text_value(plan.report_path) or "-",
+                    evidence_dir=safe_text_value(plan.evidence_dir) or "-",
+                    memory_candidates_path=(
+                        safe_text_value(plan.memory_candidates_path) or "-"
+                    ),
+                    node_count=len(plan.nodes),
+                    command_count=len(plan.command_intents),
+                    warning_count=len(plan.warnings),
+                )
+            )
+    return tuple(sorted(summaries, key=lambda item: (item.pack_id, item.template_id)))
 
 
 def _console_bee_workspace_template_summaries() -> tuple[

@@ -14,15 +14,15 @@ from coding_agent.observability import (
     PrometheusMetricsRecorder,
     build_observation_sink,
     prometheus_metrics_text,
+    record_evaluation_case_metric,
     record_executor_capability_metric,
     record_executor_run_metric,
-    record_evaluation_case_metric,
     record_hitl_interaction_metric,
     record_http_request_metric,
     record_memory_candidate_metric,
     record_memory_review_metric,
-    record_topic_recall_metric,
     record_storage_operation_metric,
+    record_topic_recall_metric,
     reset_prometheus_metrics,
 )
 
@@ -431,6 +431,36 @@ def test_bee_workspace_metrics_allow_low_cardinality_labels_without_template_id(
     assert "task_id" not in text
     assert "customer_specific_task" not in text
     assert "raw_prompt_node" not in text
+
+
+def test_bee_pack_metrics_allow_low_cardinality_labels_without_pack_or_template_ids() -> (
+    None
+):
+    recorder = PrometheusMetricsRecorder()
+
+    recorder.record_bee_pack_validation(
+        status="compatible",
+        source_type="local_workspace",
+    )
+    recorder.record_bee_pack_template(
+        status="warning",
+        source_type="fixture",
+    )
+    recorder.record_bee_pack_dry_run(status="ready")
+
+    text = recorder.exposition_text()
+    assert (
+        'bee_pack_validations_total{source_type="local_workspace",status="compatible"} 1'
+        in text
+    )
+    assert 'bee_pack_templates_total{source_type="fixture",status="warning"} 1' in text
+    assert 'bee_pack_dry_runs_total{status="ready"} 1' in text
+    assert "pack-alpha" not in text
+    assert "template-alpha" not in text
+    assert "pack_id" not in text
+    assert "template_id" not in text
+    assert "task_id" not in text
+    assert "topic_id" not in text
 
 
 def test_executor_metrics_omit_high_cardinality_labels() -> None:
