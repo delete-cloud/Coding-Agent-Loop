@@ -130,6 +130,108 @@ class BeeTemplatePack:
     manifest_path: Path | None = None
 
 
+@dataclass(frozen=True)
+class BeePackSummary:
+    pack_id: str
+    name: str
+    version: str
+    source: BeeTemplatePackSource
+    root: Path
+    manifest_path: Path | None
+    domain_profile: str | None
+    tags: tuple[str, ...]
+    template_count: int
+
+
+@dataclass(frozen=True)
+class BeePackTemplateSummary:
+    pack_id: str
+    template_id: str
+    source: BeeTemplatePackSource
+    template_kind: str
+    template_profile: str
+    title: str
+    template_dir: Path
+    manifest_path: Path | None
+
+
+@dataclass(frozen=True)
+class BeePackTemplateProvenance:
+    pack_id: str
+    template_id: str
+    source: BeeTemplatePackSource
+    root: Path
+    manifest_path: Path | None
+    template_dir: Path
+
+
+@dataclass
+class BeePackRegistry:
+    _packs: dict[str, BeeTemplatePack] = field(default_factory=dict)
+
+    @classmethod
+    def discover(
+        cls,
+        roots: tuple[Path | str, ...] | list[Path | str],
+        *,
+        source: BeeTemplatePackSource = BeeTemplatePackSource.LOCAL_WORKSPACE,
+    ) -> BeePackRegistry:
+        registry = cls()
+        for root in roots:
+            registry.register(load_bee_template_pack(root, source=source))
+        return registry
+
+    def register(self, pack: BeeTemplatePack) -> None:
+        pack_id = pack.manifest.pack_id
+        if pack_id in self._packs:
+            raise ValueError(f"Bee pack is already registered: {pack_id}")
+        self._packs[pack_id] = pack
+
+    def list_packs(self) -> tuple[BeePackSummary, ...]:
+        return tuple(
+            _pack_summary(self._packs[pack_id]) for pack_id in sorted(self._packs)
+        )
+
+    def list_templates(self, pack_id: str) -> tuple[BeePackTemplateSummary, ...]:
+        pack = self._require_pack(pack_id)
+        return tuple(
+            _template_summary(pack, template)
+            for template in sorted(pack.templates, key=lambda item: item.template_id)
+        )
+
+    def load_template(
+        self,
+        pack_id: str,
+        template_id: str,
+    ) -> BeeWorkspaceTemplate:
+        pack = self._require_pack(pack_id)
+        for template in pack.templates:
+            if template.template_id == template_id:
+                return template
+        raise KeyError(f"Bee template not found in pack {pack_id}: {template_id}")
+
+    def template_provenance(
+        self,
+        pack_id: str,
+        template_id: str,
+    ) -> BeePackTemplateProvenance:
+        template = self.load_template(pack_id, template_id)
+        pack = self._require_pack(pack_id)
+        return BeePackTemplateProvenance(
+            pack_id=pack.manifest.pack_id,
+            template_id=template.template_id,
+            source=pack.source,
+            root=pack.root,
+            manifest_path=pack.manifest_path,
+            template_dir=template.template_dir,
+        )
+
+    def _require_pack(self, pack_id: str) -> BeeTemplatePack:
+        if pack_id not in self._packs:
+            raise KeyError(f"Bee pack not found: {pack_id}")
+        return self._packs[pack_id]
+
+
 def load_bee_template_pack(
     root: Path | str,
     *,
@@ -154,6 +256,43 @@ def load_bee_template_pack(
         templates=templates,
         manifest_path=manifest_path,
     )
+
+
+def _pack_summary(pack: BeeTemplatePack) -> BeePackSummary:
+    return BeePackSummary(
+        pack_id=pack.manifest.pack_id,
+        name=pack.manifest.name,
+        version=pack.manifest.version,
+        source=pack.source,
+        root=pack.root,
+        manifest_path=pack.manifest_path,
+        domain_profile=pack.manifest.domain_profile,
+        tags=pack.manifest.tags,
+        template_count=len(pack.templates),
+    )
+
+
+def _template_summary(
+    pack: BeeTemplatePack,
+    template: BeeWorkspaceTemplate,
+) -> BeePackTemplateSummary:
+    return BeePackTemplateSummary(
+        pack_id=pack.manifest.pack_id,
+        template_id=template.template_id,
+        source=pack.source,
+        template_kind=_template_metadata_label(template, "kind"),
+        template_profile=_template_metadata_label(template, "profile"),
+        title=_template_metadata_label(template, "title"),
+        template_dir=template.template_dir,
+        manifest_path=pack.manifest_path,
+    )
+
+
+def _template_metadata_label(template: BeeWorkspaceTemplate, key: str) -> str:
+    value = template.metadata.get(key)
+    if isinstance(value, str) and value:
+        return value
+    return "unknown"
 
 
 def _load_manifest_file(root: Path) -> tuple[Path | None, JSONObject | None]:

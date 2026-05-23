@@ -120,3 +120,48 @@ remaining risks before continuing to the next goal.
 - Remaining risks:
   - G148 still needs registry/discovery across multiple pack roots and explicit
     provenance APIs.
+
+## G148_BEE_PACK_REGISTRY_AND_DISCOVERY
+
+### Before
+
+- Goal id: `G148_BEE_PACK_REGISTRY_AND_DISCOVERY`
+- Intended files:
+  - `docs/bee_template_pack/GOAL_PROGRESS.md`
+  - `src/coding_agent/bee_template_pack.py`
+  - `tests/coding_agent/test_bee_template_pack.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_bee_template_pack.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -v`
+  - `uv run ruff format --check --preview src/coding_agent/bee_template_pack.py tests/coding_agent/test_bee_template_pack.py docs/bee_template_pack/GOAL_PROGRESS.md`
+  - `uv run ruff check --preview src/coding_agent/bee_template_pack.py tests/coding_agent/test_bee_template_pack.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - `BeePackRegistry` can discover one or more local/fixture/imported pack
+    roots.
+  - Registry lists packs and templates by pack.
+  - Registry loads templates through pack context.
+  - Unknown packs/templates are rejected.
+  - Pack/template provenance is available without executing commands.
+
+### After
+
+- Changed files:
+  - `docs/bee_template_pack/GOAL_PROGRESS.md`
+  - `src/coding_agent/bee_template_pack.py`
+  - `tests/coding_agent/test_bee_template_pack.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_template_pack.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -v`
+  - `uv run ruff format --check --preview src/coding_agent/bee_template_pack.py tests/coding_agent/test_bee_template_pack.py docs/bee_template_pack/GOAL_PROGRESS.md`
+  - `uv run ruff check --preview src/coding_agent/bee_template_pack.py tests/coding_agent/test_bee_template_pack.py`
+  - `git diff --check -- .`
+- Results:
+  - Focused pack manifest/registry tests passed: 19 passed.
+  - Existing Bee workspace regression passed: 54 passed.
+  - Ruff format check, ruff check, and git whitespace check passed.
+  - Initial red test failed on missing `BeePackRegistry`; implementation added
+    registry summaries, template lookup, and provenance records.
+- Remaining risks:
+  - G149 still needs compatibility reports, static command-ref validation, and
+    unsupported executor/no-raw-artifact findings.

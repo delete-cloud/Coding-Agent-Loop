@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from coding_agent.bee_template_pack import (
+    BeePackRegistry,
     BeeTemplatePackSource,
     load_bee_template_pack,
 )
@@ -204,6 +205,95 @@ templates:
     assert not marker.exists()
 
 
+def test_bee_pack_registry_discovers_one_local_pack(tmp_path: Path) -> None:
+    _write_manifest_pack(tmp_path, pack_id="pack-alpha", template_id="template-alpha")
+
+    registry = BeePackRegistry.discover(
+        (tmp_path,), source=BeeTemplatePackSource.LOCAL_WORKSPACE
+    )
+
+    assert [summary.pack_id for summary in registry.list_packs()] == ["pack-alpha"]
+    summary = registry.list_packs()[0]
+    assert summary.source == BeeTemplatePackSource.LOCAL_WORKSPACE
+    assert summary.template_count == 1
+    assert summary.root == tmp_path
+
+
+def test_bee_pack_registry_discovers_multiple_fixture_packs(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    _write_manifest_pack(first, pack_id="pack-alpha", template_id="template-alpha")
+    _write_manifest_pack(second, pack_id="pack-beta", template_id="template-beta")
+
+    registry = BeePackRegistry.discover(
+        (second, first), source=BeeTemplatePackSource.FIXTURE
+    )
+
+    assert [summary.pack_id for summary in registry.list_packs()] == [
+        "pack-alpha",
+        "pack-beta",
+    ]
+    assert {summary.source for summary in registry.list_packs()} == {
+        BeeTemplatePackSource.FIXTURE
+    }
+
+
+def test_bee_pack_registry_lists_templates_by_pack(tmp_path: Path) -> None:
+    _write_manifest_pack(tmp_path, pack_id="pack-alpha", template_id="template-alpha")
+
+    registry = BeePackRegistry.discover((tmp_path,))
+
+    assert [
+        summary.template_id for summary in registry.list_templates("pack-alpha")
+    ] == ["template-alpha"]
+    template_summary = registry.list_templates("pack-alpha")[0]
+    assert template_summary.pack_id == "pack-alpha"
+    assert template_summary.source == BeeTemplatePackSource.LOCAL_WORKSPACE
+    assert template_summary.template_kind == "maintenance"
+    assert template_summary.template_profile == "local"
+
+
+def test_bee_pack_registry_loads_template_from_pack(tmp_path: Path) -> None:
+    _write_manifest_pack(tmp_path, pack_id="pack-alpha", template_id="template-alpha")
+
+    registry = BeePackRegistry.discover((tmp_path,))
+    template = registry.load_template("pack-alpha", "template-alpha")
+
+    assert template.template_id == "template-alpha"
+    assert template.template_dir == tmp_path / ".bee" / "templates" / "template-alpha"
+
+
+def test_bee_pack_registry_rejects_unknown_pack(tmp_path: Path) -> None:
+    _write_manifest_pack(tmp_path, pack_id="pack-alpha", template_id="template-alpha")
+
+    registry = BeePackRegistry.discover((tmp_path,))
+
+    with pytest.raises(KeyError, match="pack-missing"):
+        registry.list_templates("pack-missing")
+    with pytest.raises(KeyError, match="pack-missing"):
+        registry.load_template("pack-missing", "template-alpha")
+    with pytest.raises(KeyError, match="template-missing"):
+        registry.load_template("pack-alpha", "template-missing")
+
+
+def test_bee_pack_registry_preserves_pack_template_provenance(
+    tmp_path: Path,
+) -> None:
+    _write_manifest_pack(tmp_path, pack_id="pack-alpha", template_id="template-alpha")
+
+    registry = BeePackRegistry.discover(
+        (tmp_path,), source=BeeTemplatePackSource.IMPORTED
+    )
+    provenance = registry.template_provenance("pack-alpha", "template-alpha")
+
+    assert provenance.pack_id == "pack-alpha"
+    assert provenance.template_id == "template-alpha"
+    assert provenance.source == BeeTemplatePackSource.IMPORTED
+    assert provenance.root == tmp_path
+    assert provenance.manifest_path == tmp_path / "bee-pack.yaml"
+    assert provenance.template_dir == tmp_path / ".bee" / "templates" / "template-alpha"
+
+
 def _write_safe_template(workspace_root: Path, template_id: str) -> Path:
     template_dir = workspace_root / ".bee" / "templates" / template_id
     feature_dir = template_dir / "features"
@@ -234,3 +324,21 @@ def _write_safe_template(workspace_root: Path, template_id: str) -> Path:
         "Feature: safe local template\n", encoding="utf-8"
     )
     return template_dir
+
+
+def _write_manifest_pack(
+    workspace_root: Path, *, pack_id: str, template_id: str
+) -> None:
+    _write_safe_template(workspace_root, template_id)
+    (workspace_root / "bee-pack.yaml").write_text(
+        f"""pack_id: {pack_id}
+name: {pack_id}
+version: 1.0.0
+domain_profile: maintenance
+templates:
+  - {template_id}
+tags:
+  - local
+""",
+        encoding="utf-8",
+    )
