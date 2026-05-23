@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from html import escape
-import re
 
 
 @dataclass(frozen=True)
@@ -388,6 +388,53 @@ class ConsoleBeeLaunchSummary:
 
 
 @dataclass(frozen=True)
+class ConsoleBeePackSummary:
+    pack_id: str
+    name: str
+    version: str
+    source_type: str
+    domain_profile: str | None
+    tags: tuple[str, ...]
+    template_count: int
+
+
+@dataclass(frozen=True)
+class ConsoleBeePackTemplateSummary:
+    pack_id: str
+    template_id: str
+    source_type: str
+    kind: str
+    profile: str
+    title: str
+
+
+@dataclass(frozen=True)
+class ConsoleBeePackCompatibilitySummary:
+    pack_id: str | None
+    source_type: str
+    status: str
+    check_count: int
+    finding_count: int
+    template_count: int
+    recommended_fixes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ConsoleBeePackDryRunSummary:
+    pack_id: str
+    template_id: str
+    source_type: str
+    status: str
+    task_json_path: str
+    report_path: str
+    evidence_dir: str
+    memory_candidates_path: str
+    node_count: int
+    command_count: int
+    warning_count: int
+
+
+@dataclass(frozen=True)
 class ConsoleExecutorRunSummary:
     executor_run_id: str
     executor_kind: str
@@ -404,6 +451,10 @@ class ConsoleExecutorRunSummary:
 class ConsoleBeePage:
     tasks: tuple[ConsoleBeeTaskSummary, ...]
     nodes: tuple[ConsoleBeeNodeSummary, ...]
+    packs: tuple[ConsoleBeePackSummary, ...] = ()
+    pack_templates: tuple[ConsoleBeePackTemplateSummary, ...] = ()
+    pack_compatibility: tuple[ConsoleBeePackCompatibilitySummary, ...] = ()
+    pack_dry_runs: tuple[ConsoleBeePackDryRunSummary, ...] = ()
     templates: tuple[ConsoleBeeTemplateSummary, ...] = ()
     run_artifacts: tuple[ConsoleBeeRunArtifactSummary, ...] = ()
     commands: tuple[ConsoleBeeCommandIntentSummary, ...] = ()
@@ -745,6 +796,10 @@ def render_console_bee_page(page_summary: ConsoleBeePage) -> str:
         f'<p class="lede">{escape(page.description)}</p>'
         f"{_bee_task_table(page_summary.tasks)}"
         f"{_bee_node_table(page_summary.nodes)}"
+        f"{_bee_pack_table(page_summary.packs)}"
+        f"{_bee_pack_template_table(page_summary.pack_templates)}"
+        f"{_bee_pack_compatibility_table(page_summary.pack_compatibility)}"
+        f"{_bee_pack_dry_run_table(page_summary.pack_dry_runs)}"
         f"{_bee_template_table(page_summary.templates)}"
         f"{_bee_run_artifact_table(page_summary.run_artifacts)}"
         f"{_bee_command_intent_table(page_summary.commands)}"
@@ -1592,6 +1647,143 @@ def _bee_template_table(templates: tuple[ConsoleBeeTemplateSummary, ...]) -> str
         "<thead><tr><th>Template ID</th><th>Kind</th><th>Profile</th>"
         "<th>Title</th><th>Features</th><th>Commands File</th>"
         "<th>Command Intents</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+        "</section>"
+    )
+
+
+def _bee_pack_table(packs: tuple[ConsoleBeePackSummary, ...]) -> str:
+    if not packs:
+        return _empty_state(
+            "Bee Template Packs",
+            "No data loaded yet. No Bee template packs are available.",
+        )
+    rows = []
+    for pack in packs:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(pack.pack_id)}</td>"
+            f"<td>{escape(pack.name)}</td>"
+            f"<td>{escape(pack.version)}</td>"
+            f"<td>{escape(pack.source_type)}</td>"
+            f"<td>{escape(pack.domain_profile or '-')}</td>"
+            f"<td>{escape(_join_or_dash(pack.tags))}</td>"
+            f"<td>{pack.template_count}</td>"
+            "</tr>"
+        )
+    return (
+        '<section aria-label="Bee template packs">'
+        "<h2>Bee Template Packs</h2>"
+        '<table aria-label="Developer Console Bee template packs">'
+        "<thead><tr><th>Pack ID</th><th>Name</th><th>Version</th>"
+        "<th>Source</th><th>Domain Profile</th><th>Tags</th>"
+        "<th>Templates</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+        "</section>"
+    )
+
+
+def _bee_pack_template_table(
+    templates: tuple[ConsoleBeePackTemplateSummary, ...],
+) -> str:
+    if not templates:
+        return _empty_state(
+            "Bee Pack Templates",
+            "No data loaded yet. No Bee pack templates are available.",
+        )
+    rows = []
+    for template in templates:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(template.pack_id)}</td>"
+            f"<td>{escape(template.template_id)}</td>"
+            f"<td>{escape(template.source_type)}</td>"
+            f"<td>{escape(template.kind)}</td>"
+            f"<td>{escape(template.profile)}</td>"
+            f"<td>{escape(template.title)}</td>"
+            "</tr>"
+        )
+    return (
+        '<section aria-label="Bee pack templates">'
+        "<h2>Bee Pack Templates</h2>"
+        '<table aria-label="Developer Console Bee pack templates">'
+        "<thead><tr><th>Pack ID</th><th>Template ID</th><th>Source</th>"
+        "<th>Kind</th><th>Profile</th><th>Title</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+        "</section>"
+    )
+
+
+def _bee_pack_compatibility_table(
+    reports: tuple[ConsoleBeePackCompatibilitySummary, ...],
+) -> str:
+    if not reports:
+        return _empty_state(
+            "Bee Pack Compatibility",
+            "No data loaded yet. No Bee pack compatibility reports are available.",
+        )
+    rows = []
+    for report in reports:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(report.pack_id or '-')}</td>"
+            f"<td>{escape(report.source_type)}</td>"
+            f'<td class="status">{escape(report.status)}</td>'
+            f"<td>{report.check_count}</td>"
+            f"<td>{report.finding_count}</td>"
+            f"<td>{report.template_count}</td>"
+            f"<td>{escape(_join_or_dash(report.recommended_fixes))}</td>"
+            "</tr>"
+        )
+    return (
+        '<section aria-label="Bee pack compatibility">'
+        "<h2>Bee Pack Compatibility</h2>"
+        '<table aria-label="Developer Console Bee pack compatibility">'
+        "<thead><tr><th>Pack ID</th><th>Source</th><th>Status</th>"
+        "<th>Checks</th><th>Findings</th><th>Templates</th>"
+        "<th>Recommended Fixes</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+        "</section>"
+    )
+
+
+def _bee_pack_dry_run_table(
+    plans: tuple[ConsoleBeePackDryRunSummary, ...],
+) -> str:
+    if not plans:
+        return _empty_state(
+            "Bee Pack Dry-Run Plans",
+            "No data loaded yet. No Bee pack dry-run plans are available.",
+        )
+    rows = []
+    for plan in plans:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(plan.pack_id)}</td>"
+            f"<td>{escape(plan.template_id)}</td>"
+            f"<td>{escape(plan.source_type)}</td>"
+            f'<td class="status">{escape(plan.status)}</td>'
+            f"<td>{escape(plan.task_json_path)}</td>"
+            f"<td>{escape(plan.report_path)}</td>"
+            f"<td>{escape(plan.evidence_dir)}</td>"
+            f"<td>{escape(plan.memory_candidates_path)}</td>"
+            f"<td>{plan.node_count}</td>"
+            f"<td>{plan.command_count}</td>"
+            f"<td>{plan.warning_count}</td>"
+            "</tr>"
+        )
+    return (
+        '<section aria-label="Bee pack dry-run plans">'
+        "<h2>Bee Pack Dry-Run Plans</h2>"
+        '<table aria-label="Developer Console Bee pack dry-run plans">'
+        "<thead><tr><th>Pack ID</th><th>Template ID</th><th>Source</th>"
+        "<th>Status</th><th>Task JSON</th><th>Report</th><th>Evidence</th>"
+        "<th>Memory Candidates</th><th>Nodes</th><th>Commands</th>"
+        "<th>Warnings</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
         "</section>"
