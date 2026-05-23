@@ -164,8 +164,9 @@ multi-agent task graph work are out of scope.
 - [x] `test_topic_range_index_indexes_bee_task_topic_metadata`
 - [x] `test_topic_finalization_creates_memory_candidate_with_provenance`
 - [x] `test_bee_task_report_creates_memory_candidate_with_evidence_refs`
-- [ ] `test_memory_review_accept_reject_archive_idempotent`
-- [ ] `test_accepted_memory_renders_as_reference_only`
+- [x] `test_memory_review_accept_candidate_keeps_provenance`
+- [x] `test_memory_review_reject_and_archive_are_idempotent`
+- [x] `test_accepted_memory_context_pack_is_reference_only`
 - [ ] `test_topic_recall_planner_records_anchor_and_links`
 - [ ] `test_recall_context_pack_contains_reference_evidence`
 - [ ] `test_recall_metrics_omit_high_cardinality_labels`

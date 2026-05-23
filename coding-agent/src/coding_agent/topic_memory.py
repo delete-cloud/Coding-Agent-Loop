@@ -7,12 +7,20 @@ import json
 from dataclasses import dataclass
 
 from coding_agent.bee_workspace import BeeWorkspaceRunArtifacts
+from coding_agent.context_pack import (
+    ContextPack,
+    ContextPackItem,
+    ContextPackRenderer,
+    ContextPackSection,
+    EvidenceRef,
+)
 from coding_agent.topic_provenance import TopicEntryRange, topic_entry_range
 from coding_agent.topic_range_index import require_recall_safe_text
 from coding_agent.topic_store import JSONObject, JSONValue, TopicRecord
 
 MEMORY_CANDIDATE_STATUS = "candidate"
 MEMORY_REFERENCE_MODE = "reference_only"
+MEMORY_REVIEW_STATUSES = frozenset({"candidate", "accepted", "rejected", "archived"})
 
 _ALLOWED_KINDS = frozenset({
     "procedure",
@@ -70,6 +78,142 @@ class TopicDerivedMemoryCandidate:
             "reference_mode": MEMORY_REFERENCE_MODE,
             "provenance": self.provenance,
         }
+
+
+@dataclass(frozen=True)
+class ReviewedMemoryRecord:
+    candidate: TopicDerivedMemoryCandidate
+    status: str
+    review_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.status not in MEMORY_REVIEW_STATUSES:
+            raise ValueError(f"memory review status is not supported: {self.status}")
+        if self.review_reason is not None:
+            require_recall_safe_text("review_reason", self.review_reason)
+
+    def to_dict(self) -> JSONObject:
+        payload = self.candidate.to_dict()
+        payload["status"] = self.status
+        if self.review_reason is not None:
+            payload["review_reason"] = self.review_reason
+        return payload
+
+
+class MemoryReviewStore:
+    """Local deterministic review store for topic-derived memory candidates."""
+
+    def __init__(self) -> None:
+        self._records: dict[str, ReviewedMemoryRecord] = {}
+
+    def add_candidate(
+        self,
+        candidate: TopicDerivedMemoryCandidate,
+    ) -> ReviewedMemoryRecord:
+        candidate_id = _candidate_id_value(candidate)
+        existing = self._records.get(candidate_id)
+        if existing is not None:
+            return existing
+        record = ReviewedMemoryRecord(candidate=candidate, status="candidate")
+        self._records[candidate_id] = record
+        return record
+
+    def list_memories(
+        self, *, status: str | None = None
+    ) -> tuple[ReviewedMemoryRecord, ...]:
+        if status is not None and status not in MEMORY_REVIEW_STATUSES:
+            raise ValueError(f"memory review status is not supported: {status}")
+        records = self._records.values()
+        if status is not None:
+            records = [record for record in records if record.status == status]
+        return tuple(
+            sorted(
+                records,
+                key=lambda record: _candidate_id_value(record.candidate),
+            )
+        )
+
+    def load_memory(self, candidate_id: str) -> ReviewedMemoryRecord | None:
+        _require_safe_scope(candidate_id)
+        return self._records.get(candidate_id)
+
+    def accept_candidate(
+        self,
+        candidate_id: str,
+        *,
+        reason: str | None = None,
+    ) -> ReviewedMemoryRecord:
+        return self._transition(candidate_id, "accepted", reason=reason)
+
+    def reject_candidate(
+        self,
+        candidate_id: str,
+        *,
+        reason: str | None = None,
+    ) -> ReviewedMemoryRecord:
+        return self._transition(candidate_id, "rejected", reason=reason)
+
+    def archive_candidate(
+        self,
+        candidate_id: str,
+        *,
+        reason: str | None = None,
+    ) -> ReviewedMemoryRecord:
+        return self._transition(candidate_id, "archived", reason=reason)
+
+    def _transition(
+        self,
+        candidate_id: str,
+        status: str,
+        *,
+        reason: str | None,
+    ) -> ReviewedMemoryRecord:
+        _require_safe_scope(candidate_id)
+        record = self._records.get(candidate_id)
+        if record is None:
+            raise KeyError(f"memory candidate not found: {candidate_id}")
+        if record.status == status:
+            return record
+        if record.status != "candidate":
+            raise ValueError(
+                f"memory candidate {candidate_id} is already {record.status}"
+            )
+        updated = ReviewedMemoryRecord(
+            candidate=record.candidate,
+            status=status,
+            review_reason=reason,
+        )
+        self._records[candidate_id] = updated
+        return updated
+
+    def accepted_memories(self) -> tuple[ReviewedMemoryRecord, ...]:
+        return self.list_memories(status="accepted")
+
+
+def accepted_memory_context_pack(
+    records: tuple[ReviewedMemoryRecord, ...],
+) -> ContextPack:
+    items = tuple(
+        _accepted_memory_item(record)
+        for record in records
+        if record.status == "accepted"
+    )
+    if not items:
+        return ContextPack(sections=())
+    return ContextPack(
+        sections=(
+            ContextPackSection(
+                title="Accepted memory references",
+                items=items,
+            ),
+        )
+    )
+
+
+def accepted_memory_context_messages(
+    records: tuple[ReviewedMemoryRecord, ...],
+) -> list[dict[str, object]]:
+    return ContextPackRenderer().render_messages(accepted_memory_context_pack(records))
 
 
 def propose_memory_candidate_from_topic(
@@ -228,6 +372,43 @@ def _candidate_id(candidate: TopicDerivedMemoryCandidate) -> str:
     return (
         f"memory-candidate-{hashlib.sha256(encoded.encode('utf-8')).hexdigest()[:16]}"
     )
+
+
+def _candidate_id_value(candidate: TopicDerivedMemoryCandidate) -> str:
+    if candidate.candidate_id is None:
+        raise ValueError("memory candidate is missing candidate_id")
+    return candidate.candidate_id
+
+
+def _accepted_memory_item(record: ReviewedMemoryRecord) -> ContextPackItem:
+    candidate = record.candidate
+    topic_id = _provenance_topic_id(candidate.provenance)
+    return ContextPackItem(
+        source_kind="memory",
+        source_id=f"accepted-memory:{_candidate_id_value(candidate)}",
+        label=candidate.title,
+        body=candidate.summary,
+        evidence=(
+            EvidenceRef(
+                kind="topic",
+                source_id=topic_id,
+                label="accepted memory provenance",
+            ),
+        ),
+        metadata={
+            "reference_mode": MEMORY_REFERENCE_MODE,
+            "memory_status": "accepted",
+            "memory_kind": candidate.kind,
+            "provenance": candidate.provenance,
+        },
+    )
+
+
+def _provenance_topic_id(provenance: JSONObject) -> str:
+    topic_id = provenance.get("topic_id")
+    if not isinstance(topic_id, str) or not topic_id:
+        raise ValueError("memory candidate provenance requires topic_id")
+    return topic_id
 
 
 def _require_provenance(provenance: JSONObject) -> None:
