@@ -75,3 +75,50 @@ This ledger tracks G127-G135 for the External Executor Adapter MVP phase.
   - Kept Docker/Kubernetes/Argo optional, disabled by default, and testable through fake/dry-run/capability paths.
 - Remaining risks:
   - G129 still needs the concrete model/store/registry implementation and tests.
+
+## G129_EXECUTOR_MODEL_STORE_AND_REGISTRY
+
+### Before
+
+- Goal id: G129_EXECUTOR_MODEL_STORE_AND_REGISTRY
+- Intended files:
+  - `docs/external_executor/GOAL_PROGRESS.md`
+  - `docs/adr/0045-external-executor-adapter-boundaries.md`
+  - `src/coding_agent/external_executor.py`
+  - `tests/coding_agent/test_external_executor.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_external_executor.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_command_bridge.py -q`
+  - `uv run ruff format --check --preview docs/external_executor/GOAL_PROGRESS.md docs/adr/0045-external-executor-adapter-boundaries.md src/coding_agent/external_executor.py tests/coding_agent/test_external_executor.py`
+  - `uv run ruff check src/coding_agent/external_executor.py tests/coding_agent/test_external_executor.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Generic external executor model, protocol, registry, and durable executor run store exist in the Coding Agent product layer.
+  - Store schema initialization is idempotent.
+  - Store APIs cover create, load, status update, sanitized result/evidence attachment, and list by task/node.
+  - Registry tests cover known and unknown executor kinds.
+  - Existing Bee launch and Bee command bridge behavior still passes.
+  - No executor performs real local, Docker, Kubernetes, or Argo execution in this goal.
+
+### After
+
+- Changed files:
+  - `docs/external_executor/GOAL_PROGRESS.md`
+  - `docs/adr/0045-external-executor-adapter-boundaries.md`
+  - `src/coding_agent/external_executor.py`
+  - `tests/coding_agent/test_external_executor.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_external_executor.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_command_bridge.py -q`
+  - `uv run ruff format --check --preview docs/external_executor/GOAL_PROGRESS.md docs/adr/0045-external-executor-adapter-boundaries.md src/coding_agent/external_executor.py tests/coding_agent/test_external_executor.py`
+  - `uv run ruff check src/coding_agent/external_executor.py tests/coding_agent/test_external_executor.py`
+  - `git diff --check -- .`
+- Results:
+  - Added the generic `ExternalExecutor` protocol, executor capability/plan/result/evidence models, executor registry, and `PGExecutorRunStore`.
+  - Store schema is idempotent and limited to `executor_runs`; it does not migrate or couple to Bee task tables.
+  - Store tests cover create, load, duplicate create rejection, status update, sanitized result/evidence attachment, list filtering by task/node/kind/status, missing-row failure, and sensitive metadata/reference rejection.
+  - Bee launch and Bee command bridge tests still pass.
+- Remaining risks:
+  - G130 still needs to normalize the existing local safe execution path behind this interface and prove denied or approval-required plans cannot execute.

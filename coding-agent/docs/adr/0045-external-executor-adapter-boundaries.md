@@ -164,9 +164,9 @@ integration and must not create or apply Argo CD Application manifests.
 
 ## Acceptance Criteria
 
-- [ ] `test_executor_registry_resolves_known_and_rejects_unknown_kind`
-- [ ] `test_executor_run_store_schema_is_idempotent`
-- [ ] `test_executor_run_store_create_update_attach_and_list`
+- [x] `test_executor_registry_resolves_known_and_rejects_unknown_kind`
+- [x] `test_executor_run_store_schema_is_idempotent`
+- [x] `test_executor_run_store_create_update_attach_and_list`
 - [ ] `test_local_executor_runs_approved_plan_and_records_sanitized_result`
 - [ ] `test_local_executor_rejects_denied_or_approval_required_plan`
 - [ ] `test_docker_executor_capability_detection_and_dry_run`
@@ -177,7 +177,7 @@ integration and must not create or apply Argo CD Application manifests.
 - [ ] `test_console_executor_runs_render_safe_summary`
 - [ ] `test_executor_metrics_omit_high_cardinality_labels`
 - [ ] `test_external_executor_e2e_smoke`
-- [ ] `uv run pytest tests/coding_agent/test_external_executor.py -v`
+- [x] `uv run pytest tests/coding_agent/test_external_executor.py -v`
 - [ ] `uv run pytest tests/ui/test_developer_console.py -v`
 - [ ] `uv run pytest tests/coding_agent/test_observability.py -v`
 - [ ] `git diff --check -- .`
