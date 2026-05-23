@@ -32,78 +32,81 @@ _MEMORY_CANDIDATES_FILE: Final[str] = "memory_candidates.yaml"
 _SAFE_TEMPLATE_ID_RE: Final[re.Pattern[str]] = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
 )
-_FORBIDDEN_ARTIFACT_KEY_PARTS: Final[frozenset[str]] = frozenset(
-    {
-        "api_key",
-        "apikey",
-        "args",
-        "argv",
-        "cmd",
-        "command",
-        "commands",
-        "command_output",
-        "credential",
-        "credentials",
-        "content",
-        "env",
-        "environment",
-        "exec",
-        "executor",
-        "bearer",
-        "key",
-        "message",
-        "password",
-        "prompt",
-        "result",
-        "script",
-        "secret",
-        "shell",
-        "stderr",
-        "stdout",
-        "text",
-        "token",
-    }
-)
-_COMPACT_FORBIDDEN_ARTIFACT_KEY_PARTS: Final[frozenset[str]] = frozenset(
-    {
-        "api_key",
-        "apikey",
-        "args",
-        "argv",
-        "cmd",
-        "command",
-        "commands",
-        "command_output",
-        "credential",
-        "credentials",
-        "env",
-        "environment",
-        "exec",
-        "executor",
-        "bearer",
-        "key",
-        "password",
-        "prompt",
-        "script",
-        "secret",
-        "shell",
-        "stderr",
-        "stdout",
-        "token",
-    }
-)
+_FORBIDDEN_ARTIFACT_KEY_PARTS: Final[frozenset[str]] = frozenset({
+    "api_key",
+    "apikey",
+    "args",
+    "argv",
+    "cmd",
+    "command",
+    "commands",
+    "command_output",
+    "credential",
+    "credentials",
+    "content",
+    "env",
+    "environment",
+    "exec",
+    "executor",
+    "bearer",
+    "key",
+    "message",
+    "password",
+    "prompt",
+    "result",
+    "script",
+    "secret",
+    "shell",
+    "stderr",
+    "stdout",
+    "text",
+    "token",
+})
+_COMPACT_FORBIDDEN_ARTIFACT_KEY_PARTS: Final[frozenset[str]] = frozenset({
+    "api_key",
+    "apikey",
+    "args",
+    "argv",
+    "cmd",
+    "command",
+    "commands",
+    "command_output",
+    "credential",
+    "credentials",
+    "env",
+    "environment",
+    "exec",
+    "executor",
+    "bearer",
+    "key",
+    "password",
+    "prompt",
+    "script",
+    "secret",
+    "shell",
+    "stderr",
+    "stdout",
+    "token",
+})
 _FORBIDDEN_REPORT_VALUE_MARKERS: Final[tuple[str, ...]] = (
+    "command:",
+    "command=",
     "command_output=",
     "content=",
     "env=",
     "message=",
     "prompt=",
+    "raw log",
+    "raw_log",
     "result=",
     "secret=",
+    "stderr:",
     "stderr=",
+    "stdout:",
     "stdout=",
     "text=",
     "token=",
+    "traceback",
 )
 _SECRET_VALUE_MARKERS: Final[tuple[str, ...]] = (
     "-----begin ",
@@ -119,17 +122,30 @@ _SECRET_VALUE_MARKERS: Final[tuple[str, ...]] = (
 )
 _MAX_ARTIFACT_TEXT_CHARS: Final[int] = 256
 _COMMAND_INTENT_STATUSES: Final[frozenset[str]] = frozenset({"declared", "disabled"})
-_ALLOWED_COMMAND_INTENT_KEYS: Final[frozenset[str]] = frozenset(
-    {
-        "name",
-        "profile",
-        "policy",
-        "category",
-        "validation_label",
-        "status",
-        "metadata",
-    }
-)
+_ALLOWED_COMMAND_INTENT_KEYS: Final[frozenset[str]] = frozenset({
+    "name",
+    "profile",
+    "policy",
+    "category",
+    "validation_label",
+    "status",
+    "metadata",
+})
+_ALLOWED_EXECUTOR_ARTIFACT_KEYS: Final[frozenset[str]] = frozenset({
+    "executor_run_id",
+    "executor_kind",
+    "executor_runs",
+    "executor_status",
+    "executor_summary",
+    "executor_evidence_path",
+})
+_EXECUTOR_KINDS: Final[frozenset[str]] = frozenset({
+    "local",
+    "docker",
+    "kubernetes_job",
+    "argo_workflow",
+    "fixture",
+})
 
 
 @dataclass(frozen=True)
@@ -151,6 +167,21 @@ class BeeWorkspaceRunNode:
     action_ids: tuple[str, ...] = ()
     validation_ids: tuple[str, ...] = ()
     attempts: int = 0
+    executor_run_id: str | None = None
+    executor_kind: str | None = None
+
+
+@dataclass(frozen=True)
+class BeeWorkspaceExecutorRunArtifact:
+    executor_run_id: str
+    executor_kind: str
+    status: str
+    executor_summary: str
+    task_id: str | None = None
+    node_id: str | None = None
+    launch_id: str | None = None
+    topic_id: str | None = None
+    executor_evidence_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -166,6 +197,7 @@ class BeeWorkspaceRunArtifacts:
     action_ids: tuple[str, ...] = ()
     validation_ids: tuple[str, ...] = ()
     evidence_labels: tuple[str, ...] = ()
+    executor_runs: tuple[BeeWorkspaceExecutorRunArtifact, ...] = ()
     memory_candidates: tuple[JSONObject, ...] = ()
 
 
@@ -188,6 +220,7 @@ class BeeWorkspaceRunArtifactRecord:
     run_count: int
     action_count: int
     validation_count: int
+    executor_count: int
     has_report: bool
     has_memory_candidates: bool
 
@@ -381,6 +414,7 @@ def write_bee_workspace_run_artifacts(
         encoding="utf-8",
     )
     report_path.write_text(_report_markdown(artifacts), encoding="utf-8")
+    _write_executor_evidence_files(evidence_dir, artifacts)
     if memory_candidates_path is not None:
         memory_candidates_path.write_text(
             yaml.safe_dump(
@@ -481,6 +515,7 @@ def _task_json_payload(
             "action_ids": list(node.action_ids),
             "validation_ids": list(node.validation_ids),
             "attempts": node.attempts,
+            **_node_executor_payload(node),
         }
         for node in artifacts.nodes
     ]
@@ -496,6 +531,10 @@ def _task_json_payload(
         "run_ids": list(artifacts.run_ids),
         "action_ids": list(artifacts.action_ids),
         "validation_ids": list(artifacts.validation_ids),
+        "executor_runs": [
+            _executor_run_payload(executor_run)
+            for executor_run in artifacts.executor_runs
+        ],
         "report_path": _REPORT_FILE,
     }
     if has_memory:
@@ -538,6 +577,7 @@ def _load_run_artifact_record(
                 task_json_path,
             )
         ),
+        executor_count=len(_task_json_executor_runs(raw, task_json_path)),
         has_report=(safe_run_dir / _REPORT_FILE).is_file(),
         has_memory_candidates=(safe_run_dir / _MEMORY_CANDIDATES_FILE).is_file(),
     )
@@ -570,7 +610,70 @@ def _count_task_json_nodes(raw: dict[object, object], path: Path) -> int:
             _required_task_json_id(item, "run_id", path)
         _task_json_id_sequence(item, "action_ids", path)
         _task_json_id_sequence(item, "validation_ids", path)
+        if item.get("executor_run_id") is not None:
+            _required_task_json_id(item, "executor_run_id", path)
+        if item.get("executor_kind") is not None:
+            _required_executor_kind(item, "executor_kind", path)
     return len(value)
+
+
+def _node_executor_payload(node: BeeWorkspaceRunNode) -> JSONObject:
+    payload: JSONObject = {}
+    if node.executor_run_id is not None:
+        payload["executor_run_id"] = node.executor_run_id
+    if node.executor_kind is not None:
+        payload["executor_kind"] = node.executor_kind
+    return payload
+
+
+def _executor_run_payload(
+    executor_run: BeeWorkspaceExecutorRunArtifact,
+) -> JSONObject:
+    payload: JSONObject = {
+        "executor_run_id": executor_run.executor_run_id,
+        "executor_kind": executor_run.executor_kind,
+        "executor_status": executor_run.status,
+        "executor_summary": executor_run.executor_summary,
+    }
+    if executor_run.task_id is not None:
+        payload["task_id"] = executor_run.task_id
+    if executor_run.node_id is not None:
+        payload["node_id"] = executor_run.node_id
+    if executor_run.launch_id is not None:
+        payload["launch_id"] = executor_run.launch_id
+    if executor_run.topic_id is not None:
+        payload["topic_id"] = executor_run.topic_id
+    if executor_run.executor_evidence_path is not None:
+        payload["executor_evidence_path"] = executor_run.executor_evidence_path
+    return payload
+
+
+def _task_json_executor_runs(
+    raw: dict[object, object],
+    path: Path,
+) -> tuple[dict[object, object], ...]:
+    value = raw.get("executor_runs", ())
+    if not isinstance(value, list):
+        raise TypeError(f"Bee run task.json executor_runs must be a list: {path}")
+    runs = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise TypeError(
+                f"Bee run task.json executor_runs entries must be objects: {path}"
+            )
+        _required_task_json_id(item, "executor_run_id", path)
+        _required_executor_kind(item, "executor_kind", path)
+        _required_task_json_id(item, "executor_status", path)
+        summary = item.get("executor_summary")
+        if not isinstance(summary, str):
+            raise TypeError(
+                f"Bee run task.json executor_summary must be a string: {path}"
+            )
+        _require_safe_report_value("executor_summary", summary)
+        if item.get("executor_evidence_path") is not None:
+            _required_evidence_path(item, "executor_evidence_path", path)
+        runs.append(item)
+    return tuple(runs)
 
 
 def _task_json_id_sequence(
@@ -598,8 +701,29 @@ def _required_task_json_id(raw: dict[object, object], key: str, path: Path) -> s
     return value
 
 
+def _required_executor_kind(raw: dict[object, object], key: str, path: Path) -> str:
+    value = raw.get(key)
+    if not isinstance(value, str):
+        raise TypeError(f"Bee run task.json {key} must be a string: {path}")
+    if value not in _EXECUTOR_KINDS:
+        raise ValueError(f"Bee run task.json {key} is not supported: {value}")
+    return value
+
+
+def _required_evidence_path(raw: dict[object, object], key: str, path: Path) -> str:
+    value = raw.get(key)
+    if not isinstance(value, str):
+        raise TypeError(f"Bee run task.json {key} must be a string: {path}")
+    if value.startswith("/") or ".." in Path(value).parts:
+        raise ValueError(f"Bee run task.json {key} must stay under evidence/: {path}")
+    if not value.startswith(f"{_EVIDENCE_DIR}/"):
+        raise ValueError(f"Bee run task.json {key} must stay under evidence/: {path}")
+    _require_safe_report_value(key, value)
+    return value
+
+
 def _report_markdown(artifacts: BeeWorkspaceRunArtifacts) -> str:
-    return (
+    body = (
         f"# {artifacts.report_title}\n\n"
         f"- task_id: {artifacts.task_id}\n"
         f"- template_id: {artifacts.template_id}\n"
@@ -607,6 +731,39 @@ def _report_markdown(artifacts: BeeWorkspaceRunArtifacts) -> str:
         f"- status: {artifacts.status}\n"
         f"- summary: {artifacts.report_summary}\n"
     )
+    if not artifacts.executor_runs:
+        return body
+    rows = [
+        f"- {item.executor_run_id}: {item.executor_kind} {item.status} - {item.executor_summary}\n"
+        for item in artifacts.executor_runs
+    ]
+    return body + "\n## Executor Results\n\n" + "".join(rows)
+
+
+def _write_executor_evidence_files(
+    evidence_dir: Path,
+    artifacts: BeeWorkspaceRunArtifacts,
+) -> None:
+    for executor_run in artifacts.executor_runs:
+        if executor_run.executor_evidence_path is None:
+            continue
+        evidence_path = evidence_dir.parent / executor_run.executor_evidence_path
+        evidence_path = _writable_run_file(evidence_path, evidence_dir.parent)
+        if not evidence_path.resolve(strict=False).is_relative_to(
+            evidence_dir.resolve(strict=True)
+        ):
+            raise ValueError("Executor evidence path must stay under evidence/")
+        evidence_path.write_text(
+            "\n".join([
+                f"# Executor Evidence {executor_run.executor_run_id}",
+                "",
+                f"- executor_kind: {executor_run.executor_kind}",
+                f"- executor_status: {executor_run.status}",
+                f"- executor_summary: {executor_run.executor_summary}",
+                "",
+            ]),
+            encoding="utf-8",
+        )
 
 
 def _validate_run_artifacts(artifacts: BeeWorkspaceRunArtifacts) -> None:
@@ -626,6 +783,8 @@ def _validate_run_artifacts(artifacts: BeeWorkspaceRunArtifacts) -> None:
         _require_safe_report_value("evidence_label", value)
     for node in artifacts.nodes:
         _validate_run_node(node)
+    for executor_run in artifacts.executor_runs:
+        _validate_executor_run_artifact(executor_run)
     for candidate in artifacts.memory_candidates:
         _validate_artifact_json("memory_candidate", candidate)
 
@@ -639,8 +798,38 @@ def _validate_run_node(node: BeeWorkspaceRunNode) -> None:
         _require_safe_template_id(value)
     for value in node.validation_ids:
         _require_safe_template_id(value)
+    if node.executor_run_id is not None:
+        _require_safe_template_id(node.executor_run_id)
+    if node.executor_kind is not None and node.executor_kind not in _EXECUTOR_KINDS:
+        raise ValueError(f"Bee node executor_kind is not supported: {node.node_id}")
     if node.attempts < 0:
         raise ValueError(f"Bee node attempts must be non-negative: {node.node_id}")
+
+
+def _validate_executor_run_artifact(
+    executor_run: BeeWorkspaceExecutorRunArtifact,
+) -> None:
+    _require_safe_template_id(executor_run.executor_run_id)
+    if executor_run.executor_kind not in _EXECUTOR_KINDS:
+        raise ValueError(
+            f"Bee executor kind is not supported: {executor_run.executor_kind}"
+        )
+    _require_safe_template_id(executor_run.status)
+    _require_safe_report_value("executor_summary", executor_run.executor_summary)
+    for value in (
+        executor_run.task_id,
+        executor_run.node_id,
+        executor_run.launch_id,
+        executor_run.topic_id,
+    ):
+        if value is not None:
+            _require_safe_template_id(value)
+    if executor_run.executor_evidence_path is not None:
+        _required_evidence_path(
+            {"executor_evidence_path": executor_run.executor_evidence_path},
+            "executor_evidence_path",
+            Path(_TASK_JSON_FILE),
+        )
 
 
 def _validate_artifact_json(path: str, value: object) -> None:
@@ -664,6 +853,8 @@ def _validate_artifact_json(path: str, value: object) -> None:
 
 
 def _reject_forbidden_artifact_key(path: str, key: str) -> None:
+    if key in _ALLOWED_EXECUTOR_ARTIFACT_KEYS:
+        return
     normalized = _normalize_artifact_key(key)
     compact = re.sub(r"[^a-z0-9]", "", key.lower())
     for forbidden in _FORBIDDEN_ARTIFACT_KEY_PARTS:

@@ -307,3 +307,61 @@ This ledger tracks G127-G135 for the External Executor Adapter MVP phase.
   - Argo `submit` remains deferred and no normal test requires Argo Workflows, Argo CLI, Kubernetes, or a cluster.
 - Remaining risks:
   - G134 still needs console, task artifact, report/evidence, metrics, and trace integration for executor runs.
+
+## G134_EXECUTOR_CONSOLE_OBSERVABILITY_AND_ARTIFACTS
+
+### Before
+
+- Goal id: G134_EXECUTOR_CONSOLE_OBSERVABILITY_AND_ARTIFACTS
+- Intended files:
+  - `docs/external_executor/GOAL_PROGRESS.md`
+  - `docs/adr/0045-external-executor-adapter-boundaries.md`
+  - `src/coding_agent/bee_workspace.py`
+  - `src/coding_agent/observability.py`
+  - `src/coding_agent/ui/developer_console.py`
+  - `src/coding_agent/ui/http_server.py`
+  - `tests/coding_agent/test_bee_workspace.py`
+  - `tests/coding_agent/test_observability.py`
+  - `tests/ui/test_developer_console.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -v`
+  - `uv run pytest tests/coding_agent/test_observability.py -v`
+  - `uv run pytest tests/ui/test_developer_console.py -v`
+  - `uv run pytest tests/coding_agent/test_external_executor.py -v`
+  - `uv run ruff format --check --preview docs/external_executor/GOAL_PROGRESS.md docs/adr/0045-external-executor-adapter-boundaries.md src/coding_agent/bee_workspace.py src/coding_agent/observability.py src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/coding_agent/test_bee_workspace.py tests/coding_agent/test_observability.py tests/ui/test_developer_console.py`
+  - `uv run ruff check src/coding_agent/bee_workspace.py src/coding_agent/observability.py src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/coding_agent/test_bee_workspace.py tests/coding_agent/test_observability.py tests/ui/test_developer_console.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - `task.json`, `report.md`, and `evidence/` can include sanitized executor run references/results.
+  - Console Bee page renders executor kind/status/capability/sanitized summary linked to task/node/launch/topic.
+  - Prometheus exposes executor metrics using only `executor_kind` and `status` labels.
+  - No executor run IDs, task IDs, node IDs, pod/job/workflow names, raw logs, env dumps, or command text leak into metrics or unsafe artifact fields.
+
+### After
+
+- Changed files:
+  - `docs/external_executor/GOAL_PROGRESS.md`
+  - `docs/adr/0045-external-executor-adapter-boundaries.md`
+  - `src/coding_agent/bee_workspace.py`
+  - `src/coding_agent/observability.py`
+  - `src/coding_agent/ui/developer_console.py`
+  - `src/coding_agent/ui/http_server.py`
+  - `tests/coding_agent/test_bee_workspace.py`
+  - `tests/coding_agent/test_observability.py`
+  - `tests/ui/test_developer_console.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -v`
+  - `uv run pytest tests/coding_agent/test_observability.py -v`
+  - `uv run pytest tests/ui/test_developer_console.py -v`
+  - `uv run pytest tests/coding_agent/test_external_executor.py -v`
+  - `uv run ruff format --check --preview docs/external_executor/GOAL_PROGRESS.md docs/adr/0045-external-executor-adapter-boundaries.md src/coding_agent/bee_workspace.py src/coding_agent/observability.py src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/coding_agent/test_bee_workspace.py tests/coding_agent/test_observability.py tests/ui/test_developer_console.py`
+  - `uv run ruff check src/coding_agent/bee_workspace.py src/coding_agent/observability.py src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/coding_agent/test_bee_workspace.py tests/coding_agent/test_observability.py tests/ui/test_developer_console.py`
+  - `git diff --check -- .`
+- Results:
+  - Added sanitized executor run fields to Bee workspace `task.json`, report, and evidence artifacts.
+  - Added executor run summaries to the Developer Console Bee page from durable executor records and run metadata.
+  - Added executor run and executor capability Prometheus metrics using low-cardinality `executor_kind` and `status` labels only.
+  - Tightened Bee artifact summary redaction so executor summaries reject colon-form raw output markers such as `stdout:`, `stderr:`, `command:`, `raw_log`, and tracebacks.
+  - Added no-leak tests ensuring executor/task/node/launch/topic IDs, pod/job/workflow names, raw logs, command output, env, and secrets do not appear in metrics or unsafe rendered output.
+- Remaining risks:
+  - G135 still needs final end-to-end external executor smoke tests and documentation.

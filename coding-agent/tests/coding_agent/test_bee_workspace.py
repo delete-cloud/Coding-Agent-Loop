@@ -7,6 +7,7 @@ import pytest
 
 from agentkit.observability import SpanRecord
 from coding_agent.bee_workspace import (
+    BeeWorkspaceExecutorRunArtifact,
     BeeWorkspaceRunArtifacts,
     BeeWorkspaceRunNode,
     build_bee_manifest_from_workspace_template,
@@ -34,26 +35,24 @@ def test_bee_workspace_discovers_template_metadata(tmp_path: Path) -> None:
     feature_dir = template_dir / "features"
     feature_dir.mkdir(parents=True)
     (template_dir / "metadata.yaml").write_text(
-        "\n".join(
-            [
-                "version: 1",
-                "template_id: template-alpha",
-                "kind: maintenance",
-                "profile: local",
-                "title: Local template alpha",
-                "summary: Safe local template",
-                "topic:",
-                "  session_id: session-alpha",
-                "context_profile: default",
-                "validation_profile: smoke",
-                "workspace_policy: local",
-                "nodes:",
-                "  - node_id: node-plan",
-                "    kind: analysis",
-                "    profile: default",
-                "    title: Plan local task",
-            ]
-        ),
+        "\n".join([
+            "version: 1",
+            "template_id: template-alpha",
+            "kind: maintenance",
+            "profile: local",
+            "title: Local template alpha",
+            "summary: Safe local template",
+            "topic:",
+            "  session_id: session-alpha",
+            "context_profile: default",
+            "validation_profile: smoke",
+            "workspace_policy: local",
+            "nodes:",
+            "  - node_id: node-plan",
+            "    kind: analysis",
+            "    profile: default",
+            "    title: Plan local task",
+        ]),
         encoding="utf-8",
     )
     (template_dir / "SKILL.md").write_text("# Template Skill\n", encoding="utf-8")
@@ -61,18 +60,16 @@ def test_bee_workspace_discovers_template_metadata(tmp_path: Path) -> None:
         "Feature: safe local template\n", encoding="utf-8"
     )
     (template_dir / "commands.yaml").write_text(
-        "\n".join(
-            [
-                "commands:",
-                "  - name: smoke",
-                "    profile: validation",
-                "    policy: existing_command_policy",
-                "    category: validation",
-                "    validation_label: pytest_smoke",
-                "    metadata:",
-                "      owner: local",
-            ]
-        ),
+        "\n".join([
+            "commands:",
+            "  - name: smoke",
+            "    profile: validation",
+            "    policy: existing_command_policy",
+            "    category: validation",
+            "    validation_label: pytest_smoke",
+            "    metadata:",
+            "      owner: local",
+        ]),
         encoding="utf-8",
     )
 
@@ -94,18 +91,16 @@ def test_bee_workspace_commands_yaml_is_non_executing_intent(
     template_dir = tmp_path / ".bee" / "templates" / "template-alpha"
     _write_safe_template(template_dir, template_id="template-alpha")
     (template_dir / "commands.yaml").write_text(
-        "\n".join(
-            [
-                "commands:",
-                "  - name: smoke",
-                "    profile: validation",
-                "    policy: existing_command_policy",
-                "    category: validation",
-                "    validation_label: pytest_smoke",
-                "    metadata:",
-                "      owner: local",
-            ]
-        ),
+        "\n".join([
+            "commands:",
+            "  - name: smoke",
+            "    profile: validation",
+            "    policy: existing_command_policy",
+            "    category: validation",
+            "    validation_label: pytest_smoke",
+            "    metadata:",
+            "      owner: local",
+        ]),
         encoding="utf-8",
     )
     template = load_bee_workspace_template(tmp_path, "template-alpha")
@@ -127,17 +122,15 @@ def test_bee_workspace_commands_yaml_allows_safe_context_metadata(
     template_dir = tmp_path / ".bee" / "templates" / "template-alpha"
     _write_safe_template(template_dir, template_id="template-alpha")
     (template_dir / "commands.yaml").write_text(
-        "\n".join(
-            [
-                "commands:",
-                "  - name: smoke",
-                "    profile: validation",
-                "    policy: existing_command_policy",
-                "    category: validation",
-                "    metadata:",
-                "      contextProfile: default",
-            ]
-        ),
+        "\n".join([
+            "commands:",
+            "  - name: smoke",
+            "    profile: validation",
+            "    policy: existing_command_policy",
+            "    category: validation",
+            "    metadata:",
+            "      contextProfile: default",
+        ]),
         encoding="utf-8",
     )
     template = load_bee_workspace_template(tmp_path, "template-alpha")
@@ -155,16 +148,14 @@ def test_bee_workspace_commands_yaml_rejects_executable_fields(
     template_dir = tmp_path / ".bee" / "templates" / "template-alpha"
     _write_safe_template(template_dir, template_id="template-alpha")
     (template_dir / "commands.yaml").write_text(
-        "\n".join(
-            [
-                "commands:",
-                "  - name: unsafe",
-                "    profile: validation",
-                "    policy: existing_command_policy",
-                "    category: validation",
-                f"    {field}: pytest",
-            ]
-        ),
+        "\n".join([
+            "commands:",
+            "  - name: unsafe",
+            "    profile: validation",
+            "    policy: existing_command_policy",
+            "    category: validation",
+            f"    {field}: pytest",
+        ]),
         encoding="utf-8",
     )
     template = load_bee_workspace_template(tmp_path, "template-alpha")
@@ -207,17 +198,15 @@ def test_bee_workspace_commands_yaml_rejects_nested_sensitive_metadata_keys(
     _write_safe_template(template_dir, template_id="template-alpha")
     parent, child = metadata_key.split(".")
     (template_dir / "commands.yaml").write_text(
-        "\n".join(
-            [
-                "commands:",
-                "  - name: unsafe",
-                "    profile: validation",
-                "    policy: existing_command_policy",
-                "    category: validation",
-                f"    {parent}:",
-                f"      {child}: local",
-            ]
-        ),
+        "\n".join([
+            "commands:",
+            "  - name: unsafe",
+            "    profile: validation",
+            "    policy: existing_command_policy",
+            "    category: validation",
+            f"    {parent}:",
+            f"      {child}: local",
+        ]),
         encoding="utf-8",
     )
     template = load_bee_workspace_template(tmp_path, "template-alpha")
@@ -231,24 +220,22 @@ def test_bee_workspace_loads_json_metadata(tmp_path: Path) -> None:
     feature_dir = template_dir / "features"
     feature_dir.mkdir(parents=True)
     (template_dir / "metadata.json").write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "template_id": "json-template",
-                "kind": "maintenance",
-                "profile": "local",
-                "title": "JSON template",
-                "topic": {"session_id": "session-alpha"},
-                "nodes": [
-                    {
-                        "node_id": "node-plan",
-                        "kind": "analysis",
-                        "profile": "default",
-                        "title": "Plan JSON task",
-                    }
-                ],
-            }
-        ),
+        json.dumps({
+            "version": 1,
+            "template_id": "json-template",
+            "kind": "maintenance",
+            "profile": "local",
+            "title": "JSON template",
+            "topic": {"session_id": "session-alpha"},
+            "nodes": [
+                {
+                    "node_id": "node-plan",
+                    "kind": "analysis",
+                    "profile": "default",
+                    "title": "Plan JSON task",
+                }
+            ],
+        }),
         encoding="utf-8",
     )
     (template_dir / "SKILL.md").write_text("# JSON Skill\n", encoding="utf-8")
@@ -294,6 +281,8 @@ def test_bee_workspace_writes_safe_task_json(tmp_path: Path) -> None:
                     action_ids=("action-alpha",),
                     validation_ids=("validation-alpha",),
                     attempts=1,
+                    executor_run_id="executor-run-alpha",
+                    executor_kind="local",
                 ),
             ),
             run_ids=("run-alpha",),
@@ -302,6 +291,19 @@ def test_bee_workspace_writes_safe_task_json(tmp_path: Path) -> None:
             report_title="Local Bee task completed",
             report_summary="Validation passed with sanitized evidence.",
             evidence_labels=("pytest-smoke",),
+            executor_runs=(
+                BeeWorkspaceExecutorRunArtifact(
+                    executor_run_id="executor-run-alpha",
+                    executor_kind="local",
+                    status="succeeded",
+                    executor_summary="Local executor succeeded",
+                    task_id="bee-task-alpha",
+                    node_id="node-plan",
+                    launch_id="launch-alpha",
+                    topic_id="topic-alpha",
+                    executor_evidence_path="evidence/executor-run-alpha.md",
+                ),
+            ),
             memory_candidates=(
                 {"candidate_id": "memory-alpha", "status": "pending_review"},
             ),
@@ -324,12 +326,27 @@ def test_bee_workspace_writes_safe_task_json(tmp_path: Path) -> None:
                 "action_ids": ["action-alpha"],
                 "validation_ids": ["validation-alpha"],
                 "attempts": 1,
+                "executor_run_id": "executor-run-alpha",
+                "executor_kind": "local",
             }
         ],
         "node_attempts": {"node-plan": 1},
         "run_ids": ["run-alpha"],
         "action_ids": ["action-alpha"],
         "validation_ids": ["validation-alpha"],
+        "executor_runs": [
+            {
+                "executor_run_id": "executor-run-alpha",
+                "executor_kind": "local",
+                "executor_status": "succeeded",
+                "executor_summary": "Local executor succeeded",
+                "task_id": "bee-task-alpha",
+                "node_id": "node-plan",
+                "launch_id": "launch-alpha",
+                "topic_id": "topic-alpha",
+                "executor_evidence_path": "evidence/executor-run-alpha.md",
+            }
+        ],
         "report_path": "report.md",
         "memory_candidates_path": "memory_candidates.yaml",
     }
@@ -340,8 +357,18 @@ def test_bee_workspace_writes_safe_task_json(tmp_path: Path) -> None:
         "- topic_id: topic-alpha\n"
         "- status: completed\n"
         "- summary: Validation passed with sanitized evidence.\n"
+        "\n## Executor Results\n\n"
+        "- executor-run-alpha: local succeeded - Local executor succeeded\n"
     )
     assert paths.evidence_dir.is_dir()
+    assert (paths.evidence_dir / "executor-run-alpha.md").read_text(
+        encoding="utf-8"
+    ) == (
+        "# Executor Evidence executor-run-alpha\n\n"
+        "- executor_kind: local\n"
+        "- executor_status: succeeded\n"
+        "- executor_summary: Local executor succeeded\n"
+    )
     assert paths.memory_candidates_path is not None
     assert "memory-alpha" in paths.memory_candidates_path.read_text(encoding="utf-8")
 
@@ -387,6 +414,7 @@ def test_bee_workspace_discovers_run_artifact_summaries(tmp_path: Path) -> None:
     assert record.run_count == 1
     assert record.action_count == 1
     assert record.validation_count == 1
+    assert record.executor_count == 0
     assert record.has_report is True
     assert record.has_memory_candidates is True
 
@@ -395,18 +423,16 @@ def test_bee_workspace_local_dogfood_smoke(tmp_path: Path) -> None:
     template_dir = tmp_path / ".bee" / "templates" / "template-alpha"
     _write_safe_template(template_dir, template_id="template-alpha")
     (template_dir / "commands.yaml").write_text(
-        "\n".join(
-            [
-                "commands:",
-                "  - name: smoke",
-                "    profile: validation",
-                "    policy: existing_command_policy",
-                "    category: validation",
-                "    validation_label: pytest_smoke",
-                "    metadata:",
-                "      owner: local",
-            ]
-        ),
+        "\n".join([
+            "commands:",
+            "  - name: smoke",
+            "    profile: validation",
+            "    policy: existing_command_policy",
+            "    category: validation",
+            "    validation_label: pytest_smoke",
+            "    metadata:",
+            "      owner: local",
+        ]),
         encoding="utf-8",
     )
 
@@ -465,6 +491,7 @@ def test_bee_workspace_local_dogfood_smoke(tmp_path: Path) -> None:
                     run_count=artifact_records[0].run_count,
                     action_count=artifact_records[0].action_count,
                     validation_count=artifact_records[0].validation_count,
+                    executor_count=artifact_records[0].executor_count,
                     has_report=artifact_records[0].has_report,
                     has_memory_candidates=artifact_records[0].has_memory_candidates,
                 ),
@@ -576,6 +603,48 @@ def test_bee_workspace_rejects_raw_memory_candidate_fields(
         )
 
 
+@pytest.mark.parametrize(
+    "executor_summary",
+    [
+        "stdout: raw execution output",
+        "stderr: raw execution output",
+        "raw_log captured output",
+        "command: pytest",
+        "Traceback most recent call last",
+    ],
+)
+def test_bee_workspace_rejects_raw_executor_summary(
+    tmp_path: Path,
+    executor_summary: str,
+) -> None:
+    with pytest.raises(ValueError, match="forbidden raw output marker"):
+        write_bee_workspace_run_artifacts(
+            tmp_path,
+            BeeWorkspaceRunArtifacts(
+                task_id="bee-task-alpha",
+                template_id="template-alpha",
+                topic_id="topic-alpha",
+                status="completed",
+                nodes=(
+                    BeeWorkspaceRunNode(
+                        node_id="node-plan",
+                        status="completed",
+                    ),
+                ),
+                report_title="Local Bee task completed",
+                report_summary="Validation passed with sanitized evidence.",
+                executor_runs=(
+                    BeeWorkspaceExecutorRunArtifact(
+                        executor_run_id="executor-run-alpha",
+                        executor_kind="local",
+                        status="failed",
+                        executor_summary=executor_summary,
+                    ),
+                ),
+            ),
+        )
+
+
 def test_bee_workspace_rejects_symlinked_run_artifact_file(
     tmp_path: Path,
 ) -> None:
@@ -638,20 +707,18 @@ def test_bee_workspace_rejects_sensitive_template_fields(
     feature_dir = template_dir / "features"
     feature_dir.mkdir(parents=True)
     (template_dir / "metadata.yaml").write_text(
-        "\n".join(
-            [
-                "version: 1",
-                f"template_id: unsafe-{metadata_key}",
-                "kind: maintenance",
-                "profile: local",
-                "title: Unsafe template",
-                "topic:",
-                "  session_id: session-alpha",
-                "nodes: []",
-                "metadata:",
-                f"  {metadata_key}: unsafe value",
-            ]
-        ),
+        "\n".join([
+            "version: 1",
+            f"template_id: unsafe-{metadata_key}",
+            "kind: maintenance",
+            "profile: local",
+            "title: Unsafe template",
+            "topic:",
+            "  session_id: session-alpha",
+            "nodes: []",
+            "metadata:",
+            f"  {metadata_key}: unsafe value",
+        ]),
         encoding="utf-8",
     )
     (template_dir / "SKILL.md").write_text("# Unsafe Skill\n", encoding="utf-8")
@@ -709,19 +776,17 @@ def _write_safe_template(template_dir: Path, *, template_id: str) -> None:
 
 
 def _safe_template_yaml(template_id: str) -> str:
-    return "\n".join(
-        [
-            "version: 1",
-            f"template_id: {template_id}",
-            "kind: maintenance",
-            "profile: local",
-            "title: Local template",
-            "topic:",
-            "  session_id: session-alpha",
-            "nodes:",
-            "  - node_id: node-plan",
-            "    kind: analysis",
-            "    profile: default",
-            "    title: Plan local task",
-        ]
-    )
+    return "\n".join([
+        "version: 1",
+        f"template_id: {template_id}",
+        "kind: maintenance",
+        "profile: local",
+        "title: Local template",
+        "topic:",
+        "  session_id: session-alpha",
+        "nodes:",
+        "  - node_id: node-plan",
+        "    kind: analysis",
+        "    profile: default",
+        "    title: Plan local task",
+    ])
