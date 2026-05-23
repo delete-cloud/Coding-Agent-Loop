@@ -389,3 +389,67 @@ phase.
   - G144 still needs end-to-end smoke documentation tying topic range search,
     memory candidates, review, recall context, console, and observability
     together.
+
+## G144_CROSS_TOPIC_MEMORY_E2E_SMOKE_AND_DOCS
+
+### Before
+
+- Goal id: G144_CROSS_TOPIC_MEMORY_E2E_SMOKE_AND_DOCS
+- Intended files:
+  - `docs/cross_topic_memory/GOAL_PROGRESS.md`
+  - `docs/cross_topic_memory/IMPLEMENTATION_REPORT.md`
+  - `docs/cross_topic_memory/USAGE.md`
+  - `docs/adr/0046-cross-topic-memory-and-topic-range-search.md`
+  - `tests/coding_agent/test_cross_topic_memory_smoke.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_cross_topic_memory_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_topic_range_index.py tests/coding_agent/test_topic_memory.py tests/coding_agent/test_memory_review.py tests/coding_agent/test_recall_context.py tests/coding_agent/test_recall_evaluation.py -v`
+  - `uv run pytest tests/coding_agent/test_topic_layer_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+  - `uv run pytest tests/ui/test_developer_console.py -v`
+  - `uv run pytest tests/coding_agent/test_observability.py -v`
+  - `uv run pytest tests/coding_agent/test_observability_platform_smoke.py -v`
+  - `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+  - `uv run pytest tests/integration/test_durable_runtime_smoke.py -v`
+  - `uv run ruff format --check --preview docs/cross_topic_memory/GOAL_PROGRESS.md docs/cross_topic_memory/IMPLEMENTATION_REPORT.md docs/cross_topic_memory/USAGE.md docs/adr/0046-cross-topic-memory-and-topic-range-search.md tests/coding_agent/test_cross_topic_memory_smoke.py`
+  - `uv run ruff check tests/coding_agent/test_cross_topic_memory_smoke.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Smoke covers topic range search, Bee memory candidate generation, memory
+    review, recall anchors/links, recall context pack, console rendering, and
+    recall/memory metrics.
+  - Implementation report and usage docs exist.
+  - Prior smoke tests pass where practical.
+  - No unrelated homelab, nmem, Argo/K8s, desktop, bridge, or multi-agent work
+    is introduced.
+
+### After
+
+- Changed files:
+  - `docs/cross_topic_memory/GOAL_PROGRESS.md`
+  - `docs/cross_topic_memory/IMPLEMENTATION_REPORT.md`
+  - `docs/cross_topic_memory/USAGE.md`
+  - `docs/adr/0046-cross-topic-memory-and-topic-range-search.md`
+  - `tests/coding_agent/test_cross_topic_memory_smoke.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_cross_topic_memory_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_topic_range_index.py tests/coding_agent/test_topic_memory.py tests/coding_agent/test_memory_review.py tests/coding_agent/test_recall_context.py tests/coding_agent/test_recall_evaluation.py -v`
+  - `uv run pytest tests/coding_agent/test_cross_topic_memory_smoke.py tests/coding_agent/test_topic_layer_smoke.py tests/coding_agent/test_context_system_smoke.py -v`
+  - `uv run pytest tests/ui/test_developer_console.py tests/coding_agent/test_observability.py tests/coding_agent/test_observability_platform_smoke.py -v`
+  - `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py tests/integration/test_durable_runtime_smoke.py -v`
+  - `uv run pytest tests/coding_agent/evaluation/ -v`
+  - `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+  - `uv run ruff format --check --preview docs/cross_topic_memory/GOAL_PROGRESS.md docs/cross_topic_memory/IMPLEMENTATION_REPORT.md docs/cross_topic_memory/USAGE.md docs/adr/0046-cross-topic-memory-and-topic-range-search.md tests/coding_agent/test_cross_topic_memory_smoke.py`
+  - `uv run ruff check tests/coding_agent/test_cross_topic_memory_smoke.py`
+  - `git diff --check -- .`
+- Results:
+  - Added E2E smoke covering finalized topic indexing/search, Bee-derived
+    memory candidate generation, candidate review/promotion, duplicate accept
+    idempotence, topic recall anchors/links, recall context pack, console
+    memory/topic rendering, and low-cardinality recall/memory metrics.
+  - Added `USAGE.md` and `IMPLEMENTATION_REPORT.md`.
+  - Marked ADR-0046 cross-topic smoke acceptance criteria complete.
+- Remaining risks:
+  - External memory backends such as nmem, homelab-specific memories, production
+    Argo/K8s integration, desktop/bridge, and multi-agent task graph remain
+    explicitly out of scope.
