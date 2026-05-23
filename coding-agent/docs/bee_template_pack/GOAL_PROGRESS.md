@@ -369,3 +369,83 @@ remaining risks before continuing to the next goal.
     unrelated to this goal. G153 should keep verification scoped unless that
     debt is intentionally scheduled.
   - G153 still needs final end-to-end smoke tests and user-facing pack docs.
+
+## G153_BEE_TEMPLATE_PACK_E2E_SMOKE_AND_DOCS
+
+### Before
+
+- Goal id: `G153_BEE_TEMPLATE_PACK_E2E_SMOKE_AND_DOCS`
+- Intended files:
+  - `docs/bee_template_pack/GOAL_PROGRESS.md`
+  - `docs/bee_template_pack/USAGE.md`
+  - `docs/bee_template_pack/IMPLEMENTATION_REPORT.md`
+  - `tests/coding_agent/test_bee_template_pack_smoke.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_bee_template_pack_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_cross_topic_memory_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_external_executor.py -v`
+  - `uv run pytest tests/coding_agent/test_external_executor_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_command_bridge.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_runtime.py -v`
+  - `uv run pytest tests/coding_agent/test_scheduled_runs.py -v`
+  - `uv run pytest tests/coding_agent/test_topic_layer_smoke.py -v`
+  - `uv run pytest tests/ui/test_developer_console.py -v`
+  - `uv run pytest tests/coding_agent/test_observability.py -v`
+  - `uv run pytest tests/integration/test_durable_runtime_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`
+  - `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py -v`
+  - `uv run pytest tests/coding_agent/evaluation/ -v`
+  - `uv run ruff format --check --preview tests/coding_agent/test_bee_template_pack_smoke.py docs/bee_template_pack/USAGE.md docs/bee_template_pack/IMPLEMENTATION_REPORT.md docs/bee_template_pack/GOAL_PROGRESS.md`
+  - `uv run ruff check --preview tests/coding_agent/test_bee_template_pack_smoke.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Smoke tests cover pack discovery, compatibility, dry-run, memory/recall,
+    console visibility, observability labels, and no raw leakage.
+  - Usage and implementation report docs exist.
+  - Prior smoke/regression suites pass where practical.
+  - No unrelated homelab/nmem/Argo/K8s/desktop/bridge/multi-agent work is
+    introduced.
+
+### After
+
+- Changed files:
+  - `docs/bee_template_pack/GOAL_PROGRESS.md`
+  - `docs/bee_template_pack/USAGE.md`
+  - `docs/bee_template_pack/IMPLEMENTATION_REPORT.md`
+  - `tests/coding_agent/test_bee_template_pack_smoke.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_template_pack_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_cross_topic_memory_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_external_executor.py tests/coding_agent/test_external_executor_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_launch.py tests/coding_agent/test_bee_command_bridge.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py tests/coding_agent/test_bee_runtime.py -v`
+  - `uv run pytest tests/coding_agent/test_scheduled_runs.py tests/coding_agent/test_topic_layer_smoke.py -v`
+  - `uv run pytest tests/ui/test_developer_console.py tests/coding_agent/test_observability.py -v`
+  - `uv run pytest tests/integration/test_durable_runtime_smoke.py tests/coding_agent/test_context_system_smoke.py -v`
+  - `uv run pytest tests/coding_agent/action_safety/test_safe_action_smoke.py tests/coding_agent/evaluation/ -v`
+  - `uv run pytest tests/agentkit/runtime/test_pipeline.py -k "build_context or runtime_stage_spans" -v`
+  - `uv run ruff format --check --preview tests/coding_agent/test_bee_template_pack_smoke.py docs/bee_template_pack/USAGE.md docs/bee_template_pack/IMPLEMENTATION_REPORT.md docs/bee_template_pack/GOAL_PROGRESS.md`
+  - `uv run ruff check --preview tests/coding_agent/test_bee_template_pack_smoke.py`
+  - `git diff --check -- .`
+- Results:
+  - Bee template pack smoke passed: 5 passed.
+  - Cross-topic memory smoke passed: 1 passed.
+  - External executor tests passed: 29 passed.
+  - Bee launch and command bridge tests passed: 67 passed.
+  - Bee workspace and Bee runtime tests passed: 109 passed.
+  - Scheduled runs and topic layer smoke passed: 21 passed.
+  - Developer Console and observability tests passed: 83 passed.
+  - Durable runtime and context system smokes passed: 7 passed.
+  - Action safety smoke and evaluation suite passed: 21 passed.
+  - Release verification AgentKit pipeline gate passed: 8 passed,
+    29 deselected.
+  - Ruff format check, smoke-test ruff check, and git whitespace check passed.
+  - Initial smoke test failed on unsafe `script_note` fixture metadata, proving
+    commands.yaml static safety checks were active; fixture was changed to safe
+    metadata and rerun green.
+- Remaining risks:
+  - Full production-module `ruff check --preview` remains outside this goal due
+    to pre-existing lint debt documented in G152.
+  - First real external pack dogfood remains deferred to the next phase.
