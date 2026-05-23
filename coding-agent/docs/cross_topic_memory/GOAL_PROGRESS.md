@@ -40,3 +40,45 @@ phase.
 - Remaining risks:
   - G137 still needs the ADR to lock the durable model, review/promotion, recall
     injection, console, and metrics boundaries before production code changes.
+
+## G137_CROSS_TOPIC_MEMORY_ADR
+
+### Before
+
+- Goal id: G137_CROSS_TOPIC_MEMORY_ADR
+- Intended files:
+  - `docs/cross_topic_memory/GOAL_PROGRESS.md`
+  - `docs/adr/0046-cross-topic-memory-and-topic-range-search.md`
+- Verification commands:
+  - `rg -n "TopicRange|TopicSummary|TopicRangeIndex|TopicRecallQuery|TopicRecallResult|TopicRecallAnchor|TopicDerivedMemory|MemoryCandidateReview|AcceptedMemory|RecallContextPack|nmem|Acceptance Criteria" docs/adr/0046-cross-topic-memory-and-topic-range-search.md`
+  - `uv run ruff format --check --preview docs/cross_topic_memory/GOAL_PROGRESS.md docs/adr/0046-cross-topic-memory-and-topic-range-search.md`
+  - `git diff --check -- .`
+- Stop criteria:
+  - ADR defines cross-topic memory, topic range search, memory review, accepted
+    memory, recall context, no-leak, metrics, and console boundaries.
+  - ADR states memory and recall are reference evidence, not system
+    instructions.
+  - ADR explicitly defers nmem, homelab, production Argo/K8s, desktop, bridge,
+    and multi-agent work.
+  - No production code is changed.
+
+### After
+
+- Changed files:
+  - `docs/cross_topic_memory/GOAL_PROGRESS.md`
+  - `docs/adr/0046-cross-topic-memory-and-topic-range-search.md`
+- Tests run:
+  - `rg -n "TopicRange|TopicSummary|TopicRangeIndex|TopicRecallQuery|TopicRecallResult|TopicRecallAnchor|TopicDerivedMemory|MemoryCandidateReview|AcceptedMemory|RecallContextPack|nmem|Acceptance Criteria" docs/adr/0046-cross-topic-memory-and-topic-range-search.md`
+  - `uv run ruff format --check --preview docs/cross_topic_memory/GOAL_PROGRESS.md docs/adr/0046-cross-topic-memory-and-topic-range-search.md`
+  - `git diff --check -- .`
+- Results:
+  - Added ADR-0046 defining cross-topic memory and topic range search
+    boundaries.
+  - Locked memory candidate review, accepted memory, topic recall, context-pack,
+    console, observability, and no-leak semantics before production code
+    changes.
+  - Confirmed G137 made no production code changes.
+- Remaining risks:
+  - G138 still needs the first production implementation: deterministic
+    topic-range indexing/search over finalized topics and sanitized Bee
+    summaries.
