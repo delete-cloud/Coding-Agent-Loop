@@ -218,3 +218,45 @@ This ledger tracks G127-G135 for the External Executor Adapter MVP phase.
   - Forged, unsigned, wrong-kind, or signature-mutated Docker plans are rejected.
 - Remaining risks:
   - G132 still needs Kubernetes Job dry-run/fake-client rendering and status import.
+
+## G132_KUBERNETES_JOB_EXECUTOR_DRY_RUN
+
+### Before
+
+- Goal id: G132_KUBERNETES_JOB_EXECUTOR_DRY_RUN
+- Intended files:
+  - `docs/external_executor/GOAL_PROGRESS.md`
+  - `docs/adr/0045-external-executor-adapter-boundaries.md`
+  - `src/coding_agent/external_executor.py`
+  - `tests/coding_agent/test_external_executor.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_external_executor.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_command_bridge.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -q`
+  - `uv run ruff format --check --preview docs/external_executor/GOAL_PROGRESS.md docs/adr/0045-external-executor-adapter-boundaries.md src/coding_agent/external_executor.py tests/coding_agent/test_external_executor.py`
+  - `uv run ruff check src/coding_agent/external_executor.py tests/coding_agent/test_external_executor.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Kubernetes Job executor adapter is disabled by default.
+  - Dry-run Job spec rendering works from signed Kubernetes executor plans.
+  - Fake status import maps running, succeeded, and failed to executor statuses.
+  - Sanitized evidence is generated without pod/job names, kubeconfig, env dumps, raw logs, or command text.
+  - No normal test requires Kubernetes, kubectl, or a cluster.
+
+### After
+
+- Changed files:
+  - `docs/external_executor/GOAL_PROGRESS.md`
+  - `docs/adr/0045-external-executor-adapter-boundaries.md`
+  - `src/coding_agent/external_executor.py`
+  - `tests/coding_agent/test_external_executor.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_external_executor.py -v`
+- Results:
+  - Added `KubernetesJobExecutorAdapter` with disabled-by-default capability reporting.
+  - Added signed Kubernetes Job executor plan derivation from authorized local executor plans.
+  - Added sanitized dry-run Job spec rendering without raw command text, pod/job names, kubeconfig, env dumps, or secrets.
+  - Added fake status import for running, succeeded, and failed states with sanitized evidence metadata.
+  - Kubernetes `submit` remains deferred and no normal test requires Kubernetes, kubectl, or a cluster.
+- Remaining risks:
+  - G133 still needs Argo Workflow dry-run/fake-client rendering and status import.

@@ -23,9 +23,11 @@ from coding_agent.external_executor import (
     ExecutorRegistry,
     ExecutorResult,
     ExecutorRunRecord,
+    KubernetesJobExecutorAdapter,
     LocalExecutorAdapter,
     PGExecutorRunStore,
     build_docker_executor_plan_from_local_plan,
+    build_kubernetes_job_executor_plan_from_local_plan,
     build_local_executor_plan_from_bee_command_plan,
     executor_result_completion_evidence,
 )
@@ -163,6 +165,14 @@ class FakeExecutor:
 
 
 class FakeDockerCapabilityClient:
+    def __init__(self, available: bool) -> None:
+        self._available = available
+
+    def available(self) -> bool:
+        return self._available
+
+
+class FakeKubernetesCapabilityClient:
     def __init__(self, available: bool) -> None:
         self._available = available
 
@@ -908,6 +918,128 @@ async def test_docker_executor_submit_is_deferred(tmp_path: Path) -> None:
         await DockerExecutorAdapter(
             enabled=True,
             capability_client=FakeDockerCapabilityClient(True),
+        ).submit(plan)
+
+
+def test_kubernetes_job_executor_renders_sanitized_dry_run_spec(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    local_plan = _approved_local_plan(workspace)
+    plan = build_kubernetes_job_executor_plan_from_local_plan(
+        local_plan,
+        executor_run_id="executor-run-k8s",
+    )
+    disabled = KubernetesJobExecutorAdapter()
+    unavailable = KubernetesJobExecutorAdapter(
+        enabled=True,
+        capability_client=FakeKubernetesCapabilityClient(False),
+    )
+    available = KubernetesJobExecutorAdapter(
+        enabled=True,
+        capability_client=FakeKubernetesCapabilityClient(True),
+    )
+
+    rendered = available.dry_run_render(plan)
+
+    assert disabled.capability().status == "disabled"
+    assert unavailable.capability().status == "unavailable"
+    assert available.capability().status == "available"
+    assert rendered["apiVersion"] == "batch/v1"
+    assert rendered["kind"] == "Job"
+    assert rendered["metadata"]["labels"]["executor_kind"] == "kubernetes_job"
+    assert rendered["metadata"]["labels"]["intent_category"] == "validation"
+    assert rendered["spec"]["template"]["spec"]["restartPolicy"] == "Never"
+    serialized = str(rendered)
+    for forbidden in (
+        "task-1",
+        "node-validate",
+        "workspace-alpha",
+        "pytest",
+        "command",
+        "stdout",
+        "stderr",
+        "kubeconfig",
+        "pod_name",
+        "job_name",
+        "secret",
+    ):
+        assert forbidden not in serialized
+
+
+def test_kubernetes_job_executor_imports_fake_status_safely(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    plan = build_kubernetes_job_executor_plan_from_local_plan(
+        _approved_local_plan(workspace)
+    )
+    adapter = KubernetesJobExecutorAdapter(
+        enabled=True,
+        capability_client=FakeKubernetesCapabilityClient(True),
+    )
+
+    running = adapter.import_status(plan, {"active": True})
+    succeeded = adapter.import_status(plan, {"succeeded": True, "pod_name": "raw-pod"})
+    failed = adapter.import_status(plan, {"condition": "failed", "raw_log": "secret"})
+
+    assert running.status == "running"
+    assert succeeded.status == "succeeded"
+    assert failed.status == "failed"
+    for result in (running, succeeded, failed):
+        serialized = str(result)
+        assert result.evidence[0].evidence_ref == "evidence/kubernetes-job-status"
+        for forbidden in (
+            "raw-pod",
+            "raw_log",
+            "secret",
+            "stdout",
+            "stderr",
+            "kubeconfig",
+            "job_name",
+            "pod_name",
+        ):
+            assert forbidden not in serialized
+
+
+def test_kubernetes_job_executor_rejects_forged_plan(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    adapter = KubernetesJobExecutorAdapter(
+        enabled=True,
+        capability_client=FakeKubernetesCapabilityClient(True),
+    )
+    plan = build_kubernetes_job_executor_plan_from_local_plan(
+        _approved_local_plan(workspace)
+    )
+    forged = replace(plan, node_id="forged-node")
+    unsigned = ExecutorPlan(
+        executor_kind="kubernetes_job",
+        task_id="task-1",
+        node_id="node-validate",
+        workspace_ref="workspace-alpha",
+        requested_at=_dt(9),
+        metadata={"policy_decision": "allow", "approval_route": "allow"},
+    )
+
+    with pytest.raises(ValueError, match="signed executor plan"):
+        adapter.dry_run_render(forged)
+    with pytest.raises(ValueError, match="authorized executor plan"):
+        adapter.import_status(unsigned, {"active": True})
+
+
+@pytest.mark.asyncio
+async def test_kubernetes_job_executor_submit_is_deferred(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    plan = build_kubernetes_job_executor_plan_from_local_plan(
+        _approved_local_plan(workspace)
+    )
+
+    with pytest.raises(RuntimeError, match="deferred"):
+        await KubernetesJobExecutorAdapter(
+            enabled=True,
+            capability_client=FakeKubernetesCapabilityClient(True),
         ).submit(plan)
 
 
