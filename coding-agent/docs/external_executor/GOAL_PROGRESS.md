@@ -84,6 +84,7 @@ This ledger tracks G127-G135 for the External Executor Adapter MVP phase.
 - Intended files:
   - `docs/external_executor/GOAL_PROGRESS.md`
   - `docs/adr/0045-external-executor-adapter-boundaries.md`
+  - `src/coding_agent/bee_command_bridge.py`
   - `src/coding_agent/external_executor.py`
   - `tests/coding_agent/test_external_executor.py`
 - Verification commands:
@@ -122,3 +123,52 @@ This ledger tracks G127-G135 for the External Executor Adapter MVP phase.
   - Bee launch and Bee command bridge tests still pass.
 - Remaining risks:
   - G130 still needs to normalize the existing local safe execution path behind this interface and prove denied or approval-required plans cannot execute.
+
+## G130_LOCAL_EXECUTOR_ADAPTER_NORMALIZATION
+
+### Before
+
+- Goal id: G130_LOCAL_EXECUTOR_ADAPTER_NORMALIZATION
+- Intended files:
+  - `docs/external_executor/GOAL_PROGRESS.md`
+  - `docs/adr/0045-external-executor-adapter-boundaries.md`
+  - `src/coding_agent/external_executor.py`
+  - `tests/coding_agent/test_external_executor.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_external_executor.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_command_bridge.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -q`
+  - `uv run ruff format --check --preview docs/external_executor/GOAL_PROGRESS.md docs/adr/0045-external-executor-adapter-boundaries.md src/coding_agent/bee_command_bridge.py src/coding_agent/external_executor.py tests/coding_agent/test_external_executor.py`
+  - `uv run ruff check src/coding_agent/bee_command_bridge.py src/coding_agent/external_executor.py tests/coding_agent/test_external_executor.py`
+  - `git diff --check -- .`
+  - `uv run ruff format --check --preview docs/external_executor/GOAL_PROGRESS.md docs/adr/0045-external-executor-adapter-boundaries.md src/coding_agent/external_executor.py tests/coding_agent/test_external_executor.py`
+  - `uv run ruff check src/coding_agent/external_executor.py tests/coding_agent/test_external_executor.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Existing Bee command bridge ready/allow plans can be normalized into local `ExecutorPlan` values without carrying raw command strings.
+  - Local executor adapter records planned/running/final executor run status through `ExecutorRunStore`.
+  - Local executor success and failure return sanitized `ExecutorResult`/`ExecutorEvidence`.
+  - Denied, approval-required, wrong-kind, and missing-workspace plans cannot execute.
+  - Bee node completion can consume executor evidence through the existing evidence gate.
+  - Existing Bee command bridge and Bee launch tests still pass.
+
+### After
+
+- Changed files:
+  - `docs/external_executor/GOAL_PROGRESS.md`
+  - `docs/adr/0045-external-executor-adapter-boundaries.md`
+  - `src/coding_agent/external_executor.py`
+  - `tests/coding_agent/test_external_executor.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_external_executor.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_command_bridge.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -q`
+- Results:
+  - Added `LocalExecutorAdapter` over already-approved local `ExecutorPlan` values.
+  - Added `build_local_executor_plan_from_bee_command_plan` so only signed Bee command bridge `ready` plans with `allow` policy and `allow` approval route can become local executor plans.
+  - Added executor result-to-Bee completion evidence conversion, preserving the existing evidence gate.
+  - Local adapter records planned, running, and final sanitized result/evidence through the executor run store.
+  - Denied, approval-required, wrong-kind, forged Bee plans, forged executor plans, mismatched workspace binding, missing workspace, and raw evidence refs reject before runner invocation or final durable result persistence.
+  - Bee command bridge and Bee launch tests still pass.
+- Remaining risks:
+  - G131 still needs Docker adapter capability detection and dry-run rendering, disabled by default.

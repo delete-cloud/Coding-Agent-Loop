@@ -167,8 +167,8 @@ integration and must not create or apply Argo CD Application manifests.
 - [x] `test_executor_registry_resolves_known_and_rejects_unknown_kind`
 - [x] `test_executor_run_store_schema_is_idempotent`
 - [x] `test_executor_run_store_create_update_attach_and_list`
-- [ ] `test_local_executor_runs_approved_plan_and_records_sanitized_result`
-- [ ] `test_local_executor_rejects_denied_or_approval_required_plan`
+- [x] `test_local_executor_runs_approved_plan_and_records_sanitized_result`
+- [x] `test_local_executor_rejects_denied_or_approval_required_plan`
 - [ ] `test_docker_executor_capability_detection_and_dry_run`
 - [ ] `test_kubernetes_job_executor_renders_sanitized_dry_run_spec`
 - [ ] `test_kubernetes_job_executor_imports_fake_status_safely`

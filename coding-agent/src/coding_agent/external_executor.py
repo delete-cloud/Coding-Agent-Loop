@@ -7,15 +7,27 @@ adapters are added in later goals.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
+import hashlib
+from inspect import isawaitable
+from pathlib import Path
 from typing import Final, Protocol
 
 from agentkit.storage.pg import AsyncPGPool, PGPool
+from coding_agent.action_safety.approval_routing import ActionApprovalRoute
+from coding_agent.action_safety.command_policy import CommandPolicyDecision
+from coding_agent.bee_command_bridge import (
+    BeeCommandIntentPlan,
+    BeeNodeCompletionEvidence,
+    is_authorized_bee_command_plan,
+)
 from coding_agent.topic_store import JSONObject, JSONValue
 
 ExecutorKind = str
 ExecutorRunStatus = str
+WorkspaceResolver = Callable[[str], Path | None]
 
 _EXECUTOR_KINDS: Final[frozenset[str]] = frozenset({
     "local",
@@ -101,6 +113,22 @@ _FORBIDDEN_REF_PARTS: Final[frozenset[str]] = frozenset({
     "workflow_name",
     "workflows/",
 })
+_RAW_EXECUTION_TEXT_MARKERS: Final[tuple[str, ...]] = (
+    "command:",
+    "command=",
+    "raw log",
+    "raw_log",
+    "rm -rf",
+    "stderr:",
+    "stderr=",
+    "stdout:",
+    "stdout=",
+    "traceback",
+    "uv run",
+    "python -c",
+    "pytest ",
+    "pytest -q",
+)
 _SECRET_VALUE_MARKERS: Final[tuple[str, ...]] = (
     "-----begin ",
     "akia",
@@ -114,6 +142,7 @@ _SECRET_VALUE_MARKERS: Final[tuple[str, ...]] = (
     "sk-",
     "token=",
 )
+_LOCAL_AUTHORIZATION_TOKEN: Final[object] = object()
 
 
 class ExternalExecutor(Protocol):
@@ -194,6 +223,8 @@ class ExecutorPlan:
     node_id: str
     workspace_ref: str
     requested_at: datetime
+    executor_run_id: str | None = None
+    approved_workspace_hash: str | None = None
     command_category: str = "unknown"
     command_profile: str = "unknown"
     launch_id: str | None = None
@@ -201,6 +232,10 @@ class ExecutorPlan:
     timeout_seconds: int | None = None
     validation_label: str | None = None
     metadata: JSONObject = field(default_factory=dict)
+    authorization_token: object | None = field(default=None, repr=False, compare=False)
+    authorization_signature: str | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         _require_executor_kind(self.executor_kind)
@@ -208,6 +243,8 @@ class ExecutorPlan:
         _require_non_empty("node_id", self.node_id)
         _require_optional_label("workspace_ref", self.workspace_ref)
         _require_datetime("requested_at", self.requested_at)
+        _require_optional_id("executor_run_id", self.executor_run_id)
+        _require_optional_id("approved_workspace_hash", self.approved_workspace_hash)
         _require_optional_label("command_category", self.command_category)
         _require_optional_label("command_profile", self.command_profile)
         _require_optional_id("launch_id", self.launch_id)
@@ -267,6 +304,12 @@ class ExecutorResult:
 
     def evidence_as_json(self) -> list[JSONObject]:
         return [item.to_safe_dict() for item in self.evidence]
+
+
+LocalExecutorRunner = Callable[
+    [ExecutorPlan, Path],
+    ExecutorResult | Awaitable[ExecutorResult],
+]
 
 
 @dataclass(frozen=True)
@@ -330,6 +373,226 @@ class ExecutorRegistry:
 
     def list_kinds(self) -> tuple[ExecutorKind, ...]:
         return tuple(sorted(self._executors))
+
+
+class LocalExecutorAdapter:
+    """Local executor adapter over already-approved Bee command bridge plans."""
+
+    kind: Final[ExecutorKind] = "local"
+
+    def __init__(
+        self,
+        *,
+        store: ExecutorRunStore,
+        runner: LocalExecutorRunner | None = None,
+        workspace_resolver: WorkspaceResolver | None = None,
+        now: Callable[[], datetime],
+        executor_run_id_factory: Callable[[ExecutorPlan], str] | None = None,
+    ) -> None:
+        self._store = store
+        self._runner = runner
+        self._workspace_resolver = workspace_resolver
+        self._now = now
+        self._executor_run_id_factory = (
+            executor_run_id_factory or _default_executor_run_id
+        )
+
+    def capability(self) -> ExecutorCapability:
+        available = self._runner is not None and self._workspace_resolver is not None
+        return ExecutorCapability(
+            executor_kind=self.kind,
+            enabled=True,
+            available=available,
+            status="available" if available else "unavailable",
+            reason=None if available else "local executor dependencies not configured",
+        )
+
+    async def submit(self, plan: ExecutorPlan) -> ExecutorResult:
+        _require_local_executor_plan(plan)
+        workspace_root = self._resolve_workspace(plan)
+        if workspace_root is None:
+            raise ValueError(
+                f"local executor workspace not found: {plan.workspace_ref}"
+            )
+        _require_approved_workspace_binding(plan, workspace_root)
+        if self._runner is None:
+            raise ValueError("local executor runner is not configured")
+        executor_run_id = plan.executor_run_id or self._executor_run_id_factory(plan)
+        requested_at = plan.requested_at
+        await self._store.create_executor_run(
+            ExecutorRunRecord(
+                executor_run_id=executor_run_id,
+                executor_kind=self.kind,
+                task_id=plan.task_id,
+                node_id=plan.node_id,
+                launch_id=plan.launch_id,
+                topic_id=plan.topic_id,
+                status="planned",
+                requested_at=requested_at,
+                metadata=_executor_run_metadata(plan),
+            )
+        )
+        started_at = self._now()
+        await self._store.update_executor_run_status(
+            executor_run_id,
+            status="running",
+            submitted_at=started_at,
+            started_at=started_at,
+            finished_at=None,
+            error_type=None,
+            error_message=None,
+            metadata={"phase": "local_runner_started"},
+        )
+        try:
+            result_or_awaitable = self._runner(plan, workspace_root)
+            result = (
+                await result_or_awaitable
+                if isawaitable(result_or_awaitable)
+                else result_or_awaitable
+            )
+            result = _sanitize_local_executor_result(result)
+        except ValueError as exc:
+            if _is_safety_validation_error(exc):
+                raise
+            result = ExecutorResult(
+                status="failed",
+                sanitized_summary="Local executor failed with sanitized error",
+                finished_at=self._now(),
+                error_type=exc.__class__.__name__,
+                error_message="local executor runner failed",
+                metadata={"phase": "local_runner_failed"},
+            )
+        except Exception as exc:
+            result = ExecutorResult(
+                status="failed",
+                sanitized_summary="Local executor failed with sanitized error",
+                finished_at=self._now(),
+                error_type=exc.__class__.__name__,
+                error_message="local executor runner failed",
+                metadata={"phase": "local_runner_failed"},
+            )
+        await self._store.attach_executor_result(executor_run_id, result=result)
+        return result
+
+    def _resolve_workspace(self, plan: ExecutorPlan) -> Path | None:
+        if self._workspace_resolver is None:
+            return None
+        workspace_root = self._workspace_resolver(plan.workspace_ref)
+        if workspace_root is None:
+            return None
+        resolved = Path(workspace_root).expanduser().resolve()
+        if not resolved.is_dir():
+            return None
+        return resolved
+
+
+def build_local_executor_plan_from_bee_command_plan(
+    *,
+    command_plan: BeeCommandIntentPlan,
+    task_id: str,
+    workspace_ref: str,
+    approved_workspace_root: Path | str,
+    requested_at: datetime,
+    executor_run_id: str | None = None,
+    launch_id: str | None = None,
+    topic_id: str | None = None,
+    timeout_seconds: int | None = None,
+) -> ExecutorPlan:
+    if command_plan.status != "ready":
+        raise ValueError("local executor requires a ready Bee command plan")
+    if not is_authorized_bee_command_plan(command_plan):
+        raise ValueError("local executor requires authorized Bee command plan")
+    if command_plan.policy is None:
+        raise ValueError("local executor requires command policy verdict")
+    if command_plan.policy.decision != CommandPolicyDecision.ALLOW:
+        raise ValueError("local executor requires allowed command policy")
+    if command_plan.approval_route is None:
+        raise ValueError("local executor requires approval route")
+    if command_plan.approval_route.route != ActionApprovalRoute.ALLOW:
+        raise ValueError("local executor requires allow approval route")
+    intent = command_plan.resolution.intent
+    if intent is None:
+        raise ValueError("local executor requires resolved command intent")
+    return _authorize_executor_plan(
+        ExecutorPlan(
+            executor_kind="local",
+            executor_run_id=executor_run_id,
+            approved_workspace_hash=_workspace_hash(
+                Path(approved_workspace_root).expanduser().resolve()
+            ),
+            task_id=task_id,
+            node_id=command_plan.resolution.node_id,
+            workspace_ref=workspace_ref,
+            requested_at=requested_at,
+            command_category=intent.category,
+            command_profile=intent.profile,
+            launch_id=launch_id,
+            topic_id=topic_id,
+            timeout_seconds=timeout_seconds or command_plan.policy.timeout_seconds,
+            validation_label=intent.validation_label or intent.name,
+            metadata={
+                "policy_decision": command_plan.policy.decision.value,
+                "approval_route": command_plan.approval_route.route.value,
+                "template_id": command_plan.resolution.template_id,
+                "runtime_kind": command_plan.policy.environment_kind,
+            },
+            authorization_token=_LOCAL_AUTHORIZATION_TOKEN,
+        )
+    )
+
+
+def executor_result_completion_evidence(
+    result: ExecutorResult,
+) -> tuple[BeeNodeCompletionEvidence, ...]:
+    status = "passed" if result.status == "succeeded" else "failed"
+    return tuple(
+        BeeNodeCompletionEvidence(
+            evidence_kind=item.evidence_kind,
+            evidence_ref=item.evidence_ref,
+            status=status,
+        )
+        for item in result.evidence
+    )
+
+
+def _sanitize_local_executor_result(result: ExecutorResult) -> ExecutorResult:
+    return ExecutorResult(
+        status=result.status,
+        sanitized_summary=_local_executor_status_summary(result.status),
+        evidence=tuple(
+            evidence for item in result.evidence if (evidence := _safe_evidence(item))
+        ),
+        finished_at=result.finished_at,
+        error_type=result.error_type,
+        error_message=_local_executor_error_summary(result),
+        metadata={"phase": "local_runner_result"},
+    )
+
+
+def _local_executor_status_summary(status: ExecutorRunStatus) -> str:
+    if status == "succeeded":
+        return "Local executor succeeded"
+    if status == "failed":
+        return "Local executor failed"
+    if status == "cancelled":
+        return "Local executor cancelled"
+    return "Local executor status recorded"
+
+
+def _local_executor_error_summary(result: ExecutorResult) -> str | None:
+    if result.status == "failed":
+        return "local executor returned failed status"
+    return None
+
+
+def _safe_evidence(item: ExecutorEvidence) -> ExecutorEvidence | None:
+    try:
+        return ExecutorEvidence(
+            evidence_kind=item.evidence_kind,
+            evidence_ref=item.evidence_ref,
+        )
+    except ValueError:
+        return None
 
 
 class PGExecutorRunStore:
@@ -620,6 +883,86 @@ def _require_executor_kind(value: str) -> None:
         raise ValueError(f"executor kind must be one of {sorted(_EXECUTOR_KINDS)}")
 
 
+def _require_local_executor_plan(plan: ExecutorPlan) -> None:
+    if plan.executor_kind != "local":
+        raise ValueError("local executor requires executor_kind='local'")
+    if plan.authorization_token is not _LOCAL_AUTHORIZATION_TOKEN:
+        raise ValueError("local executor requires bridge-authorized executor plan")
+    if plan.authorization_signature != _executor_plan_signature(plan):
+        raise ValueError("local executor requires signed executor plan")
+    if plan.metadata.get("policy_decision") != "allow":
+        raise ValueError("local executor requires allowed command policy")
+    if plan.metadata.get("approval_route") != "allow":
+        raise ValueError("local executor requires allow approval route")
+    if plan.approved_workspace_hash is None:
+        raise ValueError("local executor requires approved workspace binding")
+
+
+def _require_approved_workspace_binding(
+    plan: ExecutorPlan, workspace_root: Path
+) -> None:
+    if plan.approved_workspace_hash != _workspace_hash(workspace_root):
+        raise ValueError("local executor workspace binding mismatch")
+
+
+def _executor_run_metadata(plan: ExecutorPlan) -> JSONObject:
+    return {
+        "phase": "local_executor_planned",
+        "intent_category": plan.command_category,
+        "intent_profile": plan.command_profile,
+    }
+
+
+def _default_executor_run_id(plan: ExecutorPlan) -> str:
+    return f"executor-{plan.task_id}-{plan.node_id}"
+
+
+def _authorize_executor_plan(plan: ExecutorPlan) -> ExecutorPlan:
+    object.__setattr__(
+        plan,
+        "authorization_signature",
+        _executor_plan_signature(plan),
+    )
+    return plan
+
+
+def _executor_plan_signature(plan: ExecutorPlan) -> str:
+    metadata_items = tuple(
+        sorted((key, str(value)) for key, value in plan.metadata.items())
+    )
+    parts = (
+        plan.executor_kind,
+        plan.executor_run_id or "",
+        plan.approved_workspace_hash or "",
+        plan.task_id,
+        plan.node_id,
+        plan.workspace_ref,
+        plan.command_category,
+        plan.command_profile,
+        plan.launch_id or "",
+        plan.topic_id or "",
+        str(plan.timeout_seconds or ""),
+        plan.validation_label or "",
+        repr(metadata_items),
+    )
+    return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
+
+
+def _workspace_hash(path: Path) -> str:
+    return hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:16]
+
+
+def _is_safety_validation_error(exc: ValueError) -> bool:
+    message = str(exc)
+    return (
+        "raw execution text" in message
+        or "secret-shaped" in message
+        or "forbidden metadata key" in message
+        or "sensitive reference text" in message
+        or "must not contain whitespace" in message
+    )
+
+
 def _require_non_empty(field_name: str, value: str) -> None:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field_name} must be a non-empty string")
@@ -651,10 +994,13 @@ def _require_safe_ref(field_name: str, value: str) -> None:
         raise ValueError(
             f"{field_name} must be at most {_MAX_DISPLAY_TEXT_CHARS} characters"
         )
+    if any(character.isspace() for character in value):
+        raise ValueError(f"{field_name} must not contain whitespace")
     _reject_secret_shaped_value(field_name, value)
     folded = value.casefold()
     if any(part in folded for part in _FORBIDDEN_REF_PARTS):
         raise ValueError(f"{field_name} must not contain sensitive reference text")
+    _reject_raw_execution_text(field_name, value)
 
 
 def _require_status(field_name: str, value: str) -> None:
@@ -683,6 +1029,7 @@ def _require_optional_display_text(field_name: str, value: str | None) -> None:
             f"{field_name} must be at most {_MAX_DISPLAY_TEXT_CHARS} characters"
         )
     _reject_secret_shaped_value(field_name, value)
+    _reject_raw_execution_text(field_name, value)
 
 
 def _require_positive_int(field_name: str, value: int) -> None:
@@ -710,6 +1057,7 @@ def _require_json_value(field_name: str, value: JSONValue) -> None:
                     f"{field_name} must be at most {_MAX_METADATA_STRING_CHARS} characters"
                 )
             _reject_secret_shaped_value(field_name, value)
+            _reject_raw_execution_text(field_name, value)
         return
     if isinstance(value, list):
         for index, item in enumerate(value):
@@ -725,6 +1073,12 @@ def _reject_secret_shaped_value(field_name: str, value: str) -> None:
     folded = value.casefold()
     if any(marker in folded for marker in _SECRET_VALUE_MARKERS):
         raise ValueError(f"{field_name} must not contain secret-shaped values")
+
+
+def _reject_raw_execution_text(field_name: str, value: str) -> None:
+    folded = value.casefold()
+    if any(marker in folded for marker in _RAW_EXECUTION_TEXT_MARKERS):
+        raise ValueError(f"{field_name} must not contain raw execution text")
 
 
 def _required_row(row: dict[str, object] | None, context: str) -> dict[str, object]:

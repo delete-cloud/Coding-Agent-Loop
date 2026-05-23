@@ -1,10 +1,20 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import cast
 
 import pytest
 
+from coding_agent.bee_command_bridge import (
+    complete_bee_node_from_bridge_result,
+    plan_bee_command_intent,
+)
+from coding_agent.bee_workspace import (
+    build_bee_manifest_from_workspace_template,
+    load_bee_workspace_template,
+)
 from coding_agent.external_executor import (
     ExecutorCapability,
     ExecutorEvidence,
@@ -12,7 +22,10 @@ from coding_agent.external_executor import (
     ExecutorRegistry,
     ExecutorResult,
     ExecutorRunRecord,
+    LocalExecutorAdapter,
     PGExecutorRunStore,
+    build_local_executor_plan_from_bee_command_plan,
+    executor_result_completion_evidence,
 )
 
 
@@ -342,6 +355,461 @@ async def test_executor_run_store_missing_rows_fail_fast(
         )
 
 
+@pytest.mark.asyncio
+async def test_local_executor_runs_approved_plan_and_records_sanitized_result(
+    store: PGExecutorRunStore,
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    template = _write_template_with_commands(workspace)
+    manifest = build_bee_manifest_from_workspace_template(template)
+    command_plan = plan_bee_command_intent(
+        template=template,
+        node=manifest.nodes[0],
+        command="pytest -q",
+        workspace_root=workspace,
+        cwd=workspace,
+    )
+    executor_plan = build_local_executor_plan_from_bee_command_plan(
+        command_plan=command_plan,
+        task_id="task-1",
+        workspace_ref="workspace-alpha",
+        approved_workspace_root=workspace,
+        requested_at=_dt(9),
+        executor_run_id="executor-run-local",
+        launch_id="launch-1",
+        topic_id="topic-1",
+    )
+    seen_plans: list[ExecutorPlan] = []
+
+    def runner(plan: ExecutorPlan, workspace_root: Path) -> ExecutorResult:
+        seen_plans.append(plan)
+        assert workspace_root == workspace.resolve()
+        return ExecutorResult(
+            status="succeeded",
+            sanitized_summary="Local validation passed",
+            finished_at=_dt(12),
+            evidence=(
+                ExecutorEvidence(
+                    evidence_kind="validation_report",
+                    evidence_ref="evidence/validation-report.md",
+                    summary="Sanitized validation report",
+                ),
+            ),
+            metadata={"phase": "local_runner_complete"},
+        )
+
+    result = await LocalExecutorAdapter(
+        store=store,
+        runner=runner,
+        workspace_resolver=lambda workspace_ref: (
+            workspace if workspace_ref == "workspace-alpha" else None
+        ),
+        now=_clock(10, 11, 12),
+    ).submit(executor_plan)
+    record = await store.load_executor_run("executor-run-local")
+    completion = complete_bee_node_from_bridge_result(
+        node=manifest.nodes[0],
+        evidence=executor_result_completion_evidence(result),
+    )
+
+    assert seen_plans == [executor_plan]
+    assert result.status == "succeeded"
+    assert record is not None
+    assert record.status == "succeeded"
+    assert record.sanitized_summary == "Local executor succeeded"
+    assert record.evidence[0].evidence_ref == "evidence/validation-report.md"
+    assert record.evidence[0].summary is None
+    assert record.metadata == {"phase": "local_runner_result"}
+    assert completion.status == "completed"
+    assert completion.will_complete is True
+
+
+@pytest.mark.asyncio
+async def test_local_executor_records_failed_result_without_completing_node(
+    store: PGExecutorRunStore,
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    template = _write_template_with_commands(workspace)
+    manifest = build_bee_manifest_from_workspace_template(template)
+    command_plan = plan_bee_command_intent(
+        template=template,
+        node=manifest.nodes[0],
+        command="pytest -q",
+        workspace_root=workspace,
+        cwd=workspace,
+    )
+    executor_plan = build_local_executor_plan_from_bee_command_plan(
+        command_plan=command_plan,
+        task_id="task-1",
+        workspace_ref="workspace-alpha",
+        approved_workspace_root=workspace,
+        requested_at=_dt(9),
+        executor_run_id="executor-run-failed",
+    )
+
+    async def runner(_plan: ExecutorPlan, workspace_root: Path) -> ExecutorResult:
+        assert workspace_root == workspace.resolve()
+        return ExecutorResult(
+            status="failed",
+            sanitized_summary="Local validation failed",
+            finished_at=_dt(12),
+            evidence=(
+                ExecutorEvidence(
+                    evidence_kind="validation_report",
+                    evidence_ref="evidence/validation-report.md",
+                    summary="Sanitized validation report",
+                ),
+            ),
+            metadata={"phase": "local_runner_complete"},
+        )
+
+    result = await LocalExecutorAdapter(
+        store=store,
+        runner=runner,
+        workspace_resolver=lambda _workspace_ref: workspace,
+        now=_clock(10, 11, 12),
+    ).submit(executor_plan)
+    record = await store.load_executor_run("executor-run-failed")
+    completion = complete_bee_node_from_bridge_result(
+        node=manifest.nodes[0],
+        evidence=executor_result_completion_evidence(result),
+    )
+
+    assert result.status == "failed"
+    assert record is not None
+    assert record.status == "failed"
+    assert record.sanitized_summary == "Local executor failed"
+    assert record.error_message == "local executor returned failed status"
+    assert completion.status == "evidence_failed"
+    assert completion.will_complete is False
+
+
+def test_local_executor_rejects_denied_or_approval_required_plan(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    template = _write_template_with_commands(workspace)
+    manifest = build_bee_manifest_from_workspace_template(template)
+    denied = plan_bee_command_intent(
+        template=template,
+        node=manifest.nodes[0],
+        command="echo hello && rm -rf /",
+        workspace_root=workspace,
+        cwd=workspace,
+    )
+    approval_required = plan_bee_command_intent(
+        template=template,
+        node=manifest.nodes[0],
+        command="rm -rf build",
+        workspace_root=workspace,
+        cwd=workspace,
+    )
+
+    with pytest.raises(ValueError, match="ready Bee command plan"):
+        build_local_executor_plan_from_bee_command_plan(
+            command_plan=denied,
+            task_id="task-1",
+            workspace_ref="workspace-alpha",
+            approved_workspace_root=workspace,
+            requested_at=_dt(9),
+        )
+    with pytest.raises(ValueError, match="ready Bee command plan"):
+        build_local_executor_plan_from_bee_command_plan(
+            command_plan=approval_required,
+            task_id="task-1",
+            workspace_ref="workspace-alpha",
+            approved_workspace_root=workspace,
+            requested_at=_dt(9),
+        )
+
+
+def test_local_executor_rejects_forged_ready_allow_command_plan(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    template = _write_template_with_commands(workspace)
+    manifest = build_bee_manifest_from_workspace_template(template)
+    command_plan = plan_bee_command_intent(
+        template=template,
+        node=manifest.nodes[0],
+        command="pytest -q",
+        workspace_root=workspace,
+        cwd=workspace,
+    )
+    forged = replace(command_plan, authorization_token=None)
+
+    with pytest.raises(ValueError, match="authorized Bee command plan"):
+        build_local_executor_plan_from_bee_command_plan(
+            command_plan=forged,
+            task_id="task-1",
+            workspace_ref="workspace-alpha",
+            approved_workspace_root=workspace,
+            requested_at=_dt(9),
+        )
+    forged_resolution = replace(
+        command_plan.resolution,
+        template_id="template-forged",
+        node_id="node-forged",
+    )
+    forged_with_token = replace(command_plan, resolution=forged_resolution)
+
+    with pytest.raises(ValueError, match="authorized Bee command plan"):
+        build_local_executor_plan_from_bee_command_plan(
+            command_plan=forged_with_token,
+            task_id="task-1",
+            workspace_ref="workspace-alpha",
+            approved_workspace_root=workspace,
+            requested_at=_dt(9),
+        )
+
+
+@pytest.mark.asyncio
+async def test_local_executor_rejects_forged_executor_plan_replace(
+    store: PGExecutorRunStore,
+    tmp_path: Path,
+) -> None:
+    approved_workspace = tmp_path / "approved"
+    forged_workspace = tmp_path / "forged"
+    approved_workspace.mkdir()
+    forged_workspace.mkdir()
+    template = _write_template_with_commands(approved_workspace)
+    manifest = build_bee_manifest_from_workspace_template(template)
+    command_plan = plan_bee_command_intent(
+        template=template,
+        node=manifest.nodes[0],
+        command="pytest -q",
+        workspace_root=approved_workspace,
+        cwd=approved_workspace,
+    )
+    executor_plan = build_local_executor_plan_from_bee_command_plan(
+        command_plan=command_plan,
+        task_id="task-1",
+        workspace_ref="approved-workspace",
+        approved_workspace_root=approved_workspace,
+        requested_at=_dt(9),
+        executor_run_id="executor-run-signed",
+    )
+    forged_plan = replace(
+        executor_plan,
+        workspace_ref="forged-workspace",
+        approved_workspace_hash=executor_plan.approved_workspace_hash,
+    )
+    calls: list[ExecutorPlan] = []
+
+    def runner(plan: ExecutorPlan, _workspace_root: Path) -> ExecutorResult:
+        calls.append(plan)
+        return ExecutorResult(status="succeeded")
+
+    with pytest.raises(ValueError, match="signed executor plan"):
+        await LocalExecutorAdapter(
+            store=store,
+            runner=runner,
+            workspace_resolver=lambda workspace_ref: (
+                forged_workspace
+                if workspace_ref == "forged-workspace"
+                else approved_workspace
+            ),
+            now=_clock(10),
+        ).submit(forged_plan)
+
+    assert calls == []
+    assert await store.list_executor_runs() == []
+
+
+@pytest.mark.asyncio
+async def test_local_executor_rejects_unauthorized_or_missing_workspace_plan(
+    store: PGExecutorRunStore,
+    tmp_path: Path,
+) -> None:
+    calls: list[ExecutorPlan] = []
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    def runner(plan: ExecutorPlan, _workspace_root: Path) -> ExecutorResult:
+        calls.append(plan)
+        return ExecutorResult(status="succeeded")
+
+    adapter = LocalExecutorAdapter(
+        store=store,
+        runner=runner,
+        workspace_resolver=lambda _workspace_ref: workspace,
+        now=_clock(10),
+    )
+    unauthorized = ExecutorPlan(
+        executor_kind="local",
+        executor_run_id="executor-run-unauthorized",
+        task_id="task-1",
+        node_id="node-1",
+        workspace_ref="workspace-alpha",
+        requested_at=_dt(9),
+        metadata={"policy_decision": "deny", "approval_route": "deny"},
+    )
+    wrong_kind = ExecutorPlan(
+        executor_kind="fixture",
+        task_id="task-1",
+        node_id="node-1",
+        workspace_ref="workspace-alpha",
+        requested_at=_dt(9),
+        metadata={"policy_decision": "allow", "approval_route": "allow"},
+    )
+    missing_workspace = ExecutorPlan(
+        executor_kind="local",
+        executor_run_id="executor-run-missing-workspace",
+        task_id="task-1",
+        node_id="node-1",
+        workspace_ref="workspace-alpha",
+        requested_at=_dt(9),
+        metadata={"policy_decision": "allow", "approval_route": "allow"},
+    )
+
+    with pytest.raises(ValueError, match="bridge-authorized"):
+        await adapter.submit(unauthorized)
+    with pytest.raises(ValueError, match="executor_kind='local'"):
+        await adapter.submit(wrong_kind)
+    with pytest.raises(ValueError, match="bridge-authorized"):
+        await adapter.submit(missing_workspace)
+
+    assert calls == []
+    assert await store.list_executor_runs() == []
+
+
+@pytest.mark.asyncio
+async def test_local_executor_rejects_missing_or_mismatched_workspace_binding(
+    store: PGExecutorRunStore,
+    tmp_path: Path,
+) -> None:
+    approved_workspace = tmp_path / "approved"
+    mismatched_workspace = tmp_path / "mismatched"
+    approved_workspace.mkdir()
+    mismatched_workspace.mkdir()
+    template = _write_template_with_commands(approved_workspace)
+    manifest = build_bee_manifest_from_workspace_template(template)
+    command_plan = plan_bee_command_intent(
+        template=template,
+        node=manifest.nodes[0],
+        command="pytest -q",
+        workspace_root=approved_workspace,
+        cwd=approved_workspace,
+    )
+    executor_plan = build_local_executor_plan_from_bee_command_plan(
+        command_plan=command_plan,
+        task_id="task-1",
+        workspace_ref="workspace-alpha",
+        approved_workspace_root=approved_workspace,
+        requested_at=_dt(9),
+        executor_run_id="executor-run-bound",
+    )
+    calls: list[ExecutorPlan] = []
+
+    def runner(plan: ExecutorPlan, _workspace_root: Path) -> ExecutorResult:
+        calls.append(plan)
+        return ExecutorResult(status="succeeded")
+
+    missing_adapter = LocalExecutorAdapter(
+        store=store,
+        runner=runner,
+        workspace_resolver=lambda _workspace_ref: None,
+        now=_clock(10),
+    )
+    mismatched_adapter = LocalExecutorAdapter(
+        store=store,
+        runner=runner,
+        workspace_resolver=lambda _workspace_ref: mismatched_workspace,
+        now=_clock(10),
+    )
+
+    with pytest.raises(ValueError, match="workspace not found"):
+        await missing_adapter.submit(executor_plan)
+    with pytest.raises(ValueError, match="workspace binding mismatch"):
+        await mismatched_adapter.submit(executor_plan)
+
+    assert calls == []
+    assert await store.list_executor_runs() == []
+
+
+@pytest.mark.asyncio
+async def test_local_executor_rejects_runner_raw_evidence_ref_before_storage(
+    store: PGExecutorRunStore,
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    template = _write_template_with_commands(workspace)
+    manifest = build_bee_manifest_from_workspace_template(template)
+    command_plan = plan_bee_command_intent(
+        template=template,
+        node=manifest.nodes[0],
+        command="pytest -q",
+        workspace_root=workspace,
+        cwd=workspace,
+    )
+    executor_plan = build_local_executor_plan_from_bee_command_plan(
+        command_plan=command_plan,
+        task_id="task-1",
+        workspace_ref="workspace-alpha",
+        approved_workspace_root=workspace,
+        requested_at=_dt(9),
+        executor_run_id="executor-run-raw-text",
+    )
+
+    def runner(_plan: ExecutorPlan, _workspace_root: Path) -> ExecutorResult:
+        return ExecutorResult(
+            status="succeeded",
+            sanitized_summary="uv run pytest tests/coding_agent/test_external_executor.py -v",
+            evidence=(
+                ExecutorEvidence(
+                    evidence_kind="validation_report",
+                    evidence_ref="stdout: pytest failed",
+                    summary="Traceback most recent call last",
+                    metadata={"detail": "uv run pytest tests"},
+                ),
+            ),
+            metadata={"detail": "Traceback most recent call last"},
+        )
+
+    with pytest.raises(ValueError, match="whitespace"):
+        await LocalExecutorAdapter(
+            store=store,
+            runner=runner,
+            workspace_resolver=lambda _workspace_ref: workspace,
+            now=_clock(10),
+        ).submit(executor_plan)
+
+    record = await store.load_executor_run("executor-run-raw-text")
+    assert record is not None
+    assert record.status == "running"
+    assert record.sanitized_summary is None
+    assert record.evidence == ()
+    serialized = str(record)
+    assert "uv run pytest" not in serialized
+    assert "Traceback" not in serialized
+    assert "stdout:" not in serialized
+
+
+def test_executor_evidence_rejects_traceback_summary() -> None:
+    with pytest.raises(ValueError, match="raw execution text"):
+        ExecutorEvidence(
+            evidence_kind="validation_report",
+            evidence_ref="evidence/validation-report.md",
+            summary="Traceback most recent call last",
+        )
+
+
+def test_executor_evidence_rejects_raw_command_ref() -> None:
+    with pytest.raises(ValueError, match="whitespace"):
+        ExecutorEvidence(
+            evidence_kind="validation_report",
+            evidence_ref="uv run pytest tests/coding_agent/test_external_executor.py -v",
+        )
+
+
 def _run_row(*args: object) -> dict[str, object]:
     (
         executor_run_id,
@@ -405,3 +873,62 @@ def _run(
 
 def _dt(hour: int) -> datetime:
     return datetime(2026, 5, 23, hour, tzinfo=UTC)
+
+
+def _clock(*hours: int):
+    values = [_dt(hour) for hour in hours]
+
+    def now() -> datetime:
+        if values:
+            return values.pop(0)
+        return _dt(23)
+
+    return now
+
+
+def _write_template_with_commands(tmp_path: Path):
+    template_dir = tmp_path / ".bee" / "templates" / "template-alpha"
+    feature_dir = template_dir / "features"
+    feature_dir.mkdir(parents=True)
+    (template_dir / "metadata.yaml").write_text(
+        "\n".join([
+            "version: 1",
+            "template_id: template-alpha",
+            "kind: maintenance",
+            "profile: local",
+            "title: Local template alpha",
+            "summary: Safe local template",
+            "topic:",
+            "  session_id: session-alpha",
+            "context_profile: default",
+            "validation_profile: smoke",
+            "workspace_policy: local",
+            "nodes:",
+            "  - node_id: node-validate",
+            "    kind: validation",
+            "    profile: smoke",
+            "    title: Run smoke validation",
+            "    command_ref: pytest_smoke",
+        ]),
+        encoding="utf-8",
+    )
+    (template_dir / "SKILL.md").write_text("# Template Skill\n", encoding="utf-8")
+    (feature_dir / "acceptance.feature").write_text(
+        "Feature: safe local template\n",
+        encoding="utf-8",
+    )
+    (template_dir / "commands.yaml").write_text(
+        "\n".join([
+            "commands:",
+            "  - name: pytest_smoke",
+            "    profile: validation",
+            "    policy: existing_command_policy",
+            "    category: validation",
+            "    validation_label: pytest_smoke",
+            "    status: declared",
+            "    metadata:",
+            "      owner: local",
+        ]),
+        encoding="utf-8",
+    )
+    return load_bee_workspace_template(tmp_path, "template-alpha")
