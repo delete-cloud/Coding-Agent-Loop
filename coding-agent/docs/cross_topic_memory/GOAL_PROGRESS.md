@@ -230,3 +230,52 @@ phase.
 - Remaining risks:
   - G141 still needs recall planner integration that queries topic range index
     and accepted memory together during context building.
+
+## G141_TOPIC_RECALL_PLANNER_AND_CONTEXT_INTEGRATION
+
+### Before
+
+- Goal id: G141_TOPIC_RECALL_PLANNER_AND_CONTEXT_INTEGRATION
+- Intended files:
+  - `docs/cross_topic_memory/GOAL_PROGRESS.md`
+  - `docs/adr/0046-cross-topic-memory-and-topic-range-search.md`
+  - `src/coding_agent/topic_range_index.py`
+  - `src/coding_agent/recall_context.py`
+  - `tests/coding_agent/test_recall_context.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_recall_context.py -v`
+  - `uv run pytest tests/coding_agent/test_topic_range_index.py tests/coding_agent/test_memory_review.py tests/coding_agent/test_topic_recall.py tests/coding_agent/test_context_pack.py -v`
+  - `uv run ruff format --check --preview docs/cross_topic_memory/GOAL_PROGRESS.md docs/adr/0046-cross-topic-memory-and-topic-range-search.md src/coding_agent/topic_range_index.py src/coding_agent/recall_context.py tests/coding_agent/test_recall_context.py`
+  - `uv run ruff check src/coding_agent/topic_range_index.py src/coding_agent/recall_context.py tests/coding_agent/test_recall_context.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - New topic/Bee launch metadata can build a safe recall query.
+  - Planner searches topic range index and accepted memory.
+  - Planner records topic recall anchors and recall links where appropriate.
+  - Recall results render into ContextPack as reference evidence.
+  - Disabled mode preserves old context behavior.
+  - Raw query/evidence text is rejected.
+
+### After
+
+- Changed files:
+  - `docs/cross_topic_memory/GOAL_PROGRESS.md`
+  - `docs/adr/0046-cross-topic-memory-and-topic-range-search.md`
+  - `src/coding_agent/topic_range_index.py`
+  - `src/coding_agent/recall_context.py`
+  - `tests/coding_agent/test_recall_context.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_recall_context.py -v`
+  - `uv run pytest tests/coding_agent/test_topic_range_index.py tests/coding_agent/test_memory_review.py tests/coding_agent/test_topic_recall.py tests/coding_agent/test_context_pack.py -v`
+  - `uv run ruff format --check --preview docs/cross_topic_memory/GOAL_PROGRESS.md docs/adr/0046-cross-topic-memory-and-topic-range-search.md src/coding_agent/topic_range_index.py src/coding_agent/recall_context.py tests/coding_agent/test_recall_context.py`
+  - `uv run ruff check src/coding_agent/topic_range_index.py src/coding_agent/recall_context.py tests/coding_agent/test_recall_context.py`
+  - `git diff --check -- .`
+- Results:
+  - Added recall planner over topic range index and accepted memories.
+  - Added safe recall query construction for new topics and Bee launch metadata.
+  - Added recall anchor/link recording for recalled topic results.
+  - Added combined recall ContextPack rendering with reference-only topic and
+    memory evidence.
+  - Added disabled mode and no-leak query validation.
+- Remaining risks:
+  - G142 still needs recall evaluation and low-cardinality recall/memory metrics.
