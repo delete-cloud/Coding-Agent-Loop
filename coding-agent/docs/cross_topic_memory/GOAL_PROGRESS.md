@@ -183,3 +183,50 @@ phase.
 - Remaining risks:
   - G140 still needs durable candidate listing and accept/reject/archive review
     behavior.
+
+## G140_MEMORY_REVIEW_AND_PROMOTION
+
+### Before
+
+- Goal id: G140_MEMORY_REVIEW_AND_PROMOTION
+- Intended files:
+  - `docs/cross_topic_memory/GOAL_PROGRESS.md`
+  - `docs/adr/0046-cross-topic-memory-and-topic-range-search.md`
+  - `src/coding_agent/topic_memory.py`
+  - `tests/coding_agent/test_memory_review.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_memory_review.py -v`
+  - `uv run pytest tests/coding_agent/test_topic_memory.py tests/coding_agent/plugins/test_memory.py tests/coding_agent/test_context_pack.py -v`
+  - `uv run ruff format --check --preview docs/cross_topic_memory/GOAL_PROGRESS.md docs/adr/0046-cross-topic-memory-and-topic-range-search.md src/coding_agent/topic_memory.py tests/coding_agent/test_memory_review.py`
+  - `uv run ruff check src/coding_agent/topic_memory.py tests/coding_agent/test_memory_review.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Candidate memories can be listed.
+  - Candidate memories can be accepted, rejected, and archived idempotently.
+  - Accepted memory keeps provenance and remains reference-only.
+  - Accepted memory can render into context-pack reference evidence.
+  - Raw review reason/content is rejected.
+
+### After
+
+- Changed files:
+  - `docs/cross_topic_memory/GOAL_PROGRESS.md`
+  - `docs/adr/0046-cross-topic-memory-and-topic-range-search.md`
+  - `src/coding_agent/topic_memory.py`
+  - `tests/coding_agent/test_memory_review.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_memory_review.py -v`
+  - `uv run pytest tests/coding_agent/test_topic_memory.py tests/coding_agent/plugins/test_memory.py tests/coding_agent/test_context_pack.py -v`
+  - `uv run ruff format --check --preview docs/cross_topic_memory/GOAL_PROGRESS.md docs/adr/0046-cross-topic-memory-and-topic-range-search.md src/coding_agent/topic_memory.py tests/coding_agent/test_memory_review.py`
+  - `uv run ruff check src/coding_agent/topic_memory.py tests/coding_agent/test_memory_review.py`
+  - `git diff --check -- .`
+- Results:
+  - Added local deterministic memory review store for candidate, accepted,
+    rejected, and archived states.
+  - Added idempotent accept/reject/archive behavior and terminal transition
+    guards.
+  - Added accepted-memory context-pack rendering as reference-only evidence.
+  - Added no-leak checks for review reasons.
+- Remaining risks:
+  - G141 still needs recall planner integration that queries topic range index
+    and accepted memory together during context building.
