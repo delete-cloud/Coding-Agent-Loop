@@ -260,3 +260,50 @@ This ledger tracks G127-G135 for the External Executor Adapter MVP phase.
   - Kubernetes `submit` remains deferred and no normal test requires Kubernetes, kubectl, or a cluster.
 - Remaining risks:
   - G133 still needs Argo Workflow dry-run/fake-client rendering and status import.
+
+## G133_ARGO_WORKFLOW_EXECUTOR_DRY_RUN
+
+### Before
+
+- Goal id: G133_ARGO_WORKFLOW_EXECUTOR_DRY_RUN
+- Intended files:
+  - `docs/external_executor/GOAL_PROGRESS.md`
+  - `docs/adr/0045-external-executor-adapter-boundaries.md`
+  - `src/coding_agent/external_executor.py`
+  - `tests/coding_agent/test_external_executor.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_external_executor.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_command_bridge.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -q`
+  - `uv run ruff format --check --preview docs/external_executor/GOAL_PROGRESS.md docs/adr/0045-external-executor-adapter-boundaries.md src/coding_agent/external_executor.py tests/coding_agent/test_external_executor.py`
+  - `uv run ruff check src/coding_agent/external_executor.py tests/coding_agent/test_external_executor.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Argo Workflow executor adapter is disabled by default.
+  - Dry-run Workflow spec rendering works from signed Argo executor plans.
+  - Fake workflow status import maps running, succeeded, and failed to executor statuses.
+  - Sanitized evidence is generated without workflow names, pod names, kubeconfig, env dumps, raw logs, Argo CD integration, or command text.
+  - No normal test requires Argo Workflows, Argo CLI, Kubernetes, or a cluster.
+
+### After
+
+- Changed files:
+  - `docs/external_executor/GOAL_PROGRESS.md`
+  - `docs/adr/0045-external-executor-adapter-boundaries.md`
+  - `src/coding_agent/external_executor.py`
+  - `tests/coding_agent/test_external_executor.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_external_executor.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_command_bridge.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -q`
+  - `uv run ruff format --check --preview docs/external_executor/GOAL_PROGRESS.md docs/adr/0045-external-executor-adapter-boundaries.md src/coding_agent/external_executor.py tests/coding_agent/test_external_executor.py`
+  - `uv run ruff check src/coding_agent/external_executor.py tests/coding_agent/test_external_executor.py`
+  - `git diff --check -- .`
+- Results:
+  - Added `ArgoWorkflowExecutorAdapter` with disabled-by-default capability reporting.
+  - Added signed Argo Workflow executor plan derivation from authorized local executor plans.
+  - Added sanitized dry-run Workflow spec rendering without raw command text, workflow names, pod names, kubeconfig, env dumps, Argo CD references, or secrets.
+  - Added fake status import for running, succeeded, failed, and errored phases with sanitized evidence metadata.
+  - Argo `submit` remains deferred and no normal test requires Argo Workflows, Argo CLI, Kubernetes, or a cluster.
+- Remaining risks:
+  - G134 still needs console, task artifact, report/evidence, metrics, and trace integration for executor runs.

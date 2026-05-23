@@ -172,8 +172,8 @@ integration and must not create or apply Argo CD Application manifests.
 - [x] `test_docker_executor_capability_detection_and_dry_run`
 - [x] `test_kubernetes_job_executor_renders_sanitized_dry_run_spec`
 - [x] `test_kubernetes_job_executor_imports_fake_status_safely`
-- [ ] `test_argo_workflow_executor_renders_sanitized_dry_run_spec`
-- [ ] `test_argo_workflow_executor_imports_fake_status_safely`
+- [x] `test_argo_workflow_executor_renders_sanitized_dry_run_spec`
+- [x] `test_argo_workflow_executor_imports_fake_status_safely`
 - [ ] `test_console_executor_runs_render_safe_summary`
 - [ ] `test_executor_metrics_omit_high_cardinality_labels`
 - [ ] `test_external_executor_e2e_smoke`
