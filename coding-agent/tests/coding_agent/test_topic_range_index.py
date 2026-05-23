@@ -148,6 +148,34 @@ def test_topic_range_index_indexes_bee_task_topic_metadata() -> None:
     assert results[0].evidence_refs == ("evidence/executor-run.md",)
 
 
+def test_topic_range_index_records_pack_template_metadata() -> None:
+    index = TopicRangeIndex()
+    index.index_topic(
+        _topic("topic-bee", title="Backup check", summary="Validated backup readiness"),
+        profile="local",
+        tags=("backup",),
+        bee_pack_id="pack-alpha",
+        bee_template_id="backup-check",
+        domain_profile="maintenance",
+        template_kind="maintenance",
+    )
+
+    results = index.search(
+        TopicRangeSearchQuery(
+            text="backup",
+            bee_pack_id="pack-alpha",
+            domain_profile="maintenance",
+            tags=("backup",),
+        )
+    )
+
+    assert [result.topic_id for result in results] == ["topic-bee"]
+    assert results[0].bee_pack_id == "pack-alpha"
+    assert results[0].bee_template_id == "backup-check"
+    assert results[0].domain_profile == "maintenance"
+    assert results[0].template_kind == "maintenance"
+
+
 def test_topic_range_index_rejects_raw_evidence_and_report_text() -> None:
     index = TopicRangeIndex()
 

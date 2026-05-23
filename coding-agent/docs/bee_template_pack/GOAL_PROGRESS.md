@@ -258,3 +258,56 @@ remaining risks before continuing to the next goal.
 - Remaining risks:
   - G151 still needs memory candidate, topic range, and recall binding for
     pack/template/domain provenance.
+
+## G151_BEE_PACK_MEMORY_AND_RECALL_BINDING
+
+### Before
+
+- Goal id: `G151_BEE_PACK_MEMORY_AND_RECALL_BINDING`
+- Intended files:
+  - `docs/bee_template_pack/GOAL_PROGRESS.md`
+  - `src/coding_agent/topic_memory.py`
+  - `src/coding_agent/topic_range_index.py`
+  - `src/coding_agent/recall_context.py`
+  - `tests/coding_agent/test_topic_memory.py`
+  - `tests/coding_agent/test_topic_range_index.py`
+  - `tests/coding_agent/test_recall_context.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_topic_memory.py tests/coding_agent/test_topic_range_index.py tests/coding_agent/test_recall_context.py -v`
+  - `uv run pytest tests/coding_agent/test_cross_topic_memory_smoke.py -v`
+  - `uv run ruff format --check --preview src/coding_agent/topic_memory.py src/coding_agent/topic_range_index.py src/coding_agent/recall_context.py tests/coding_agent/test_topic_memory.py tests/coding_agent/test_topic_range_index.py tests/coding_agent/test_recall_context.py docs/bee_template_pack/GOAL_PROGRESS.md`
+  - `uv run ruff check --preview src/coding_agent/topic_memory.py src/coding_agent/topic_range_index.py src/coding_agent/recall_context.py tests/coding_agent/test_topic_memory.py tests/coding_agent/test_topic_range_index.py tests/coding_agent/test_recall_context.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Memory candidates can include safe pack/template/domain provenance.
+  - Topic range documents/results can include pack/template/domain metadata.
+  - Recall can filter/boost by domain profile and pack tags.
+  - Accepted memory remains reference-only.
+  - No raw artifact content is exposed.
+
+### After
+
+- Changed files:
+  - `docs/bee_template_pack/GOAL_PROGRESS.md`
+  - `src/coding_agent/topic_memory.py`
+  - `src/coding_agent/topic_range_index.py`
+  - `src/coding_agent/recall_context.py`
+  - `tests/coding_agent/test_topic_memory.py`
+  - `tests/coding_agent/test_topic_range_index.py`
+  - `tests/coding_agent/test_recall_context.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_topic_memory.py tests/coding_agent/test_topic_range_index.py tests/coding_agent/test_recall_context.py -v`
+  - `uv run pytest tests/coding_agent/test_cross_topic_memory_smoke.py -v`
+  - `uv run ruff format --check --preview src/coding_agent/topic_memory.py src/coding_agent/topic_range_index.py src/coding_agent/recall_context.py tests/coding_agent/test_topic_memory.py tests/coding_agent/test_topic_range_index.py tests/coding_agent/test_recall_context.py docs/bee_template_pack/GOAL_PROGRESS.md`
+  - `uv run ruff check --preview src/coding_agent/topic_memory.py src/coding_agent/topic_range_index.py src/coding_agent/recall_context.py tests/coding_agent/test_topic_memory.py tests/coding_agent/test_topic_range_index.py tests/coding_agent/test_recall_context.py`
+  - `git diff --check -- .`
+- Results:
+  - Focused topic memory/range/recall tests passed: 29 passed.
+  - Existing cross-topic memory smoke passed: 1 passed.
+  - Ruff format check, ruff check, and git whitespace check passed.
+  - Initial red tests failed on missing pack/domain fields in memory,
+    topic-range, and recall APIs; implementation added safe provenance fields,
+    filters, and accepted-memory ranking boosts.
+- Remaining risks:
+  - G152 still needs console and low-cardinality observability surfaces for
+    pack validation, template status, and dry-run plans.
