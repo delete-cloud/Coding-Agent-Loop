@@ -213,3 +213,48 @@ remaining risks before continuing to the next goal.
 - Remaining risks:
   - G150 still needs dry-run launch planning and explicit no-durable-task
     checks.
+
+## G150_BEE_PACK_DRY_RUN_LAUNCH_PLAN
+
+### Before
+
+- Goal id: `G150_BEE_PACK_DRY_RUN_LAUNCH_PLAN`
+- Intended files:
+  - `docs/bee_template_pack/GOAL_PROGRESS.md`
+  - `src/coding_agent/bee_template_pack.py`
+  - `tests/coding_agent/test_bee_template_pack.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_bee_template_pack.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -v`
+  - `uv run ruff format --check --preview src/coding_agent/bee_template_pack.py tests/coding_agent/test_bee_template_pack.py docs/bee_template_pack/GOAL_PROGRESS.md`
+  - `uv run ruff check --preview src/coding_agent/bee_template_pack.py tests/coding_agent/test_bee_template_pack.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Pack dry-run planning validates inputs, topic/workspace policy, command
+    intent resolution, and executor capability declarations.
+  - Dry-run previews launch/topic/task/nodes/command intents and expected
+    task.json/report/evidence/memory paths.
+  - Dry-run creates no durable task and executes no commands.
+
+### After
+
+- Changed files:
+  - `docs/bee_template_pack/GOAL_PROGRESS.md`
+  - `src/coding_agent/bee_template_pack.py`
+  - `tests/coding_agent/test_bee_template_pack.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_template_pack.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -v`
+  - `uv run ruff format --check --preview src/coding_agent/bee_template_pack.py tests/coding_agent/test_bee_template_pack.py docs/bee_template_pack/GOAL_PROGRESS.md`
+  - `uv run ruff check --preview src/coding_agent/bee_template_pack.py tests/coding_agent/test_bee_template_pack.py`
+  - `git diff --check -- .`
+- Results:
+  - Focused pack manifest/registry/compatibility/dry-run tests passed:
+    32 passed.
+  - Existing Bee launch regression passed: 43 passed.
+  - Ruff format check, ruff check, and git whitespace check passed.
+  - Initial red test failed on missing `build_bee_pack_dry_run_plan`;
+    implementation added deterministic non-durable dry-run previews.
+- Remaining risks:
+  - G151 still needs memory candidate, topic range, and recall binding for
+    pack/template/domain provenance.
