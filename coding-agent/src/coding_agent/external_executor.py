@@ -142,7 +142,7 @@ _SECRET_VALUE_MARKERS: Final[tuple[str, ...]] = (
     "sk-",
     "token=",
 )
-_LOCAL_AUTHORIZATION_TOKEN: Final[object] = object()
+_EXECUTOR_PLAN_AUTHORIZATION_TOKEN: Final[object] = object()
 
 
 class ExternalExecutor(Protocol):
@@ -152,6 +152,10 @@ class ExternalExecutor(Protocol):
     def capability(self) -> ExecutorCapability: ...
 
     async def submit(self, plan: ExecutorPlan) -> ExecutorResult: ...
+
+
+class DockerCapabilityClient(Protocol):
+    def available(self) -> bool: ...
 
 
 class ExecutorRunStore(Protocol):
@@ -486,6 +490,59 @@ class LocalExecutorAdapter:
         return resolved
 
 
+class DockerExecutorAdapter:
+    """Optional Docker executor adapter in disabled/dry-run mode."""
+
+    kind: Final[ExecutorKind] = "docker"
+
+    def __init__(
+        self,
+        *,
+        enabled: bool = False,
+        capability_client: DockerCapabilityClient | None = None,
+    ) -> None:
+        self._enabled = enabled
+        self._capability_client = capability_client
+
+    def capability(self) -> ExecutorCapability:
+        if not self._enabled:
+            return ExecutorCapability(
+                executor_kind=self.kind,
+                enabled=False,
+                available=False,
+                status="disabled",
+                reason="docker executor disabled",
+            )
+        available = (
+            self._capability_client.available()
+            if self._capability_client is not None
+            else False
+        )
+        return ExecutorCapability(
+            executor_kind=self.kind,
+            enabled=True,
+            available=available,
+            status="available" if available else "unavailable",
+            reason=None if available else "docker capability unavailable",
+        )
+
+    async def submit(self, plan: ExecutorPlan) -> ExecutorResult:
+        raise RuntimeError("docker executor execution is deferred; use dry_run_render")
+
+    def dry_run_render(self, plan: ExecutorPlan) -> JSONObject:
+        _require_authorized_executor_plan(plan, expected_kind=self.kind)
+        return {
+            "executor_kind": self.kind,
+            "mode": "dry_run",
+            "task_ref": _safe_ref_token(plan.task_id),
+            "node_ref": _safe_ref_token(plan.node_id),
+            "workspace_ref": _safe_ref_token(plan.workspace_ref),
+            "intent_category": plan.command_category,
+            "intent_profile": plan.command_profile,
+            "timeout_seconds": plan.timeout_seconds or 0,
+        }
+
+
 def build_local_executor_plan_from_bee_command_plan(
     *,
     command_plan: BeeCommandIntentPlan,
@@ -536,7 +593,38 @@ def build_local_executor_plan_from_bee_command_plan(
                 "template_id": command_plan.resolution.template_id,
                 "runtime_kind": command_plan.policy.environment_kind,
             },
-            authorization_token=_LOCAL_AUTHORIZATION_TOKEN,
+            authorization_token=_EXECUTOR_PLAN_AUTHORIZATION_TOKEN,
+        )
+    )
+
+
+def build_docker_executor_plan_from_local_plan(
+    local_plan: ExecutorPlan,
+    *,
+    executor_run_id: str | None = None,
+) -> ExecutorPlan:
+    _require_authorized_executor_plan(local_plan, expected_kind="local")
+    return _authorize_executor_plan(
+        ExecutorPlan(
+            executor_kind="docker",
+            executor_run_id=executor_run_id,
+            approved_workspace_hash=local_plan.approved_workspace_hash,
+            task_id=local_plan.task_id,
+            node_id=local_plan.node_id,
+            workspace_ref=local_plan.workspace_ref,
+            requested_at=local_plan.requested_at,
+            command_category=local_plan.command_category,
+            command_profile=local_plan.command_profile,
+            launch_id=local_plan.launch_id,
+            topic_id=local_plan.topic_id,
+            timeout_seconds=local_plan.timeout_seconds,
+            validation_label=local_plan.validation_label,
+            metadata={
+                "policy_decision": "allow",
+                "approval_route": "allow",
+                "source_kind": "local",
+            },
+            authorization_token=_EXECUTOR_PLAN_AUTHORIZATION_TOKEN,
         )
     )
 
@@ -884,18 +972,28 @@ def _require_executor_kind(value: str) -> None:
 
 
 def _require_local_executor_plan(plan: ExecutorPlan) -> None:
-    if plan.executor_kind != "local":
-        raise ValueError("local executor requires executor_kind='local'")
-    if plan.authorization_token is not _LOCAL_AUTHORIZATION_TOKEN:
-        raise ValueError("local executor requires bridge-authorized executor plan")
-    if plan.authorization_signature != _executor_plan_signature(plan):
-        raise ValueError("local executor requires signed executor plan")
-    if plan.metadata.get("policy_decision") != "allow":
-        raise ValueError("local executor requires allowed command policy")
-    if plan.metadata.get("approval_route") != "allow":
-        raise ValueError("local executor requires allow approval route")
+    _require_authorized_executor_plan(plan, expected_kind="local")
     if plan.approved_workspace_hash is None:
         raise ValueError("local executor requires approved workspace binding")
+
+
+def _require_authorized_executor_plan(
+    plan: ExecutorPlan,
+    *,
+    expected_kind: ExecutorKind,
+) -> None:
+    if plan.executor_kind != expected_kind:
+        raise ValueError(
+            f"{expected_kind} executor requires executor_kind={expected_kind!r}"
+        )
+    if plan.authorization_token is not _EXECUTOR_PLAN_AUTHORIZATION_TOKEN:
+        raise ValueError(f"{expected_kind} executor requires authorized executor plan")
+    if plan.authorization_signature != _executor_plan_signature(plan):
+        raise ValueError(f"{expected_kind} executor requires signed executor plan")
+    if plan.metadata.get("policy_decision") != "allow":
+        raise ValueError(f"{expected_kind} executor requires allowed command policy")
+    if plan.metadata.get("approval_route") != "allow":
+        raise ValueError(f"{expected_kind} executor requires allow approval route")
 
 
 def _require_approved_workspace_binding(
@@ -950,6 +1048,10 @@ def _executor_plan_signature(plan: ExecutorPlan) -> str:
 
 def _workspace_hash(path: Path) -> str:
     return hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:16]
+
+
+def _safe_ref_token(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
 
 
 def _is_safety_validation_error(exc: ValueError) -> bool:

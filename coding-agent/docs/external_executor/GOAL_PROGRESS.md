@@ -172,3 +172,49 @@ This ledger tracks G127-G135 for the External Executor Adapter MVP phase.
   - Bee command bridge and Bee launch tests still pass.
 - Remaining risks:
   - G131 still needs Docker adapter capability detection and dry-run rendering, disabled by default.
+
+## G131_DOCKER_EXECUTOR_OPTIONAL_CAPABILITY
+
+### Before
+
+- Goal id: G131_DOCKER_EXECUTOR_OPTIONAL_CAPABILITY
+- Intended files:
+  - `docs/external_executor/GOAL_PROGRESS.md`
+  - `docs/adr/0045-external-executor-adapter-boundaries.md`
+  - `src/coding_agent/external_executor.py`
+  - `tests/coding_agent/test_external_executor.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_external_executor.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_command_bridge.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -q`
+  - `uv run ruff format --check --preview docs/external_executor/GOAL_PROGRESS.md docs/adr/0045-external-executor-adapter-boundaries.md src/coding_agent/external_executor.py tests/coding_agent/test_external_executor.py`
+  - `uv run ruff check src/coding_agent/external_executor.py tests/coding_agent/test_external_executor.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Docker executor adapter is disabled by default.
+  - Docker capability detection reports unavailable without a fake/real client.
+  - Docker adapter can render a sanitized dry-run description from an authorized executor plan.
+  - Denied or forged Docker plans are rejected.
+  - No raw logs, command text, Docker names, env dumps, or secrets are stored.
+  - No normal test requires Docker.
+
+### After
+
+- Changed files:
+  - `docs/external_executor/GOAL_PROGRESS.md`
+  - `docs/adr/0045-external-executor-adapter-boundaries.md`
+  - `src/coding_agent/external_executor.py`
+  - `tests/coding_agent/test_external_executor.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_external_executor.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_command_bridge.py -q`
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -q`
+- Results:
+  - Added `DockerExecutorAdapter` with disabled-by-default capability reporting.
+  - Added fake-client capability checks for unavailable and available Docker states without requiring Docker.
+  - Added dry-run rendering from signed Docker executor plans derived from authorized local plans.
+  - Dry-run rendering hashes task/node/workspace references and excludes command text, stdout/stderr, secrets, and Docker runtime names.
+  - Docker `submit` remains deferred and cannot execute containers in this goal.
+  - Forged, unsigned, wrong-kind, or signature-mutated Docker plans are rejected.
+- Remaining risks:
+  - G132 still needs Kubernetes Job dry-run/fake-client rendering and status import.
