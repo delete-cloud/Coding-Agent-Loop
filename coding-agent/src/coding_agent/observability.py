@@ -21,166 +21,163 @@ from agentkit.observability import (
     SpanRecord,
 )
 
-_SENSITIVE_ATTRIBUTE_PARTS = frozenset(
-    {
-        "content",
-        "env",
-        "message",
-        "output",
-        "prompt",
-        "result",
-        "secret",
-        "stderr",
-        "stdout",
-        "text",
-    }
-)
-_SENSITIVE_PROMETHEUS_VALUE_PARTS = frozenset(
-    {
-        "content",
-        "env",
-        "message",
-        "output",
-        "prompt",
-        "result",
-        "secret",
-        "stderr",
-        "stdout",
-        "text",
-    }
-)
-_FORBIDDEN_PROMETHEUS_LABELS = frozenset(
-    {
-        "run_id",
-        "schedule_id",
-        "session_id",
-        "signal_id",
-        "template_id",
-        "node_id",
-        "task_id",
-        "trace_id",
-        "topic_id",
-        "event_id",
-        "interaction_id",
-        "tool_call_id",
-        "file_path",
-        "prompt",
-        "message",
-        "content",
-        "command_output",
-        "secret",
-    }
-)
-_PROMETHEUS_ALLOWED_ATTRIBUTE_LABELS = frozenset(
-    {
-        "action_kind",
-        "action_status",
-        "cache_hit",
-        "error_type",
-        "eval_status",
-        "hitl_status",
-        "model",
-        "operation",
-        "policy_decision",
-        "provider",
-        "risk_level",
-        "schedule_kind",
-        "schedule_status",
-        "signal_kind",
-        "signal_status",
-        "source_kind",
-        "stage",
-        "status",
-        "storage_status",
-        "task_kind",
-        "task_profile",
-        "task_status",
-        "template_kind",
-        "template_profile",
-        "command_category",
-        "command_policy",
-        "command_status",
-        "tool_name",
-        "node_kind",
-        "node_profile",
-        "node_status",
-        "topic_kind",
-        "topic_profile",
-        "topic_status",
-        "trigger_kind",
-    }
-)
+_SENSITIVE_ATTRIBUTE_PARTS = frozenset({
+    "content",
+    "env",
+    "message",
+    "output",
+    "prompt",
+    "result",
+    "secret",
+    "stderr",
+    "stdout",
+    "text",
+})
+_SENSITIVE_PROMETHEUS_VALUE_PARTS = frozenset({
+    "content",
+    "env",
+    "message",
+    "output",
+    "prompt",
+    "result",
+    "secret",
+    "stderr",
+    "stdout",
+    "text",
+})
+_FORBIDDEN_PROMETHEUS_LABELS = frozenset({
+    "run_id",
+    "schedule_id",
+    "session_id",
+    "signal_id",
+    "template_id",
+    "node_id",
+    "task_id",
+    "trace_id",
+    "topic_id",
+    "event_id",
+    "executor_id",
+    "executor_run_id",
+    "interaction_id",
+    "job_name",
+    "launch_id",
+    "pod_name",
+    "tool_call_id",
+    "workflow_name",
+    "file_path",
+    "prompt",
+    "message",
+    "content",
+    "command_output",
+    "secret",
+})
+_PROMETHEUS_ALLOWED_ATTRIBUTE_LABELS = frozenset({
+    "action_kind",
+    "action_status",
+    "cache_hit",
+    "error_type",
+    "executor_kind",
+    "eval_status",
+    "hitl_status",
+    "model",
+    "operation",
+    "policy_decision",
+    "provider",
+    "risk_level",
+    "schedule_kind",
+    "schedule_status",
+    "signal_kind",
+    "signal_status",
+    "source_kind",
+    "stage",
+    "status",
+    "storage_status",
+    "task_kind",
+    "task_profile",
+    "task_status",
+    "template_kind",
+    "template_profile",
+    "command_category",
+    "command_policy",
+    "command_status",
+    "tool_name",
+    "node_kind",
+    "node_profile",
+    "node_status",
+    "topic_kind",
+    "topic_profile",
+    "topic_status",
+    "trigger_kind",
+})
 _PROMETHEUS_ATTRIBUTE_LABEL_ALIASES = {
     "retrieval.cache_hit": "cache_hit",
     "retrieval.source_kind": "source_kind",
 }
 _PROMETHEUS_RESERVED_LABELS = frozenset({"event", "span", "status"})
-_PROMETHEUS_KNOWN_SPAN_NAMES = frozenset(
-    {
-        "action.execute",
-        "action_safety.action",
-        "context_pack.build",
-        "context_pack.render",
-        "kb.index_failure",
-        "kb.index_repo",
-        "kb.query",
-        "llm.generation",
-        "runtime.stage.apply_directives",
-        "runtime.stage.build_context",
-        "runtime.stage.dispatch",
-        "runtime.stage.load_state",
-        "runtime.stage.render",
-        "runtime.stage.run_model",
-        "runtime.stage.save_state",
-        "tool.call",
-        "retrieval.kb.search",
-    }
-)
-_PROMETHEUS_KNOWN_EVENT_NAMES = frozenset(
-    {
-        "action_safety.action",
-        "action.completed",
-        "action.failed",
-        "action.started",
-        "runtime.started",
-        "tool.call.completed",
-    }
-)
+_PROMETHEUS_KNOWN_SPAN_NAMES = frozenset({
+    "action.execute",
+    "action_safety.action",
+    "context_pack.build",
+    "context_pack.render",
+    "kb.index_failure",
+    "kb.index_repo",
+    "kb.query",
+    "llm.generation",
+    "runtime.stage.apply_directives",
+    "runtime.stage.build_context",
+    "runtime.stage.dispatch",
+    "runtime.stage.load_state",
+    "runtime.stage.render",
+    "runtime.stage.run_model",
+    "runtime.stage.save_state",
+    "tool.call",
+    "retrieval.kb.search",
+})
+_PROMETHEUS_KNOWN_EVENT_NAMES = frozenset({
+    "action_safety.action",
+    "action.completed",
+    "action.failed",
+    "action.started",
+    "runtime.started",
+    "tool.call.completed",
+})
 _PROMETHEUS_LABEL_VALUE_ALLOWLISTS = {
-    "action_kind": frozenset(
-        {
-            "approval",
-            "command",
-            "command_policy",
-            "file_edit",
-            "patch",
-            "restore",
-            "validation",
-        }
-    ),
-    "action_status": frozenset(
-        {
-            "allowed",
-            "approval_required",
-            "completed",
-            "denied",
-            "failed",
-            "started",
-        }
-    ),
+    "action_kind": frozenset({
+        "approval",
+        "command",
+        "command_policy",
+        "file_edit",
+        "patch",
+        "restore",
+        "validation",
+    }),
+    "action_status": frozenset({
+        "allowed",
+        "approval_required",
+        "completed",
+        "denied",
+        "failed",
+        "started",
+    }),
     "cache_hit": frozenset({"false", "true"}),
+    "executor_kind": frozenset({
+        "local",
+        "docker",
+        "kubernetes_job",
+        "argo_workflow",
+        "fixture",
+        "unknown",
+    }),
     "eval_status": frozenset({"failed", "passed", "skipped"}),
     "hitl_status": frozenset({"approved", "rejected", "requested", "timed_out"}),
-    "operation": frozenset(
-        {
-            "checkpoint_load",
-            "checkpoint_save",
-            "session_load",
-            "session_save",
-            "tape_append",
-            "tape_load",
-        }
-    ),
+    "operation": frozenset({
+        "checkpoint_load",
+        "checkpoint_save",
+        "session_load",
+        "session_save",
+        "tape_append",
+        "tape_load",
+    }),
     "policy_decision": frozenset({"allow", "approval_required", "deny"}),
     "risk_level": frozenset({"low", "medium", "high"}),
     "schedule_kind": frozenset({"interval", "manual", "once", "unknown"}),
@@ -188,24 +185,26 @@ _PROMETHEUS_LABEL_VALUE_ALLOWLISTS = {
     "signal_kind": frozenset({"repo_activity", "unknown"}),
     "signal_status": frozenset({"consumed", "ignored", "new", "planned"}),
     "source_kind": frozenset({"kb", "kb_chunk", "repo_file", "test_failure"}),
-    "stage": frozenset(
-        {
-            "apply_directives",
-            "build_context",
-            "dispatch",
-            "load_state",
-            "render",
-            "run_model",
-            "save_state",
-        }
-    ),
+    "stage": frozenset({
+        "apply_directives",
+        "build_context",
+        "dispatch",
+        "load_state",
+        "render",
+        "run_model",
+        "save_state",
+    }),
     "status": frozenset({"ok", "error", "started", "completed", "failed"}),
     "storage_status": frozenset({"ok", "error"}),
     "task_kind": frozenset({"maintenance", "unknown"}),
     "task_profile": frozenset({"ci", "demo", "local", "unknown"}),
-    "task_status": frozenset(
-        {"pending", "running", "completed", "failed", "cancelled"}
-    ),
+    "task_status": frozenset({
+        "pending",
+        "running",
+        "completed",
+        "failed",
+        "cancelled",
+    }),
     "template_kind": frozenset({"maintenance", "unknown"}),
     "template_profile": frozenset({"ci", "demo", "local", "unknown"}),
     "command_category": frozenset({"analysis", "report", "validation", "unknown"}),
@@ -213,23 +212,55 @@ _PROMETHEUS_LABEL_VALUE_ALLOWLISTS = {
     "command_status": frozenset({"declared", "disabled", "unknown"}),
     "node_kind": frozenset({"analysis", "report", "validation", "unknown"}),
     "node_profile": frozenset({"ci", "demo", "default", "local", "unknown"}),
-    "node_status": frozenset(
-        {"pending", "ready", "running", "completed", "failed", "skipped"}
-    ),
+    "node_status": frozenset({
+        "pending",
+        "ready",
+        "running",
+        "completed",
+        "failed",
+        "skipped",
+    }),
     "topic_kind": frozenset({"coding", "unknown"}),
     "topic_profile": frozenset({"ci", "demo", "local", "unknown"}),
     "topic_status": frozenset({"open", "finalized", "aborted"}),
     "trigger_kind": frozenset({"proactive_signal", "schedule", "unknown"}),
 }
-_BEE_LAUNCH_SOURCES: Final[frozenset[str]] = frozenset(
-    {"manual", "schedule", "proactive_signal"}
-)
-_BEE_LAUNCH_STATUSES: Final[frozenset[str]] = frozenset(
-    {"planned", "launching", "launched", "failed", "cancelled"}
-)
-_BEE_PROACTIVE_SIGNAL_KINDS: Final[frozenset[str]] = frozenset(
-    {"repo_activity", "unknown"}
-)
+_BEE_LAUNCH_SOURCES: Final[frozenset[str]] = frozenset({
+    "manual",
+    "schedule",
+    "proactive_signal",
+})
+_BEE_LAUNCH_STATUSES: Final[frozenset[str]] = frozenset({
+    "planned",
+    "launching",
+    "launched",
+    "failed",
+    "cancelled",
+})
+_BEE_PROACTIVE_SIGNAL_KINDS: Final[frozenset[str]] = frozenset({
+    "repo_activity",
+    "unknown",
+})
+_EXECUTOR_KINDS: Final[frozenset[str]] = frozenset({
+    "local",
+    "docker",
+    "kubernetes_job",
+    "argo_workflow",
+    "fixture",
+    "unknown",
+})
+_EXECUTOR_STATUSES: Final[frozenset[str]] = frozenset({
+    "available",
+    "cancelled",
+    "disabled",
+    "failed",
+    "planned",
+    "running",
+    "submitted",
+    "succeeded",
+    "unavailable",
+    "unknown",
+})
 _PROMETHEUS_HISTOGRAM_BUCKETS = (5.0, 10.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 5000.0)
 _PROMETHEUS_HTTP_HISTOGRAM_BUCKETS = (
     1.0,
@@ -242,9 +273,17 @@ _PROMETHEUS_HTTP_HISTOGRAM_BUCKETS = (
     1000.0,
     5000.0,
 )
-_PROMETHEUS_HTTP_METHODS = frozenset(
-    {"CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "TRACE"}
-)
+_PROMETHEUS_HTTP_METHODS = frozenset({
+    "CONNECT",
+    "DELETE",
+    "GET",
+    "HEAD",
+    "OPTIONS",
+    "PATCH",
+    "POST",
+    "PUT",
+    "TRACE",
+})
 _LABEL_VALUE_PATTERN = re.compile(r"[^a-zA-Z0-9_.:-]+")
 
 
@@ -577,18 +616,48 @@ class PrometheusMetricsRecorder:
                     },
                 )
 
+    def record_executor_run(
+        self,
+        *,
+        executor_kind: str,
+        status: str,
+        duration_ms: float,
+    ) -> None:
+        labels = {
+            "executor_kind": _prometheus_metric_part(executor_kind, _EXECUTOR_KINDS),
+            "status": _prometheus_metric_part(status, _EXECUTOR_STATUSES),
+        }
+        with self._lock:
+            self._inc("executor_runs_total", labels)
+            self._observe(
+                "executor_run_duration_seconds",
+                labels,
+                max(0.0, float(duration_ms)) / 1000.0,
+            )
+
+    def record_executor_capability(
+        self,
+        *,
+        executor_kind: str,
+        status: str,
+    ) -> None:
+        labels = {
+            "executor_kind": _prometheus_metric_part(executor_kind, _EXECUTOR_KINDS),
+            "status": _prometheus_metric_part(status, _EXECUTOR_STATUSES),
+        }
+        with self._lock:
+            self._set("executor_capability_status", labels, 1.0)
+
     def exposition_text(self) -> str:
         lines: list[str] = []
         with self._lock:
             span_counters = self._span_counters
             event_counters = self._event_counters
             if span_counters:
-                lines.extend(
-                    (
-                        "# HELP coding_agent_observation_spans_total Observation spans recorded.",
-                        "# TYPE coding_agent_observation_spans_total counter",
-                    )
-                )
+                lines.extend((
+                    "# HELP coding_agent_observation_spans_total Observation spans recorded.",
+                    "# TYPE coding_agent_observation_spans_total counter",
+                ))
                 lines.extend(
                     self._format_metric(
                         "coding_agent_observation_spans_total", span_counters
@@ -596,20 +665,16 @@ class PrometheusMetricsRecorder:
                 )
             observation_histograms = self._observation_span_histograms
             if observation_histograms:
-                lines.extend(
-                    (
-                        "# HELP coding_agent_observation_span_duration_ms Observation span duration in milliseconds.",
-                        "# TYPE coding_agent_observation_span_duration_ms histogram",
-                    )
-                )
+                lines.extend((
+                    "# HELP coding_agent_observation_span_duration_ms Observation span duration in milliseconds.",
+                    "# TYPE coding_agent_observation_span_duration_ms histogram",
+                ))
                 lines.extend(self._format_histograms(histograms=observation_histograms))
             if event_counters:
-                lines.extend(
-                    (
-                        "# HELP coding_agent_observation_events_total Observation events recorded.",
-                        "# TYPE coding_agent_observation_events_total counter",
-                    )
-                )
+                lines.extend((
+                    "# HELP coding_agent_observation_events_total Observation events recorded.",
+                    "# TYPE coding_agent_observation_events_total counter",
+                ))
                 lines.extend(
                     self._format_metric(
                         "coding_agent_observation_events_total",
@@ -617,12 +682,10 @@ class PrometheusMetricsRecorder:
                     )
                 )
             if self._gauges:
-                lines.extend(
-                    (
-                        "# HELP coding_agent_observation_last_event_timestamp_seconds Last observation event timestamp.",
-                        "# TYPE coding_agent_observation_last_event_timestamp_seconds gauge",
-                    )
-                )
+                lines.extend((
+                    "# HELP coding_agent_observation_last_event_timestamp_seconds Last observation event timestamp.",
+                    "# TYPE coding_agent_observation_last_event_timestamp_seconds gauge",
+                ))
                 lines.extend(
                     self._format_metric(
                         "coding_agent_observation_last_event_timestamp_seconds",
@@ -632,12 +695,10 @@ class PrometheusMetricsRecorder:
             http_counters = self._http_request_counters
             http_histograms = self._http_request_histograms
             if http_counters:
-                lines.extend(
-                    (
-                        "# HELP coding_agent_http_requests_total HTTP requests handled.",
-                        "# TYPE coding_agent_http_requests_total counter",
-                    )
-                )
+                lines.extend((
+                    "# HELP coding_agent_http_requests_total HTTP requests handled.",
+                    "# TYPE coding_agent_http_requests_total counter",
+                ))
                 lines.extend(
                     self._format_metric(
                         "coding_agent_http_requests_total",
@@ -645,12 +706,10 @@ class PrometheusMetricsRecorder:
                     )
                 )
             if http_histograms:
-                lines.extend(
-                    (
-                        "# HELP coding_agent_http_request_duration_ms HTTP request duration in milliseconds.",
-                        "# TYPE coding_agent_http_request_duration_ms histogram",
-                    )
-                )
+                lines.extend((
+                    "# HELP coding_agent_http_request_duration_ms HTTP request duration in milliseconds.",
+                    "# TYPE coding_agent_http_request_duration_ms histogram",
+                ))
                 lines.extend(
                     self._format_histograms(
                         histograms=http_histograms,
@@ -660,36 +719,30 @@ class PrometheusMetricsRecorder:
                 )
             domain_counters = self._domain_counters
             if domain_counters:
-                lines.extend(
-                    (
-                        "# HELP coding_agent_evaluation_case_results_total Evaluation case results.",
-                        "# TYPE coding_agent_evaluation_case_results_total counter",
-                    )
-                )
+                lines.extend((
+                    "# HELP coding_agent_evaluation_case_results_total Evaluation case results.",
+                    "# TYPE coding_agent_evaluation_case_results_total counter",
+                ))
                 lines.extend(
                     self._format_metric(
                         "coding_agent_evaluation_case_results_total",
                         domain_counters,
                     )
                 )
-                lines.extend(
-                    (
-                        "# HELP coding_agent_hitl_interactions_total Human interaction outcomes.",
-                        "# TYPE coding_agent_hitl_interactions_total counter",
-                    )
-                )
+                lines.extend((
+                    "# HELP coding_agent_hitl_interactions_total Human interaction outcomes.",
+                    "# TYPE coding_agent_hitl_interactions_total counter",
+                ))
                 lines.extend(
                     self._format_metric(
                         "coding_agent_hitl_interactions_total",
                         domain_counters,
                     )
                 )
-                lines.extend(
-                    (
-                        "# HELP coding_agent_storage_operations_total Storage operations.",
-                        "# TYPE coding_agent_storage_operations_total counter",
-                    )
-                )
+                lines.extend((
+                    "# HELP coding_agent_storage_operations_total Storage operations.",
+                    "# TYPE coding_agent_storage_operations_total counter",
+                ))
                 lines.extend(
                     self._format_metric(
                         "coding_agent_storage_operations_total",
@@ -698,12 +751,10 @@ class PrometheusMetricsRecorder:
                 )
             storage_histograms = self._storage_operation_histograms
             if storage_histograms:
-                lines.extend(
-                    (
-                        "# HELP coding_agent_storage_operation_duration_ms Storage operation duration in milliseconds.",
-                        "# TYPE coding_agent_storage_operation_duration_ms histogram",
-                    )
-                )
+                lines.extend((
+                    "# HELP coding_agent_storage_operation_duration_ms Storage operation duration in milliseconds.",
+                    "# TYPE coding_agent_storage_operation_duration_ms histogram",
+                ))
                 lines.extend(
                     self._format_histograms(
                         histograms=storage_histograms,
@@ -714,33 +765,27 @@ class PrometheusMetricsRecorder:
             bee_launch_counters = self._bee_launch_counters
             bee_launch_histograms = self._bee_launch_histograms
             if bee_launch_counters:
-                lines.extend(
-                    (
-                        "# HELP bee_launches_total Bee launches by source and status.",
-                        "# TYPE bee_launches_total counter",
-                    )
-                )
+                lines.extend((
+                    "# HELP bee_launches_total Bee launches by source and status.",
+                    "# TYPE bee_launches_total counter",
+                ))
                 lines.extend(
                     self._format_metric("bee_launches_total", bee_launch_counters)
                 )
-                lines.extend(
-                    (
-                        "# HELP scheduled_bee_launches_total Scheduled Bee launches.",
-                        "# TYPE scheduled_bee_launches_total counter",
-                    )
-                )
+                lines.extend((
+                    "# HELP scheduled_bee_launches_total Scheduled Bee launches.",
+                    "# TYPE scheduled_bee_launches_total counter",
+                ))
                 lines.extend(
                     self._format_metric(
                         "scheduled_bee_launches_total",
                         bee_launch_counters,
                     )
                 )
-                lines.extend(
-                    (
-                        "# HELP proactive_bee_launches_total Proactive Bee launches.",
-                        "# TYPE proactive_bee_launches_total counter",
-                    )
-                )
+                lines.extend((
+                    "# HELP proactive_bee_launches_total Proactive Bee launches.",
+                    "# TYPE proactive_bee_launches_total counter",
+                ))
                 lines.extend(
                     self._format_metric(
                         "proactive_bee_launches_total",
@@ -748,17 +793,49 @@ class PrometheusMetricsRecorder:
                     )
                 )
             if bee_launch_histograms:
-                lines.extend(
-                    (
-                        "# HELP bee_launch_duration_seconds Bee launch duration in seconds.",
-                        "# TYPE bee_launch_duration_seconds histogram",
-                    )
-                )
+                lines.extend((
+                    "# HELP bee_launch_duration_seconds Bee launch duration in seconds.",
+                    "# TYPE bee_launch_duration_seconds histogram",
+                ))
                 lines.extend(
                     self._format_histograms(
                         histograms=bee_launch_histograms,
                         metric_name="bee_launch_duration_seconds",
                         buckets=_PROMETHEUS_HISTOGRAM_BUCKETS,
+                    )
+                )
+            executor_counters = self._executor_counters
+            executor_histograms = self._executor_histograms
+            executor_capabilities = self._executor_capability_gauges
+            if executor_counters:
+                lines.extend((
+                    "# HELP executor_runs_total External executor runs by kind and status.",
+                    "# TYPE executor_runs_total counter",
+                ))
+                lines.extend(
+                    self._format_metric("executor_runs_total", executor_counters)
+                )
+            if executor_histograms:
+                lines.extend((
+                    "# HELP executor_run_duration_seconds External executor run duration in seconds.",
+                    "# TYPE executor_run_duration_seconds histogram",
+                ))
+                lines.extend(
+                    self._format_histograms(
+                        histograms=executor_histograms,
+                        metric_name="executor_run_duration_seconds",
+                        buckets=_PROMETHEUS_HISTOGRAM_BUCKETS,
+                    )
+                )
+            if executor_capabilities:
+                lines.extend((
+                    "# HELP executor_capability_status External executor capability status.",
+                    "# TYPE executor_capability_status gauge",
+                ))
+                lines.extend(
+                    self._format_metric(
+                        "executor_capability_status",
+                        executor_capabilities,
                     )
                 )
         return "\n".join(lines) + ("\n" if lines else "")
@@ -863,6 +940,36 @@ class PrometheusMetricsRecorder:
             key: value
             for key, value in self._histograms.items()
             if key[0] == "bee_launch_duration_seconds"
+        }
+
+    @property
+    def _executor_counters(
+        self,
+    ) -> dict[tuple[str, tuple[tuple[str, str], ...]], float]:
+        return {
+            key: value
+            for key, value in self._counters.items()
+            if key[0] == "executor_runs_total"
+        }
+
+    @property
+    def _executor_histograms(
+        self,
+    ) -> dict[tuple[str, tuple[tuple[str, str], ...]], list[float]]:
+        return {
+            key: value
+            for key, value in self._histograms.items()
+            if key[0] == "executor_run_duration_seconds"
+        }
+
+    @property
+    def _executor_capability_gauges(
+        self,
+    ) -> dict[tuple[str, tuple[tuple[str, str], ...]], float]:
+        return {
+            key: value
+            for key, value in self._gauges.items()
+            if key[0] == "executor_capability_status"
         }
 
     def _inc(self, metric: str, labels: Mapping[str, str], amount: float = 1.0) -> None:
@@ -1007,6 +1114,36 @@ def record_bee_launch_metric(
             status=status,
             duration_ms=duration_ms,
             proactive_kind=proactive_kind,
+        )
+    except Exception:
+        return
+
+
+def record_executor_run_metric(
+    *,
+    executor_kind: str,
+    status: str,
+    duration_ms: float,
+) -> None:
+    try:
+        _DEFAULT_PROMETHEUS_RECORDER.record_executor_run(
+            executor_kind=executor_kind,
+            status=status,
+            duration_ms=duration_ms,
+        )
+    except Exception:
+        return
+
+
+def record_executor_capability_metric(
+    *,
+    executor_kind: str,
+    status: str,
+) -> None:
+    try:
+        _DEFAULT_PROMETHEUS_RECORDER.record_executor_capability(
+            executor_kind=executor_kind,
+            status=status,
         )
     except Exception:
         return

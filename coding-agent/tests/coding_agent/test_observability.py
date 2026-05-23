@@ -14,6 +14,8 @@ from coding_agent.observability import (
     PrometheusMetricsRecorder,
     build_observation_sink,
     prometheus_metrics_text,
+    record_executor_capability_metric,
+    record_executor_run_metric,
     record_evaluation_case_metric,
     record_hitl_interaction_metric,
     record_http_request_metric,
@@ -428,6 +430,111 @@ def test_bee_workspace_metrics_allow_low_cardinality_labels_without_template_id(
     assert "raw_prompt_node" not in text
 
 
+def test_executor_metrics_omit_high_cardinality_labels() -> None:
+    recorder = PrometheusMetricsRecorder()
+    sink = PrometheusMetricsObservationSink(recorder=recorder)
+
+    sink.record_span(
+        SpanRecord(
+            name="runtime.stage.dispatch",
+            status="ok",
+            attributes={
+                "executor_run_id": "executor-run-alpha",
+                "executor_id": "executor-instance-alpha",
+                "launch_id": "launch-alpha",
+                "task_id": "bee-task-alpha",
+                "node_id": "node-validate",
+                "topic_id": "topic-alpha",
+                "pod_name": "pod-alpha",
+                "job_name": "job-alpha",
+                "workflow_name": "workflow-alpha",
+                "executor_kind": "kubernetes_job",
+            },
+            duration_ms=1,
+        )
+    )
+    recorder.record_executor_run(
+        executor_kind="kubernetes_job",
+        status="succeeded",
+        duration_ms=15,
+    )
+    recorder.record_executor_capability(
+        executor_kind="argo_workflow",
+        status="available",
+    )
+
+    text = recorder.exposition_text()
+
+    assert 'executor_kind="kubernetes_job"' in text
+    assert 'executor_kind="argo_workflow"' in text
+    assert 'status="succeeded"' in text
+    assert 'status="available"' in text
+    assert "executor_runs_total" in text
+    assert "executor_run_duration_seconds" in text
+    assert "executor_capability_status" in text
+    for forbidden in (
+        "executor_run_id",
+        "executor_id",
+        "launch_id",
+        "task_id",
+        "node_id",
+        "topic_id",
+        "pod_name",
+        "job_name",
+        "workflow_name",
+        "executor-run-alpha",
+        "executor-instance-alpha",
+        "launch-alpha",
+        "bee-task-alpha",
+        "node-validate",
+        "topic-alpha",
+        "pod-alpha",
+        "job-alpha",
+        "workflow-alpha",
+    ):
+        assert forbidden not in text
+
+
+def test_executor_span_metrics_normalize_unlisted_executor_kind() -> None:
+    recorder = PrometheusMetricsRecorder()
+    sink = PrometheusMetricsObservationSink(recorder=recorder)
+
+    sink.record_span(
+        SpanRecord(
+            name="runtime.stage.dispatch",
+            status="ok",
+            attributes={"executor_kind": "customer_cluster_pool"},
+            duration_ms=1,
+        )
+    )
+
+    text = recorder.exposition_text()
+
+    assert 'executor_kind="unknown"' in text
+    assert "customer_cluster_pool" not in text
+
+
+def test_executor_metrics_record_on_default_recorder() -> None:
+    reset_prometheus_metrics()
+
+    record_executor_run_metric(
+        executor_kind="local",
+        status="succeeded",
+        duration_ms=20,
+    )
+    record_executor_capability_metric(
+        executor_kind="docker",
+        status="disabled",
+    )
+
+    text = prometheus_metrics_text()
+
+    assert 'executor_runs_total{executor_kind="local",status="succeeded"} 1' in text
+    assert (
+        'executor_capability_status{executor_kind="docker",status="disabled"} 1' in text
+    )
+
+
 def test_prometheus_metrics_normalize_unsafe_allowed_values_and_reserved_labels() -> (
     None
 ):
@@ -754,64 +861,56 @@ def test_otlp_sink_fail_opens_when_export_fails() -> None:
 
 
 def test_build_observation_sink_builds_otlp_http_sink() -> None:
-    sink = build_observation_sink(
-        {
-            "enabled": True,
-            "backend": "otlp_http",
-            "endpoint": "https://otel.example.test/api/public/otel",
-            "headers": {"x-test": "yes"},
-        }
-    )
+    sink = build_observation_sink({
+        "enabled": True,
+        "backend": "otlp_http",
+        "endpoint": "https://otel.example.test/api/public/otel",
+        "headers": {"x-test": "yes"},
+    })
 
     assert isinstance(sink, OtlpHttpObservationSink)
     assert sink.endpoint == "https://otel.example.test/api/public/otel/v1/traces"
 
 
 def test_build_observation_sink_supports_tracing_only() -> None:
-    sink = build_observation_sink(
-        {
+    sink = build_observation_sink({
+        "enabled": True,
+        "tracing": {
             "enabled": True,
-            "tracing": {
-                "enabled": True,
-                "backend": "otlp_http",
-                "endpoint": "https://otel.example.test/api/public/otel",
-            },
-        }
-    )
+            "backend": "otlp_http",
+            "endpoint": "https://otel.example.test/api/public/otel",
+        },
+    })
 
     assert isinstance(sink, OtlpHttpObservationSink)
     assert sink.endpoint == "https://otel.example.test/api/public/otel/v1/traces"
 
 
 def test_build_observation_sink_supports_metrics_only() -> None:
-    sink = build_observation_sink(
-        {
+    sink = build_observation_sink({
+        "enabled": True,
+        "metrics": {
             "enabled": True,
-            "metrics": {
-                "enabled": True,
-                "backend": "prometheus",
-            },
-        }
-    )
+            "backend": "prometheus",
+        },
+    })
 
     assert isinstance(sink, PrometheusMetricsObservationSink)
 
 
 def test_build_observation_sink_supports_tracing_and_metrics() -> None:
-    sink = build_observation_sink(
-        {
+    sink = build_observation_sink({
+        "enabled": True,
+        "tracing": {
             "enabled": True,
-            "tracing": {
-                "enabled": True,
-                "backend": "otlp_http",
-                "endpoint": "https://otel.example.test/api/public/otel",
-            },
-            "metrics": {
-                "enabled": True,
-                "backend": "prometheus",
-            },
-        }
-    )
+            "backend": "otlp_http",
+            "endpoint": "https://otel.example.test/api/public/otel",
+        },
+        "metrics": {
+            "enabled": True,
+            "backend": "prometheus",
+        },
+    })
 
     assert isinstance(sink, CompositeObservationSink)
     assert len(sink.sinks) == 2
@@ -822,17 +921,15 @@ def test_build_observation_sink_supports_tracing_and_metrics() -> None:
 def test_build_observation_sink_preserves_flat_tracing_when_metrics_are_nested() -> (
     None
 ):
-    sink = build_observation_sink(
-        {
+    sink = build_observation_sink({
+        "enabled": True,
+        "backend": "otlp_http",
+        "endpoint": "https://otel.example.test/api/public/otel",
+        "metrics": {
             "enabled": True,
-            "backend": "otlp_http",
-            "endpoint": "https://otel.example.test/api/public/otel",
-            "metrics": {
-                "enabled": True,
-                "backend": "prometheus",
-            },
-        }
-    )
+            "backend": "prometheus",
+        },
+    })
 
     assert isinstance(sink, CompositeObservationSink)
     assert len(sink.sinks) == 2
@@ -850,13 +947,11 @@ def test_build_observation_sink_returns_none_when_disabled() -> None:
 def test_build_observation_sink_returns_noop_when_all_nested_backends_disabled() -> (
     None
 ):
-    sink = build_observation_sink(
-        {
-            "enabled": True,
-            "tracing": {"enabled": False},
-            "metrics": {"enabled": False},
-        }
-    )
+    sink = build_observation_sink({
+        "enabled": True,
+        "tracing": {"enabled": False},
+        "metrics": {"enabled": False},
+    })
 
     assert isinstance(sink, NoopObservationSink)
 
@@ -867,13 +962,11 @@ def test_build_observation_sink_builds_langfuse_basic_auth(
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
 
-    sink = build_observation_sink(
-        {
-            "enabled": True,
-            "backend": "langfuse",
-            "endpoint": "https://cloud.langfuse.com/api/public/otel",
-        }
-    )
+    sink = build_observation_sink({
+        "enabled": True,
+        "backend": "langfuse",
+        "endpoint": "https://cloud.langfuse.com/api/public/otel",
+    })
 
     assert isinstance(sink, OtlpHttpObservationSink)
     encoded = base64.b64encode(b"pk-test:sk-test").decode("ascii")
@@ -887,10 +980,8 @@ def test_build_observation_sink_rejects_missing_langfuse_secret(
     monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
 
     with pytest.raises(ValueError, match="LANGFUSE_SECRET_KEY"):
-        build_observation_sink(
-            {
-                "enabled": True,
-                "backend": "langfuse",
-                "endpoint": "https://cloud.langfuse.com/api/public/otel",
-            }
-        )
+        build_observation_sink({
+            "enabled": True,
+            "backend": "langfuse",
+            "endpoint": "https://cloud.langfuse.com/api/public/otel",
+        })

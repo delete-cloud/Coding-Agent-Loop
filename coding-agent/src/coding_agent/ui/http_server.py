@@ -39,6 +39,7 @@ from coding_agent.bee_workspace import (
     load_bee_workspace_command_intents,
 )
 from coding_agent.bee_launch import BeeLaunchRecord, PGBeeLaunchStore
+from coding_agent.external_executor import ExecutorRunRecord, PGExecutorRunStore
 from coding_agent.runtime_store import (
     AgentRunRecord,
     RunMessageSnapshotRecord,
@@ -96,6 +97,7 @@ from coding_agent.ui.developer_console import (
     ConsoleBeeRunArtifactSummary,
     ConsoleBeeTaskSummary,
     ConsoleBeeTemplateSummary,
+    ConsoleExecutorRunSummary,
     ConsoleCorrelationSummary,
     ConsoleContextEvidence,
     ConsoleContextSectionSummary,
@@ -1846,82 +1848,70 @@ def _wire_message_to_event(msg: WireMessage) -> dict[str, str]:
         case TurnEnd():
             return {
                 "event": "TurnEnd",
-                "data": json.dumps(
-                    {
-                        "session_id": msg.session_id,
-                        "agent_id": msg.agent_id,
-                        "turn_id": msg.turn_id,
-                        "completion_status": msg.completion_status,
-                        "timestamp": msg.timestamp.isoformat(),
-                    }
-                ),
+                "data": json.dumps({
+                    "session_id": msg.session_id,
+                    "agent_id": msg.agent_id,
+                    "turn_id": msg.turn_id,
+                    "completion_status": msg.completion_status,
+                    "timestamp": msg.timestamp.isoformat(),
+                }),
             }
         case TurnBegin():
             return {
                 "event": "TurnBegin",
-                "data": json.dumps(
-                    {
-                        "session_id": msg.session_id,
-                        "agent_id": msg.agent_id,
-                        "timestamp": msg.timestamp.isoformat(),
-                    }
-                ),
+                "data": json.dumps({
+                    "session_id": msg.session_id,
+                    "agent_id": msg.agent_id,
+                    "timestamp": msg.timestamp.isoformat(),
+                }),
             }
         case StreamDelta():
             return {
                 "event": "StreamDelta",
-                "data": json.dumps(
-                    {
-                        "session_id": msg.session_id,
-                        "agent_id": msg.agent_id,
-                        "content": msg.content,
-                        "role": msg.role,
-                        "timestamp": msg.timestamp.isoformat(),
-                    }
-                ),
+                "data": json.dumps({
+                    "session_id": msg.session_id,
+                    "agent_id": msg.agent_id,
+                    "content": msg.content,
+                    "role": msg.role,
+                    "timestamp": msg.timestamp.isoformat(),
+                }),
             }
         case ThinkingDelta():
             return {
                 "event": "ThinkingDelta",
-                "data": json.dumps(
-                    {
-                        "session_id": msg.session_id,
-                        "agent_id": msg.agent_id,
-                        "text": msg.text,
-                        "timestamp": msg.timestamp.isoformat(),
-                    }
-                ),
+                "data": json.dumps({
+                    "session_id": msg.session_id,
+                    "agent_id": msg.agent_id,
+                    "text": msg.text,
+                    "timestamp": msg.timestamp.isoformat(),
+                }),
             }
         case TurnStatusDelta():
             return {
                 "event": "TurnStatusDelta",
-                "data": json.dumps(
-                    {
-                        "session_id": msg.session_id,
-                        "agent_id": msg.agent_id,
-                        "phase": msg.phase,
-                        "elapsed_seconds": msg.elapsed_seconds,
-                        "tokens_in": msg.tokens_in,
-                        "tokens_out": msg.tokens_out,
-                        "model_name": msg.model_name,
-                        "context_percent": msg.context_percent,
-                        "timestamp": msg.timestamp.isoformat(),
-                    }
-                ),
+                "data": json.dumps({
+                    "session_id": msg.session_id,
+                    "agent_id": msg.agent_id,
+                    "phase": msg.phase,
+                    "elapsed_seconds": msg.elapsed_seconds,
+                    "tokens_in": msg.tokens_in,
+                    "tokens_out": msg.tokens_out,
+                    "model_name": msg.model_name,
+                    "context_percent": msg.context_percent,
+                    "timestamp": msg.timestamp.isoformat(),
+                }),
             }
         case ToolCallDelta():
             return {
                 "event": "ToolCallDelta",
-                "data": json.dumps(
-                    {
-                        "session_id": msg.session_id,
-                        "agent_id": msg.agent_id,
-                        "tool_name": msg.tool_name,
-                        "arguments": msg.arguments,
-                        "call_id": msg.call_id,
-                        "timestamp": msg.timestamp.isoformat(),
-                    }
-                ),
+                "data": json.dumps({
+                    "session_id": msg.session_id,
+                    "agent_id": msg.agent_id,
+                    "tool_name": msg.tool_name,
+                    "arguments": msg.arguments,
+                    "call_id": msg.call_id,
+                    "timestamp": msg.timestamp.isoformat(),
+                }),
             }
         case ToolResultDelta():
             return {
@@ -1931,101 +1921,83 @@ def _wire_message_to_event(msg: WireMessage) -> dict[str, str]:
         case ToolCallBegin():
             return {
                 "event": "ToolCallBegin",
-                "data": json.dumps(
-                    {
-                        "session_id": msg.session_id,
-                        "agent_id": msg.agent_id,
-                        "call_id": msg.call_id,
-                        "tool": msg.tool,
-                        "args": msg.args,
-                        "timestamp": msg.timestamp.isoformat(),
-                    }
-                ),
+                "data": json.dumps({
+                    "session_id": msg.session_id,
+                    "agent_id": msg.agent_id,
+                    "call_id": msg.call_id,
+                    "tool": msg.tool,
+                    "args": msg.args,
+                    "timestamp": msg.timestamp.isoformat(),
+                }),
             }
         case ToolCallEnd():
             return {
                 "event": "ToolCallEnd",
-                "data": json.dumps(
-                    {
-                        "session_id": msg.session_id,
-                        "agent_id": msg.agent_id,
-                        "call_id": msg.call_id,
-                        "result": msg.result,
-                        "timestamp": msg.timestamp.isoformat(),
-                    }
-                ),
+                "data": json.dumps({
+                    "session_id": msg.session_id,
+                    "agent_id": msg.agent_id,
+                    "call_id": msg.call_id,
+                    "result": msg.result,
+                    "timestamp": msg.timestamp.isoformat(),
+                }),
             }
         case ApprovalRequest():
             return {
                 "event": "ApprovalRequest",
-                "data": json.dumps(
-                    {
-                        "session_id": msg.session_id,
-                        "agent_id": msg.agent_id,
-                        "request_id": msg.request_id,
-                        "tool_call": {
-                            "tool_name": msg.tool_call.tool_name
-                            if msg.tool_call
-                            else "",
-                            "arguments": msg.tool_call.arguments
-                            if msg.tool_call
-                            else {},
-                            "call_id": msg.tool_call.call_id if msg.tool_call else "",
-                        },
-                        "timeout_seconds": msg.timeout_seconds,
-                        "timestamp": msg.timestamp.isoformat(),
-                    }
-                ),
+                "data": json.dumps({
+                    "session_id": msg.session_id,
+                    "agent_id": msg.agent_id,
+                    "request_id": msg.request_id,
+                    "tool_call": {
+                        "tool_name": msg.tool_call.tool_name if msg.tool_call else "",
+                        "arguments": msg.tool_call.arguments if msg.tool_call else {},
+                        "call_id": msg.tool_call.call_id if msg.tool_call else "",
+                    },
+                    "timeout_seconds": msg.timeout_seconds,
+                    "timestamp": msg.timestamp.isoformat(),
+                }),
             }
         case ApprovalResponse():
             return {
                 "event": "ApprovalResponse",
-                "data": json.dumps(
-                    {
-                        "session_id": msg.session_id,
-                        "agent_id": msg.agent_id,
-                        "request_id": msg.request_id,
-                        "approved": msg.approved,
-                        "feedback": msg.feedback,
-                        "timestamp": msg.timestamp.isoformat(),
-                    }
-                ),
+                "data": json.dumps({
+                    "session_id": msg.session_id,
+                    "agent_id": msg.agent_id,
+                    "request_id": msg.request_id,
+                    "approved": msg.approved,
+                    "feedback": msg.feedback,
+                    "timestamp": msg.timestamp.isoformat(),
+                }),
             }
         case ErrorMessage():
             return {
                 "event": "ErrorMessage",
-                "data": json.dumps(
-                    {
-                        "session_id": msg.session_id,
-                        "agent_id": msg.agent_id,
-                        "content": msg.content,
-                        "timestamp": msg.timestamp.isoformat(),
-                    }
-                ),
+                "data": json.dumps({
+                    "session_id": msg.session_id,
+                    "agent_id": msg.agent_id,
+                    "content": msg.content,
+                    "timestamp": msg.timestamp.isoformat(),
+                }),
             }
         case StepInfo():
             return {
                 "event": "StepInfo",
-                "data": json.dumps(
-                    {
-                        "session_id": msg.session_id,
-                        "agent_id": msg.agent_id,
-                        "step_number": msg.step_number,
-                        "max_steps": msg.max_steps,
-                        "timestamp": msg.timestamp.isoformat(),
-                    }
-                ),
+                "data": json.dumps({
+                    "session_id": msg.session_id,
+                    "agent_id": msg.agent_id,
+                    "step_number": msg.step_number,
+                    "max_steps": msg.max_steps,
+                    "timestamp": msg.timestamp.isoformat(),
+                }),
             }
         case _:
             return {
                 "event": "Unknown",
-                "data": json.dumps(
-                    {
-                        "type": type(msg).__name__,
-                        "session_id": getattr(msg, "session_id", None),
-                        "agent_id": getattr(msg, "agent_id", None),
-                    }
-                ),
+                "data": json.dumps({
+                    "type": type(msg).__name__,
+                    "session_id": getattr(msg, "session_id", None),
+                    "agent_id": getattr(msg, "agent_id", None),
+                }),
             }
 
 
@@ -2343,13 +2315,11 @@ async def send_prompt(
             logger.exception("Error during turn")
             error_data = {
                 "event": "Error",
-                "data": json.dumps(
-                    {
-                        "session_id": session_id,
-                        "error": str(e),
-                        "timestamp": datetime.now().isoformat(),
-                    }
-                ),
+                "data": json.dumps({
+                    "session_id": session_id,
+                    "error": str(e),
+                    "timestamp": datetime.now().isoformat(),
+                }),
             }
             await _broadcast_event(session, error_data)
             yield error_data
@@ -2526,9 +2496,10 @@ async def cancel_session_turn(
             session,
             {
                 "event": "TurnCancelling",
-                "data": json.dumps(
-                    {"session_id": session_id, "turn_id": result.turn_id}
-                ),
+                "data": json.dumps({
+                    "session_id": session_id,
+                    "turn_id": result.turn_id,
+                }),
             },
         )
 
@@ -3354,6 +3325,7 @@ async def _console_bee_page(auth_context: AuthContext | None) -> ConsoleBeePage:
         tasks=tuple(sorted(tasks_by_id.values(), key=lambda item: item.task_id)),
         nodes=tuple(sorted(nodes, key=lambda item: (item.task_id, item.node_id))),
         launches=launch_summaries,
+        executor_runs=await _executor_run_summaries(auth_context, runs),
         templates=(
             _console_bee_workspace_template_summaries()
             if can_view_workspace_artifacts
@@ -3370,6 +3342,81 @@ async def _console_bee_page(auth_context: AuthContext | None) -> ConsoleBeePage:
             else ()
         ),
     )
+
+
+async def _executor_run_summaries(
+    auth_context: AuthContext | None,
+    runs: Iterable[AgentRunRecord],
+) -> tuple[ConsoleExecutorRunSummary, ...]:
+    summaries = {
+        summary.executor_run_id: summary
+        for summary in await _executor_run_summaries_from_store(auth_context, runs)
+    }
+    for summary in _executor_run_summaries_from_runs(runs):
+        summaries.setdefault(summary.executor_run_id, summary)
+    return tuple(sorted(summaries.values(), key=lambda item: item.executor_run_id))
+
+
+async def _executor_run_summaries_from_store(
+    auth_context: AuthContext | None,
+    runs: Iterable[AgentRunRecord],
+) -> tuple[ConsoleExecutorRunSummary, ...]:
+    store = _console_executor_run_store()
+    if store is None:
+        return ()
+    visible_task_ids = {
+        task_id
+        for run in runs
+        if (task_id := safe_id_value(run.metadata.get("task_id"))) is not None
+    }
+    try:
+        records = await store.list_executor_runs(limit=100)
+    except Exception:
+        logger.exception("Console executor run store list failed")
+        return ()
+    if auth_context is not None and auth_context.scope != "admin":
+        records = [record for record in records if record.task_id in visible_task_ids]
+    return tuple(_executor_run_summary_from_record(record) for record in records)
+
+
+def _executor_run_summary_from_record(
+    record: ExecutorRunRecord,
+) -> ConsoleExecutorRunSummary:
+    return ConsoleExecutorRunSummary(
+        executor_run_id=safe_id_value(record.executor_run_id) or "unknown",
+        executor_kind=safe_label_value(record.executor_kind) or "unknown",
+        status=safe_label_value(record.status) or "unknown",
+        task_id=safe_id_value(record.task_id),
+        node_id=safe_id_value(record.node_id),
+        launch_id=safe_id_value(record.launch_id),
+        topic_id=safe_id_value(record.topic_id),
+        capability_status=safe_label_value(record.metadata.get("capability_status")),
+        sanitized_summary=safe_error_summary(record.sanitized_summary),
+    )
+
+
+def _executor_run_summaries_from_runs(
+    runs: Iterable[AgentRunRecord],
+) -> tuple[ConsoleExecutorRunSummary, ...]:
+    summaries: dict[str, ConsoleExecutorRunSummary] = {}
+    for run in runs:
+        metadata = run.metadata
+        executor_run_id = safe_id_value(metadata.get("executor_run_id"))
+        executor_kind = safe_label_value(metadata.get("executor_kind"))
+        if executor_run_id is None or executor_kind is None:
+            continue
+        summaries[executor_run_id] = ConsoleExecutorRunSummary(
+            executor_run_id=executor_run_id,
+            executor_kind=executor_kind,
+            status=safe_label_value(metadata.get("executor_status")) or run.status,
+            task_id=safe_id_value(metadata.get("task_id")),
+            node_id=safe_id_value(metadata.get("node_id")),
+            launch_id=safe_id_value(metadata.get("launch_id")),
+            topic_id=safe_id_value(metadata.get("topic_id")),
+            capability_status=safe_label_value(metadata.get("executor_capability")),
+            sanitized_summary=safe_error_summary(metadata.get("executor_summary")),
+        )
+    return tuple(sorted(summaries.values(), key=lambda item: item.executor_run_id))
 
 
 async def _bee_launch_summaries(
@@ -3531,6 +3578,7 @@ def _console_bee_run_artifact_summary(
         run_count=record.run_count,
         action_count=record.action_count,
         validation_count=record.validation_count,
+        executor_count=record.executor_count,
         has_report=record.has_report,
         has_memory_candidates=record.has_memory_candidates,
     )
@@ -3663,6 +3711,21 @@ def _console_bee_launch_store() -> PGBeeLaunchStore | None:
         return PGBeeLaunchStore(pool=session_manager.pg_pool)
     except Exception:
         logger.exception("Unable to initialize console Bee launch store")
+        return None
+
+
+def _console_executor_run_store() -> PGExecutorRunStore | None:
+    try:
+        storage_config = _load_storage_config()
+    except Exception:
+        logger.exception("Unable to load storage config for console executor store")
+        return None
+    if not _storage_uses_pg_http_sessions(storage_config):
+        return None
+    try:
+        return PGExecutorRunStore(pool=session_manager.pg_pool)
+    except Exception:
+        logger.exception("Unable to initialize console executor store")
         return None
 
 

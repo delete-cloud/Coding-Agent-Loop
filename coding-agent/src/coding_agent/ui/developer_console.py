@@ -341,6 +341,7 @@ class ConsoleBeeRunArtifactSummary:
     run_count: int
     action_count: int
     validation_count: int
+    executor_count: int
     has_report: bool
     has_memory_candidates: bool
 
@@ -373,6 +374,19 @@ class ConsoleBeeLaunchSummary:
 
 
 @dataclass(frozen=True)
+class ConsoleExecutorRunSummary:
+    executor_run_id: str
+    executor_kind: str
+    status: str
+    task_id: str | None
+    node_id: str | None
+    launch_id: str | None
+    topic_id: str | None
+    capability_status: str | None = None
+    sanitized_summary: str | None = None
+
+
+@dataclass(frozen=True)
 class ConsoleBeePage:
     tasks: tuple[ConsoleBeeTaskSummary, ...]
     nodes: tuple[ConsoleBeeNodeSummary, ...]
@@ -380,6 +394,7 @@ class ConsoleBeePage:
     run_artifacts: tuple[ConsoleBeeRunArtifactSummary, ...] = ()
     commands: tuple[ConsoleBeeCommandIntentSummary, ...] = ()
     launches: tuple[ConsoleBeeLaunchSummary, ...] = ()
+    executor_runs: tuple[ConsoleExecutorRunSummary, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -719,6 +734,7 @@ def render_console_bee_page(page_summary: ConsoleBeePage) -> str:
         f"{_bee_run_artifact_table(page_summary.run_artifacts)}"
         f"{_bee_command_intent_table(page_summary.commands)}"
         f"{_bee_launch_table(page_summary.launches)}"
+        f"{_executor_run_table(page_summary.executor_runs)}"
     )
     return _html_document(title=page.title, body=body, active_path=page.path)
 
@@ -1542,6 +1558,7 @@ def _bee_run_artifact_table(
             f"<td>{artifact.run_count}</td>"
             f"<td>{artifact.action_count}</td>"
             f"<td>{artifact.validation_count}</td>"
+            f"<td>{artifact.executor_count}</td>"
             f"<td>{'yes' if artifact.has_report else 'no'}</td>"
             f"<td>{'yes' if artifact.has_memory_candidates else 'no'}</td>"
             "</tr>"
@@ -1552,7 +1569,8 @@ def _bee_run_artifact_table(
         '<table aria-label="Developer Console Bee workspace run artifacts">'
         "<thead><tr><th>Task ID</th><th>Template ID</th><th>Topic ID</th>"
         "<th>Status</th><th>Nodes</th><th>Runs</th><th>Actions</th>"
-        "<th>Validations</th><th>Report</th><th>Memory Candidates</th></tr></thead>"
+        "<th>Validations</th><th>Executors</th><th>Report</th>"
+        "<th>Memory Candidates</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
         "</section>"
@@ -1624,6 +1642,40 @@ def _bee_launch_table(launches: tuple[ConsoleBeeLaunchSummary, ...]) -> str:
         "<thead><tr><th>Launch ID</th><th>Source</th><th>Status</th>"
         "<th>Template ID</th><th>Task ID</th><th>Topic ID</th>"
         "<th>Schedule ID</th><th>Signal ID</th><th>Error</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+        "</section>"
+    )
+
+
+def _executor_run_table(executor_runs: tuple[ConsoleExecutorRunSummary, ...]) -> str:
+    if not executor_runs:
+        return _empty_state(
+            "Executor Runs",
+            "No data loaded yet. No external executor runs are available.",
+        )
+    rows = []
+    for executor_run in executor_runs:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(executor_run.executor_run_id)}</td>"
+            f"<td>{escape(executor_run.executor_kind)}</td>"
+            f'<td class="status">{escape(executor_run.status)}</td>'
+            f"<td>{escape(executor_run.capability_status or '-')}</td>"
+            f"<td>{escape(executor_run.task_id or '-')}</td>"
+            f"<td>{escape(executor_run.node_id or '-')}</td>"
+            f"<td>{escape(executor_run.launch_id or '-')}</td>"
+            f"<td>{escape(executor_run.topic_id or '-')}</td>"
+            f"<td>{escape(executor_run.sanitized_summary or '-')}</td>"
+            "</tr>"
+        )
+    return (
+        '<section aria-label="Executor runs">'
+        "<h2>Executor Runs</h2>"
+        '<table aria-label="Developer Console executor runs">'
+        "<thead><tr><th>Executor Run ID</th><th>Kind</th><th>Status</th>"
+        "<th>Capability</th><th>Task ID</th><th>Node ID</th>"
+        "<th>Launch ID</th><th>Topic ID</th><th>Summary</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
         "</section>"
