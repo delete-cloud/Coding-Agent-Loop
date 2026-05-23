@@ -171,7 +171,7 @@ multi-agent task graph work are out of scope.
 - [x] `test_recall_context_pack_contains_reference_evidence`
 - [x] `test_recall_eval_report_compares_all_recall_variants`
 - [x] `test_recall_metrics_omit_high_cardinality_labels`
-- [ ] `test_console_memory_recall_renders_safe_provenance`
+- [x] `test_console_memory_recall_renders_safe_provenance`
 - [ ] `test_cross_topic_memory_e2e_smoke`
 - [ ] `uv run pytest tests/coding_agent/test_topic_layer_smoke.py -v`
 - [ ] `uv run pytest tests/coding_agent/test_context_system_smoke.py -v`

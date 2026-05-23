@@ -710,6 +710,73 @@ def _runtime_run(
     )
 
 
+def _memory_review_runtime_run(run_id: str, session_id: str) -> AgentRunRecord:
+    base = _runtime_run(run_id, session_id, status="completed")
+    metadata = dict(base.metadata)
+    metadata["memory_candidates"] = [
+        _memory_review_item(
+            "memory-candidate-auth",
+            status="candidate",
+            kind="procedure",
+            title="Auth memory candidate",
+        ),
+        _memory_review_item(
+            "memory-accepted-auth",
+            status="accepted",
+            kind="decision",
+            title="Accepted auth decision",
+        ),
+        _memory_review_item(
+            "memory-rejected-auth",
+            status="rejected",
+            kind="fact",
+            title="Rejected auth fact",
+        ),
+        _memory_review_item(
+            "memory-archived-auth",
+            status="archived",
+            kind="project_convention",
+            title="Archived auth convention",
+        ),
+    ]
+    return AgentRunRecord(
+        run_id=base.run_id,
+        session_id=base.session_id,
+        tape_id=base.tape_id,
+        parent_run_id=base.parent_run_id,
+        agent_id=base.agent_id,
+        status=base.status,
+        started_at=base.started_at,
+        ended_at=base.ended_at,
+        metadata=metadata,
+        result=base.result,
+        error=base.error,
+    )
+
+
+def _memory_review_item(
+    candidate_id: str,
+    *,
+    status: str,
+    kind: str,
+    title: str,
+) -> dict[str, object]:
+    return {
+        "candidate_id": candidate_id,
+        "kind": kind,
+        "title": title,
+        "summary": "JWT validation belongs in shared middleware",
+        "status": status,
+        "provenance": {
+            "topic_id": "topic-auth",
+            "task_id": "bee-task-alpha",
+            "run_id": "run-alpha",
+            "evidence_refs": ["evidence/auth-summary.md"],
+            "source_entry_ranges": [{"start_seq": 2, "end_seq": 9}],
+        },
+    }
+
+
 def _topic_runtime_run(run_id: str = "run-alpha") -> AgentRunRecord:
     base = _runtime_run(run_id, "session-alpha", status="completed")
     metadata = dict(base.metadata)
@@ -2232,6 +2299,40 @@ async def test_console_memory_renders_memory_evidence_without_raw_content() -> N
     assert "src/auth.py" in response.text
     assert "30-32" in response.text
     assert 'href="/console/runs/run-alpha"' in response.text
+    for forbidden in FORBIDDEN_RENDERED_TEXT:
+        assert forbidden not in response.text
+
+
+@pytest.mark.asyncio
+async def test_console_memory_recall_renders_safe_provenance() -> None:
+    _register_console_session("session-alpha")
+    session_manager.configure_runtime_store(
+        _ConsoleRuntimeStore([_memory_review_runtime_run("run-alpha", "session-alpha")])
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/console/memory")
+
+    assert response.status_code == 200
+    assert "Memory Review Inbox" in response.text
+    assert "memory-candidate-auth" in response.text
+    assert "memory-accepted-auth" in response.text
+    assert "memory-rejected-auth" in response.text
+    assert "memory-archived-auth" in response.text
+    assert "candidate" in response.text
+    assert "accepted" in response.text
+    assert "rejected" in response.text
+    assert "archived" in response.text
+    assert "procedure" in response.text
+    assert "decision" in response.text
+    assert "topic-auth" in response.text
+    assert 'href="/console/topics/topic-auth"' in response.text
+    assert "bee-task-alpha" in response.text
+    assert "run-alpha" in response.text
+    assert 'href="/console/runs/run-alpha"' in response.text
+    assert "Review actions are intentionally read-only" in response.text
+    assert "JWT validation belongs in shared middleware" not in response.text
     for forbidden in FORBIDDEN_RENDERED_TEXT:
         assert forbidden not in response.text
 

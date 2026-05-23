@@ -105,6 +105,7 @@ from coding_agent.ui.developer_console import (
     ConsoleEventSummary,
     ConsoleInteractionSummary,
     ConsoleMemoryEvidence,
+    ConsoleMemoryReviewSummary,
     ConsoleMemorySummary,
     ConsoleObservabilitySummary,
     ConsoleReleaseGateSummary,
@@ -1295,7 +1296,8 @@ async def console_memory(
 ) -> HTMLResponse:
     del request
     if run_id is None:
-        return HTMLResponse(render_console_memory_page(None))
+        runs = await _visible_console_runs(auth_context)
+        return HTMLResponse(render_console_memory_page(_memory_summary_from_runs(runs)))
     try:
         run = await _get_visible_runtime_run(run_id, auth_context)
     except HTTPException as exc:
@@ -2959,8 +2961,35 @@ def _context_evidence_from_item(
     )
 
 
+def _memory_summary_from_runs(runs: Iterable[AgentRunRecord]) -> ConsoleMemorySummary:
+    items: list[ConsoleMemoryEvidence] = []
+    reviews: list[ConsoleMemoryReviewSummary] = []
+    seen_items: set[tuple[str | None, str]] = set()
+    seen_reviews: set[tuple[str | None, str]] = set()
+    for run in runs:
+        summary = _memory_summary_from_run(run)
+        for item in summary.items:
+            key = (item.run_id, item.source_id)
+            if key in seen_items:
+                continue
+            seen_items.add(key)
+            items.append(item)
+        for review in summary.reviews:
+            key = (review.run_id, review.source_id)
+            if key in seen_reviews:
+                continue
+            seen_reviews.add(key)
+            reviews.append(review)
+    return ConsoleMemorySummary(
+        run_id=None,
+        items=tuple(items),
+        reviews=tuple(reviews),
+    )
+
+
 def _memory_summary_from_run(run: AgentRunRecord) -> ConsoleMemorySummary:
     items: list[ConsoleMemoryEvidence] = []
+    reviews: list[ConsoleMemoryReviewSummary] = []
     seen_source_ids: set[str] = set()
     context = _context_summary_from_run(run)
     if context is not None:
@@ -2988,12 +3017,28 @@ def _memory_summary_from_run(run: AgentRunRecord) -> ConsoleMemorySummary:
         run.metadata,
         ("memory_evidence", "memory_candidates", "memories"),
     ):
+        review = _memory_review_from_item(run.run_id, raw_item)
+        if review is not None:
+            reviews.append(review)
         memory = _memory_evidence_from_item(run.run_id, raw_item)
         if memory is None or memory.source_id in seen_source_ids:
             continue
         seen_source_ids.add(memory.source_id)
         items.append(memory)
-    return ConsoleMemorySummary(run_id=run.run_id, items=tuple(items))
+    return ConsoleMemorySummary(
+        run_id=run.run_id,
+        items=tuple(items),
+        reviews=tuple(
+            sorted(
+                reviews,
+                key=lambda item: (
+                    item.status,
+                    item.kind,
+                    item.source_id,
+                ),
+            )
+        ),
+    )
 
 
 def _memory_evidence_from_item(
@@ -3020,6 +3065,40 @@ def _memory_evidence_from_item(
         repo_path=safe_text_value(raw_item.get("repo_path")),
         line_start=_optional_int(raw_item.get("line_start")),
         line_end=_optional_int(raw_item.get("line_end")),
+    )
+
+
+def _memory_review_from_item(
+    run_id: str,
+    raw_item: dict[str, object],
+) -> ConsoleMemoryReviewSummary | None:
+    source_id = (
+        safe_id_value(raw_item.get("candidate_id"))
+        or safe_id_value(raw_item.get("source_id"))
+        or safe_id_value(raw_item.get("memory_id"))
+        or safe_id_value(raw_item.get("id"))
+    )
+    if source_id is None:
+        return None
+    status = safe_label_value(raw_item.get("status")) or "candidate"
+    if status not in {"candidate", "accepted", "rejected", "archived"}:
+        status = "redacted"
+    provenance = _safe_dict(raw_item.get("provenance"))
+    source_ranges = provenance.get("source_entry_ranges")
+    evidence_refs = provenance.get("evidence_refs") or raw_item.get("evidence")
+    return ConsoleMemoryReviewSummary(
+        source_id=source_id,
+        label=safe_text_value(raw_item.get("title") or raw_item.get("label"))
+        or "Memory",
+        kind=safe_label_value(raw_item.get("kind")) or "unknown",
+        status=status,
+        run_id=safe_id_value(run_id),
+        topic_id=safe_id_value(provenance.get("topic_id") or raw_item.get("topic_id")),
+        task_id=safe_id_value(provenance.get("task_id") or raw_item.get("task_id")),
+        evidence_count=len(evidence_refs) if isinstance(evidence_refs, list) else None,
+        source_range_count=len(source_ranges)
+        if isinstance(source_ranges, list)
+        else None,
     )
 
 
