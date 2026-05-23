@@ -10,12 +10,14 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final, cast
 
 import yaml
 
+from coding_agent.bee_launch import BeeLaunchRequest, build_bee_launch_plan
 from coding_agent.bee_runtime import BeeTaskManifest
 from coding_agent.bee_workspace import (
     BeeWorkspaceTemplate,
@@ -275,6 +277,44 @@ class BeePackCompatibilityReport:
         return payload
 
 
+@dataclass(frozen=True)
+class BeePackDryRunPlan:
+    status: str
+    pack_id: str
+    template_id: str
+    source: BeeTemplatePackSource
+    launch_preview: JSONObject
+    topic_policy: JSONObject
+    workspace_policy: JSONObject
+    task_preview: JSONObject
+    task_json_path: str
+    report_path: str
+    evidence_dir: str
+    memory_candidates_path: str
+    nodes: tuple[JSONObject, ...]
+    command_intents: tuple[str, ...]
+    warnings: tuple[str, ...] = ()
+
+    def to_safe_dict(self) -> JSONObject:
+        return {
+            "status": self.status,
+            "pack_id": self.pack_id,
+            "template_id": self.template_id,
+            "source": self.source.value,
+            "launch_preview": dict(self.launch_preview),
+            "topic_policy": dict(self.topic_policy),
+            "workspace_policy": dict(self.workspace_policy),
+            "task_preview": dict(self.task_preview),
+            "task_json_path": self.task_json_path,
+            "report_path": self.report_path,
+            "evidence_dir": self.evidence_dir,
+            "memory_candidates_path": self.memory_candidates_path,
+            "nodes": [dict(node) for node in self.nodes],
+            "command_intents": list(self.command_intents),
+            "warnings": list(self.warnings),
+        }
+
+
 @dataclass
 class BeePackRegistry:
     _packs: dict[str, BeeTemplatePack] = field(default_factory=dict)
@@ -342,6 +382,71 @@ class BeePackRegistry:
         return self._packs[pack_id]
 
 
+def build_bee_pack_dry_run_plan(
+    registry: BeePackRegistry,
+    *,
+    pack_id: str,
+    template_id: str,
+    inputs: JSONObject,
+    topic_policy: JSONObject | None = None,
+    workspace_policy: JSONObject | None = None,
+    requested_at: datetime | None = None,
+) -> BeePackDryRunPlan:
+    """Build a non-durable Bee launch preview for a pack template."""
+
+    pack = registry._require_pack(pack_id)
+    template = registry.load_template(pack_id, template_id)
+    launch_id = f"dry-run-launch-{pack_id}-{template_id}"
+    launch_plan = build_bee_launch_plan(
+        BeeLaunchRequest(
+            launch_id=launch_id,
+            source="manual",
+            template_id=template.template_id,
+            workspace_root=pack.root,
+            requested_at=requested_at or datetime.now(UTC),
+            inputs=dict(inputs),
+            topic_policy=dict(topic_policy or {}),
+            workspace_policy=dict(workspace_policy or {}),
+            metadata={
+                "pack_id": pack.manifest.pack_id,
+                "pack_source": pack.source.value,
+                "dry_run": True,
+            },
+        )
+    )
+    _require_dry_run_command_refs_resolved(launch_plan)
+    task_id = f"dry-run-task-{pack_id}-{template_id}"
+    run_root = f".bee/runs/{task_id}"
+    warnings = _dry_run_warnings(pack)
+    return BeePackDryRunPlan(
+        status="warning" if warnings else "ready",
+        pack_id=pack.manifest.pack_id,
+        template_id=template.template_id,
+        source=pack.source,
+        launch_preview={
+            "launch_id": launch_id,
+            "source": launch_plan.source,
+            "template_kind": launch_plan.resolution.template_kind,
+            "template_profile": launch_plan.resolution.template_profile,
+        },
+        topic_policy=dict(launch_plan.topic_policy),
+        workspace_policy=dict(launch_plan.workspace_policy),
+        task_preview={
+            "task_id": task_id,
+            "kind": launch_plan.manifest.kind,
+            "profile": launch_plan.manifest.profile,
+            "title": launch_plan.manifest.title,
+        },
+        task_json_path=f"{run_root}/task.json",
+        report_path=f"{run_root}/report.md",
+        evidence_dir=f"{run_root}/evidence",
+        memory_candidates_path=f"{run_root}/memory_candidates.yaml",
+        nodes=tuple(_dry_run_node(node) for node in launch_plan.manifest.nodes),
+        command_intents=launch_plan.resolution.command_intent_names,
+        warnings=warnings,
+    )
+
+
 def validate_bee_pack_compatibility(
     root: Path | str,
     *,
@@ -383,6 +488,43 @@ def validate_bee_pack_compatibility(
         pack_id=pack.manifest.pack_id,
         templates=template_summaries,
     )
+
+
+def _require_dry_run_command_refs_resolved(launch_plan: Any) -> None:
+    command_intents = set(launch_plan.resolution.command_intent_names)
+    missing_refs = [
+        node.command_ref
+        for node in launch_plan.manifest.nodes
+        if node.command_ref is not None and node.command_ref not in command_intents
+    ]
+    if missing_refs:
+        missing = ", ".join(sorted(str(item) for item in set(missing_refs)))
+        raise ValueError(f"unknown Bee command_ref in dry-run plan: {missing}")
+
+
+def _dry_run_node(node: Any) -> JSONObject:
+    payload: JSONObject = {
+        "node_id": node.node_id,
+        "kind": node.kind,
+        "profile": node.profile,
+    }
+    if node.command_ref is not None:
+        payload["command_ref"] = node.command_ref
+    if node.depends_on:
+        payload["depends_on"] = list(node.depends_on)
+    return payload
+
+
+def _dry_run_warnings(pack: BeeTemplatePack) -> tuple[str, ...]:
+    executor_kind = pack.manifest.metadata.get("executor_kind")
+    if executor_kind is None:
+        return ()
+    if (
+        isinstance(executor_kind, str)
+        and executor_kind not in _SUPPORTED_EXECUTOR_KINDS
+    ):
+        return (f"Executor kind {executor_kind} is unsupported or deferred",)
+    return ()
 
 
 def load_bee_template_pack(

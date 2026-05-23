@@ -10,6 +10,7 @@ from coding_agent.bee_template_pack import (
     BeePackCompatibilityReport,
     BeePackRegistry,
     BeeTemplatePackSource,
+    build_bee_pack_dry_run_plan,
     load_bee_template_pack,
     validate_bee_pack_compatibility,
 )
@@ -414,6 +415,130 @@ def test_bee_pack_compatibility_validator_does_not_execute_commands(
     assert report.status == "compatible"
 
 
+def test_bee_pack_dry_run_plan_validates_launch_preview(tmp_path: Path) -> None:
+    _write_compatible_pack(tmp_path, include_inputs_contract=True)
+    registry = BeePackRegistry.discover((tmp_path,))
+
+    plan = build_bee_pack_dry_run_plan(
+        registry,
+        pack_id="pack-alpha",
+        template_id="template-alpha",
+        inputs={"region": "us-test-1"},
+        topic_policy={"mode": "create"},
+        workspace_policy={"workspace_ref": "workspace-local"},
+    )
+
+    assert plan.status == "ready"
+    assert plan.pack_id == "pack-alpha"
+    assert plan.template_id == "template-alpha"
+    assert plan.launch_preview["source"] == "manual"
+    assert plan.topic_policy == {"mode": "create"}
+    assert plan.task_preview["task_id"] == "dry-run-task-pack-alpha-template-alpha"
+    assert (
+        plan.task_json_path
+        == ".bee/runs/dry-run-task-pack-alpha-template-alpha/task.json"
+    )
+    assert (
+        plan.report_path == ".bee/runs/dry-run-task-pack-alpha-template-alpha/report.md"
+    )
+    assert (
+        plan.evidence_dir == ".bee/runs/dry-run-task-pack-alpha-template-alpha/evidence"
+    )
+    assert plan.memory_candidates_path == (
+        ".bee/runs/dry-run-task-pack-alpha-template-alpha/memory_candidates.yaml"
+    )
+    assert plan.nodes == (
+        {
+            "node_id": "node-plan",
+            "kind": "analysis",
+            "profile": "default",
+            "command_ref": "pytest_smoke",
+        },
+    )
+    assert plan.command_intents == ("pytest_smoke",)
+    assert not (tmp_path / ".bee" / "runs").exists()
+
+
+def test_bee_pack_dry_run_rejects_missing_input(tmp_path: Path) -> None:
+    _write_compatible_pack(tmp_path, include_inputs_contract=True)
+    registry = BeePackRegistry.discover((tmp_path,))
+
+    with pytest.raises(ValueError, match="missing required Bee launch inputs"):
+        build_bee_pack_dry_run_plan(
+            registry,
+            pack_id="pack-alpha",
+            template_id="template-alpha",
+            inputs={},
+        )
+
+
+def test_bee_pack_dry_run_warns_unsupported_executor(tmp_path: Path) -> None:
+    _write_compatible_pack(
+        tmp_path,
+        executor_kind="cloud_batch",
+        include_inputs_contract=True,
+    )
+    registry = BeePackRegistry.discover((tmp_path,))
+
+    plan = build_bee_pack_dry_run_plan(
+        registry,
+        pack_id="pack-alpha",
+        template_id="template-alpha",
+        inputs={"region": "us-test-1"},
+    )
+
+    assert plan.status == "warning"
+    assert any("cloud_batch" in warning for warning in plan.warnings)
+
+
+def test_bee_pack_dry_run_detects_unsafe_command_intent(tmp_path: Path) -> None:
+    _write_compatible_pack(tmp_path, include_inputs_contract=True)
+    commands_path = tmp_path / ".bee" / "templates" / "template-alpha" / "commands.yaml"
+    commands_path.write_text(
+        """commands:
+  - name: pytest_smoke
+    profile: validation
+    policy: existing_command_policy
+    category: validation
+    shell: pytest
+""",
+        encoding="utf-8",
+    )
+    registry = BeePackRegistry.discover((tmp_path,))
+
+    with pytest.raises(ValueError, match="forbidden sensitive field|not supported"):
+        build_bee_pack_dry_run_plan(
+            registry,
+            pack_id="pack-alpha",
+            template_id="template-alpha",
+            inputs={"region": "us-test-1"},
+        )
+
+
+def test_bee_pack_dry_run_does_not_execute_commands(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_compatible_pack(tmp_path, include_inputs_contract=True)
+    registry = BeePackRegistry.discover((tmp_path,))
+
+    def fail_if_subprocess_runs(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("dry-run planning must not execute commands")
+
+    monkeypatch.setattr("subprocess.run", fail_if_subprocess_runs)
+    monkeypatch.setattr("subprocess.Popen", fail_if_subprocess_runs)
+
+    plan = build_bee_pack_dry_run_plan(
+        registry,
+        pack_id="pack-alpha",
+        template_id="template-alpha",
+        inputs={"region": "us-test-1"},
+    )
+
+    assert plan.status == "ready"
+    assert not (tmp_path / ".bee" / "runs").exists()
+
+
 def _write_safe_template(workspace_root: Path, template_id: str) -> Path:
     template_dir = workspace_root / ".bee" / "templates" / template_id
     feature_dir = template_dir / "features"
@@ -480,6 +605,7 @@ def _write_compatible_pack(
     command_ref: str = "pytest_smoke",
     executor_kind: str | None = None,
     include_memory_contract: bool = True,
+    include_inputs_contract: bool = False,
 ) -> None:
     template_dir = _write_safe_template(workspace_root, "template-alpha")
     metadata_path = template_dir / "metadata.yaml"
@@ -496,6 +622,15 @@ def _write_compatible_pack(
             "context_profile: default",
             "validation_profile: smoke",
             "workspace_policy: local",
+            *(
+                [
+                    "inputs:",
+                    "  required:",
+                    "    - region",
+                ]
+                if include_inputs_contract
+                else []
+            ),
             "metadata:",
             "  risk_profile: low",
             "  report_output_contract: sanitized_report",
