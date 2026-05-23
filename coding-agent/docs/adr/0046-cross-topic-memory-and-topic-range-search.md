@@ -167,8 +167,8 @@ multi-agent task graph work are out of scope.
 - [x] `test_memory_review_accept_candidate_keeps_provenance`
 - [x] `test_memory_review_reject_and_archive_are_idempotent`
 - [x] `test_accepted_memory_context_pack_is_reference_only`
-- [ ] `test_topic_recall_planner_records_anchor_and_links`
-- [ ] `test_recall_context_pack_contains_reference_evidence`
+- [x] `test_recall_plan_records_anchor_and_topic_recall_links`
+- [x] `test_recall_context_pack_contains_reference_evidence`
 - [ ] `test_recall_metrics_omit_high_cardinality_labels`
 - [ ] `test_console_memory_recall_renders_safe_provenance`
 - [ ] `test_cross_topic_memory_e2e_smoke`

@@ -129,12 +129,17 @@ class TopicRangeSearchQuery:
 @dataclass(frozen=True)
 class TopicRangeSearchResult:
     topic_id: str
+    tape_id: str
+    session_id: str
+    title: str | None
     summary: str
     score: float
     reason: str
     source_ranges: tuple[TopicEntryRange, ...]
     kind: str
     status: str
+    created_at: datetime
+    finalized_at: datetime | None
     profile: str | None = None
     bee_template_id: str | None = None
     related_task_ids: tuple[str, ...] = ()
@@ -203,12 +208,17 @@ class TopicRangeIndex:
             results.append(
                 TopicRangeSearchResult(
                     topic_id=document.topic_id,
+                    tape_id=document.tape_id,
+                    session_id=document.session_id,
+                    title=document.title,
                     summary=document.summary,
                     score=score,
                     reason=reason,
                     source_ranges=(document.source_range,),
                     kind=document.kind,
                     status=document.status,
+                    created_at=document.created_at,
+                    finalized_at=document.finalized_at,
                     profile=document.profile,
                     bee_template_id=document.bee_template_id,
                     related_task_ids=document.related_task_ids,
