@@ -82,3 +82,53 @@ phase.
   - G138 still needs the first production implementation: deterministic
     topic-range indexing/search over finalized topics and sanitized Bee
     summaries.
+
+## G138_TOPIC_RANGE_INDEX_AND_SEARCH
+
+### Before
+
+- Goal id: G138_TOPIC_RANGE_INDEX_AND_SEARCH
+- Intended files:
+  - `docs/cross_topic_memory/GOAL_PROGRESS.md`
+  - `docs/adr/0046-cross-topic-memory-and-topic-range-search.md`
+  - `src/coding_agent/topic_range_index.py`
+  - `tests/coding_agent/test_topic_range_index.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_topic_range_index.py -v`
+  - `uv run pytest tests/coding_agent/test_topic_recall.py tests/coding_agent/test_topic_layer_smoke.py -v`
+  - `uv run ruff format --check --preview docs/cross_topic_memory/GOAL_PROGRESS.md docs/adr/0046-cross-topic-memory-and-topic-range-search.md src/coding_agent/topic_range_index.py tests/coding_agent/test_topic_range_index.py`
+  - `uv run ruff check src/coding_agent/topic_range_index.py tests/coding_agent/test_topic_range_index.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Finalized topic summaries can be indexed and searched deterministically.
+  - Open topics are skipped by default unless explicitly indexed.
+  - Bee task metadata, report refs, evidence refs, and sanitized summaries can
+    be attached to topic range search results.
+  - Search supports text, kind/profile, Bee template ID, tags, status, and time
+    range filters.
+  - Raw stdout/stderr/env/command output/secret-like text is rejected.
+
+### After
+
+- Changed files:
+  - `docs/cross_topic_memory/GOAL_PROGRESS.md`
+  - `docs/adr/0046-cross-topic-memory-and-topic-range-search.md`
+  - `src/coding_agent/topic_range_index.py`
+  - `tests/coding_agent/test_topic_range_index.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_topic_range_index.py -v`
+  - `uv run pytest tests/coding_agent/test_topic_recall.py tests/coding_agent/test_topic_layer_smoke.py -v`
+  - `uv run ruff format --check --preview docs/cross_topic_memory/GOAL_PROGRESS.md docs/adr/0046-cross-topic-memory-and-topic-range-search.md src/coding_agent/topic_range_index.py tests/coding_agent/test_topic_range_index.py`
+  - `uv run ruff check src/coding_agent/topic_range_index.py tests/coding_agent/test_topic_range_index.py`
+  - `git diff --check -- .`
+- Results:
+  - Added deterministic in-process `TopicRangeIndex` for finalized topic
+    summaries and sanitized Bee task/report/evidence metadata.
+  - Added search by text, kind, profile, Bee template ID, tags, status, and
+    created-at bounds.
+  - Added no-leak validation rejecting raw stdout/stderr/env/command output/log
+    and secret-like text before indexing or querying.
+  - Preserved existing topic recall and topic layer smoke behavior.
+- Remaining risks:
+  - G139 still needs topic-derived memory candidate generation from finalized
+    topics and Bee task outputs.
