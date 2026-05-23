@@ -16,9 +16,12 @@ from typing import Any, Final, cast
 
 import yaml
 
+from coding_agent.bee_runtime import BeeTaskManifest
 from coding_agent.bee_workspace import (
     BeeWorkspaceTemplate,
+    build_bee_manifest_from_workspace_template,
     discover_bee_workspace_templates,
+    load_bee_workspace_command_intents,
     load_bee_workspace_template,
 )
 from coding_agent.topic_store import JSONObject
@@ -83,6 +86,11 @@ _COMPACT_FORBIDDEN_PACK_KEY_PARTS: Final[frozenset[str]] = frozenset({
     "stdout",
     "token",
 })
+_ALLOWED_PACK_STATIC_CAPABILITY_KEYS: Final[frozenset[str]] = frozenset({
+    "executor_kind",
+    "executor_kinds",
+    "supported_executor_kinds",
+})
 _SECRET_VALUE_MARKERS: Final[tuple[str, ...]] = (
     "-----begin ",
     "bearer ",
@@ -95,6 +103,36 @@ _SECRET_VALUE_MARKERS: Final[tuple[str, ...]] = (
     "token=",
 )
 _MAX_SAFE_TEXT_CHARS: Final[int] = 256
+_SUPPORTED_EXECUTOR_KINDS: Final[frozenset[str]] = frozenset({
+    "local",
+    "docker",
+    "kubernetes_job",
+    "argo_workflow",
+    "fixture",
+})
+_COMPATIBILITY_CHECK_ORDER: Final[tuple[str, ...]] = (
+    "pack_manifest",
+    "template_schema",
+    "skill_file",
+    "feature_files",
+    "commands_yaml_intents",
+    "command_ref_references",
+    "node_dependencies",
+    "acceptance_criteria",
+    "risk_profile",
+    "report_output_contract",
+    "memory_candidate_contract",
+    "executor_capability",
+    "static_no_raw_keys",
+)
+_COMPATIBILITY_VALIDATION_EXCEPTIONS: Final[tuple[type[Exception], ...]] = (
+    FileNotFoundError,
+    json.JSONDecodeError,
+    OSError,
+    TypeError,
+    ValueError,
+    yaml.YAMLError,
+)
 
 
 class BeeTemplatePackSource(StrEnum):
@@ -165,6 +203,78 @@ class BeePackTemplateProvenance:
     template_dir: Path
 
 
+@dataclass(frozen=True)
+class BeePackCompatibilityCheck:
+    check_id: str
+    status: str
+    summary: str
+
+    def to_safe_dict(self) -> JSONObject:
+        return {
+            "check_id": self.check_id,
+            "status": self.status,
+            "summary": self.summary,
+        }
+
+
+@dataclass(frozen=True)
+class BeePackCompatibilityFinding:
+    check_id: str
+    severity: str
+    scope: str
+    message: str
+    recommended_fix: str
+
+    def to_safe_dict(self) -> JSONObject:
+        return {
+            "check_id": self.check_id,
+            "severity": self.severity,
+            "scope": self.scope,
+            "message": self.message,
+            "recommended_fix": self.recommended_fix,
+        }
+
+
+@dataclass(frozen=True)
+class BeePackTemplateCompatibilitySummary:
+    template_id: str
+    status: str
+    feature_count: int
+    command_count: int
+    finding_count: int
+
+    def to_safe_dict(self) -> JSONObject:
+        return {
+            "template_id": self.template_id,
+            "status": self.status,
+            "feature_count": self.feature_count,
+            "command_count": self.command_count,
+            "finding_count": self.finding_count,
+        }
+
+
+@dataclass(frozen=True)
+class BeePackCompatibilityReport:
+    status: str
+    pack_id: str | None
+    source: BeeTemplatePackSource
+    checks: tuple[BeePackCompatibilityCheck, ...]
+    findings: tuple[BeePackCompatibilityFinding, ...]
+    templates: tuple[BeePackTemplateCompatibilitySummary, ...]
+
+    def to_safe_dict(self) -> JSONObject:
+        payload: JSONObject = {
+            "status": self.status,
+            "source": self.source.value,
+            "checks": [check.to_safe_dict() for check in self.checks],
+            "findings": [finding.to_safe_dict() for finding in self.findings],
+            "templates": [template.to_safe_dict() for template in self.templates],
+        }
+        if self.pack_id is not None:
+            payload["pack_id"] = self.pack_id
+        return payload
+
+
 @dataclass
 class BeePackRegistry:
     _packs: dict[str, BeeTemplatePack] = field(default_factory=dict)
@@ -232,6 +342,49 @@ class BeePackRegistry:
         return self._packs[pack_id]
 
 
+def validate_bee_pack_compatibility(
+    root: Path | str,
+    *,
+    source: BeeTemplatePackSource = BeeTemplatePackSource.LOCAL_WORKSPACE,
+) -> BeePackCompatibilityReport:
+    """Validate a Bee template pack using static artifacts only."""
+
+    recorder = _CompatibilityRecorder(source=source)
+    try:
+        pack = load_bee_template_pack(root, source=source)
+    except _COMPATIBILITY_VALIDATION_EXCEPTIONS as exc:
+        pack_id = _best_effort_pack_id(Path(root))
+        recorder.add_check(
+            "pack_manifest", "failed", "Pack manifest or templates failed to load"
+        )
+        recorder.add_finding(
+            check_id="pack_manifest",
+            severity="error",
+            scope="pack",
+            message=_safe_exception_message(exc),
+            recommended_fix="Fix the pack manifest and referenced template files.",
+        )
+        recorder.add_check(
+            "static_no_raw_keys", "failed", "Static artifact safety validation failed"
+        )
+        return recorder.report(pack_id=pack_id, templates=())
+
+    recorder.add_check("pack_manifest", "passed", "Pack manifest loaded")
+    recorder.add_check(
+        "static_no_raw_keys", "passed", "Static artifacts passed no-raw-key validation"
+    )
+    _validate_executor_capability(pack, recorder)
+
+    template_summaries = tuple(
+        _validate_template_compatibility(template, recorder)
+        for template in pack.templates
+    )
+    return recorder.report(
+        pack_id=pack.manifest.pack_id,
+        templates=template_summaries,
+    )
+
+
 def load_bee_template_pack(
     root: Path | str,
     *,
@@ -293,6 +446,366 @@ def _template_metadata_label(template: BeeWorkspaceTemplate, key: str) -> str:
     if isinstance(value, str) and value:
         return value
     return "unknown"
+
+
+def _validate_template_compatibility(
+    template: BeeWorkspaceTemplate,
+    recorder: _CompatibilityRecorder,
+) -> BeePackTemplateCompatibilitySummary:
+    scope = f"template:{template.template_id}"
+    template_findings_before = len(recorder.findings)
+    feature_count = 0
+    command_count = 0
+    manifest: BeeTaskManifest | None = None
+
+    if template.skill_path.is_file():
+        recorder.add_check("skill_file", "passed", "SKILL.md exists")
+    else:
+        recorder.add_check("skill_file", "failed", "SKILL.md missing")
+        recorder.add_finding(
+            check_id="skill_file",
+            severity="error",
+            scope=scope,
+            message=f"Template {template.template_id} is missing SKILL.md",
+            recommended_fix="Add a SKILL.md file to the template directory.",
+        )
+
+    feature_count = len(template.feature_paths)
+    if feature_count:
+        recorder.add_check("feature_files", "passed", "features/*.feature discovered")
+    else:
+        recorder.add_check("feature_files", "failed", "No feature files discovered")
+        recorder.add_finding(
+            check_id="feature_files",
+            severity="error",
+            scope=scope,
+            message=f"Template {template.template_id} has no features/*.feature files",
+            recommended_fix="Add at least one acceptance feature file.",
+        )
+    _validate_acceptance_criteria(template, recorder)
+
+    try:
+        manifest = build_bee_manifest_from_workspace_template(template)
+    except _COMPATIBILITY_VALIDATION_EXCEPTIONS as exc:
+        recorder.add_check(
+            "template_schema", "failed", "Template manifest schema failed"
+        )
+        recorder.add_check("node_dependencies", "failed", "Node dependencies failed")
+        recorder.add_finding(
+            check_id="template_schema",
+            severity="error",
+            scope=scope,
+            message=_safe_exception_message(exc),
+            recommended_fix="Fix template metadata so it satisfies the Bee manifest schema.",
+        )
+    else:
+        recorder.add_check(
+            "template_schema", "passed", "Template manifest schema valid"
+        )
+        recorder.add_check("node_dependencies", "passed", "Node dependencies valid")
+
+    try:
+        intents = load_bee_workspace_command_intents(template)
+    except _COMPATIBILITY_VALIDATION_EXCEPTIONS as exc:
+        intents = ()
+        recorder.add_check(
+            "commands_yaml_intents", "failed", "commands.yaml intent validation failed"
+        )
+        recorder.add_finding(
+            check_id="commands_yaml_intents",
+            severity="error",
+            scope=scope,
+            message=_safe_exception_message(exc),
+            recommended_fix="Fix commands.yaml to contain only safe command intent metadata.",
+        )
+    else:
+        recorder.add_check(
+            "commands_yaml_intents", "passed", "commands.yaml intents valid"
+        )
+        command_count = len(intents)
+
+    if manifest is not None:
+        _validate_command_refs(template, manifest, intents, recorder)
+        _validate_template_contracts(template, recorder)
+    else:
+        recorder.add_check(
+            "command_ref_references", "failed", "Template manifest unavailable"
+        )
+
+    finding_count = len(recorder.findings) - template_findings_before
+    return BeePackTemplateCompatibilitySummary(
+        template_id=template.template_id,
+        status=_status_from_findings(recorder.findings[template_findings_before:]),
+        feature_count=feature_count,
+        command_count=command_count,
+        finding_count=finding_count,
+    )
+
+
+def _validate_command_refs(
+    template: BeeWorkspaceTemplate,
+    manifest: BeeTaskManifest,
+    intents: tuple[Any, ...],
+    recorder: _CompatibilityRecorder,
+) -> None:
+    declared_intents = {intent.name for intent in intents}
+    missing_refs = [
+        node.command_ref
+        for node in manifest.nodes
+        if node.command_ref is not None and node.command_ref not in declared_intents
+    ]
+    if not missing_refs:
+        recorder.add_check(
+            "command_ref_references", "passed", "command_ref references valid"
+        )
+        return
+    recorder.add_check(
+        "command_ref_references", "failed", "Unknown command_ref references found"
+    )
+    for command_ref in sorted(set(missing_refs)):
+        recorder.add_finding(
+            check_id="command_ref_references",
+            severity="error",
+            scope=f"template:{template.template_id}",
+            message=f"command_ref {command_ref} is not declared in commands.yaml",
+            recommended_fix="Declare the command_ref in commands.yaml or remove it from the node.",
+        )
+
+
+def _validate_acceptance_criteria(
+    template: BeeWorkspaceTemplate,
+    recorder: _CompatibilityRecorder,
+) -> None:
+    non_empty_features = [
+        path
+        for path in template.feature_paths
+        if path.read_text(encoding="utf-8").strip()
+    ]
+    if non_empty_features:
+        recorder.add_check("acceptance_criteria", "passed", "Acceptance criteria exist")
+        return
+    recorder.add_check("acceptance_criteria", "failed", "Acceptance criteria missing")
+    recorder.add_finding(
+        check_id="acceptance_criteria",
+        severity="error",
+        scope=f"template:{template.template_id}",
+        message=f"Template {template.template_id} has no non-empty acceptance criteria",
+        recommended_fix="Add non-empty features/*.feature acceptance criteria.",
+    )
+
+
+def _validate_template_contracts(
+    template: BeeWorkspaceTemplate,
+    recorder: _CompatibilityRecorder,
+) -> None:
+    metadata = _template_contract_metadata(template)
+    if metadata.get("risk_profile") or metadata.get("risk"):
+        recorder.add_check("risk_profile", "passed", "Risk profile declared")
+    else:
+        recorder.add_check("risk_profile", "warning", "Risk profile missing")
+        recorder.add_finding(
+            check_id="risk_profile",
+            severity="warning",
+            scope=f"template:{template.template_id}",
+            message=f"Template {template.template_id} does not declare risk_profile",
+            recommended_fix="Declare metadata.risk_profile with a bounded safe value.",
+        )
+
+    if metadata.get("report_output_contract") or metadata.get("report_contract"):
+        recorder.add_check(
+            "report_output_contract", "passed", "Report output contract declared"
+        )
+    else:
+        recorder.add_check(
+            "report_output_contract", "warning", "Report output contract missing"
+        )
+        recorder.add_finding(
+            check_id="report_output_contract",
+            severity="warning",
+            scope=f"template:{template.template_id}",
+            message=f"Template {template.template_id} does not declare a report output contract",
+            recommended_fix="Declare metadata.report_output_contract for sanitized reports.",
+        )
+
+    memory_contract = metadata.get("memory_candidates")
+    if (
+        isinstance(memory_contract, dict)
+        and memory_contract.get("review_required") is True
+    ):
+        recorder.add_check(
+            "memory_candidate_contract",
+            "passed",
+            "Memory candidate contract is review-gated",
+        )
+    elif memory_contract is None:
+        recorder.add_check(
+            "memory_candidate_contract",
+            "warning",
+            "Optional memory candidate contract missing",
+        )
+        recorder.add_finding(
+            check_id="memory_candidate_contract",
+            severity="warning",
+            scope=f"template:{template.template_id}",
+            message=f"Template {template.template_id} does not declare memory_candidates",
+            recommended_fix="Declare metadata.memory_candidates.review_required: true when the template emits memory candidates.",
+        )
+    else:
+        recorder.add_check(
+            "memory_candidate_contract",
+            "failed",
+            "Memory candidate contract is not review-gated",
+        )
+        recorder.add_finding(
+            check_id="memory_candidate_contract",
+            severity="error",
+            scope=f"template:{template.template_id}",
+            message=f"Template {template.template_id} memory_candidates contract must require review",
+            recommended_fix="Set metadata.memory_candidates.review_required to true.",
+        )
+
+
+def _validate_executor_capability(
+    pack: BeeTemplatePack,
+    recorder: _CompatibilityRecorder,
+) -> None:
+    executor_kind = pack.manifest.metadata.get("executor_kind")
+    if executor_kind is None:
+        recorder.add_check(
+            "executor_capability", "passed", "No external executor required"
+        )
+        return
+    if not isinstance(executor_kind, str):
+        recorder.add_check(
+            "executor_capability", "failed", "executor_kind must be a string"
+        )
+        recorder.add_finding(
+            check_id="executor_capability",
+            severity="error",
+            scope=f"pack:{pack.manifest.pack_id}",
+            message="Pack executor_kind must be a string",
+            recommended_fix="Use a bounded executor_kind string or omit the field.",
+        )
+        return
+    if executor_kind in _SUPPORTED_EXECUTOR_KINDS:
+        recorder.add_check(
+            "executor_capability", "passed", "Executor kind is supported"
+        )
+        return
+    recorder.add_check(
+        "executor_capability", "warning", "Executor kind is unsupported or deferred"
+    )
+    recorder.add_finding(
+        check_id="executor_capability",
+        severity="warning",
+        scope=f"pack:{pack.manifest.pack_id}",
+        message=f"Executor kind {executor_kind} is unsupported or deferred",
+        recommended_fix="Use a supported executor kind or treat this pack as dry-run only.",
+    )
+
+
+def _template_contract_metadata(template: BeeWorkspaceTemplate) -> JSONObject:
+    metadata = template.metadata.get("metadata", {})
+    if isinstance(metadata, dict):
+        return cast(JSONObject, metadata)
+    return {}
+
+
+def _best_effort_pack_id(root: Path) -> str | None:
+    try:
+        manifest_path, raw_manifest = _load_manifest_file(root)
+        if raw_manifest is None:
+            return None
+        return _parse_manifest(raw_manifest, manifest_path=manifest_path).pack_id
+    except _COMPATIBILITY_VALIDATION_EXCEPTIONS:
+        return None
+
+
+def _safe_exception_message(exc: Exception) -> str:
+    message = str(exc) or exc.__class__.__name__
+    if len(message) > _MAX_SAFE_TEXT_CHARS:
+        return message[:_MAX_SAFE_TEXT_CHARS]
+    return message
+
+
+def _status_from_findings(
+    findings: tuple[BeePackCompatibilityFinding, ...]
+    | list[BeePackCompatibilityFinding],
+) -> str:
+    if any(finding.severity == "error" for finding in findings):
+        return "incompatible"
+    if any(finding.severity == "warning" for finding in findings):
+        return "warning"
+    return "compatible"
+
+
+@dataclass
+class _CompatibilityRecorder:
+    source: BeeTemplatePackSource
+    checks_by_id: dict[str, BeePackCompatibilityCheck] = field(default_factory=dict)
+    findings: list[BeePackCompatibilityFinding] = field(default_factory=list)
+
+    def add_check(self, check_id: str, status: str, summary: str) -> None:
+        current = self.checks_by_id.get(check_id)
+        next_check = BeePackCompatibilityCheck(
+            check_id=check_id,
+            status=status,
+            summary=summary,
+        )
+        if current is None or _check_status_rank(status) > _check_status_rank(
+            current.status
+        ):
+            self.checks_by_id[check_id] = next_check
+
+    def add_finding(
+        self,
+        *,
+        check_id: str,
+        severity: str,
+        scope: str,
+        message: str,
+        recommended_fix: str,
+    ) -> None:
+        self.findings.append(
+            BeePackCompatibilityFinding(
+                check_id=check_id,
+                severity=severity,
+                scope=scope,
+                message=message,
+                recommended_fix=recommended_fix,
+            )
+        )
+
+    def report(
+        self,
+        *,
+        pack_id: str | None,
+        templates: tuple[BeePackTemplateCompatibilitySummary, ...],
+    ) -> BeePackCompatibilityReport:
+        checks = tuple(
+            self.checks_by_id[check_id]
+            for check_id in _COMPATIBILITY_CHECK_ORDER
+            if check_id in self.checks_by_id
+        )
+        findings = tuple(self.findings)
+        return BeePackCompatibilityReport(
+            status=_status_from_findings(findings),
+            pack_id=pack_id,
+            source=self.source,
+            checks=checks,
+            findings=findings,
+            templates=templates,
+        )
+
+
+def _check_status_rank(status: str) -> int:
+    if status == "failed":
+        return 3
+    if status == "warning":
+        return 2
+    if status == "passed":
+        return 1
+    return 0
 
 
 def _load_manifest_file(root: Path) -> tuple[Path | None, JSONObject | None]:
@@ -529,6 +1042,8 @@ def _validate_safe_json(path: str, value: object) -> None:
 
 
 def _reject_forbidden_key(path: str, key: str) -> None:
+    if key in _ALLOWED_PACK_STATIC_CAPABILITY_KEYS:
+        return
     normalized = key.strip().replace("-", "_").lower()
     compact = re.sub(r"[^a-z0-9]", "", key.lower())
     for forbidden in _FORBIDDEN_PACK_KEY_PARTS:

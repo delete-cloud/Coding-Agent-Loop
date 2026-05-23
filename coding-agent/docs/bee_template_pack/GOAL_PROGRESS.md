@@ -165,3 +165,51 @@ remaining risks before continuing to the next goal.
 - Remaining risks:
   - G149 still needs compatibility reports, static command-ref validation, and
     unsupported executor/no-raw-artifact findings.
+
+## G149_BEE_PACK_COMPATIBILITY_VALIDATOR
+
+### Before
+
+- Goal id: `G149_BEE_PACK_COMPATIBILITY_VALIDATOR`
+- Intended files:
+  - `docs/bee_template_pack/GOAL_PROGRESS.md`
+  - `src/coding_agent/bee_template_pack.py`
+  - `tests/coding_agent/test_bee_template_pack.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_bee_template_pack.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -v`
+  - `uv run ruff format --check --preview src/coding_agent/bee_template_pack.py tests/coding_agent/test_bee_template_pack.py docs/bee_template_pack/GOAL_PROGRESS.md`
+  - `uv run ruff check --preview src/coding_agent/bee_template_pack.py tests/coding_agent/test_bee_template_pack.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Static compatibility validation reports compatible, warning, or
+    incompatible status.
+  - Validator checks pack/template loading, SKILL/features, commands.yaml
+    intents, command_ref references, node dependencies, risk/report contracts,
+    optional memory candidate contract, executor capability declarations, and
+    forbidden raw static keys.
+  - Report serialization is sanitized and deterministic.
+  - Validator does not execute commands.
+
+### After
+
+- Changed files:
+  - `docs/bee_template_pack/GOAL_PROGRESS.md`
+  - `src/coding_agent/bee_template_pack.py`
+  - `tests/coding_agent/test_bee_template_pack.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_bee_template_pack.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -v`
+  - `uv run ruff format --check --preview src/coding_agent/bee_template_pack.py tests/coding_agent/test_bee_template_pack.py docs/bee_template_pack/GOAL_PROGRESS.md`
+  - `uv run ruff check --preview src/coding_agent/bee_template_pack.py tests/coding_agent/test_bee_template_pack.py`
+  - `git diff --check -- .`
+- Results:
+  - Focused pack manifest/registry/compatibility tests passed: 27 passed.
+  - Existing Bee workspace regression passed: 54 passed.
+  - Ruff format check, ruff check, and git whitespace check passed.
+  - Initial red test failed on missing `validate_bee_pack_compatibility`;
+    implementation added sanitized report/check/finding/template summaries and
+    static validator logic.
+- Remaining risks:
+  - G150 still needs dry-run launch planning and explicit no-durable-task
+    checks.
