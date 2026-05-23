@@ -158,9 +158,10 @@ multi-agent task graph work are out of scope.
 
 ## Acceptance Criteria
 
-- [ ] `test_topic_range_index_indexes_finalized_topic`
-- [ ] `test_topic_range_index_skips_open_topic_by_default`
-- [ ] `test_topic_range_index_searches_text_kind_tag_and_template`
+- [x] `test_topic_range_index_indexes_finalized_topic_and_searches_text`
+- [x] `test_topic_range_index_skips_open_topic_by_default`
+- [x] `test_topic_range_index_searches_kind_profile_tag_status_and_time`
+- [x] `test_topic_range_index_indexes_bee_task_topic_metadata`
 - [ ] `test_topic_derived_memory_candidate_preserves_provenance`
 - [ ] `test_memory_review_accept_reject_archive_idempotent`
 - [ ] `test_accepted_memory_renders_as_reference_only`
