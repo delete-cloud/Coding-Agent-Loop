@@ -6,9 +6,12 @@ from pathlib import Path
 import pytest
 
 from coding_agent.bee_template_pack import (
+    BeePackCompatibilityFinding,
+    BeePackCompatibilityReport,
     BeePackRegistry,
     BeeTemplatePackSource,
     load_bee_template_pack,
+    validate_bee_pack_compatibility,
 )
 
 
@@ -294,6 +297,123 @@ def test_bee_pack_registry_preserves_pack_template_provenance(
     assert provenance.template_dir == tmp_path / ".bee" / "templates" / "template-alpha"
 
 
+def test_bee_pack_compatibility_reports_compatible_pack(tmp_path: Path) -> None:
+    _write_compatible_pack(tmp_path)
+
+    report = validate_bee_pack_compatibility(tmp_path)
+
+    assert report.status == "compatible"
+    assert report.pack_id == "pack-alpha"
+    assert [summary.template_id for summary in report.templates] == ["template-alpha"]
+    assert {check.check_id: check.status for check in report.checks}[
+        "commands_yaml_intents"
+    ] == "passed"
+    assert report.findings == ()
+
+
+def test_bee_pack_compatibility_reports_missing_skill(tmp_path: Path) -> None:
+    _write_compatible_pack(tmp_path)
+    (tmp_path / ".bee" / "templates" / "template-alpha" / "SKILL.md").unlink()
+
+    report = validate_bee_pack_compatibility(tmp_path)
+
+    assert report.status == "incompatible"
+    assert any("SKILL.md" in finding.message for finding in report.findings)
+
+
+def test_bee_pack_compatibility_reports_bad_command_ref(tmp_path: Path) -> None:
+    _write_compatible_pack(tmp_path, command_ref="missing_smoke")
+
+    report = validate_bee_pack_compatibility(tmp_path)
+
+    assert report.status == "incompatible"
+    finding = _finding_by_check(report, "command_ref_references")
+    assert finding.severity == "error"
+    assert "missing_smoke" in finding.message
+
+
+def test_bee_pack_compatibility_warns_unsupported_executor(tmp_path: Path) -> None:
+    _write_compatible_pack(tmp_path, executor_kind="cloud_batch")
+
+    report = validate_bee_pack_compatibility(tmp_path)
+
+    assert report.status == "warning"
+    finding = _finding_by_check(report, "executor_capability")
+    assert finding.severity == "warning"
+    assert "cloud_batch" in finding.message
+
+
+def test_bee_pack_compatibility_warns_optional_memory_contract_missing(
+    tmp_path: Path,
+) -> None:
+    _write_compatible_pack(tmp_path, include_memory_contract=False)
+
+    report = validate_bee_pack_compatibility(tmp_path)
+
+    assert report.status == "warning"
+    finding = _finding_by_check(report, "memory_candidate_contract")
+    assert finding.severity == "warning"
+    assert "memory_candidates" in finding.message
+
+
+def test_bee_pack_compatibility_detects_forbidden_raw_keys(tmp_path: Path) -> None:
+    _write_compatible_pack(tmp_path)
+    (tmp_path / "bee-pack.yaml").write_text(
+        """pack_id: pack-alpha
+name: pack-alpha
+version: 1.0.0
+templates:
+  - template-alpha
+metadata:
+  prompt: raw prompt must not be accepted
+""",
+        encoding="utf-8",
+    )
+
+    report = validate_bee_pack_compatibility(tmp_path)
+
+    assert report.status == "incompatible"
+    assert any("forbidden" in finding.message for finding in report.findings)
+
+
+def test_bee_pack_compatibility_report_serializes_safely(tmp_path: Path) -> None:
+    _write_compatible_pack(tmp_path)
+
+    payload = validate_bee_pack_compatibility(tmp_path).to_safe_dict()
+
+    assert payload["status"] == "compatible"
+    assert payload["pack_id"] == "pack-alpha"
+    assert payload["templates"] == [
+        {
+            "template_id": "template-alpha",
+            "status": "compatible",
+            "feature_count": 1,
+            "command_count": 1,
+            "finding_count": 0,
+        }
+    ]
+    serialized = json.dumps(payload, sort_keys=True)
+    for forbidden in ("raw prompt", "stdout", "stderr", "command_output", "secret"):
+        assert forbidden not in serialized
+
+
+def test_bee_pack_compatibility_validator_does_not_execute_commands(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_compatible_pack(tmp_path)
+
+    def fail_if_subprocess_runs(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("compatibility validation must not execute commands")
+
+    monkeypatch.setattr("subprocess.run", fail_if_subprocess_runs)
+    monkeypatch.setattr("subprocess.Popen", fail_if_subprocess_runs)
+
+    report = validate_bee_pack_compatibility(tmp_path)
+
+    assert report.status == "compatible"
+
+
 def _write_safe_template(workspace_root: Path, template_id: str) -> Path:
     template_dir = workspace_root / ".bee" / "templates" / template_id
     feature_dir = template_dir / "features"
@@ -326,6 +446,16 @@ def _write_safe_template(workspace_root: Path, template_id: str) -> Path:
     return template_dir
 
 
+def _finding_by_check(
+    report: BeePackCompatibilityReport,
+    check_id: str,
+) -> BeePackCompatibilityFinding:
+    for finding in report.findings:
+        if finding.check_id == check_id:
+            return finding
+    raise AssertionError(f"missing finding for check {check_id}")
+
+
 def _write_manifest_pack(
     workspace_root: Path, *, pack_id: str, template_id: str
 ) -> None:
@@ -340,5 +470,81 @@ templates:
 tags:
   - local
 """,
+        encoding="utf-8",
+    )
+
+
+def _write_compatible_pack(
+    workspace_root: Path,
+    *,
+    command_ref: str = "pytest_smoke",
+    executor_kind: str | None = None,
+    include_memory_contract: bool = True,
+) -> None:
+    template_dir = _write_safe_template(workspace_root, "template-alpha")
+    metadata_path = template_dir / "metadata.yaml"
+    metadata_path.write_text(
+        "\n".join([
+            "version: 1",
+            "template_id: template-alpha",
+            "kind: maintenance",
+            "profile: local",
+            "title: Local template",
+            "summary: Safe local template",
+            "topic:",
+            "  session_id: session-alpha",
+            "context_profile: default",
+            "validation_profile: smoke",
+            "workspace_policy: local",
+            "metadata:",
+            "  risk_profile: low",
+            "  report_output_contract: sanitized_report",
+            *(
+                [
+                    "  memory_candidates:",
+                    "    review_required: true",
+                    "    kind: reference",
+                ]
+                if include_memory_contract
+                else []
+            ),
+            "nodes:",
+            "  - node_id: node-plan",
+            "    kind: analysis",
+            "    profile: default",
+            "    title: Plan local task",
+            f"    command_ref: {command_ref}",
+        ]),
+        encoding="utf-8",
+    )
+    (template_dir / "commands.yaml").write_text(
+        """commands:
+  - name: pytest_smoke
+    profile: validation
+    policy: existing_command_policy
+    category: validation
+    validation_label: pytest_smoke
+""",
+        encoding="utf-8",
+    )
+    metadata_lines = [
+        "metadata:",
+        "  owner: platform",
+    ]
+    if executor_kind is not None:
+        metadata_lines.append(f"  executor_kind: {executor_kind}")
+    (workspace_root / "bee-pack.yaml").write_text(
+        "\n".join([
+            "pack_id: pack-alpha",
+            "name: pack-alpha",
+            "version: 1.0.0",
+            "domain_profile: maintenance",
+            "templates:",
+            "  - template-alpha",
+            "tags:",
+            "  - local",
+            *metadata_lines,
+            "",
+        ]),
         encoding="utf-8",
     )
