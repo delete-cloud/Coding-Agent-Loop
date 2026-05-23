@@ -144,6 +144,20 @@ class ConsoleMemoryEvidence:
 class ConsoleMemorySummary:
     run_id: str | None
     items: tuple[ConsoleMemoryEvidence, ...]
+    reviews: tuple["ConsoleMemoryReviewSummary", ...] = ()
+
+
+@dataclass(frozen=True)
+class ConsoleMemoryReviewSummary:
+    source_id: str
+    label: str
+    kind: str
+    status: str
+    run_id: str | None
+    topic_id: str | None
+    task_id: str | None
+    evidence_count: int | None
+    source_range_count: int | None
 
 
 @dataclass(frozen=True)
@@ -654,6 +668,7 @@ def render_console_memory_page(memory: ConsoleMemorySummary | None) -> str:
         f"<h1>{escape(page.title)}</h1>"
         f'<p class="lede">{escape(page.description)}</p>'
         "<p>Read-only memory evidence from existing run metadata and context packs.</p>"
+        f"{_memory_review_section(memory)}"
         f"{_memory_evidence_section(memory)}"
     )
     return _html_document(title=page.title, body=body, active_path=page.path)
@@ -1074,6 +1089,51 @@ def _memory_evidence_section(memory: ConsoleMemorySummary | None) -> str:
         "<thead><tr><th>Source ID</th><th>Label</th><th>Status</th>"
         "<th>Tags</th><th>Evidence</th><th>Source Path</th><th>Line Range</th>"
         "</tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+        "</section>"
+    )
+
+
+def _memory_review_section(memory: ConsoleMemorySummary | None) -> str:
+    if memory is None or not memory.reviews:
+        return _empty_state(
+            "Memory Review Inbox",
+            "No memory candidates or reviewed memories are available.",
+        )
+    rows = []
+    for item in memory.reviews:
+        topic = (
+            f'<a href="/console/topics/{escape(item.topic_id)}">{escape(item.topic_id)}</a>'
+            if item.topic_id
+            else "-"
+        )
+        run = (
+            f'<a href="/console/runs/{escape(item.run_id)}">{escape(item.run_id)}</a>'
+            if item.run_id
+            else "-"
+        )
+        rows.append(
+            "<tr>"
+            f"<td>{escape(item.source_id)}</td>"
+            f"<td>{escape(item.label)}</td>"
+            f"<td>{escape(item.kind)}</td>"
+            f'<td class="status">{escape(item.status)}</td>'
+            f"<td>{topic}</td>"
+            f"<td>{escape(item.task_id or '-')}</td>"
+            f"<td>{run}</td>"
+            f"<td>{escape('-' if item.evidence_count is None else str(item.evidence_count))}</td>"
+            f"<td>{escape('-' if item.source_range_count is None else str(item.source_range_count))}</td>"
+            "</tr>"
+        )
+    return (
+        '<section aria-label="Memory review inbox">'
+        "<h2>Memory Review Inbox</h2>"
+        '<p class="lede">Review actions are intentionally read-only in this console view; use the product API or review store to change candidate status.</p>'
+        '<table aria-label="Memory candidate and review results">'
+        "<thead><tr><th>Memory ID</th><th>Title</th><th>Kind</th>"
+        "<th>Status</th><th>Topic</th><th>Task</th><th>Run</th>"
+        "<th>Evidence</th><th>Source Ranges</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
         "</section>"

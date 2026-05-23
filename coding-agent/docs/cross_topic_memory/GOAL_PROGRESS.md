@@ -340,3 +340,52 @@ phase.
 - Remaining risks:
   - G143 still needs Developer Console memory/recall rendering and safe review
     surface coverage.
+
+## G143_MEMORY_AND_RECALL_CONSOLE
+
+### Before
+
+- Goal id: G143_MEMORY_AND_RECALL_CONSOLE
+- Intended files:
+  - `docs/cross_topic_memory/GOAL_PROGRESS.md`
+  - `docs/adr/0046-cross-topic-memory-and-topic-range-search.md`
+  - `src/coding_agent/ui/developer_console.py`
+  - `src/coding_agent/ui/http_server.py`
+  - `tests/ui/test_developer_console.py`
+- Verification commands:
+  - `uv run pytest tests/ui/test_developer_console.py -k "memory or topics" -v`
+  - `uv run pytest tests/ui/test_developer_console.py -v`
+  - `uv run ruff format --check --preview docs/cross_topic_memory/GOAL_PROGRESS.md docs/adr/0046-cross-topic-memory-and-topic-range-search.md src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/ui/test_developer_console.py`
+  - `uv run ruff check src/coding_agent/ui/developer_console.py src/coding_agent/ui/http_server.py tests/ui/test_developer_console.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Console memory page renders candidate, accepted, rejected, and archived
+    memory records from safe run metadata.
+  - Memory provenance renders topic/task/run/evidence counts without raw
+    summaries, logs, command output, stdout/stderr, env, or secrets.
+  - Topic recall links remain visible on topic detail.
+  - User-token access continues to respect visible run permissions.
+
+### After
+
+- Changed files:
+  - `docs/cross_topic_memory/GOAL_PROGRESS.md`
+  - `docs/adr/0046-cross-topic-memory-and-topic-range-search.md`
+  - `src/coding_agent/ui/developer_console.py`
+  - `src/coding_agent/ui/http_server.py`
+  - `tests/ui/test_developer_console.py`
+- Tests run:
+  - `uv run pytest tests/ui/test_developer_console.py -k "memory or topics" -v`
+  - `uv run pytest tests/ui/test_developer_console.py -v`
+- Results:
+  - Added read-only Memory Review Inbox rendering for candidate, accepted,
+    rejected, and archived memory records.
+  - Added memory provenance rendering for topic, task, run, evidence count, and
+    source-range count without rendering raw summaries or evidence bodies.
+  - `/console/memory` now aggregates visible runs when no `run_id` is provided
+    and still respects existing user-token visibility controls.
+  - Existing topic detail recall-link rendering remains covered.
+- Remaining risks:
+  - G144 still needs end-to-end smoke documentation tying topic range search,
+    memory candidates, review, recall context, console, and observability
+    together.
