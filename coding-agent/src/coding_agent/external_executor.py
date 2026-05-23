@@ -162,6 +162,10 @@ class KubernetesCapabilityClient(Protocol):
     def available(self) -> bool: ...
 
 
+class ArgoWorkflowCapabilityClient(Protocol):
+    def available(self) -> bool: ...
+
+
 class ExecutorRunStore(Protocol):
     async def create_executor_run(
         self,
@@ -640,6 +644,96 @@ class KubernetesJobExecutorAdapter:
         )
 
 
+class ArgoWorkflowExecutorAdapter:
+    """Argo Workflows adapter in disabled/dry-run/fake-status mode."""
+
+    kind: Final[ExecutorKind] = "argo_workflow"
+
+    def __init__(
+        self,
+        *,
+        enabled: bool = False,
+        capability_client: ArgoWorkflowCapabilityClient | None = None,
+    ) -> None:
+        self._enabled = enabled
+        self._capability_client = capability_client
+
+    def capability(self) -> ExecutorCapability:
+        if not self._enabled:
+            return ExecutorCapability(
+                executor_kind=self.kind,
+                enabled=False,
+                available=False,
+                status="disabled",
+                reason="argo workflow executor disabled",
+            )
+        available = (
+            self._capability_client.available()
+            if self._capability_client is not None
+            else False
+        )
+        return ExecutorCapability(
+            executor_kind=self.kind,
+            enabled=True,
+            available=available,
+            status="available" if available else "unavailable",
+            reason=None if available else "argo workflow capability unavailable",
+        )
+
+    async def submit(self, plan: ExecutorPlan) -> ExecutorResult:
+        raise RuntimeError(
+            "argo workflow executor execution is deferred; use dry_run_render"
+        )
+
+    def dry_run_render(self, plan: ExecutorPlan) -> JSONObject:
+        _require_authorized_executor_plan(plan, expected_kind=self.kind)
+        return {
+            "apiVersion": "argoproj.io/v1alpha1",
+            "kind": "Workflow",
+            "metadata": {
+                "generateName": "coding-agent-executor-",
+                "labels": {
+                    "app": "coding-agent",
+                    "executor_kind": self.kind,
+                    "intent_category": plan.command_category,
+                    "intent_profile": plan.command_profile,
+                },
+            },
+            "spec": {
+                "entrypoint": "executor",
+                "templates": [
+                    {
+                        "name": "executor",
+                        "container": {
+                            "image": "coding-agent-executor:dry-run",
+                            "args": ["dry-run"],
+                        },
+                    }
+                ],
+            },
+            "safe_refs": {
+                "task_ref": _safe_ref_token(plan.task_id),
+                "node_ref": _safe_ref_token(plan.node_id),
+                "workspace_ref": _safe_ref_token(plan.workspace_ref),
+            },
+        }
+
+    def import_status(self, plan: ExecutorPlan, status: JSONObject) -> ExecutorResult:
+        _require_authorized_executor_plan(plan, expected_kind=self.kind)
+        executor_status = _argo_workflow_status(status)
+        return ExecutorResult(
+            status=executor_status,
+            sanitized_summary=f"Argo Workflow {executor_status}",
+            evidence=(
+                ExecutorEvidence(
+                    evidence_kind="sanitized_artifact",
+                    evidence_ref="evidence/argo-workflow-status",
+                ),
+            ),
+            metadata={"phase": "argo_workflow_status_imported"},
+        )
+
+
 def build_local_executor_plan_from_bee_command_plan(
     *,
     command_plan: BeeCommandIntentPlan,
@@ -735,6 +829,37 @@ def build_kubernetes_job_executor_plan_from_local_plan(
     return _authorize_executor_plan(
         ExecutorPlan(
             executor_kind="kubernetes_job",
+            executor_run_id=executor_run_id,
+            approved_workspace_hash=local_plan.approved_workspace_hash,
+            task_id=local_plan.task_id,
+            node_id=local_plan.node_id,
+            workspace_ref=local_plan.workspace_ref,
+            requested_at=local_plan.requested_at,
+            command_category=local_plan.command_category,
+            command_profile=local_plan.command_profile,
+            launch_id=local_plan.launch_id,
+            topic_id=local_plan.topic_id,
+            timeout_seconds=local_plan.timeout_seconds,
+            validation_label=local_plan.validation_label,
+            metadata={
+                "policy_decision": "allow",
+                "approval_route": "allow",
+                "source_kind": "local",
+            },
+            authorization_token=_EXECUTOR_PLAN_AUTHORIZATION_TOKEN,
+        )
+    )
+
+
+def build_argo_workflow_executor_plan_from_local_plan(
+    local_plan: ExecutorPlan,
+    *,
+    executor_run_id: str | None = None,
+) -> ExecutorPlan:
+    _require_authorized_executor_plan(local_plan, expected_kind="local")
+    return _authorize_executor_plan(
+        ExecutorPlan(
+            executor_kind="argo_workflow",
             executor_run_id=executor_run_id,
             approved_workspace_hash=local_plan.approved_workspace_hash,
             task_id=local_plan.task_id,
@@ -1186,6 +1311,15 @@ def _kubernetes_job_status(status: JSONObject) -> ExecutorRunStatus:
     if status.get("succeeded") is True or status.get("condition") == "complete":
         return "succeeded"
     if status.get("failed") is True or status.get("condition") == "failed":
+        return "failed"
+    return "running"
+
+
+def _argo_workflow_status(status: JSONObject) -> ExecutorRunStatus:
+    phase = status.get("phase")
+    if phase == "Succeeded" or status.get("succeeded") is True:
+        return "succeeded"
+    if phase in {"Failed", "Error"} or status.get("failed") is True:
         return "failed"
     return "running"
 

@@ -16,6 +16,7 @@ from coding_agent.bee_workspace import (
     load_bee_workspace_template,
 )
 from coding_agent.external_executor import (
+    ArgoWorkflowExecutorAdapter,
     DockerExecutorAdapter,
     ExecutorCapability,
     ExecutorEvidence,
@@ -26,6 +27,7 @@ from coding_agent.external_executor import (
     KubernetesJobExecutorAdapter,
     LocalExecutorAdapter,
     PGExecutorRunStore,
+    build_argo_workflow_executor_plan_from_local_plan,
     build_docker_executor_plan_from_local_plan,
     build_kubernetes_job_executor_plan_from_local_plan,
     build_local_executor_plan_from_bee_command_plan,
@@ -173,6 +175,14 @@ class FakeDockerCapabilityClient:
 
 
 class FakeKubernetesCapabilityClient:
+    def __init__(self, available: bool) -> None:
+        self._available = available
+
+    def available(self) -> bool:
+        return self._available
+
+
+class FakeArgoWorkflowCapabilityClient:
     def __init__(self, available: bool) -> None:
         self._available = available
 
@@ -1040,6 +1050,133 @@ async def test_kubernetes_job_executor_submit_is_deferred(tmp_path: Path) -> Non
         await KubernetesJobExecutorAdapter(
             enabled=True,
             capability_client=FakeKubernetesCapabilityClient(True),
+        ).submit(plan)
+
+
+def test_argo_workflow_executor_renders_sanitized_dry_run_spec(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    local_plan = _approved_local_plan(workspace)
+    plan = build_argo_workflow_executor_plan_from_local_plan(
+        local_plan,
+        executor_run_id="executor-run-argo",
+    )
+    disabled = ArgoWorkflowExecutorAdapter()
+    unavailable = ArgoWorkflowExecutorAdapter(
+        enabled=True,
+        capability_client=FakeArgoWorkflowCapabilityClient(False),
+    )
+    available = ArgoWorkflowExecutorAdapter(
+        enabled=True,
+        capability_client=FakeArgoWorkflowCapabilityClient(True),
+    )
+
+    rendered = available.dry_run_render(plan)
+
+    assert disabled.capability().status == "disabled"
+    assert unavailable.capability().status == "unavailable"
+    assert available.capability().status == "available"
+    assert rendered["apiVersion"] == "argoproj.io/v1alpha1"
+    assert rendered["kind"] == "Workflow"
+    assert rendered["metadata"]["labels"]["executor_kind"] == "argo_workflow"
+    assert rendered["metadata"]["labels"]["intent_category"] == "validation"
+    assert rendered["spec"]["entrypoint"] == "executor"
+    serialized = str(rendered)
+    for forbidden in (
+        "task-1",
+        "node-validate",
+        "workspace-alpha",
+        "pytest",
+        "command",
+        "stdout",
+        "stderr",
+        "kubeconfig",
+        "pod_name",
+        "workflow_name",
+        "secret",
+        "argocd",
+    ):
+        assert forbidden not in serialized.casefold()
+
+
+def test_argo_workflow_executor_imports_fake_status_safely(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    plan = build_argo_workflow_executor_plan_from_local_plan(
+        _approved_local_plan(workspace)
+    )
+    adapter = ArgoWorkflowExecutorAdapter(
+        enabled=True,
+        capability_client=FakeArgoWorkflowCapabilityClient(True),
+    )
+
+    running = adapter.import_status(plan, {"phase": "Running"})
+    succeeded = adapter.import_status(
+        plan, {"phase": "Succeeded", "workflow_name": "raw-workflow"}
+    )
+    failed = adapter.import_status(plan, {"phase": "Failed", "raw_log": "secret"})
+    errored = adapter.import_status(plan, {"phase": "Error", "pod_name": "raw-pod"})
+
+    assert running.status == "running"
+    assert succeeded.status == "succeeded"
+    assert failed.status == "failed"
+    assert errored.status == "failed"
+    for result in (running, succeeded, failed, errored):
+        serialized = str(result).casefold()
+        assert result.evidence[0].evidence_ref == "evidence/argo-workflow-status"
+        for forbidden in (
+            "raw-workflow",
+            "raw_log",
+            "secret",
+            "stdout",
+            "stderr",
+            "kubeconfig",
+            "workflow_name",
+            "pod_name",
+        ):
+            assert forbidden not in serialized
+
+
+def test_argo_workflow_executor_rejects_forged_plan(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    adapter = ArgoWorkflowExecutorAdapter(
+        enabled=True,
+        capability_client=FakeArgoWorkflowCapabilityClient(True),
+    )
+    plan = build_argo_workflow_executor_plan_from_local_plan(
+        _approved_local_plan(workspace)
+    )
+    forged = replace(plan, node_id="forged-node")
+    unsigned = ExecutorPlan(
+        executor_kind="argo_workflow",
+        task_id="task-1",
+        node_id="node-validate",
+        workspace_ref="workspace-alpha",
+        requested_at=_dt(9),
+        metadata={"policy_decision": "allow", "approval_route": "allow"},
+    )
+
+    with pytest.raises(ValueError, match="signed executor plan"):
+        adapter.dry_run_render(forged)
+    with pytest.raises(ValueError, match="authorized executor plan"):
+        adapter.import_status(unsigned, {"phase": "Running"})
+
+
+@pytest.mark.asyncio
+async def test_argo_workflow_executor_submit_is_deferred(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    plan = build_argo_workflow_executor_plan_from_local_plan(
+        _approved_local_plan(workspace)
+    )
+
+    with pytest.raises(RuntimeError, match="deferred"):
+        await ArgoWorkflowExecutorAdapter(
+            enabled=True,
+            capability_client=FakeArgoWorkflowCapabilityClient(True),
         ).submit(plan)
 
 
