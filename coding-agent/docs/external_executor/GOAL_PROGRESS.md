@@ -365,3 +365,57 @@ This ledger tracks G127-G135 for the External Executor Adapter MVP phase.
   - Added no-leak tests ensuring executor/task/node/launch/topic IDs, pod/job/workflow names, raw logs, command output, env, and secrets do not appear in metrics or unsafe rendered output.
 - Remaining risks:
   - G135 still needs final end-to-end external executor smoke tests and documentation.
+
+## G135_EXTERNAL_EXECUTOR_E2E_SMOKE_AND_DOCS
+
+### Before
+
+- Goal id: G135_EXTERNAL_EXECUTOR_E2E_SMOKE_AND_DOCS
+- Intended files:
+  - `docs/external_executor/GOAL_PROGRESS.md`
+  - `docs/adr/0045-external-executor-adapter-boundaries.md`
+  - `docs/external_executor/USAGE.md`
+  - `docs/external_executor/IMPLEMENTATION_REPORT.md`
+  - `tests/coding_agent/test_external_executor_smoke.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_external_executor_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_external_executor.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_command_bridge.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -v`
+  - `uv run pytest tests/coding_agent/test_observability.py -v`
+  - `uv run pytest tests/ui/test_developer_console.py -v`
+  - `uv run ruff format --check --preview docs/external_executor/GOAL_PROGRESS.md docs/adr/0045-external-executor-adapter-boundaries.md docs/external_executor/USAGE.md docs/external_executor/IMPLEMENTATION_REPORT.md tests/coding_agent/test_external_executor_smoke.py`
+  - `uv run ruff check tests/coding_agent/test_external_executor_smoke.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Local executor adapter E2E smoke writes executor records and Bee completion evidence.
+  - Docker/Kubernetes/Argo optional adapter smoke uses fake/dry-run paths only.
+  - Console, artifact, and Prometheus surfaces show sanitized executor data without high-cardinality labels or raw execution payloads.
+  - Final usage and implementation report docs exist.
+
+### After
+
+- Changed files:
+  - `docs/external_executor/GOAL_PROGRESS.md`
+  - `docs/adr/0045-external-executor-adapter-boundaries.md`
+  - `docs/external_executor/USAGE.md`
+  - `docs/external_executor/IMPLEMENTATION_REPORT.md`
+  - `tests/coding_agent/test_external_executor_smoke.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_external_executor_smoke.py -v`
+  - `uv run pytest tests/coding_agent/test_external_executor.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_launch.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_command_bridge.py -v`
+  - `uv run pytest tests/coding_agent/test_bee_workspace.py -v`
+  - `uv run pytest tests/coding_agent/test_observability.py -v`
+  - `uv run pytest tests/ui/test_developer_console.py -v`
+  - `uv run ruff format --check --preview docs/external_executor/GOAL_PROGRESS.md docs/adr/0045-external-executor-adapter-boundaries.md docs/external_executor/USAGE.md docs/external_executor/IMPLEMENTATION_REPORT.md tests/coding_agent/test_external_executor_smoke.py`
+  - `uv run ruff check tests/coding_agent/test_external_executor_smoke.py`
+  - `git diff --check -- .`
+- Results:
+  - Added final local executor E2E smoke covering authorized plan creation, local adapter execution, executor record updates, Bee evidence-gated completion, sanitized `.bee` artifacts, console rendering, and low-cardinality metrics.
+  - Added optional Docker/Kubernetes/Argo dry-run smoke covering fake/dry-run rendering and sanitized status import without requiring Docker, Kubernetes, Argo, CLIs, credentials, or hosted services.
+  - Added external executor usage documentation and final implementation report.
+- Remaining risks:
+  - Real external executor submission, status import, and sanitized log import are deferred to later adapter-specific phases.
