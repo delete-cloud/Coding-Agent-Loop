@@ -36,14 +36,20 @@ _SENSITIVE_ATTRIBUTE_PARTS = frozenset({
 _SENSITIVE_PROMETHEUS_VALUE_PARTS = frozenset({
     "content",
     "env",
+    "key",
+    "log",
     "message",
     "output",
+    "password",
+    "private",
     "prompt",
+    "raw",
     "result",
     "secret",
     "stderr",
     "stdout",
     "text",
+    "token",
 })
 _FORBIDDEN_PROMETHEUS_LABELS = frozenset({
     "run_id",
@@ -61,6 +67,7 @@ _FORBIDDEN_PROMETHEUS_LABELS = frozenset({
     "interaction_id",
     "job_name",
     "launch_id",
+    "memory_id",
     "pod_name",
     "tool_call_id",
     "workflow_name",
@@ -79,10 +86,15 @@ _PROMETHEUS_ALLOWED_ATTRIBUTE_LABELS = frozenset({
     "executor_kind",
     "eval_status",
     "hitl_status",
+    "memory_kind",
+    "memory_review_status",
+    "memory_status",
     "model",
     "operation",
     "policy_decision",
     "provider",
+    "recall_source",
+    "recall_status",
     "risk_level",
     "schedule_kind",
     "schedule_status",
@@ -170,6 +182,17 @@ _PROMETHEUS_LABEL_VALUE_ALLOWLISTS = {
     }),
     "eval_status": frozenset({"failed", "passed", "skipped"}),
     "hitl_status": frozenset({"approved", "rejected", "requested", "timed_out"}),
+    "memory_kind": frozenset({
+        "command_memory",
+        "decision",
+        "fact",
+        "incident",
+        "procedure",
+        "project_convention",
+        "unknown",
+    }),
+    "memory_review_status": frozenset({"accepted", "archived", "rejected"}),
+    "memory_status": frozenset({"accepted", "archived", "candidate", "rejected"}),
     "operation": frozenset({
         "checkpoint_load",
         "checkpoint_save",
@@ -179,6 +202,20 @@ _PROMETHEUS_LABEL_VALUE_ALLOWLISTS = {
         "tape_load",
     }),
     "policy_decision": frozenset({"allow", "approval_required", "deny"}),
+    "recall_source": frozenset({
+        "accepted_memory",
+        "none",
+        "topic_and_memory",
+        "topic_range",
+        "unknown",
+    }),
+    "recall_status": frozenset({
+        "disabled",
+        "empty",
+        "failed",
+        "matched",
+        "unknown",
+    }),
     "risk_level": frozenset({"low", "medium", "high"}),
     "schedule_kind": frozenset({"interval", "manual", "once", "unknown"}),
     "schedule_status": frozenset({"active", "completed", "disabled", "paused"}),
@@ -260,6 +297,40 @@ _EXECUTOR_STATUSES: Final[frozenset[str]] = frozenset({
     "succeeded",
     "unavailable",
     "unknown",
+})
+_TOPIC_RECALL_SOURCES: Final[frozenset[str]] = frozenset({
+    "accepted_memory",
+    "none",
+    "topic_and_memory",
+    "topic_range",
+    "unknown",
+})
+_TOPIC_RECALL_STATUSES: Final[frozenset[str]] = frozenset({
+    "disabled",
+    "empty",
+    "failed",
+    "matched",
+    "unknown",
+})
+_MEMORY_KINDS: Final[frozenset[str]] = frozenset({
+    "command_memory",
+    "decision",
+    "fact",
+    "incident",
+    "procedure",
+    "project_convention",
+    "unknown",
+})
+_MEMORY_STATUSES: Final[frozenset[str]] = frozenset({
+    "accepted",
+    "archived",
+    "candidate",
+    "rejected",
+})
+_MEMORY_REVIEW_STATUSES: Final[frozenset[str]] = frozenset({
+    "accepted",
+    "archived",
+    "rejected",
 })
 _PROMETHEUS_HISTOGRAM_BUCKETS = (5.0, 10.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 5000.0)
 _PROMETHEUS_HTTP_HISTOGRAM_BUCKETS = (
@@ -397,8 +468,17 @@ def _otlp_attributes(attributes: Mapping[str, Any]) -> list[dict[str, Any]]:
     return [
         {"key": key, "value": _otlp_value(value)}
         for key, value in attributes.items()
-        if _attribute_allowed(key)
+        if _attribute_allowed(key) and _attribute_value_allowed(value)
     ]
+
+
+def _attribute_value_allowed(value: Any) -> bool:
+    if not isinstance(value, str):
+        return True
+    normalized_tokens = {
+        token for token in re.split(r"[^a-zA-Z0-9]+", value.casefold()) if token
+    }
+    return not bool(normalized_tokens & _SENSITIVE_PROMETHEUS_VALUE_PARTS)
 
 
 def _resource_attributes(attributes: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -648,6 +728,39 @@ class PrometheusMetricsRecorder:
         with self._lock:
             self._set("executor_capability_status", labels, 1.0)
 
+    def record_topic_recall_run(
+        self,
+        *,
+        source: str,
+        status: str,
+        candidate_count: int,
+    ) -> None:
+        labels = {
+            "source": _prometheus_metric_part(source, _TOPIC_RECALL_SOURCES),
+            "status": _prometheus_metric_part(status, _TOPIC_RECALL_STATUSES),
+        }
+        histogram_labels = {"source": labels["source"]}
+        with self._lock:
+            self._inc("topic_recall_runs_total", labels)
+            self._observe(
+                "topic_recall_candidates",
+                histogram_labels,
+                max(0.0, float(candidate_count)),
+            )
+
+    def record_memory_candidate(self, *, kind: str, status: str) -> None:
+        labels = {
+            "kind": _prometheus_metric_part(kind, _MEMORY_KINDS),
+            "status": _prometheus_metric_part(status, _MEMORY_STATUSES),
+        }
+        with self._lock:
+            self._inc("memory_candidates_total", labels)
+
+    def record_memory_review(self, *, status: str) -> None:
+        labels = {"status": _prometheus_metric_part(status, _MEMORY_REVIEW_STATUSES)}
+        with self._lock:
+            self._inc("memory_reviews_total", labels)
+
     def exposition_text(self) -> str:
         lines: list[str] = []
         with self._lock:
@@ -838,6 +951,53 @@ class PrometheusMetricsRecorder:
                         executor_capabilities,
                     )
                 )
+            topic_recall_counters = self._topic_recall_counters
+            topic_recall_histograms = self._topic_recall_histograms
+            if topic_recall_counters:
+                lines.extend((
+                    "# HELP topic_recall_runs_total Topic recall runs by source and status.",
+                    "# TYPE topic_recall_runs_total counter",
+                ))
+                lines.extend(
+                    self._format_metric(
+                        "topic_recall_runs_total",
+                        topic_recall_counters,
+                    )
+                )
+            if topic_recall_histograms:
+                lines.extend((
+                    "# HELP topic_recall_candidates Recall candidates returned by source.",
+                    "# TYPE topic_recall_candidates histogram",
+                ))
+                lines.extend(
+                    self._format_histograms(
+                        histograms=topic_recall_histograms,
+                        metric_name="topic_recall_candidates",
+                        buckets=_PROMETHEUS_HISTOGRAM_BUCKETS,
+                    )
+                )
+            memory_counters = self._memory_counters
+            if memory_counters:
+                lines.extend((
+                    "# HELP memory_candidates_total Topic-derived memory candidates by kind and status.",
+                    "# TYPE memory_candidates_total counter",
+                ))
+                lines.extend(
+                    self._format_metric(
+                        "memory_candidates_total",
+                        memory_counters,
+                    )
+                )
+                lines.extend((
+                    "# HELP memory_reviews_total Memory review transitions by status.",
+                    "# TYPE memory_reviews_total counter",
+                ))
+                lines.extend(
+                    self._format_metric(
+                        "memory_reviews_total",
+                        memory_counters,
+                    )
+                )
         return "\n".join(lines) + ("\n" if lines else "")
 
     def reset(self) -> None:
@@ -970,6 +1130,36 @@ class PrometheusMetricsRecorder:
             key: value
             for key, value in self._gauges.items()
             if key[0] == "executor_capability_status"
+        }
+
+    @property
+    def _topic_recall_counters(
+        self,
+    ) -> dict[tuple[str, tuple[tuple[str, str], ...]], float]:
+        return {
+            key: value
+            for key, value in self._counters.items()
+            if key[0] == "topic_recall_runs_total"
+        }
+
+    @property
+    def _topic_recall_histograms(
+        self,
+    ) -> dict[tuple[str, tuple[tuple[str, str], ...]], list[float]]:
+        return {
+            key: value
+            for key, value in self._histograms.items()
+            if key[0] == "topic_recall_candidates"
+        }
+
+    @property
+    def _memory_counters(
+        self,
+    ) -> dict[tuple[str, tuple[tuple[str, str], ...]], float]:
+        return {
+            key: value
+            for key, value in self._counters.items()
+            if key[0] in {"memory_candidates_total", "memory_reviews_total"}
         }
 
     def _inc(self, metric: str, labels: Mapping[str, str], amount: float = 1.0) -> None:
@@ -1145,6 +1335,39 @@ def record_executor_capability_metric(
             executor_kind=executor_kind,
             status=status,
         )
+    except Exception:
+        return
+
+
+def record_topic_recall_metric(
+    *,
+    source: str,
+    status: str,
+    candidate_count: int,
+) -> None:
+    try:
+        _DEFAULT_PROMETHEUS_RECORDER.record_topic_recall_run(
+            source=source,
+            status=status,
+            candidate_count=candidate_count,
+        )
+    except Exception:
+        return
+
+
+def record_memory_candidate_metric(*, kind: str, status: str) -> None:
+    try:
+        _DEFAULT_PROMETHEUS_RECORDER.record_memory_candidate(
+            kind=kind,
+            status=status,
+        )
+    except Exception:
+        return
+
+
+def record_memory_review_metric(*, status: str) -> None:
+    try:
+        _DEFAULT_PROMETHEUS_RECORDER.record_memory_review(status=status)
     except Exception:
         return
 

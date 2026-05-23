@@ -279,3 +279,64 @@ phase.
   - Added disabled mode and no-leak query validation.
 - Remaining risks:
   - G142 still needs recall evaluation and low-cardinality recall/memory metrics.
+
+## G142_RECALL_EVAL_AND_OBSERVABILITY
+
+### Before
+
+- Goal id: G142_RECALL_EVAL_AND_OBSERVABILITY
+- Intended files:
+  - `docs/cross_topic_memory/GOAL_PROGRESS.md`
+  - `docs/adr/0046-cross-topic-memory-and-topic-range-search.md`
+  - `src/coding_agent/recall_evaluation.py`
+  - `src/coding_agent/observability.py`
+  - `tests/coding_agent/test_recall_evaluation.py`
+  - `tests/coding_agent/test_observability.py`
+- Verification commands:
+  - `uv run pytest tests/coding_agent/test_recall_evaluation.py tests/coding_agent/test_observability.py -v`
+  - `uv run pytest tests/coding_agent/test_recall_context.py tests/coding_agent/test_memory_review.py tests/coding_agent/evaluation/ -v`
+  - `uv run ruff format --check --preview docs/cross_topic_memory/GOAL_PROGRESS.md docs/adr/0046-cross-topic-memory-and-topic-range-search.md src/coding_agent/recall_evaluation.py src/coding_agent/observability.py tests/coding_agent/test_recall_evaluation.py tests/coding_agent/test_observability.py`
+  - `uv run ruff check src/coding_agent/recall_evaluation.py src/coding_agent/observability.py tests/coding_agent/test_recall_evaluation.py tests/coding_agent/test_observability.py`
+  - `git diff --check -- .`
+- Stop criteria:
+  - Eval helper compares no recall, accepted-memory recall, topic-range recall,
+    and combined topic+memory recall deterministically.
+  - Recall/memory metrics emit only low-cardinality labels.
+  - Metrics omit `memory_id`, `topic_id`, `task_id`, `run_id`, and
+    `session_id` labels.
+  - Recall evaluation reports and metrics avoid raw evidence/log content.
+
+### After
+
+- Changed files:
+  - `docs/cross_topic_memory/GOAL_PROGRESS.md`
+  - `docs/adr/0046-cross-topic-memory-and-topic-range-search.md`
+  - `src/coding_agent/recall_evaluation.py`
+  - `src/coding_agent/observability.py`
+  - `tests/coding_agent/test_recall_evaluation.py`
+  - `tests/coding_agent/test_observability.py`
+- Tests run:
+  - `uv run pytest tests/coding_agent/test_recall_evaluation.py tests/coding_agent/test_observability.py -q`
+  - `uv run pytest tests/coding_agent/test_recall_evaluation.py tests/coding_agent/test_observability.py -v`
+  - `uv run pytest tests/coding_agent/test_recall_context.py tests/coding_agent/test_memory_review.py tests/coding_agent/evaluation/ -v`
+  - `uv run pytest tests/coding_agent/test_observability_platform_smoke.py tests/coding_agent/test_context_system_smoke.py -v`
+  - `uv run ruff format --check --preview docs/cross_topic_memory/GOAL_PROGRESS.md docs/adr/0046-cross-topic-memory-and-topic-range-search.md src/coding_agent/recall_evaluation.py src/coding_agent/observability.py tests/coding_agent/test_recall_evaluation.py tests/coding_agent/test_observability.py`
+  - `uv run ruff check src/coding_agent/recall_evaluation.py src/coding_agent/observability.py tests/coding_agent/test_recall_evaluation.py tests/coding_agent/test_observability.py`
+  - `git diff --check -- .`
+- Results:
+  - Red check before implementation failed on missing
+    `coding_agent.recall_evaluation` and missing recall/memory metric wrappers,
+    confirming the target tests covered the new behavior.
+  - Added deterministic recall evaluation reports for no-recall,
+    accepted-memory, topic-range, and combined recall variants.
+  - Added recall and memory metrics:
+    `topic_recall_runs_total`, `topic_recall_candidates`,
+    `memory_candidates_total`, and `memory_reviews_total`.
+  - Added no-leak and cardinality tests for recall/memory metrics and recall
+    evaluation report serialization.
+  - Local review found an OTLP trace value leak for raw recall/memory attribute
+    values; fixed by filtering sensitive string values before OTLP
+    serialization and adding a regression test.
+- Remaining risks:
+  - G143 still needs Developer Console memory/recall rendering and safe review
+    surface coverage.
