@@ -55,7 +55,10 @@ class TopicRangeIndexDocument:
     finalized_at: datetime | None
     profile: str | None = None
     tags: tuple[str, ...] = ()
+    bee_pack_id: str | None = None
     bee_template_id: str | None = None
+    domain_profile: str | None = None
+    template_kind: str | None = None
     related_task_ids: tuple[str, ...] = ()
     report_refs: tuple[str, ...] = ()
     evidence_refs: tuple[str, ...] = ()
@@ -73,8 +76,14 @@ class TopicRangeIndexDocument:
             _require_safe_text("title", self.title)
         if self.profile is not None:
             _require_safe_id("profile", self.profile)
+        if self.bee_pack_id is not None:
+            _require_safe_id("bee_pack_id", self.bee_pack_id)
         if self.bee_template_id is not None:
             _require_safe_id("bee_template_id", self.bee_template_id)
+        if self.domain_profile is not None:
+            _require_safe_id("domain_profile", self.domain_profile)
+        if self.template_kind is not None:
+            _require_safe_id("template_kind", self.template_kind)
         _require_safe_values("tags", self.tags)
         _require_safe_values("related_task_ids", self.related_task_ids)
         _require_safe_refs("report_refs", self.report_refs)
@@ -102,7 +111,10 @@ class TopicRangeSearchQuery:
     text: str | None = None
     kind: str | None = None
     profile: str | None = None
+    bee_pack_id: str | None = None
     bee_template_id: str | None = None
+    domain_profile: str | None = None
+    template_kind: str | None = None
     tags: tuple[str, ...] = ()
     status: str | None = "finalized"
     created_after: datetime | None = None
@@ -116,8 +128,14 @@ class TopicRangeSearchQuery:
             _require_safe_id("kind", self.kind)
         if self.profile is not None:
             _require_safe_id("profile", self.profile)
+        if self.bee_pack_id is not None:
+            _require_safe_id("bee_pack_id", self.bee_pack_id)
         if self.bee_template_id is not None:
             _require_safe_id("bee_template_id", self.bee_template_id)
+        if self.domain_profile is not None:
+            _require_safe_id("domain_profile", self.domain_profile)
+        if self.template_kind is not None:
+            _require_safe_id("template_kind", self.template_kind)
         if self.status is not None:
             _require_safe_id("status", self.status)
         _require_safe_values("tags", self.tags)
@@ -141,7 +159,10 @@ class TopicRangeSearchResult:
     created_at: datetime
     finalized_at: datetime | None
     profile: str | None = None
+    bee_pack_id: str | None = None
     bee_template_id: str | None = None
+    domain_profile: str | None = None
+    template_kind: str | None = None
     related_task_ids: tuple[str, ...] = ()
     report_refs: tuple[str, ...] = ()
     evidence_refs: tuple[str, ...] = ()
@@ -160,7 +181,10 @@ class TopicRangeIndex:
         *,
         profile: str | None = None,
         tags: tuple[str, ...] = (),
+        bee_pack_id: str | None = None,
         bee_template_id: str | None = None,
+        domain_profile: str | None = None,
+        template_kind: str | None = None,
         related_task_ids: tuple[str, ...] = (),
         report_refs: tuple[str, ...] = (),
         evidence_refs: tuple[str, ...] = (),
@@ -186,7 +210,10 @@ class TopicRangeIndex:
             finalized_at=topic.finalized_at,
             profile=profile,
             tags=tags,
+            bee_pack_id=bee_pack_id,
             bee_template_id=bee_template_id,
+            domain_profile=domain_profile,
+            template_kind=template_kind,
             related_task_ids=related_task_ids,
             report_refs=report_refs,
             evidence_refs=evidence_refs,
@@ -220,7 +247,10 @@ class TopicRangeIndex:
                     created_at=document.created_at,
                     finalized_at=document.finalized_at,
                     profile=document.profile,
+                    bee_pack_id=document.bee_pack_id,
                     bee_template_id=document.bee_template_id,
+                    domain_profile=document.domain_profile,
+                    template_kind=document.template_kind,
                     related_task_ids=document.related_task_ids,
                     report_refs=document.report_refs,
                     evidence_refs=document.evidence_refs,
@@ -239,9 +269,21 @@ def _matches_filters(
         return False
     if query.profile is not None and document.profile != query.profile:
         return False
+    if query.bee_pack_id is not None and document.bee_pack_id != query.bee_pack_id:
+        return False
     if (
         query.bee_template_id is not None
         and document.bee_template_id != query.bee_template_id
+    ):
+        return False
+    if (
+        query.domain_profile is not None
+        and document.domain_profile != query.domain_profile
+    ):
+        return False
+    if (
+        query.template_kind is not None
+        and document.template_kind != query.template_kind
     ):
         return False
     if query.status is not None and document.status != query.status:
@@ -250,9 +292,9 @@ def _matches_filters(
         return False
     if query.created_after is not None and document.created_at < query.created_after:
         return False
-    if query.created_before is not None and document.created_at > query.created_before:
-        return False
-    return True
+    return not (
+        query.created_before is not None and document.created_at > query.created_before
+    )
 
 
 def _score_document(
@@ -275,7 +317,10 @@ def _document_text(document: TopicRangeIndexDocument) -> str:
             document.summary,
             document.kind,
             document.profile or "",
+            document.bee_pack_id or "",
             document.bee_template_id or "",
+            document.domain_profile or "",
+            document.template_kind or "",
             " ".join(document.tags),
             document.report_summary or "",
             " ".join(document.evidence_summaries),

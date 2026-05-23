@@ -246,6 +246,9 @@ def propose_memory_candidates_from_bee_artifacts(
     artifacts: BeeWorkspaceRunArtifacts,
     candidate_kind: str = "procedure",
     confidence: float = 0.65,
+    pack_id: str | None = None,
+    domain_profile: str | None = None,
+    pack_tags: tuple[str, ...] = (),
 ) -> tuple[TopicDerivedMemoryCandidate, ...]:
     if topic.topic_id != artifacts.topic_id:
         raise ValueError("Bee artifact topic_id must match topic")
@@ -263,7 +266,11 @@ def propose_memory_candidates_from_bee_artifacts(
             title=artifacts.report_title,
             summary=artifacts.report_summary,
             scope=f"bee:{artifacts.template_id}",
-            tags=(artifacts.template_id,),
+            tags=_bee_memory_tags(
+                template_id=artifacts.template_id,
+                pack_id=pack_id,
+                pack_tags=pack_tags,
+            ),
             confidence=confidence,
             provenance=_provenance(
                 topic=topic,
@@ -271,6 +278,10 @@ def propose_memory_candidates_from_bee_artifacts(
                 run_id=run_id,
                 report_refs=report_refs,
                 evidence_refs=evidence_refs,
+                template_id=artifacts.template_id,
+                pack_id=pack_id,
+                domain_profile=domain_profile,
+                pack_tags=pack_tags,
             ),
         )
     )
@@ -282,6 +293,9 @@ def propose_memory_candidates_from_bee_artifacts(
             run_id=run_id,
             report_refs=report_refs,
             evidence_refs=evidence_refs,
+            pack_id=pack_id,
+            domain_profile=domain_profile,
+            pack_tags=pack_tags,
         )
         if candidate is not None:
             candidates.append(candidate)
@@ -296,6 +310,9 @@ def _candidate_from_existing(
     run_id: str | None,
     report_refs: tuple[str, ...],
     evidence_refs: tuple[str, ...],
+    pack_id: str | None,
+    domain_profile: str | None,
+    pack_tags: tuple[str, ...],
 ) -> TopicDerivedMemoryCandidate | None:
     try:
         kind = _optional_str(raw_candidate, "kind") or "fact"
@@ -310,7 +327,14 @@ def _candidate_from_existing(
             title=title,
             summary=summary,
             scope=f"bee:{artifacts.template_id}",
-            tags=(artifacts.template_id, *tags),
+            tags=(
+                *_bee_memory_tags(
+                    template_id=artifacts.template_id,
+                    pack_id=pack_id,
+                    pack_tags=pack_tags,
+                ),
+                *tags,
+            ),
             confidence=confidence,
             provenance=_provenance(
                 topic=topic,
@@ -318,6 +342,10 @@ def _candidate_from_existing(
                 run_id=run_id,
                 report_refs=report_refs,
                 evidence_refs=evidence_refs,
+                template_id=artifacts.template_id,
+                pack_id=pack_id,
+                domain_profile=domain_profile,
+                pack_tags=pack_tags,
             ),
         )
     except (TypeError, ValueError):
@@ -332,6 +360,10 @@ def _provenance(
     report_refs: tuple[str, ...] = (),
     evidence_refs: tuple[str, ...] = (),
     source_ranges: tuple[TopicEntryRange, ...] | None = None,
+    template_id: str | None = None,
+    pack_id: str | None = None,
+    domain_profile: str | None = None,
+    pack_tags: tuple[str, ...] = (),
 ) -> JSONObject:
     payload: JSONObject = {
         "topic_id": topic.topic_id,
@@ -354,7 +386,32 @@ def _provenance(
     if evidence_refs:
         _require_safe_refs("evidence_refs", evidence_refs)
         payload["evidence_refs"] = list(evidence_refs)
+    if template_id is not None:
+        _require_safe_scope(template_id)
+        payload["template_id"] = template_id
+    if pack_id is not None:
+        _require_safe_scope(pack_id)
+        payload["pack_id"] = pack_id
+    if domain_profile is not None:
+        _require_safe_scope(domain_profile)
+        payload["domain_profile"] = domain_profile
+    if pack_tags:
+        for tag in pack_tags:
+            _require_safe_scope(tag)
+        payload["pack_tags"] = sorted(set(pack_tags))
     return payload
+
+
+def _bee_memory_tags(
+    *,
+    template_id: str,
+    pack_id: str | None,
+    pack_tags: tuple[str, ...],
+) -> tuple[str, ...]:
+    tags = [template_id, *pack_tags]
+    if pack_id is not None:
+        tags.append(pack_id)
+    return tuple(tags)
 
 
 def _candidate_id(candidate: TopicDerivedMemoryCandidate) -> str:

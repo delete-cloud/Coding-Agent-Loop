@@ -79,12 +79,32 @@ def test_bee_task_report_creates_memory_candidate_with_evidence_refs() -> None:
         "run_id": "run-alpha",
         "report_refs": ["report.md"],
         "evidence_refs": ["evidence/executor-run-alpha.md"],
+        "template_id": "backup-check",
     }
 
     existing_candidate = candidates[1].to_dict()
     assert existing_candidate["kind"] == "project_convention"
     assert existing_candidate["summary"] == "Backups should be checked before restore."
     assert existing_candidate["tags"] == ["backup-check", "restore"]
+
+
+def test_bee_memory_candidate_includes_pack_template_provenance() -> None:
+    candidates = propose_memory_candidates_from_bee_artifacts(
+        topic=_topic("topic-bee", summary="Backup validation finished"),
+        artifacts=_bee_artifacts(),
+        pack_id="pack-alpha",
+        domain_profile="maintenance",
+        pack_tags=("homelab", "backup"),
+    )
+
+    payload = candidates[0].to_dict()
+
+    assert payload["tags"] == ["backup", "backup-check", "homelab", "pack-alpha"]
+    assert payload["reference_mode"] == MEMORY_REFERENCE_MODE
+    assert payload["provenance"]["pack_id"] == "pack-alpha"
+    assert payload["provenance"]["template_id"] == "backup-check"
+    assert payload["provenance"]["domain_profile"] == "maintenance"
+    assert payload["provenance"]["pack_tags"] == ["backup", "homelab"]
 
 
 def test_bee_candidate_generation_rejects_mismatched_topic() -> None:

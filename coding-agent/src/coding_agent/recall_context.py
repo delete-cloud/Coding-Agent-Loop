@@ -35,7 +35,10 @@ class TopicRecallPlannerInput:
     source_topic: TopicRecord
     text: str | None = None
     profile: str | None = None
+    bee_pack_id: str | None = None
     bee_template_id: str | None = None
+    domain_profile: str | None = None
+    template_kind: str | None = None
     tags: tuple[str, ...] = ()
     limit: int = 5
     enabled: bool = True
@@ -43,6 +46,14 @@ class TopicRecallPlannerInput:
     def __post_init__(self) -> None:
         if self.text is not None:
             require_recall_safe_text("text", self.text)
+        for name, value in (
+            ("bee_pack_id", self.bee_pack_id),
+            ("bee_template_id", self.bee_template_id),
+            ("domain_profile", self.domain_profile),
+            ("template_kind", self.template_kind),
+        ):
+            if value is not None:
+                require_recall_safe_text(name, value)
         if self.limit <= 0:
             raise ValueError("limit must be positive")
         for index, tag in enumerate(self.tags):
@@ -79,6 +90,8 @@ class TopicRecallPlanner:
             self._accepted_memories,
             query_text=query.text,
             tags=planner_input.tags,
+            domain_profile=planner_input.domain_profile,
+            bee_pack_id=planner_input.bee_pack_id,
             limit=planner_input.limit,
         )
         return TopicRecallPlan(
@@ -96,7 +109,10 @@ def build_topic_recall_query(
         text=text or None,
         kind=planner_input.source_topic.kind,
         profile=planner_input.profile,
+        bee_pack_id=planner_input.bee_pack_id,
         bee_template_id=planner_input.bee_template_id,
+        domain_profile=planner_input.domain_profile,
+        template_kind=planner_input.template_kind,
         tags=planner_input.tags,
         status="finalized",
         limit=planner_input.limit,
@@ -183,6 +199,8 @@ def _rank_accepted_memories(
     *,
     query_text: str | None,
     tags: tuple[str, ...],
+    domain_profile: str | None,
+    bee_pack_id: str | None,
     limit: int,
 ) -> tuple[ReviewedMemoryRecord, ...]:
     query_tokens = _tokens(query_text or "")
@@ -191,9 +209,15 @@ def _rank_accepted_memories(
     for record in records:
         if record.status != "accepted":
             continue
-        memory_tokens = _tokens(
-            " ".join((record.candidate.title, record.candidate.summary))
-        )
+        provenance = record.candidate.provenance
+        if (
+            domain_profile is not None
+            and provenance.get("domain_profile") != domain_profile
+        ):
+            continue
+        if bee_pack_id is not None and provenance.get("pack_id") != bee_pack_id:
+            continue
+        memory_tokens = _tokens(f"{record.candidate.title} {record.candidate.summary}")
         token_score = (
             len(query_tokens & memory_tokens) / len(query_tokens)
             if query_tokens
@@ -202,7 +226,18 @@ def _rank_accepted_memories(
         tag_score = (
             0.25 if tag_set and tag_set.intersection(record.candidate.tags) else 0
         )
-        score = round(token_score + tag_score, 4)
+        domain_score = (
+            0.15
+            if domain_profile is not None
+            and provenance.get("domain_profile") == domain_profile
+            else 0
+        )
+        pack_score = (
+            0.15
+            if bee_pack_id is not None and provenance.get("pack_id") == bee_pack_id
+            else 0
+        )
+        score = round(token_score + tag_score + domain_score + pack_score, 4)
         if query_tokens and score == 0:
             continue
         candidate_id = record.candidate.candidate_id or ""

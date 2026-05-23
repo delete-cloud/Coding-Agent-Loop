@@ -90,6 +90,38 @@ def test_bee_launch_recall_uses_template_and_tags() -> None:
     assert plan.topic_results[0].related_task_ids == ("bee-task-backup",)
 
 
+def test_bee_pack_recall_filters_by_domain_profile_and_tag() -> None:
+    index = TopicRangeIndex()
+    index.index_topic(
+        _topic("topic-backup", summary="Backup validation passed"),
+        profile="local",
+        tags=("backup", "homelab"),
+        bee_pack_id="pack-alpha",
+        bee_template_id="backup-check",
+        domain_profile="maintenance",
+    )
+    index.index_topic(
+        _topic("topic-docs", summary="Documentation validation passed"),
+        profile="local",
+        tags=("docs",),
+        bee_pack_id="pack-docs",
+        domain_profile="documentation",
+    )
+    planner = TopicRecallPlanner(topic_index=index)
+
+    plan = planner.plan(
+        TopicRecallPlannerInput(
+            source_topic=_topic("topic-new", status="open", summary=None, end=None),
+            text="validation passed",
+            profile="local",
+            domain_profile="maintenance",
+            tags=("homelab",),
+        )
+    )
+
+    assert [result.topic_id for result in plan.topic_results] == ["topic-backup"]
+
+
 def test_recall_planner_recalls_accepted_memory() -> None:
     review_store = MemoryReviewStore()
     candidate = propose_memory_candidate_from_topic(
@@ -120,6 +152,52 @@ def test_recall_planner_recalls_accepted_memory() -> None:
     assert plan.accepted_memories == (accepted,)
 
 
+def test_bee_pack_recall_boosts_accepted_memory_by_domain_and_tags() -> None:
+    review_store = MemoryReviewStore()
+    candidate = propose_memory_candidate_from_topic(
+        _topic(
+            "topic-backup",
+            title="Backup convention",
+            summary="Validate backups before restore operations",
+        ),
+        tags=("backup", "homelab"),
+    )
+    assert candidate is not None
+    candidate = candidate.__class__(
+        kind=candidate.kind,
+        title=candidate.title,
+        summary=candidate.summary,
+        scope=candidate.scope,
+        tags=candidate.tags,
+        confidence=candidate.confidence,
+        provenance={
+            **candidate.provenance,
+            "domain_profile": "maintenance",
+            "pack_id": "pack-alpha",
+        },
+    )
+    review_store.add_candidate(candidate)
+    accepted = review_store.accept_candidate(candidate.candidate_id or "")
+    planner = TopicRecallPlanner(
+        topic_index=TopicRangeIndex(),
+        accepted_memories=review_store.accepted_memories(),
+    )
+
+    plan = planner.plan(
+        TopicRecallPlannerInput(
+            source_topic=_topic("topic-new", status="open", summary=None, end=None),
+            text="restore",
+            domain_profile="maintenance",
+            tags=("homelab",),
+        )
+    )
+
+    assert plan.accepted_memories == (accepted,)
+    assert plan.accepted_memories[0].candidate.to_dict()["reference_mode"] == (
+        "reference_only"
+    )
+
+
 @pytest.mark.asyncio
 async def test_recall_plan_records_anchor_and_topic_recall_links() -> None:
     index = TopicRangeIndex()
@@ -148,7 +226,7 @@ async def test_recall_plan_records_anchor_and_topic_recall_links() -> None:
         "score_bucket": "high",
         "recall_source": "topic_range_index",
     }
-    assert getattr(tape[-1], "meta")["product_anchor_type"] == "recall_anchor"
+    assert tape[-1].meta["product_anchor_type"] == "recall_anchor"
     assert store.links == list(links)
 
 
