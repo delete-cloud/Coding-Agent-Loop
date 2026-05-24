@@ -354,6 +354,13 @@ class MockProvider:
         return "Mock response"
 
 
+@dataclass(frozen=True, slots=True)
+class EventBroadcastResult:
+    delivered_count: int
+    full_pruned_count: int
+    failed_pruned_count: int
+
+
 @dataclass
 class Session:
     """A managed agent session.
@@ -412,6 +419,30 @@ class Session:
             )
         self.wire = LocalWire(self.id)
         self.approval_coordinator = ApprovalCoordinator(self.approval_store)
+
+    def broadcast_event_nowait(self, event: dict[str, Any]) -> EventBroadcastResult:
+        active_queues: list[asyncio.Queue[dict[str, Any]]] = []
+        delivered_count = 0
+        full_pruned_count = 0
+        failed_pruned_count = 0
+
+        for queue in self.event_queues:
+            try:
+                queue.put_nowait(event)
+            except asyncio.QueueFull:
+                full_pruned_count += 1
+            except Exception:
+                failed_pruned_count += 1
+            else:
+                delivered_count += 1
+                active_queues.append(queue)
+
+        self.event_queues = active_queues
+        return EventBroadcastResult(
+            delivered_count=delivered_count,
+            full_pruned_count=full_pruned_count,
+            failed_pruned_count=failed_pruned_count,
+        )
 
     def as_dict(self) -> dict[str, Any]:
         workspace_id = (
@@ -2178,22 +2209,19 @@ class SessionManager:
         event: dict[str, str],
     ) -> None:
         session = self.get_session(session_id)
-        before_count = len(session.event_queues)
-        session.event_queues = [
-            queue for queue in session.event_queues if not queue.full()
-        ]
-        pruned_count = before_count - len(session.event_queues)
-        if pruned_count:
+        result = session.broadcast_event_nowait(event)
+        if result.full_pruned_count:
             logger.info(
                 "Pruned %d full event queue(s) for session %s",
-                pruned_count,
+                result.full_pruned_count,
                 session_id,
             )
-        for queue in session.event_queues:
-            try:
-                await queue.put(event)
-            except Exception:
-                logger.debug("Dropping closed event queue", exc_info=True)
+        if result.failed_pruned_count:
+            logger.info(
+                "Pruned %d failed event queue(s) for session %s",
+                result.failed_pruned_count,
+                session_id,
+            )
 
     def has_approval_request(self, session_id: str) -> bool:
         return (

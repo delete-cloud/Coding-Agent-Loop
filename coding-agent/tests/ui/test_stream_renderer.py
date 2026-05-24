@@ -16,6 +16,20 @@ from coding_agent.ui.stream_renderer import (
 from coding_agent.ui.theme import theme
 
 
+_TERMINAL_ENV = {"TERM": "xterm-256color"}
+
+
+def _test_console(
+    buf: StringIO, *, force_terminal: bool = True, width: int = 80
+) -> Console:
+    return Console(
+        file=buf,
+        force_terminal=force_terminal,
+        width=width,
+        _environ=_TERMINAL_ENV,
+    )
+
+
 class TestStreamingRenderer:
     def _make_renderer(self) -> tuple[StreamingRenderer, Console, StringIO]:
         buf = StringIO()
@@ -223,7 +237,7 @@ class TestLineCount:
         self, width: int = 80
     ) -> tuple[StreamingRenderer, Console, StringIO]:
         buf = StringIO()
-        console = Console(file=buf, force_terminal=True, width=width)
+        console = _test_console(buf, force_terminal=True, width=width)
         renderer = StreamingRenderer(console=console)
         return renderer, console, buf
 
@@ -273,7 +287,7 @@ class TestClearOutput:
         self, force_terminal: bool = True
     ) -> tuple[StreamingRenderer, Console, StringIO]:
         buf = StringIO()
-        console = Console(file=buf, force_terminal=force_terminal, width=80)
+        console = _test_console(buf, force_terminal=force_terminal, width=80)
         renderer = StreamingRenderer(console=console)
         return renderer, console, buf
 
@@ -354,7 +368,7 @@ class TestHybridStreamEnd:
         self, *, force_terminal: bool = True, width: int = 80
     ) -> tuple[StreamingRenderer, Console, StringIO]:
         buf = StringIO()
-        console = Console(file=buf, force_terminal=force_terminal, width=width)
+        console = _test_console(buf, force_terminal=force_terminal, width=width)
         renderer = StreamingRenderer(console=console)
         return renderer, console, buf
 
@@ -824,7 +838,7 @@ class TestRenderDiff:
         result = _render_diff(text)
         plain_lines = result.plain.split("\n")
         context_idx = next(
-            i for i, l in enumerate(plain_lines) if l.strip() == "unchanged"
+            i for i, line in enumerate(plain_lines) if line.strip() == "unchanged"
         )
         line_start = sum(len(plain_lines[j]) + 1 for j in range(context_idx))
         line_end = line_start + len(plain_lines[context_idx])

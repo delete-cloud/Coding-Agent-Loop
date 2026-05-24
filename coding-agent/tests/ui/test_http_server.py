@@ -1252,20 +1252,19 @@ class TestSessionCreation:
         assert response.status_code == 200
         session = session_manager.get_session(response.json()["session_id"])
         assert isinstance(session.execution_binding, CloudWorkspaceBinding)
-        assert session.origin == {
+        expected_origin = {
             "channel": "http",
             "binding_kind": "cloud",
             "workspace_source_kind": "docker",
+            "workspace_provider": "docker",
+            "workspace_root_ref": str(tmp_path),
         }
+        assert session.origin == expected_origin
         assert (tmp_path / session.execution_binding.workspace_id).is_dir()
 
         info_response = await client.get(f"/sessions/{response.json()['session_id']}")
         assert info_response.status_code == 200
-        assert info_response.json()["origin"] == {
-            "channel": "http",
-            "binding_kind": "cloud",
-            "workspace_source_kind": "docker",
-        }
+        assert info_response.json()["origin"] == expected_origin
 
     async def test_create_session_rejects_conflicting_workspace_binding_inputs(
         self, client
@@ -6282,6 +6281,30 @@ class TestBroadcastEvent:
 
         await _broadcast_event(session, event)
 
+        assert session.event_queues == [healthy_queue]
+        assert full_queue.qsize() == 1
+        assert await healthy_queue.get() == event
+
+    async def test_session_broadcast_result_counts_pruned_queues(self):
+        session = register_session("broadcast-result-counts")
+        full_queue: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=1)
+        await full_queue.put({"event": "Old", "data": "{}"})
+
+        class BrokenQueue:
+            def put_nowait(self, item: object) -> None:
+                _ = item
+                raise RuntimeError("queue closed")
+
+        healthy_queue: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=1)
+        broken_queue = cast(asyncio.Queue[dict[str, str]], cast(object, BrokenQueue()))
+        session.event_queues = [full_queue, broken_queue, healthy_queue]
+        event = {"event": "Test", "data": "{}"}
+
+        result = session.broadcast_event_nowait(event)
+
+        assert result.delivered_count == 1
+        assert result.full_pruned_count == 1
+        assert result.failed_pruned_count == 1
         assert session.event_queues == [healthy_queue]
         assert full_queue.qsize() == 1
         assert await healthy_queue.get() == event
