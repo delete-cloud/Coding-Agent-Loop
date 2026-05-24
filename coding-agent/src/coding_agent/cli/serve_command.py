@@ -66,7 +66,7 @@ def serve(port: int | None, host: str | None, config_path: Path | None):
         resolved_host = _server_cli_host(server_config, host)
         resolved_port = _server_cli_port(server_config, port)
 
-        from coding_agent.ui.http_server import app
+        from coding_agent.server.http_server import app
 
         click.echo(
             f"Starting Coding Agent HTTP server on {resolved_host}:{resolved_port}"
