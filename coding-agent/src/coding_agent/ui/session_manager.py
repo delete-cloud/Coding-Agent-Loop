@@ -432,6 +432,10 @@ class Session:
             except asyncio.QueueFull:
                 full_pruned_count += 1
             except Exception:
+                logger.debug(
+                    "Pruning event queue after broadcast failure",
+                    exc_info=True,
+                )
                 failed_pruned_count += 1
             else:
                 delivered_count += 1
@@ -2206,7 +2210,7 @@ class SessionManager:
     async def broadcast_event(
         self,
         session_id: str,
-        event: dict[str, str],
+        event: dict[str, Any],
     ) -> None:
         session = self.get_session(session_id)
         result = session.broadcast_event_nowait(event)
