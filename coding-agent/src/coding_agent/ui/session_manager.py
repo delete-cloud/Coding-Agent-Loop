@@ -68,20 +68,20 @@ from coding_agent.wire.protocol import (
     TurnEnd,
     WireMessage,
 )
-from coding_agent.ui.session_store import (
+from coding_agent.server.stores.session_store import (
     SessionStore,
     create_session_store,
 )
-from coding_agent.ui.session_owner_store import SessionOwnerStoreProtocol
-from coding_agent.ui.session_owner_store import SessionOwnershipConflictError
-from coding_agent.ui.session_owner_store import SessionOwnershipConflictReason
+from coding_agent.server.stores.session_owner_store import SessionOwnerStoreProtocol
+from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictError
+from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictReason
 from coding_agent.ui.binding_resolver import BindingResolver, DefaultBindingResolver
 from coding_agent.ui.execution_binding import (
     CloudWorkspaceBinding,
     ExecutionBinding,
     LocalExecutionBinding,
 )
-from coding_agent.ui.workspace_store import (
+from coding_agent.server.stores.workspace_store import (
     JSONValue,
     WorkspaceRecord,
     WorkspaceRetentionPolicy,
