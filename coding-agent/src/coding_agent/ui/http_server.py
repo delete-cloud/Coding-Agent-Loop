@@ -1005,27 +1005,44 @@ app.add_middleware(
 )
 
 
-@app.middleware("http")
-async def _record_http_metrics(request: Request, call_next):
-    start = time.perf_counter()
-    status_code = 500
-    try:
-        response = await call_next(request)
-        status_code = response.status_code
-        return response
-    finally:
-        if _prometheus_metrics_enabled():
-            route = request.scope.get("route")
-            route_label = getattr(route, "path", None)
-            if not isinstance(route_label, str) or not route_label:
-                route_label = "unmatched"
-            route_label = _http_metrics_route_label(route_label)
-            record_http_request_metric(
-                method=request.method,
-                route=route_label,
-                status_code=status_code,
-                duration_ms=(time.perf_counter() - start) * 1000,
-            )
+class _HTTPMetricsASGIMiddleware:
+    def __init__(self, wrapped_app: Any) -> None:
+        self._wrapped_app = wrapped_app
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self._wrapped_app(scope, receive, send)
+            return
+
+        start = time.perf_counter()
+        status_code = 500
+
+        async def send_with_metrics(message: dict[str, Any]) -> None:
+            nonlocal status_code
+            if message.get("type") == "http.response.start":
+                message_status = message.get("status")
+                if isinstance(message_status, int):
+                    status_code = message_status
+            await send(message)
+
+        try:
+            await self._wrapped_app(scope, receive, send_with_metrics)
+        finally:
+            if _prometheus_metrics_enabled():
+                route = scope.get("route")
+                route_label = getattr(route, "path", None)
+                if not isinstance(route_label, str) or not route_label:
+                    route_label = "unmatched"
+                route_label = _http_metrics_route_label(route_label)
+                record_http_request_metric(
+                    method=cast(str, scope["method"]),
+                    route=route_label,
+                    status_code=status_code,
+                    duration_ms=(time.perf_counter() - start) * 1000,
+                )
+
+
+app.add_middleware(_HTTPMetricsASGIMiddleware)
 
 
 # Add exception handler for rate limit exceeded
@@ -2020,32 +2037,18 @@ def _wire_message_to_event(msg: WireMessage) -> dict[str, str]:
 
 async def _broadcast_event(session: Session, event: dict[str, str]) -> None:
     """Broadcast event to all connected clients."""
-    active_queues: list[asyncio.Queue[dict[str, str]]] = []
-    full_pruned_count = 0
-    failed_pruned_count = 0
+    result = session.broadcast_event_nowait(event)
 
-    for queue in session.event_queues:
-        try:
-            queue.put_nowait(event)
-            active_queues.append(queue)
-        except asyncio.QueueFull:
-            full_pruned_count += 1
-        except Exception:
-            failed_pruned_count += 1
-            logger.debug("Dropping closed event queue", exc_info=True)
-
-    session.event_queues = active_queues
-
-    if full_pruned_count:
+    if result.full_pruned_count:
         logger.info(
             "Pruned %d full event queue(s) for session %s",
-            full_pruned_count,
+            result.full_pruned_count,
             session.id,
         )
-    if failed_pruned_count:
+    if result.failed_pruned_count:
         logger.info(
             "Pruned %d failed event queue(s) for session %s",
-            failed_pruned_count,
+            result.failed_pruned_count,
             session.id,
         )
 
