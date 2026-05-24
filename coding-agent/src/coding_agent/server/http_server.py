@@ -93,7 +93,7 @@ from coding_agent.topic_store import (
     TopicRecallLinkRecord,
     TopicRecord,
 )
-from coding_agent.ui.auth import AuthContext, auth_context_from_headers, verify_api_key
+from coding_agent.server.auth import AuthContext, auth_context_from_headers, verify_api_key
 from coding_agent.ui.binding_resolver import DefaultBindingResolver
 from coding_agent.ui.developer_console import (
     ConsoleActionSummary,
@@ -169,7 +169,7 @@ from coding_agent.ui.execution_binding import (
     LocalExecutionBinding,
 )
 from coding_agent.ui.rate_limit import RateLimits, limiter
-from coding_agent.ui.schemas import (
+from coding_agent.server.schemas import (
     ApprovalResponseSchema,
     ApproveRequest,
     CancelSessionResponse,
