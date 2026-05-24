@@ -207,12 +207,12 @@ from coding_agent.server.schemas import (
     WorkspaceUnpinRequest,
 )
 from coding_agent.ui.session_manager import Session, SessionManager
-from coding_agent.ui.session_owner_store import (
+from coding_agent.server.stores.session_owner_store import (
     SessionOwnershipConflictError,
     SessionOwnershipConflictReason,
     SessionOwnerStore,
 )
-from coding_agent.ui.workspace_store import (
+from coding_agent.server.stores.workspace_store import (
     JSONValue,
     PGWorkspaceMetadataStore,
     WorkspaceRecord,
