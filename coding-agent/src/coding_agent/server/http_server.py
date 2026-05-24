@@ -206,7 +206,7 @@ from coding_agent.server.schemas import (
     WorkspaceSummarySchema,
     WorkspaceUnpinRequest,
 )
-from coding_agent.ui.session_manager import Session, SessionManager
+from coding_agent.server.session_manager import Session, SessionManager
 from coding_agent.server.stores.session_owner_store import (
     SessionOwnershipConflictError,
     SessionOwnershipConflictReason,

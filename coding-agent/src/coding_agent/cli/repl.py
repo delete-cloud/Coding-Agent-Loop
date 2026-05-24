@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import importlib
 import sys
 from typing import Any, Literal
@@ -24,9 +23,8 @@ from coding_agent.core.config import Config
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.ui.stream_renderer import StreamingRenderer
 from coding_agent.ui.rich_consumer import RichConsumer
-from coding_agent.ui.rich_tui import CodingAgentTUI
 from coding_agent.ui.status_footer import StatusFooter
-from coding_agent.ui.session_manager import SessionManager
+from coding_agent.server.session_manager import SessionManager
 
 
 console = Console(force_terminal=True, soft_wrap=False)
