@@ -95,7 +95,7 @@ from coding_agent.topic_store import (
 )
 from coding_agent.server.auth import AuthContext, auth_context_from_headers, verify_api_key
 from coding_agent.server.binding_resolver import DefaultBindingResolver
-from coding_agent.ui.developer_console import (
+from coding_agent.server.developer_console import (
     ConsoleActionSummary,
     ConsoleActionValidationSummary,
     ConsoleBeeCommandIntentSummary,

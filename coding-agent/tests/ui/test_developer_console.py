@@ -1258,6 +1258,8 @@ async def test_console_shell_routes_render_navigation_without_secrets() -> None:
             for label, href in NAV_LINKS.items():
                 assert label in response.text
                 assert f'href="{href}"' in response.text
+            if route == "/console":
+                assert '<a class="active" href="/console">Overview</a>' in response.text
             for forbidden in FORBIDDEN_RENDERED_TEXT:
                 assert forbidden not in response.text
 
