@@ -149,6 +149,11 @@ def test_local_binding_requires_string_workspace_root() -> None:
         _ = LocalExecutionBinding.from_dict({"kind": "local", "workspace_root": 123})
 
 
+def test_local_binding_rejects_empty_workspace_root() -> None:
+    with pytest.raises(ValueError, match="workspace_root must be non-empty"):
+        _ = LocalExecutionBinding.from_dict({"kind": "local", "workspace_root": " "})
+
+
 def test_local_resolver_returns_absolute_path(tmp_path: Path) -> None:
     workspace = tmp_path / "repo"
     binding = LocalExecutionBinding(workspace_root=str(workspace))
@@ -196,12 +201,37 @@ def test_cloud_resolver_raises_typed_not_implemented() -> None:
             },
             "string workspace_url and workspace_id",
         ),
+        (
+            {
+                "kind": "cloud",
+                "workspace_url": " ",
+                "workspace_id": "ws-123",
+            },
+            "workspace_url must be non-empty",
+        ),
+        (
+            {
+                "kind": "cloud",
+                "workspace_url": "https://workspace.example.com",
+                "workspace_id": " ",
+            },
+            "workspace_id must be non-empty",
+        ),
+        (
+            {
+                "kind": "cloud",
+                "workspace_url": "https://workspace.example.com",
+                "workspace_id": "ws-123",
+                "runtime_profile": " ",
+            },
+            "runtime_profile must be non-empty",
+        ),
     ],
 )
 def test_cloud_binding_rejects_invalid_field_types(
     payload: dict[str, object], message: str
 ) -> None:
-    with pytest.raises(TypeError, match=message):
+    with pytest.raises((TypeError, ValueError), match=message):
         _ = CloudWorkspaceBinding.from_dict(payload)
 
 

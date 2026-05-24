@@ -94,7 +94,7 @@ from coding_agent.topic_store import (
     TopicRecord,
 )
 from coding_agent.server.auth import AuthContext, auth_context_from_headers, verify_api_key
-from coding_agent.ui.binding_resolver import DefaultBindingResolver
+from coding_agent.server.binding_resolver import DefaultBindingResolver
 from coding_agent.ui.developer_console import (
     ConsoleActionSummary,
     ConsoleActionValidationSummary,
@@ -163,7 +163,7 @@ from coding_agent.ui.developer_console import (
     safe_label_value,
     safe_text_value,
 )
-from coding_agent.ui.execution_binding import (
+from coding_agent.server.execution_binding import (
     CloudWorkspaceBinding,
     ExecutionBinding,
     LocalExecutionBinding,
