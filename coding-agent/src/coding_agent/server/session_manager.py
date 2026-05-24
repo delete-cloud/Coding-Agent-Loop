@@ -75,8 +75,8 @@ from coding_agent.server.stores.session_store import (
 from coding_agent.server.stores.session_owner_store import SessionOwnerStoreProtocol
 from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictError
 from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictReason
-from coding_agent.ui.binding_resolver import BindingResolver, DefaultBindingResolver
-from coding_agent.ui.execution_binding import (
+from coding_agent.server.binding_resolver import BindingResolver, DefaultBindingResolver
+from coding_agent.server.execution_binding import (
     CloudWorkspaceBinding,
     ExecutionBinding,
     LocalExecutionBinding,
