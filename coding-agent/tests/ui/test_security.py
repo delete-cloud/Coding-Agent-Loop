@@ -10,9 +10,9 @@ import pytest
 from fastapi import HTTPException
 from httpx import AsyncClient, ASGITransport
 
-from coding_agent.ui.http_server import app, session_manager
-from coding_agent.ui.auth import auth_context_from_headers, verify_api_key
-from coding_agent.ui.rate_limit import limiter
+from coding_agent.server.http_server import app, session_manager
+from coding_agent.server.auth import auth_context_from_headers, verify_api_key
+from coding_agent.server.rate_limit import limiter
 from coding_agent.core.config import settings
 from tests.ui.test_http_server import add_store_backed_approval_request
 
@@ -353,7 +353,7 @@ class TestRateLimiting:
     def test_rate_limiter_uses_redis_storage_when_env_configured(
         self, monkeypatch: pytest.MonkeyPatch
     ):
-        import coding_agent.ui.rate_limit as rate_limit
+        import coding_agent.server.rate_limit as rate_limit
         import slowapi
 
         monkeypatch.setenv("AGENT_SESSION_REDIS_URL", "redis://cache.example:6379/0")

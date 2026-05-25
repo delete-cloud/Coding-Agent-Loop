@@ -26,8 +26,8 @@ from coding_agent.runtime_store import (
     RunMessageSnapshotRecord,
     RuntimeEventRecord,
 )
-from coding_agent.ui.session_manager import SessionManager
-from coding_agent.ui.session_store import InMemorySessionStore
+from coding_agent.server.session_manager import SessionManager
+from coding_agent.server.stores.session_store import InMemorySessionStore
 from coding_agent.wire.protocol import (
     ApprovalRequest,
     ApprovalResponse,
@@ -36,7 +36,7 @@ from coding_agent.wire.protocol import (
     ToolCallDelta,
     TurnEnd,
 )
-import coding_agent.ui.http_server as http_server
+import coding_agent.server.http_server as http_server
 
 
 class _SmokeRuntimeStore:
@@ -228,7 +228,7 @@ def _install_adapter(
             return await run_turn(self, prompt)
 
     monkeypatch.setattr(
-        "coding_agent.ui.session_manager.PipelineAdapter",
+        "coding_agent.server.session_manager.PipelineAdapter",
         SmokeAdapter,
     )
 

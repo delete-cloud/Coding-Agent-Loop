@@ -48,16 +48,16 @@ from coding_agent.environment.workspace_provider import (
     WorkspaceInventoryEntry,
     WorkspacePatch,
 )
-from coding_agent.ui.execution_binding import (
+from coding_agent.server.execution_binding import (
     CloudWorkspaceBinding,
     LocalExecutionBinding,
 )
 from coding_agent.wire.local import LocalWire
-from coding_agent.ui.session_manager import Session
-from coding_agent.ui.workspace_store import JSONValue, WorkspaceRecord
-from coding_agent.ui.session_owner_store import SessionOwnerRecord
-from coding_agent.ui.session_owner_store import SessionOwnershipConflictError
-from coding_agent.ui.http_server import (
+from coding_agent.server.session_manager import Session
+from coding_agent.server.stores.workspace_store import JSONValue, WorkspaceRecord
+from coding_agent.server.stores.session_owner_store import SessionOwnerRecord
+from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictError
+from coding_agent.server.http_server import (
     SESSION_IDLE_TIMEOUT_MINUTES,
     _build_binding_resolver,
     _build_session_manager,
@@ -73,7 +73,7 @@ from coding_agent.ui.http_server import (
     session_manager,
     wait_for_approval,
 )
-import coding_agent.ui.http_server as http_server
+import coding_agent.server.http_server as http_server
 from coding_agent.observability import reset_prometheus_metrics
 from coding_agent.wire.protocol import (
     ApprovalRequest,
@@ -699,7 +699,7 @@ async def test_http_create_session_rejects_request_setup_commands_until_executio
         "agent": {"network": "none"},
     }
     monkeypatch.setattr(
-        "coding_agent.ui.http_server._load_cloud_workspace_config",
+        "coding_agent.server.http_server._load_cloud_workspace_config",
         lambda: cloud_workspace_config,
     )
 
@@ -737,7 +737,7 @@ async def test_http_create_session_rejects_request_setup_commands_when_policy_di
         "agent": {"network": "none"},
     }
     monkeypatch.setattr(
-        "coding_agent.ui.http_server._load_cloud_workspace_config",
+        "coding_agent.server.http_server._load_cloud_workspace_config",
         lambda: cloud_workspace_config,
     )
 
@@ -777,7 +777,7 @@ async def test_http_create_session_rejects_invalid_request_setup_commands(
         "agent": {"network": "none"},
     }
     monkeypatch.setattr(
-        "coding_agent.ui.http_server._load_cloud_workspace_config",
+        "coding_agent.server.http_server._load_cloud_workspace_config",
         lambda: cloud_workspace_config,
     )
 
@@ -1043,7 +1043,7 @@ class TestSessionCreation:
             return func(*args)
 
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             lambda: {
                 "enabled": True,
                 "provider": "docker",
@@ -1051,12 +1051,12 @@ class TestSessionCreation:
             },
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.cloud_workspace_ready_from_config",
+            "coding_agent.server.http_server.cloud_workspace_ready_from_config",
             fake_readiness,
             raising=False,
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.asyncio.to_thread",
+            "coding_agent.server.http_server.asyncio.to_thread",
             fake_to_thread,
         )
 
@@ -1095,7 +1095,7 @@ class TestSessionCreation:
         self, client, monkeypatch
     ):
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             lambda: {
                 "enabled": True,
                 "provider": "docker",
@@ -1103,7 +1103,7 @@ class TestSessionCreation:
             },
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.cloud_workspace_ready_from_config",
+            "coding_agent.server.http_server.cloud_workspace_ready_from_config",
             lambda config: False,
             raising=False,
         )
@@ -1124,7 +1124,7 @@ class TestSessionCreation:
         self, client, monkeypatch
     ):
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             lambda: {"enabled": True},
         )
 
@@ -1238,7 +1238,7 @@ class TestSessionCreation:
             lambda provider_config, binding: None,
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             lambda: {
                 "enabled": True,
                 "provider": "docker",
@@ -1294,7 +1294,7 @@ class TestSessionCreation:
         self, client, monkeypatch
     ):
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             lambda: {},
         )
 
@@ -1312,7 +1312,7 @@ class TestSessionCreation:
         self, client, monkeypatch, tmp_path
     ):
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             lambda: {
                 "enabled": True,
                 "provider": "docker",
@@ -1333,7 +1333,7 @@ class TestSessionCreation:
             raise exc
 
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.provision_cloud_binding_from_config",
+            "coding_agent.server.http_server.provision_cloud_binding_from_config",
             fail_setup,
         )
 
@@ -1364,7 +1364,7 @@ class TestSessionCreation:
         captured_configs: list[dict[str, object]] = []
 
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             lambda: {
                 "enabled": True,
                 "provider": "docker",
@@ -1375,7 +1375,7 @@ class TestSessionCreation:
             },
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.provision_cloud_binding_from_config",
+            "coding_agent.server.http_server.provision_cloud_binding_from_config",
             lambda config, source: (
                 captured_configs.append(dict(config))
                 or captured_sources.append(dict(source))
@@ -1426,7 +1426,7 @@ class TestSessionCreation:
         cleaned: list[CloudWorkspaceBinding] = []
 
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             lambda: {
                 "enabled": True,
                 "provider": "docker",
@@ -1434,7 +1434,7 @@ class TestSessionCreation:
             },
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.provision_cloud_binding_from_config",
+            "coding_agent.server.http_server.provision_cloud_binding_from_config",
             lambda config, source: binding,
         )
 
@@ -1444,7 +1444,7 @@ class TestSessionCreation:
 
         monkeypatch.setattr(session_manager, "create_session", fail_create_session)
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.cleanup_cloud_binding_from_config",
+            "coding_agent.server.http_server.cleanup_cloud_binding_from_config",
             lambda config, target_binding: cleaned.append(target_binding),
         )
 
@@ -1466,7 +1466,7 @@ class TestSessionCreation:
         cleaned: list[CloudWorkspaceBinding] = []
 
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             lambda: {
                 "enabled": True,
                 "provider": "docker",
@@ -1474,7 +1474,7 @@ class TestSessionCreation:
             },
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.provision_cloud_binding_from_config",
+            "coding_agent.server.http_server.provision_cloud_binding_from_config",
             lambda config, source: binding,
         )
 
@@ -1484,7 +1484,7 @@ class TestSessionCreation:
 
         monkeypatch.setattr(session_manager, "create_session", fail_create_session)
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.cleanup_cloud_binding_from_config",
+            "coding_agent.server.http_server.cleanup_cloud_binding_from_config",
             lambda config, target_binding: cleaned.append(target_binding),
         )
 
@@ -1505,7 +1505,7 @@ class TestSessionCreation:
         )
 
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             lambda: {
                 "enabled": True,
                 "provider": "docker",
@@ -1513,7 +1513,7 @@ class TestSessionCreation:
             },
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.provision_cloud_binding_from_config",
+            "coding_agent.server.http_server.provision_cloud_binding_from_config",
             lambda config, source: binding,
         )
 
@@ -1527,7 +1527,7 @@ class TestSessionCreation:
 
         monkeypatch.setattr(session_manager, "create_session", fail_create_session)
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._cleanup_provisioned_cloud_binding",
+            "coding_agent.server.http_server._cleanup_provisioned_cloud_binding",
             fail_cleanup,
         )
 
@@ -1549,7 +1549,7 @@ class TestSessionCreation:
         cleaned: list[CloudWorkspaceBinding] = []
 
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             lambda: {
                 "enabled": True,
                 "provider": "docker",
@@ -1557,7 +1557,7 @@ class TestSessionCreation:
             },
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.provision_cloud_binding_from_config",
+            "coding_agent.server.http_server.provision_cloud_binding_from_config",
             lambda config, source: binding,
         )
 
@@ -1567,7 +1567,7 @@ class TestSessionCreation:
 
         monkeypatch.setattr(session_manager, "create_session", cancel_create_session)
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.cleanup_cloud_binding_from_config",
+            "coding_agent.server.http_server.cleanup_cloud_binding_from_config",
             lambda config, target_binding: cleaned.append(target_binding),
         )
 
@@ -1589,7 +1589,7 @@ class TestSessionCreation:
             lambda provider_config, binding: None,
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             lambda: {
                 "enabled": True,
                 "provider": "docker",
@@ -1599,7 +1599,7 @@ class TestSessionCreation:
             },
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.cleanup_cloud_binding_from_config",
+            "coding_agent.server.http_server.cleanup_cloud_binding_from_config",
             lambda config, target_binding: cleaned.append(target_binding),
         )
 
@@ -1642,11 +1642,11 @@ class TestSessionCreation:
             }
 
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             cloud_workspace_config,
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.cleanup_cloud_binding_from_config",
+            "coding_agent.server.http_server.cleanup_cloud_binding_from_config",
             lambda config, target_binding: cleaned.append(target_binding),
         )
 
@@ -1765,7 +1765,7 @@ max_turns = 17
                 self.workspace_root: object | None = None
 
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             lambda: {
                 "enabled": True,
                 "provider": "docker",
@@ -1818,7 +1818,7 @@ max_turns = 17
 
         monkeypatch.setattr(session_manager, "_create_agent", fake_create_agent)
         monkeypatch.setattr(
-            "coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter
+            "coding_agent.server.session_manager.PipelineAdapter", FakeAdapter
         )
 
         create_response = await client.post(
@@ -1856,7 +1856,7 @@ max_turns = 17
                 self.pg_pool = pg_pool
 
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_storage_config",
+            "coding_agent.server.http_server._load_storage_config",
             lambda: {
                 "http_session_backend": "pg",
                 "tape_backend": "pg",
@@ -1868,7 +1868,7 @@ max_turns = 17
             },
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.SessionOwnerStore",
+            "coding_agent.server.http_server.SessionOwnerStore",
             FakeOwnerStore,
         )
 
@@ -1897,7 +1897,7 @@ max_turns = 17
         if fencing_token is not None:
             storage_config["fencing_token"] = fencing_token
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_storage_config",
+            "coding_agent.server.http_server._load_storage_config",
             lambda: storage_config,
         )
 
@@ -1908,7 +1908,7 @@ max_turns = 17
         self, monkeypatch
     ):
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_storage_config",
+            "coding_agent.server.http_server._load_storage_config",
             lambda: {
                 "http_session_backend": "redis",
                 "tape_backend": "pg",
@@ -1945,7 +1945,7 @@ max_turns = 17
             "renew_owner_leases",
             fail_renew_owner_leases,
         )
-        monkeypatch.setattr("coding_agent.ui.http_server.asyncio.sleep", fail_sleep)
+        monkeypatch.setattr("coding_agent.server.http_server.asyncio.sleep", fail_sleep)
 
         await _renew_owner_leases()
 
@@ -2033,7 +2033,7 @@ max_turns = 17
             "list_sessions_async",
             fake_list_sessions_async,
         )
-        monkeypatch.setattr("coding_agent.ui.http_server.asyncio.sleep", fake_sleep)
+        monkeypatch.setattr("coding_agent.server.http_server.asyncio.sleep", fake_sleep)
 
         with pytest.raises(asyncio.CancelledError):
             await _renew_owner_leases()
@@ -2074,7 +2074,7 @@ max_turns = 17
             "renew_owner_leases",
             fake_renew_owner_leases,
         )
-        monkeypatch.setattr("coding_agent.ui.http_server.asyncio.sleep", fake_sleep)
+        monkeypatch.setattr("coding_agent.server.http_server.asyncio.sleep", fake_sleep)
 
         with pytest.raises(asyncio.CancelledError):
             await _renew_owner_leases()
@@ -2104,7 +2104,7 @@ max_turns = 17
             "renew_owner_leases",
             fake_renew_owner_leases,
         )
-        monkeypatch.setattr("coding_agent.ui.http_server.asyncio.sleep", fake_sleep)
+        monkeypatch.setattr("coding_agent.server.http_server.asyncio.sleep", fake_sleep)
 
         with pytest.raises(asyncio.CancelledError):
             await _renew_owner_leases()
@@ -2302,7 +2302,7 @@ class TestPromptStreaming:
         session_id = create_resp.json()["session_id"]
 
         with patch(
-            "coding_agent.ui.session_manager.importlib.import_module"
+            "coding_agent.server.session_manager.importlib.import_module"
         ) as import_module:
             import_module.return_value = types.SimpleNamespace(
                 create_agent=lambda **kwargs: (_ for _ in ()).throw(
@@ -2361,7 +2361,7 @@ class TestPromptStreaming:
             ),
         )
         monkeypatch.setattr(
-            "coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter
+            "coding_agent.server.session_manager.PipelineAdapter", FakeAdapter
         )
 
         events = []
@@ -3172,7 +3172,7 @@ class TestEventsFanOut:
             session_manager, "get_session_async", fake_get_session_async
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.EventSourceResponse",
+            "coding_agent.server.http_server.EventSourceResponse",
             FakeEventSourceResponse,
         )
 
@@ -3185,7 +3185,7 @@ class TestEventsFanOut:
             return await real_wait_for(awaitable, timeout)
 
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.asyncio.wait_for", fake_wait_for
+            "coding_agent.server.http_server.asyncio.wait_for", fake_wait_for
         )
 
         request = Request(
@@ -3239,7 +3239,7 @@ class TestEventsFanOut:
             session_manager, "has_event_queue_async", fake_has_event_queue_async
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.EventSourceResponse",
+            "coding_agent.server.http_server.EventSourceResponse",
             FakeEventSourceResponse,
         )
 
@@ -3252,7 +3252,7 @@ class TestEventsFanOut:
             return await real_wait_for(awaitable, timeout)
 
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.asyncio.wait_for", fake_wait_for
+            "coding_agent.server.http_server.asyncio.wait_for", fake_wait_for
         )
 
         request = Request(
@@ -3303,19 +3303,19 @@ class TestLifespanShutdown:
             events.append("close")
 
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             lambda: cloud_workspace_config,
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.cleanup_stale_cloud_workspaces_from_config",
+            "coding_agent.server.http_server.cleanup_stale_cloud_workspaces_from_config",
             fake_cleanup_stale,
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._cleanup_idle_sessions",
+            "coding_agent.server.http_server._cleanup_idle_sessions",
             fake_cleanup_idle_sessions,
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._renew_owner_leases",
+            "coding_agent.server.http_server._renew_owner_leases",
             fake_renew_owner_leases,
         )
         monkeypatch.setattr(
@@ -3349,7 +3349,7 @@ class TestLifespanShutdown:
             return 0
 
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             lambda: {
                 "enabled": True,
                 "provider": "docker",
@@ -3357,7 +3357,7 @@ class TestLifespanShutdown:
             },
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.cleanup_stale_cloud_workspaces_from_config",
+            "coding_agent.server.http_server.cleanup_stale_cloud_workspaces_from_config",
             fake_cleanup_stale,
         )
 
@@ -3450,11 +3450,11 @@ class TestLifespanShutdown:
             return SimpleNamespace(workspace_id=workspace_id, status="cleaned")
 
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_remote_retention_config",
+            "coding_agent.server.http_server._load_remote_retention_config",
             lambda: {"enabled": True},
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.cleanup_cloud_workspace_from_config",
+            "coding_agent.server.http_server.cleanup_cloud_workspace_from_config",
             fake_cleanup,
         )
 
@@ -3506,7 +3506,7 @@ class TestLifespanShutdown:
             raise RuntimeError("docker unavailable")
 
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.cleanup_cloud_workspace_from_config",
+            "coding_agent.server.http_server.cleanup_cloud_workspace_from_config",
             fake_cleanup,
         )
 
@@ -3546,14 +3546,14 @@ class TestLifespanShutdown:
             raise asyncio.CancelledError
 
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             lambda: cloud_workspace_config,
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.cleanup_stale_cloud_workspaces_from_config",
+            "coding_agent.server.http_server.cleanup_stale_cloud_workspaces_from_config",
             fake_cleanup_stale,
         )
-        monkeypatch.setattr("coding_agent.ui.http_server.asyncio.sleep", fake_sleep)
+        monkeypatch.setattr("coding_agent.server.http_server.asyncio.sleep", fake_sleep)
 
         with pytest.raises(asyncio.CancelledError):
             await http_server._cleanup_stale_cloud_workspaces_periodically()
@@ -3605,7 +3605,7 @@ class TestLifespanShutdown:
             close_calls.append("closed")
 
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._cleanup_idle_sessions",
+            "coding_agent.server.http_server._cleanup_idle_sessions",
             fake_cleanup_idle_sessions,
         )
         monkeypatch.setattr(
@@ -3647,11 +3647,11 @@ class TestLifespanShutdown:
             close_calls.append("closed")
 
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._cleanup_idle_sessions",
+            "coding_agent.server.http_server._cleanup_idle_sessions",
             fake_cleanup_idle_sessions,
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._renew_owner_leases",
+            "coding_agent.server.http_server._renew_owner_leases",
             fake_renew_owner_leases,
         )
         monkeypatch.setattr(
@@ -3691,11 +3691,11 @@ class TestLifespanShutdown:
             events.append("close")
 
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._cleanup_idle_sessions",
+            "coding_agent.server.http_server._cleanup_idle_sessions",
             fake_cleanup_idle_sessions,
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._renew_owner_leases",
+            "coding_agent.server.http_server._renew_owner_leases",
             fake_renew_owner_leases,
         )
         monkeypatch.setattr(
@@ -3745,11 +3745,11 @@ class TestLifespanShutdown:
             events.append("close")
 
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._cleanup_idle_sessions",
+            "coding_agent.server.http_server._cleanup_idle_sessions",
             fake_cleanup_idle_sessions,
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._renew_owner_leases",
+            "coding_agent.server.http_server._renew_owner_leases",
             fake_renew_owner_leases,
         )
         monkeypatch.setattr(
@@ -3801,11 +3801,11 @@ class TestLifespanShutdown:
             events.append("close")
 
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._cleanup_idle_sessions",
+            "coding_agent.server.http_server._cleanup_idle_sessions",
             fake_cleanup_idle_sessions,
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._renew_owner_leases",
+            "coding_agent.server.http_server._renew_owner_leases",
             fake_renew_owner_leases,
         )
         monkeypatch.setattr(
@@ -4349,11 +4349,11 @@ class TestRemoteWorkspaceRetentionContract:
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_remote_retention_config",
+            "coding_agent.server.http_server._load_remote_retention_config",
             lambda: {"enabled": True},
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             lambda: {"provider_instance_id": "docker-local"},
         )
         session_manager.configure_workspace_metadata_store(
@@ -4431,11 +4431,11 @@ class TestRemoteWorkspaceRetentionContract:
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_remote_retention_config",
+            "coding_agent.server.http_server._load_remote_retention_config",
             lambda: {"enabled": True},
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             lambda: {"provider_instance_id": "docker-local"},
         )
         session_manager.configure_workspace_metadata_store(
@@ -4474,7 +4474,7 @@ class TestRemoteWorkspaceRetentionContract:
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_remote_retention_config",
+            "coding_agent.server.http_server._load_remote_retention_config",
             lambda: {"enabled": True},
         )
         session_manager.configure_workspace_metadata_store(
@@ -4490,11 +4490,11 @@ class TestRemoteWorkspaceRetentionContract:
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_remote_retention_config",
+            "coding_agent.server.http_server._load_remote_retention_config",
             lambda: {"enabled": True},
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             lambda: {"provider": "docker", "provider_instance_id": "docker-local"},
         )
         store = FakeWorkspaceMetadataStore(
@@ -4517,7 +4517,7 @@ class TestRemoteWorkspaceRetentionContract:
         session_manager.configure_workspace_metadata_store(store)
         cleanup = MagicMock()
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.cleanup_cloud_workspace_from_config",
+            "coding_agent.server.http_server.cleanup_cloud_workspace_from_config",
             cleanup,
         )
 
@@ -4537,11 +4537,11 @@ class TestRemoteWorkspaceRetentionContract:
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_remote_retention_config",
+            "coding_agent.server.http_server._load_remote_retention_config",
             lambda: {"enabled": True},
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             lambda: {"provider": "docker", "provider_instance_id": "docker-local"},
         )
         store = FakeWorkspaceMetadataStore(
@@ -4582,7 +4582,7 @@ class TestRemoteWorkspaceRetentionContract:
             )
 
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.cleanup_cloud_workspace_from_config",
+            "coding_agent.server.http_server.cleanup_cloud_workspace_from_config",
             fake_cleanup,
         )
 
@@ -4603,11 +4603,11 @@ class TestRemoteWorkspaceRetentionContract:
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_remote_retention_config",
+            "coding_agent.server.http_server._load_remote_retention_config",
             lambda: {"enabled": True},
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             lambda: {"provider": "docker", "provider_instance_id": "docker-local"},
         )
         store = FakeWorkspaceMetadataStore(
@@ -4639,7 +4639,7 @@ class TestRemoteWorkspaceRetentionContract:
             raise KeyError(f"workspace not found: {workspace_id}")
 
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.cleanup_cloud_workspace_from_config",
+            "coding_agent.server.http_server.cleanup_cloud_workspace_from_config",
             fake_cleanup,
         )
 
@@ -4655,11 +4655,11 @@ class TestRemoteWorkspaceRetentionContract:
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_remote_retention_config",
+            "coding_agent.server.http_server._load_remote_retention_config",
             lambda: {"enabled": True},
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             lambda: {"provider": "docker", "provider_instance_id": "docker-local"},
         )
         store = FakeWorkspaceMetadataStore(
@@ -4682,7 +4682,7 @@ class TestRemoteWorkspaceRetentionContract:
         session_manager.configure_workspace_metadata_store(store)
         manifest = MagicMock()
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.workspace_archive_manifest_from_config",
+            "coding_agent.server.http_server.workspace_archive_manifest_from_config",
             manifest,
         )
 
@@ -4695,11 +4695,11 @@ class TestRemoteWorkspaceRetentionContract:
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_remote_retention_config",
+            "coding_agent.server.http_server._load_remote_retention_config",
             lambda: {"enabled": True},
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             lambda: {"provider": "docker", "provider_instance_id": "docker-local"},
         )
         store = FakeWorkspaceMetadataStore(
@@ -4722,7 +4722,7 @@ class TestRemoteWorkspaceRetentionContract:
         session_manager.configure_workspace_metadata_store(store)
         export_archive = MagicMock()
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.export_workspace_archive_by_id_from_config",
+            "coding_agent.server.http_server.export_workspace_archive_by_id_from_config",
             export_archive,
         )
 
@@ -4735,11 +4735,11 @@ class TestRemoteWorkspaceRetentionContract:
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_remote_retention_config",
+            "coding_agent.server.http_server._load_remote_retention_config",
             lambda: {"enabled": True},
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             lambda: {"provider": "docker", "provider_instance_id": "docker-local"},
         )
         store = FakeWorkspaceMetadataStore(
@@ -4787,7 +4787,7 @@ class TestRemoteWorkspaceRetentionContract:
             )
 
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.workspace_archive_manifest_from_config",
+            "coding_agent.server.http_server.workspace_archive_manifest_from_config",
             fake_manifest,
         )
 
@@ -4801,7 +4801,7 @@ class TestRemoteWorkspaceRetentionContract:
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_remote_retention_config",
+            "coding_agent.server.http_server._load_remote_retention_config",
             lambda: {"enabled": True, "default_policy": "delete_on_close"},
         )
         store = FakeWorkspaceMetadataStore(
@@ -4838,7 +4838,7 @@ class TestRemoteWorkspaceRetentionContract:
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_remote_retention_config",
+            "coding_agent.server.http_server._load_remote_retention_config",
             lambda: {"enabled": True, "default_policy": "delete_on_close"},
         )
         store = FakeWorkspaceMetadataStore(
@@ -4886,7 +4886,7 @@ class TestRemoteWorkspaceRetentionContract:
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_remote_retention_config",
+            "coding_agent.server.http_server._load_remote_retention_config",
             lambda: {"enabled": True, "default_policy": "delete_on_close"},
         )
         store = FakeWorkspaceMetadataStore(
@@ -4956,11 +4956,11 @@ class TestRemoteWorkspaceRetentionContract:
             )
 
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.workspace_diff_from_config",
+            "coding_agent.server.http_server.workspace_diff_from_config",
             fake_workspace_diff,
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             lambda: {"provider": "docker"},
         )
 
@@ -5011,11 +5011,11 @@ class TestRemoteWorkspaceRetentionContract:
             )
 
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.workspace_patch_from_config",
+            "coding_agent.server.http_server.workspace_patch_from_config",
             fake_workspace_patch,
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             lambda: {"provider": "docker"},
         )
 
@@ -5068,15 +5068,15 @@ class TestRemoteWorkspaceRetentionContract:
 
         mock_publish = MagicMock(side_effect=fake_publish)
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.publish_workspace_branch_from_config",
+            "coding_agent.server.http_server.publish_workspace_branch_from_config",
             mock_publish,
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             lambda: {"provider": "docker"},
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_remote_publication_config",
+            "coding_agent.server.http_server._load_remote_publication_config",
             lambda: {
                 "enabled": True,
                 "git_author_name": "coding-agent",
@@ -5150,11 +5150,11 @@ class TestRemoteWorkspaceRetentionContract:
         session_manager.configure_workspace_metadata_store(store)
 
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_remote_retention_config",
+            "coding_agent.server.http_server._load_remote_retention_config",
             lambda: {"enabled": True, "default_policy": "delete_on_close"},
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.publish_workspace_branch_from_config",
+            "coding_agent.server.http_server.publish_workspace_branch_from_config",
             lambda cloud_config, publication_config, workspace_id, branch_name, commit_message: (
                 WorkspaceBranchPublication(
                     workspace_id=workspace_id,
@@ -5166,11 +5166,11 @@ class TestRemoteWorkspaceRetentionContract:
             ),
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             lambda: {"provider": "docker", "provider_instance_id": "docker-local"},
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_remote_publication_config",
+            "coding_agent.server.http_server._load_remote_publication_config",
             lambda: {
                 "enabled": True,
                 "git_author_name": "coding-agent",
@@ -5283,7 +5283,7 @@ class TestRemoteWorkspaceRetentionContract:
         session_id = create_resp.json()["session_id"]
 
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.publish_workspace_branch_from_config",
+            "coding_agent.server.http_server.publish_workspace_branch_from_config",
             lambda cloud_config, publication_config, workspace_id, branch_name, commit_message: (
                 WorkspaceBranchPublication(
                     workspace_id=workspace_id,
@@ -5297,11 +5297,11 @@ class TestRemoteWorkspaceRetentionContract:
             ),
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             lambda: {"provider": "docker"},
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_remote_publication_config",
+            "coding_agent.server.http_server._load_remote_publication_config",
             lambda: {
                 "enabled": True,
                 "git_author_name": "coding-agent",
@@ -5397,15 +5397,15 @@ class TestRemoteWorkspaceRetentionContract:
                 return FakeGitHubResponse()
 
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.publish_workspace_branch_from_config",
+            "coding_agent.server.http_server.publish_workspace_branch_from_config",
             MagicMock(side_effect=fake_publish),
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             lambda: {"provider": "docker"},
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_remote_publication_config",
+            "coding_agent.server.http_server._load_remote_publication_config",
             lambda: {
                 "enabled": True,
                 "git_author_name": "coding-agent",
@@ -5496,15 +5496,15 @@ class TestRemoteWorkspaceRetentionContract:
             )
 
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.publish_workspace_branch_from_config",
+            "coding_agent.server.http_server.publish_workspace_branch_from_config",
             MagicMock(side_effect=fake_publish),
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             lambda: {"provider": "docker"},
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_remote_publication_config",
+            "coding_agent.server.http_server._load_remote_publication_config",
             lambda: {
                 "enabled": True,
                 "git_author_name": "coding-agent",
@@ -5597,15 +5597,15 @@ class TestRemoteWorkspaceRetentionContract:
                 return FakeGitHubResponse()
 
         monkeypatch.setattr(
-            "coding_agent.ui.http_server.publish_workspace_branch_from_config",
+            "coding_agent.server.http_server.publish_workspace_branch_from_config",
             MagicMock(side_effect=fake_publish),
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             lambda: {"provider": "docker"},
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_remote_publication_config",
+            "coding_agent.server.http_server._load_remote_publication_config",
             lambda: {
                 "enabled": True,
                 "git_author_name": "coding-agent",
@@ -5663,11 +5663,11 @@ class TestRemoteWorkspaceRetentionContract:
         )
         session_id = create_resp.json()["session_id"]
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_cloud_workspace_config",
+            "coding_agent.server.http_server._load_cloud_workspace_config",
             lambda: {"provider": "docker"},
         )
         monkeypatch.setattr(
-            "coding_agent.ui.http_server._load_remote_publication_config",
+            "coding_agent.server.http_server._load_remote_publication_config",
             lambda: {},
         )
 
@@ -6371,7 +6371,7 @@ class TestWaitForApproval:
         )
 
         # Use a very short timeout for testing
-        import coding_agent.ui.http_server as http_server
+        import coding_agent.server.http_server as http_server
 
         original_timeout = http_server.APPROVAL_TIMEOUT_SECONDS
         http_server.APPROVAL_TIMEOUT_SECONDS = 0.1
@@ -6387,7 +6387,7 @@ class TestWaitForApproval:
     async def test_wait_for_approval_request_can_be_approved_via_http_endpoint(
         self, client
     ):
-        import coding_agent.ui.http_server as http_server
+        import coding_agent.server.http_server as http_server
 
         session_id = "http-wait-approval"
         register_session(session_id, turn_in_progress=True)
@@ -6442,59 +6442,59 @@ class TestWaitForApproval:
 def test_http_server_import_falls_back_when_agent_toml_is_unreadable(
     monkeypatch,
 ) -> None:
-    original_module = sys.modules.get("coding_agent.ui.http_server")
-    ui_module = sys.modules.get("coding_agent.ui")
+    original_module = sys.modules.get("coding_agent.server.http_server")
+    server_module = sys.modules.get("coding_agent.server")
     original_parent_attr = (
-        getattr(ui_module, "http_server", None) if ui_module is not None else None
+        getattr(server_module, "http_server", None) if server_module is not None else None
     )
-    monkeypatch.delitem(sys.modules, "coding_agent.ui.http_server", raising=False)
-    if ui_module is not None:
-        monkeypatch.delattr(ui_module, "http_server", raising=False)
+    monkeypatch.delitem(sys.modules, "coding_agent.server.http_server", raising=False)
+    if server_module is not None:
+        monkeypatch.delattr(server_module, "http_server", raising=False)
 
     try:
         with patch("agentkit.config.loader.load_config") as load_config:
             load_config.side_effect = ConfigError(
                 "config file not found: /tmp/missing-agent.toml"
             )
-            http_server = importlib.import_module("coding_agent.ui.http_server")
+            http_server = importlib.import_module("coding_agent.server.http_server")
 
         assert http_server._load_storage_config() == {}
         assert http_server.session_manager._storage_config == {}
     finally:
         if original_module is None:
             monkeypatch.delitem(
-                sys.modules, "coding_agent.ui.http_server", raising=False
+                sys.modules, "coding_agent.server.http_server", raising=False
             )
         else:
-            sys.modules["coding_agent.ui.http_server"] = original_module
-        if ui_module is not None and original_parent_attr is not None:
-            setattr(ui_module, "http_server", original_parent_attr)
+            sys.modules["coding_agent.server.http_server"] = original_module
+        if server_module is not None and original_parent_attr is not None:
+            setattr(server_module, "http_server", original_parent_attr)
 
 
 def test_http_server_import_raises_on_invalid_agent_toml(monkeypatch) -> None:
-    original_module = sys.modules.get("coding_agent.ui.http_server")
-    ui_module = sys.modules.get("coding_agent.ui")
+    original_module = sys.modules.get("coding_agent.server.http_server")
+    server_module = sys.modules.get("coding_agent.server")
     original_parent_attr = (
-        getattr(ui_module, "http_server", None) if ui_module is not None else None
+        getattr(server_module, "http_server", None) if server_module is not None else None
     )
-    monkeypatch.delitem(sys.modules, "coding_agent.ui.http_server", raising=False)
-    if ui_module is not None:
-        monkeypatch.delattr(ui_module, "http_server", raising=False)
+    monkeypatch.delitem(sys.modules, "coding_agent.server.http_server", raising=False)
+    if server_module is not None:
+        monkeypatch.delattr(server_module, "http_server", raising=False)
 
     try:
         with patch("agentkit.config.loader.load_config") as load_config:
             load_config.side_effect = ConfigError("missing [agent] section")
             with pytest.raises(ConfigError, match=r"missing \[agent\] section"):
-                importlib.import_module("coding_agent.ui.http_server")
+                importlib.import_module("coding_agent.server.http_server")
     finally:
         if original_module is None:
             monkeypatch.delitem(
-                sys.modules, "coding_agent.ui.http_server", raising=False
+                sys.modules, "coding_agent.server.http_server", raising=False
             )
         else:
-            sys.modules["coding_agent.ui.http_server"] = original_module
-        if ui_module is not None and original_parent_attr is not None:
-            setattr(ui_module, "http_server", original_parent_attr)
+            sys.modules["coding_agent.server.http_server"] = original_module
+        if server_module is not None and original_parent_attr is not None:
+            setattr(server_module, "http_server", original_parent_attr)
 
 
 def test_cli_module_import_does_not_eagerly_import_http_server(monkeypatch) -> None:
@@ -6504,7 +6504,7 @@ def test_cli_module_import_does_not_eagerly_import_http_server(monkeypatch) -> N
             sys.executable,
             "-c",
             "import sys; import coding_agent.__main__; "
-            "print('coding_agent.ui.http_server' in sys.modules)",
+            "print('coding_agent.server.http_server' in sys.modules)",
         ],
         check=True,
         capture_output=True,

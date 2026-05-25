@@ -6,7 +6,6 @@ from collections.abc import AsyncIterator
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Callable
-from typing import Any
 from typing import cast
 
 import pytest
@@ -14,17 +13,17 @@ from httpx import ASGITransport, AsyncClient
 from fastapi import HTTPException
 from starlette.requests import Request
 
-from coding_agent.ui.http_server import (
+from coding_agent.server.http_server import (
     _broadcast_event,
     app,
     get_events,
     limiter,
     session_manager,
 )
-from coding_agent.ui.session_owner_store import SessionOwnerRecord
-from coding_agent.ui.session_owner_store import SessionOwnershipConflictError
-from coding_agent.ui.session_owner_store import SessionOwnershipConflictReason
-from coding_agent.ui.session_store import InMemorySessionStore
+from coding_agent.server.stores.session_owner_store import SessionOwnerRecord
+from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictError
+from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictReason
+from coding_agent.server.stores.session_store import InMemorySessionStore
 
 
 class FakeOwnerStore:
@@ -248,7 +247,7 @@ async def test_get_events_stops_stream_after_owner_change(
     )
 
     monkeypatch.setattr(
-        "coding_agent.ui.http_server.EventSourceResponse", FakeEventSourceResponse
+        "coding_agent.server.http_server.EventSourceResponse", FakeEventSourceResponse
     )
 
     real_wait_for = asyncio.wait_for
@@ -268,7 +267,7 @@ async def test_get_events_stops_stream_after_owner_change(
                 raise asyncio.TimeoutError
         return await real_wait_for(awaitable, timeout)
 
-    monkeypatch.setattr("coding_agent.ui.http_server.asyncio.wait_for", fake_wait_for)
+    monkeypatch.setattr("coding_agent.server.http_server.asyncio.wait_for", fake_wait_for)
 
     response = await get_events(_events_request(session_id), session_id, None)
     event_generator = cast(AsyncIterator[dict[str, str]], response.body_iterator)
@@ -292,7 +291,7 @@ async def test_get_events_drops_queued_event_after_owner_change(
     )
 
     monkeypatch.setattr(
-        "coding_agent.ui.http_server.EventSourceResponse", FakeEventSourceResponse
+        "coding_agent.server.http_server.EventSourceResponse", FakeEventSourceResponse
     )
 
     original_verify = session_manager.verify_event_stream_ownership
@@ -588,7 +587,7 @@ async def test_get_events_keeps_stream_alive_for_current_owner(
     )
 
     monkeypatch.setattr(
-        "coding_agent.ui.http_server.EventSourceResponse", FakeEventSourceResponse
+        "coding_agent.server.http_server.EventSourceResponse", FakeEventSourceResponse
     )
 
     real_wait_for = asyncio.wait_for
@@ -609,7 +608,7 @@ async def test_get_events_keeps_stream_alive_for_current_owner(
             raise asyncio.TimeoutError
         return await real_wait_for(awaitable, timeout)
 
-    monkeypatch.setattr("coding_agent.ui.http_server.asyncio.wait_for", fake_wait_for)
+    monkeypatch.setattr("coding_agent.server.http_server.asyncio.wait_for", fake_wait_for)
 
     response = await get_events(_events_request(session_id), session_id, None)
     event_generator = cast(AsyncIterator[dict[str, str]], response.body_iterator)

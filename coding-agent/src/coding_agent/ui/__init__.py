@@ -14,9 +14,9 @@ __all__ = [
 
 def __getattr__(name: str) -> object:
     if name == "app":
-        http_server = import_module("coding_agent.ui.http_server")
+        http_server = import_module("coding_agent.server.http_server")
         return cast(object, http_server.app)
     if name == "wait_for_approval":
-        http_server = import_module("coding_agent.ui.http_server")
+        http_server = import_module("coding_agent.server.http_server")
         return cast(object, http_server.wait_for_approval)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

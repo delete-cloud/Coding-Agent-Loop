@@ -21,7 +21,7 @@ from agentkit.tape.tape import Tape
 from coding_agent.approval.store import ApprovalStore
 from coding_agent.approval import ApprovalPolicy
 from agentkit.config.loader import ConfigError
-from coding_agent.ui.execution_binding import (
+from coding_agent.server.execution_binding import (
     CloudWorkspaceBinding,
     LocalExecutionBinding,
 )
@@ -32,8 +32,8 @@ from coding_agent.wire.protocol import (
     ToolCallDelta,
     TurnEnd,
 )
-from coding_agent.ui.session_manager import MockProvider, Session, SessionManager
-from coding_agent.ui.session_store import (
+from coding_agent.server.session_manager import MockProvider, Session, SessionManager
+from coding_agent.server.stores.session_store import (
     InMemorySessionStore,
     PGSessionMetadataStore,
     RedisSessionStore,
@@ -494,13 +494,13 @@ def test_session_manager_uses_pg_backends_when_storage_config_requests_pg() -> N
             self.pool = pool
 
     with (
-        patch("coding_agent.ui.session_manager.create_session_store") as create_store,
+        patch("coding_agent.server.session_manager.create_session_store") as create_store,
         patch(
-            "coding_agent.ui.session_manager._load_pg_storage_types",
+            "coding_agent.server.session_manager._load_pg_storage_types",
             return_value=(FakePGPool, FakePGTapeStore, FakePGCheckpointStore),
         ),
         patch(
-            "coding_agent.ui.session_manager.PGRuntimeStore",
+            "coding_agent.server.session_manager.PGRuntimeStore",
             FakePGRuntimeStore,
         ),
     ):
@@ -565,11 +565,11 @@ def test_session_manager_creates_pg_runtime_store_when_storage_config_requests_p
 
     with (
         patch(
-            "coding_agent.ui.session_manager._load_pg_storage_types",
+            "coding_agent.server.session_manager._load_pg_storage_types",
             return_value=(FakePGPool, FakePGTapeStore, FakePGCheckpointStore),
         ),
         patch(
-            "coding_agent.ui.session_manager.PGRuntimeStore",
+            "coding_agent.server.session_manager.PGRuntimeStore",
             FakePGRuntimeStore,
         ),
     ):
@@ -607,9 +607,9 @@ def test_session_manager_creates_dedicated_pg_pool_for_http_session_store() -> N
             self.pool = pool
 
     with (
-        patch("coding_agent.ui.session_manager.create_session_store") as create_store,
+        patch("coding_agent.server.session_manager.create_session_store") as create_store,
         patch(
-            "coding_agent.ui.session_manager._load_pg_storage_types",
+            "coding_agent.server.session_manager._load_pg_storage_types",
             return_value=(FakePGPool, FakePGTapeStore, FakePGCheckpointStore),
         ),
     ):
@@ -643,9 +643,9 @@ def test_session_manager_normalizes_tape_backend_for_http_session_pg_default() -
             self.dsn = dsn
 
     with (
-        patch("coding_agent.ui.session_manager.create_session_store") as create_store,
+        patch("coding_agent.server.session_manager.create_session_store") as create_store,
         patch(
-            "coding_agent.ui.session_manager._load_pg_storage_types",
+            "coding_agent.server.session_manager._load_pg_storage_types",
             return_value=(FakePGPool, object(), object()),
         ),
     ):
@@ -674,7 +674,7 @@ def test_session_manager_normalizes_tape_backend_for_checkpoint_default() -> Non
     manager._pg_pool = None
 
     with patch(
-        "coding_agent.ui.session_manager._load_pg_storage_types",
+        "coding_agent.server.session_manager._load_pg_storage_types",
         return_value=(FakePGPool, object(), FakePGCheckpointStore),
     ):
         store = SessionManager._create_checkpoint_store(manager, Path("/tmp/data"))
@@ -692,7 +692,7 @@ def test_session_manager_strips_dsn_before_creating_pg_pool() -> None:
     manager._pg_pool = None
 
     with patch(
-        "coding_agent.ui.session_manager._load_pg_storage_types",
+        "coding_agent.server.session_manager._load_pg_storage_types",
         return_value=(FakePGPool, object(), object()),
     ):
         pool = SessionManager._get_pg_pool(manager)
@@ -708,7 +708,7 @@ def test_session_manager_reuses_injected_pg_pool_without_importing_pg_types() ->
     manager._pg_pool = injected_pool
 
     with patch(
-        "coding_agent.ui.session_manager._load_pg_storage_types",
+        "coding_agent.server.session_manager._load_pg_storage_types",
         side_effect=AssertionError("should not import pg types when pool injected"),
     ):
         pool = SessionManager._get_pg_pool(manager)
@@ -725,7 +725,7 @@ def test_session_manager_http_session_store_does_not_reuse_injected_pg_pool() ->
     }
     manager._pg_pool = injected_pool
 
-    with patch("coding_agent.ui.session_manager.create_session_store") as create_store:
+    with patch("coding_agent.server.session_manager.create_session_store") as create_store:
         create_store.return_value = InMemorySessionStore()
 
         _ = SessionManager._create_http_session_store(manager)

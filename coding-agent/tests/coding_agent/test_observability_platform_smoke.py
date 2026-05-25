@@ -18,7 +18,7 @@ from coding_agent.observability import (
     record_storage_operation_metric,
     reset_prometheus_metrics,
 )
-import coding_agent.ui.http_server as http_server
+import coding_agent.server.http_server as http_server
 
 
 SENSITIVE_SENTINEL = "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT"

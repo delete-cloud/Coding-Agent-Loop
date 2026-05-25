@@ -5,8 +5,8 @@ from typing import Any
 
 from coding_agent.environment import CloudCommandResult
 from coding_agent.plugins.core_tools import CoreToolsPlugin
-from coding_agent.ui.binding_resolver import DefaultBindingResolver
-from coding_agent.ui.execution_binding import CloudWorkspaceBinding
+from coding_agent.server.binding_resolver import DefaultBindingResolver
+from coding_agent.server.execution_binding import CloudWorkspaceBinding
 
 
 @dataclass

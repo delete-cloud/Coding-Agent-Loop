@@ -6,17 +6,17 @@ import pytest
 
 from agentkit.checkpoint import CheckpointService
 from agentkit.runtime import RuntimeMessageCursor, RuntimeMessageKind
-from coding_agent.ui.session_manager import SessionManager
+from coding_agent.server.session_manager import SessionManager
 import types
 from unittest.mock import patch
 from datetime import UTC, datetime
-from coding_agent.ui.session_owner_store import SessionOwnershipConflictError
-from coding_agent.ui.session_owner_store import SessionOwnershipConflictReason
+from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictError
+from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictReason
 
-from coding_agent.ui.session_owner_store import (
+from coding_agent.server.stores.session_owner_store import (
     SessionOwnerRecord,
 )
-from coding_agent.ui.session_store import InMemorySessionStore
+from coding_agent.server.stores.session_store import InMemorySessionStore
 from agentkit.tape.tape import Tape
 
 

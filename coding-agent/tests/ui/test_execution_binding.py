@@ -6,7 +6,7 @@ from typing import cast
 
 import pytest
 
-from coding_agent.ui.binding_resolver import (
+from coding_agent.server.binding_resolver import (
     CloudBindingNotImplementedError,
     DefaultBindingResolver,
 )
@@ -25,7 +25,7 @@ from coding_agent.environment.workspace_provider import (
     workspace_provider_capabilities_from_config,
     WorkspaceProvider,
 )
-from coding_agent.ui.execution_binding import (
+from coding_agent.server.execution_binding import (
     CloudWorkspaceBinding,
     ExecutionBinding,
     LocalExecutionBinding,
