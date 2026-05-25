@@ -153,6 +153,10 @@ def register_session(
     return session
 
 
+def test_http_server_uses_canonical_rate_limiter_module():
+    assert app.state.limiter is http_server.limiter
+
+
 def _minimal_agent_toml(extra: str = "") -> str:
     return (
         "[agent]\n"
