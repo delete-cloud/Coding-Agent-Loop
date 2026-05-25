@@ -168,7 +168,7 @@ from coding_agent.server.execution_binding import (
     ExecutionBinding,
     LocalExecutionBinding,
 )
-from coding_agent.ui.rate_limit import RateLimits, limiter
+from coding_agent.server.rate_limit import RateLimits, limiter
 from coding_agent.server.schemas import (
     ApprovalResponseSchema,
     ApproveRequest,
