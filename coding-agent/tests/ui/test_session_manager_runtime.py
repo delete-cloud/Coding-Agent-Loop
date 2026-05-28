@@ -415,6 +415,55 @@ async def test_run_agent_marks_agent_run_failed_when_turn_outcome_errors() -> No
         "steps_taken": 0,
     }
     assert runtime_store.updated[-1]["error"] == "model failed"
+    session = await manager.get_session_async(session_id)
+    assert session.turn_status == "failed"
+    assert session.last_failure_details == "Agent turn failed: model failed"
+
+
+@pytest.mark.asyncio
+async def test_run_agent_records_error_outcome_without_runtime_store() -> None:
+    manager = SessionManager()
+    session_id = await manager.create_session()
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, ctx, consumer
+
+        async def run_turn(self, prompt: str) -> TurnOutcome:
+            del prompt
+            return TurnOutcome(stop_reason=StopReason.ERROR, error="provider failed")
+
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        )
+    )
+
+    def fake_create_agent(**kwargs):
+        environment = kwargs["environment"]
+        if not isinstance(environment, LocalEnvironment):
+            raise TypeError("expected local environment")
+        return fake_pipeline, types.SimpleNamespace(
+            session_id=kwargs["session_id_override"],
+            config={},
+            tape=kwargs.get("tape") or Tape(tape_id="stable-tape"),
+            run_context=AgentRunContext(
+                session_id=kwargs["session_id_override"],
+                run_id=kwargs["run_id_override"],
+                agent_id=None,
+                environment=environment,
+            ),
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
+        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+
+        await manager.run_agent(session_id, "hello")
+
+    session = await manager.get_session_async(session_id)
+    assert session.turn_status == "failed"
+    assert session.last_failure_details == "Agent turn failed: provider failed"
 
 
 @pytest.mark.asyncio
