@@ -2456,6 +2456,7 @@ class SessionManager:
                 outcome = await adapter.run_turn(prompt)
                 if self._runtime_store is not None:
                     turn_outcome = self._require_turn_outcome(outcome)
+                    turn_status = self._status_from_turn_outcome(turn_outcome)
                     session.tape_id = ctx.tape.tape_id
                     await self._save_runtime_message_snapshot(
                         session,
@@ -2465,13 +2466,30 @@ class SessionManager:
                     await self._finish_runtime_agent_run(
                         session,
                         run_id=run_id,
-                        status=self._status_from_turn_outcome(turn_outcome),
+                        status=turn_status,
                         result=self._result_from_turn_outcome(turn_outcome),
                         error=turn_outcome.error,
                     )
+                    if turn_status == "failed":
+                        session.turn_status = "failed"
+                        reason = turn_outcome.error or turn_outcome.stop_reason.value
+                        session.last_failure_details = f"Agent turn failed: {reason}"
+                    else:
+                        session.last_failure_details = None
                 else:
                     session.tape_id = ctx.tape.tape_id
-                session.last_failure_details = None
+                    if isinstance(outcome, TurnOutcome):
+                        turn_status = self._status_from_turn_outcome(outcome)
+                        if turn_status == "failed":
+                            session.turn_status = "failed"
+                            reason = outcome.error or outcome.stop_reason.value
+                            session.last_failure_details = (
+                                f"Agent turn failed: {reason}"
+                            )
+                        else:
+                            session.last_failure_details = None
+                    else:
+                        session.last_failure_details = None
                 await self._persist_session_async(session)
             except FatalToolExecutionError as exc:
                 if agent_run_created:

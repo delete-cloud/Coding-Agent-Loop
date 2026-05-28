@@ -79,9 +79,7 @@ class TestTuiRunUsesPipeline:
                 "coding_agent.__main__.create_agent",
                 return_value=(mock_pipeline, mock_ctx),
             ) as p_create,
-            patch(
-                "coding_agent.__main__.PipelineAdapter", mock_adapter_cls
-            ) as p_adapter,
+            patch("coding_agent.__main__.PipelineAdapter", mock_adapter_cls),
             patch("coding_agent.__main__.CodingAgentTUI", mock_tui_cls),
         ):
             from coding_agent.__main__ import _run_with_tui
@@ -606,16 +604,9 @@ class TestReplMultiturnContext:
             )
             return _ok_outcome()
 
-        with patch("coding_agent.cli.repl.CodingAgentTUI") as mock_tui_cls:
-            mock_tui = MagicMock()
-            mock_tui.__enter__ = MagicMock(return_value=mock_tui)
-            mock_tui.__exit__ = MagicMock(return_value=False)
-            mock_tui.consumer = MagicMock()
-            mock_tui_cls.return_value = mock_tui
-
-            with patch.object(adapter, "run_turn", side_effect=fake_run_turn):
-                await session._process_message("first question")
-                await session._process_message("second question")
+        with patch.object(adapter, "run_turn", side_effect=fake_run_turn):
+            await session._process_message("first question")
+            await session._process_message("second question")
 
         assert call_messages == ["first question", "second question"]
         assert session._pipeline_adapter is adapter
@@ -697,18 +688,9 @@ class TestReplErrorRecovery:
             patch("coding_agent.cli.commands.print_pt"),
             patch("coding_agent.cli.commands.print_html"),
         ):
-            with patch("coding_agent.cli.repl.CodingAgentTUI") as mock_tui_cls:
-                mock_tui = MagicMock()
-                mock_tui.__enter__ = MagicMock(return_value=mock_tui)
-                mock_tui.__exit__ = MagicMock(return_value=False)
-                mock_tui.consumer = MagicMock()
-                mock_tui_cls.return_value = mock_tui
-
-                with patch.object(
-                    adapter, "run_turn", side_effect=side_effect_run_turn
-                ):
-                    await session._process_message("bad input")
-                    await session._process_message("good input")
+            with patch.object(adapter, "run_turn", side_effect=side_effect_run_turn):
+                await session._process_message("bad input")
+                await session._process_message("good input")
 
         assert len(turn_results) == 2
         assert turn_results[0].stop_reason == StopReason.ERROR
@@ -809,8 +791,8 @@ class TestHeadlessPipelineOutput:
         # Result summary line present
         assert "--- Result" in captured.out
         # No additional content line after the result summary
-        lines = [l for l in captured.out.strip().split("\n") if l.strip()]
-        result_lines = [l for l in lines if "--- Result" in l]
+        lines = [line for line in captured.out.strip().split("\n") if line.strip()]
+        result_lines = [line for line in lines if "--- Result" in line]
         assert len(result_lines) == 1
 
 
@@ -979,7 +961,7 @@ class TestReplApprovalWiring:
         from coding_agent.cli.repl import InteractiveSession
 
         config = _make_repl_config()
-        session = InteractiveSession(config)
+        _ = InteractiveSession(config)
 
         assert mock_pipeline._directive_executor._ask_user is not None
         assert callable(mock_pipeline._directive_executor._ask_user)
@@ -1000,7 +982,7 @@ class TestReplApprovalWiring:
         from coding_agent.cli.repl import InteractiveSession
 
         config = _make_repl_config()
-        session = InteractiveSession(config)
+        _ = InteractiveSession(config)
 
         assert executor._ask_user is not None
 
@@ -1026,7 +1008,7 @@ class TestReplApprovalWiring:
         from coding_agent.cli.repl import InteractiveSession
 
         config = _make_repl_config()
-        session = InteractiveSession(config)
+        _ = InteractiveSession(config)
 
         monkeypatch.setattr("builtins.input", lambda prompt="": "n")
 
@@ -1051,7 +1033,7 @@ class TestReplApprovalWiring:
         from coding_agent.cli.repl import InteractiveSession
 
         config = _make_repl_config()
-        session = InteractiveSession(config)
+        _ = InteractiveSession(config)
 
         monkeypatch.setattr("builtins.input", lambda prompt="": "")
 
@@ -1075,7 +1057,7 @@ class TestReplApprovalWiring:
         from coding_agent.cli.repl import InteractiveSession
 
         config = _make_repl_config()
-        session = InteractiveSession(config)
+        _ = InteractiveSession(config)
 
         for variant in ("y", "Y", "yes", "YES", "Yes"):
             monkeypatch.setattr("builtins.input", lambda prompt="", v=variant: v)

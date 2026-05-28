@@ -182,6 +182,26 @@ def _optional_int(value: object | None) -> int | None:
     return int(value)
 
 
+def _positive_int(value: object, *, name: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a positive integer")
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError(f"{name} must be a positive integer")
+        try:
+            parsed = int(stripped)
+        except ValueError as exc:
+            raise ValueError(f"{name} must be a positive integer") from exc
+    else:
+        raise ValueError(f"{name} must be a positive integer")
+    if parsed <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return parsed
+
+
 def _sandbox_request(
     *, args: list[str], cwd: str | None, env: dict[str, str] | None, timeout: int
 ) -> object:
@@ -205,7 +225,8 @@ def _validated_execution_cwd(
         resolved_cwd.relative_to(workspace_root)
     except ValueError as exc:
         raise ValueError(
-            f"Working directory is outside sandbox workspace: {resolved_cwd}"
+            "Working directory is outside sandbox workspace: "
+            f"{resolved_cwd}. Use a path under workspace root: {workspace_root}"
         ) from exc
     return str(resolved_cwd)
 
@@ -218,11 +239,18 @@ def _validate_no_path_escape(args: list[str], workspace_root: Path) -> None:
                 candidate.relative_to(workspace_root)
             except ValueError as exc:
                 raise ValueError(
-                    f"Path is outside sandbox workspace: {candidate}"
+                    "Path is outside sandbox workspace: "
+                    f"{candidate}. Use a path under workspace root: {workspace_root}"
                 ) from exc
 
 
-@tool(description="Run a shell command and return stdout/stderr.")
+@tool(
+    description=(
+        "Run one simple command and return stdout/stderr. Use separate bash_run "
+        "calls instead of &&, ||, pipes, redirects, heredocs, semicolons, or "
+        "backgrounding. Paths must stay under the workspace root."
+    )
+)
 def bash_run(
     command: str,
     timeout: int = 120,
@@ -231,6 +259,7 @@ def bash_run(
     __pipeline_ctx__: object | None = None,
 ) -> str | dict[str, str | int]:
     try:
+        timeout_seconds = _positive_int(timeout, name="timeout")
         shell_config = _pipeline_shell_config(__pipeline_ctx__)
         mode_value = _sandbox_mode(shell_config)
         execution_cwd = _validated_execution_cwd(
@@ -251,7 +280,9 @@ def bash_run(
                     Path(changed_dir).relative_to(workspace_root)
                 except ValueError as exc:
                     raise ValueError(
-                        f"Directory is outside sandbox workspace: {changed_dir}"
+                        "Directory is outside sandbox workspace: "
+                        f"{changed_dir}. Use a path under workspace root: "
+                        f"{workspace_root}"
                     ) from exc
             return f"Changed directory to {changed_dir}"
 
@@ -273,7 +304,7 @@ def bash_run(
                 shell=False,
                 capture_output=True,
                 text=True,
-                timeout=timeout,
+                timeout=timeout_seconds,
                 cwd=execution_cwd,
                 env=_build_env(env),
             )
@@ -287,7 +318,7 @@ def bash_run(
                     args=args,
                     cwd=execution_cwd,
                     env=env,
-                    timeout=timeout,
+                    timeout=timeout_seconds,
                 )
             )
         if _structured_results_enabled():
@@ -301,7 +332,7 @@ def bash_run(
             output += f"\nExit code: {result.returncode}"
         return output.strip() or "(no output)"
     except subprocess.TimeoutExpired:
-        return f"Error: command timed out after {timeout}s"
+        return f"Error: command timed out after {timeout_seconds}s"
     except Exception as e:
         return f"Error: {e}"
 
