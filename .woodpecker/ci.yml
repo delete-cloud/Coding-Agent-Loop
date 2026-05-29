@@ -9,14 +9,14 @@ steps:
     image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
     commands:
       - cd coding-agent
-      - uv pip install --system -e '.[dev,redis]' ruff
+      - python -m pip install -e '.[dev,redis]' ruff
       - ruff check src tests
 
   smoke-tests:
     image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
     commands:
       - cd coding-agent
-      - uv pip install --system -e '.[dev,redis]'
+      - python -m pip install -e '.[dev,redis]'
       - pytest tests/ui/test_server_compat_imports.py tests/coding_agent/test_agent_observability.py tests/coding_agent/test_bee_template_pack_smoke.py -q
 
   build-image:
