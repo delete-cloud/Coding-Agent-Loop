@@ -16,7 +16,7 @@ DeepSeek, Langfuse, bearer tokens, or kube credentials into the image.
 The default image target is:
 
 ```text
-ghcr.io/delete-cloud/coding-agent:${CI_COMMIT_SHA}
+git.mesh.kinaz.me/kina/coding-agent:${CI_COMMIT_SHA}
 ```
 
 The deploy workflow updates:
@@ -38,7 +38,7 @@ kubeconfig
 ```
 
 `registry_username` and `registry_password` must be able to push
-`ghcr.io/delete-cloud/coding-agent`.
+`git.mesh.kinaz.me/kina/coding-agent`.
 
 `kubeconfig` should be scoped to the target cluster and preferably to the
 `coding-agent-deepseek` namespace. The service account only needs permission to:

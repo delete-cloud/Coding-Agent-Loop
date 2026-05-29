@@ -22,8 +22,8 @@ steps:
   build-image:
     image: woodpeckerci/plugin-docker-buildx
     settings:
-      repo: ghcr.io/delete-cloud/coding-agent
-      registry: ghcr.io
+      repo: git.mesh.kinaz.me/kina/coding-agent
+      registry: git.mesh.kinaz.me
       dockerfile: coding-agent/Dockerfile
       context: coding-agent
       platforms: linux/amd64
