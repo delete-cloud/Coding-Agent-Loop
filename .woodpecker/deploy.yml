@@ -1,0 +1,18 @@
+when:
+  - event: manual
+    branch: main
+
+steps:
+  deploy-o6n:
+    image: dtzar/helm-kubectl:3.16.3
+    environment:
+      KUBECONFIG_CONTENT:
+        from_secret: kubeconfig
+      IMAGE_REPOSITORY: ghcr.io/delete-cloud/coding-agent
+      IMAGE_TAG: ${CI_COMMIT_SHA}
+      K8S_NAMESPACE: coding-agent-deepseek
+      K8S_DEPLOYMENT: coding-agent-coding-agent
+      K8S_CONTAINER: coding-agent
+      ENABLE_POD_HEALTH_SMOKE: "1"
+    commands:
+      - ./scripts/deploy-coding-agent-k8s.sh
