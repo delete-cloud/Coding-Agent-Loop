@@ -6,6 +6,7 @@ IMAGE_TAG="${IMAGE_TAG:-${CI_COMMIT_SHA:-}}"
 K8S_NAMESPACE="${K8S_NAMESPACE:-coding-agent-deepseek}"
 K8S_DEPLOYMENT="${K8S_DEPLOYMENT:-coding-agent-coding-agent}"
 K8S_CONTAINER="${K8S_CONTAINER:-coding-agent}"
+K8S_SERVICE="${K8S_SERVICE:-$K8S_DEPLOYMENT}"
 ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-180s}"
 ENABLE_POD_HEALTH_SMOKE="${ENABLE_POD_HEALTH_SMOKE:-1}"
 
@@ -35,7 +36,13 @@ kubectl -n "$K8S_NAMESPACE" get deployment "$K8S_DEPLOYMENT" \
   -o "jsonpath={.spec.template.spec.containers[?(@.name=='${K8S_CONTAINER}')].image}{'\n'}"
 
 if [ "$ENABLE_POD_HEALTH_SMOKE" = "1" ]; then
-  kubectl -n "$K8S_NAMESPACE" exec "deployment/${K8S_DEPLOYMENT}" \
-    -c "$K8S_CONTAINER" \
-    -- python -c 'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8080/healthz", timeout=5).read().decode())'
+  health_url="http://${K8S_SERVICE}.${K8S_NAMESPACE}.svc.cluster.local:8080/healthz"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsS "$health_url"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO- "$health_url"
+  else
+    printf '%s\n' "curl or wget is required for service health smoke" >&2
+    exit 2
+  fi
 fi
