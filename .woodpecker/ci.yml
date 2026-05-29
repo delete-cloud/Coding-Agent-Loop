@@ -7,21 +7,17 @@ when:
 steps:
   lint:
     image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
-    environment:
-      UV_NO_WATCHER: "1"
     commands:
       - cd coding-agent
-      - uv sync --all-extras
-      - uv run ruff check src tests
+      - uv pip install --system -e '.[dev,redis]' ruff
+      - ruff check src tests
 
   smoke-tests:
     image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
-    environment:
-      UV_NO_WATCHER: "1"
     commands:
       - cd coding-agent
-      - uv sync --all-extras
-      - uv run pytest tests/ui/test_server_compat_imports.py tests/coding_agent/test_agent_observability.py tests/coding_agent/test_bee_template_pack_smoke.py -q
+      - uv pip install --system -e '.[dev,redis]'
+      - pytest tests/ui/test_server_compat_imports.py tests/coding_agent/test_agent_observability.py tests/coding_agent/test_bee_template_pack_smoke.py -q
 
   build-image:
     image: gcr.io/kaniko-project/executor:v1.24.0-debug
