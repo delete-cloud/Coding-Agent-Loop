@@ -72,9 +72,11 @@ IMAGE_TAG
 K8S_NAMESPACE
 K8S_DEPLOYMENT
 K8S_CONTAINER
+K8S_SERVICE
 ROLLOUT_TIMEOUT
 ENABLE_POD_HEALTH_SMOKE
 ```
 
-Set `ENABLE_POD_HEALTH_SMOKE=0` if the runner cannot `kubectl exec` into the
-pod.
+The health smoke calls `http://$K8S_SERVICE.$K8S_NAMESPACE.svc.cluster.local:8080/healthz`
+from the pipeline container. Set `ENABLE_POD_HEALTH_SMOKE=0` if the runner cannot
+resolve or reach Kubernetes Service DNS.
