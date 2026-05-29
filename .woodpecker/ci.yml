@@ -20,20 +20,17 @@ steps:
       - uv run pytest tests/ui/test_server_compat_imports.py tests/coding_agent/test_agent_observability.py tests/coding_agent/test_bee_template_pack_smoke.py -q
 
   build-image:
-    image: woodpeckerci/plugin-docker-buildx
-    settings:
-      repo: git.mesh.kinaz.me/kina/coding-agent
-      registry: git.mesh.kinaz.me
-      dockerfile: coding-agent/Dockerfile
-      context: coding-agent
-      platforms: linux/amd64
-      tags:
-        - ${CI_COMMIT_SHA}
-        - main
-      username:
+    image: gcr.io/kaniko-project/executor:v1.24.0-debug
+    environment:
+      REGISTRY_USERNAME:
         from_secret: registry_username
-      password:
+      REGISTRY_PASSWORD:
         from_secret: registry_password
+    commands:
+      - mkdir -p /kaniko/.docker
+      - auth="$(printf '%s:%s' "$REGISTRY_USERNAME" "$REGISTRY_PASSWORD" | base64 | tr -d '\n')"
+      - printf '{"auths":{"git.mesh.kinaz.me":{"auth":"%s"}}}\n' "$auth" > /kaniko/.docker/config.json
+      - /kaniko/executor --context "$CI_WORKSPACE/coding-agent" --dockerfile "$CI_WORKSPACE/coding-agent/Dockerfile" --destination "git.mesh.kinaz.me/kina/coding-agent:${CI_COMMIT_SHA}" --destination "git.mesh.kinaz.me/kina/coding-agent:main"
     when:
       - event:
           - push
