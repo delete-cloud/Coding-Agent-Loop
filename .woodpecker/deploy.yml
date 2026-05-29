@@ -8,7 +8,7 @@ steps:
     environment:
       KUBECONFIG_CONTENT:
         from_secret: kubeconfig
-      IMAGE_REPOSITORY: ghcr.io/delete-cloud/coding-agent
+      IMAGE_REPOSITORY: git.mesh.kinaz.me/kina/coding-agent
       IMAGE_TAG: ${CI_COMMIT_SHA}
       K8S_NAMESPACE: coding-agent-deepseek
       K8S_DEPLOYMENT: coding-agent-coding-agent
