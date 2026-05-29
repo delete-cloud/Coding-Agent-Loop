@@ -4,8 +4,8 @@ import asyncio
 
 import pytest
 
-from coding_agent.ui.session_manager import SessionManager
-from coding_agent.ui.session_store import InMemorySessionStore
+from coding_agent.server.session_manager import SessionManager
+from coding_agent.server.stores.session_store import InMemorySessionStore
 from coding_agent.wire.protocol import ApprovalRequest, ToolCallDelta
 
 

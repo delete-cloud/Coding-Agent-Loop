@@ -35,7 +35,7 @@ from coding_agent.external_executor import (
     executor_result_completion_evidence,
 )
 from coding_agent.observability import PrometheusMetricsRecorder
-from coding_agent.ui.developer_console import (
+from coding_agent.server.developer_console import (
     ConsoleBeePage,
     ConsoleBeeRunArtifactSummary,
     ConsoleExecutorRunSummary,

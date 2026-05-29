@@ -23,7 +23,7 @@ from agentkit.tape.models import Entry
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.adapter_types import StopReason, TurnOutcome
 from coding_agent.plugins.metrics import SessionMetricsPlugin
-from coding_agent.ui.session_owner_store import SessionOwnershipConflictError
+from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictError
 from coding_agent.wire.protocol import (
     CompletionStatus,
     StreamDelta,
@@ -777,7 +777,7 @@ class TestEventToWireMessage:
         consumer = _RecordingConsumer()
         adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
 
-        outcome = await adapter.run_turn("hello")
+        await adapter.run_turn("hello")
 
         turn_ends = [m for m in consumer.messages if isinstance(m, TurnEnd)]
         assert len(turn_ends) == 1

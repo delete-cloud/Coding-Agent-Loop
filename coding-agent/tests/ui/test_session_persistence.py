@@ -11,15 +11,15 @@ from unittest.mock import patch
 import pytest
 
 from coding_agent.approval.store import ApprovalStore
-from coding_agent.ui.session_manager import Session, SessionManager
-from coding_agent.ui.session_store import (
+from coding_agent.server.session_manager import Session, SessionManager
+from coding_agent.server.stores.session_store import (
     InMemorySessionStore,
     PGSessionMetadataStore,
     RedisClient,
     RedisSessionStore,
     create_session_store,
 )
-from coding_agent.ui.workspace_store import (
+from coding_agent.server.stores.workspace_store import (
     PGWorkspaceMetadataStore,
     WorkspaceRecord,
 )
@@ -723,10 +723,10 @@ def test_pg_session_metadata_store_waits_for_loop_start_before_returning() -> No
 
     with (
         patch(
-            "coding_agent.ui.session_store.asyncio.new_event_loop", side_effect=FakeLoop
+            "coding_agent.server.stores.session_store.asyncio.new_event_loop", side_effect=FakeLoop
         ),
-        patch("coding_agent.ui.session_store.asyncio.set_event_loop"),
-        patch("coding_agent.ui.session_store.threading.Thread", side_effect=FakeThread),
+        patch("coding_agent.server.stores.session_store.asyncio.set_event_loop"),
+        patch("coding_agent.server.stores.session_store.threading.Thread", side_effect=FakeThread),
     ):
         store = PGSessionMetadataStore(pool=FakePool())
 
@@ -936,7 +936,7 @@ def test_pg_session_metadata_store_close_handles_already_closed_loop() -> None:
         patch.object(store, "_loop_thread", fake_thread),
         patch.object(store, "_loop", fake_loop),
         patch.object(store, "_run_sync", fake_run_sync),
-        patch("coding_agent.ui.session_store.logger.warning") as warning,
+        patch("coding_agent.server.stores.session_store.logger.warning") as warning,
     ):
         store.close()
 
@@ -992,7 +992,7 @@ def test_pg_session_metadata_store_close_swallows_pool_close_errors() -> None:
         patch.object(store, "_loop_thread", fake_thread),
         patch.object(store, "_loop", fake_loop),
         patch.object(store, "_run_sync", fake_run_sync),
-        patch("coding_agent.ui.session_store.logger.warning") as warning,
+        patch("coding_agent.server.stores.session_store.logger.warning") as warning,
     ):
         store.close()
 
@@ -1058,9 +1058,9 @@ def test_pg_session_metadata_store_close_test_does_not_start_real_thread() -> No
 
     with (
         patch(
-            "coding_agent.ui.session_store.asyncio.new_event_loop", side_effect=FakeLoop
+            "coding_agent.server.stores.session_store.asyncio.new_event_loop", side_effect=FakeLoop
         ),
-        patch("coding_agent.ui.session_store.threading.Thread", side_effect=FakeThread),
+        patch("coding_agent.server.stores.session_store.threading.Thread", side_effect=FakeThread),
     ):
         with pytest.raises(
             RuntimeError, match="postgres session metadata loop thread failed to start"
@@ -1090,7 +1090,7 @@ def test_pg_session_metadata_store_run_sync_times_out_and_cancels_future() -> No
     try:
         operation = asyncio.sleep(0)
         with patch(
-            "coding_agent.ui.session_store.asyncio.run_coroutine_threadsafe",
+            "coding_agent.server.stores.session_store.asyncio.run_coroutine_threadsafe",
             return_value=future,
         ):
             with pytest.raises(
@@ -1125,7 +1125,7 @@ def test_pg_session_metadata_store_run_sync_waits_for_cancellation_callback() ->
     try:
         operation = asyncio.sleep(0)
         with patch(
-            "coding_agent.ui.session_store.asyncio.run_coroutine_threadsafe",
+            "coding_agent.server.stores.session_store.asyncio.run_coroutine_threadsafe",
             return_value=future,
         ):
             with pytest.raises(
@@ -1156,7 +1156,7 @@ def test_pg_session_metadata_store_run_sync_raises_clear_error_when_loop_unavail
     try:
         operation = asyncio.sleep(0)
         with patch(
-            "coding_agent.ui.session_store.asyncio.run_coroutine_threadsafe",
+            "coding_agent.server.stores.session_store.asyncio.run_coroutine_threadsafe",
             side_effect=RuntimeError("loop closed"),
         ):
             with pytest.raises(
@@ -1171,7 +1171,7 @@ def test_pg_session_metadata_store_run_sync_raises_clear_error_when_loop_unavail
 
 
 def test_create_session_store_strips_dsn_before_building_pg_pool() -> None:
-    with patch("coding_agent.ui.session_store.PGPool") as pg_pool_cls:
+    with patch("coding_agent.server.stores.session_store.PGPool") as pg_pool_cls:
         store = create_session_store(backend="pg", dsn="  postgresql://example  ")
     assert isinstance(store, PGSessionMetadataStore)
     try:

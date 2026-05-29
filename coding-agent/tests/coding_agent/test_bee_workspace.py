@@ -21,7 +21,7 @@ from coding_agent.observability import (
     PrometheusMetricsObservationSink,
     PrometheusMetricsRecorder,
 )
-from coding_agent.ui.developer_console import (
+from coding_agent.server.developer_console import (
     ConsoleBeeCommandIntentSummary,
     ConsoleBeePage,
     ConsoleBeeRunArtifactSummary,

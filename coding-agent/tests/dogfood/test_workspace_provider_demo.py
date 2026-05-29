@@ -19,12 +19,12 @@ from coding_agent.runtime_store import (
     RuntimeEventRecord,
 )
 from coding_agent.ui import http_server
-from coding_agent.ui.binding_resolver import DefaultBindingResolver
-from coding_agent.ui.execution_binding import CloudWorkspaceBinding
-from coding_agent.ui.http_server import app
-from coding_agent.ui.session_manager import MockProvider, SessionManager
-from coding_agent.ui.session_store import InMemorySessionStore
-from coding_agent.ui.workspace_store import WorkspaceRecord
+from coding_agent.server.binding_resolver import DefaultBindingResolver
+from coding_agent.server.execution_binding import CloudWorkspaceBinding
+from coding_agent.server.http_server import app
+from coding_agent.server.session_manager import MockProvider, SessionManager
+from coding_agent.server.stores.session_store import InMemorySessionStore
+from coding_agent.server.stores.workspace_store import WorkspaceRecord
 
 
 FORBIDDEN_RENDERED_TEXT: Sequence[str] = (

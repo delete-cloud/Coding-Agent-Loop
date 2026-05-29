@@ -22,7 +22,7 @@ from coding_agent.topic_memory import (
 )
 from coding_agent.topic_range_index import TopicRangeIndex
 from coding_agent.topic_store import TopicRecallLinkRecord, TopicRecord
-from coding_agent.ui.developer_console import (
+from coding_agent.server.developer_console import (
     ConsoleMemoryReviewSummary,
     ConsoleMemorySummary,
     ConsoleTopicAnchorSummary,

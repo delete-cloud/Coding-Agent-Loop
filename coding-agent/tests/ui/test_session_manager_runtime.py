@@ -28,13 +28,13 @@ from coding_agent.runtime_store import (
     RunMessageSnapshotRecord,
     RuntimeEventRecord,
 )
-from coding_agent.ui.binding_resolver import DefaultBindingResolver
-from coding_agent.ui.execution_binding import (
+from coding_agent.server.binding_resolver import DefaultBindingResolver
+from coding_agent.server.execution_binding import (
     CloudWorkspaceBinding,
     LocalExecutionBinding,
 )
-from coding_agent.ui.session_owner_store import SessionOwnershipConflictError
-from coding_agent.ui.session_owner_store import SessionOwnerRecord
+from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictError
+from coding_agent.server.stores.session_owner_store import SessionOwnerRecord
 from coding_agent.wire.protocol import (
     ApprovalRequest,
     CompletionStatus,
@@ -42,13 +42,13 @@ from coding_agent.wire.protocol import (
     ToolCallDelta,
     TurnEnd,
 )
-from coding_agent.ui.session_manager import (
+from coding_agent.server.session_manager import (
     MockProvider,
     SessionManager,
     _load_pg_storage_types,
 )
-from coding_agent.ui.session_store import InMemorySessionStore
-from coding_agent.ui.workspace_store import (
+from coding_agent.server.stores.session_store import InMemorySessionStore
+from coding_agent.server.stores.workspace_store import (
     JSONValue,
     WorkspaceRecord,
     WorkspaceRetentionPolicy,
@@ -208,7 +208,7 @@ async def test_run_agent_does_not_hardcode_api_key() -> None:
         pytest.MonkeyPatch.context() as mp,
     ):
         mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
-        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
 
         await manager.run_agent(session_id, "hello")
 
@@ -258,7 +258,7 @@ async def test_run_agent_creates_run_id_and_preserves_current_turn_id_alias() ->
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
-        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
 
         await manager.run_agent(session_id, "hello")
 
@@ -380,7 +380,7 @@ async def test_run_agent_persists_agent_run_lifecycle_when_store_configured() ->
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
-        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
 
         await manager.run_agent(session_id, "hello")
 
@@ -458,7 +458,7 @@ async def test_run_agent_marks_agent_run_failed_when_turn_outcome_errors() -> No
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
-        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
 
         await manager.run_agent(session_id, "hello")
 
@@ -562,7 +562,7 @@ async def test_agent_run_marks_interrupted_outcome_as_interrupted() -> None:
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
-        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
 
         await manager.run_agent(session_id, "hello")
 
@@ -804,7 +804,7 @@ async def test_run_agent_persists_wire_events_when_runtime_store_configured() ->
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
-        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
 
         await manager.run_agent(session_id, "hello")
 
@@ -881,7 +881,7 @@ async def test_run_agent_persists_approval_request_wire_events() -> None:
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
-        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
 
         await manager.run_agent(session_id, "needs approval")
 
@@ -1135,7 +1135,7 @@ async def test_run_agent_persists_message_snapshot_when_runtime_store_configured
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
-        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
 
         await manager.run_agent(session_id, "hello")
 
@@ -1163,7 +1163,7 @@ def test_load_pg_storage_types_reports_missing_optional_dependencies() -> None:
     with pytest.MonkeyPatch.context() as mp:
         fake_import_error = ModuleNotFoundError("No module named 'asyncpg'")
         mp.setattr(
-            "coding_agent.ui.session_manager.importlib.import_module",
+            "coding_agent.server.session_manager.importlib.import_module",
             lambda name: (_ for _ in ()).throw(fake_import_error),
         )
 
@@ -1176,7 +1176,7 @@ def test_load_pg_storage_types_reports_missing_exports() -> None:
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(
-            "coding_agent.ui.session_manager.importlib.import_module",
+            "coding_agent.server.session_manager.importlib.import_module",
             lambda name: fake_module,
         )
 
@@ -1257,7 +1257,7 @@ async def test_run_agent_clears_pending_approval_after_runtime_timeout() -> None
             "coding_agent.__main__.create_agent",
             lambda **kwargs: (fake_pipeline, fake_ctx),
         )
-        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
         await manager.run_agent(session_id, "needs approval")
 
     assert approval_requested is True
@@ -1297,7 +1297,7 @@ async def test_run_agent_reuses_session_tape_id_across_hot_turns() -> None:
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
-        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
 
         await manager.run_agent(session_id, "hello")
         await manager.run_agent(session_id, "again")
@@ -1357,7 +1357,7 @@ async def test_run_agent_reuses_live_runtime_for_hot_turns() -> None:
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
-        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
 
         await manager.run_agent(session_id, "first")
         await manager.run_agent(session_id, "second")
@@ -1404,7 +1404,7 @@ async def test_run_agent_closes_cached_runtime_after_turn_failure() -> None:
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
-        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
         await manager.run_agent(session_id, "boom")
 
     session = manager.get_session(session_id)
@@ -1448,7 +1448,7 @@ async def test_run_agent_reraises_owner_conflict_without_sending_error_turn() ->
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
-        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
         with pytest.raises(
             SessionOwnershipConflictError,
             match="stale owner or fencing token rejected",
@@ -1499,7 +1499,7 @@ async def test_run_agent_reraises_fatal_tool_execution_error_without_sending_err
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
-        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
         with pytest.raises(FatalToolExecutionError, match="fatal tool failure"):
             await manager.run_agent(session_id, "boom")
 
@@ -1560,7 +1560,7 @@ async def test_close_session_raises_if_task_survives_cancellation() -> None:
     session.task = cast(asyncio.Task[None], cast(object, fake_task))
 
     with patch(
-        "coding_agent.ui.session_manager.asyncio.wait_for",
+        "coding_agent.server.session_manager.asyncio.wait_for",
         side_effect=asyncio.TimeoutError,
     ):
         with pytest.raises(RuntimeError, match="did not stop after cancellation"):
@@ -1590,7 +1590,7 @@ async def test_shutdown_session_runtime_raises_if_task_survives_cancellation() -
     session.task = cast(asyncio.Task[None], cast(object, fake_task))
 
     with patch(
-        "coding_agent.ui.session_manager.asyncio.wait_for",
+        "coding_agent.server.session_manager.asyncio.wait_for",
         side_effect=asyncio.TimeoutError,
     ):
         with pytest.raises(RuntimeError, match="did not stop after cancellation"):
@@ -1707,7 +1707,7 @@ async def test_run_agent_persists_tape_id_before_turn_completion() -> None:
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
-        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
         await manager.run_agent(session_id, "hello")
 
     persisted_payload = store.get(session_id)
@@ -1746,7 +1746,7 @@ async def test_run_agent_rejects_concurrent_turn_for_same_session() -> None:
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
-        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
 
         first = asyncio.create_task(manager.run_agent(session_id, "first"))
         await asyncio.wait_for(started.wait(), timeout=1)
@@ -1863,7 +1863,7 @@ async def test_rehydrated_session_rebuilds_runtime_from_persisted_tape() -> None
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
-        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
         mp.setattr(rehydrated, "_restore_tape", fake_restore_tape)
 
         await rehydrated.run_agent(session_id, "resume")
@@ -1918,7 +1918,7 @@ async def test_failover_rebuilds_from_persisted_state_without_resuming_local_run
         return fake_pipeline, rebuilt_ctx
 
     monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+    monkeypatch.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
     original_task: asyncio.Task[object] | None = None
 
     try:
@@ -2009,7 +2009,7 @@ async def test_session_store_persists_tape_id_for_cold_recovery() -> None:
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
-        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
         await manager.run_agent(session_id, "hello")
 
     reloaded = SessionManager(store=store).get_session(session_id)
@@ -2062,7 +2062,7 @@ async def test_cold_restore_recovers_conversation_history() -> None:
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
-        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
         mp.setattr(manager, "_restore_tape", fake_restore_tape)
         await manager.run_agent(session_id, "resume")
 
@@ -2110,7 +2110,7 @@ async def test_cold_restore_does_not_restore_live_shell_state() -> None:
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
-        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
         mp.setattr(manager, "_restore_tape", fake_restore_tape)
         await manager.run_agent(session_id, "resume")
 
@@ -2195,7 +2195,7 @@ async def test_restore_truncates_tape_store_to_checkpoint_entry_count() -> None:
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
-        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
         mp.setattr(
             manager, "_checkpoint_service", FakeCheckpointService(), raising=False
         )
@@ -2328,7 +2328,7 @@ async def test_restore_injects_checkpoint_plugin_states_before_mount() -> None:
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
-        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
         mp.setattr(
             manager, "_checkpoint_service", FakeCheckpointService(), raising=False
         )
@@ -2440,7 +2440,7 @@ async def test_restore_rewinds_restart_safe_agent_configuration_from_checkpoint_
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
-        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
         mp.setattr(
             manager, "_checkpoint_service", FakeCheckpointService(), raising=False
         )
@@ -2496,7 +2496,7 @@ async def test_run_agent_uses_resolved_workspace_root_from_binding(
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
-        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
         await manager.run_agent(session_id, "hello")
 
     assert captured_kwargs["workspace_root"] == bound_workspace.resolve()
@@ -2566,7 +2566,7 @@ async def test_restore_checkpoint_preserves_execution_binding(tmp_path: Path) ->
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
-        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
         mp.setattr(
             manager, "_checkpoint_service", FakeCheckpointService(), raising=False
         )
@@ -2655,7 +2655,7 @@ async def test_run_agent_passes_cloud_environment_from_execution_binding() -> No
             del prompt
 
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
         await manager.run_agent(session_id, "hello")
 
     assert captured_kwargs["workspace_root"] is None
@@ -2735,7 +2735,7 @@ async def test_restore_checkpoint_preserves_cloud_execution_binding() -> None:
             return None
 
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
         mp.setattr(
             manager, "_checkpoint_service", FakeCheckpointService(), raising=False
         )
@@ -2801,7 +2801,7 @@ async def test_close_session_offloads_provisioned_cloud_cleanup(
         return func(*args)
 
     monkeypatch.setattr(
-        "coding_agent.ui.session_manager.asyncio.to_thread", fake_to_thread
+        "coding_agent.server.session_manager.asyncio.to_thread", fake_to_thread
     )
 
     await manager.close_session(session_id)
@@ -3235,7 +3235,7 @@ async def test_restore_legacy_checkpoint_without_session_config_uses_current_ses
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
-        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
         mp.setattr(
             manager, "_checkpoint_service", FakeCheckpointService(), raising=False
         )
@@ -3388,7 +3388,7 @@ async def test_restore_clears_hot_provider_override_when_checkpoint_rewinds_prov
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
-        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
         mp.setattr(
             manager, "_checkpoint_service", FakeCheckpointService(), raising=False
         )
@@ -3477,7 +3477,7 @@ async def test_restore_does_not_reuse_hot_provider_when_model_changes_with_same_
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
-        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
         mp.setattr(
             manager, "_checkpoint_service", FakeCheckpointService(), raising=False
         )
@@ -3563,7 +3563,7 @@ async def test_restore_closes_existing_runtime_before_replacing_it() -> None:
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
-        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", NewAdapter)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", NewAdapter)
         mp.setattr(
             manager, "_checkpoint_service", FakeCheckpointService(), raising=False
         )

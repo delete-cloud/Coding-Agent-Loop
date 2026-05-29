@@ -15,9 +15,9 @@ from coding_agent.runtime_store import (
     RuntimeEventRecord,
 )
 from coding_agent.ui import http_server
-from coding_agent.ui.http_server import app
-from coding_agent.ui.session_manager import MockProvider, SessionManager
-from coding_agent.ui.session_store import InMemorySessionStore
+from coding_agent.server.http_server import app
+from coding_agent.server.session_manager import MockProvider, SessionManager
+from coding_agent.server.stores.session_store import InMemorySessionStore
 
 
 class InMemoryRuntimeStore:

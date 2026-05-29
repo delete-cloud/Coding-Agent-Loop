@@ -19,7 +19,7 @@ from coding_agent.adapter_types import StopReason, TurnOutcome
 from coding_agent.__main__ import create_agent, create_child_pipeline
 from coding_agent.environment import CloudCommandResult, CloudEnvironment, LocalEnvironment
 from coding_agent.plugins.core_tools import CoreToolsPlugin
-from coding_agent.ui.session_owner_store import SessionOwnershipConflictError
+from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictError
 from coding_agent.wire.protocol import StreamDelta, TurnEnd, WireMessage
 from coding_agent.tools.subagent import build_subagent_tool
 

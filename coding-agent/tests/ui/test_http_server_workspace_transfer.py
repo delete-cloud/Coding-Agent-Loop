@@ -8,11 +8,11 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
-from coding_agent.ui.execution_binding import CloudWorkspaceBinding
-from coding_agent.ui.http_server import app, session_manager
-from coding_agent.ui.rate_limit import limiter
-from coding_agent.ui.session_manager import Session
-from coding_agent.ui.session_owner_store import SessionOwnerRecord
+from coding_agent.server.execution_binding import CloudWorkspaceBinding
+from coding_agent.server.http_server import app, session_manager
+from coding_agent.server.rate_limit import limiter
+from coding_agent.server.session_manager import Session
+from coding_agent.server.stores.session_owner_store import SessionOwnerRecord
 from coding_agent.core.config import settings
 from httpx import ASGITransport, AsyncClient
 import pytest
@@ -209,7 +209,7 @@ def _configure_workspace_server(
     if max_workspace_age_seconds is not None:
         config["max_workspace_age_seconds"] = max_workspace_age_seconds
     monkeypatch.setattr(
-        "coding_agent.ui.http_server._load_cloud_workspace_config",
+        "coding_agent.server.http_server._load_cloud_workspace_config",
         lambda: config,
     )
 
@@ -230,7 +230,7 @@ async def test_create_session_provisions_docker_workspace_from_snapshot(
         lambda provider_config, binding: None,
     )
     monkeypatch.setattr(
-        "coding_agent.ui.http_server._load_cloud_workspace_config",
+        "coding_agent.server.http_server._load_cloud_workspace_config",
         lambda: {
             "enabled": True,
             "provider": "docker",
@@ -397,7 +397,7 @@ async def test_get_workspace_archive_returns_cloud_workspace_snapshot(
         lambda provider_config, binding: None,
     )
     monkeypatch.setattr(
-        "coding_agent.ui.http_server._load_cloud_workspace_config",
+        "coding_agent.server.http_server._load_cloud_workspace_config",
         lambda: {
             "enabled": True,
             "provider": "docker",
@@ -438,7 +438,7 @@ async def test_get_workspace_archive_returns_409_for_active_turn(
         lambda provider_config, binding: None,
     )
     monkeypatch.setattr(
-        "coding_agent.ui.http_server._load_cloud_workspace_config",
+        "coding_agent.server.http_server._load_cloud_workspace_config",
         lambda: {
             "enabled": True,
             "provider": "docker",
@@ -473,7 +473,7 @@ async def test_get_workspace_archive_returns_409_for_stale_owner(
         lambda provider_config, binding: None,
     )
     monkeypatch.setattr(
-        "coding_agent.ui.http_server._load_cloud_workspace_config",
+        "coding_agent.server.http_server._load_cloud_workspace_config",
         lambda: {
             "enabled": True,
             "provider": "docker",
@@ -511,7 +511,7 @@ async def test_get_workspace_archive_rejects_owner_change_during_export(
         lambda provider_config, binding: None,
     )
     monkeypatch.setattr(
-        "coding_agent.ui.http_server._load_cloud_workspace_config",
+        "coding_agent.server.http_server._load_cloud_workspace_config",
         lambda: {
             "enabled": True,
             "provider": "docker",
@@ -536,7 +536,7 @@ async def test_get_workspace_archive_rejects_owner_change_during_export(
     )
 
     monkeypatch.setattr(
-        "coding_agent.ui.http_server.export_workspace_archive_from_config",
+        "coding_agent.server.http_server.export_workspace_archive_from_config",
         lambda config, binding: (
             owner_store._owners.__setitem__(
                 "sess-race",
@@ -564,7 +564,7 @@ async def test_get_workspace_archive_returns_500_for_unexpected_runtime_error(
         lambda provider_config, binding: None,
     )
     monkeypatch.setattr(
-        "coding_agent.ui.http_server._load_cloud_workspace_config",
+        "coding_agent.server.http_server._load_cloud_workspace_config",
         lambda: {
             "enabled": True,
             "provider": "docker",
@@ -583,7 +583,7 @@ async def test_get_workspace_archive_returns_500_for_unexpected_runtime_error(
     _register_cloud_session("sess-fail", binding)
 
     monkeypatch.setattr(
-        "coding_agent.ui.http_server.export_workspace_archive_from_config",
+        "coding_agent.server.http_server.export_workspace_archive_from_config",
         lambda config, binding: (_ for _ in ()).throw(
             RuntimeError("docker export failed")
         ),
@@ -602,7 +602,7 @@ async def test_create_session_rejects_snapshot_archive_larger_than_limit(
         lambda provider_config, binding: None,
     )
     monkeypatch.setattr(
-        "coding_agent.ui.http_server._load_cloud_workspace_config",
+        "coding_agent.server.http_server._load_cloud_workspace_config",
         lambda: {
             "enabled": True,
             "provider": "docker",
@@ -636,7 +636,7 @@ async def test_get_workspace_archive_returns_400_for_oversized_workspace_export(
         lambda provider_config, binding: None,
     )
     monkeypatch.setattr(
-        "coding_agent.ui.http_server._load_cloud_workspace_config",
+        "coding_agent.server.http_server._load_cloud_workspace_config",
         lambda: {
             "enabled": True,
             "provider": "docker",

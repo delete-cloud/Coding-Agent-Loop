@@ -14,7 +14,7 @@ from coding_agent.plugins.parallel_executor import (
     DependencyAnalyzer,
     ParallelExecutorPlugin,
 )
-from coding_agent.ui.session_owner_store import SessionOwnershipConflictError
+from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictError
 
 
 class TestDependencyAnalyzer:

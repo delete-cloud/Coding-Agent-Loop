@@ -10,8 +10,8 @@ from agentkit.runtime import (
 )
 from coding_agent.approval import ApprovalCoordinator
 from coding_agent.approval.runtime_messages import ApprovalDecisionConsumer
-from coding_agent.ui.session_manager import MockProvider, SessionManager
-from coding_agent.ui.session_store import InMemorySessionStore
+from coding_agent.server.session_manager import MockProvider, SessionManager
+from coding_agent.server.stores.session_store import InMemorySessionStore
 from coding_agent.wire.protocol import ApprovalRequest, ToolCallDelta
 
 

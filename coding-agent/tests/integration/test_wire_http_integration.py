@@ -19,9 +19,8 @@ import httpx
 import pytest
 from httpx_sse import aconnect_sse
 
-from coding_agent.ui.session_manager import MockProvider, Session
-from coding_agent.ui.http_server import (
-    APPROVAL_TIMEOUT_SECONDS,
+from coding_agent.server.session_manager import MockProvider, Session
+from coding_agent.server.http_server import (
     _broadcast_event,
     _wire_message_to_event,
     app,
@@ -546,8 +545,8 @@ class TestApprovalFlowIntegration:
             from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
 
             from coding_agent.approval import ApprovalPolicy
-            from coding_agent.ui.http_server import app, session_manager
-            from coding_agent.ui.session_manager import Session
+            from coding_agent.server.http_server import app, session_manager
+            from coding_agent.server.session_manager import Session
 
             class ScriptedApprovalProvider:
                 def __init__(self) -> None:
@@ -719,7 +718,7 @@ class TestApprovalFlowIntegration:
 
             import uvicorn
 
-            from coding_agent.ui.http_server import app
+            from coding_agent.server.http_server import app
 
             uvicorn.run(
                 app,
@@ -999,7 +998,7 @@ class TestSessionTimeout:
         )
 
         # Manually check if session would be cleaned up
-        from coding_agent.ui.http_server import SESSION_IDLE_TIMEOUT_MINUTES
+        from coding_agent.server.http_server import SESSION_IDLE_TIMEOUT_MINUTES
 
         idle_time = datetime.now() - session.last_activity
         assert idle_time > timedelta(minutes=SESSION_IDLE_TIMEOUT_MINUTES)
@@ -1011,7 +1010,7 @@ class TestSessionTimeout:
         session_id = "test-active"
         session = register_session(session_id)
 
-        from coding_agent.ui.http_server import SESSION_IDLE_TIMEOUT_MINUTES
+        from coding_agent.server.http_server import SESSION_IDLE_TIMEOUT_MINUTES
 
         idle_time = datetime.now() - session.last_activity
         assert idle_time < timedelta(minutes=SESSION_IDLE_TIMEOUT_MINUTES)

@@ -38,7 +38,7 @@ from coding_agent.topic_store import (
     TopicRecallLinkRecord,
     TopicRecord,
 )
-from coding_agent.ui.developer_console import (
+from coding_agent.server.developer_console import (
     ConsoleTopicAnchorSummary,
     ConsoleTopicCostSummary,
     ConsoleTopicDetail,

@@ -25,7 +25,7 @@ from coding_agent.scheduled_runs import (
 )
 from coding_agent.topic_lifecycle import TopicLifecycle
 from coding_agent.topic_store import JSONObject, TopicAnchorRecord, TopicRecord
-from coding_agent.ui.developer_console import (
+from coding_agent.server.developer_console import (
     ConsoleProactiveSignalSummary,
     ConsoleScheduleSummary,
     ConsoleSchedulesPage,

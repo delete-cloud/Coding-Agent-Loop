@@ -37,9 +37,9 @@ from coding_agent.topic_store import (
     TopicRecord,
 )
 from coding_agent.ui import http_server
-from coding_agent.ui.http_server import app, session_manager
-from coding_agent.ui.session_manager import Session
-from coding_agent.ui.workspace_store import WorkspaceRecord
+from coding_agent.server.http_server import app, session_manager
+from coding_agent.server.session_manager import Session
+from coding_agent.server.stores.workspace_store import WorkspaceRecord
 
 CONSOLE_ROUTES = (
     "/console",
