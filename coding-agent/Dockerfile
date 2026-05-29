@@ -1,4 +1,6 @@
-FROM python:3.12-slim AS builder
+ARG PYTHON_BASE_IMAGE=python:3.12-slim
+
+FROM ${PYTHON_BASE_IMAGE} AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -15,7 +17,7 @@ RUN uv sync --frozen --no-dev
 RUN uv pip install --python /app/.venv/bin/python redis
 
 
-FROM python:3.12-slim AS runtime
+FROM ${PYTHON_BASE_IMAGE} AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
