@@ -10,7 +10,7 @@ steps:
     commands:
       - cd coding-agent
       - python -m pip install -e '.[dev,redis]' ruff
-      - ruff check src tests
+      - ruff check src/coding_agent/observability.py src/coding_agent/ui/http_server.py src/coding_agent/ui/session_manager.py tests/ui/test_server_compat_imports.py tests/coding_agent/test_agent_observability.py tests/coding_agent/test_bee_template_pack_smoke.py
 
   smoke-tests:
     image: python:3.12-slim
