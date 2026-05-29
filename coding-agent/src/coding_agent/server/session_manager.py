@@ -32,12 +32,20 @@ from agentkit.runtime import (
     RuntimeMessageKind,
 )
 from agentkit.runtime.context import AgentRunContext
+from agentkit.observability import ObservationSink
 from agentkit.storage.protocols import CheckpointStore, TapeStore
 from agentkit.storage.protocols import TapeDebugStore, TapeInfo, TapeSearchResult
+from agentkit.tape.extract import TurnTrace, extract_turns
 from agentkit.tape.tape import Tape
 from agentkit.tools import FatalToolExecutionError
 from agentkit.tape.models import Entry
 from coding_agent.adapter import PipelineAdapter
+from coding_agent.agent_observability import (
+    AgentObservationRecorder,
+    AgentObservationStatus,
+    AgentObservationStore,
+    JsonlAgentObservationStore,
+)
 from coding_agent.approval import (
     ApprovalCoordinator,
     ApprovalDecisionConsumer,
@@ -74,7 +82,9 @@ from coding_agent.server.stores.session_store import (
 )
 from coding_agent.server.stores.session_owner_store import SessionOwnerStoreProtocol
 from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictError
-from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictReason
+from coding_agent.server.stores.session_owner_store import (
+    SessionOwnershipConflictReason,
+)
 from coding_agent.server.binding_resolver import BindingResolver, DefaultBindingResolver
 from coding_agent.server.execution_binding import (
     CloudWorkspaceBinding,
@@ -740,6 +750,7 @@ class SessionManager:
         ) = None,
         workspace_metadata_store: WorkspaceMetadataStoreProtocol | None = None,
         runtime_store: RuntimeStoreProtocol | None = None,
+        observation_store: AgentObservationStore | None = None,
         owner_store: SessionOwnerStoreProtocol | None = None,
         owner_id: str | None = None,
         fencing_token: int | None = None,
@@ -757,6 +768,9 @@ class SessionManager:
         self._session_workspace_export_counts: dict[str, int] = {}
         data_dir = Path(os.environ.get("AGENT_DATA_DIR", "./data"))
         self._tape_store = tape_store or self._create_tape_store(data_dir)
+        self._agent_observation_store = observation_store or JsonlAgentObservationStore(
+            data_dir / "observability"
+        )
         resolved_checkpoint_store = checkpoint_store or self._create_checkpoint_store(
             data_dir
         )
@@ -1188,6 +1202,64 @@ class SessionManager:
         if outcome.error is not None or outcome.stop_reason == StopReason.ERROR:
             return "failed"
         return "completed"
+
+    def _agent_observation_status(self, turn_status: str) -> AgentObservationStatus:
+        if turn_status in {"cancelled", "interrupted"}:
+            return "cancelled"
+        if turn_status == "failed":
+            return "error"
+        return "ok"
+
+    def _latest_turn_trace(self, ctx: Any) -> TurnTrace | None:
+        tape = getattr(ctx, "tape", None)
+        if tape is None or not hasattr(tape, "snapshot"):
+            return None
+        turns = extract_turns(tape.snapshot())
+        if not turns:
+            return None
+        return turns[-1]
+
+    def _agent_observation_sink(self, ctx: Any) -> ObservationSink | None:
+        config = getattr(ctx, "config", None)
+        if not isinstance(config, dict):
+            return None
+        sink = config.get("observation_sink")
+        if isinstance(sink, ObservationSink):
+            return sink
+        return None
+
+    def _start_agent_observation(
+        self,
+        *,
+        session: Session,
+        ctx: Any,
+        run_id: str,
+        prompt: str,
+    ) -> AgentObservationRecorder | None:
+        config = getattr(ctx, "config", None)
+        if not isinstance(config, dict):
+            return None
+        recorder = AgentObservationRecorder(
+            store=self._agent_observation_store,
+            sink=self._agent_observation_sink(ctx),
+        )
+        config["agent_observation_recorder"] = recorder
+        recorder.start_turn(session_id=session.id, run_id=run_id, prompt=prompt)
+        return recorder
+
+    def _complete_agent_observation(
+        self,
+        recorder: AgentObservationRecorder | None,
+        *,
+        ctx: Any,
+        turn_status: str,
+    ) -> None:
+        if recorder is None:
+            return
+        recorder.complete_turn(
+            status=self._agent_observation_status(turn_status),
+            turn=self._latest_turn_trace(ctx),
+        )
 
     def _require_turn_outcome(self, outcome: object) -> TurnOutcome:
         if not isinstance(outcome, TurnOutcome):
@@ -2384,6 +2456,7 @@ class SessionManager:
             session.last_failure_details = None
             await self._persist_session_async(session)
             agent_run_created = False
+            observation_recorder: AgentObservationRecorder | None = None
 
             try:
                 approval_mode_map = {
@@ -2453,9 +2526,16 @@ class SessionManager:
                 ctx.runtime_message_bus = session.runtime_message_bus
                 ctx.config["wire_consumer"] = consumer
                 self._bind_subagent_message_publisher(ctx)
+                observation_recorder = self._start_agent_observation(
+                    session=session,
+                    ctx=ctx,
+                    run_id=run_id,
+                    prompt=prompt,
+                )
                 outcome = await adapter.run_turn(prompt)
                 if self._runtime_store is not None:
                     turn_outcome = self._require_turn_outcome(outcome)
+                    turn_status = self._status_from_turn_outcome(turn_outcome)
                     session.tape_id = ctx.tape.tape_id
                     await self._save_runtime_message_snapshot(
                         session,
@@ -2465,15 +2545,40 @@ class SessionManager:
                     await self._finish_runtime_agent_run(
                         session,
                         run_id=run_id,
-                        status=self._status_from_turn_outcome(turn_outcome),
+                        status=turn_status,
                         result=self._result_from_turn_outcome(turn_outcome),
                         error=turn_outcome.error,
                     )
+                    if turn_status == "failed":
+                        session.turn_status = "failed"
+                        reason = turn_outcome.error or turn_outcome.stop_reason.value
+                        session.last_failure_details = f"Agent turn failed: {reason}"
+                    else:
+                        session.last_failure_details = None
                 else:
                     session.tape_id = ctx.tape.tape_id
-                session.last_failure_details = None
+                    turn_status = "completed"
+                    if isinstance(outcome, TurnOutcome):
+                        turn_status = self._status_from_turn_outcome(outcome)
+                        if turn_status == "failed":
+                            session.turn_status = "failed"
+                            reason = outcome.error or outcome.stop_reason.value
+                            session.last_failure_details = (
+                                f"Agent turn failed: {reason}"
+                            )
+                        else:
+                            session.last_failure_details = None
+                    else:
+                        session.last_failure_details = None
+                self._complete_agent_observation(
+                    observation_recorder,
+                    ctx=ctx,
+                    turn_status=turn_status,
+                )
                 await self._persist_session_async(session)
             except FatalToolExecutionError as exc:
+                if observation_recorder is not None:
+                    observation_recorder.fail_turn(error_type=type(exc).__name__)
                 if agent_run_created:
                     await self._finish_runtime_agent_run(
                         session,
@@ -2487,6 +2592,8 @@ class SessionManager:
                 await self._close_runtime(session)
                 raise
             except asyncio.CancelledError:
+                if observation_recorder is not None:
+                    observation_recorder.cancel_turn()
                 if agent_run_created:
                     await self._finish_runtime_agent_run(
                         session,
@@ -2497,6 +2604,8 @@ class SessionManager:
                     )
                 raise
             except Exception as exc:
+                if observation_recorder is not None:
+                    observation_recorder.fail_turn(error_type=type(exc).__name__)
                 if agent_run_created:
                     await self._finish_runtime_agent_run(
                         session,

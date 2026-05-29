@@ -5,7 +5,7 @@ import re
 import uuid
 from inspect import isawaitable
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
@@ -22,11 +22,11 @@ from agentkit.runtime.pipeline import Pipeline, PipelineContext
 from agentkit.tape.models import Entry
 
 from coding_agent.adapter_types import StopReason, TurnOutcome
+from coding_agent.agent_observability import AgentObservationRecorder
 from coding_agent.plugins.metrics import SessionMetricsPlugin
 from .redaction import redact_sensitive_text
 from coding_agent.wire.protocol import (
     ApprovalRequest,
-    ApprovalResponse,
     CompletionStatus,
     StreamDelta,
     ThinkingDelta,
@@ -34,7 +34,6 @@ from coding_agent.wire.protocol import (
     ToolResultDelta,
     TurnEnd,
     TurnStatusDelta,
-    WireMessage,
 )
 
 _SENSITIVE_STRING_PATTERNS = (
@@ -203,6 +202,12 @@ class PipelineAdapter:
             return wrapped
         return None
 
+    def _agent_observation_recorder(self) -> AgentObservationRecorder | None:
+        recorder = self._ctx.config.get("agent_observation_recorder")
+        if isinstance(recorder, AgentObservationRecorder):
+            return recorder
+        return None
+
     async def run_turn(self, user_input: str) -> TurnOutcome:
         await self.initialize()
         initial_tool_calls = len(
@@ -288,6 +293,13 @@ class PipelineAdapter:
                     event.output_tokens,
                 )
                 metrics_plugin.on_checkpoint(ctx=self._ctx)
+            recorder = self._agent_observation_recorder()
+            if recorder is not None:
+                recorder.observe_llm_usage(
+                    input_tokens=event.input_tokens,
+                    output_tokens=event.output_tokens,
+                    provider_name=event.provider_name,
+                )
             await self._consumer.emit(
                 TurnStatusDelta(
                     phase="idle",
@@ -299,6 +311,13 @@ class PipelineAdapter:
                 )
             )
         elif isinstance(event, ToolCallEvent):
+            recorder = self._agent_observation_recorder()
+            if recorder is not None:
+                recorder.observe_tool_call(
+                    tool_name=event.name,
+                    tool_call_id=event.tool_call_id,
+                    arguments=event.arguments,
+                )
             await self._consumer.emit(
                 ToolCallDelta(
                     tool_name=event.name,
@@ -309,6 +328,14 @@ class PipelineAdapter:
                 )
             )
         elif isinstance(event, ToolResultEvent):
+            recorder = self._agent_observation_recorder()
+            if recorder is not None:
+                recorder.observe_tool_result(
+                    tool_name=event.name,
+                    tool_call_id=event.tool_call_id,
+                    result=event.result,
+                    is_error=event.is_error,
+                )
             wire_result, display_result = _normalize_tool_result_for_wire(event.result)
             await self._consumer.emit(
                 ToolResultDelta(

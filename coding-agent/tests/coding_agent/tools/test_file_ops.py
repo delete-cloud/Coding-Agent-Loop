@@ -1,5 +1,3 @@
-import pytest
-
 from coding_agent.tools.file_ops import (
     configure_workspace,
     file_read,
@@ -29,14 +27,14 @@ class TestFileOps:
     def test_file_write(self, tmp_path):
         configure_workspace(tmp_path)
         f = tmp_path / "out.txt"
-        result = file_write(path="out.txt", content="written")
+        file_write(path="out.txt", content="written")
         assert f.read_text() == "written"
 
     def test_file_replace(self, tmp_path):
         configure_workspace(tmp_path)
         f = tmp_path / "repl.txt"
         f.write_text("old text here")
-        result = file_replace(path="repl.txt", old="old", new="new")
+        file_replace(path="repl.txt", old="old", new="new")
         assert f.read_text() == "new text here"
 
     def test_file_read_rejects_escape_outside_workspace(self, tmp_path):
@@ -48,6 +46,7 @@ class TestFileOps:
 
         assert isinstance(result, str)
         assert "outside workspace" in result.lower()
+        assert str(tmp_path) in result
 
     def test_glob_files_rejects_escape_directory(self, tmp_path):
         configure_workspace(tmp_path)
@@ -56,3 +55,12 @@ class TestFileOps:
 
         assert isinstance(result, str)
         assert "outside workspace" in result.lower()
+        assert str(tmp_path) in result
+
+    def test_file_tool_descriptions_mention_workspace_root(self, tmp_path):
+        configure_workspace(tmp_path)
+
+        assert "workspace root" in file_read._tool_schema.description
+        assert "workspace root" in file_write._tool_schema.description
+        assert "workspace root" in file_replace._tool_schema.description
+        assert "workspace root" in glob_files._tool_schema.description

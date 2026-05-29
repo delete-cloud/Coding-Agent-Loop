@@ -77,7 +77,10 @@ def _resolve_workspace_path(path: str) -> Path:
     try:
         resolved.relative_to(_workspace_root)
     except ValueError as exc:
-        raise ValueError(f"Path is outside workspace root: {path}") from exc
+        raise ValueError(
+            f"Path is outside workspace root: {path}. "
+            f"Use a path under workspace root: {_workspace_root}"
+        ) from exc
 
     return resolved
 
@@ -111,13 +114,19 @@ def build_file_tools(
         try:
             resolved.relative_to(root)
         except ValueError as exc:
-            raise ValueError(f"Path is outside workspace root: {path}") from exc
+            raise ValueError(
+                f"Path is outside workspace root: {path}. "
+                f"Use a path under workspace root: {root}"
+            ) from exc
 
         return resolved
 
     @tool(
         name="file_read",
-        description="Read file contents. Returns file text or error message.",
+        description=(
+            "Read file contents under the workspace root. Returns file text or "
+            "error message."
+        ),
     )
     def bound_file_read(path: str) -> str | dict[str, Any]:
         try:
@@ -132,7 +141,10 @@ def build_file_tools(
 
     @tool(
         name="file_write",
-        description="Write content to a file. Creates parent directories if needed.",
+        description=(
+            "Write content to a file under the workspace root. Creates parent "
+            "directories if needed."
+        ),
     )
     def bound_file_write(path: str, content: str) -> str:
         try:
@@ -143,7 +155,10 @@ def build_file_tools(
         except Exception as e:
             return f"Error writing {path}: {e}"
 
-    @tool(name="file_replace", description="Replace exact string in a file.")
+    @tool(
+        name="file_replace",
+        description="Replace exact string in a file under the workspace root.",
+    )
     def bound_file_replace(path: str, old: str, new: str) -> str:
         try:
             p = resolve_path(path)
@@ -158,7 +173,10 @@ def build_file_tools(
         except Exception as e:
             return f"Error: {e}"
 
-    @tool(name="glob_files", description="Search for files matching a glob pattern.")
+    @tool(
+        name="glob_files",
+        description="Search under the workspace root for files matching a glob pattern.",
+    )
     def bound_glob_files(pattern: str, directory: str = ".") -> str:
         try:
             base = resolve_path(directory)
@@ -169,7 +187,10 @@ def build_file_tools(
         except Exception as e:
             return f"Error: {e}"
 
-    @tool(name="grep_search", description="Search file contents for a regex pattern.")
+    @tool(
+        name="grep_search",
+        description="Search file contents under the workspace root for a regex pattern.",
+    )
     def bound_grep_search(
         pattern: str, directory: str = ".", include: str = ""
     ) -> str | dict[str, Any]:
@@ -204,27 +225,37 @@ def build_file_tools(
     return tools
 
 
-@tool(description="Read file contents. Returns file text or error message.")
+@tool(
+    description=(
+        "Read file contents under the workspace root. Returns file text or error "
+        "message."
+    )
+)
 def file_read(path: str) -> str | dict[str, Any]:
     return build_file_tools(_workspace_root)[0](path)
 
 
-@tool(description="Write content to a file. Creates parent directories if needed.")
+@tool(
+    description=(
+        "Write content to a file under the workspace root. Creates parent "
+        "directories if needed."
+    )
+)
 def file_write(path: str, content: str) -> str:
     return build_file_tools(_workspace_root)[1](path, content)
 
 
-@tool(description="Replace exact string in a file.")
+@tool(description="Replace exact string in a file under the workspace root.")
 def file_replace(path: str, old: str, new: str) -> str:
     return build_file_tools(_workspace_root)[2](path, old, new)
 
 
-@tool(description="Search for files matching a glob pattern.")
+@tool(description="Search under the workspace root for files matching a glob pattern.")
 def glob_files(pattern: str, directory: str = ".") -> str:
     return build_file_tools(_workspace_root)[3](pattern, directory)
 
 
-@tool(description="Search file contents for a regex pattern.")
+@tool(description="Search file contents under the workspace root for a regex pattern.")
 def grep_search(
     pattern: str, directory: str = ".", include: str = ""
 ) -> str | dict[str, Any]:

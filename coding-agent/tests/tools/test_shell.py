@@ -47,6 +47,17 @@ class TestShellTool:
         result = bash_run(command="sleep 10", timeout=1)
         assert "timed out" in _as_text(result).lower()
 
+    def test_timeout_numeric_string_is_normalized(self):
+        result = bash_run(command="echo hello", timeout="1")  # type: ignore[arg-type]
+        assert _as_text(result) == "hello"
+
+    def test_invalid_timeout_string_returns_clear_error(self):
+        result = bash_run(command="echo hello", timeout="soon")  # type: ignore[arg-type]
+        result_text = _as_text(result).lower()
+        assert "error" in result_text
+        assert "timeout" in result_text
+        assert "positive integer" in result_text
+
     def test_empty_command(self):
         result = bash_run(command="")
         result_text = _as_text(result).lower()
@@ -131,7 +142,9 @@ class TestShellTool:
         result = bash_run(
             command="pwd", cwd=str(tmp_path), __pipeline_ctx__=pipeline_ctx
         )
-        assert "outside sandbox workspace" in _as_text(result).lower()
+        result_text = _as_text(result).lower()
+        assert "outside sandbox workspace" in result_text
+        assert str(workspace).lower() in result_text
 
     def test_none_sandbox_blocks_absolute_path_escape(self, tmp_path: Path):
         workspace = tmp_path / "workspace"
@@ -158,6 +171,7 @@ class TestShellTool:
         blocked_text = _as_text(blocked).lower()
         assert "error" in blocked_text
         assert "workspace" in blocked_text
+        assert str(workspace).lower() in blocked_text
         assert "secret" not in blocked_text
 
     def test_cd_outside_workspace_is_rejected(self, tmp_path: Path):
@@ -169,7 +183,15 @@ class TestShellTool:
         result = bash_run(
             command="cd /tmp", cwd=str(workspace), __pipeline_ctx__=pipeline_ctx
         )
-        assert "outside sandbox workspace" in _as_text(result).lower()
+        result_text = _as_text(result).lower()
+        assert "outside sandbox workspace" in result_text
+        assert str(workspace).lower() in result_text
+
+    def test_tool_description_guides_simple_workspace_safe_commands(self):
+        description = bash_run._tool_schema.description
+        assert "separate bash_run calls" in description
+        assert "workspace root" in description
+        assert "&&" in description
 
     def test_cd_within_workspace_succeeds(self, tmp_path: Path):
         workspace = tmp_path / "workspace"
