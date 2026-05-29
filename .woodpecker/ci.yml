@@ -7,6 +7,8 @@ when:
 steps:
   lint:
     image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+    environment:
+      UV_NO_WATCHER: "1"
     commands:
       - cd coding-agent
       - uv sync --all-extras
@@ -14,6 +16,8 @@ steps:
 
   smoke-tests:
     image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+    environment:
+      UV_NO_WATCHER: "1"
     commands:
       - cd coding-agent
       - uv sync --all-extras
