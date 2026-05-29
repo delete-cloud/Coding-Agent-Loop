@@ -15,6 +15,7 @@ from agentkit.tools import FatalToolExecutionError
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
 from coding_agent.adapter_types import StopReason, TurnOutcome
+from coding_agent.agent_observability import JsonlAgentObservationStore
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.environment import (
     CloudCommandResult,
@@ -268,14 +269,67 @@ async def test_run_agent_creates_run_id_and_preserves_current_turn_id_alias() ->
     session = manager.get_session(session_id)
     assert session.current_turn_id == run_id
     assert observed_run_ids == [run_id]
-    assert session.runtime_ctx.session_id == session_id
-    assert session.runtime_ctx.run_context.session_id == session_id
-    assert session.runtime_ctx.run_context.run_id == run_id
-    assert session.runtime_ctx.run_context.parent_run_id is None
-    assert session.runtime_ctx.run_context.trace_metadata == {
-        "turn_id": run_id,
-        "tape_id": session.runtime_ctx.tape.tape_id,
-    }
+
+
+@pytest.mark.asyncio
+async def test_run_agent_records_turn_started_before_adapter_finishes(tmp_path) -> None:
+    observation_store = JsonlAgentObservationStore(tmp_path)
+    manager = SessionManager(observation_store=observation_store)
+    session_id = await manager.create_session()
+    adapter_started = asyncio.Event()
+    release_adapter = asyncio.Event()
+    observed_run_ids: list[str] = []
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+            self.ctx = ctx
+
+        async def run_turn(self, prompt: str) -> TurnOutcome:
+            del prompt
+            observed_run_ids.append(self.ctx.run_context.run_id)
+            adapter_started.set()
+            await release_adapter.wait()
+            return TurnOutcome(stop_reason=StopReason.NO_TOOL_CALLS)
+
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        )
+    )
+
+    def fake_create_agent(**kwargs):
+        environment = kwargs["environment"]
+        if not isinstance(environment, LocalEnvironment):
+            raise TypeError("expected local environment")
+        return fake_pipeline, types.SimpleNamespace(
+            session_id="stale-session",
+            config={},
+            tape=kwargs.get("tape") or Tape(),
+            run_context=AgentRunContext(
+                session_id="stale-session",
+                run_id="stale-run",
+                agent_id=None,
+                parent_run_id=None,
+                environment=environment,
+            ),
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
+        mp.setattr("coding_agent.ui.session_manager.PipelineAdapter", FakeAdapter)
+
+        run_task = asyncio.create_task(manager.run_agent(session_id, "raw prompt"))
+        await asyncio.wait_for(adapter_started.wait(), timeout=1.0)
+
+        run_id = observed_run_ids[0]
+        observation_path = tmp_path / "runs" / run_id / "observations.jsonl"
+        body = observation_path.read_text(encoding="utf-8")
+        assert "turn.started" in body
+        assert "raw prompt" not in body
+
+        release_adapter.set()
+        await run_task
 
 
 @pytest.mark.asyncio

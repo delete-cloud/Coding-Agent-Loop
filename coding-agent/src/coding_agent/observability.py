@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import os
 import re
 import secrets
@@ -32,6 +33,34 @@ _SENSITIVE_ATTRIBUTE_PARTS = frozenset({
     "stderr",
     "stdout",
     "text",
+})
+_SANITIZED_LANGFUSE_OBSERVATION_KEYS = frozenset({
+    "langfuse.observation.input",
+    "langfuse.observation.output",
+})
+_SANITIZED_LANGFUSE_ALLOWED_KEYS = frozenset({
+    "arg_shape",
+    "field_count",
+    "final_length",
+    "final_present",
+    "input",
+    "item_count",
+    "key_count",
+    "length",
+    "line_count",
+    "list",
+    "output",
+    "result_shape",
+    "safe_keys",
+    "status",
+    "string_lengths",
+    "tool_call_count",
+    "tool_calls",
+    "tool_name",
+    "type",
+    "types",
+    "user_length",
+    "user_present",
 })
 _SENSITIVE_PROMETHEUS_VALUE_PARTS = frozenset({
     "content",
@@ -483,8 +512,14 @@ def _otlp_attributes(attributes: Mapping[str, Any]) -> list[dict[str, Any]]:
     return [
         {"key": key, "value": _otlp_value(value)}
         for key, value in attributes.items()
-        if _attribute_allowed(key) and _attribute_value_allowed(value)
+        if _otlp_attribute_allowed(key, value)
     ]
+
+
+def _otlp_attribute_allowed(key: str, value: Any) -> bool:
+    if key in _SANITIZED_LANGFUSE_OBSERVATION_KEYS:
+        return _sanitized_langfuse_attribute_allowed(key, value)
+    return _attribute_allowed(key) and _attribute_value_allowed(value)
 
 
 def _attribute_value_allowed(value: Any) -> bool:
@@ -494,6 +529,37 @@ def _attribute_value_allowed(value: Any) -> bool:
         token for token in re.split(r"[^a-zA-Z0-9]+", value.casefold()) if token
     }
     return not bool(normalized_tokens & _SENSITIVE_PROMETHEUS_VALUE_PARTS)
+
+
+def _sanitized_langfuse_attribute_allowed(key: str, value: Any) -> bool:
+    if key not in _SANITIZED_LANGFUSE_OBSERVATION_KEYS:
+        return False
+    if not isinstance(value, str):
+        return False
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError:
+        return False
+    return _sanitized_langfuse_payload_allowed(payload)
+
+
+def _sanitized_langfuse_payload_allowed(value: Any) -> bool:
+    if isinstance(value, bool | int | float) or value is None:
+        return True
+    if isinstance(value, str):
+        return _attribute_value_allowed(value)
+    if isinstance(value, list):
+        return all(_sanitized_langfuse_payload_allowed(item) for item in value)
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                return False
+            if key not in _SANITIZED_LANGFUSE_ALLOWED_KEYS:
+                return False
+            if not _sanitized_langfuse_payload_allowed(item):
+                return False
+        return True
+    return False
 
 
 def _resource_attributes(attributes: Mapping[str, Any]) -> list[dict[str, Any]]:
