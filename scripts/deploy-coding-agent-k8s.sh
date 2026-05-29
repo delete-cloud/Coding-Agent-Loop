@@ -41,8 +41,16 @@ if [ "$ENABLE_POD_HEALTH_SMOKE" = "1" ]; then
     curl -fsS "$health_url"
   elif command -v wget >/dev/null 2>&1; then
     wget -qO- "$health_url"
+  elif command -v python >/dev/null 2>&1; then
+    python - "$health_url" <<'PY'
+import sys
+from urllib.request import urlopen
+
+with urlopen(sys.argv[1], timeout=10) as response:
+    sys.stdout.write(response.read().decode())
+PY
   else
-    printf '%s\n' "curl or wget is required for service health smoke" >&2
+    printf '%s\n' "curl, wget, or python is required for service health smoke" >&2
     exit 2
   fi
 fi

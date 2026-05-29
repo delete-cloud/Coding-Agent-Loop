@@ -4,7 +4,7 @@ when:
 
 steps:
   deploy-o6n:
-    image: dtzar/helm-kubectl:3.16.3
+    image: git.mesh.kinaz.me/kina/coding-agent-deploy-tools:kubectl-1.36.0-python-3.12-slim
     environment:
       KUBECONFIG_CONTENT:
         from_secret: kubeconfig
