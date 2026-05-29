@@ -13,6 +13,7 @@ steps:
       K8S_NAMESPACE: coding-agent-deepseek
       K8S_DEPLOYMENT: coding-agent-coding-agent
       K8S_CONTAINER: coding-agent
+      ROLLOUT_TIMEOUT: 420s
       ENABLE_POD_HEALTH_SMOKE: "1"
     commands:
       - ./scripts/deploy-coding-agent-k8s.sh
