@@ -1,0 +1,41 @@
+when:
+  - event:
+      - push
+      - pull_request
+      - manual
+
+steps:
+  lint:
+    image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+    commands:
+      - cd coding-agent
+      - uv sync --all-extras
+      - uv run ruff check src tests
+
+  smoke-tests:
+    image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+    commands:
+      - cd coding-agent
+      - uv sync --all-extras
+      - uv run pytest tests/ui/test_server_compat_imports.py tests/coding_agent/test_agent_observability.py tests/coding_agent/test_bee_template_pack_smoke.py -q
+
+  build-image:
+    image: woodpeckerci/plugin-docker-buildx
+    settings:
+      repo: ghcr.io/delete-cloud/coding-agent
+      registry: ghcr.io
+      dockerfile: coding-agent/Dockerfile
+      context: coding-agent
+      platforms: linux/amd64
+      tags:
+        - ${CI_COMMIT_SHA}
+        - main
+      username:
+        from_secret: registry_username
+      password:
+        from_secret: registry_password
+    when:
+      - event:
+          - push
+          - manual
+        branch: main
