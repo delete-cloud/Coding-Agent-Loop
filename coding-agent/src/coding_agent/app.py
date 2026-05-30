@@ -184,6 +184,8 @@ def create_child_pipeline(
         resolved_key = os.environ.get("KIMI_CODE_API_KEY", "")
     if not resolved_key and cfg.provider == "deepseek":
         resolved_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    if not resolved_key and cfg.provider == "stepfun":
+        resolved_key = os.environ.get("STEP_API_KEY", "")
     resolved_key = resolved_key or ""
 
     approval_cfg = cfg.extra.get("approval", {})

@@ -285,3 +285,68 @@ class TestDeepSeekProvider:
 
         assert isinstance(result, OpenAICompatProvider)
         assert result._client.api_key == "sk-explicit"
+
+
+class TestStepFunProvider:
+    def test_stepfun_creates_openai_compat_instance(self):
+        plugin = LLMProviderPlugin(
+            provider="stepfun",
+            model="step-3.7-flash",
+            api_key="sk-stepfun-test",
+        )
+
+        result = plugin.provide_llm()
+
+        assert isinstance(result, OpenAICompatProvider)
+        assert result.model_name == "step-3.7-flash"
+
+    def test_stepfun_uses_stepfun_openai_compatible_base_url(self):
+        plugin = LLMProviderPlugin(
+            provider="stepfun",
+            model="step-3.7-flash",
+            api_key="sk-stepfun-test",
+        )
+
+        result = plugin.provide_llm()
+
+        assert isinstance(result, OpenAICompatProvider)
+        assert str(result._client.base_url) == "https://api.stepfun.com/v1/"
+
+    def test_stepfun_respects_base_url_override(self):
+        plugin = LLMProviderPlugin(
+            provider="stepfun",
+            model="step-3.7-flash",
+            api_key="sk-stepfun-test",
+            base_url="https://stepfun-proxy.example/v1",
+        )
+
+        result = plugin.provide_llm()
+
+        assert isinstance(result, OpenAICompatProvider)
+        assert str(result._client.base_url) == "https://stepfun-proxy.example/v1/"
+
+    def test_stepfun_api_key_env_fallback(self, monkeypatch):
+        monkeypatch.setenv("STEP_API_KEY", "sk-stepfun-from-env")
+        plugin = LLMProviderPlugin(
+            provider="stepfun",
+            model="step-3.7-flash",
+            api_key="",
+        )
+
+        result = plugin.provide_llm()
+
+        assert isinstance(result, OpenAICompatProvider)
+        assert result._client.api_key == "sk-stepfun-from-env"
+
+    def test_stepfun_explicit_key_takes_priority_over_env(self, monkeypatch):
+        monkeypatch.setenv("STEP_API_KEY", "sk-stepfun-from-env")
+        plugin = LLMProviderPlugin(
+            provider="stepfun",
+            model="step-3.7-flash",
+            api_key="sk-explicit",
+        )
+
+        result = plugin.provide_llm()
+
+        assert isinstance(result, OpenAICompatProvider)
+        assert result._client.api_key == "sk-explicit"

@@ -16,6 +16,7 @@ ProviderName = Literal[
     "kimi-code",
     "kimi-code-anthropic",
     "deepseek",
+    "stepfun",
 ]
 
 
@@ -107,6 +108,11 @@ def load_config(cli_args: dict[str, object] | None = None) -> Config:
         deepseek_token = os.environ.get("DEEPSEEK_API_KEY")
         if deepseek_token:
             values["api_key"] = deepseek_token
+
+    if values.get("provider") == "stepfun" and not values.get("api_key"):
+        stepfun_token = os.environ.get("STEP_API_KEY")
+        if stepfun_token:
+            values["api_key"] = stepfun_token
 
     return Config.model_validate(values)
 
