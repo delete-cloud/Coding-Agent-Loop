@@ -178,3 +178,154 @@ def test_otlp_sink_rejects_unsanitized_langfuse_observation_input() -> None:
     body = transport.requests[0].read().decode()
     assert "langfuse.observation.input" not in body
     assert "raw prompt with harmless words" not in body
+
+
+class RecordingSink:
+    def __init__(self) -> None:
+        self.spans: list[SpanRecord] = []
+
+    def record_span(self, span: SpanRecord) -> None:
+        self.spans.append(span)
+
+    def record_event(self, event) -> None:  # pragma: no cover - unused
+        del event
+
+
+def _span_by_name(spans: list[SpanRecord], name: str) -> SpanRecord:
+    matches = [span for span in spans if span.name == name]
+    assert len(matches) == 1, f"expected exactly one {name} span, got {len(matches)}"
+    return matches[0]
+
+
+def test_recorder_emits_nested_typed_spans_with_real_times(tmp_path, monkeypatch):
+    clock = {"now": 1000.0}
+
+    def fake_time() -> float:
+        value = clock["now"]
+        clock["now"] += 5.0
+        return value
+
+    monkeypatch.setattr("coding_agent.agent_observability.time.time", fake_time)
+
+    store = JsonlAgentObservationStore(tmp_path)
+    sink = RecordingSink()
+    recorder = AgentObservationRecorder(store=store, sink=sink)
+
+    recorder.start_turn(session_id="session-1", run_id="run-1", prompt="hello")
+    recorder.observe_llm_usage(
+        input_tokens=2527, output_tokens=263, provider_name="openai"
+    )
+    recorder.observe_tool_call(
+        tool_name="web_search", tool_call_id="tool-1", arguments={"query": "rwa"}
+    )
+    recorder.observe_tool_result(
+        tool_name="web_search", tool_call_id="tool-1", result="ok", is_error=False
+    )
+    recorder.complete_turn(
+        status="ok",
+        turn=TurnTrace(user_input="hello", tool_calls=(), final_output="done"),
+    )
+
+    turn_span = _span_by_name(sink.spans, "agent.turn.sanitized")
+    generation_span = _span_by_name(sink.spans, "agent.generation.sanitized")
+    tool_span = _span_by_name(sink.spans, "agent.tool.sanitized")
+
+    # No span lands at epoch: every span has real start/end times.
+    for span in (turn_span, generation_span, tool_span):
+        assert span.start_time is not None
+        assert span.end_time is not None
+        assert span.end_time >= span.start_time
+
+    # Turn is the trace root; children nest under it.
+    assert turn_span.parent_span_id is None
+    assert turn_span.span_id is not None
+    assert generation_span.parent_span_id == turn_span.span_id
+    assert tool_span.parent_span_id == turn_span.span_id
+
+    # Observation types drive Langfuse rendering.
+    assert turn_span.attributes["langfuse.observation.type"] == "agent"
+    assert generation_span.attributes["langfuse.observation.type"] == "generation"
+    assert tool_span.attributes["langfuse.observation.type"] == "tool"
+
+    # Generation carries token usage; tool span has a non-zero duration.
+    assert generation_span.attributes["gen_ai.usage.input_tokens"] == 2527
+    assert generation_span.attributes["gen_ai.usage.output_tokens"] == 263
+    assert tool_span.end_time > tool_span.start_time
+
+
+def test_otlp_payload_has_parent_span_and_nonzero_times() -> None:
+    transport = RecordingTransport()
+    sink = OtlpHttpObservationSink(
+        endpoint="https://otel.example.test/v1/traces",
+        client=httpx.Client(transport=httpx.MockTransport(transport.handler)),
+    )
+
+    sink.record_span(
+        SpanRecord(
+            name="agent.tool.sanitized",
+            status="ok",
+            start_time=1000.0,
+            end_time=1003.0,
+            span_id="aaaaaaaaaaaaaaaa",
+            parent_span_id="bbbbbbbbbbbbbbbb",
+            attributes={"session_id": "session-1", "run_id": "run-1"},
+        )
+    )
+
+    span = json.loads(transport.requests[0].read().decode())["resourceSpans"][0][
+        "scopeSpans"
+    ][0]["spans"][0]
+    assert span["spanId"] == "aaaaaaaaaaaaaaaa"
+    assert span["parentSpanId"] == "bbbbbbbbbbbbbbbb"
+    assert span["startTimeUnixNano"] != "0"
+    assert span["endTimeUnixNano"] != "0"
+
+
+def test_otlp_sink_allows_integer_generation_token_usage() -> None:
+    transport = RecordingTransport()
+    sink = OtlpHttpObservationSink(
+        endpoint="https://otel.example.test/v1/traces",
+        client=httpx.Client(transport=httpx.MockTransport(transport.handler)),
+    )
+
+    sink.record_span(
+        SpanRecord(
+            name="agent.generation.sanitized",
+            status="ok",
+            attributes={
+                "session_id": "session-1",
+                "run_id": "run-1",
+                "gen_ai.usage.input_tokens": 2527,
+                "gen_ai.usage.output_tokens": 263,
+            },
+        )
+    )
+
+    body = transport.requests[0].read().decode()
+    assert "gen_ai.usage.input_tokens" in body
+    assert "gen_ai.usage.output_tokens" in body
+    assert "263" in body
+
+
+def test_otlp_sink_rejects_non_integer_generation_token_usage() -> None:
+    transport = RecordingTransport()
+    sink = OtlpHttpObservationSink(
+        endpoint="https://otel.example.test/v1/traces",
+        client=httpx.Client(transport=httpx.MockTransport(transport.handler)),
+    )
+
+    sink.record_span(
+        SpanRecord(
+            name="agent.generation.sanitized",
+            status="ok",
+            attributes={
+                "session_id": "session-1",
+                "run_id": "run-1",
+                "gen_ai.usage.output_tokens": "raw secret output text",
+            },
+        )
+    )
+
+    body = transport.requests[0].read().decode()
+    assert "gen_ai.usage.output_tokens" not in body
+    assert "raw secret output text" not in body

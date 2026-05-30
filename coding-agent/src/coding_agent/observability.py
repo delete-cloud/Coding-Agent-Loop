@@ -38,6 +38,14 @@ _SANITIZED_LANGFUSE_OBSERVATION_KEYS = frozenset({
     "langfuse.observation.input",
     "langfuse.observation.output",
 })
+# Generation token counts. These keys contain the substring ``output`` which
+# the sensitive-key heuristic would otherwise drop, but integer token counts
+# cannot carry raw prompt/result text, so they are explicitly permitted with
+# int-only values.
+_GENERATION_USAGE_KEYS = frozenset({
+    "gen_ai.usage.input_tokens",
+    "gen_ai.usage.output_tokens",
+})
 _SANITIZED_LANGFUSE_ALLOWED_KEYS = frozenset({
     "arg_shape",
     "field_count",
@@ -519,6 +527,8 @@ def _otlp_attributes(attributes: Mapping[str, Any]) -> list[dict[str, Any]]:
 def _otlp_attribute_allowed(key: str, value: Any) -> bool:
     if key in _SANITIZED_LANGFUSE_OBSERVATION_KEYS:
         return _sanitized_langfuse_attribute_allowed(key, value)
+    if key in _GENERATION_USAGE_KEYS:
+        return isinstance(value, int) and not isinstance(value, bool)
     return _attribute_allowed(key) and _attribute_value_allowed(value)
 
 
@@ -590,6 +600,12 @@ def _nanos(timestamp: float | None) -> str:
     if timestamp is None:
         return "0"
     return str(int(timestamp * 1_000_000_000))
+
+
+def _span_id(span_id: str | None) -> str:
+    if isinstance(span_id, str) and span_id:
+        return span_id
+    return secrets.token_hex(8)
 
 
 @dataclass
@@ -1608,6 +1624,18 @@ class OtlpHttpObservationSink:
             attributes["error.type"] = span.error_type
         if span.error_message is not None:
             attributes["error.message"] = span.error_message
+        otlp_span: dict[str, Any] = {
+            "traceId": _trace_id(attributes),
+            "spanId": _span_id(span.span_id),
+            "name": span.name,
+            "kind": 1,
+            "startTimeUnixNano": _nanos(span.start_time),
+            "endTimeUnixNano": _nanos(span.end_time),
+            "attributes": _otlp_attributes(attributes),
+            "status": {"code": status_code},
+        }
+        if isinstance(span.parent_span_id, str) and span.parent_span_id:
+            otlp_span["parentSpanId"] = span.parent_span_id
         return {
             "resourceSpans": [
                 {
@@ -1615,18 +1643,7 @@ class OtlpHttpObservationSink:
                     "scopeSpans": [
                         {
                             "scope": {"name": "coding_agent"},
-                            "spans": [
-                                {
-                                    "traceId": _trace_id(attributes),
-                                    "spanId": secrets.token_hex(8),
-                                    "name": span.name,
-                                    "kind": 1,
-                                    "startTimeUnixNano": _nanos(span.start_time),
-                                    "endTimeUnixNano": _nanos(span.end_time),
-                                    "attributes": _otlp_attributes(attributes),
-                                    "status": {"code": status_code},
-                                }
-                            ],
+                            "spans": [otlp_span],
                         }
                     ],
                 }

@@ -50,6 +50,30 @@ content egress path.
 - [x] `uv run pytest tests/coding_agent/test_agent_observability.py tests/coding_agent/test_observability.py tests/ui/test_session_manager_runtime.py -q`
 - [x] `uv run pytest tests/coding_agent/test_pipeline_adapter.py tests/coding_agent/test_release_observability_contract.py -q`
 
+## Amendment (2026-05-30): nested span tree
+
+The initial recorder emitted flat `SpanRecord`s with no start/end times and no
+parent linkage, so Langfuse rendered every observation at the Unix epoch with no
+duration or tree. To make the sanitized observations usable in the Langfuse
+timeline:
+
+- `agentkit` `SpanRecord` gains two optional, provider-neutral fields
+  `span_id` and `parent_span_id` (OpenTelemetry concepts, not Langfuse-specific).
+  This is a minimal model extension, not the rejected "AgentKit Core tracing
+  rewrite": Core still emits provider-neutral records and imports no exporter.
+- The recorder emits a nested tree per turn: a root `agent.turn.sanitized` span
+  (`langfuse.observation.type=agent`) with child `agent.generation.sanitized`
+  (`type=generation`, `gen_ai.usage.*` token counts) and `agent.tool.sanitized`
+  (`type=tool`) spans linked by `parent_span_id`.
+- Tool and turn spans carry real start/end times; generation spans approximate a
+  start from the previous observable activity (the runtime only surfaces usage at
+  completion).
+- Integer generation token counts (`gen_ai.usage.input_tokens` /
+  `gen_ai.usage.output_tokens`) are explicitly allowlisted in the Coding Agent
+  OTLP exporter with int-only values; the no-leak boundary is otherwise
+  unchanged (raw tape stays local; input/output still gated by the sanitized
+  projection schema).
+
 ## References
 
 - `src/coding_agent/agent_observability.py`

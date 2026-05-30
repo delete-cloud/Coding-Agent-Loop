@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import secrets
 import time
 import uuid
 from collections.abc import Mapping
@@ -11,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
-from agentkit.observability import ObservationSink, SpanRecord
+from agentkit.observability import ObservationSink, ObservationStatus, SpanRecord
 from agentkit.tape.extract import TurnTrace
 
 AgentObservationStatus = Literal["started", "ok", "error", "cancelled"]
@@ -57,6 +58,18 @@ _SAFE_STRUCTURAL_KEYS = frozenset(
 
 class AgentObservationStore(Protocol):
     def append(self, event: "AgentObservationEvent") -> None: ...
+
+
+@dataclass(frozen=True)
+class _PendingToolCall:
+    """Start time and sanitized argument shape captured at tool-call time.
+
+    Held between ``observe_tool_call`` and ``observe_tool_result`` so the tool
+    span can be emitted once with a real start/end duration.
+    """
+
+    start_time: float
+    arg_shape: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -113,17 +126,29 @@ class AgentObservationRecorder:
         self._run_id: str | None = None
         self._turn_id: str | None = None
         self._sequence_no = 0
+        self._turn_span_id: str | None = None
+        self._turn_start_time: float | None = None
+        # Wall-clock high-water mark used to give generation spans a plausible
+        # start time: the LLM ran between the previous observable activity and
+        # the usage report (the runtime only surfaces usage at completion).
+        self._last_activity_time: float | None = None
+        self._pending_tool_calls: dict[str, _PendingToolCall] = {}
 
     def start_turn(self, *, session_id: str, run_id: str, prompt: str) -> None:
         self._session_id = session_id
         self._run_id = run_id
         self._turn_id = run_id
         self._sequence_no = 0
-        self._record(
+        self._turn_span_id = secrets.token_hex(8)
+        self._pending_tool_calls = {}
+        event = self._record(
             kind="turn.started",
             status="started",
             attributes={"user_length": len(prompt)},
         )
+        started_at = event.occurred_at if event is not None else time.time()
+        self._turn_start_time = started_at
+        self._last_activity_time = started_at
 
     def observe_llm_usage(
         self,
@@ -132,7 +157,7 @@ class AgentObservationRecorder:
         output_tokens: int,
         provider_name: str,
     ) -> None:
-        self._record(
+        event = self._record(
             kind="llm.usage",
             status="ok",
             attributes={
@@ -141,6 +166,24 @@ class AgentObservationRecorder:
                 "provider_name": _safe_label(provider_name),
             },
         )
+        if event is None:
+            return
+        start_time = self._last_activity_time or event.occurred_at
+        self._emit_child_span(
+            name="agent.generation.sanitized",
+            status="ok",
+            start_time=start_time,
+            end_time=event.occurred_at,
+            attributes={
+                "langfuse.observation.type": "generation",
+                "gen_ai.request.model": _safe_label(provider_name),
+                "gen_ai.usage.input_tokens": input_tokens,
+                "gen_ai.usage.output_tokens": output_tokens,
+                "agent.event.kind": event.kind,
+                "agent.sequence_no": event.sequence_no,
+            },
+        )
+        self._last_activity_time = event.occurred_at
 
     def observe_tool_call(
         self,
@@ -149,14 +192,21 @@ class AgentObservationRecorder:
         tool_call_id: str,
         arguments: Mapping[str, Any],
     ) -> None:
-        self._record(
+        arg_shape = _mapping_shape(arguments)
+        event = self._record(
             kind="tool.call.requested",
             status="started",
             attributes={
                 "tool_name": _safe_label(tool_name),
                 "tool_call_id": tool_call_id,
-                "arg_shape": _mapping_shape(arguments),
+                "arg_shape": arg_shape,
             },
+        )
+        if event is None:
+            return
+        self._pending_tool_calls[tool_call_id] = _PendingToolCall(
+            start_time=event.occurred_at,
+            arg_shape=arg_shape,
         )
 
     def observe_tool_result(
@@ -167,15 +217,40 @@ class AgentObservationRecorder:
         result: Any,
         is_error: bool,
     ) -> None:
-        self._record(
+        result_shape = _value_shape(result)
+        event = self._record(
             kind="tool.result.observed",
             status="error" if is_error else "ok",
             attributes={
                 "tool_name": _safe_label(tool_name),
                 "tool_call_id": tool_call_id,
-                "result_shape": _value_shape(result),
+                "result_shape": result_shape,
             },
         )
+        if event is None:
+            return
+        pending = self._pending_tool_calls.pop(tool_call_id, None)
+        start_time = pending.start_time if pending is not None else event.occurred_at
+        span_attributes: dict[str, Any] = {
+            "langfuse.observation.type": "tool",
+            "tool_name": _safe_label(tool_name),
+            "tool_call_id": tool_call_id,
+            "langfuse.observation.output": json.dumps(result_shape, sort_keys=True),
+            "agent.event.kind": event.kind,
+            "agent.sequence_no": event.sequence_no,
+        }
+        if pending is not None:
+            span_attributes["langfuse.observation.input"] = json.dumps(
+                pending.arg_shape, sort_keys=True
+            )
+        self._emit_child_span(
+            name="agent.tool.sanitized",
+            status="error" if is_error else "ok",
+            start_time=start_time,
+            end_time=event.occurred_at,
+            attributes=span_attributes,
+        )
+        self._last_activity_time = event.occurred_at
 
     def complete_turn(
         self, *, status: AgentObservationStatus, turn: TurnTrace | None
@@ -195,9 +270,10 @@ class AgentObservationRecorder:
                 "tool_call_count": output["tool_call_count"],
                 "final_present": output["final_present"],
             }
-        self._record(kind=kind, status=status, attributes=attributes)
+        event = self._record(kind=kind, status=status, attributes=attributes)
         if turn is not None:
-            self._record_turn_span(turn, status=status)
+            end_time = event.occurred_at if event is not None else time.time()
+            self._record_turn_span(turn, status=status, end_time=end_time)
 
     def fail_turn(self, *, error_type: str) -> None:
         self._record(
@@ -215,9 +291,9 @@ class AgentObservationRecorder:
         kind: AgentObservationKind,
         status: AgentObservationStatus,
         attributes: Mapping[str, Any],
-    ) -> None:
+    ) -> AgentObservationEvent | None:
         if self._session_id is None or self._run_id is None or self._turn_id is None:
-            return
+            return None
         self._sequence_no += 1
         event = AgentObservationEvent(
             kind=kind,
@@ -232,31 +308,45 @@ class AgentObservationRecorder:
             self._store.append(event)
         except Exception:
             pass
-        if self._sink is not None:
-            try:
-                self._sink.record_span(
-                    SpanRecord(
-                        name="agent.action.sanitized",
-                        status="error" if status == "error" else "ok",
-                        attributes={
-                            "session_id": event.session_id,
-                            "run_id": event.run_id,
-                            "turn_id": event.turn_id,
-                            "event_id": event.event_id,
-                            "agent.event.kind": event.kind,
-                            "agent.sequence_no": event.sequence_no,
-                            **event.attributes,
-                        },
-                    )
+        return event
+
+    def _emit_child_span(
+        self,
+        *,
+        name: str,
+        status: ObservationStatus,
+        start_time: float,
+        end_time: float,
+        attributes: Mapping[str, Any],
+    ) -> None:
+        if self._sink is None or self._session_id is None or self._run_id is None:
+            return
+        try:
+            self._sink.record_span(
+                SpanRecord(
+                    name=name,
+                    status=status,
+                    start_time=start_time,
+                    end_time=end_time,
+                    span_id=secrets.token_hex(8),
+                    parent_span_id=self._turn_span_id,
+                    attributes={
+                        "session_id": self._session_id,
+                        "run_id": self._run_id,
+                        "turn_id": self._turn_id or self._run_id,
+                        **attributes,
+                    },
                 )
-            except Exception:
-                return
+            )
+        except Exception:
+            return
 
     def _record_turn_span(
         self,
         turn: TurnTrace,
         *,
         status: AgentObservationStatus,
+        end_time: float,
     ) -> None:
         if self._sink is None or self._session_id is None or self._run_id is None:
             return
@@ -266,11 +356,16 @@ class AgentObservationRecorder:
                 SpanRecord(
                     name="agent.turn.sanitized",
                     status="error" if status == "error" else "ok",
+                    start_time=self._turn_start_time,
+                    end_time=end_time,
+                    span_id=self._turn_span_id,
+                    parent_span_id=None,
                     attributes={
                         "session_id": self._session_id,
                         "run_id": self._run_id,
                         "turn_id": self._turn_id or self._run_id,
                         "gen_ai.operation.name": "invoke_agent",
+                        "langfuse.observation.type": "agent",
                         "langfuse.observation.input": json.dumps(
                             projection["input"], sort_keys=True
                         ),
