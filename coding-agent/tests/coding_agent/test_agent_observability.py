@@ -279,6 +279,47 @@ def test_otlp_sink_exports_tool_sanitized_input_field_list() -> None:
     assert "path" in body
 
 
+def test_otlp_sink_exports_redacted_tool_input_field_labels() -> None:
+    transport = RecordingTransport()
+    sink = OtlpHttpObservationSink(
+        endpoint="https://otel.example.test/v1/traces",
+        client=httpx.Client(transport=httpx.MockTransport(transport.handler)),
+    )
+
+    sink.record_span(
+        SpanRecord(
+            name="agent.tool.sanitized",
+            status="ok",
+            attributes={
+                "session_id": "session-1",
+                "run_id": "run-1",
+                "langfuse.observation.input": json.dumps(
+                    {
+                        "field_count": 2,
+                        "fields": [
+                            {
+                                "name": "path",
+                                "type": "str",
+                                "string_length": 21,
+                            },
+                            {
+                                "name": "redacted_key",
+                                "type": "str",
+                                "string_length": 19,
+                            },
+                        ],
+                    },
+                    sort_keys=True,
+                ),
+            },
+        )
+    )
+
+    body = transport.requests[0].read().decode()
+    assert "langfuse.observation.input" in body
+    assert "redacted_key" in body
+
+
 class RecordingSink:
     def __init__(self) -> None:
         self.spans: list[SpanRecord] = []
