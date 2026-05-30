@@ -98,14 +98,13 @@ class LLMProviderPlugin:
         elif self._provider_name == "deepseek":
             import os
 
-            from coding_agent.providers.anthropic import AnthropicProvider
+            from coding_agent.providers.openai_compat import OpenAICompatProvider
 
             api_key = self._api_key or os.environ.get("DEEPSEEK_API_KEY", "")
-            self._instance = AnthropicProvider(
+            self._instance = OpenAICompatProvider(
                 model=self._model,
                 api_key=api_key,
-                base_url="https://api.deepseek.com/anthropic",
-                thinking={"type": "disabled"},
+                base_url=self._base_url or "https://api.deepseek.com",
             )
         else:
             raise ValueError(f"unsupported provider: {self._provider_name}")
