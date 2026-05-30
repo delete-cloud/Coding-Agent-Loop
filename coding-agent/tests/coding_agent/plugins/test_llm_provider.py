@@ -223,7 +223,7 @@ class TestKimiCodeAnthropicProvider:
 
 
 class TestDeepSeekProvider:
-    def test_deepseek_creates_anthropic_instance(self):
+    def test_deepseek_creates_openai_compat_instance(self):
         plugin = LLMProviderPlugin(
             provider="deepseek",
             model="deepseek-v4-pro",
@@ -232,10 +232,10 @@ class TestDeepSeekProvider:
 
         result = plugin.provide_llm()
 
-        assert isinstance(result, AnthropicProvider)
+        assert isinstance(result, OpenAICompatProvider)
         assert result.model_name == "deepseek-v4-pro"
 
-    def test_deepseek_uses_deepseek_anthropic_base_url(self):
+    def test_deepseek_uses_deepseek_openai_compatible_base_url(self):
         plugin = LLMProviderPlugin(
             provider="deepseek",
             model="deepseek-v4-flash",
@@ -244,20 +244,21 @@ class TestDeepSeekProvider:
 
         result = plugin.provide_llm()
 
-        assert isinstance(result, AnthropicProvider)
-        assert result._base_url == "https://api.deepseek.com/anthropic"
+        assert isinstance(result, OpenAICompatProvider)
+        assert str(result._client.base_url) == "https://api.deepseek.com"
 
-    def test_deepseek_disables_anthropic_thinking_mode(self):
+    def test_deepseek_respects_base_url_override(self):
         plugin = LLMProviderPlugin(
             provider="deepseek",
             model="deepseek-v4-pro",
             api_key="sk-deepseek-test",
+            base_url="https://deepseek-proxy.example/v1",
         )
 
         result = plugin.provide_llm()
 
-        assert isinstance(result, AnthropicProvider)
-        assert result._thinking == {"type": "disabled"}
+        assert isinstance(result, OpenAICompatProvider)
+        assert str(result._client.base_url) == "https://deepseek-proxy.example/v1/"
 
     def test_deepseek_api_key_env_fallback(self, monkeypatch):
         monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek-from-env")
@@ -269,8 +270,8 @@ class TestDeepSeekProvider:
 
         result = plugin.provide_llm()
 
-        assert isinstance(result, AnthropicProvider)
-        assert result._api_key == "sk-deepseek-from-env"
+        assert isinstance(result, OpenAICompatProvider)
+        assert result._client.api_key == "sk-deepseek-from-env"
 
     def test_deepseek_explicit_key_takes_priority_over_env(self, monkeypatch):
         monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek-from-env")
@@ -282,5 +283,5 @@ class TestDeepSeekProvider:
 
         result = plugin.provide_llm()
 
-        assert isinstance(result, AnthropicProvider)
-        assert result._api_key == "sk-explicit"
+        assert isinstance(result, OpenAICompatProvider)
+        assert result._client.api_key == "sk-explicit"
