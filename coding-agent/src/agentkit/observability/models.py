@@ -24,7 +24,14 @@ class ObservationEvent:
 
 @dataclass(frozen=True)
 class SpanRecord:
-    """Completed span record emitted by agentkit instrumentation."""
+    """Completed span record emitted by agentkit instrumentation.
+
+    ``span_id`` and ``parent_span_id`` are provider-neutral OpenTelemetry span
+    identifiers (hex strings). They are optional: when unset, exporters mint a
+    fresh span id and treat the span as a trace root. When set, exporters emit
+    them as the OTLP ``spanId``/``parentSpanId`` so backends can render the
+    parent/child observation tree.
+    """
 
     name: str
     status: ObservationStatus
@@ -34,6 +41,8 @@ class SpanRecord:
     duration_ms: float = 0.0
     error_type: str | None = None
     error_message: str | None = None
+    span_id: str | None = None
+    parent_span_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "attributes", dict(self.attributes))
