@@ -77,9 +77,11 @@ def test_tool_events_persist_shape_without_raw_arguments_or_result(tmp_path) -> 
     assert tool_call["attributes"]["tool_name"] == "bash_run"
     assert tool_call["attributes"]["arg_shape"] == {
         "field_count": 3,
-        "safe_keys": ["cmd", "redacted_key", "count"],
-        "types": {"cmd": "str", "redacted_key": "str", "count": "int"},
-        "string_lengths": {"cmd": 19, "redacted_key": 13},
+        "fields": [
+            {"name": "cmd", "type": "str", "string_length": 19},
+            {"name": "redacted_key", "type": "str", "string_length": 13},
+            {"name": "count", "type": "int"},
+        ],
     }
     tool_result = records[2]
     assert tool_result["kind"] == "tool.result.observed"
@@ -178,6 +180,103 @@ def test_otlp_sink_rejects_unsanitized_langfuse_observation_input() -> None:
     body = transport.requests[0].read().decode()
     assert "langfuse.observation.input" not in body
     assert "raw prompt with harmless words" not in body
+
+
+def test_tool_input_shape_uses_fixed_field_list_for_langfuse(tmp_path) -> None:
+    sink = RecordingSink()
+    recorder = AgentObservationRecorder(
+        store=JsonlAgentObservationStore(tmp_path),
+        sink=sink,
+    )
+    recorder.start_turn(session_id="session-1", run_id="run-1", prompt="hello")
+
+    recorder.observe_tool_call(
+        tool_name="file_write",
+        tool_call_id="tool-1",
+        arguments={"path": "/workspace/secret.txt"},
+    )
+    recorder.observe_tool_result(
+        tool_name="file_write",
+        tool_call_id="tool-1",
+        result="ok",
+        is_error=False,
+    )
+
+    tool_span = _span_by_name(sink.spans, "agent.tool.sanitized")
+    payload = json.loads(tool_span.attributes["langfuse.observation.input"])
+    assert payload == {
+        "field_count": 1,
+        "fields": [{"name": "path", "type": "str", "string_length": 21}],
+    }
+
+
+def test_tool_input_shape_redacts_unsafe_keys_with_stable_suffixes(tmp_path) -> None:
+    recorder = AgentObservationRecorder(store=JsonlAgentObservationStore(tmp_path))
+    recorder.start_turn(session_id="session-1", run_id="run-1", prompt="hello")
+
+    recorder.observe_tool_call(
+        tool_name="bash_run",
+        tool_call_id="tool-1",
+        arguments={
+            "api_key": "sk-raw-secret",
+            "content": "stdout says sk-raw-secret",
+            "path": "/workspace/secret.txt",
+        },
+    )
+
+    body = (tmp_path / "runs" / "run-1" / "observations.jsonl").read_text(
+        encoding="utf-8"
+    )
+    assert "api_key" not in body
+    assert "content" not in body
+    assert "sk-raw-secret" not in body
+    assert "stdout says" not in body
+    assert "/workspace/secret.txt" not in body
+
+    records = _jsonl_records(tmp_path / "runs" / "run-1" / "observations.jsonl")
+    shape = records[1]["attributes"]["arg_shape"]
+    assert shape == {
+        "field_count": 3,
+        "fields": [
+            {"name": "redacted_key", "type": "str", "string_length": 13},
+            {"name": "redacted_key_2", "type": "str", "string_length": 25},
+            {"name": "path", "type": "str", "string_length": 21},
+        ],
+    }
+    assert shape["field_count"] == len(shape["fields"])
+
+
+def test_otlp_sink_exports_tool_sanitized_input_field_list() -> None:
+    transport = RecordingTransport()
+    sink = OtlpHttpObservationSink(
+        endpoint="https://otel.example.test/v1/traces",
+        client=httpx.Client(transport=httpx.MockTransport(transport.handler)),
+    )
+
+    sink.record_span(
+        SpanRecord(
+            name="agent.tool.sanitized",
+            status="ok",
+            attributes={
+                "session_id": "session-1",
+                "run_id": "run-1",
+                "langfuse.observation.input": json.dumps(
+                    {
+                        "field_count": 1,
+                        "fields": [
+                            {"name": "path", "type": "str", "string_length": 21}
+                        ],
+                    },
+                    sort_keys=True,
+                ),
+            },
+        )
+    )
+
+    body = transport.requests[0].read().decode()
+    assert "langfuse.observation.input" in body
+    assert "fields" in body
+    assert "path" in body
 
 
 class RecordingSink:

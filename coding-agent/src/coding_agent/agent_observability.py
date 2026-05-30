@@ -418,9 +418,7 @@ def _heuristic_result_status(value: str | None) -> str:
 
 
 def _mapping_shape(arguments: Mapping[str, Any]) -> dict[str, Any]:
-    safe_keys: list[str] = []
-    types: dict[str, str] = {}
-    string_lengths: dict[str, int] = {}
+    fields: list[dict[str, Any]] = []
     used: dict[str, int] = {}
     for key, value in arguments.items():
         safe_key = _safe_key_label(str(key))
@@ -428,18 +426,21 @@ def _mapping_shape(arguments: Mapping[str, Any]) -> dict[str, Any]:
         used[safe_key] = count + 1
         if count:
             safe_key = f"{safe_key}_{count + 1}"
-        safe_keys.append(safe_key)
-        types[safe_key] = _type_name(value)
+        field: dict[str, Any] = {
+            "name": safe_key,
+            "type": _type_name(value),
+        }
         if isinstance(value, str):
-            string_lengths[safe_key] = len(value)
-    shape: dict[str, Any] = {
-        "field_count": len(arguments),
-        "safe_keys": safe_keys,
-        "types": types,
+            field["string_length"] = len(value)
+        elif isinstance(value, Mapping):
+            field["field_count"] = len(value)
+        elif isinstance(value, list | tuple):
+            field["item_count"] = len(value)
+        fields.append(field)
+    return {
+        "field_count": len(fields),
+        "fields": fields,
     }
-    if string_lengths:
-        shape["string_lengths"] = string_lengths
-    return shape
 
 
 def _value_shape(value: Any) -> dict[str, Any]:
