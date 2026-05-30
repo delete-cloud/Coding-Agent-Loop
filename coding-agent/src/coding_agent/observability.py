@@ -557,22 +557,39 @@ def _sanitized_langfuse_attribute_allowed(key: str, value: Any) -> bool:
 
 
 def _sanitized_langfuse_payload_allowed(value: Any) -> bool:
+    return _sanitized_langfuse_payload_allowed_for_key(None, value)
+
+
+def _sanitized_langfuse_payload_allowed_for_key(parent_key: str | None, value: Any) -> bool:
     if isinstance(value, bool | int | float) or value is None:
         return True
     if isinstance(value, str):
+        if parent_key == "name" and _sanitized_field_name_allowed(value):
+            return True
         return _attribute_value_allowed(value)
     if isinstance(value, list):
-        return all(_sanitized_langfuse_payload_allowed(item) for item in value)
+        return all(
+            _sanitized_langfuse_payload_allowed_for_key(parent_key, item)
+            for item in value
+        )
     if isinstance(value, dict):
         for key, item in value.items():
             if not isinstance(key, str):
                 return False
             if key not in _SANITIZED_LANGFUSE_ALLOWED_KEYS:
                 return False
-            if not _sanitized_langfuse_payload_allowed(item):
+            if not _sanitized_langfuse_payload_allowed_for_key(key, item):
                 return False
         return True
     return False
+
+
+def _sanitized_field_name_allowed(value: str) -> bool:
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", value):
+        return False
+    if re.fullmatch(r"redacted_key(?:_[0-9]+)?", value):
+        return True
+    return _attribute_value_allowed(value)
 
 
 def _resource_attributes(attributes: Mapping[str, Any]) -> list[dict[str, Any]]:
