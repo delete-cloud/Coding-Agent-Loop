@@ -233,7 +233,7 @@ def _validated_execution_cwd(
 
 def _validate_no_path_escape(args: list[str], workspace_root: Path) -> None:
     for arg in args[1:]:
-        for match in re.findall(r"/[A-Za-z0-9_./-]+", arg):
+        for match in re.findall(r"(?<![A-Za-z0-9_.-])/[A-Za-z0-9_./-]+", arg):
             candidate = Path(match).expanduser().resolve()
             try:
                 candidate.relative_to(workspace_root)
