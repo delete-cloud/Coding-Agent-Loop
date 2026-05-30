@@ -174,6 +174,27 @@ class TestShellTool:
         assert str(workspace).lower() in blocked_text
         assert "secret" not in blocked_text
 
+    def test_none_sandbox_allows_relative_paths_with_slashes(self, tmp_path: Path):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        pipeline_ctx = SimpleNamespace(
+            config={"workspace_root": str(workspace), "shell": {"sandbox_mode": "none"}}
+        )
+
+        mkdir_result = bash_run(
+            command="mkdir -p src/mini_strings tests",
+            cwd=str(workspace),
+            __pipeline_ctx__=pipeline_ctx,
+        )
+        pytest_result = bash_run(
+            command="python3 -m pytest tests/test_slug.py -q",
+            cwd=str(workspace),
+            __pipeline_ctx__=pipeline_ctx,
+        )
+
+        assert _as_text(mkdir_result) == "(no output)"
+        assert "outside sandbox workspace" not in _as_text(pytest_result).lower()
+
     def test_cd_outside_workspace_is_rejected(self, tmp_path: Path):
         workspace = tmp_path / "workspace"
         workspace.mkdir()
