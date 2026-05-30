@@ -357,6 +357,31 @@ enabled = ["storage", "core_tools"]
         approval_plugin = pipeline._registry.get("approval")
         assert approval_plugin._policy.name == "INTERACTIVE"
 
+    def test_create_agent_uses_stepfun_api_key_env_fallback(
+        self, tmp_path, monkeypatch
+    ):
+        config_path = (
+            Path(__file__).parent.parent.parent / "src" / "coding_agent" / "agent.toml"
+        )
+        if not config_path.exists():
+            pytest.skip("agent.toml not found")
+        monkeypatch.delenv("AGENT_API_KEY", raising=False)
+        monkeypatch.setenv("STEP_API_KEY", "sk-stepfun-from-env")
+
+        pipeline, ctx = create_agent(
+            config_path=config_path,
+            data_dir=tmp_path / "data",
+            api_key=None,
+            provider_override="stepfun",
+            model_override="step-3.7-flash",
+        )
+
+        assert ctx.config["provider"] == "stepfun"
+        assert ctx.config["model"] == "step-3.7-flash"
+        llm_plugin = pipeline._registry.get("llm_provider")
+        assert llm_plugin._provider_name == "stepfun"
+        assert llm_plugin._api_key == "sk-stepfun-from-env"
+
     def test_create_agent_uses_injected_environment(self, tmp_path):
         config_path = (
             Path(__file__).parent.parent.parent / "src" / "coding_agent" / "agent.toml"

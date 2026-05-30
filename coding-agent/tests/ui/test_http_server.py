@@ -1717,6 +1717,28 @@ class TestSessionCreation:
         assert info["provider_name"] == "deepseek"
         assert info["model_name"] == "deepseek-v4-pro"
 
+    async def test_create_session_accepts_stepfun_runtime_provider(self, client):
+        response = await client.post(
+            "/sessions",
+            json={
+                "provider": "stepfun",
+                "model": "step-3.7-flash",
+            },
+        )
+        assert response.status_code == 200
+
+        session = session_manager.get_session(response.json()["session_id"])
+
+        assert session.provider is None
+        assert session.provider_name == "stepfun"
+        assert session.model_name == "step-3.7-flash"
+
+        info_response = await client.get(f"/sessions/{response.json()['session_id']}")
+        assert info_response.status_code == 200
+        info = info_response.json()
+        assert info["provider_name"] == "stepfun"
+        assert info["model_name"] == "step-3.7-flash"
+
     async def test_create_session_uses_explicit_server_agent_defaults(
         self, client, monkeypatch, tmp_path
     ):

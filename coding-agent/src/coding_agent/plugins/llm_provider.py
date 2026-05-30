@@ -106,6 +106,17 @@ class LLMProviderPlugin:
                 api_key=api_key,
                 base_url=self._base_url or "https://api.deepseek.com",
             )
+        elif self._provider_name == "stepfun":
+            import os
+
+            from coding_agent.providers.openai_compat import OpenAICompatProvider
+
+            api_key = self._api_key or os.environ.get("STEP_API_KEY", "")
+            self._instance = OpenAICompatProvider(
+                model=self._model,
+                api_key=api_key,
+                base_url=self._base_url or "https://api.stepfun.com/v1",
+            )
         else:
             raise ValueError(f"unsupported provider: {self._provider_name}")
 

@@ -403,6 +403,30 @@ class TestCliProviderChoices:
             cli_args={"provider": "deepseek", "model": "deepseek-v4-pro"}
         )
 
+    def test_top_level_accepts_stepfun_provider(self):
+        from coding_agent.__main__ import main
+
+        with (
+            patch("coding_agent.__main__.load_config") as mock_load_config,
+            patch("coding_agent.cli.repl.run_repl", AsyncMock()),
+            patch("coding_agent.__main__.sys.stdout.isatty", return_value=True),
+        ):
+            mock_load_config.return_value = MagicMock()
+            ctx = click.Context(main)
+            with ctx.scope(cleanup=False):
+                wrapped_main = getattr(main.callback, "__wrapped__")
+                wrapped_main(
+                    ctx,
+                    model="step-3.7-flash",
+                    provider_name="stepfun",
+                    base_url=None,
+                    api_key=None,
+                )
+
+        mock_load_config.assert_called_once_with(
+            cli_args={"provider": "stepfun", "model": "step-3.7-flash"}
+        )
+
     def test_top_level_accepts_kimi_code_provider(self):
         from coding_agent.__main__ import main
 
@@ -533,6 +557,27 @@ class TestCliProviderChoices:
         assert config.provider == "deepseek"
         assert config.api_key is not None
         assert config.api_key.get_secret_value() == "deepseek-env-key"
+
+    def test_run_uses_stepfun_api_key_env_without_cli_api_key(self, monkeypatch):
+        from coding_agent.__main__ import main
+
+        monkeypatch.delenv("AGENT_API_KEY", raising=False)
+        monkeypatch.setenv("STEP_API_KEY", "stepfun-env-key")
+        runner = CliRunner()
+
+        with patch("coding_agent.__main__._run_headless", AsyncMock()) as mock_run:
+            result = runner.invoke(
+                main,
+                ["--provider", "stepfun", "run", "--goal", "test goal"],
+            )
+
+        assert result.exit_code == 0
+        assert mock_run.await_args is not None
+        config, goal = mock_run.await_args.args
+        assert goal == "test goal"
+        assert config.provider == "stepfun"
+        assert config.api_key is not None
+        assert config.api_key.get_secret_value() == "stepfun-env-key"
 
     def test_run_keeps_run_only_options_local_to_subcommand(self):
         from coding_agent.__main__ import main
@@ -881,6 +926,43 @@ class TestHeadlessPipelineIsolation:
         assert str(captured_kwargs.get("workspace_root")) == "/tmp/repo"
         assert captured_kwargs.get("max_steps_override") == 7
         assert captured_kwargs.get("approval_mode_override") == "interactive"
+
+    @pytest.mark.asyncio
+    async def test_headless_pipeline_forwards_stepfun_runtime_config(self):
+        mock_outcome = _make_outcome()
+        mock_adapter_instance = AsyncMock()
+        mock_adapter_instance.run_turn = AsyncMock(return_value=mock_outcome)
+
+        captured_kwargs: dict = {}
+
+        def fake_create_agent(**kwargs):
+            captured_kwargs.update(kwargs)
+            return _mock_create_agent()
+
+        with (
+            patch(
+                "coding_agent.__main__.create_agent",
+                side_effect=fake_create_agent,
+            ),
+            patch(
+                "coding_agent.__main__.PipelineAdapter",
+                return_value=mock_adapter_instance,
+            ),
+            patch("coding_agent.__main__.HeadlessConsumer", MagicMock()),
+        ):
+            from coding_agent.__main__ import _run_headless
+            from coding_agent.core.config import Config
+
+            config = Config(
+                provider="stepfun",
+                model="step-3.7-flash",
+                api_key=None,
+            )
+            await _run_headless(config, "goal")
+
+        assert captured_kwargs.get("provider_override") == "stepfun"
+        assert captured_kwargs.get("model_override") == "step-3.7-flash"
+        assert captured_kwargs.get("api_key") is None
 
 
 class TestReplPipelineAdapterConsumerUpdated:

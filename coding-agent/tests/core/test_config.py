@@ -44,7 +44,7 @@ class TestConfig:
 
     @pytest.mark.parametrize(
         "provider",
-        ["kimi", "kimi-code", "kimi-code-anthropic", "deepseek"],
+        ["kimi", "kimi-code", "kimi-code-anthropic", "deepseek", "stepfun"],
     )
     def test_accepts_kimi_family_providers(self, provider):
         c = Config(provider=provider)
@@ -139,3 +139,23 @@ class TestLoadConfig:
         assert c.provider == "deepseek"
         assert c.api_key is not None
         assert c.api_key.get_secret_value() == "sk-deepseek-token"
+
+    def test_stepfun_uses_step_api_key_when_agent_api_key_missing(self, monkeypatch):
+        monkeypatch.delenv("AGENT_API_KEY", raising=False)
+        monkeypatch.setenv("STEP_API_KEY", "sk-stepfun-token")
+
+        c = load_config(cli_args={"provider": "stepfun"})
+
+        assert c.provider == "stepfun"
+        assert c.api_key is not None
+        assert c.api_key.get_secret_value() == "sk-stepfun-token"
+
+    def test_stepfun_uses_step_api_key_when_agent_api_key_is_empty(self, monkeypatch):
+        monkeypatch.setenv("AGENT_API_KEY", "")
+        monkeypatch.setenv("STEP_API_KEY", "sk-stepfun-token")
+
+        c = load_config(cli_args={"provider": "stepfun"})
+
+        assert c.provider == "stepfun"
+        assert c.api_key is not None
+        assert c.api_key.get_secret_value() == "sk-stepfun-token"
