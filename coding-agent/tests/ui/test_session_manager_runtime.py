@@ -149,6 +149,15 @@ class FakeRuntimeStore:
         self.interactions.append(record)
         return record
 
+    async def load_agent_interaction(
+        self,
+        interaction_id: str,
+    ) -> AgentInteractionRecord | None:
+        for interaction in self.interactions:
+            if interaction.interaction_id == interaction_id:
+                return interaction
+        return None
+
     async def resolve_agent_interaction(
         self,
         interaction_id: str,
@@ -1918,7 +1927,9 @@ async def test_failover_rebuilds_from_persisted_state_without_resuming_local_run
         return fake_pipeline, rebuilt_ctx
 
     monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
+    monkeypatch.setattr(
+        "coding_agent.server.session_manager.PipelineAdapter", FakeAdapter
+    )
     original_task: asyncio.Task[object] | None = None
 
     try:

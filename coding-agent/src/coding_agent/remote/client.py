@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from collections.abc import Mapping
 from pathlib import Path
 from typing import cast
+from urllib.parse import quote, urlencode
 
 import click
 import httpx
@@ -218,6 +219,83 @@ def list_remote_run_events(
     if not isinstance(events, list):
         raise click.ClickException("Remote run events response missing events")
     return [dict(_expect_mapping(item, "Remote run event entry")) for item in events]
+
+
+def list_remote_run_interactions(
+    endpoint: RemoteEndpoint,
+    run_id: str,
+    *,
+    status: str | None = None,
+) -> list[dict[str, object]]:
+    path = f"/runs/{run_id}/interactions"
+    if status is not None:
+        path = f"{path}?status={quote(status)}"
+    data = _get_remote_json(endpoint, path, "list remote run interactions")
+    interactions = data.get("interactions")
+    if not isinstance(interactions, list):
+        raise click.ClickException("Remote interactions response missing interactions")
+    return [
+        dict(_expect_mapping(item, "Remote interaction entry")) for item in interactions
+    ]
+
+
+def list_remote_interactions(
+    endpoint: RemoteEndpoint,
+    *,
+    session_id: str | None = None,
+    run_id: str | None = None,
+    status: str | None = None,
+) -> list[dict[str, object]]:
+    params: list[tuple[str, str]] = []
+    if session_id is not None:
+        params.append(("session_id", session_id))
+    if run_id is not None:
+        params.append(("run_id", run_id))
+    if status is not None:
+        params.append(("status", status))
+    path = "/interactions"
+    if params:
+        path = f"{path}?{urlencode(params)}"
+    data = _get_remote_json(endpoint, path, "list remote interactions")
+    interactions = data.get("interactions")
+    if not isinstance(interactions, list):
+        raise click.ClickException("Remote interactions response missing interactions")
+    return [
+        dict(_expect_mapping(item, "Remote interaction entry")) for item in interactions
+    ]
+
+
+def get_remote_interaction(
+    endpoint: RemoteEndpoint,
+    interaction_id: str,
+) -> dict[str, object]:
+    return _get_remote_json(
+        endpoint,
+        f"/interactions/{quote(interaction_id, safe='')}",
+        "get remote interaction",
+    )
+
+
+def resolve_remote_interaction(
+    endpoint: RemoteEndpoint,
+    interaction_id: str,
+    *,
+    approved: bool,
+    feedback: str | None = None,
+    scope: str = "once",
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "approved": approved,
+        "scope": scope,
+    }
+    if feedback is not None:
+        payload["feedback"] = feedback
+    return _post_remote_json(
+        endpoint,
+        f"/interactions/{quote(interaction_id, safe='')}/resolve",
+        json=payload,
+        action="resolve remote interaction",
+    )
 
 
 def list_remote_workers(endpoint: RemoteEndpoint) -> list[dict[str, object]]:

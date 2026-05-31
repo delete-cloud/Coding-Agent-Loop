@@ -76,7 +76,9 @@ from coding_agent.observability import (
     record_http_request_metric,
 )
 from coding_agent.runtime_store import (
+    AgentInteractionRecord,
     AgentRunRecord,
+    JSONObject,
     RunMessageSnapshotRecord,
     RuntimeEventRecord,
 )
@@ -189,8 +191,11 @@ from coding_agent.server.schemas import (
     PublishSessionRequest,
     PublishSessionResponse,
     ReadinessResponse,
+    ResolveInteractionRequest,
     RuntimeEventResponse,
     RuntimeEventsResponse,
+    RuntimeInteractionListResponse,
+    RuntimeInteractionResponse,
     RuntimeMessageSnapshotResponse,
     RuntimeRunListResponse,
     RuntimeRunResponse,
@@ -2478,6 +2483,10 @@ async def claim_worker_run(
             executor_kind=body.executor_kind,
             session_id=body.session_id,
             lease_seconds=body.lease_seconds,
+            worker_instance_id=body.worker_instance_id,
+            process_id=body.process_id,
+            capabilities=cast(JSONObject | None, body.capabilities),
+            workspace_sync=cast(JSONObject | None, body.workspace_sync),
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -2512,6 +2521,10 @@ async def heartbeat_worker_run(
             worker_id=body.worker_id,
             claim_token=body.claim_token,
             lease_seconds=body.lease_seconds,
+            worker_instance_id=body.worker_instance_id,
+            process_id=body.process_id,
+            capabilities=cast(JSONObject | None, body.capabilities),
+            workspace_sync=cast(JSONObject | None, body.workspace_sync),
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
@@ -3239,6 +3252,22 @@ def _runtime_event_response(record: RuntimeEventRecord) -> RuntimeEventResponse:
     )
 
 
+def _runtime_interaction_response(
+    record: AgentInteractionRecord,
+) -> RuntimeInteractionResponse:
+    return RuntimeInteractionResponse(
+        interaction_id=record.interaction_id,
+        run_id=record.run_id,
+        interaction_kind=record.interaction_kind,
+        status=record.status,
+        request_payload=record.request_payload,
+        response_payload=record.response_payload,
+        metadata=record.metadata,
+        created_at=record.created_at,
+        resolved_at=record.resolved_at,
+    )
+
+
 def _safe_dict(value: object) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
 
@@ -3323,6 +3352,9 @@ def _worker_status_from_runs(
     else:
         status = "running"
     workspace_ref = metadata.get("workspace_ref")
+    capabilities = metadata.get("capabilities")
+    workspace_sync = metadata.get("workspace_sync")
+    process_id = metadata.get("process_id")
     return WorkerStatusResponse(
         worker_id=worker_id,
         status=status,
@@ -3336,7 +3368,15 @@ def _worker_status_from_runs(
             if isinstance(metadata.get("worker_pool"), str)
             else None
         ),
+        worker_instance_id=(
+            metadata.get("worker_instance_id")
+            if isinstance(metadata.get("worker_instance_id"), str)
+            else None
+        ),
+        process_id=process_id if isinstance(process_id, int) else None,
+        capabilities=capabilities if isinstance(capabilities, dict) else None,
         workspace_ref=workspace_ref if isinstance(workspace_ref, dict) else None,
+        workspace_sync=workspace_sync if isinstance(workspace_sync, dict) else None,
         current_run_id=current.run_id if current is not None else None,
         current_session_id=current.session_id if current is not None else None,
         last_run_id=latest.run_id,
@@ -5108,6 +5148,37 @@ async def get_runtime_run(
 
 
 @app.get(
+    "/runs/{run_id}/interactions",
+    response_model=RuntimeInteractionListResponse,
+)
+@limiter.limit(RateLimits.GET_SESSION)
+async def get_runtime_run_interactions(
+    request: Request,
+    run_id: str,
+    status: str | None = Query(None, min_length=1, max_length=100),
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> RuntimeInteractionListResponse:
+    del request
+    _ = await _get_visible_runtime_run(run_id, auth_context)
+    try:
+        interactions = await session_manager.list_runtime_interactions(run_id)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="Runtime interactions not found",
+        ) from exc
+    if status is not None:
+        interactions = [
+            interaction for interaction in interactions if interaction.status == status
+        ]
+    return RuntimeInteractionListResponse(
+        interactions=[
+            _runtime_interaction_response(interaction) for interaction in interactions
+        ]
+    )
+
+
+@app.get(
     "/runs/{run_id}/message-snapshot",
     response_model=RuntimeMessageSnapshotResponse,
 )
@@ -5154,6 +5225,117 @@ async def get_runtime_events(
         run_id=run_id,
         events=[_runtime_event_response(event) for event in events],
     )
+
+
+@app.get("/interactions", response_model=RuntimeInteractionListResponse)
+@limiter.limit(RateLimits.GET_SESSION)
+async def list_runtime_interactions(
+    request: Request,
+    session_id: str | None = Query(None, min_length=1, max_length=100),
+    run_id: str | None = Query(None, min_length=1, max_length=100),
+    status: str | None = Query(None, min_length=1, max_length=100),
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> RuntimeInteractionListResponse:
+    del request
+    if run_id is not None:
+        runs = [await _get_visible_runtime_run(run_id, auth_context)]
+    elif session_id is not None:
+        _ = await _get_visible_session(session_id, auth_context)
+        runs = await session_manager.list_runtime_runs(session_id)
+    else:
+        runs = await _visible_runtime_runs(auth_context)
+    interactions: list[AgentInteractionRecord] = []
+    for run in runs:
+        if session_id is not None and run.session_id != session_id:
+            continue
+        try:
+            interactions.extend(
+                await session_manager.list_runtime_interactions(run.run_id)
+            )
+        except RuntimeError:
+            continue
+    if status is not None:
+        interactions = [
+            interaction for interaction in interactions if interaction.status == status
+        ]
+    interactions.sort(key=lambda interaction: interaction.created_at, reverse=True)
+    return RuntimeInteractionListResponse(
+        interactions=[
+            _runtime_interaction_response(interaction) for interaction in interactions
+        ]
+    )
+
+
+@app.get(
+    "/interactions/{interaction_id}",
+    response_model=RuntimeInteractionResponse,
+)
+@limiter.limit(RateLimits.GET_SESSION)
+async def get_runtime_interaction(
+    request: Request,
+    interaction_id: str,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> RuntimeInteractionResponse:
+    del request
+    try:
+        interaction = await session_manager.load_runtime_interaction(interaction_id)
+    except (KeyError, RuntimeError) as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="Runtime interaction not found",
+        ) from exc
+    _ = await _get_visible_runtime_run(interaction.run_id, auth_context)
+    return _runtime_interaction_response(interaction)
+
+
+@app.post(
+    "/interactions/{interaction_id}/resolve",
+    response_model=RuntimeInteractionResponse,
+)
+@limiter.limit(RateLimits.APPROVE)
+async def resolve_runtime_interaction(
+    request: Request,
+    interaction_id: str,
+    body: ResolveInteractionRequest,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> RuntimeInteractionResponse:
+    del request
+    try:
+        interaction = await session_manager.load_runtime_interaction(interaction_id)
+    except (KeyError, RuntimeError) as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="Runtime interaction not found",
+        ) from exc
+    _ = await _get_visible_runtime_run(interaction.run_id, auth_context)
+    if interaction.interaction_kind != "approval":
+        raise HTTPException(status_code=400, detail="Interaction is not an approval")
+    if interaction.status != "pending":
+        raise HTTPException(status_code=409, detail="Interaction is not pending")
+    session_id = interaction.metadata.get("session_id")
+    request_id = interaction.metadata.get("request_id")
+    if not isinstance(session_id, str) or not isinstance(request_id, str):
+        raise HTTPException(
+            status_code=400,
+            detail="Approval interaction metadata is incomplete",
+        )
+    try:
+        approval = await session_manager.submit_approval_response(
+            session_id=session_id,
+            request_id=request_id,
+            approved=body.approved,
+            feedback=body.feedback,
+            scope=body.scope,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Session not found") from exc
+    if approval is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Approval request is no longer pending",
+        )
+    resolved = await session_manager.load_runtime_interaction(interaction_id)
+    return _runtime_interaction_response(resolved)
 
 
 @app.get("/workers", response_model=WorkerListResponse)

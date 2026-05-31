@@ -112,6 +112,12 @@ class InMemoryRuntimeStore:
         self.interactions[record.interaction_id] = record
         return record
 
+    async def load_agent_interaction(
+        self,
+        interaction_id: str,
+    ) -> AgentInteractionRecord | None:
+        return self.interactions.get(interaction_id)
+
     async def list_agent_interactions(
         self,
         run_id: str,

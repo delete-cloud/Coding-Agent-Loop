@@ -36,6 +36,7 @@ from coding_agent.approval.store import ApprovalStore
 from coding_agent.core.config import settings
 from coding_agent.environment import CloudCommandResult, CloudEnvironment
 from coding_agent.runtime_store import (
+    AgentInteractionRecord,
     AgentRunRecord,
     RunMessageSnapshotRecord,
     RuntimeEventRecord,
@@ -2579,6 +2580,72 @@ class TestPromptStreaming:
         assert active_offline_response.status_code == 200
         assert active_offline_response.json()["status"] == "offline"
 
+    async def test_external_worker_worker_metadata_surfaces_in_status(
+        self, client, tmp_path: Path
+    ):
+        store = FakeExternalWorkerRuntimeStore()
+        session_manager.configure_runtime_store(store)
+        create_resp = await client.post(
+            "/sessions",
+            json={
+                "approval_policy": "yolo",
+                "execution_binding": {
+                    "kind": "external_worker",
+                    "executor_kind": "local_cli",
+                    "worker_pool": "default",
+                    "workspace_ref": {
+                        "kind": "local_path",
+                        "display_path": str(tmp_path),
+                    },
+                },
+            },
+        )
+        session_id = create_resp.json()["session_id"]
+        run = await session_manager.request_external_worker_run(session_id, "hello")
+
+        claim_resp = await client.post(
+            "/worker/runs/claim",
+            json={
+                "worker_id": "worker-1",
+                "executor_kind": "local_cli",
+                "session_id": session_id,
+                "worker_instance_id": "worker-1:instance-1",
+                "process_id": 1234,
+                "capabilities": {
+                    "process_reconnect": "metadata_only",
+                    "workspace_sync": "metadata_only",
+                },
+                "workspace_sync": {
+                    "mode": "none",
+                    "workspace_ref_kind": "local_path",
+                },
+            },
+        )
+        assert claim_resp.status_code == 200
+        claim = claim_resp.json()
+
+        heartbeat_resp = await client.post(
+            f"/worker/runs/{run.run_id}/heartbeat",
+            json={
+                "worker_id": "worker-1",
+                "claim_token": claim["claim_token"],
+                "worker_instance_id": "worker-1:instance-2",
+                "process_id": 5678,
+                "capabilities": {"process_reconnect": "metadata_only"},
+                "workspace_sync": {"mode": "none"},
+            },
+        )
+        assert heartbeat_resp.status_code == 200
+
+        status_resp = await client.get("/workers/worker-1")
+
+        assert status_resp.status_code == 200
+        worker = status_resp.json()
+        assert worker["worker_instance_id"] == "worker-1:instance-2"
+        assert worker["process_id"] == 5678
+        assert worker["capabilities"] == {"process_reconnect": "metadata_only"}
+        assert worker["workspace_sync"] == {"mode": "none"}
+
     async def test_external_worker_approval_uses_server_approval_flow(
         self, client, monkeypatch
     ):
@@ -2642,6 +2709,99 @@ class TestPromptStreaming:
         }
         assert observed[0].tool == "shell_execute"
         assert observed[0].args == {"command": "pwd"}
+
+    async def test_runtime_run_interactions_endpoint_lists_interactions(self, client):
+        store = FakeExternalWorkerRuntimeStore()
+        session_manager.configure_runtime_store(store)
+        create_resp = await client.post(
+            "/sessions",
+            json={
+                "approval_policy": "interactive",
+                "execution_binding": {
+                    "kind": "external_worker",
+                    "executor_kind": "local_cli",
+                },
+            },
+        )
+        session_id = create_resp.json()["session_id"]
+        run = await session_manager.request_external_worker_run(session_id, "hello")
+        approval_req = ApprovalRequest(
+            session_id=session_id,
+            agent_id="",
+            request_id="approval-1",
+            tool="shell_execute",
+            args={"command": "pwd"},
+        )
+
+        approval_task = asyncio.create_task(
+            session_manager.wait_for_http_approval(
+                session_id,
+                approval_req,
+                timeout_seconds=30,
+            )
+        )
+        await _wait_for_fake_interaction(store, approval_task)
+
+        response = await client.get(f"/runs/{run.run_id}/interactions")
+
+        assert response.status_code == 200
+        interactions = response.json()["interactions"]
+        assert len(interactions) == 1
+        assert interactions[0]["interaction_id"] == f"{run.run_id}:approval:approval-1"
+        assert interactions[0]["status"] == "pending"
+        assert interactions[0]["metadata"]["session_id"] == session_id
+
+        approval_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await approval_task
+
+    async def test_runtime_interaction_resolve_uses_session_approval_flow(self, client):
+        store = FakeExternalWorkerRuntimeStore()
+        session_manager.configure_runtime_store(store)
+        create_resp = await client.post(
+            "/sessions",
+            json={
+                "approval_policy": "interactive",
+                "execution_binding": {
+                    "kind": "external_worker",
+                    "executor_kind": "local_cli",
+                },
+            },
+        )
+        session_id = create_resp.json()["session_id"]
+        run = await session_manager.request_external_worker_run(session_id, "hello")
+        approval_req = ApprovalRequest(
+            session_id=session_id,
+            agent_id="",
+            request_id="approval-1",
+            tool="shell_execute",
+            args={"command": "pwd"},
+        )
+        approval_task = asyncio.create_task(
+            session_manager.wait_for_http_approval(
+                session_id,
+                approval_req,
+                timeout_seconds=30,
+            )
+        )
+        await _wait_for_fake_interaction(store, approval_task)
+
+        response = await client.post(
+            f"/interactions/{run.run_id}:approval:approval-1/resolve",
+            json={
+                "approved": True,
+                "feedback": "ok",
+                "scope": "once",
+            },
+        )
+        approval = await approval_task
+
+        assert response.status_code == 200
+        resolved = response.json()
+        assert resolved["status"] == "approved"
+        assert resolved["response_payload"]["approved"] is True
+        assert approval.approved is True
+        assert approval.feedback == "ok"
 
     async def test_external_worker_recovery_expires_stale_claim(self, client):
         store = FakeExternalWorkerRuntimeStore()
@@ -7182,6 +7342,7 @@ class FakeExternalWorkerRuntimeStore:
     def __init__(self) -> None:
         self.runs: dict[str, AgentRunRecord] = {}
         self.events: list[RuntimeEventRecord] = []
+        self.interactions: dict[str, AgentInteractionRecord] = {}
 
     async def create_agent_run(self, record: AgentRunRecord) -> AgentRunRecord:
         self.runs[record.run_id] = record
@@ -7245,6 +7406,65 @@ class FakeExternalWorkerRuntimeStore:
         stored = replace(record, sequence=len(self.events) + 1)
         self.events.append(stored)
         return stored
+
+    async def create_agent_interaction(
+        self,
+        record: AgentInteractionRecord,
+    ) -> AgentInteractionRecord:
+        stored = self.interactions.setdefault(record.interaction_id, record)
+        return stored
+
+    async def load_agent_interaction(
+        self,
+        interaction_id: str,
+    ) -> AgentInteractionRecord | None:
+        return self.interactions.get(interaction_id)
+
+    async def list_agent_interactions(
+        self,
+        run_id: str,
+    ) -> list[AgentInteractionRecord]:
+        return [
+            interaction
+            for interaction in self.interactions.values()
+            if interaction.run_id == run_id
+        ]
+
+    async def resolve_agent_interaction(
+        self,
+        interaction_id: str,
+        *,
+        status: str,
+        response_payload: dict[str, object],
+        resolved_at: datetime,
+    ) -> AgentInteractionRecord:
+        interaction = self.interactions[interaction_id]
+        if interaction.resolved_at is not None:
+            return interaction
+        resolved = replace(
+            interaction,
+            status=status,
+            response_payload=response_payload,
+            resolved_at=resolved_at,
+        )
+        self.interactions[interaction_id] = resolved
+        return resolved
+
+
+async def _wait_for_fake_interaction(
+    store: FakeExternalWorkerRuntimeStore,
+    approval_task: asyncio.Task[ApprovalResponse],
+) -> None:
+    async def wait_until_registered() -> None:
+        while not store.interactions:
+            if approval_task.done():
+                _ = approval_task.result()
+                raise AssertionError(
+                    "approval task finished before interaction was registered"
+                )
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_until_registered(), timeout=1)
 
 
 class TestRuntimeReplayEndpoints:

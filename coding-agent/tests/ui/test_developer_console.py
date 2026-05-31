@@ -119,38 +119,40 @@ class _ConsoleTapeStore:
         entries = []
         for known_tape_id in self.tape_ids:
             known_run_id = known_tape_id.replace("tape", "run")
-            entries.extend([
-                TapeSearchResult(
-                    tape_id=known_tape_id,
-                    seq=0,
-                    entry={
-                        "kind": "message",
-                        "payload": {
-                            "run_id": known_run_id,
-                            "content": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT",
+            entries.extend(
+                [
+                    TapeSearchResult(
+                        tape_id=known_tape_id,
+                        seq=0,
+                        entry={
+                            "kind": "message",
+                            "payload": {
+                                "run_id": known_run_id,
+                                "content": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT",
+                            },
                         },
-                    },
-                ),
-                TapeSearchResult(
-                    tape_id=known_tape_id,
-                    seq=1,
-                    entry={
-                        "kind": "tool_call",
-                        "payload": {
-                            "run_id": known_run_id,
-                            "tool_call_id": "tool-alpha",
+                    ),
+                    TapeSearchResult(
+                        tape_id=known_tape_id,
+                        seq=1,
+                        entry={
+                            "kind": "tool_call",
+                            "payload": {
+                                "run_id": known_run_id,
+                                "tool_call_id": "tool-alpha",
+                            },
                         },
-                    },
-                ),
-                TapeSearchResult(
-                    tape_id=known_tape_id,
-                    seq=2,
-                    entry={
-                        "kind": "anchor",
-                        "meta": {"anchor_type": "handoff", "secret": "hidden"},
-                    },
-                ),
-            ])
+                    ),
+                    TapeSearchResult(
+                        tape_id=known_tape_id,
+                        seq=2,
+                        entry={
+                            "kind": "anchor",
+                            "meta": {"anchor_type": "handoff", "secret": "hidden"},
+                        },
+                    ),
+                ]
+            )
         filtered = []
         for result in entries:
             entry = result.entry
@@ -273,6 +275,12 @@ class _ConsoleRuntimeStore:
     ) -> AgentInteractionRecord:
         self.interactions.setdefault(record.interaction_id, record)
         return record
+
+    async def load_agent_interaction(
+        self,
+        interaction_id: str,
+    ) -> AgentInteractionRecord | None:
+        return self.interactions.get(interaction_id)
 
     async def resolve_agent_interaction(
         self,
@@ -837,38 +845,40 @@ def _topic_runtime_run(run_id: str = "run-alpha") -> AgentRunRecord:
 def _bee_runtime_run(run_id: str = "run-bee") -> AgentRunRecord:
     base = _runtime_run(run_id, "session-alpha", status="completed")
     metadata = dict(base.metadata)
-    metadata.update({
-        "bee_runtime": "task_launch",
-        "launch_id": "launch-alpha",
-        "launch_source": "schedule",
-        "launch_status": "launched",
-        "launch_kind": "durable_run",
-        "task_id": "bee-task-alpha",
-        "node_id": "node-validate",
-        "topic_id": "topic-auth",
-        "session_id": "session-alpha",
-        "template_id": "launch-blueprint-alpha",
-        "schedule_id": "schedule-alpha",
-        "task_kind": "maintenance",
-        "task_profile": "local",
-        "node_kind": "validation",
-        "node_profile": "default",
-        "approval_policy": "existing_runtime_policy",
-        "action_policy": "existing_action_safety",
-        "workspace_binding": "existing_workspace_provider",
-        "workspace_policy": "default",
-        "context_profile": "repo",
-        "context_reference": "profile_only",
-        "validation_profile": "pytest",
-        "validation_reference": "profile_only",
-        "executor_run_id": "executor-run-alpha",
-        "executor_kind": "local",
-        "executor_status": "succeeded",
-        "executor_capability": "available",
-        "executor_summary": "Local executor succeeded",
-        "prompt": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT",
-        "command_output": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT",
-    })
+    metadata.update(
+        {
+            "bee_runtime": "task_launch",
+            "launch_id": "launch-alpha",
+            "launch_source": "schedule",
+            "launch_status": "launched",
+            "launch_kind": "durable_run",
+            "task_id": "bee-task-alpha",
+            "node_id": "node-validate",
+            "topic_id": "topic-auth",
+            "session_id": "session-alpha",
+            "template_id": "launch-blueprint-alpha",
+            "schedule_id": "schedule-alpha",
+            "task_kind": "maintenance",
+            "task_profile": "local",
+            "node_kind": "validation",
+            "node_profile": "default",
+            "approval_policy": "existing_runtime_policy",
+            "action_policy": "existing_action_safety",
+            "workspace_binding": "existing_workspace_provider",
+            "workspace_policy": "default",
+            "context_profile": "repo",
+            "context_reference": "profile_only",
+            "validation_profile": "pytest",
+            "validation_reference": "profile_only",
+            "executor_run_id": "executor-run-alpha",
+            "executor_kind": "local",
+            "executor_status": "succeeded",
+            "executor_capability": "available",
+            "executor_summary": "Local executor succeeded",
+            "prompt": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT",
+            "command_output": "SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT",
+        }
+    )
     return AgentRunRecord(
         run_id=base.run_id,
         session_id=base.session_id,
@@ -1146,14 +1156,16 @@ async def _configure_run_detail_fixture(
     error: str | None = None,
 ) -> _ConsoleRuntimeStore:
     _register_console_session("session-detail")
-    store = _ConsoleRuntimeStore([
-        _runtime_run(
-            "run-detail",
-            "session-detail",
-            status=status,
-            error=error,
-        )
-    ])
+    store = _ConsoleRuntimeStore(
+        [
+            _runtime_run(
+                "run-detail",
+                "session-detail",
+                status=status,
+                error=error,
+            )
+        ]
+    )
     await store.save_message_snapshot(
         RunMessageSnapshotRecord(
             snapshot_id="run-detail:latest",
@@ -1380,9 +1392,9 @@ async def test_console_observability_renders_configured_links_and_correlation(
 ) -> None:
     _register_console_session("session-alpha")
     session_manager.configure_runtime_store(
-        _ConsoleRuntimeStore([
-            _runtime_run("run-alpha", "session-alpha", status="completed")
-        ])
+        _ConsoleRuntimeStore(
+            [_runtime_run("run-alpha", "session-alpha", status="completed")]
+        )
     )
     monkeypatch.setattr(
         http_server,
@@ -1716,20 +1728,22 @@ async def test_console_bee_renders_durable_executor_run_summary(
     monkeypatch.setattr(
         http_server,
         "_console_executor_run_store",
-        lambda: _ConsoleExecutorRunStore([
-            ExecutorRunRecord(
-                executor_run_id="executor-run-store",
-                executor_kind="kubernetes_job",
-                task_id="bee-task-store",
-                node_id="node-validate",
-                launch_id="launch-store",
-                topic_id="topic-store",
-                status="succeeded",
-                requested_at=datetime(2026, 5, 20, 1, 0, tzinfo=UTC),
-                sanitized_summary="Kubernetes Job succeeded",
-                metadata={"capability_status": "available"},
-            )
-        ]),
+        lambda: _ConsoleExecutorRunStore(
+            [
+                ExecutorRunRecord(
+                    executor_run_id="executor-run-store",
+                    executor_kind="kubernetes_job",
+                    task_id="bee-task-store",
+                    node_id="node-validate",
+                    launch_id="launch-store",
+                    topic_id="topic-store",
+                    status="succeeded",
+                    requested_at=datetime(2026, 5, 20, 1, 0, tzinfo=UTC),
+                    sanitized_summary="Kubernetes Job succeeded",
+                    metadata={"capability_status": "available"},
+                )
+            ]
+        ),
     )
 
     transport = ASGITransport(app=app)
@@ -1758,43 +1772,45 @@ async def test_console_bee_launch_renders_durable_launch_store_summary(
     monkeypatch.setattr(
         http_server,
         "_console_bee_launch_store",
-        lambda: _ConsoleBeeLaunchStore([
-            BeeLaunchRecord(
-                launch_id="launch-manual",
-                source="manual",
-                template_id="template-manual",
-                status="launched",
-                requested_at=datetime(2026, 5, 20, 1, 0, tzinfo=UTC),
-                task_id="bee-task-manual",
-                topic_id="topic-manual",
-                session_id="session-alpha",
-                launched_at=datetime(2026, 5, 20, 1, 1, tzinfo=UTC),
-            ),
-            BeeLaunchRecord(
-                launch_id="launch-scheduled",
-                source="schedule",
-                template_id="template-scheduled",
-                status="launched",
-                requested_at=datetime(2026, 5, 20, 2, 0, tzinfo=UTC),
-                task_id="bee-task-scheduled",
-                topic_id="topic-scheduled",
-                session_id="session-alpha",
-                schedule_id="schedule-alpha",
-                launched_at=datetime(2026, 5, 20, 2, 1, tzinfo=UTC),
-            ),
-            BeeLaunchRecord(
-                launch_id="launch-signal",
-                source="proactive_signal",
-                template_id="template-signal",
-                status="failed",
-                requested_at=datetime(2026, 5, 20, 3, 0, tzinfo=UTC),
-                topic_id="topic-signal",
-                session_id="session-alpha",
-                signal_id="signal-alpha",
-                error_type="policy_denied",
-                error_message="safe policy denied",
-            ),
-        ]),
+        lambda: _ConsoleBeeLaunchStore(
+            [
+                BeeLaunchRecord(
+                    launch_id="launch-manual",
+                    source="manual",
+                    template_id="template-manual",
+                    status="launched",
+                    requested_at=datetime(2026, 5, 20, 1, 0, tzinfo=UTC),
+                    task_id="bee-task-manual",
+                    topic_id="topic-manual",
+                    session_id="session-alpha",
+                    launched_at=datetime(2026, 5, 20, 1, 1, tzinfo=UTC),
+                ),
+                BeeLaunchRecord(
+                    launch_id="launch-scheduled",
+                    source="schedule",
+                    template_id="template-scheduled",
+                    status="launched",
+                    requested_at=datetime(2026, 5, 20, 2, 0, tzinfo=UTC),
+                    task_id="bee-task-scheduled",
+                    topic_id="topic-scheduled",
+                    session_id="session-alpha",
+                    schedule_id="schedule-alpha",
+                    launched_at=datetime(2026, 5, 20, 2, 1, tzinfo=UTC),
+                ),
+                BeeLaunchRecord(
+                    launch_id="launch-signal",
+                    source="proactive_signal",
+                    template_id="template-signal",
+                    status="failed",
+                    requested_at=datetime(2026, 5, 20, 3, 0, tzinfo=UTC),
+                    topic_id="topic-signal",
+                    session_id="session-alpha",
+                    signal_id="signal-alpha",
+                    error_type="policy_denied",
+                    error_message="safe policy denied",
+                ),
+            ]
+        ),
     )
 
     transport = ASGITransport(app=app)
@@ -2053,15 +2069,17 @@ async def test_console_workspaces_renders_provider_inventory_without_raw_content
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session_manager.configure_workspace_metadata_store(
-        _ConsoleWorkspaceStore([
-            _workspace_record("workspace-alpha"),
-            _workspace_record(
-                "workspace-remote",
-                status="retained",
-                provider_instance_id="docker-remote",
-                cleanup_error="safe cleanup failure",
-            ),
-        ])
+        _ConsoleWorkspaceStore(
+            [
+                _workspace_record("workspace-alpha"),
+                _workspace_record(
+                    "workspace-remote",
+                    status="retained",
+                    provider_instance_id="docker-remote",
+                    cleanup_error="safe cleanup failure",
+                ),
+            ]
+        )
     )
     monkeypatch.setattr(
         http_server,
@@ -2262,20 +2280,22 @@ async def test_console_tape_restricts_user_token_to_visible_tapes(
         owner_label=_owner_label("admin-token"),
     )
     session_manager.configure_runtime_store(
-        _ConsoleRuntimeStore([
-            _runtime_run(
-                "run-user",
-                "session-user",
-                status="completed",
-                tape_id="tape-user",
-            ),
-            _runtime_run(
-                "run-admin",
-                "session-admin",
-                status="completed",
-                tape_id="tape-admin",
-            ),
-        ])
+        _ConsoleRuntimeStore(
+            [
+                _runtime_run(
+                    "run-user",
+                    "session-user",
+                    status="completed",
+                    tape_id="tape-user",
+                ),
+                _runtime_run(
+                    "run-admin",
+                    "session-admin",
+                    status="completed",
+                    tape_id="tape-admin",
+                ),
+            ]
+        )
     )
     session_manager._tape_store = _ConsoleTapeStore(["tape-user", "tape-admin"])
 
@@ -2323,9 +2343,9 @@ async def test_console_tape_renders_missing_state() -> None:
 async def test_console_context_renders_context_pack_evidence_without_body() -> None:
     _register_console_session("session-alpha")
     session_manager.configure_runtime_store(
-        _ConsoleRuntimeStore([
-            _runtime_run("run-alpha", "session-alpha", status="completed")
-        ])
+        _ConsoleRuntimeStore(
+            [_runtime_run("run-alpha", "session-alpha", status="completed")]
+        )
     )
 
     transport = ASGITransport(app=app)
@@ -2351,21 +2371,23 @@ async def test_console_context_renders_empty_state_for_missing_pack() -> None:
     _register_console_session("session-alpha")
     run = _runtime_run("run-alpha", "session-alpha", status="completed")
     session_manager.configure_runtime_store(
-        _ConsoleRuntimeStore([
-            AgentRunRecord(
-                run_id=run.run_id,
-                session_id=run.session_id,
-                tape_id=run.tape_id,
-                parent_run_id=run.parent_run_id,
-                agent_id=run.agent_id,
-                status=run.status,
-                started_at=run.started_at,
-                ended_at=run.ended_at,
-                metadata={},
-                result=run.result,
-                error=run.error,
-            )
-        ])
+        _ConsoleRuntimeStore(
+            [
+                AgentRunRecord(
+                    run_id=run.run_id,
+                    session_id=run.session_id,
+                    tape_id=run.tape_id,
+                    parent_run_id=run.parent_run_id,
+                    agent_id=run.agent_id,
+                    status=run.status,
+                    started_at=run.started_at,
+                    ended_at=run.ended_at,
+                    metadata={},
+                    result=run.result,
+                    error=run.error,
+                )
+            ]
+        )
     )
 
     transport = ASGITransport(app=app)
@@ -2381,9 +2403,9 @@ async def test_console_context_renders_empty_state_for_missing_pack() -> None:
 async def test_console_memory_renders_memory_evidence_without_raw_content() -> None:
     _register_console_session("session-alpha")
     session_manager.configure_runtime_store(
-        _ConsoleRuntimeStore([
-            _runtime_run("run-alpha", "session-alpha", status="completed")
-        ])
+        _ConsoleRuntimeStore(
+            [_runtime_run("run-alpha", "session-alpha", status="completed")]
+        )
     )
 
     transport = ASGITransport(app=app)
@@ -2454,9 +2476,9 @@ async def test_console_memory_renders_empty_state_for_missing_run() -> None:
 async def test_console_actions_renders_action_validation_and_policy_summaries() -> None:
     _register_console_session("session-alpha")
     session_manager.configure_runtime_store(
-        _ConsoleRuntimeStore([
-            _runtime_run("run-alpha", "session-alpha", status="completed")
-        ])
+        _ConsoleRuntimeStore(
+            [_runtime_run("run-alpha", "session-alpha", status="completed")]
+        )
     )
 
     transport = ASGITransport(app=app)
@@ -2515,10 +2537,12 @@ async def test_console_memory_and_actions_restrict_user_token_to_visible_run(
         owner_label=_owner_label("admin-token"),
     )
     session_manager.configure_runtime_store(
-        _ConsoleRuntimeStore([
-            _runtime_run("run-user", "session-user", status="completed"),
-            _runtime_run("run-admin", "session-admin", status="completed"),
-        ])
+        _ConsoleRuntimeStore(
+            [
+                _runtime_run("run-user", "session-user", status="completed"),
+                _runtime_run("run-admin", "session-admin", status="completed"),
+            ]
+        )
     )
 
     transport = ASGITransport(app=app)
@@ -2545,9 +2569,9 @@ async def test_console_memory_and_actions_restrict_user_token_to_visible_run(
 @pytest.mark.asyncio
 async def test_console_interactions_renders_pending_and_resolved_lists() -> None:
     _register_console_session("session-alpha")
-    store = _ConsoleRuntimeStore([
-        _runtime_run("run-alpha", "session-alpha", status="running")
-    ])
+    store = _ConsoleRuntimeStore(
+        [_runtime_run("run-alpha", "session-alpha", status="running")]
+    )
     await store.create_agent_interaction(
         _interaction("interaction-pending", "run-alpha", status="pending")
     )
@@ -2585,9 +2609,9 @@ async def test_console_interactions_renders_pending_and_resolved_lists() -> None
 @pytest.mark.asyncio
 async def test_console_interactions_displays_terminal_duplicate_state_safely() -> None:
     _register_console_session("session-alpha")
-    store = _ConsoleRuntimeStore([
-        _runtime_run("run-alpha", "session-alpha", status="completed")
-    ])
+    store = _ConsoleRuntimeStore(
+        [_runtime_run("run-alpha", "session-alpha", status="completed")]
+    )
     await store.create_agent_interaction(
         _interaction(
             "interaction-terminal",
@@ -2716,16 +2740,18 @@ async def test_console_runs_list_renders_fixture_data_and_status_filter() -> Non
     _register_console_session("session-alpha")
     _register_console_session("session-beta")
     session_manager.configure_runtime_store(
-        _ConsoleRuntimeStore([
-            _runtime_run("run-complete", "session-alpha", status="completed"),
-            _runtime_run(
-                "run-failed",
-                "session-beta",
-                status="failed",
-                error="safe failure summary",
-            ),
-            _runtime_run("run-running", "session-alpha", status="running"),
-        ])
+        _ConsoleRuntimeStore(
+            [
+                _runtime_run("run-complete", "session-alpha", status="completed"),
+                _runtime_run(
+                    "run-failed",
+                    "session-beta",
+                    status="failed",
+                    error="safe failure summary",
+                ),
+                _runtime_run("run-running", "session-alpha", status="running"),
+            ]
+        )
     )
 
     transport = ASGITransport(app=app)
@@ -2753,14 +2779,16 @@ async def test_console_runs_list_renders_fixture_data_and_status_filter() -> Non
 async def test_console_runs_list_redacts_sensitive_error_summary() -> None:
     _register_console_session("session-sensitive")
     session_manager.configure_runtime_store(
-        _ConsoleRuntimeStore([
-            _runtime_run(
-                "run-sensitive",
-                "session-sensitive",
-                status="failed",
-                error="SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT command_output",
-            )
-        ])
+        _ConsoleRuntimeStore(
+            [
+                _runtime_run(
+                    "run-sensitive",
+                    "session-sensitive",
+                    status="failed",
+                    error="SECRET_PROMPT_MESSAGE_CONTENT_RESULT_TEXT command_output",
+                )
+            ]
+        )
     )
 
     transport = ASGITransport(app=app)

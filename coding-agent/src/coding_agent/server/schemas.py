@@ -234,6 +234,10 @@ class WorkerClaimRequest(BaseModel):
     executor_kind: str = Field("local_cli", min_length=1, max_length=100)
     session_id: str | None = Field(None, min_length=1, max_length=100)
     lease_seconds: int = Field(30, ge=5, le=300)
+    worker_instance_id: str | None = Field(None, min_length=1, max_length=200)
+    process_id: int | None = Field(None, ge=1)
+    capabilities: dict[str, Any] | None = None
+    workspace_sync: dict[str, Any] | None = None
 
 
 class WorkerClaimResponse(BaseModel):
@@ -253,6 +257,10 @@ class WorkerHeartbeatRequest(BaseModel):
     worker_id: str = Field(..., min_length=1, max_length=200)
     claim_token: str = Field(..., min_length=1, max_length=500)
     lease_seconds: int = Field(30, ge=5, le=300)
+    worker_instance_id: str | None = Field(None, min_length=1, max_length=200)
+    process_id: int | None = Field(None, ge=1)
+    capabilities: dict[str, Any] | None = None
+    workspace_sync: dict[str, Any] | None = None
 
 
 class WorkerHeartbeatResponse(BaseModel):
@@ -305,7 +313,11 @@ class WorkerStatusResponse(BaseModel):
     status: Literal["idle", "running", "stale", "offline"]
     executor_kind: str | None = None
     worker_pool: str | None = None
+    worker_instance_id: str | None = None
+    process_id: int | None = None
+    capabilities: dict[str, Any] | None = None
     workspace_ref: dict[str, Any] | None = None
+    workspace_sync: dict[str, Any] | None = None
     current_run_id: str | None = None
     current_session_id: str | None = None
     last_run_id: str | None = None
@@ -316,6 +328,28 @@ class WorkerStatusResponse(BaseModel):
 
 class WorkerListResponse(BaseModel):
     workers: list[WorkerStatusResponse]
+
+
+class RuntimeInteractionResponse(BaseModel):
+    interaction_id: str
+    run_id: str
+    interaction_kind: str
+    status: str
+    request_payload: dict[str, Any]
+    response_payload: dict[str, Any]
+    metadata: dict[str, Any]
+    created_at: datetime
+    resolved_at: datetime | None = None
+
+
+class RuntimeInteractionListResponse(BaseModel):
+    interactions: list[RuntimeInteractionResponse]
+
+
+class ResolveInteractionRequest(BaseModel):
+    approved: bool
+    feedback: str | None = Field(None, max_length=1000)
+    scope: Literal["once", "session", "always"] = "once"
 
 
 class WorkspaceDiffFileSchema(BaseModel):
