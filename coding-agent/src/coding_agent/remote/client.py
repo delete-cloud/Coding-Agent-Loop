@@ -186,6 +186,56 @@ def get_remote_session(endpoint: RemoteEndpoint, session_id: str) -> dict[str, o
     return data
 
 
+def list_remote_session_runs(
+    endpoint: RemoteEndpoint,
+    session_id: str,
+) -> list[dict[str, object]]:
+    data = _get_remote_json(
+        endpoint,
+        f"/sessions/{session_id}/runs",
+        "list remote session runs",
+    )
+    runs = data.get("runs")
+    if not isinstance(runs, list):
+        raise click.ClickException("Remote session runs response missing runs")
+    return [dict(_expect_mapping(item, "Remote run entry")) for item in runs]
+
+
+def get_remote_run(endpoint: RemoteEndpoint, run_id: str) -> dict[str, object]:
+    return _get_remote_json(endpoint, f"/runs/{run_id}", "get remote run")
+
+
+def list_remote_run_events(
+    endpoint: RemoteEndpoint,
+    run_id: str,
+) -> list[dict[str, object]]:
+    data = _get_remote_json(
+        endpoint,
+        f"/runs/{run_id}/events",
+        "list remote run events",
+    )
+    events = data.get("events")
+    if not isinstance(events, list):
+        raise click.ClickException("Remote run events response missing events")
+    return [dict(_expect_mapping(item, "Remote run event entry")) for item in events]
+
+
+def list_remote_workers(endpoint: RemoteEndpoint) -> list[dict[str, object]]:
+    data = _get_remote_json(endpoint, "/workers", "list remote workers")
+    workers = data.get("workers")
+    if not isinstance(workers, list):
+        raise click.ClickException("Remote workers response missing workers")
+    return [dict(_expect_mapping(item, "Remote worker entry")) for item in workers]
+
+
+def get_remote_worker(endpoint: RemoteEndpoint, worker_id: str) -> dict[str, object]:
+    return _get_remote_json(
+        endpoint,
+        f"/workers/{worker_id}",
+        "get remote worker",
+    )
+
+
 def get_remote_session_result(
     endpoint: RemoteEndpoint, session_id: str
 ) -> dict[str, object]:
@@ -507,6 +557,96 @@ def stream_prompt(
     if line_open:
         click.echo()
     raise click.ClickException("Remote prompt stream ended without TurnEnd")
+
+
+def stream_prompt_or_run_request(
+    *, base_url: str, session_id: str, prompt: str, headers: dict[str, str]
+) -> int:
+    timeout = httpx.Timeout(connect=10.0, write=30.0, pool=30.0, read=None)
+    line_open = False
+    try:
+        with httpx.Client(
+            base_url=base_url, headers=headers, timeout=timeout
+        ) as client:
+            with connect_sse(
+                client,
+                "POST",
+                f"/sessions/{session_id}/prompt",
+                json={"prompt": prompt},
+            ) as event_source:
+                _raise_remote_http_error(event_source.response, "stream remote prompt")
+                for sse in event_source.iter_sse():
+                    if sse.event == "RunRequested":
+                        if line_open:
+                            click.echo()
+                        payload = _parse_sse_payload(sse.data)
+                        run_id = payload.get("run_id")
+                        if not isinstance(run_id, str) or not run_id:
+                            raise click.ClickException(
+                                "Remote RunRequested event missing run_id"
+                            )
+                        click.echo(f"Requested external worker run {run_id}")
+                        return 0
+                    status, line_open = handle_sse_event(
+                        base_url=base_url,
+                        session_id=session_id,
+                        headers=headers,
+                        event=sse.event,
+                        data=sse.data,
+                        line_open=line_open,
+                    )
+                    if status is not None:
+                        if line_open:
+                            click.echo()
+                        return status
+    except httpx.RequestError as exc:
+        if line_open:
+            click.echo()
+        raise click.ClickException(f"Failed to stream remote prompt: {exc}") from exc
+    if line_open:
+        click.echo()
+    raise click.ClickException(
+        "Remote prompt stream ended without RunRequested or TurnEnd"
+    )
+
+
+def attach_remote_session(
+    *, base_url: str, session_id: str, headers: dict[str, str]
+) -> int:
+    timeout = httpx.Timeout(connect=10.0, write=30.0, pool=30.0, read=None)
+    line_open = False
+    try:
+        with httpx.Client(
+            base_url=base_url, headers=headers, timeout=timeout
+        ) as client:
+            with connect_sse(
+                client,
+                "GET",
+                f"/sessions/{session_id}/events",
+            ) as event_source:
+                _raise_remote_http_error(event_source.response, "attach remote session")
+                for sse in event_source.iter_sse():
+                    if sse.event == "ping":
+                        continue
+                    status, line_open = handle_sse_event(
+                        base_url=base_url,
+                        session_id=session_id,
+                        headers=headers,
+                        event=sse.event,
+                        data=sse.data,
+                        line_open=line_open,
+                    )
+                    if status is not None:
+                        if line_open:
+                            click.echo()
+                        return status
+    except httpx.RequestError as exc:
+        if line_open:
+            click.echo()
+        raise click.ClickException(f"Failed to attach remote session: {exc}") from exc
+    if line_open:
+        click.echo()
+    return 0
 
 
 def handle_sse_event(

@@ -202,6 +202,11 @@ class RuntimeRunResponse(BaseModel):
     error: str | None = None
 
 
+class RuntimeRunListResponse(BaseModel):
+    session_id: str
+    runs: list[RuntimeRunResponse]
+
+
 class RuntimeMessageSnapshotResponse(BaseModel):
     snapshot_id: str
     run_id: str
@@ -293,6 +298,24 @@ class WorkerApprovalResponse(BaseModel):
     approved: bool
     feedback: str | None = None
     scope: Literal["once", "session", "always"] = "once"
+
+
+class WorkerStatusResponse(BaseModel):
+    worker_id: str
+    status: Literal["idle", "running", "stale", "offline"]
+    executor_kind: str | None = None
+    worker_pool: str | None = None
+    workspace_ref: dict[str, Any] | None = None
+    current_run_id: str | None = None
+    current_session_id: str | None = None
+    last_run_id: str | None = None
+    last_session_id: str | None = None
+    last_seen_at: datetime | None = None
+    lease_expires_at: datetime | None = None
+
+
+class WorkerListResponse(BaseModel):
+    workers: list[WorkerStatusResponse]
 
 
 class WorkspaceDiffFileSchema(BaseModel):

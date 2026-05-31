@@ -448,6 +448,22 @@ def _format_cli_command(args: list[str]) -> str:
     return " ".join(shlex.quote(arg) for arg in args)
 
 
+def _print_mapping(payload: dict[str, object]) -> None:
+    for key in sorted(payload):
+        value = payload[key]
+        if isinstance(value, dict | list):
+            click.echo(f"{key}:")
+            click.echo(_json_dumps_pretty(value))
+        else:
+            click.echo(f"{key}: {value}")
+
+
+def _json_dumps_pretty(value: object) -> str:
+    import json
+
+    return json.dumps(value, indent=2, sort_keys=True)
+
+
 def _git_workspace_source_for_remote_run(
     repo_path: Path,
     *,
@@ -657,6 +673,10 @@ def remote_sessions() -> None:
 @click.argument("name")
 def remote_sessions_list(name: str) -> None:
     """List sessions visible to the remote token."""
+    _print_remote_sessions(name)
+
+
+def _print_remote_sessions(name: str) -> None:
     from coding_agent.remote.client import get_remote, list_remote_sessions
 
     endpoint = get_remote(name)
@@ -686,8 +706,163 @@ def remote_sessions_status(name: str, session_id: str) -> None:
 
     endpoint = get_remote(name)
     session = get_remote_session(endpoint, session_id)
-    for key in sorted(session):
-        click.echo(f"{key}: {session[key]}")
+    _print_mapping(session)
+
+
+@remote.command("session")
+@click.argument("name")
+@click.argument("session_id")
+def remote_session(name: str, session_id: str) -> None:
+    """Show one remote session."""
+    from coding_agent.remote.client import get_remote, get_remote_session
+
+    endpoint = get_remote(name)
+    _print_mapping(get_remote_session(endpoint, session_id))
+
+
+@remote.command("runs")
+@click.argument("name")
+@click.option("--session", "session_id", required=True, help="Remote session ID.")
+def remote_runs(name: str, session_id: str) -> None:
+    """List durable runs for a remote session."""
+    from coding_agent.remote.client import get_remote, list_remote_session_runs
+
+    endpoint = get_remote(name)
+    runs = list_remote_session_runs(endpoint, session_id)
+    if not runs:
+        click.echo("No remote runs found.")
+        return
+    for run in runs:
+        metadata = run.get("metadata")
+        worker_id = (
+            metadata.get("worker_id")
+            if isinstance(metadata, dict) and isinstance(metadata.get("worker_id"), str)
+            else ""
+        )
+        click.echo(
+            "\t".join(
+                [
+                    str(run.get("run_id", "")),
+                    str(run.get("status", "")),
+                    worker_id,
+                    str(run.get("tape_id", "")),
+                ]
+            )
+        )
+
+
+@remote.command("run-info")
+@click.argument("name")
+@click.argument("run_id")
+def remote_run_info(name: str, run_id: str) -> None:
+    """Show one durable remote run."""
+    from coding_agent.remote.client import get_remote, get_remote_run
+
+    endpoint = get_remote(name)
+    _print_mapping(get_remote_run(endpoint, run_id))
+
+
+@remote.command("events")
+@click.argument("name")
+@click.option("--run", "run_id", required=True, help="Remote run ID.")
+def remote_events(name: str, run_id: str) -> None:
+    """List replayed runtime events for a remote run."""
+    from coding_agent.remote.client import get_remote, list_remote_run_events
+
+    endpoint = get_remote(name)
+    events = list_remote_run_events(endpoint, run_id)
+    if not events:
+        click.echo("No remote events found.")
+        return
+    for event in events:
+        click.echo(
+            "\t".join(
+                [
+                    str(event.get("sequence", "")),
+                    str(event.get("event_kind", "")),
+                    str(event.get("event_id", "")),
+                    str(event.get("created_at", "")),
+                ]
+            )
+        )
+
+
+@remote.command("workers")
+@click.argument("name")
+def remote_workers(name: str) -> None:
+    """List external worker health derived from durable runs."""
+    from coding_agent.remote.client import get_remote, list_remote_workers
+
+    endpoint = get_remote(name)
+    workers = list_remote_workers(endpoint)
+    if not workers:
+        click.echo("No remote workers found.")
+        return
+    for worker in workers:
+        click.echo(
+            "\t".join(
+                [
+                    str(worker.get("worker_id", "")),
+                    str(worker.get("status", "")),
+                    str(worker.get("executor_kind", "")),
+                    str(worker.get("current_run_id", "")),
+                    str(worker.get("last_seen_at", "")),
+                ]
+            )
+        )
+
+
+@remote.command("worker-status")
+@click.argument("name")
+@click.argument("worker_id")
+def remote_worker_status(name: str, worker_id: str) -> None:
+    """Show one external worker status."""
+    from coding_agent.remote.client import get_remote, get_remote_worker
+
+    endpoint = get_remote(name)
+    _print_mapping(get_remote_worker(endpoint, worker_id))
+
+
+@remote.command("prompt")
+@click.argument("name")
+@click.argument("session_id")
+@click.option("--goal", required=True, help="Prompt to send to the remote session.")
+def remote_prompt(name: str, session_id: str, goal: str) -> None:
+    """Send a prompt to an existing remote session."""
+    from coding_agent.remote.client import (
+        auth_headers,
+        get_remote,
+        stream_prompt_or_run_request,
+    )
+
+    endpoint = get_remote(name)
+    status = stream_prompt_or_run_request(
+        base_url=endpoint.url,
+        session_id=session_id,
+        prompt=goal,
+        headers=auth_headers(endpoint),
+    )
+    raise SystemExit(status)
+
+
+@remote.command("attach")
+@click.argument("name")
+@click.argument("session_id")
+def remote_attach(name: str, session_id: str) -> None:
+    """Attach to a remote session event stream."""
+    from coding_agent.remote.client import (
+        attach_remote_session,
+        auth_headers,
+        get_remote,
+    )
+
+    endpoint = get_remote(name)
+    status = attach_remote_session(
+        base_url=endpoint.url,
+        session_id=session_id,
+        headers=auth_headers(endpoint),
+    )
+    raise SystemExit(status)
 
 
 @remote_sessions.command("cancel")
@@ -1199,11 +1374,15 @@ def _manifest_file_count(manifest: dict[str, object], field: str) -> int:
 @click.option("--goal", required=True, help="Prompt to send to the remote session")
 def attach(name: str, session_id: str, goal: str) -> None:
     """Send one prompt to an existing remote session."""
-    from coding_agent.remote.client import auth_headers, get_remote, stream_prompt
+    from coding_agent.remote.client import (
+        auth_headers,
+        get_remote,
+        stream_prompt_or_run_request,
+    )
 
     endpoint = get_remote(name)
     raise SystemExit(
-        stream_prompt(
+        stream_prompt_or_run_request(
             base_url=endpoint.url,
             session_id=session_id,
             prompt=goal,

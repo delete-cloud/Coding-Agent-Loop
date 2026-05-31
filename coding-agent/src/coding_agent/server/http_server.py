@@ -192,6 +192,7 @@ from coding_agent.server.schemas import (
     RuntimeEventResponse,
     RuntimeEventsResponse,
     RuntimeMessageSnapshotResponse,
+    RuntimeRunListResponse,
     RuntimeRunResponse,
     SessionListResponse,
     SessionResponse,
@@ -216,8 +217,10 @@ from coding_agent.server.schemas import (
     WorkerApprovalResponse,
     WorkerHeartbeatRequest,
     WorkerHeartbeatResponse,
+    WorkerListResponse,
     WorkerRunCompleteRequest,
     WorkerRuntimeEventsRequest,
+    WorkerStatusResponse,
 )
 from coding_agent.server.session_manager import Session, SessionManager
 from coding_agent.server.stores.session_owner_store import (
@@ -259,6 +262,8 @@ logger = logging.getLogger(__name__)
 # Constants
 APPROVAL_TIMEOUT_SECONDS = 120
 SESSION_IDLE_TIMEOUT_MINUTES = 30
+WORKER_STALE_AFTER_SECONDS = 60
+WORKER_OFFLINE_AFTER_SECONDS = 300
 _SERVER_CONFIG_ENV = "CODING_AGENT_SERVER_CONFIG"
 _GITHUB_API_BASE_URL = "https://api.github.com"
 _GITHUB_API_VERSION = "2022-11-28"
@@ -3157,6 +3162,28 @@ async def get_session(
     return SessionSummaryResponse(**session.as_dict())
 
 
+@app.get("/sessions/{session_id}/runs", response_model=RuntimeRunListResponse)
+@limiter.limit(RateLimits.GET_SESSION)
+async def list_session_runtime_runs(
+    request: Request,
+    session_id: str,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> RuntimeRunListResponse:
+    del request
+    _ = await _get_visible_session(session_id, auth_context)
+    try:
+        records = await session_manager.list_runtime_runs(session_id)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="Runtime store not configured",
+        ) from exc
+    return RuntimeRunListResponse(
+        session_id=session_id,
+        runs=[_runtime_run_response(record) for record in records],
+    )
+
+
 async def _get_visible_session(
     session_id: str,
     auth_context: AuthContext | None,
@@ -3172,6 +3199,8 @@ async def _get_visible_session(
 
 
 def _runtime_run_response(record: AgentRunRecord) -> RuntimeRunResponse:
+    metadata = dict(record.metadata)
+    metadata.pop("claim_token_hash", None)
     return RuntimeRunResponse(
         run_id=record.run_id,
         session_id=record.session_id,
@@ -3181,7 +3210,7 @@ def _runtime_run_response(record: AgentRunRecord) -> RuntimeRunResponse:
         status=record.status,
         started_at=record.started_at,
         ended_at=record.ended_at,
-        metadata=record.metadata,
+        metadata=metadata,
         result=record.result,
         error=record.error,
     )
@@ -3212,6 +3241,124 @@ def _runtime_event_response(record: RuntimeEventRecord) -> RuntimeEventResponse:
 
 def _safe_dict(value: object) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
+
+
+def _metadata_datetime(
+    metadata: Mapping[str, object],
+    key: str,
+) -> datetime | None:
+    value = metadata.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed
+
+
+async def _visible_runtime_runs(
+    auth_context: AuthContext | None,
+) -> list[AgentRunRecord]:
+    records: list[AgentRunRecord] = []
+    for session_id in await session_manager.list_sessions_async():
+        try:
+            session = await session_manager.get_session_async(session_id)
+        except KeyError:
+            continue
+        if not _auth_context_can_access_session(auth_context, session):
+            continue
+        try:
+            records.extend(await session_manager.list_runtime_runs(session_id))
+        except RuntimeError:
+            continue
+    return records
+
+
+def _worker_status_from_runs(
+    worker_id: str,
+    runs: Iterable[AgentRunRecord],
+) -> WorkerStatusResponse:
+    worker_runs = [run for run in runs if run.metadata.get("worker_id") == worker_id]
+    if not worker_runs:
+        raise KeyError(f"worker not found: {worker_id}")
+    worker_runs.sort(key=lambda run: (run.started_at, run.run_id))
+    latest = worker_runs[-1]
+    now = datetime.now(UTC)
+    active_runs = [
+        run for run in worker_runs if run.status in {"claimed", "running", "cancelling"}
+    ]
+    active_runs.sort(key=lambda run: (run.started_at, run.run_id))
+    current = active_runs[-1] if active_runs else None
+    source = current or latest
+    metadata = source.metadata
+    lease_expires_at = _metadata_datetime(metadata, "lease_expires_at")
+    last_seen_at = (
+        _metadata_datetime(metadata, "last_heartbeat_at")
+        or _metadata_datetime(metadata, "claimed_at")
+        or _metadata_datetime(metadata, "finalized_at")
+        or latest.ended_at
+        or latest.started_at
+    )
+    status: Literal["idle", "running", "stale", "offline"]
+    last_seen_age_seconds = (now - last_seen_at).total_seconds()
+    if current is None and last_seen_age_seconds > float(WORKER_OFFLINE_AFTER_SECONDS):
+        status = "offline"
+    elif current is None:
+        status = "idle"
+    elif lease_expires_at is not None and lease_expires_at <= now:
+        status = "stale"
+    elif lease_expires_at is None and last_seen_age_seconds > float(
+        WORKER_OFFLINE_AFTER_SECONDS
+    ):
+        status = "offline"
+    elif lease_expires_at is None and last_seen_age_seconds > float(
+        WORKER_STALE_AFTER_SECONDS
+    ):
+        status = "stale"
+    else:
+        status = "running"
+    workspace_ref = metadata.get("workspace_ref")
+    return WorkerStatusResponse(
+        worker_id=worker_id,
+        status=status,
+        executor_kind=(
+            metadata.get("executor_kind")
+            if isinstance(metadata.get("executor_kind"), str)
+            else None
+        ),
+        worker_pool=(
+            metadata.get("worker_pool")
+            if isinstance(metadata.get("worker_pool"), str)
+            else None
+        ),
+        workspace_ref=workspace_ref if isinstance(workspace_ref, dict) else None,
+        current_run_id=current.run_id if current is not None else None,
+        current_session_id=current.session_id if current is not None else None,
+        last_run_id=latest.run_id,
+        last_session_id=latest.session_id,
+        last_seen_at=last_seen_at,
+        lease_expires_at=lease_expires_at,
+    )
+
+
+def _worker_statuses_from_runs(
+    runs: Iterable[AgentRunRecord],
+) -> list[WorkerStatusResponse]:
+    run_list = list(runs)
+    worker_ids = {
+        worker_id
+        for run in run_list
+        if isinstance(worker_id := run.metadata.get("worker_id"), str) and worker_id
+    }
+    return sorted(
+        (_worker_status_from_runs(worker_id, run_list) for worker_id in worker_ids),
+        key=lambda worker: worker.worker_id,
+    )
 
 
 def _tape_entry_summary(result: object) -> ConsoleTapeEntrySummary:
@@ -5007,6 +5154,35 @@ async def get_runtime_events(
         run_id=run_id,
         events=[_runtime_event_response(event) for event in events],
     )
+
+
+@app.get("/workers", response_model=WorkerListResponse)
+@limiter.limit(RateLimits.GET_SESSION)
+async def list_workers(
+    request: Request,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> WorkerListResponse:
+    del request
+    return WorkerListResponse(
+        workers=_worker_statuses_from_runs(await _visible_runtime_runs(auth_context))
+    )
+
+
+@app.get("/workers/{worker_id}", response_model=WorkerStatusResponse)
+@limiter.limit(RateLimits.GET_SESSION)
+async def get_worker_status(
+    request: Request,
+    worker_id: str,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> WorkerStatusResponse:
+    del request
+    try:
+        return _worker_status_from_runs(
+            worker_id,
+            await _visible_runtime_runs(auth_context),
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Worker not found") from exc
 
 
 def _session_runtime_tape(session: Session) -> Tape | None:

@@ -2450,6 +2450,135 @@ class TestPromptStreaming:
             }
         ]
 
+    async def test_external_worker_session_runs_endpoint_lists_runs(self, client):
+        store = FakeExternalWorkerRuntimeStore()
+        session_manager.configure_runtime_store(store)
+        create_resp = await client.post(
+            "/sessions",
+            json={
+                "approval_policy": "yolo",
+                "execution_binding": {
+                    "kind": "external_worker",
+                    "executor_kind": "local_cli",
+                },
+            },
+        )
+        session_id = create_resp.json()["session_id"]
+        run = await session_manager.request_external_worker_run(session_id, "hello")
+        claim = await session_manager.claim_external_worker_run(
+            worker_id="worker-1",
+            executor_kind="local_cli",
+            session_id=session_id,
+            lease_seconds=30,
+        )
+        assert claim is not None
+
+        response = await client.get(f"/sessions/{session_id}/runs")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["session_id"] == session_id
+        assert [item["run_id"] for item in payload["runs"]] == [run.run_id]
+        assert payload["runs"][0]["metadata"]["worker_id"] == "worker-1"
+        assert "claim_token_hash" not in payload["runs"][0]["metadata"]
+
+    async def test_external_worker_workers_endpoint_reports_running_and_stale_workers(
+        self, client, tmp_path: Path
+    ):
+        store = FakeExternalWorkerRuntimeStore()
+        session_manager.configure_runtime_store(store)
+        create_resp = await client.post(
+            "/sessions",
+            json={
+                "approval_policy": "yolo",
+                "execution_binding": {
+                    "kind": "external_worker",
+                    "executor_kind": "local_cli",
+                    "worker_pool": "default",
+                    "workspace_ref": {
+                        "kind": "local_path",
+                        "display_path": str(tmp_path),
+                    },
+                },
+            },
+        )
+        session_id = create_resp.json()["session_id"]
+        run = await session_manager.request_external_worker_run(session_id, "hello")
+        claim = await session_manager.claim_external_worker_run(
+            worker_id="worker-1",
+            executor_kind="local_cli",
+            session_id=session_id,
+            lease_seconds=30,
+        )
+        assert claim is not None
+
+        running_response = await client.get("/workers")
+
+        assert running_response.status_code == 200
+        worker = running_response.json()["workers"][0]
+        assert worker["worker_id"] == "worker-1"
+        assert worker["status"] == "running"
+        assert worker["current_run_id"] == run.run_id
+        assert worker["worker_pool"] == "default"
+        assert worker["workspace_ref"] == {
+            "kind": "local_path",
+            "display_path": str(tmp_path),
+        }
+
+        claimed = store.runs[run.run_id]
+        store.runs[run.run_id] = replace(
+            claimed,
+            metadata={
+                **claimed.metadata,
+                "lease_expires_at": "2026-01-01T00:00:00+00:00",
+            },
+        )
+
+        stale_response = await client.get("/workers/worker-1")
+
+        assert stale_response.status_code == 200
+        assert stale_response.json()["status"] == "stale"
+
+        old_seen_at = (
+            datetime.now(UTC)
+            - timedelta(seconds=http_server.WORKER_OFFLINE_AFTER_SECONDS + 1)
+        ).isoformat()
+        stale_run = store.runs[run.run_id]
+        store.runs[run.run_id] = replace(
+            stale_run,
+            status="completed",
+            ended_at=datetime.now(UTC),
+            metadata={
+                **stale_run.metadata,
+                "claimed_at": old_seen_at,
+                "last_heartbeat_at": old_seen_at,
+                "finalized_at": old_seen_at,
+            },
+        )
+
+        offline_response = await client.get("/workers/worker-1")
+
+        assert offline_response.status_code == 200
+        assert offline_response.json()["status"] == "offline"
+
+        active_without_lease = store.runs[run.run_id]
+        metadata_without_lease = {
+            **active_without_lease.metadata,
+            "last_heartbeat_at": old_seen_at,
+        }
+        metadata_without_lease.pop("lease_expires_at", None)
+        store.runs[run.run_id] = replace(
+            active_without_lease,
+            status="running",
+            ended_at=None,
+            metadata=metadata_without_lease,
+        )
+
+        active_offline_response = await client.get("/workers/worker-1")
+
+        assert active_offline_response.status_code == 200
+        assert active_offline_response.json()["status"] == "offline"
+
     async def test_external_worker_approval_uses_server_approval_flow(
         self, client, monkeypatch
     ):

@@ -437,6 +437,161 @@ def test_remote_worker_runs_external_worker_loop(tmp_path: Path, monkeypatch) ->
     ]
 
 
+def test_remote_prompt_streams_existing_external_worker_session(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_path = tmp_path / "remotes.json"
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    calls: list[dict[str, object]] = []
+
+    def fake_stream_prompt_or_run_request(**kwargs: object) -> int:
+        calls.append(kwargs)
+        return 0
+
+    monkeypatch.setattr(
+        "coding_agent.remote.client.stream_prompt_or_run_request",
+        fake_stream_prompt_or_run_request,
+    )
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example", "--token", "secret-token"],
+        catch_exceptions=False,
+    )
+
+    result = runner.invoke(
+        main,
+        ["remote", "prompt", "dev", "sess-1", "--goal", "continue work"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        {
+            "base_url": "http://agent.example",
+            "session_id": "sess-1",
+            "prompt": "continue work",
+            "headers": {"Authorization": "Bearer secret-token"},
+        }
+    ]
+
+
+def test_remote_attach_consumes_existing_session_events(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_path = tmp_path / "remotes.json"
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    calls: list[dict[str, object]] = []
+
+    def fake_attach_remote_session(**kwargs: object) -> int:
+        calls.append(kwargs)
+        return 0
+
+    monkeypatch.setattr(
+        "coding_agent.remote.client.attach_remote_session",
+        fake_attach_remote_session,
+    )
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example", "--token", "secret-token"],
+        catch_exceptions=False,
+    )
+
+    result = runner.invoke(
+        main,
+        ["remote", "attach", "dev", "sess-1"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        {
+            "base_url": "http://agent.example",
+            "session_id": "sess-1",
+            "headers": {"Authorization": "Bearer secret-token"},
+        }
+    ]
+
+
+def test_remote_workers_lists_external_worker_status(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_path = tmp_path / "remotes.json"
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+
+    def fake_list_remote_workers(endpoint):
+        assert endpoint.name == "dev"
+        return [
+            {
+                "worker_id": "worker-1",
+                "status": "running",
+                "executor_kind": "local_cli",
+                "current_run_id": "run-1",
+                "last_seen_at": "2026-05-31T12:00:00+00:00",
+            }
+        ]
+
+    monkeypatch.setattr(
+        "coding_agent.remote.client.list_remote_workers",
+        fake_list_remote_workers,
+    )
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example", "--token", "secret-token"],
+        catch_exceptions=False,
+    )
+
+    result = runner.invoke(
+        main,
+        ["remote", "workers", "dev"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "worker-1\trunning\tlocal_cli\trun-1\t2026-05-31T12:00:00+00:00" in (
+        result.output
+    )
+
+
+def test_remote_runs_lists_session_runs(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "remotes.json"
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+
+    def fake_list_remote_session_runs(endpoint, session_id: str):
+        assert endpoint.name == "dev"
+        assert session_id == "sess-1"
+        return [
+            {
+                "run_id": "run-1",
+                "status": "running",
+                "tape_id": "tape-1",
+                "metadata": {"worker_id": "worker-1"},
+            }
+        ]
+
+    monkeypatch.setattr(
+        "coding_agent.remote.client.list_remote_session_runs",
+        fake_list_remote_session_runs,
+    )
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example", "--token", "secret-token"],
+        catch_exceptions=False,
+    )
+
+    result = runner.invoke(
+        main,
+        ["remote", "runs", "dev", "--session", "sess-1"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "run-1\trunning\tworker-1\ttape-1" in result.output
+
+
 def test_remote_repl_creates_cloud_session_and_streams_prompt_events(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -803,7 +958,7 @@ def test_attach_streams_prompt_to_existing_session(tmp_path: Path, monkeypatch) 
     )
     calls: list[dict[str, object]] = []
 
-    def fake_stream_prompt(
+    def fake_attach_stream_prompt_or_run_request(
         *, base_url: str, session_id: str, prompt: str, headers: dict[str, str]
     ) -> int:
         calls.append(
@@ -816,7 +971,10 @@ def test_attach_streams_prompt_to_existing_session(tmp_path: Path, monkeypatch) 
         )
         return 0
 
-    monkeypatch.setattr("coding_agent.remote.client.stream_prompt", fake_stream_prompt)
+    monkeypatch.setattr(
+        "coding_agent.remote.client.stream_prompt_or_run_request",
+        fake_attach_stream_prompt_or_run_request,
+    )
 
     result = runner.invoke(
         main,
