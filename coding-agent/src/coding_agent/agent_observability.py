@@ -133,6 +133,7 @@ class AgentObservationRecorder:
         # the usage report (the runtime only surfaces usage at completion).
         self._last_activity_time: float | None = None
         self._pending_tool_calls: dict[str, _PendingToolCall] = {}
+        self._pending_child_spans: list[SpanRecord] = []
 
     def start_turn(self, *, session_id: str, run_id: str, prompt: str) -> None:
         self._session_id = session_id
@@ -141,6 +142,7 @@ class AgentObservationRecorder:
         self._sequence_no = 0
         self._turn_span_id = secrets.token_hex(8)
         self._pending_tool_calls = {}
+        self._pending_child_spans = []
         event = self._record(
             kind="turn.started",
             status="started",
@@ -321,25 +323,22 @@ class AgentObservationRecorder:
     ) -> None:
         if self._sink is None or self._session_id is None or self._run_id is None:
             return
-        try:
-            self._sink.record_span(
-                SpanRecord(
-                    name=name,
-                    status=status,
-                    start_time=start_time,
-                    end_time=end_time,
-                    span_id=secrets.token_hex(8),
-                    parent_span_id=self._turn_span_id,
-                    attributes={
-                        "session_id": self._session_id,
-                        "run_id": self._run_id,
-                        "turn_id": self._turn_id or self._run_id,
-                        **attributes,
-                    },
-                )
+        self._pending_child_spans.append(
+            SpanRecord(
+                name=name,
+                status=status,
+                start_time=start_time,
+                end_time=end_time,
+                span_id=secrets.token_hex(8),
+                parent_span_id=self._turn_span_id,
+                attributes={
+                    "session_id": self._session_id,
+                    "run_id": self._run_id,
+                    "turn_id": self._turn_id or self._run_id,
+                    **attributes,
+                },
             )
-        except Exception:
-            return
+        )
 
     def _record_turn_span(
         self,
@@ -351,30 +350,33 @@ class AgentObservationRecorder:
         if self._sink is None or self._session_id is None or self._run_id is None:
             return
         projection = sanitized_turn_projection(turn)
+        child_spans = self._pending_child_spans
+        self._pending_child_spans = []
         try:
-            self._sink.record_span(
-                SpanRecord(
-                    name="agent.turn.sanitized",
-                    status="error" if status == "error" else "ok",
-                    start_time=self._turn_start_time,
-                    end_time=end_time,
-                    span_id=self._turn_span_id,
-                    parent_span_id=None,
-                    attributes={
-                        "session_id": self._session_id,
-                        "run_id": self._run_id,
-                        "turn_id": self._turn_id or self._run_id,
-                        "gen_ai.operation.name": "invoke_agent",
-                        "langfuse.observation.type": "agent",
-                        "langfuse.observation.input": json.dumps(
-                            projection["input"], sort_keys=True
-                        ),
-                        "langfuse.observation.output": json.dumps(
-                            projection["output"], sort_keys=True
-                        ),
-                    },
-                )
+            turn_span = SpanRecord(
+                name="agent.turn.sanitized",
+                status="error" if status == "error" else "ok",
+                start_time=self._turn_start_time,
+                end_time=end_time,
+                span_id=self._turn_span_id,
+                parent_span_id=None,
+                attributes={
+                    "session_id": self._session_id,
+                    "run_id": self._run_id,
+                    "turn_id": self._turn_id or self._run_id,
+                    "gen_ai.operation.name": "invoke_agent",
+                    "langfuse.observation.type": "agent",
+                    "langfuse.observation.input": json.dumps(
+                        projection["input"], sort_keys=True
+                    ),
+                    "langfuse.observation.output": json.dumps(
+                        projection["output"], sort_keys=True
+                    ),
+                },
             )
+            self._sink.record_span(turn_span)
+            for child_span in child_spans:
+                self._sink.record_span(child_span)
         except Exception:
             return
 
