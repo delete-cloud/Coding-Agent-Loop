@@ -787,6 +787,101 @@ def remote_events(name: str, run_id: str) -> None:
         )
 
 
+@remote.command("interactions")
+@click.argument("name")
+@click.option("--session", "session_id", help="Filter by remote session ID.")
+@click.option("--run", "run_id", help="Filter by remote run ID.")
+@click.option("--status", "status", help="Filter by interaction status.")
+def remote_interactions(
+    name: str,
+    session_id: str | None,
+    run_id: str | None,
+    status: str | None,
+) -> None:
+    """List durable remote runtime interactions."""
+    from coding_agent.remote.client import get_remote, list_remote_interactions
+
+    endpoint = get_remote(name)
+    interactions = list_remote_interactions(
+        endpoint,
+        session_id=session_id,
+        run_id=run_id,
+        status=status,
+    )
+    if not interactions:
+        click.echo("No remote interactions found.")
+        return
+    for interaction in interactions:
+        metadata = interaction.get("metadata")
+        request_id = (
+            metadata.get("request_id")
+            if isinstance(metadata, dict)
+            and isinstance(metadata.get("request_id"), str)
+            else ""
+        )
+        click.echo(
+            "\t".join(
+                [
+                    str(interaction.get("interaction_id", "")),
+                    str(interaction.get("status", "")),
+                    str(interaction.get("interaction_kind", "")),
+                    request_id,
+                    str(interaction.get("run_id", "")),
+                    str(interaction.get("created_at", "")),
+                ]
+            )
+        )
+
+
+@remote.command("interaction")
+@click.argument("name")
+@click.argument("interaction_id")
+def remote_interaction(name: str, interaction_id: str) -> None:
+    """Show one durable remote runtime interaction."""
+    from coding_agent.remote.client import get_remote, get_remote_interaction
+
+    endpoint = get_remote(name)
+    _print_mapping(get_remote_interaction(endpoint, interaction_id))
+
+
+@remote.command("resolve-interaction")
+@click.argument("name")
+@click.argument("interaction_id")
+@click.option("--approve", "approve", is_flag=True, help="Approve the interaction.")
+@click.option("--reject", "reject", is_flag=True, help="Reject the interaction.")
+@click.option("--feedback", "feedback", help="Optional approval feedback.")
+@click.option(
+    "--scope",
+    "scope",
+    type=click.Choice(["once", "session", "always"]),
+    default="once",
+    show_default=True,
+)
+def remote_resolve_interaction(
+    name: str,
+    interaction_id: str,
+    approve: bool,
+    reject: bool,
+    feedback: str | None,
+    scope: str,
+) -> None:
+    """Resolve a pending approval interaction."""
+    from coding_agent.remote.client import get_remote, resolve_remote_interaction
+
+    if approve == reject:
+        raise click.ClickException("Pass exactly one of --approve or --reject.")
+    endpoint = get_remote(name)
+    _print_mapping(
+        resolve_remote_interaction(
+            endpoint,
+            interaction_id,
+            approved=approve,
+            feedback=feedback,
+            scope=scope,
+        )
+    )
+
+
 @remote.command("workers")
 @click.argument("name")
 def remote_workers(name: str) -> None:

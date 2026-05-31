@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import uuid
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
@@ -128,6 +129,7 @@ async def run_local_worker_once(
         headers=headers,
         timeout=_CONTROL_TIMEOUT,
     ) as client:
+        worker_instance_id = _new_worker_instance_id(worker_id)
         session_id = await _create_external_worker_session(
             client=client,
             repo_path=repo_path,
@@ -147,6 +149,8 @@ async def run_local_worker_once(
             client=client,
             session_id=session_id,
             worker_id=worker_id,
+            worker_instance_id=worker_instance_id,
+            repo_path=repo_path,
         )
         if claim is None:
             raise ExternalWorkerError("requested run was not available to claim")
@@ -157,6 +161,7 @@ async def run_local_worker_once(
             claim=claim,
             repo_path=repo_path,
             worker_id=worker_id,
+            worker_instance_id=worker_instance_id,
         )
 
 
@@ -174,11 +179,14 @@ async def run_worker_loop(
         headers=headers,
         timeout=_CONTROL_TIMEOUT,
     ) as client:
+        worker_instance_id = _new_worker_instance_id(worker_id)
         while True:
             claim = await _claim_run(
                 client=client,
                 session_id=None,
                 worker_id=worker_id,
+                worker_instance_id=worker_instance_id,
+                repo_path=repo_path,
                 allow_empty=True,
             )
             if claim is None:
@@ -191,6 +199,7 @@ async def run_worker_loop(
                 claim=claim,
                 repo_path=repo_path,
                 worker_id=worker_id,
+                worker_instance_id=worker_instance_id,
             )
             if once:
                 return status
@@ -264,11 +273,17 @@ async def _claim_run(
     client: httpx.AsyncClient,
     session_id: str | None,
     worker_id: str,
+    worker_instance_id: str,
+    repo_path: Path,
     allow_empty: bool = False,
 ) -> dict[str, Any] | None:
     payload: dict[str, Any] = {
         "worker_id": worker_id,
         "executor_kind": "local_cli",
+        "worker_instance_id": worker_instance_id,
+        "process_id": os.getpid(),
+        "capabilities": _worker_capabilities(),
+        "workspace_sync": _workspace_sync_metadata(repo_path),
     }
     if session_id is not None:
         payload["session_id"] = session_id
@@ -291,6 +306,7 @@ async def _execute_claimed_run(
     claim: dict[str, Any],
     repo_path: Path,
     worker_id: str,
+    worker_instance_id: str,
 ) -> int:
     run_id = _required_claim_str(claim, "run_id")
     session_id = _required_claim_str(claim, "session_id")
@@ -327,8 +343,10 @@ async def _execute_claimed_run(
             client=client,
             run_id=run_id,
             worker_id=worker_id,
+            worker_instance_id=worker_instance_id,
             claim_token=claim_token,
             run_task=run_task,
+            repo_path=repo_path,
         )
     )
     try:
@@ -400,14 +418,20 @@ async def _heartbeat_until_complete(
     client: httpx.AsyncClient,
     run_id: str,
     worker_id: str,
+    worker_instance_id: str,
     claim_token: str,
     run_task: asyncio.Task[Any],
+    repo_path: Path,
 ) -> None:
     while not run_task.done():
         response = await client.post(
             f"/worker/runs/{run_id}/heartbeat",
             json={
                 "worker_id": worker_id,
+                "worker_instance_id": worker_instance_id,
+                "process_id": os.getpid(),
+                "capabilities": _worker_capabilities(),
+                "workspace_sync": _workspace_sync_metadata(repo_path),
                 "claim_token": claim_token,
                 "lease_seconds": 30,
             },
@@ -418,6 +442,27 @@ async def _heartbeat_until_complete(
             run_task.cancel()
             return
         await asyncio.sleep(5)
+
+
+def _new_worker_instance_id(worker_id: str) -> str:
+    return f"{worker_id}:{uuid.uuid4().hex}"
+
+
+def _worker_capabilities() -> dict[str, Any]:
+    return {
+        "executor": "local_cli",
+        "process_reconnect": "metadata_only",
+        "workspace_sync": "metadata_only",
+        "approval_interactions": True,
+    }
+
+
+def _workspace_sync_metadata(repo_path: Path) -> dict[str, Any]:
+    return {
+        "mode": "none",
+        "workspace_ref_kind": "local_path",
+        "display_path": str(repo_path),
+    }
 
 
 def _required_claim_str(claim: dict[str, Any], key: str) -> str:

@@ -555,6 +555,95 @@ def test_remote_workers_lists_external_worker_status(
     )
 
 
+def test_remote_interactions_list_and_resolve(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "remotes.json"
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+
+    def fake_list_remote_interactions(endpoint, *, session_id, run_id, status):
+        assert endpoint.name == "dev"
+        assert session_id == "sess-1"
+        assert run_id is None
+        assert status == "pending"
+        return [
+            {
+                "interaction_id": "run-1:approval-1",
+                "status": "pending",
+                "interaction_kind": "approval",
+                "run_id": "run-1",
+                "created_at": "2026-05-31T12:00:00+00:00",
+                "metadata": {"request_id": "approval-1"},
+            }
+        ]
+
+    def fake_resolve_remote_interaction(
+        endpoint,
+        interaction_id,
+        *,
+        approved,
+        feedback,
+        scope,
+    ):
+        assert endpoint.name == "dev"
+        assert interaction_id == "run-1:approval-1"
+        assert approved is True
+        assert feedback == "ok"
+        assert scope == "once"
+        return {
+            "interaction_id": interaction_id,
+            "status": "approved",
+        }
+
+    monkeypatch.setattr(
+        "coding_agent.remote.client.list_remote_interactions",
+        fake_list_remote_interactions,
+    )
+    monkeypatch.setattr(
+        "coding_agent.remote.client.resolve_remote_interaction",
+        fake_resolve_remote_interaction,
+    )
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example", "--token", "secret-token"],
+        catch_exceptions=False,
+    )
+
+    list_result = runner.invoke(
+        main,
+        [
+            "remote",
+            "interactions",
+            "dev",
+            "--session",
+            "sess-1",
+            "--status",
+            "pending",
+        ],
+        catch_exceptions=False,
+    )
+    resolve_result = runner.invoke(
+        main,
+        [
+            "remote",
+            "resolve-interaction",
+            "dev",
+            "run-1:approval-1",
+            "--approve",
+            "--feedback",
+            "ok",
+        ],
+        catch_exceptions=False,
+    )
+
+    assert list_result.exit_code == 0
+    assert (
+        "run-1:approval-1\tpending\tapproval\tapproval-1\trun-1\t"
+        "2026-05-31T12:00:00+00:00"
+    ) in list_result.output
+    assert resolve_result.exit_code == 0
+    assert "status: approved" in resolve_result.output
+
+
 def test_remote_runs_lists_session_runs(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "remotes.json"
     monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))

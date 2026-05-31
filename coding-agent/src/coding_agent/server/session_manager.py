@@ -342,6 +342,11 @@ class RuntimeStoreProtocol(Protocol):
         record: AgentInteractionRecord,
     ) -> AgentInteractionRecord: ...
 
+    async def load_agent_interaction(
+        self,
+        interaction_id: str,
+    ) -> AgentInteractionRecord | None: ...
+
     async def list_agent_interactions(
         self,
         run_id: str,
@@ -903,6 +908,16 @@ class SessionManager:
         store = self._require_runtime_store()
         return await store.list_agent_interactions(run_id)
 
+    async def load_runtime_interaction(
+        self,
+        interaction_id: str,
+    ) -> AgentInteractionRecord:
+        store = self._require_runtime_store()
+        record = await store.load_agent_interaction(interaction_id)
+        if record is None:
+            raise KeyError(f"runtime interaction not found: {interaction_id}")
+        return record
+
     async def load_tape_debug_info(self, tape_id: str) -> TapeInfo | None:
         if not isinstance(self._tape_store, TapeDebugStore):
             return None
@@ -1017,6 +1032,10 @@ class SessionManager:
         executor_kind: str,
         session_id: str | None = None,
         lease_seconds: int = 30,
+        worker_instance_id: str | None = None,
+        process_id: int | None = None,
+        capabilities: JSONObject | None = None,
+        workspace_sync: JSONObject | None = None,
     ) -> ExternalWorkerClaim | None:
         store = self._require_runtime_store()
         claim_token = secrets.token_urlsafe(32)
@@ -1028,6 +1047,14 @@ class SessionManager:
             "claimed_at": now.isoformat(),
             "lease_expires_at": lease_expires_at.isoformat(),
         }
+        if worker_instance_id is not None:
+            claim_metadata["worker_instance_id"] = worker_instance_id
+        if process_id is not None:
+            claim_metadata["process_id"] = process_id
+        if capabilities is not None:
+            claim_metadata["capabilities"] = capabilities
+        if workspace_sync is not None:
+            claim_metadata["workspace_sync"] = workspace_sync
         run = await store.claim_external_worker_run(
             session_id=session_id,
             executor_kind=executor_kind,
@@ -1051,6 +1078,10 @@ class SessionManager:
         worker_id: str,
         claim_token: str,
         lease_seconds: int = 30,
+        worker_instance_id: str | None = None,
+        process_id: int | None = None,
+        capabilities: JSONObject | None = None,
+        workspace_sync: JSONObject | None = None,
     ) -> AgentRunRecord:
         run = await self._load_and_authorize_external_worker_run(
             run_id=run_id,
@@ -1062,6 +1093,14 @@ class SessionManager:
             datetime.now(UTC) + timedelta(seconds=lease_seconds)
         ).isoformat()
         metadata["last_heartbeat_at"] = datetime.now(UTC).isoformat()
+        if worker_instance_id is not None:
+            metadata["worker_instance_id"] = worker_instance_id
+        if process_id is not None:
+            metadata["process_id"] = process_id
+        if capabilities is not None:
+            metadata["capabilities"] = capabilities
+        if workspace_sync is not None:
+            metadata["workspace_sync"] = workspace_sync
         status = "running" if run.status == "claimed" else run.status
         return await self._require_runtime_store().update_agent_run(
             run_id,
