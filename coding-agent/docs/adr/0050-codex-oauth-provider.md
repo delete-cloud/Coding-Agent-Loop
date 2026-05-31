@@ -101,5 +101,5 @@ The `coding-agent --provider codex` flag selects the Codex provider for agent ru
 - `src/coding_agent/plugins/llm_provider.py`
 - `tests/coding_agent/test_codex_oauth.py`
 - `tests/cli/test_oauth_commands.py`
-- `/workspace/ya-oauth-ref/packages/ya-oauth/`
-- `/workspace/ya-oauth-ref/packages/ya-oauth-provider/`
+- `https://github.com/Wh1isper/ya-mono/tree/main/packages/ya-oauth`
+- `https://github.com/Wh1isper/ya-mono/tree/main/packages/ya-oauth-provider`

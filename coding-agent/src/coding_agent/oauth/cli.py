@@ -166,7 +166,11 @@ def doctor(auth_file: Path | None) -> None:
 
 
 def _print_mode(label: str, path: Path, *, expected: int) -> None:
-    mode = stat.S_IMODE(os.stat(path).st_mode)
+    try:
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+    except FileNotFoundError:
+        click.echo(f"{label} mode: missing (expected {expected:o})")
+        return
     status_text = "ok" if mode == expected else f"expected {expected:o}"
     click.echo(f"{label} mode: {mode:o} ({status_text})")
 

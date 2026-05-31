@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import stat
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,8 +40,9 @@ def test_oauth_store_writes_private_file_and_round_trips_record(
 
     store.set_provider("codex", _record())
 
-    assert stat.S_IMODE(auth_path.parent.stat().st_mode) == 0o700
-    assert stat.S_IMODE(auth_path.stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(auth_path.parent.stat().st_mode) == 0o700
+        assert stat.S_IMODE(auth_path.stat().st_mode) == 0o600
     loaded = store.get_provider("codex")
     assert loaded is not None
     assert loaded.tokens.access_token == "access-token"
@@ -68,6 +70,40 @@ async def test_store_backed_token_source_refreshes_and_persists_token(
 
     assert snapshot.access_token == "new-token"
     assert store.get_provider("codex").tokens.access_token == "new-token"  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_store_backed_token_source_refreshes_outside_store_update(
+    tmp_path: Path,
+) -> None:
+    store = OAuthStore(tmp_path / "auth.json")
+    store.set_provider("codex", _record(access_token="old-token"))
+    update_depth = 0
+    original_update = store.update
+
+    def tracking_update(updater):
+        nonlocal update_depth
+        update_depth += 1
+        try:
+            return original_update(updater)
+        finally:
+            update_depth -= 1
+
+    store.update = tracking_update  # type: ignore[method-assign]
+
+    def refresh_provider(record: OAuthProviderRecord) -> OAuthProviderRecord:
+        assert update_depth == 0
+        return record.with_refreshed_tokens(access_token="new-token")
+
+    source = StoreBackedTokenSource(
+        "codex",
+        store=store,
+        refresh_provider=refresh_provider,
+    )
+
+    snapshot = await source.refresh_token()
+
+    assert snapshot.access_token == "new-token"
 
 
 @pytest.mark.asyncio

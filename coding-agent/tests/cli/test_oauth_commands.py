@@ -57,3 +57,18 @@ def test_oauth_doctor_redacts_tokens(tmp_path: Path) -> None:
     assert "<redacted>" in result.output
     assert "secret-access-token" not in result.output
     assert "secret-refresh-token" not in result.output
+
+
+def test_oauth_doctor_handles_missing_auth_directory(tmp_path: Path) -> None:
+    runner = CliRunner()
+    auth_file = tmp_path / "missing" / "auth.json"
+
+    result = runner.invoke(
+        main,
+        ["oauth", "doctor", "--auth-file", str(auth_file)],
+    )
+
+    assert result.exit_code == 0
+    assert "Providers: none" in result.output
+    assert "Directory mode: 700 (ok)" in result.output
+    assert "File mode:" not in result.output

@@ -197,21 +197,25 @@ class StoreBackedTokenSource:
         return _snapshot(self.provider_name, refreshed)
 
     def _refresh_and_store(self) -> OAuthProviderRecord:
-        refreshed: OAuthProviderRecord | None = None
+        record = self.store.get_provider(self.provider_name)
+        if record is None:
+            raise RuntimeError(f"OAuth provider is not logged in: {self.provider_name}")
 
-        def update(auth_file: AuthFile) -> None:
-            nonlocal refreshed
-            record = auth_file.providers.get(self.provider_name)
-            if record is None:
+        refreshed = self._refresh_provider(record)
+
+        def persist(auth_file: AuthFile) -> None:
+            current = auth_file.providers.get(self.provider_name)
+            if current is None:
                 raise RuntimeError(
                     f"OAuth provider is not logged in: {self.provider_name}"
                 )
-            refreshed = self._refresh_provider(record)
+            if current != record:
+                raise RuntimeError(
+                    f"OAuth provider changed during refresh: {self.provider_name}"
+                )
             auth_file.providers[self.provider_name] = refreshed
 
-        self.store.update(update)
-        if refreshed is None:
-            raise RuntimeError(f"OAuth provider refresh failed: {self.provider_name}")
+        self.store.update(persist)
         return refreshed
 
 

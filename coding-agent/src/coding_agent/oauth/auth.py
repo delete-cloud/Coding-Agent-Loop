@@ -19,8 +19,6 @@ class OAuthBearerAuth(httpx.Auth):
     OAuth tokens instead of API keys.
     """
 
-    requires_response_body = True
-
     def __init__(
         self,
         token_source: OAuthTokenSource,
@@ -48,6 +46,7 @@ class OAuthBearerAuth(httpx.Auth):
         response = yield request
 
         if response.status_code == 401:
+            response.read()
             logger.debug(
                 "OAuth token expired (401), refreshing for %s",
                 self._provider_name,
@@ -70,6 +69,7 @@ class OAuthBearerAuth(httpx.Auth):
         response = yield request
 
         if response.status_code == 401:
+            await response.aread()
             logger.debug(
                 "OAuth token expired (401), refreshing for %s",
                 self._provider_name,
