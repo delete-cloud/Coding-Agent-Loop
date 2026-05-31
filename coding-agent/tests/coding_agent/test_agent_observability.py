@@ -201,6 +201,10 @@ def test_tool_input_shape_uses_fixed_field_list_for_langfuse(tmp_path) -> None:
         result="ok",
         is_error=False,
     )
+    recorder.complete_turn(
+        status="ok",
+        turn=TurnTrace(user_input="hello", tool_calls=(), final_output="done"),
+    )
 
     tool_span = _span_by_name(sink.spans, "agent.tool.sanitized")
     payload = json.loads(tool_span.attributes["langfuse.observation.input"])
@@ -331,6 +335,13 @@ class RecordingSink:
         del event
 
 
+class FailAfterRootSink(RecordingSink):
+    def record_span(self, span: SpanRecord) -> None:
+        super().record_span(span)
+        if span.name == "agent.turn.sanitized":
+            raise RuntimeError("sink unavailable")
+
+
 def _span_by_name(spans: list[SpanRecord], name: str) -> SpanRecord:
     matches = [span for span in spans if span.name == name]
     assert len(matches) == 1, f"expected exactly one {name} span, got {len(matches)}"
@@ -391,6 +402,67 @@ def test_recorder_emits_nested_typed_spans_with_real_times(tmp_path, monkeypatch
     assert generation_span.attributes["gen_ai.usage.input_tokens"] == 2527
     assert generation_span.attributes["gen_ai.usage.output_tokens"] == 263
     assert tool_span.end_time > tool_span.start_time
+
+
+def test_recorder_exports_turn_root_before_child_spans(tmp_path) -> None:
+    store = JsonlAgentObservationStore(tmp_path)
+    sink = RecordingSink()
+    recorder = AgentObservationRecorder(store=store, sink=sink)
+
+    recorder.start_turn(session_id="session-1", run_id="run-1", prompt="hello")
+    recorder.observe_llm_usage(
+        input_tokens=2527, output_tokens=263, provider_name="openai"
+    )
+    recorder.observe_tool_call(
+        tool_name="web_search", tool_call_id="tool-1", arguments={"query": "rwa"}
+    )
+    recorder.observe_tool_result(
+        tool_name="web_search", tool_call_id="tool-1", result="ok", is_error=False
+    )
+
+    assert sink.spans == []
+
+    recorder.complete_turn(
+        status="ok",
+        turn=TurnTrace(user_input="hello", tool_calls=(), final_output="done"),
+    )
+
+    assert [span.name for span in sink.spans] == [
+        "agent.turn.sanitized",
+        "agent.generation.sanitized",
+        "agent.tool.sanitized",
+    ]
+    turn_span = sink.spans[0]
+    for child_span in sink.spans[1:]:
+        assert child_span.parent_span_id == turn_span.span_id
+
+
+def test_recorder_drops_pending_child_spans_after_sink_failure(tmp_path) -> None:
+    store = JsonlAgentObservationStore(tmp_path)
+    sink = FailAfterRootSink()
+    recorder = AgentObservationRecorder(store=store, sink=sink)
+
+    recorder.start_turn(session_id="session-1", run_id="run-1", prompt="hello")
+    recorder.observe_llm_usage(
+        input_tokens=2527, output_tokens=263, provider_name="openai"
+    )
+    recorder.complete_turn(
+        status="ok",
+        turn=TurnTrace(user_input="hello", tool_calls=(), final_output="done"),
+    )
+
+    sink.record_span = RecordingSink.record_span.__get__(sink, FailAfterRootSink)
+    recorder.start_turn(session_id="session-1", run_id="run-2", prompt="again")
+    recorder.complete_turn(
+        status="ok",
+        turn=TurnTrace(user_input="again", tool_calls=(), final_output="done"),
+    )
+
+    assert [span.name for span in sink.spans] == [
+        "agent.turn.sanitized",
+        "agent.turn.sanitized",
+    ]
+    assert [span.attributes["run_id"] for span in sink.spans] == ["run-1", "run-2"]
 
 
 def test_otlp_payload_has_parent_span_and_nonzero_times() -> None:
