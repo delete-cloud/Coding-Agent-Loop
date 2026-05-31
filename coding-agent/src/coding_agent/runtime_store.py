@@ -135,6 +135,17 @@ class PGRuntimeStore:
         ON agent_runs (tape_id, started_at, run_id)
         WHERE tape_id IS NOT NULL;
 
+    CREATE INDEX IF NOT EXISTS agent_runs_external_worker_claim_idx
+        ON agent_runs (
+            (metadata->>'executor_kind'),
+            session_id,
+            started_at,
+            run_id
+        )
+        WHERE status IN ('requested', 'expired')
+          AND metadata->>'execution_binding_kind' = 'external_worker'
+          AND metadata->>'executor_kind' IS NOT NULL;
+
     CREATE TABLE IF NOT EXISTS runtime_events (
         sequence BIGSERIAL PRIMARY KEY,
         event_id TEXT UNIQUE NOT NULL,
@@ -220,6 +231,25 @@ class PGRuntimeStore:
     _LIST_RUNS_SQL: Final[str] = (
         "SELECT * FROM agent_runs WHERE session_id = $1 ORDER BY started_at, run_id"
     )
+    _CLAIM_EXTERNAL_WORKER_RUN_SQL: Final[str] = """
+    WITH candidate AS (
+        SELECT run_id
+        FROM agent_runs
+        WHERE status IN ('requested', 'expired')
+          AND metadata->>'execution_binding_kind' = 'external_worker'
+          AND metadata->>'executor_kind' = $2
+          AND ($1::text IS NULL OR session_id = $1)
+        ORDER BY started_at, run_id
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED
+    )
+    UPDATE agent_runs
+    SET status = 'claimed',
+        metadata = metadata || $3::jsonb,
+        updated_at = NOW()
+    WHERE run_id = (SELECT run_id FROM candidate)
+    RETURNING *
+    """
     _INSERT_EVENT_SQL: Final[str] = """
     WITH inserted AS (
         INSERT INTO runtime_events (
@@ -389,6 +419,28 @@ class PGRuntimeStore:
         pool = await self._ensure_schema()
         rows = await pool.fetch(self._LIST_RUNS_SQL, session_id)
         return [_agent_run_from_row(row) for row in rows]
+
+    async def claim_external_worker_run(
+        self,
+        *,
+        session_id: str | None,
+        executor_kind: str,
+        claim_metadata: JSONObject,
+    ) -> AgentRunRecord | None:
+        if session_id is not None:
+            _require_non_empty("session_id", session_id)
+        _require_non_empty("executor_kind", executor_kind)
+        _require_json_object("claim_metadata", claim_metadata)
+        pool = await self._ensure_schema()
+        row = await pool.fetchrow(
+            self._CLAIM_EXTERNAL_WORKER_RUN_SQL,
+            session_id,
+            executor_kind,
+            claim_metadata,
+        )
+        if row is None:
+            return None
+        return _agent_run_from_row(row)
 
     async def append_runtime_event(
         self,

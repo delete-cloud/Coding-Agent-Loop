@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib
 import logging
 import os
+import secrets
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import asdict, dataclass, field, is_dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from functools import partial
 from inspect import isawaitable
@@ -89,6 +91,7 @@ from coding_agent.server.binding_resolver import BindingResolver, DefaultBinding
 from coding_agent.server.execution_binding import (
     CloudWorkspaceBinding,
     ExecutionBinding,
+    ExternalWorkerBinding,
     LocalExecutionBinding,
 )
 from coding_agent.server.stores.workspace_store import (
@@ -107,6 +110,29 @@ T = TypeVar("T")
 
 def _approval_decision_message_id(session_id: str, request_id: str) -> str:
     return f"approval_decision:{session_id}:{request_id}"
+
+
+def _hash_claim_token(claim_token: str) -> str:
+    return hashlib.sha256(claim_token.encode("utf-8")).hexdigest()
+
+
+def _metadata_required_str(metadata: Mapping[str, object], key: str) -> str:
+    value = metadata.get(key)
+    if not isinstance(value, str) or not value:
+        raise RuntimeError(f"runtime run metadata is missing {key}")
+    return value
+
+
+def _optional_metadata_datetime(
+    metadata: Mapping[str, object],
+    key: str,
+) -> datetime | None:
+    value = metadata.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise RuntimeError(f"runtime run metadata {key} must be a non-empty string")
+    return datetime.fromisoformat(value)
 
 
 def _subagent_message_id(session_id: str) -> str:
@@ -219,6 +245,14 @@ class CancelTurnResult:
     status: CancelTurnStatus
 
 
+@dataclass(frozen=True)
+class ExternalWorkerClaim:
+    run: AgentRunRecord
+    claim_token: str
+    prompt: str
+    session: Session
+
+
 class WorkspaceMetadataStoreProtocol(Protocol):
     async def save(self, record: WorkspaceRecord) -> None: ...
 
@@ -266,6 +300,14 @@ class RuntimeStoreProtocol(Protocol):
     async def load_agent_run(self, run_id: str) -> AgentRunRecord | None: ...
 
     async def list_agent_runs(self, session_id: str) -> list[AgentRunRecord]: ...
+
+    async def claim_external_worker_run(
+        self,
+        *,
+        session_id: str | None,
+        executor_kind: str,
+        claim_metadata: JSONObject,
+    ) -> AgentRunRecord | None: ...
 
     async def append_runtime_event(
         self,
@@ -924,6 +966,213 @@ class SessionManager:
             limit=limit,
         )
 
+    async def request_external_worker_run(
+        self,
+        session_id: str,
+        prompt: str,
+    ) -> AgentRunRecord:
+        store = self._require_runtime_store()
+        async with self._lock:
+            await self._assert_owner(session_id)
+            session = await self.get_session_async(session_id)
+            if not isinstance(session.execution_binding, ExternalWorkerBinding):
+                raise ValueError("session does not use external worker execution")
+            if session.turn_in_progress or session.turn_status in {
+                "running",
+                "cancelling",
+            }:
+                raise RuntimeError("turn already in progress")
+            run_id = uuid.uuid4().hex
+            now = datetime.now(UTC)
+            metadata = self._run_metadata_for_session(session)
+            metadata["prompt"] = prompt
+            metadata["requested_at"] = now.isoformat()
+            metadata["run_request_status"] = "requested"
+            record = await store.create_agent_run(
+                AgentRunRecord(
+                    run_id=run_id,
+                    session_id=session.id,
+                    tape_id=session.tape_id,
+                    parent_run_id=None,
+                    agent_id=None,
+                    status="requested",
+                    started_at=now,
+                    metadata=metadata,
+                    result={},
+                    error=None,
+                )
+            )
+            session.current_turn_id = run_id
+            session.turn_in_progress = True
+            session.turn_status = "running"
+            session.last_activity = now
+            session.last_failure_details = None
+            await self._persist_session_async(session)
+            return record
+
+    async def claim_external_worker_run(
+        self,
+        *,
+        worker_id: str,
+        executor_kind: str,
+        session_id: str | None = None,
+        lease_seconds: int = 30,
+    ) -> ExternalWorkerClaim | None:
+        store = self._require_runtime_store()
+        claim_token = secrets.token_urlsafe(32)
+        now = datetime.now(UTC)
+        lease_expires_at = now + timedelta(seconds=lease_seconds)
+        claim_metadata: JSONObject = {
+            "worker_id": worker_id,
+            "claim_token_hash": _hash_claim_token(claim_token),
+            "claimed_at": now.isoformat(),
+            "lease_expires_at": lease_expires_at.isoformat(),
+        }
+        run = await store.claim_external_worker_run(
+            session_id=session_id,
+            executor_kind=executor_kind,
+            claim_metadata=claim_metadata,
+        )
+        if run is None:
+            return None
+        session = await self.get_session_async(run.session_id)
+        prompt = _metadata_required_str(run.metadata, "prompt")
+        return ExternalWorkerClaim(
+            run=run,
+            claim_token=claim_token,
+            prompt=prompt,
+            session=session,
+        )
+
+    async def heartbeat_external_worker_run(
+        self,
+        *,
+        run_id: str,
+        worker_id: str,
+        claim_token: str,
+        lease_seconds: int = 30,
+    ) -> AgentRunRecord:
+        run = await self._load_and_authorize_external_worker_run(
+            run_id=run_id,
+            worker_id=worker_id,
+            claim_token=claim_token,
+        )
+        metadata = dict(run.metadata)
+        metadata["lease_expires_at"] = (
+            datetime.now(UTC) + timedelta(seconds=lease_seconds)
+        ).isoformat()
+        metadata["last_heartbeat_at"] = datetime.now(UTC).isoformat()
+        status = "running" if run.status == "claimed" else run.status
+        return await self._require_runtime_store().update_agent_run(
+            run_id,
+            status=status,
+            ended_at=run.ended_at,
+            metadata=cast(JSONObject, metadata),
+            result=run.result,
+            error=run.error,
+        )
+
+    async def append_external_worker_event(
+        self,
+        *,
+        run_id: str,
+        worker_id: str,
+        claim_token: str,
+        event_id: str,
+        event_kind: str,
+        payload: JSONObject,
+        created_at: datetime,
+    ) -> RuntimeEventRecord:
+        _ = await self._load_and_authorize_external_worker_run(
+            run_id=run_id,
+            worker_id=worker_id,
+            claim_token=claim_token,
+        )
+        return await self._require_runtime_store().append_runtime_event(
+            RuntimeEventRecord(
+                event_id=event_id,
+                run_id=run_id,
+                event_kind=event_kind,
+                payload=payload,
+                created_at=created_at,
+            )
+        )
+
+    async def finalize_external_worker_run(
+        self,
+        *,
+        run_id: str,
+        worker_id: str,
+        claim_token: str,
+        status: str,
+        result: JSONObject,
+        error: str | None,
+        tape_id: str | None,
+        tape_entries: list[JSONObject] | None = None,
+    ) -> AgentRunRecord:
+        run = await self._load_and_authorize_external_worker_run(
+            run_id=run_id,
+            worker_id=worker_id,
+            claim_token=claim_token,
+        )
+        if status not in {"completed", "cancelled", "failed"}:
+            raise ValueError("external worker final status is invalid")
+        metadata = dict(run.metadata)
+        metadata["finalized_at"] = datetime.now(UTC).isoformat()
+        if tape_id is not None:
+            metadata["final_tape_id"] = tape_id
+        if tape_id is not None and tape_entries is not None:
+            await self._tape_store.save(tape_id, tape_entries)
+        updated = await self._require_runtime_store().update_agent_run(
+            run_id,
+            status=status,
+            ended_at=datetime.now(UTC),
+            metadata=cast(JSONObject, metadata),
+            result=result,
+            error=error,
+        )
+        async with self._lock:
+            session = await self.get_session_async(run.session_id)
+            if tape_id is not None:
+                session.tape_id = tape_id
+            session.turn_in_progress = False
+            session.turn_status = (
+                cast(TurnStatus, status)
+                if status in {"cancelled", "failed"}
+                else "idle"
+            )
+            session.current_turn_id = run_id
+            session.last_activity = datetime.now(UTC)
+            session.last_failure_details = error if status == "failed" else None
+            await self._persist_session_async(session)
+        return updated
+
+    async def _load_and_authorize_external_worker_run(
+        self,
+        *,
+        run_id: str,
+        worker_id: str,
+        claim_token: str,
+    ) -> AgentRunRecord:
+        run = await self.load_runtime_run(run_id)
+        metadata = run.metadata
+        if metadata.get("execution_binding_kind") != "external_worker":
+            raise ValueError("runtime run is not external worker owned")
+        if metadata.get("worker_id") != worker_id:
+            raise PermissionError("external worker does not own this run")
+        token_hash = metadata.get("claim_token_hash")
+        if not isinstance(token_hash, str) or not secrets.compare_digest(
+            token_hash,
+            _hash_claim_token(claim_token),
+        ):
+            raise PermissionError("external worker claim token is invalid")
+        if run.status not in {"claimed", "running", "cancelling"}:
+            raise PermissionError("external worker claim is expired or inactive")
+        lease_expires_at = _optional_metadata_datetime(metadata, "lease_expires_at")
+        if lease_expires_at is None or lease_expires_at <= datetime.now(UTC):
+            raise PermissionError("external worker claim is expired or inactive")
+        return run
+
     async def list_workspace_records(self) -> list[WorkspaceRecord]:
         if self._workspace_metadata_store is None:
             raise RuntimeError("workspace metadata store is not configured")
@@ -1183,12 +1432,22 @@ class SessionManager:
             )
 
     def _run_metadata_for_session(self, session: Session) -> JSONObject:
-        return {
+        metadata: JSONObject = {
             "provider_name": session.provider_name,
             "model_name": session.model_name,
             "approval_policy": session.approval_policy.value,
             "max_steps": session.max_steps,
+            "execution_binding_kind": session.execution_binding.kind,
         }
+        if isinstance(session.execution_binding, ExternalWorkerBinding):
+            metadata["executor_kind"] = session.execution_binding.executor_kind
+            metadata["worker_pool"] = session.execution_binding.worker_pool
+            if session.execution_binding.workspace_ref is not None:
+                metadata["workspace_ref"] = cast(
+                    RuntimeJSONValue,
+                    dict(session.execution_binding.workspace_ref),
+                )
+        return metadata
 
     def _result_from_turn_outcome(self, outcome: TurnOutcome) -> JSONObject:
         return {
@@ -1346,6 +1605,12 @@ class SessionManager:
                 continue
             runs = await self._runtime_store.list_agent_runs(session_id)
             for run in runs:
+                if await self._recover_expired_external_worker_run(
+                    run,
+                    recovered_at=recovery_time,
+                ):
+                    recovered_count += 1
+                    continue
                 if run.status != "running" or run.ended_at is not None:
                     continue
                 metadata = dict(run.metadata)
@@ -1364,6 +1629,41 @@ class SessionManager:
                 )
                 recovered_count += 1
         return recovered_count
+
+    async def _recover_expired_external_worker_run(
+        self,
+        run: AgentRunRecord,
+        *,
+        recovered_at: datetime,
+    ) -> bool:
+        if self._runtime_store is None:
+            return False
+        if run.metadata.get("execution_binding_kind") != "external_worker":
+            return False
+        if run.status not in {"claimed", "running", "cancelling"}:
+            return False
+        lease_expires_at = _optional_metadata_datetime(
+            run.metadata,
+            "lease_expires_at",
+        )
+        if lease_expires_at is None or lease_expires_at > recovered_at:
+            return False
+        metadata = dict(run.metadata)
+        metadata["reclaimable"] = True
+        metadata["recovered_at"] = recovered_at.isoformat()
+        metadata["recovery_reason"] = "external_worker_lease_expired"
+        metadata["previous_status"] = run.status
+        if self._owner_id is not None:
+            metadata["recovered_by_owner_id"] = self._owner_id
+        await self._runtime_store.update_agent_run(
+            run.run_id,
+            status="expired",
+            ended_at=None,
+            metadata=cast(JSONObject, metadata),
+            result=run.result,
+            error="external worker lease expired",
+        )
+        return True
 
     async def _append_runtime_wire_event(
         self,
@@ -2366,6 +2666,56 @@ class SessionManager:
             await self._assert_owner(session_id)
             session = await self.get_session_async(session_id)
             task = session.task
+            if isinstance(session.execution_binding, ExternalWorkerBinding):
+                if session.current_turn_id is None or not session.turn_in_progress:
+                    session.turn_status = "idle"
+                    session.turn_in_progress = False
+                    session.last_activity = datetime.now(UTC)
+                    await self._persist_session_async(session)
+                    return CancelTurnResult(
+                        session_id=session_id,
+                        turn_id=session.current_turn_id,
+                        status="idle",
+                    )
+                if self._runtime_store is not None:
+                    run = await self.load_runtime_run(session.current_turn_id)
+                    metadata = dict(run.metadata)
+                    metadata["cancel_requested_at"] = datetime.now(UTC).isoformat()
+                    if run.status in {"requested", "expired"}:
+                        await self._runtime_store.update_agent_run(
+                            run.run_id,
+                            status="cancelled",
+                            ended_at=datetime.now(UTC),
+                            metadata=cast(JSONObject, metadata),
+                            result=run.result,
+                            error="cancelled before claim",
+                        )
+                        session.turn_status = "idle"
+                        session.turn_in_progress = False
+                        session.last_activity = datetime.now(UTC)
+                        await self._persist_session_async(session)
+                        return CancelTurnResult(
+                            session_id=session_id,
+                            turn_id=session.current_turn_id,
+                            status="cancelled",
+                        )
+                    await self._runtime_store.update_agent_run(
+                        run.run_id,
+                        status="cancelling",
+                        ended_at=run.ended_at,
+                        metadata=cast(JSONObject, metadata),
+                        result=run.result,
+                        error=run.error,
+                    )
+                session.turn_status = "cancelling"
+                session.turn_in_progress = True
+                session.last_activity = datetime.now(UTC)
+                await self._persist_session_async(session)
+                return CancelTurnResult(
+                    session_id=session_id,
+                    turn_id=session.current_turn_id,
+                    status="cancelling",
+                )
             if task is None or task.done():
                 status: CancelTurnStatus
                 if session.turn_status == "cancelling":

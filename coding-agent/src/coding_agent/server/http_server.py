@@ -93,7 +93,11 @@ from coding_agent.topic_store import (
     TopicRecallLinkRecord,
     TopicRecord,
 )
-from coding_agent.server.auth import AuthContext, auth_context_from_headers, verify_api_key
+from coding_agent.server.auth import (
+    AuthContext,
+    auth_context_from_headers,
+    verify_api_key,
+)
 from coding_agent.server.binding_resolver import DefaultBindingResolver
 from coding_agent.server.developer_console import (
     ConsoleActionSummary,
@@ -166,6 +170,7 @@ from coding_agent.server.developer_console import (
 from coding_agent.server.execution_binding import (
     CloudWorkspaceBinding,
     ExecutionBinding,
+    ExternalWorkerBinding,
     LocalExecutionBinding,
 )
 from coding_agent.server.rate_limit import RateLimits, limiter
@@ -205,6 +210,14 @@ from coding_agent.server.schemas import (
     WorkspaceRetentionResponse,
     WorkspaceSummarySchema,
     WorkspaceUnpinRequest,
+    WorkerClaimRequest,
+    WorkerClaimResponse,
+    WorkerApprovalRequest,
+    WorkerApprovalResponse,
+    WorkerHeartbeatRequest,
+    WorkerHeartbeatResponse,
+    WorkerRunCompleteRequest,
+    WorkerRuntimeEventsRequest,
 )
 from coding_agent.server.session_manager import Session, SessionManager
 from coding_agent.server.stores.session_owner_store import (
@@ -234,7 +247,12 @@ from coding_agent.wire import (
     TurnEnd,
     WireMessage,
 )
-from coding_agent.wire.protocol import ThinkingDelta, ToolResultDelta, TurnStatusDelta
+from coding_agent.wire.protocol import (
+    CompletionStatus,
+    ThinkingDelta,
+    ToolResultDelta,
+    TurnStatusDelta,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1745,6 +1763,13 @@ def _execution_binding_from_request(
             workspace_provider=binding.workspace_provider,
             provider_instance_id=binding.provider_instance_id,
         )
+    if binding.kind == "external_worker":
+        return ExternalWorkerBinding(
+            executor_kind=binding.executor_kind,
+            worker_pool=binding.worker_pool,
+            workspace_ref=binding.workspace_ref,
+            provider_instance_id=binding.provider_instance_id,
+        )
     return CloudWorkspaceBinding(
         workspace_url=binding.workspace_url,
         workspace_id=binding.workspace_id,
@@ -2347,6 +2372,9 @@ async def send_prompt(
             ) from exc
         raise
 
+    if isinstance(session.execution_binding, ExternalWorkerBinding):
+        return await _send_external_worker_prompt(session_id, prompt_text)
+
     session.turn_in_progress = True
     session.last_activity = datetime.now(UTC)
 
@@ -2390,6 +2418,253 @@ async def send_prompt(
         event_generator(),
         media_type="text/event-stream",
     )
+
+
+async def _send_external_worker_prompt(
+    session_id: str,
+    prompt_text: str,
+) -> EventSourceResponse:
+    try:
+        run = await session_manager.request_external_worker_run(session_id, prompt_text)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
+    except SessionOwnershipConflictError as exc:
+        raise _owner_conflict_http_exception(exc, session_id=session_id) from exc
+    except RuntimeError as exc:
+        if str(exc) == "turn already in progress":
+            raise HTTPException(
+                status_code=409,
+                detail="Turn already in progress",
+            ) from exc
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    run_requested_event = {
+        "event": "RunRequested",
+        "data": json.dumps(
+            {
+                "session_id": session_id,
+                "run_id": run.run_id,
+                "status": run.status,
+            }
+        ),
+    }
+
+    async def event_generator() -> AsyncIterator[dict[str, str]]:
+        yield run_requested_event
+
+    return EventSourceResponse(
+        event_generator(),
+        media_type="text/event-stream",
+    )
+
+
+@app.post("/worker/runs/claim", response_model=WorkerClaimResponse)
+@limiter.limit(RateLimits.SEND_PROMPT)
+async def claim_worker_run(
+    request: Request,
+    body: WorkerClaimRequest,
+    api_key: str | None = Depends(verify_api_key),
+) -> WorkerClaimResponse:
+    try:
+        claim = await session_manager.claim_external_worker_run(
+            worker_id=body.worker_id,
+            executor_kind=body.executor_kind,
+            session_id=body.session_id,
+            lease_seconds=body.lease_seconds,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if claim is None:
+        raise HTTPException(status_code=404, detail="No worker run available")
+    session = claim.session
+    return WorkerClaimResponse(
+        run_id=claim.run.run_id,
+        session_id=claim.run.session_id,
+        claim_token=claim.claim_token,
+        prompt=claim.prompt,
+        tape_id=claim.run.tape_id,
+        approval_policy=session.approval_policy.value,
+        provider_name=session.provider_name,
+        model_name=session.model_name,
+        base_url=session.base_url,
+        max_steps=session.max_steps,
+    )
+
+
+@app.post("/worker/runs/{run_id}/heartbeat", response_model=WorkerHeartbeatResponse)
+@limiter.limit(RateLimits.SEND_PROMPT)
+async def heartbeat_worker_run(
+    request: Request,
+    run_id: str,
+    body: WorkerHeartbeatRequest,
+    api_key: str | None = Depends(verify_api_key),
+) -> WorkerHeartbeatResponse:
+    try:
+        run = await session_manager.heartbeat_external_worker_run(
+            run_id=run_id,
+            worker_id=body.worker_id,
+            claim_token=body.claim_token,
+            lease_seconds=body.lease_seconds,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return WorkerHeartbeatResponse(
+        run_id=run.run_id,
+        status=run.status,
+        cancel_requested=bool(run.metadata.get("cancel_requested_at")),
+    )
+
+
+@app.post("/worker/runs/{run_id}/events", response_model=RuntimeEventsResponse)
+@limiter.limit(RateLimits.SEND_PROMPT)
+async def append_worker_run_events(
+    request: Request,
+    run_id: str,
+    body: WorkerRuntimeEventsRequest,
+    api_key: str | None = Depends(verify_api_key),
+) -> RuntimeEventsResponse:
+    records: list[RuntimeEventRecord] = []
+    try:
+        run = await session_manager.load_runtime_run(run_id)
+        session = await session_manager.get_session_async(run.session_id)
+        for event in body.events:
+            payload = cast(dict[str, JSONValue], dict(event.data))
+            record = await session_manager.append_external_worker_event(
+                run_id=run_id,
+                worker_id=body.worker_id,
+                claim_token=body.claim_token,
+                event_id=event.event_id,
+                event_kind=f"wire.{event.event}",
+                payload=payload,
+                created_at=event.created_at or datetime.now(UTC),
+            )
+            records.append(record)
+            await _broadcast_event(
+                session,
+                {"event": event.event, "data": json.dumps(event.data)},
+            )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return RuntimeEventsResponse(
+        run_id=run_id,
+        events=[_runtime_event_response(record) for record in records],
+    )
+
+
+@app.post("/worker/runs/{run_id}/approval", response_model=WorkerApprovalResponse)
+@limiter.limit(RateLimits.APPROVE)
+async def request_worker_approval(
+    request: Request,
+    run_id: str,
+    body: WorkerApprovalRequest,
+    api_key: str | None = Depends(verify_api_key),
+) -> WorkerApprovalResponse:
+    try:
+        run = await session_manager.heartbeat_external_worker_run(
+            run_id=run_id,
+            worker_id=body.worker_id,
+            claim_token=body.claim_token,
+        )
+        approval = await wait_for_approval(
+            run.session_id,
+            ApprovalRequest(
+                session_id=run.session_id,
+                agent_id="",
+                request_id=body.request_id,
+                tool=body.tool_name,
+                args=body.arguments,
+                timeout_seconds=body.timeout_seconds,
+            ),
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return WorkerApprovalResponse(
+        request_id=approval.request_id,
+        approved=approval.approved,
+        feedback=approval.feedback,
+        scope=approval.scope,
+    )
+
+
+@app.post("/worker/runs/{run_id}/complete", response_model=RuntimeRunResponse)
+@limiter.limit(RateLimits.SEND_PROMPT)
+async def complete_worker_run(
+    request: Request,
+    run_id: str,
+    body: WorkerRunCompleteRequest,
+    api_key: str | None = Depends(verify_api_key),
+) -> RuntimeRunResponse:
+    try:
+        run = await session_manager.finalize_external_worker_run(
+            run_id=run_id,
+            worker_id=body.worker_id,
+            claim_token=body.claim_token,
+            status=body.status,
+            result=cast(dict[str, JSONValue], dict(body.result)),
+            error=body.error,
+            tape_id=body.tape_id,
+            tape_entries=(
+                None
+                if body.tape_entries is None
+                else [
+                    cast(dict[str, JSONValue], dict(entry))
+                    for entry in body.tape_entries
+                ]
+            ),
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    completion_status = _worker_completion_status(body.status)
+    try:
+        session = await session_manager.get_session_async(run.session_id)
+        await _broadcast_event(
+            session,
+            {
+                "event": "TurnEnd",
+                "data": json.dumps(
+                    {
+                        "session_id": run.session_id,
+                        "agent_id": "",
+                        "turn_id": run.run_id,
+                        "completion_status": completion_status,
+                        "timestamp": datetime.now(UTC).isoformat(),
+                    }
+                ),
+            },
+        )
+    except Exception:
+        logger.exception(
+            "Failed to broadcast external worker completion",
+            extra={"run_id": run.run_id, "session_id": run.session_id},
+        )
+    return _runtime_run_response(run)
+
+
+def _worker_completion_status(status: str) -> str:
+    if status == "completed":
+        return CompletionStatus.COMPLETED.value
+    if status == "cancelled":
+        return CompletionStatus.BLOCKED.value
+    return CompletionStatus.ERROR.value
 
 
 @app.post("/sessions/{session_id}/approve", response_model=ApprovalResponseSchema)

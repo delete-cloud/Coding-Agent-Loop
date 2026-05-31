@@ -2317,6 +2317,274 @@ class TestPromptStreaming:
         assert [event["event"] for event in events] == ["Error"]
         assert events[0]["data"]["error"] == "stale owner or fencing token rejected"
 
+    async def test_external_worker_prompt_creates_run_without_running_agent(
+        self, client, monkeypatch
+    ):
+        store = FakeExternalWorkerRuntimeStore()
+        session_manager.configure_runtime_store(store)
+        create_resp = await client.post(
+            "/sessions",
+            json={
+                "approval_policy": "yolo",
+                "execution_binding": {
+                    "kind": "external_worker",
+                    "executor_kind": "local_cli",
+                    "worker_pool": "default",
+                    "workspace_ref": {
+                        "kind": "local_path",
+                        "display_path": "/tmp/repo",
+                    },
+                },
+            },
+        )
+        assert create_resp.status_code == 200
+        session_id = create_resp.json()["session_id"]
+
+        async def fail_run_agent(_session_id: str, _prompt: str) -> None:
+            raise AssertionError("external worker prompt must not run server agent")
+
+        monkeypatch.setattr(session_manager, "run_agent", fail_run_agent)
+
+        async with aconnect_sse(
+            client,
+            "POST",
+            f"/sessions/{session_id}/prompt",
+            json={"prompt": "run locally"},
+        ) as event_source:
+            async for sse in event_source.aiter_sse():
+                assert sse.event == "RunRequested"
+                payload = json.loads(sse.data)
+                run_id = payload["run_id"]
+                break
+
+        run = store.runs[run_id]
+        assert run.status == "requested"
+        assert run.metadata["prompt"] == "run locally"
+        assert run.metadata["execution_binding_kind"] == "external_worker"
+        assert run.metadata["executor_kind"] == "local_cli"
+
+    async def test_external_worker_claim_events_and_complete(self, client):
+        store = FakeExternalWorkerRuntimeStore()
+        session_manager.configure_runtime_store(store)
+        create_resp = await client.post(
+            "/sessions",
+            json={
+                "approval_policy": "yolo",
+                "execution_binding": {
+                    "kind": "external_worker",
+                    "executor_kind": "local_cli",
+                },
+            },
+        )
+        session_id = create_resp.json()["session_id"]
+        run = await session_manager.request_external_worker_run(session_id, "hello")
+
+        claim_resp = await client.post(
+            "/worker/runs/claim",
+            json={
+                "worker_id": "worker-1",
+                "executor_kind": "local_cli",
+                "session_id": session_id,
+            },
+        )
+        assert claim_resp.status_code == 200
+        claim = claim_resp.json()
+        assert claim["run_id"] == run.run_id
+        assert claim["prompt"] == "hello"
+        assert store.runs[run.run_id].status == "claimed"
+
+        queue: asyncio.Queue[dict[str, str]] = asyncio.Queue()
+        await session_manager.register_owned_event_queue_async(session_id, queue)
+        events_resp = await client.post(
+            f"/worker/runs/{run.run_id}/events",
+            json={
+                "worker_id": "worker-1",
+                "claim_token": claim["claim_token"],
+                "events": [
+                    {
+                        "event_id": "event-1",
+                        "event": "StreamDelta",
+                        "data": {
+                            "session_id": session_id,
+                            "agent_id": "",
+                            "content": "hi",
+                        },
+                    }
+                ],
+            },
+        )
+        rebroadcast = await asyncio.wait_for(queue.get(), timeout=1.0)
+        await session_manager.remove_event_queue_async(session_id, queue)
+        assert events_resp.status_code == 200
+        assert events_resp.json()["events"][0]["event_kind"] == "wire.StreamDelta"
+        assert rebroadcast["event"] == "StreamDelta"
+        assert json.loads(rebroadcast["data"])["content"] == "hi"
+
+        final_tape_id = f"tape-final-{run.run_id}"
+        complete_resp = await client.post(
+            f"/worker/runs/{run.run_id}/complete",
+            json={
+                "worker_id": "worker-1",
+                "claim_token": claim["claim_token"],
+                "status": "completed",
+                "result": {"stop_reason": "no_tool_calls"},
+                "tape_id": final_tape_id,
+                "tape_entries": [
+                    {
+                        "kind": "message",
+                        "payload": {"role": "user", "content": "hello"},
+                    }
+                ],
+            },
+        )
+        assert complete_resp.status_code == 200
+        assert complete_resp.json()["status"] == "completed"
+        session = await session_manager.get_session_async(session_id)
+        assert session.turn_in_progress is False
+        assert session.turn_status == "idle"
+        assert session.tape_id == final_tape_id
+        assert await session_manager._tape_store.load(final_tape_id) == [
+            {
+                "kind": "message",
+                "payload": {"role": "user", "content": "hello"},
+            }
+        ]
+
+    async def test_external_worker_approval_uses_server_approval_flow(
+        self, client, monkeypatch
+    ):
+        store = FakeExternalWorkerRuntimeStore()
+        session_manager.configure_runtime_store(store)
+        create_resp = await client.post(
+            "/sessions",
+            json={
+                "approval_policy": "interactive",
+                "execution_binding": {
+                    "kind": "external_worker",
+                    "executor_kind": "local_cli",
+                },
+            },
+        )
+        session_id = create_resp.json()["session_id"]
+        run = await session_manager.request_external_worker_run(session_id, "hello")
+        claim_resp = await client.post(
+            "/worker/runs/claim",
+            json={
+                "worker_id": "worker-1",
+                "executor_kind": "local_cli",
+                "session_id": session_id,
+            },
+        )
+        claim = claim_resp.json()
+        observed: list[ApprovalRequest] = []
+
+        async def fake_wait_for_approval(
+            requested_session_id: str,
+            approval_req: ApprovalRequest,
+        ) -> ApprovalResponse:
+            assert requested_session_id == session_id
+            observed.append(approval_req)
+            return ApprovalResponse(
+                session_id=session_id,
+                request_id=approval_req.request_id,
+                approved=True,
+                scope="once",
+            )
+
+        monkeypatch.setattr(http_server, "wait_for_approval", fake_wait_for_approval)
+
+        approval_resp = await client.post(
+            f"/worker/runs/{run.run_id}/approval",
+            json={
+                "worker_id": "worker-1",
+                "claim_token": claim["claim_token"],
+                "request_id": "approval-1",
+                "tool_name": "shell_execute",
+                "arguments": {"command": "pwd"},
+            },
+        )
+
+        assert approval_resp.status_code == 200
+        assert approval_resp.json() == {
+            "request_id": "approval-1",
+            "approved": True,
+            "feedback": None,
+            "scope": "once",
+        }
+        assert observed[0].tool == "shell_execute"
+        assert observed[0].args == {"command": "pwd"}
+
+    async def test_external_worker_recovery_expires_stale_claim(self, client):
+        store = FakeExternalWorkerRuntimeStore()
+        session_manager.configure_runtime_store(store)
+        create_resp = await client.post(
+            "/sessions",
+            json={
+                "approval_policy": "yolo",
+                "execution_binding": {
+                    "kind": "external_worker",
+                    "executor_kind": "local_cli",
+                },
+            },
+        )
+        session_id = create_resp.json()["session_id"]
+        run = await session_manager.request_external_worker_run(session_id, "hello")
+        claim = await session_manager.claim_external_worker_run(
+            worker_id="worker-1",
+            executor_kind="local_cli",
+            session_id=session_id,
+            lease_seconds=30,
+        )
+        assert claim is not None
+        stale_run = store.runs[run.run_id]
+        store.runs[run.run_id] = replace(
+            stale_run,
+            metadata={
+                **stale_run.metadata,
+                "lease_expires_at": "2026-01-01T00:00:00+00:00",
+            },
+        )
+
+        recovered = await session_manager.recover_stale_runtime_runs(
+            recovered_at=datetime(2026, 1, 1, 0, 1, tzinfo=UTC),
+        )
+
+        assert recovered == 1
+        recovered_run = store.runs[run.run_id]
+        assert recovered_run.status == "expired"
+        assert recovered_run.metadata["recovery_reason"] == (
+            "external_worker_lease_expired"
+        )
+        assert recovered_run.metadata["reclaimable"] is True
+
+    async def test_external_worker_fake_store_only_claims_reclaimable_runs(self):
+        store = FakeExternalWorkerRuntimeStore()
+        now = datetime.now(UTC)
+        store.runs["run-completed"] = AgentRunRecord(
+            run_id="run-completed",
+            session_id="session-1",
+            tape_id=None,
+            parent_run_id=None,
+            agent_id=None,
+            status="completed",
+            started_at=now,
+            ended_at=now,
+            metadata={
+                "execution_binding_kind": "external_worker",
+                "executor_kind": "local_cli",
+            },
+            result={},
+            error=None,
+        )
+
+        claim = await store.claim_external_worker_run(
+            session_id="session-1",
+            executor_kind="local_cli",
+            claim_metadata={"worker_id": "worker-1"},
+        )
+
+        assert claim is None
+
     async def test_prompt_returns_parent_turn_end_when_agent_bootstrap_fails(
         self, client
     ):
@@ -6467,7 +6735,9 @@ def test_http_server_import_falls_back_when_agent_toml_is_unreadable(
     original_module = sys.modules.get("coding_agent.server.http_server")
     server_module = sys.modules.get("coding_agent.server")
     original_parent_attr = (
-        getattr(server_module, "http_server", None) if server_module is not None else None
+        getattr(server_module, "http_server", None)
+        if server_module is not None
+        else None
     )
     monkeypatch.delitem(sys.modules, "coding_agent.server.http_server", raising=False)
     if server_module is not None:
@@ -6497,7 +6767,9 @@ def test_http_server_import_raises_on_invalid_agent_toml(monkeypatch) -> None:
     original_module = sys.modules.get("coding_agent.server.http_server")
     server_module = sys.modules.get("coding_agent.server")
     original_parent_attr = (
-        getattr(server_module, "http_server", None) if server_module is not None else None
+        getattr(server_module, "http_server", None)
+        if server_module is not None
+        else None
     )
     monkeypatch.delitem(sys.modules, "coding_agent.server.http_server", raising=False)
     if server_module is not None:
@@ -6775,6 +7047,75 @@ class FakeRuntimeReplayStore:
             and event.sequence is not None
             and event.sequence > after_sequence
         ][:limit]
+
+
+class FakeExternalWorkerRuntimeStore:
+    def __init__(self) -> None:
+        self.runs: dict[str, AgentRunRecord] = {}
+        self.events: list[RuntimeEventRecord] = []
+
+    async def create_agent_run(self, record: AgentRunRecord) -> AgentRunRecord:
+        self.runs[record.run_id] = record
+        return record
+
+    async def load_agent_run(self, run_id: str) -> AgentRunRecord | None:
+        return self.runs.get(run_id)
+
+    async def list_agent_runs(self, session_id: str) -> list[AgentRunRecord]:
+        return [run for run in self.runs.values() if run.session_id == session_id]
+
+    async def claim_external_worker_run(
+        self,
+        *,
+        session_id: str | None,
+        executor_kind: str,
+        claim_metadata: dict[str, object],
+    ) -> AgentRunRecord | None:
+        for run in self.runs.values():
+            if session_id is not None and run.session_id != session_id:
+                continue
+            if run.status not in {"requested", "expired"}:
+                continue
+            if run.metadata.get("executor_kind") != executor_kind:
+                continue
+            claimed = replace(
+                run,
+                status="claimed",
+                metadata={**run.metadata, **claim_metadata},
+            )
+            self.runs[run.run_id] = claimed
+            return claimed
+        return None
+
+    async def update_agent_run(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        ended_at: datetime | None,
+        metadata: dict[str, object],
+        result: dict[str, object],
+        error: str | None,
+    ) -> AgentRunRecord:
+        run = self.runs[run_id]
+        updated = replace(
+            run,
+            status=status,
+            ended_at=ended_at,
+            metadata=metadata,
+            result=result,
+            error=error,
+        )
+        self.runs[run_id] = updated
+        return updated
+
+    async def append_runtime_event(
+        self,
+        record: RuntimeEventRecord,
+    ) -> RuntimeEventRecord:
+        stored = replace(record, sequence=len(self.events) + 1)
+        self.events.append(stored)
+        return stored
 
 
 class TestRuntimeReplayEndpoints:

@@ -324,6 +324,119 @@ def test_remote_add_list_remove_manage_named_endpoint(
     assert json.loads(config_path.read_text(encoding="utf-8")) == {"remotes": {}}
 
 
+def test_remote_local_run_uses_external_worker_binding(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_path = tmp_path / "remotes.json"
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    calls: list[dict[str, object]] = []
+
+    async def fake_run_local_worker_once(**kwargs):
+        calls.append(kwargs)
+        return 0
+
+    monkeypatch.setattr(
+        "coding_agent.remote.worker.run_local_worker_once",
+        fake_run_local_worker_once,
+    )
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example", "--token", "secret-token"],
+        catch_exceptions=False,
+    )
+
+    result = runner.invoke(
+        main,
+        [
+            "remote",
+            "local-run",
+            "dev",
+            "--repo",
+            str(repo_path),
+            "--goal",
+            "do local work",
+            "--approval",
+            "yolo",
+            "--max-steps",
+            "7",
+            "--worker-id",
+            "worker-test",
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        {
+            "base_url": "http://agent.example",
+            "headers": {"Authorization": "Bearer secret-token"},
+            "repo_path": repo_path.resolve(),
+            "goal": "do local work",
+            "approval_policy": "yolo",
+            "provider_name": None,
+            "model_name": None,
+            "base_url_override": None,
+            "max_steps": 7,
+            "worker_id": "worker-test",
+        }
+    ]
+
+
+def test_remote_worker_runs_external_worker_loop(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "remotes.json"
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    calls: list[dict[str, object]] = []
+
+    async def fake_run_worker_loop(**kwargs):
+        calls.append(kwargs)
+        return 0
+
+    monkeypatch.setattr(
+        "coding_agent.remote.worker.run_worker_loop",
+        fake_run_worker_loop,
+    )
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example", "--token", "secret-token"],
+        catch_exceptions=False,
+    )
+
+    result = runner.invoke(
+        main,
+        [
+            "remote",
+            "worker",
+            "dev",
+            "--repo",
+            str(repo_path),
+            "--worker-id",
+            "worker-test",
+            "--once",
+            "--poll-interval",
+            "0.5",
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        {
+            "base_url": "http://agent.example",
+            "headers": {"Authorization": "Bearer secret-token"},
+            "repo_path": repo_path.resolve(),
+            "worker_id": "worker-test",
+            "once": True,
+            "poll_interval_seconds": 0.5,
+        }
+    ]
+
+
 def test_remote_repl_creates_cloud_session_and_streams_prompt_events(
     tmp_path: Path, monkeypatch
 ) -> None:
