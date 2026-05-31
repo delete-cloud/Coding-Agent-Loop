@@ -45,6 +45,19 @@ class CloudWorkspaceBindingRequest(BaseModel):
     )
 
 
+class ExternalWorkerBindingRequest(BaseModel):
+    kind: Literal["external_worker"]
+    executor_kind: str = Field(..., min_length=1, max_length=100)
+    worker_pool: str = Field("default", min_length=1, max_length=100)
+    workspace_ref: dict[str, Any] | None = None
+    provider_instance_id: str | None = Field(
+        None,
+        min_length=1,
+        max_length=200,
+        pattern=r"^.*\S.*$",
+    )
+
+
 class DockerWorkspaceSourceRequest(BaseModel):
     kind: Literal["docker"]
     snapshot_archive_base64: str | None = Field(None, min_length=1)
@@ -62,7 +75,11 @@ class GitWorkspaceSourceRequest(BaseModel):
     runtime_profile: str | None = Field(None, min_length=1, max_length=100)
 
 
-ExecutionBindingRequest = LocalExecutionBindingRequest | CloudWorkspaceBindingRequest
+ExecutionBindingRequest = (
+    LocalExecutionBindingRequest
+    | CloudWorkspaceBindingRequest
+    | ExternalWorkerBindingRequest
+)
 WorkspaceSourceRequest = DockerWorkspaceSourceRequest | GitWorkspaceSourceRequest
 
 
@@ -205,6 +222,77 @@ class RuntimeEventResponse(BaseModel):
 class RuntimeEventsResponse(BaseModel):
     run_id: str
     events: list[RuntimeEventResponse]
+
+
+class WorkerClaimRequest(BaseModel):
+    worker_id: str = Field(..., min_length=1, max_length=200)
+    executor_kind: str = Field("local_cli", min_length=1, max_length=100)
+    session_id: str | None = Field(None, min_length=1, max_length=100)
+    lease_seconds: int = Field(30, ge=5, le=300)
+
+
+class WorkerClaimResponse(BaseModel):
+    run_id: str
+    session_id: str
+    claim_token: str
+    prompt: str
+    tape_id: str | None = None
+    approval_policy: str
+    provider_name: str | None = None
+    model_name: str | None = None
+    base_url: str | None = None
+    max_steps: int
+
+
+class WorkerHeartbeatRequest(BaseModel):
+    worker_id: str = Field(..., min_length=1, max_length=200)
+    claim_token: str = Field(..., min_length=1, max_length=500)
+    lease_seconds: int = Field(30, ge=5, le=300)
+
+
+class WorkerHeartbeatResponse(BaseModel):
+    run_id: str
+    status: str
+    cancel_requested: bool
+
+
+class WorkerRuntimeEventRequest(BaseModel):
+    event_id: str = Field(..., min_length=1, max_length=200)
+    event: str = Field(..., min_length=1, max_length=100)
+    data: dict[str, Any]
+    created_at: datetime | None = None
+
+
+class WorkerRuntimeEventsRequest(BaseModel):
+    worker_id: str = Field(..., min_length=1, max_length=200)
+    claim_token: str = Field(..., min_length=1, max_length=500)
+    events: list[WorkerRuntimeEventRequest] = Field(..., min_length=1, max_length=100)
+
+
+class WorkerRunCompleteRequest(BaseModel):
+    worker_id: str = Field(..., min_length=1, max_length=200)
+    claim_token: str = Field(..., min_length=1, max_length=500)
+    status: Literal["completed", "cancelled", "failed"] = "completed"
+    result: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = Field(None, min_length=1, max_length=2000)
+    tape_id: str | None = Field(None, min_length=1, max_length=200)
+    tape_entries: list[dict[str, Any]] | None = None
+
+
+class WorkerApprovalRequest(BaseModel):
+    worker_id: str = Field(..., min_length=1, max_length=200)
+    claim_token: str = Field(..., min_length=1, max_length=500)
+    request_id: str = Field(..., min_length=1, max_length=100)
+    tool_name: str = Field(..., min_length=1, max_length=200)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    timeout_seconds: int = Field(120, ge=1, le=3600)
+
+
+class WorkerApprovalResponse(BaseModel):
+    request_id: str
+    approved: bool
+    feedback: str | None = None
+    scope: Literal["once", "session", "always"] = "once"
 
 
 class WorkspaceDiffFileSchema(BaseModel):

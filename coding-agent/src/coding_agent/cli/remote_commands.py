@@ -347,6 +347,103 @@ def _remote_run_once(
     raise SystemExit(status)
 
 
+@remote.command("local-run")
+@click.argument("name")
+@click.option("--repo", default=".", help="Run tools against this local workspace.")
+@click.option("--goal", required=True, help="Prompt to execute locally.")
+@click.option(
+    "--approval",
+    "approval_policy",
+    default="yolo",
+    show_default=True,
+    type=REMOTE_APPROVAL_CHOICES,
+    help="Local worker approval policy.",
+)
+@click.option("--max-steps", default=30, show_default=True, help="Max steps per turn.")
+@click.option("--worker-id", default=None, help="Stable external worker id.")
+def remote_local_run(
+    name: str,
+    repo: str,
+    goal: str,
+    approval_policy: str,
+    max_steps: int,
+    worker_id: str | None,
+) -> None:
+    """Create an o6n-managed session and execute it in the local workspace."""
+    import asyncio
+    import uuid
+
+    from coding_agent.remote.client import auth_headers, get_remote
+    from coding_agent.remote.worker import run_local_worker_once
+
+    endpoint = get_remote(name)
+    repo_path = Path(repo).expanduser().resolve()
+    if not repo_path.is_dir():
+        raise click.ClickException(f"--repo must be an existing directory: {repo}")
+    resolved_worker_id = worker_id or f"local-cli-{uuid.uuid4().hex}"
+    status = asyncio.run(
+        run_local_worker_once(
+            base_url=endpoint.url,
+            headers=auth_headers(endpoint),
+            repo_path=repo_path,
+            goal=goal,
+            approval_policy=approval_policy,
+            provider_name=None,
+            model_name=None,
+            base_url_override=None,
+            max_steps=max_steps,
+            worker_id=resolved_worker_id,
+        )
+    )
+    raise SystemExit(status)
+
+
+@remote.command("worker")
+@click.argument("name")
+@click.option("--repo", default=".", help="Run claimed jobs against this workspace.")
+@click.option("--worker-id", required=True, help="Stable external worker id.")
+@click.option(
+    "--once",
+    is_flag=True,
+    help="Exit after one claimed run or after one empty poll.",
+)
+@click.option(
+    "--poll-interval",
+    default=2.0,
+    show_default=True,
+    type=click.FloatRange(min=0.0, min_open=True),
+    help="Seconds between empty claim polls.",
+)
+def remote_worker(
+    name: str,
+    repo: str,
+    worker_id: str,
+    once: bool,
+    poll_interval: float,
+) -> None:
+    """Run a local external worker for o6n-managed sessions."""
+    import asyncio
+
+    from coding_agent.remote.client import auth_headers, get_remote
+    from coding_agent.remote.worker import run_worker_loop
+
+    endpoint = get_remote(name)
+    repo_path = Path(repo).expanduser().resolve()
+    if not repo_path.is_dir():
+        raise click.ClickException(f"--repo must be an existing directory: {repo}")
+    status = asyncio.run(
+        run_worker_loop(
+            base_url=endpoint.url,
+            headers=auth_headers(endpoint),
+            repo_path=repo_path,
+            worker_id=worker_id,
+            once=once,
+            poll_interval_seconds=poll_interval,
+        )
+    )
+    raise SystemExit(status)
+
+
 def _format_cli_command(args: list[str]) -> str:
     return " ".join(shlex.quote(arg) for arg in args)
 

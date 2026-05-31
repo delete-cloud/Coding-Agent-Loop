@@ -61,6 +61,25 @@ class FakePool:
             }
             self.agent_runs[cast(str, run_id)] = row
             return row
+        if "FOR UPDATE SKIP LOCKED" in query:
+            session_id, executor_kind, claim_metadata = args
+            for row in self.agent_runs.values():
+                if session_id is not None and row["session_id"] != session_id:
+                    continue
+                if row["status"] not in {"requested", "expired"}:
+                    continue
+                metadata = cast(dict[str, object], row["metadata"])
+                if metadata.get("execution_binding_kind") != "external_worker":
+                    continue
+                if metadata.get("executor_kind") != executor_kind:
+                    continue
+                row["status"] = "claimed"
+                row["metadata"] = {
+                    **metadata,
+                    **cast(dict[str, object], claim_metadata),
+                }
+                return row
+            return None
         if "UPDATE agent_runs" in query:
             run_id, status, ended_at, metadata, result, error = args
             row = self.agent_runs.get(cast(str, run_id))
@@ -281,6 +300,46 @@ async def test_create_update_load_and_list_agent_runs(
     assert updated.metadata == {"model": "gpt-5", "steps": 4}
     assert updated.result == {"final_message": "done"}
     assert [run.run_id for run in listed] == ["run-1", "run-2"]
+
+
+@pytest.mark.asyncio
+async def test_claim_external_worker_run_marks_requested_run_claimed(
+    store: PGRuntimeStore,
+) -> None:
+    await store.create_agent_run(
+        AgentRunRecord(
+            run_id="run-worker",
+            session_id="session-worker",
+            tape_id=None,
+            parent_run_id=None,
+            agent_id=None,
+            status="requested",
+            started_at=_dt(9),
+            ended_at=None,
+            metadata={
+                "execution_binding_kind": "external_worker",
+                "executor_kind": "local_cli",
+                "prompt": "hello",
+            },
+            result={},
+            error=None,
+        )
+    )
+
+    claimed = await store.claim_external_worker_run(
+        session_id="session-worker",
+        executor_kind="local_cli",
+        claim_metadata={
+            "worker_id": "worker-1",
+            "claim_token_hash": "hash",
+        },
+    )
+
+    assert claimed is not None
+    assert claimed.run_id == "run-worker"
+    assert claimed.status == "claimed"
+    assert claimed.metadata["worker_id"] == "worker-1"
+    assert claimed.metadata["prompt"] == "hello"
 
 
 @pytest.mark.asyncio

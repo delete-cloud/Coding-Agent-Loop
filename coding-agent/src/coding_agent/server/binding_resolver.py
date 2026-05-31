@@ -5,10 +5,15 @@ from pathlib import Path
 from typing import Protocol
 
 from agentkit.environment import Environment
-from coding_agent.environment import CloudEnvironment, CloudWorkspaceClient, LocalEnvironment
+from coding_agent.environment import (
+    CloudEnvironment,
+    CloudWorkspaceClient,
+    LocalEnvironment,
+)
 from coding_agent.server.execution_binding import (
     CloudWorkspaceBinding,
     ExecutionBinding,
+    ExternalWorkerBinding,
     LocalExecutionBinding,
 )
 
@@ -41,6 +46,8 @@ class DefaultBindingResolver:
             raise CloudBindingNotImplementedError(
                 "cloud workspace resolution is not yet implemented"
             )
+        if isinstance(binding, ExternalWorkerBinding):
+            raise ValueError("external worker bindings do not resolve on the server")
         raise ValueError(f"unsupported binding type: {type(binding).__name__}")
 
     def resolve_tool_config(self, binding: ExecutionBinding) -> dict[str, object]:
@@ -48,6 +55,8 @@ class DefaultBindingResolver:
             return {"workspace_root": str(self.resolve_workspace_root(binding))}
         if isinstance(binding, CloudWorkspaceBinding):
             return self._resolve_cloud_environment(binding).tool_config()
+        if isinstance(binding, ExternalWorkerBinding):
+            raise ValueError("external worker bindings do not resolve on the server")
         raise ValueError(f"unsupported binding type: {type(binding).__name__}")
 
     def resolve_environment(self, binding: ExecutionBinding) -> Environment:
@@ -55,6 +64,8 @@ class DefaultBindingResolver:
             return LocalEnvironment(self.resolve_workspace_root(binding))
         if isinstance(binding, CloudWorkspaceBinding):
             return self._resolve_cloud_environment(binding)
+        if isinstance(binding, ExternalWorkerBinding):
+            raise ValueError("external worker bindings do not resolve on the server")
         raise ValueError(f"unsupported binding type: {type(binding).__name__}")
 
     def _resolve_cloud_environment(

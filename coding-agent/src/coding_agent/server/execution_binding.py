@@ -17,7 +17,7 @@ def _optional_metadata_str(data: dict[str, Any], key: str) -> str | None:
 
 @dataclass(frozen=True)
 class ExecutionBinding:
-    kind: ClassVar[Literal["local", "cloud"]]
+    kind: ClassVar[Literal["local", "cloud", "external_worker"]]
 
     def to_dict(self) -> dict[str, Any]:
         raise NotImplementedError
@@ -29,6 +29,8 @@ class ExecutionBinding:
             return LocalExecutionBinding.from_dict(data)
         if kind == "cloud":
             return CloudWorkspaceBinding.from_dict(data)
+        if kind == "external_worker":
+            return ExternalWorkerBinding.from_dict(data)
         raise ValueError(f"unknown binding kind: {kind}")
 
 
@@ -106,5 +108,48 @@ class CloudWorkspaceBinding(ExecutionBinding):
             workspace_id=workspace_id,
             runtime_profile=runtime_profile,
             workspace_provider=_optional_metadata_str(data, "workspace_provider"),
+            provider_instance_id=_optional_metadata_str(data, "provider_instance_id"),
+        )
+
+
+@dataclass(frozen=True)
+class ExternalWorkerBinding(ExecutionBinding):
+    executor_kind: str
+    worker_pool: str = "default"
+    workspace_ref: dict[str, Any] | None = None
+    provider_instance_id: str | None = None
+    kind: ClassVar[Literal["external_worker"]] = "external_worker"
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "kind": self.kind,
+            "executor_kind": self.executor_kind,
+            "worker_pool": self.worker_pool,
+        }
+        if self.workspace_ref is not None:
+            payload["workspace_ref"] = dict(self.workspace_ref)
+        if self.provider_instance_id is not None:
+            payload["provider_instance_id"] = self.provider_instance_id
+        return payload
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ExternalWorkerBinding:
+        executor_kind = data.get("executor_kind")
+        worker_pool = data.get("worker_pool", "default")
+        workspace_ref = data.get("workspace_ref")
+        if not isinstance(executor_kind, str):
+            raise TypeError("external_worker binding requires string executor_kind")
+        if not executor_kind.strip():
+            raise ValueError("external_worker binding executor_kind must be non-empty")
+        if not isinstance(worker_pool, str):
+            raise TypeError("external_worker binding worker_pool must be a string")
+        if not worker_pool.strip():
+            raise ValueError("external_worker binding worker_pool must be non-empty")
+        if workspace_ref is not None and not isinstance(workspace_ref, dict):
+            raise TypeError("external_worker binding workspace_ref must be an object")
+        return cls(
+            executor_kind=executor_kind,
+            worker_pool=worker_pool,
+            workspace_ref=None if workspace_ref is None else dict(workspace_ref),
             provider_instance_id=_optional_metadata_str(data, "provider_instance_id"),
         )
