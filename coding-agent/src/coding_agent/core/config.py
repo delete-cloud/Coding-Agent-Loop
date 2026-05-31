@@ -17,6 +17,7 @@ ProviderName = Literal[
     "kimi-code-anthropic",
     "deepseek",
     "stepfun",
+    "codex",
 ]
 
 

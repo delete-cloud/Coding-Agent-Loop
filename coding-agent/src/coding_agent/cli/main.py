@@ -10,6 +10,7 @@ import click
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.app import create_agent, create_child_pipeline  # noqa: F401
 from coding_agent.cli.kb_commands import kb
+from coding_agent.cli.oauth_commands import oauth_cli
 from coding_agent.cli.postmortem_commands import postmortem
 from coding_agent.cli.remote_commands import attach, remote
 from coding_agent.cli.serve_command import serve
@@ -230,6 +231,7 @@ def _create_provider(config):
 
 
 main.add_command(kb)
+main.add_command(oauth_cli)
 main.add_command(postmortem)
 main.add_command(stats)
 main.add_command(serve)

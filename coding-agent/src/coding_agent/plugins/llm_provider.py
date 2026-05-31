@@ -117,10 +117,71 @@ class LLMProviderPlugin:
                 api_key=api_key,
                 base_url=self._base_url or "https://api.stepfun.com/v1",
             )
+        elif self._provider_name == "codex":
+            from coding_agent.oauth.auth import OAuthBearerAuth
+            from coding_agent.oauth.codex import CODEX_BASE_URL
+            from coding_agent.oauth.store import OAuthStore
+            from coding_agent.providers.openai_compat import OpenAICompatProvider
+
+            store = OAuthStore()
+            record = store.get_provider("codex")
+            if record is None:
+                raise RuntimeError(
+                    "Codex OAuth provider is not logged in. "
+                    "Run `coding-agent oauth login codex` first."
+                )
+
+            token_source = StoreBackedCodexTokenSource(store)
+            auth = OAuthBearerAuth(
+                token_source,
+                provider_name="codex",
+            )
+            base_url = self._base_url or CODEX_BASE_URL
+
+            self._instance = OpenAICompatProvider(
+                model=self._model,
+                api_key="oauth-managed",
+                base_url=base_url,
+                httpx_auth=auth,
+            )
         else:
             raise ValueError(f"unsupported provider: {self._provider_name}")
 
         return self._instance
+
+
+class StoreBackedCodexTokenSource:
+    """Small adapter that avoids constructing network clients until refresh."""
+
+    def __init__(self, store: Any) -> None:
+        self._store = store
+
+    async def get_token(self) -> Any:
+        from coding_agent.oauth.store import StoreBackedTokenSource
+
+        return await StoreBackedTokenSource(
+            "codex",
+            store=self._store,
+            refresh_provider=self._refresh_record,
+        ).get_token()
+
+    async def refresh_token(self) -> Any:
+        from coding_agent.oauth.store import StoreBackedTokenSource
+
+        return await StoreBackedTokenSource(
+            "codex",
+            store=self._store,
+            refresh_provider=self._refresh_record,
+        ).refresh_token()
+
+    def _refresh_record(self, record: Any) -> Any:
+        from coding_agent.oauth.codex import CodexOAuthClient
+
+        client = CodexOAuthClient(store=self._store)
+        try:
+            return client.refresh_record(record)
+        finally:
+            client.close()
 
 
 async def adapt_stream_events(

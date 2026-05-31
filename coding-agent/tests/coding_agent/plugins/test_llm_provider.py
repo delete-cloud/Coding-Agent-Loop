@@ -2,6 +2,8 @@ import pytest
 
 from agentkit.providers.protocol import LLMProvider
 from coding_agent.plugins.llm_provider import LLMProviderPlugin
+from coding_agent.oauth.store import OAuthStore
+from coding_agent.oauth.types import OAuthProviderRecord, OAuthTokens
 from coding_agent.providers.anthropic import AnthropicProvider
 from coding_agent.providers.copilot import CopilotProvider
 from coding_agent.providers.openai_compat import OpenAICompatProvider
@@ -49,6 +51,40 @@ class TestLLMProviderPlugin:
         plugin = LLMProviderPlugin(provider="unknown", model="x", api_key="sk-test")
         with pytest.raises(ValueError, match="unsupported provider"):
             plugin.provide_llm()
+
+    def test_codex_provider_requires_login(self, monkeypatch, tmp_path):
+        import coding_agent.oauth.store as store_module
+
+        monkeypatch.setattr(store_module, "DEFAULT_AUTH_PATH", tmp_path / "auth.json")
+        plugin = LLMProviderPlugin(provider="codex", model="codex-mini", api_key="")
+
+        with pytest.raises(RuntimeError, match="oauth login codex"):
+            plugin.provide_llm()
+
+    def test_codex_provider_uses_oauth_backed_openai_compat(
+        self, monkeypatch, tmp_path
+    ):
+        import coding_agent.oauth.store as store_module
+
+        auth_path = tmp_path / "auth.json"
+        monkeypatch.setattr(store_module, "DEFAULT_AUTH_PATH", auth_path)
+        OAuthStore(auth_path).set_provider(
+            "codex",
+            OAuthProviderRecord(
+                issuer="https://auth.openai.com",
+                client_id="codex-client",
+                token_endpoint="https://auth.openai.com/oauth/token",
+                base_url="https://chatgpt.com/backend-api/codex",
+                tokens=OAuthTokens(access_token="access-token"),
+            ),
+        )
+        plugin = LLMProviderPlugin(provider="codex", model="codex-mini", api_key="")
+
+        result = plugin.provide_llm()
+
+        assert isinstance(result, OpenAICompatProvider)
+        assert result.model_name == "codex-mini"
+        assert "chatgpt.com/backend-api/codex" in str(result._client.base_url)
 
 
 class TestKimiProvider:

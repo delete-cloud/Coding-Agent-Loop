@@ -9,7 +9,7 @@ import random
 from typing import Any, AsyncIterator
 
 import httpx
-from openai import AsyncOpenAI, APIError, RateLimitError, APIStatusError
+from openai import AsyncOpenAI
 
 from agentkit.providers.models import (
     StreamEvent,
@@ -57,6 +57,7 @@ class OpenAICompatProvider:
         retry_base_delay: float = 1.0,
         retry_max_delay: float = 60.0,
         default_headers: dict[str, str] | None = None,
+        httpx_auth: httpx.Auth | None = None,
     ):
         self._model = model
         # Handle SecretStr by extracting actual value
@@ -72,6 +73,7 @@ class OpenAICompatProvider:
         self._http_client = httpx.AsyncClient(
             limits=limits,
             timeout=timeout_config,
+            auth=httpx_auth,
         )
 
         self._client = AsyncOpenAI(
