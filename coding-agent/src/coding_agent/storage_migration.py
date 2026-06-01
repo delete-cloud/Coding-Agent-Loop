@@ -73,6 +73,9 @@ async def migrate_jsonl_tapes_to_sqlite(
         tape_id = path.stem
         entries = _read_jsonl_objects(path)
         existing = [] if store is None else await store.load(tape_id)
+        if not entries and not existing:
+            skipped += 1
+            continue
         if existing:
             if existing == entries:
                 skipped += 1
