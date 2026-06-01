@@ -4,6 +4,14 @@ from dataclasses import dataclass
 from typing import Any, ClassVar, Literal
 
 
+WorkspaceSurface = Literal[
+    "local_workspace",
+    "cloud_workspace",
+    "external_worker_workspace_ref",
+    "local_attached_workspace",
+]
+
+
 def _optional_metadata_str(data: dict[str, Any], key: str) -> str | None:
     value = data.get(key)
     if value is None:
@@ -18,6 +26,10 @@ def _optional_metadata_str(data: dict[str, Any], key: str) -> str | None:
 @dataclass(frozen=True)
 class ExecutionBinding:
     kind: ClassVar[Literal["local", "cloud", "external_worker", "local_attached"]]
+
+    @property
+    def workspace_surface(self) -> WorkspaceSurface:
+        raise NotImplementedError
 
     def to_dict(self) -> dict[str, Any]:
         raise NotImplementedError
@@ -42,6 +54,10 @@ class LocalExecutionBinding(ExecutionBinding):
     workspace_provider: str | None = None
     provider_instance_id: str | None = None
     kind: ClassVar[Literal["local"]] = "local"
+
+    @property
+    def workspace_surface(self) -> WorkspaceSurface:
+        return "local_workspace"
 
     def to_dict(self) -> dict[str, Any]:
         payload = {"kind": self.kind, "workspace_root": self.workspace_root}
@@ -73,6 +89,10 @@ class CloudWorkspaceBinding(ExecutionBinding):
     workspace_provider: str | None = None
     provider_instance_id: str | None = None
     kind: ClassVar[Literal["cloud"]] = "cloud"
+
+    @property
+    def workspace_surface(self) -> WorkspaceSurface:
+        return "cloud_workspace"
 
     def to_dict(self) -> dict[str, Any]:
         payload = {
@@ -122,6 +142,10 @@ class ExternalWorkerBinding(ExecutionBinding):
     provider_instance_id: str | None = None
     kind: ClassVar[Literal["external_worker"]] = "external_worker"
 
+    @property
+    def workspace_surface(self) -> WorkspaceSurface:
+        return "external_worker_workspace_ref"
+
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "kind": self.kind,
@@ -160,3 +184,7 @@ class ExternalWorkerBinding(ExecutionBinding):
 @dataclass(frozen=True)
 class LocalAttachedExecutionBinding(ExternalWorkerBinding):
     kind: ClassVar[Literal["local_attached"]] = "local_attached"
+
+    @property
+    def workspace_surface(self) -> WorkspaceSurface:
+        return "local_attached_workspace"
