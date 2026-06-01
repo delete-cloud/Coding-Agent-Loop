@@ -23,6 +23,7 @@ from typing import Any, Literal, Protocol, TypeVar, cast
 from agentkit.environment import Environment
 from agentkit.storage.checkpoint_fs import FSCheckpointStore
 from agentkit.storage.pg import PGPool
+from agentkit.storage.sqlite import SQLiteCheckpointStore, SQLiteTapeStore
 from agentkit.checkpoint.models import CheckpointMeta
 from agentkit.checkpoint import CheckpointService
 from agentkit.providers.models import DoneEvent, TextEvent
@@ -1957,6 +1958,14 @@ class SessionManager:
         if backend == "pg":
             _, PGTapeStore, _ = _load_pg_storage_types()
             return cast(TapeStore, PGTapeStore(pool=self._get_pg_pool()))
+        if backend == "sqlite":
+            path_obj = self._storage_config.get("tape_path")
+            path = (
+                Path(path_obj)
+                if isinstance(path_obj, str) and path_obj.strip()
+                else data_dir / "tape.sqlite3"
+            )
+            return SQLiteTapeStore(path)
         return JSONLTapeStore(data_dir / "tapes")
 
     def _create_checkpoint_store(self, data_dir: Path) -> CheckpointStore:
@@ -1972,6 +1981,14 @@ class SessionManager:
         if backend == "pg":
             _, _, PGCheckpointStore = _load_pg_storage_types()
             return cast(CheckpointStore, PGCheckpointStore(pool=self._get_pg_pool()))
+        if backend == "sqlite":
+            path_obj = self._storage_config.get("checkpoint_path")
+            path = (
+                Path(path_obj)
+                if isinstance(path_obj, str) and path_obj.strip()
+                else data_dir / "checkpoints.sqlite3"
+            )
+            return SQLiteCheckpointStore(path)
         return FSCheckpointStore(data_dir / "checkpoints")
 
     def _create_runtime_store(self) -> RuntimeStoreProtocol | None:

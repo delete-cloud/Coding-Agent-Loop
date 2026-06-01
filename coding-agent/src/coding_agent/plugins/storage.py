@@ -17,6 +17,7 @@ from typing import Any, Callable, cast
 
 from agentkit.storage.protocols import SessionStore, TapeStore
 from agentkit.storage.session import FileSessionStore
+from agentkit.storage.sqlite import SQLiteTapeStore
 from agentkit.tape.store import ForkTapeStore
 
 
@@ -198,6 +199,7 @@ class StoragePlugin:
         self._fork_store: ForkTapeStore | None = None
         self._session_store: SessionStore | None = None
         self._jsonl_store: JSONLTapeStore | None = None
+        self._sqlite_store: SQLiteTapeStore | None = None
         self._session_lock: object | None = None
 
         if self._backend == "pg" and self._pg_pool is not None:
@@ -236,6 +238,8 @@ class StoragePlugin:
             if self._session_lock is None:
                 self._session_lock = PGSessionLock(pool=pool)
             return cast(TapeStore, PGTapeStore(pool=pool))
+        if self._backend == "sqlite":
+            return self._get_sqlite_store()
         return self._get_jsonl_store()
 
     def _get_jsonl_store(self) -> JSONLTapeStore:
@@ -243,15 +247,34 @@ class StoragePlugin:
             self._jsonl_store = JSONLTapeStore(self._data_dir / "tapes")
         return self._jsonl_store
 
+    def _get_sqlite_store(self) -> SQLiteTapeStore:
+        if self._sqlite_store is None:
+            path = self._config.get("tape_path")
+            resolved_path = (
+                Path(path)
+                if isinstance(path, str) and path.strip()
+                else self._data_dir / "tape.sqlite3"
+            )
+            self._sqlite_store = SQLiteTapeStore(resolved_path)
+        return self._sqlite_store
+
     def load_memory_records(self, session_id: str) -> list[dict[str, Any]]:
+        if self._backend == "sqlite":
+            return self._get_sqlite_store().load_memory_records(session_id)
         return self._get_jsonl_store().load_memory_records(session_id)
 
     def append_memory_record(self, session_id: str, record: dict[str, Any]) -> None:
+        if self._backend == "sqlite":
+            self._get_sqlite_store().append_memory_record(session_id, record)
+            return
         self._get_jsonl_store().append_memory_record(session_id, record)
 
     def replace_memory_records(
         self, session_id: str, records: list[dict[str, Any]]
     ) -> None:
+        if self._backend == "sqlite":
+            self._get_sqlite_store().replace_memory_records(session_id, records)
+            return
         self._get_jsonl_store().replace_memory_records(session_id, records)
 
     def _create_session_store(self) -> SessionStore:
