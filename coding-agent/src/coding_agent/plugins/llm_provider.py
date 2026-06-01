@@ -118,10 +118,9 @@ class LLMProviderPlugin:
                 base_url=self._base_url or "https://api.stepfun.com/v1",
             )
         elif self._provider_name == "codex":
-            from coding_agent.oauth.auth import OAuthBearerAuth
             from coding_agent.oauth.codex import CODEX_BASE_URL
             from coding_agent.oauth.store import OAuthStore
-            from coding_agent.providers.openai_compat import OpenAICompatProvider
+            from coding_agent.providers.codex_responses import CodexResponsesProvider
 
             store = OAuthStore()
             record = store.get_provider("codex")
@@ -132,17 +131,12 @@ class LLMProviderPlugin:
                 )
 
             token_source = StoreBackedCodexTokenSource(store)
-            auth = OAuthBearerAuth(
-                token_source,
-                provider_name="codex",
-            )
             base_url = self._base_url or CODEX_BASE_URL
 
-            self._instance = OpenAICompatProvider(
+            self._instance = CodexResponsesProvider(
                 model=self._model,
-                api_key="oauth-managed",
+                token_source=token_source,
                 base_url=base_url,
-                httpx_auth=auth,
             )
         else:
             raise ValueError(f"unsupported provider: {self._provider_name}")

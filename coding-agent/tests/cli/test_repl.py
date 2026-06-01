@@ -1,10 +1,10 @@
 """Tests for REPL functionality."""
 
 from collections.abc import Callable
+from inspect import isawaitable, getsource
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal, cast
-from inspect import isawaitable
 from unittest.mock import AsyncMock, MagicMock
 
 import asyncio
@@ -280,6 +280,17 @@ class TestREPLImports:
         session_constructor = cast(Callable[[], object], InteractiveSession)
         with pytest.raises(TypeError):
             session_constructor()
+
+    def test_repl_does_not_import_server_session_manager_for_local_runtime(self):
+        import coding_agent.cli.repl as repl_module
+
+        source = getsource(repl_module)
+
+        assert (
+            "from coding_agent.server.session_manager import SessionManager"
+            not in source
+        )
+        assert "create_local_cli_session_manager" in source
 
 
 class TestBashIntegration:
