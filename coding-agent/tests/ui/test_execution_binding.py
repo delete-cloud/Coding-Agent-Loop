@@ -6,7 +6,7 @@ from typing import cast
 
 import pytest
 
-from coding_agent.server.binding_resolver import (
+from coding_agent.environment.binding_resolver import (
     CloudBindingNotImplementedError,
     DefaultBindingResolver,
 )

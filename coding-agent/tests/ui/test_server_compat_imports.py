@@ -5,7 +5,14 @@ import importlib
 
 def test_ui_server_module_aliases_point_to_canonical_modules() -> None:
     module_pairs = [
-        ("coding_agent.ui.binding_resolver", "coding_agent.server.binding_resolver"),
+        (
+            "coding_agent.ui.binding_resolver",
+            "coding_agent.environment.binding_resolver",
+        ),
+        (
+            "coding_agent.server.binding_resolver",
+            "coding_agent.environment.binding_resolver",
+        ),
         ("coding_agent.ui.developer_console", "coding_agent.server.developer_console"),
         ("coding_agent.ui.execution_binding", "coding_agent.server.execution_binding"),
         ("coding_agent.ui.http_server", "coding_agent.server.http_server"),
@@ -16,7 +23,10 @@ def test_ui_server_module_aliases_point_to_canonical_modules() -> None:
             "coding_agent.server.stores.session_owner_store",
         ),
         ("coding_agent.ui.session_store", "coding_agent.server.stores.session_store"),
-        ("coding_agent.ui.workspace_store", "coding_agent.server.stores.workspace_store"),
+        (
+            "coding_agent.ui.workspace_store",
+            "coding_agent.server.stores.workspace_store",
+        ),
     ]
 
     for legacy_name, canonical_name in module_pairs:

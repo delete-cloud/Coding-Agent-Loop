@@ -91,7 +91,10 @@ from coding_agent.server.stores.session_owner_store import SessionOwnershipConfl
 from coding_agent.server.stores.session_owner_store import (
     SessionOwnershipConflictReason,
 )
-from coding_agent.server.binding_resolver import BindingResolver, DefaultBindingResolver
+from coding_agent.environment.binding_resolver import (
+    BindingResolver,
+    DefaultBindingResolver,
+)
 from coding_agent.server.execution_binding import (
     CloudWorkspaceBinding,
     ExecutionBinding,

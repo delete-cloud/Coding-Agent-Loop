@@ -100,7 +100,7 @@ from coding_agent.server.auth import (
     auth_context_from_headers,
     verify_api_key,
 )
-from coding_agent.server.binding_resolver import DefaultBindingResolver
+from coding_agent.environment.binding_resolver import DefaultBindingResolver
 from coding_agent.server.developer_console import (
     ConsoleActionSummary,
     ConsoleActionValidationSummary,

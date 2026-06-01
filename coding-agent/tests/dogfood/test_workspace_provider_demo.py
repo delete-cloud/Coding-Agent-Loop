@@ -19,7 +19,7 @@ from coding_agent.runtime_store import (
     RuntimeEventRecord,
 )
 from coding_agent.ui import http_server
-from coding_agent.server.binding_resolver import DefaultBindingResolver
+from coding_agent.environment.binding_resolver import DefaultBindingResolver
 from coding_agent.server.execution_binding import CloudWorkspaceBinding
 from coding_agent.server.http_server import app
 from coding_agent.server.session_manager import MockProvider, SessionManager

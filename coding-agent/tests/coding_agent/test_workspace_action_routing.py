@@ -5,7 +5,7 @@ from typing import Any
 
 from coding_agent.environment import CloudCommandResult
 from coding_agent.plugins.core_tools import CoreToolsPlugin
-from coding_agent.server.binding_resolver import DefaultBindingResolver
+from coding_agent.environment.binding_resolver import DefaultBindingResolver
 from coding_agent.server.execution_binding import CloudWorkspaceBinding
 
 
