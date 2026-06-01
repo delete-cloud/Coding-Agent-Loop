@@ -30,7 +30,7 @@ from coding_agent.runtime_store import (
     RunMessageSnapshotRecord,
     RuntimeEventRecord,
 )
-from coding_agent.server.binding_resolver import DefaultBindingResolver
+from coding_agent.environment.binding_resolver import DefaultBindingResolver
 from coding_agent.server.execution_binding import (
     CloudWorkspaceBinding,
     ExternalWorkerBinding,

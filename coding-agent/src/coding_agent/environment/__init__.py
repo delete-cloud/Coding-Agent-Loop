@@ -5,6 +5,12 @@ from .cloud import (
 )
 from .docker_workspace_provider import DockerCloudWorkspaceClient
 from .local import LocalEnvironment
+from .binding_resolver import (
+    BindingResolver,
+    CloudBindingNotImplementedError,
+    CloudClientFactory,
+    DefaultBindingResolver,
+)
 from .workspace_provider import (
     cleanup_cloud_binding_from_config,
     cleanup_cloud_workspace_from_config,
@@ -42,9 +48,13 @@ __all__ = [
     "CloudWorkspaceClient",
     "CloudWorkspaceClientFactory",
     "CloudWorkspaceSource",
+    "BindingResolver",
     "cleanup_cloud_binding_from_config",
     "cleanup_cloud_workspace_from_config",
     "cleanup_stale_cloud_workspaces_from_config",
+    "CloudBindingNotImplementedError",
+    "CloudClientFactory",
+    "DefaultBindingResolver",
     "LocalEnvironment",
     "WorkspaceArchiveManifest",
     "WorkspaceBranchPublication",
