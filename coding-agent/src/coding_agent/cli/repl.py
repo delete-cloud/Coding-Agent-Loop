@@ -14,6 +14,10 @@ from coding_agent.approval.coordinator import ApprovalCoordinator
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.cli.commands import handle_command
 from coding_agent.cli.input_handler import InputHandler, expand_pasted_refs
+from coding_agent.cli.local_runtime import (
+    LocalCliSessionManager,
+    create_local_cli_session_manager,
+)
 from coding_agent.cli.terminal_output import (
     get_prompt_output,
     print_pt,
@@ -25,7 +29,6 @@ from coding_agent.adapter import PipelineAdapter
 from coding_agent.ui.stream_renderer import StreamingRenderer
 from coding_agent.ui.rich_consumer import RichConsumer
 from coding_agent.ui.status_footer import StatusFooter
-from coding_agent.server.session_manager import SessionManager
 from coding_agent.wire.protocol import TurnEnd, WireMessage
 
 
@@ -469,13 +472,8 @@ def _is_root_turn_end(message: WireMessage) -> bool:
     return isinstance(message, TurnEnd) and not message.agent_id
 
 
-def _local_session_manager() -> SessionManager:
-    return SessionManager(
-        storage_config={
-            "http_session_backend": "fs",
-            "runtime_backend": "jsonl",
-        }
-    )
+def _local_session_manager() -> LocalCliSessionManager:
+    return create_local_cli_session_manager()
 
 
 async def run_repl(config: Config):

@@ -5,6 +5,7 @@ from coding_agent.plugins.llm_provider import LLMProviderPlugin
 from coding_agent.oauth.store import OAuthStore
 from coding_agent.oauth.types import OAuthProviderRecord, OAuthTokens
 from coding_agent.providers.anthropic import AnthropicProvider
+from coding_agent.providers.codex_responses import CodexResponsesProvider
 from coding_agent.providers.copilot import CopilotProvider
 from coding_agent.providers.openai_compat import OpenAICompatProvider
 
@@ -61,10 +62,9 @@ class TestLLMProviderPlugin:
         with pytest.raises(RuntimeError, match="oauth login codex"):
             plugin.provide_llm()
 
-    def test_codex_provider_uses_oauth_backed_openai_compat(
-        self, monkeypatch, tmp_path
-    ):
+    def test_codex_provider_uses_responses_provider(self, monkeypatch, tmp_path):
         import coding_agent.oauth.store as store_module
+        from coding_agent.oauth.types import OAuthAccount
 
         auth_path = tmp_path / "auth.json"
         monkeypatch.setattr(store_module, "DEFAULT_AUTH_PATH", auth_path)
@@ -76,15 +76,16 @@ class TestLLMProviderPlugin:
                 token_endpoint="https://auth.openai.com/oauth/token",
                 base_url="https://chatgpt.com/backend-api/codex",
                 tokens=OAuthTokens(access_token="access-token"),
+                account=OAuthAccount(chatgpt_account_id="account-123"),
             ),
         )
         plugin = LLMProviderPlugin(provider="codex", model="codex-mini", api_key="")
 
         result = plugin.provide_llm()
 
-        assert isinstance(result, OpenAICompatProvider)
+        assert isinstance(result, CodexResponsesProvider)
         assert result.model_name == "codex-mini"
-        assert "chatgpt.com/backend-api/codex" in str(result._client.base_url)
+        assert result._base_url == "https://chatgpt.com/backend-api/codex"
 
 
 class TestKimiProvider:
