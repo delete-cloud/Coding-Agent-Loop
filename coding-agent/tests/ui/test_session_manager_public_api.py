@@ -494,7 +494,9 @@ def test_session_manager_uses_pg_backends_when_storage_config_requests_pg() -> N
             self.pool = pool
 
     with (
-        patch("coding_agent.server.session_manager.create_session_store") as create_store,
+        patch(
+            "coding_agent.server.session_manager.create_session_store"
+        ) as create_store,
         patch(
             "coding_agent.server.session_manager._load_pg_storage_types",
             return_value=(FakePGPool, FakePGTapeStore, FakePGCheckpointStore),
@@ -585,6 +587,82 @@ def test_session_manager_creates_pg_runtime_store_when_storage_config_requests_p
     assert len(FakePGPool.instances) == 1
 
 
+def test_session_manager_creates_jsonl_runtime_store_when_storage_config_requests_jsonl(
+    tmp_path,
+) -> None:
+    from coding_agent.runtime_store import JSONLRuntimeStore
+
+    manager = SessionManager(
+        storage_config={
+            "runtime_backend": "jsonl",
+            "runtime_path": str(tmp_path / "runtime"),
+        }
+    )
+
+    assert isinstance(manager._runtime_store, JSONLRuntimeStore)
+
+
+def test_session_manager_creates_file_session_store_for_local_cli_storage(
+    tmp_path,
+) -> None:
+    from coding_agent.server.stores.session_store import FileSessionStore
+
+    manager = SessionManager(
+        storage_config={
+            "http_session_backend": "fs",
+            "http_session_path": str(tmp_path / "sessions"),
+        }
+    )
+
+    assert isinstance(manager._store, FileSessionStore)
+
+
+@pytest.mark.asyncio
+async def test_file_session_and_jsonl_runtime_store_reopen_resume_metadata(
+    tmp_path,
+) -> None:
+    from datetime import UTC
+
+    from coding_agent.runtime_store import AgentRunRecord
+
+    storage_config = {
+        "http_session_backend": "fs",
+        "http_session_path": str(tmp_path / "sessions"),
+        "runtime_backend": "jsonl",
+        "runtime_path": str(tmp_path / "runtime"),
+    }
+    first = SessionManager(storage_config=storage_config)
+    session_id = await first.create_session(repo_path=tmp_path)
+    assert first._runtime_store is not None
+    await first._runtime_store.create_agent_run(
+        AgentRunRecord(
+            run_id="run-interrupted",
+            session_id=session_id,
+            tape_id="tape-local",
+            parent_run_id=None,
+            agent_id=None,
+            status="interrupted",
+            started_at=datetime(2026, 6, 1, 10, 0, tzinfo=UTC),
+            ended_at=datetime(2026, 6, 1, 10, 1, tzinfo=UTC),
+            metadata={"execution_placement": "server_embedded"},
+            result={},
+            error="interrupted",
+        )
+    )
+    await first.close()
+
+    second = SessionManager(storage_config=storage_config)
+    try:
+        assert session_id in await second.list_sessions_async()
+        metadata = await second.session_resume_metadata(session_id)
+    finally:
+        await second.close()
+
+    assert metadata["resumable"] is True
+    assert metadata["last_run_id"] == "run-interrupted"
+    assert metadata["last_run_status"] == "interrupted"
+
+
 def test_session_manager_rejects_unknown_runtime_store_backend() -> None:
     with pytest.raises(ValueError, match="unsupported storage.runtime_backend"):
         SessionManager(storage_config={"runtime_backend": "redis"})
@@ -607,7 +685,9 @@ def test_session_manager_creates_dedicated_pg_pool_for_http_session_store() -> N
             self.pool = pool
 
     with (
-        patch("coding_agent.server.session_manager.create_session_store") as create_store,
+        patch(
+            "coding_agent.server.session_manager.create_session_store"
+        ) as create_store,
         patch(
             "coding_agent.server.session_manager._load_pg_storage_types",
             return_value=(FakePGPool, FakePGTapeStore, FakePGCheckpointStore),
@@ -643,7 +723,9 @@ def test_session_manager_normalizes_tape_backend_for_http_session_pg_default() -
             self.dsn = dsn
 
     with (
-        patch("coding_agent.server.session_manager.create_session_store") as create_store,
+        patch(
+            "coding_agent.server.session_manager.create_session_store"
+        ) as create_store,
         patch(
             "coding_agent.server.session_manager._load_pg_storage_types",
             return_value=(FakePGPool, object(), object()),
@@ -725,7 +807,9 @@ def test_session_manager_http_session_store_does_not_reuse_injected_pg_pool() ->
     }
     manager._pg_pool = injected_pool
 
-    with patch("coding_agent.server.session_manager.create_session_store") as create_store:
+    with patch(
+        "coding_agent.server.session_manager.create_session_store"
+    ) as create_store:
         create_store.return_value = InMemorySessionStore()
 
         _ = SessionManager._create_http_session_store(manager)

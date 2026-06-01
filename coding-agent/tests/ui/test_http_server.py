@@ -31,6 +31,7 @@ from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
 from agentkit.tools import FatalToolExecutionError
 
+from coding_agent.adapter_types import StopReason, TurnOutcome
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.approval.store import ApprovalStore
 from coding_agent.core.config import settings
@@ -51,6 +52,7 @@ from coding_agent.environment.workspace_provider import (
 )
 from coding_agent.server.execution_binding import (
     CloudWorkspaceBinding,
+    ExternalWorkerBinding,
     LocalExecutionBinding,
 )
 from coding_agent.wire.local import LocalWire
@@ -2362,6 +2364,53 @@ class TestPromptStreaming:
         assert run.status == "requested"
         assert run.metadata["prompt"] == "run locally"
         assert run.metadata["execution_binding_kind"] == "external_worker"
+        assert run.metadata["execution_placement"] == "local_attached"
+        assert run.metadata["executor_kind"] == "local_cli"
+
+    async def test_local_attached_prompt_creates_attached_executor_run(
+        self, client, monkeypatch
+    ):
+        store = FakeExternalWorkerRuntimeStore()
+        session_manager.configure_runtime_store(store)
+        create_resp = await client.post(
+            "/sessions",
+            json={
+                "approval_policy": "yolo",
+                "execution_binding": {
+                    "kind": "local_attached",
+                    "executor_kind": "local_cli",
+                    "workspace_ref": {
+                        "kind": "local_path",
+                        "display_path": "/tmp/repo",
+                    },
+                },
+            },
+        )
+        assert create_resp.status_code == 200
+        session_id = create_resp.json()["session_id"]
+
+        async def fail_run_agent(_session_id: str, _prompt: str) -> None:
+            raise AssertionError("local_attached prompt must not run server agent")
+
+        monkeypatch.setattr(session_manager, "run_agent", fail_run_agent)
+
+        async with aconnect_sse(
+            client,
+            "POST",
+            f"/sessions/{session_id}/prompt",
+            json={"prompt": "run locally"},
+        ) as event_source:
+            async for sse in event_source.aiter_sse():
+                assert sse.event == "RunRequested"
+                payload = json.loads(sse.data)
+                run_id = payload["run_id"]
+                break
+
+        run = store.runs[run_id]
+        assert run.status == "requested"
+        assert run.metadata["prompt"] == "run locally"
+        assert run.metadata["execution_binding_kind"] == "local_attached"
+        assert run.metadata["execution_placement"] == "local_attached"
         assert run.metadata["executor_kind"] == "local_cli"
 
     async def test_external_worker_claim_events_and_complete(self, client):
@@ -2418,6 +2467,13 @@ class TestPromptStreaming:
         await session_manager.remove_event_queue_async(session_id, queue)
         assert events_resp.status_code == 200
         assert events_resp.json()["events"][0]["event_kind"] == "wire.StreamDelta"
+        stored_event = store.events[0]
+        assert stored_event.payload["session_id"] == session_id
+        assert stored_event.payload["run_id"] == run.run_id
+        assert stored_event.payload["execution_placement"] == "local_attached"
+        assert stored_event.payload["execution_binding_kind"] == "external_worker"
+        assert stored_event.payload["executor_id"] == "worker-1"
+        assert stored_event.payload["message_type"] == "StreamDelta"
         assert rebroadcast["event"] == "StreamDelta"
         assert json.loads(rebroadcast["data"])["content"] == "hi"
 
@@ -2450,6 +2506,57 @@ class TestPromptStreaming:
                 "payload": {"role": "user", "content": "hello"},
             }
         ]
+
+    async def test_attached_executor_alias_endpoints_accept_executor_id(self, client):
+        store = FakeExternalWorkerRuntimeStore()
+        session_manager.configure_runtime_store(store)
+        create_resp = await client.post(
+            "/sessions",
+            json={
+                "approval_policy": "yolo",
+                "execution_binding": {
+                    "kind": "local_attached",
+                    "executor_kind": "local_cli",
+                },
+            },
+        )
+        session_id = create_resp.json()["session_id"]
+        run = await session_manager.request_external_worker_run(session_id, "hello")
+
+        claim_resp = await client.post(
+            "/executor/runs/claim",
+            json={
+                "executor_id": "executor-1",
+                "executor_kind": "local_cli",
+                "session_id": session_id,
+            },
+        )
+        assert claim_resp.status_code == 200
+        claim = claim_resp.json()
+        assert claim["run_id"] == run.run_id
+        assert store.runs[run.run_id].metadata["worker_id"] == "executor-1"
+
+        heartbeat_resp = await client.post(
+            f"/executor/runs/{run.run_id}/heartbeat",
+            json={
+                "executor_id": "executor-1",
+                "claim_token": claim["claim_token"],
+            },
+        )
+        assert heartbeat_resp.status_code == 200
+        assert heartbeat_resp.json()["run_id"] == run.run_id
+
+        complete_resp = await client.post(
+            f"/executor/runs/{run.run_id}/complete",
+            json={
+                "executor_id": "executor-1",
+                "claim_token": claim["claim_token"],
+                "status": "completed",
+                "result": {"stop_reason": "no_tool_calls"},
+            },
+        )
+        assert complete_resp.status_code == 200
+        assert complete_resp.json()["status"] == "completed"
 
     async def test_external_worker_session_runs_endpoint_lists_runs(self, client):
         store = FakeExternalWorkerRuntimeStore()
@@ -2525,6 +2632,17 @@ class TestPromptStreaming:
             "kind": "local_path",
             "display_path": str(tmp_path),
         }
+
+        executors_response = await client.get("/executors")
+        assert executors_response.status_code == 200
+        executor = executors_response.json()["executors"][0]
+        assert executor["executor_id"] == "worker-1"
+        assert executor["worker_id"] == "worker-1"
+        assert executor["status"] == "running"
+
+        executor_response = await client.get("/executors/worker-1")
+        assert executor_response.status_code == 200
+        assert executor_response.json()["executor_id"] == "worker-1"
 
         claimed = store.runs[run.run_id]
         store.runs[run.run_id] = replace(
@@ -2842,6 +2960,9 @@ class TestPromptStreaming:
         recovered_run = store.runs[run.run_id]
         assert recovered_run.status == "expired"
         assert recovered_run.metadata["recovery_reason"] == (
+            "attached_executor_lease_expired"
+        )
+        assert recovered_run.metadata["legacy_recovery_reason"] == (
             "external_worker_lease_expired"
         )
         assert recovered_run.metadata["reclaimable"] is True
@@ -2873,6 +2994,222 @@ class TestPromptStreaming:
         )
 
         assert claim is None
+
+    async def test_http_resume_session_streams_resumed_run(self, client, monkeypatch):
+        store = FakeExternalWorkerRuntimeStore()
+        session_manager.configure_runtime_store(store)
+        create_resp = await client.post("/sessions", json={"approval_policy": "yolo"})
+        session_id = create_resp.json()["session_id"]
+        previous_run = AgentRunRecord(
+            run_id="run-interrupted",
+            session_id=session_id,
+            tape_id="stable-tape",
+            parent_run_id=None,
+            agent_id=None,
+            status="interrupted",
+            started_at=datetime(2026, 5, 19, 12, 0, tzinfo=UTC),
+            ended_at=datetime(2026, 5, 19, 12, 1, tzinfo=UTC),
+            metadata={},
+            result={},
+            error="interrupted",
+        )
+        store.runs[previous_run.run_id] = previous_run
+        await store.append_runtime_event(
+            RuntimeEventRecord(
+                event_id="event-resume-from",
+                run_id=previous_run.run_id,
+                event_kind="wire.StreamDelta",
+                payload={"content": "partial"},
+                created_at=datetime(2026, 5, 19, 12, 1, tzinfo=UTC),
+            )
+        )
+        observed_prompts: list[str] = []
+
+        class FakeAdapter:
+            def __init__(self, pipeline, ctx, consumer) -> None:
+                del pipeline, ctx
+                self._consumer = consumer
+
+            async def run_turn(self, prompt: str) -> TurnOutcome:
+                observed_prompts.append(prompt)
+                await self._consumer.emit(
+                    StreamDelta(
+                        session_id=session_id,
+                        agent_id="",
+                        content="resumed",
+                    )
+                )
+                await self._consumer.emit(
+                    TurnEnd(
+                        session_id=session_id,
+                        agent_id="",
+                        turn_id="turn-resumed",
+                        completion_status=CompletionStatus.COMPLETED,
+                    )
+                )
+                return TurnOutcome(stop_reason=StopReason.NO_TOOL_CALLS)
+
+        fake_pipeline = types.SimpleNamespace(
+            _registry=types.SimpleNamespace(
+                get=lambda _: types.SimpleNamespace(_instance=None)
+            )
+        )
+
+        def fake_create_agent(**kwargs):
+            return fake_pipeline, types.SimpleNamespace(
+                session_id=kwargs["session_id_override"],
+                config={},
+                tape=kwargs.get("tape") or Tape(tape_id="stable-tape"),
+            )
+
+        monkeypatch.setattr(session_manager, "_create_agent", fake_create_agent)
+        monkeypatch.setattr(
+            "coding_agent.server.session_manager.PipelineAdapter", FakeAdapter
+        )
+
+        events = []
+        async with aconnect_sse(
+            client,
+            "POST",
+            f"/sessions/{session_id}/resume",
+            json={"prompt": "keep going", "resume_reason": "user_resume"},
+        ) as event_source:
+            async for sse in event_source.aiter_sse():
+                events.append({"event": sse.event, "data": json.loads(sse.data)})
+                if sse.event == "TurnEnd":
+                    break
+
+        resumed_runs = [
+            run for run in store.runs.values() if run.run_id != previous_run.run_id
+        ]
+        assert [event["event"] for event in events] == ["StreamDelta", "TurnEnd"]
+        assert observed_prompts
+        assert "Previous run was interrupted." in observed_prompts[0]
+        assert "keep going" in observed_prompts[0]
+        assert len(resumed_runs) == 1
+        resumed_run = resumed_runs[0]
+        assert resumed_run.parent_run_id == previous_run.run_id
+        assert resumed_run.metadata["resume_from_run_id"] == previous_run.run_id
+        assert resumed_run.metadata["resume_from_event_id"] == "event-resume-from"
+
+    async def test_http_resume_external_executor_session_requests_linked_run(
+        self, client
+    ):
+        store = FakeExternalWorkerRuntimeStore()
+        session_manager.configure_runtime_store(store)
+        session_id = await session_manager.create_session(
+            approval_policy=ApprovalPolicy.YOLO,
+            execution_binding=ExternalWorkerBinding(executor_kind="local_cli"),
+        )
+        previous_run = AgentRunRecord(
+            run_id="run-cancelled",
+            session_id=session_id,
+            tape_id="stable-tape",
+            parent_run_id=None,
+            agent_id=None,
+            status="cancelled",
+            started_at=datetime(2026, 5, 19, 12, 0, tzinfo=UTC),
+            ended_at=datetime(2026, 5, 19, 12, 1, tzinfo=UTC),
+            metadata={},
+            result={},
+            error="cancelled",
+        )
+        store.runs[previous_run.run_id] = previous_run
+
+        events = []
+        async with aconnect_sse(
+            client,
+            "POST",
+            f"/sessions/{session_id}/resume",
+            json={"prompt": "resume on local executor"},
+        ) as event_source:
+            async for sse in event_source.aiter_sse():
+                events.append({"event": sse.event, "data": json.loads(sse.data)})
+                break
+
+        requested_runs = [
+            run for run in store.runs.values() if run.run_id != previous_run.run_id
+        ]
+        assert events[0]["event"] == "RunRequested"
+        assert len(requested_runs) == 1
+        requested = requested_runs[0]
+        assert requested.status == "requested"
+        assert requested.parent_run_id == previous_run.run_id
+        assert requested.metadata["resume_from_run_id"] == previous_run.run_id
+        assert requested.metadata["prompt"].startswith("Previous run was interrupted.")
+
+    async def test_session_summary_reports_resume_and_checkpoint_context(
+        self, client, monkeypatch
+    ):
+        store = FakeExternalWorkerRuntimeStore()
+        session_manager.configure_runtime_store(store)
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+        session = await session_manager.get_session_async(session_id)
+        session.tape_id = "stable-tape"
+        await session_manager._persist_session_async(session)
+        previous_run = AgentRunRecord(
+            run_id="run-interrupted",
+            session_id=session_id,
+            tape_id="stable-tape",
+            parent_run_id=None,
+            agent_id=None,
+            status="interrupted",
+            started_at=datetime(2026, 5, 19, 12, 0, tzinfo=UTC),
+            ended_at=datetime(2026, 5, 19, 12, 1, tzinfo=UTC),
+            metadata={},
+            result={},
+            error="interrupted",
+        )
+        store.runs[previous_run.run_id] = previous_run
+        await store.append_runtime_event(
+            RuntimeEventRecord(
+                event_id="event-last",
+                run_id=previous_run.run_id,
+                event_kind="wire.TurnEnd",
+                payload={"message_type": "TurnEnd"},
+                created_at=datetime(2026, 5, 19, 12, 1, tzinfo=UTC),
+            )
+        )
+
+        class FakeCheckpointService:
+            async def list(self, tape_id: str):
+                assert tape_id == "stable-tape"
+                return [
+                    CheckpointMeta(
+                        checkpoint_id="cp-latest",
+                        tape_id=tape_id,
+                        session_id=session_id,
+                        entry_count=2,
+                        window_start=0,
+                        created_at=datetime(2026, 5, 19, 12, 2, tzinfo=UTC),
+                        label="resume-point",
+                    )
+                ]
+
+        monkeypatch.setattr(
+            session_manager,
+            "_checkpoint_service",
+            FakeCheckpointService(),
+        )
+
+        response = await client.get(f"/sessions/{session_id}")
+        listed = await client.get("/sessions")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["resumable"] is True
+        assert payload["last_run_id"] == "run-interrupted"
+        assert payload["last_run_status"] == "interrupted"
+        assert payload["last_interrupted_run_id"] == "run-interrupted"
+        assert payload["resume_from_event_id"] == "event-last"
+        assert payload["checkpoint_count"] == 1
+        assert payload["latest_checkpoint_id"] == "cp-latest"
+        assert payload["latest_checkpoint_label"] == "resume-point"
+        assert listed.status_code == 200
+        listed_payload = listed.json()["sessions"][0]
+        assert listed_payload["resumable"] is True
+        assert listed_payload["latest_checkpoint_id"] == "cp-latest"
 
     async def test_prompt_returns_parent_turn_end_when_agent_bootstrap_fails(
         self, client
@@ -7342,6 +7679,7 @@ class FakeExternalWorkerRuntimeStore:
     def __init__(self) -> None:
         self.runs: dict[str, AgentRunRecord] = {}
         self.events: list[RuntimeEventRecord] = []
+        self.snapshots: dict[str, RunMessageSnapshotRecord] = {}
         self.interactions: dict[str, AgentInteractionRecord] = {}
 
     async def create_agent_run(self, record: AgentRunRecord) -> AgentRunRecord:
@@ -7354,7 +7692,7 @@ class FakeExternalWorkerRuntimeStore:
     async def list_agent_runs(self, session_id: str) -> list[AgentRunRecord]:
         return [run for run in self.runs.values() if run.session_id == session_id]
 
-    async def claim_external_worker_run(
+    async def claim_attached_executor_run(
         self,
         *,
         session_id: str | None,
@@ -7376,6 +7714,19 @@ class FakeExternalWorkerRuntimeStore:
             self.runs[run.run_id] = claimed
             return claimed
         return None
+
+    async def claim_external_worker_run(
+        self,
+        *,
+        session_id: str | None,
+        executor_kind: str,
+        claim_metadata: dict[str, object],
+    ) -> AgentRunRecord | None:
+        return await self.claim_attached_executor_run(
+            session_id=session_id,
+            executor_kind=executor_kind,
+            claim_metadata=claim_metadata,
+        )
 
     async def update_agent_run(
         self,
@@ -7406,6 +7757,43 @@ class FakeExternalWorkerRuntimeStore:
         stored = replace(record, sequence=len(self.events) + 1)
         self.events.append(stored)
         return stored
+
+    async def load_runtime_event(
+        self,
+        event_id: str,
+    ) -> RuntimeEventRecord | None:
+        for event in self.events:
+            if event.event_id == event_id:
+                return event
+        return None
+
+    async def replay_runtime_events(
+        self,
+        run_id: str,
+        *,
+        after_sequence: int = 0,
+        limit: int = 1000,
+    ) -> list[RuntimeEventRecord]:
+        return [
+            event
+            for event in self.events
+            if event.run_id == run_id
+            and event.sequence is not None
+            and event.sequence > after_sequence
+        ][:limit]
+
+    async def save_message_snapshot(
+        self,
+        record: RunMessageSnapshotRecord,
+    ) -> RunMessageSnapshotRecord:
+        self.snapshots[record.snapshot_id] = record
+        return record
+
+    async def load_message_snapshot(
+        self,
+        snapshot_id: str,
+    ) -> RunMessageSnapshotRecord | None:
+        return self.snapshots.get(snapshot_id)
 
     async def create_agent_interaction(
         self,

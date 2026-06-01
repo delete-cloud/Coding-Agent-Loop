@@ -198,7 +198,6 @@ class TestInputHandler:
 
     def test_single_ctrlc_records_timestamp(self):
         import time
-        from coding_agent.cli.input_handler import _CTRLC_TIMEOUT
 
         handler = InputHandler()
         before = time.monotonic()
@@ -214,8 +213,6 @@ class TestInputHandler:
         assert handler._should_exit_on_ctrlc() is True
 
     def test_ctrlc_after_timeout_does_not_exit(self):
-        from coding_agent.cli.input_handler import _CTRLC_TIMEOUT
-
         handler = InputHandler()
         handler._last_ctrlc = 0.0
         assert handler._should_exit_on_ctrlc() is False
@@ -632,6 +629,64 @@ class TestFooterIntegration:
 
         await session._process_message("hello")
         assert any("phase" in c for c in update_calls)
+
+    @pytest.mark.asyncio
+    async def test_process_message_uses_managed_session_when_available(
+        self, monkeypatch
+    ):
+        from coding_agent.cli.repl import InteractiveSession
+        from coding_agent.wire.local import LocalWire
+        from coding_agent.wire.protocol import CompletionStatus, TurnEnd
+
+        monkeypatch.setattr(InteractiveSession, "_setup_agent", lambda self: None)
+        session = InteractiveSession(self._make_config())
+        wire = LocalWire("sess-repl")
+        run_calls: list[tuple[str, str]] = []
+        emitted: list[object] = []
+
+        class FakeAdapter:
+            def set_consumer(self, consumer):
+                self.consumer = consumer
+
+            async def run_turn(self, message: str):
+                raise AssertionError(f"unmanaged run_turn used: {message}")
+
+        class FakeSessionManager:
+            async def get_session_async(self, session_id: str):
+                assert session_id == "sess-repl"
+                return SimpleNamespace(
+                    wire=wire,
+                    runtime_pipeline="pipeline",
+                    runtime_ctx=SimpleNamespace(config={"tool_registry": "registry"}),
+                    runtime_adapter=FakeAdapter(),
+                )
+
+            async def run_agent(self, session_id: str, message: str) -> None:
+                run_calls.append((session_id, message))
+                await wire.send(
+                    TurnEnd(
+                        session_id=session_id,
+                        agent_id="",
+                        turn_id="run-repl",
+                        completion_status=CompletionStatus.COMPLETED,
+                    )
+                )
+
+        async def fake_emit(message: object) -> None:
+            emitted.append(message)
+
+        monkeypatch.setattr(
+            session, "_renderer", SimpleNamespace(user_message=lambda msg: None)
+        )
+        monkeypatch.setattr(session._consumer, "emit", fake_emit)
+        session.context["session_id"] = "sess-repl"
+        session._session_manager = FakeSessionManager()
+        session._pipeline_adapter = FakeAdapter()
+
+        await session._process_message("hello")
+
+        assert run_calls == [("sess-repl", "hello")]
+        assert [getattr(item, "turn_id", None) for item in emitted] == ["run-repl"]
 
     @pytest.mark.asyncio
     async def test_clear_command_triggers_footer_redraw(self, monkeypatch):
@@ -1176,7 +1231,9 @@ class TestReplInitialization:
         assert fake_session_manager.replace_calls == [("session-a", "claude-next")]
 
     @pytest.mark.asyncio
-    async def test_model_change_persist_failure_restores_existing_runtime(self, monkeypatch):
+    async def test_model_change_persist_failure_restores_existing_runtime(
+        self, monkeypatch
+    ):
         from coding_agent.cli.repl import InteractiveSession
         from coding_agent.core.config import Config
 
@@ -1259,7 +1316,9 @@ class TestReplInitialization:
                     if isawaitable(result):
                         await result
 
-            replace_session_runtime_config = session_manager_module.SessionManager.replace_session_runtime_config
+            replace_session_runtime_config = (
+                session_manager_module.SessionManager.replace_session_runtime_config
+            )
 
         session = InteractiveSession(Config(model="gpt-4o-test", max_steps=10))
         fake_session_manager = cast(Any, FakeSessionManager())

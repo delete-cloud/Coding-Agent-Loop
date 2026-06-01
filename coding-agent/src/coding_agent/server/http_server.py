@@ -173,6 +173,7 @@ from coding_agent.server.execution_binding import (
     CloudWorkspaceBinding,
     ExecutionBinding,
     ExternalWorkerBinding,
+    LocalAttachedExecutionBinding,
     LocalExecutionBinding,
 )
 from coding_agent.server.rate_limit import RateLimits, limiter
@@ -192,6 +193,7 @@ from coding_agent.server.schemas import (
     PublishSessionResponse,
     ReadinessResponse,
     ResolveInteractionRequest,
+    ResumeSessionRequest,
     RuntimeEventResponse,
     RuntimeEventsResponse,
     RuntimeInteractionListResponse,
@@ -216,6 +218,7 @@ from coding_agent.server.schemas import (
     WorkspaceRetentionResponse,
     WorkspaceSummarySchema,
     WorkspaceUnpinRequest,
+    ExecutorListResponse,
     WorkerClaimRequest,
     WorkerClaimResponse,
     WorkerApprovalRequest,
@@ -1780,6 +1783,13 @@ def _execution_binding_from_request(
             workspace_ref=binding.workspace_ref,
             provider_instance_id=binding.provider_instance_id,
         )
+    if binding.kind == "local_attached":
+        return LocalAttachedExecutionBinding(
+            executor_kind=binding.executor_kind,
+            worker_pool=binding.worker_pool,
+            workspace_ref=binding.workspace_ref,
+            provider_instance_id=binding.provider_instance_id,
+        )
     return CloudWorkspaceBinding(
         workspace_url=binding.workspace_url,
         workspace_id=binding.workspace_id,
@@ -2383,7 +2393,7 @@ async def send_prompt(
         raise
 
     if isinstance(session.execution_binding, ExternalWorkerBinding):
-        return await _send_external_worker_prompt(session_id, prompt_text)
+        return await _send_attached_executor_prompt(session_id, prompt_text)
 
     session.turn_in_progress = True
     session.last_activity = datetime.now(UTC)
@@ -2430,12 +2440,120 @@ async def send_prompt(
     )
 
 
-async def _send_external_worker_prompt(
+@app.post("/sessions/{session_id}/resume")
+@limiter.limit(RateLimits.SEND_PROMPT)
+async def resume_session(
+    request: Request,
+    session_id: str,
+    body: ResumeSessionRequest | None = None,
+    api_key: str | None = Depends(verify_api_key),
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> EventSourceResponse:
+    del request, api_key
+    try:
+        session = await session_manager.get_session_async(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Session not found") from exc
+    if not _auth_context_can_access_session(auth_context, session):
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    prompt_text = None if body is None else body.prompt
+    resume_reason = "user_resume" if body is None else body.resume_reason
+
+    if isinstance(session.execution_binding, ExternalWorkerBinding):
+        try:
+            run = await session_manager.resume_session(
+                session_id,
+                prompt=prompt_text,
+                resume_reason=resume_reason,
+            )
+        except RuntimeError as exc:
+            detail = str(exc)
+            if detail in {
+                "turn already in progress",
+                "latest run is still active",
+                "session has no previous run to resume",
+            }:
+                raise HTTPException(status_code=409, detail=detail) from exc
+            raise HTTPException(status_code=503, detail=detail) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        async def external_event_generator() -> AsyncIterator[dict[str, str]]:
+            yield {
+                "event": "RunRequested",
+                "data": json.dumps(
+                    {
+                        "session_id": session_id,
+                        "run_id": run.run_id,
+                        "status": run.status,
+                        "previous_run_id": run.parent_run_id,
+                        "resume_from_run_id": run.metadata.get("resume_from_run_id"),
+                        "resume_from_event_id": run.metadata.get(
+                            "resume_from_event_id"
+                        ),
+                    }
+                ),
+            }
+
+        return EventSourceResponse(
+            external_event_generator(),
+            media_type="text/event-stream",
+        )
+
+    async def event_generator() -> AsyncIterator[dict[str, str]]:
+        try:
+            session.task = asyncio.create_task(
+                session_manager.resume_session(
+                    session_id,
+                    prompt=prompt_text,
+                    resume_reason=resume_reason,
+                )
+            )
+            async for event in stream_wire_messages(session.wire, session.task):
+                await _broadcast_event(session, event)
+                yield event
+        except Exception as exc:
+            logger.exception("Error during session resume")
+            error_data = {
+                "event": "Error",
+                "data": json.dumps(
+                    {
+                        "session_id": session_id,
+                        "error": str(exc),
+                        "timestamp": datetime.now(UTC).isoformat(),
+                    }
+                ),
+            }
+            await _broadcast_event(session, error_data)
+            yield error_data
+        finally:
+            if session.task is not None:
+                try:
+                    await session.task
+                except Exception:
+                    pass
+                session.task = None
+            session.turn_in_progress = False
+            session.last_activity = datetime.now(UTC)
+
+    return EventSourceResponse(
+        event_generator(),
+        media_type="text/event-stream",
+    )
+
+
+async def _send_attached_executor_prompt(
     session_id: str,
     prompt_text: str,
 ) -> EventSourceResponse:
     try:
-        run = await session_manager.request_external_worker_run(session_id, prompt_text)
+        run = await session_manager.request_attached_executor_run(
+            session_id,
+            prompt_text,
+        )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
     except SessionOwnershipConflictError as exc:
@@ -2471,6 +2589,7 @@ async def _send_external_worker_prompt(
 
 
 @app.post("/worker/runs/claim", response_model=WorkerClaimResponse)
+@app.post("/executor/runs/claim", response_model=WorkerClaimResponse)
 @limiter.limit(RateLimits.SEND_PROMPT)
 async def claim_worker_run(
     request: Request,
@@ -2478,8 +2597,8 @@ async def claim_worker_run(
     api_key: str | None = Depends(verify_api_key),
 ) -> WorkerClaimResponse:
     try:
-        claim = await session_manager.claim_external_worker_run(
-            worker_id=body.worker_id,
+        claim = await session_manager.claim_attached_executor_run(
+            executor_id=body.worker_id,
             executor_kind=body.executor_kind,
             session_id=body.session_id,
             lease_seconds=body.lease_seconds,
@@ -2508,6 +2627,7 @@ async def claim_worker_run(
 
 
 @app.post("/worker/runs/{run_id}/heartbeat", response_model=WorkerHeartbeatResponse)
+@app.post("/executor/runs/{run_id}/heartbeat", response_model=WorkerHeartbeatResponse)
 @limiter.limit(RateLimits.SEND_PROMPT)
 async def heartbeat_worker_run(
     request: Request,
@@ -2516,9 +2636,9 @@ async def heartbeat_worker_run(
     api_key: str | None = Depends(verify_api_key),
 ) -> WorkerHeartbeatResponse:
     try:
-        run = await session_manager.heartbeat_external_worker_run(
+        run = await session_manager.heartbeat_attached_executor_run(
             run_id=run_id,
-            worker_id=body.worker_id,
+            executor_id=body.worker_id,
             claim_token=body.claim_token,
             lease_seconds=body.lease_seconds,
             worker_instance_id=body.worker_instance_id,
@@ -2540,6 +2660,7 @@ async def heartbeat_worker_run(
 
 
 @app.post("/worker/runs/{run_id}/events", response_model=RuntimeEventsResponse)
+@app.post("/executor/runs/{run_id}/events", response_model=RuntimeEventsResponse)
 @limiter.limit(RateLimits.SEND_PROMPT)
 async def append_worker_run_events(
     request: Request,
@@ -2552,10 +2673,16 @@ async def append_worker_run_events(
         run = await session_manager.load_runtime_run(run_id)
         session = await session_manager.get_session_async(run.session_id)
         for event in body.events:
-            payload = cast(dict[str, JSONValue], dict(event.data))
-            record = await session_manager.append_external_worker_event(
+            payload = cast(
+                dict[str, JSONValue],
+                {
+                    "message_type": event.event,
+                    "message": dict(event.data),
+                },
+            )
+            record = await session_manager.append_attached_executor_event(
                 run_id=run_id,
-                worker_id=body.worker_id,
+                executor_id=body.worker_id,
                 claim_token=body.claim_token,
                 event_id=event.event_id,
                 event_kind=f"wire.{event.event}",
@@ -2580,6 +2707,7 @@ async def append_worker_run_events(
 
 
 @app.post("/worker/runs/{run_id}/approval", response_model=WorkerApprovalResponse)
+@app.post("/executor/runs/{run_id}/approval", response_model=WorkerApprovalResponse)
 @limiter.limit(RateLimits.APPROVE)
 async def request_worker_approval(
     request: Request,
@@ -2588,9 +2716,9 @@ async def request_worker_approval(
     api_key: str | None = Depends(verify_api_key),
 ) -> WorkerApprovalResponse:
     try:
-        run = await session_manager.heartbeat_external_worker_run(
+        run = await session_manager.heartbeat_attached_executor_run(
             run_id=run_id,
-            worker_id=body.worker_id,
+            executor_id=body.worker_id,
             claim_token=body.claim_token,
         )
         approval = await wait_for_approval(
@@ -2619,6 +2747,7 @@ async def request_worker_approval(
 
 
 @app.post("/worker/runs/{run_id}/complete", response_model=RuntimeRunResponse)
+@app.post("/executor/runs/{run_id}/complete", response_model=RuntimeRunResponse)
 @limiter.limit(RateLimits.SEND_PROMPT)
 async def complete_worker_run(
     request: Request,
@@ -2627,9 +2756,9 @@ async def complete_worker_run(
     api_key: str | None = Depends(verify_api_key),
 ) -> RuntimeRunResponse:
     try:
-        run = await session_manager.finalize_external_worker_run(
+        run = await session_manager.finalize_attached_executor_run(
             run_id=run_id,
-            worker_id=body.worker_id,
+            executor_id=body.worker_id,
             claim_token=body.claim_token,
             status=body.status,
             result=cast(dict[str, JSONValue], dict(body.result)),
@@ -3151,7 +3280,7 @@ async def list_sessions(
             continue
         if not _auth_context_can_access_session(auth_context, session):
             continue
-        summaries.append(SessionSummaryResponse(**session.as_dict()))
+        summaries.append(await _session_summary_response(session))
     return SessionListResponse(sessions=summaries)
 
 
@@ -3172,7 +3301,13 @@ async def get_session(
     if not _auth_context_can_access_session(auth_context, session):
         raise HTTPException(status_code=404, detail="Session not found")
 
-    return SessionSummaryResponse(**session.as_dict())
+    return await _session_summary_response(session)
+
+
+async def _session_summary_response(session: Session) -> SessionSummaryResponse:
+    payload = session.as_dict()
+    payload.update(await session_manager.session_resume_metadata(session.id))
+    return SessionSummaryResponse(**payload)
 
 
 @app.get("/sessions/{session_id}/runs", response_model=RuntimeRunListResponse)
@@ -3357,6 +3492,7 @@ def _worker_status_from_runs(
     process_id = metadata.get("process_id")
     return WorkerStatusResponse(
         worker_id=worker_id,
+        executor_id=worker_id,
         status=status,
         executor_kind=(
             metadata.get("executor_kind")
@@ -5350,6 +5486,18 @@ async def list_workers(
     )
 
 
+@app.get("/executors", response_model=ExecutorListResponse)
+@limiter.limit(RateLimits.GET_SESSION)
+async def list_executors(
+    request: Request,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> ExecutorListResponse:
+    del request
+    return ExecutorListResponse(
+        executors=_worker_statuses_from_runs(await _visible_runtime_runs(auth_context))
+    )
+
+
 @app.get("/workers/{worker_id}", response_model=WorkerStatusResponse)
 @limiter.limit(RateLimits.GET_SESSION)
 async def get_worker_status(
@@ -5365,6 +5513,23 @@ async def get_worker_status(
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Worker not found") from exc
+
+
+@app.get("/executors/{executor_id}", response_model=WorkerStatusResponse)
+@limiter.limit(RateLimits.GET_SESSION)
+async def get_executor_status(
+    request: Request,
+    executor_id: str,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> WorkerStatusResponse:
+    del request
+    try:
+        return _worker_status_from_runs(
+            executor_id,
+            await _visible_runtime_runs(auth_context),
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Executor not found") from exc
 
 
 def _session_runtime_tape(session: Session) -> Tape | None:

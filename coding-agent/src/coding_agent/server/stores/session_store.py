@@ -5,8 +5,10 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 import json
 import logging
 import os
+import sqlite3
 import threading
 from collections.abc import Callable, Coroutine, Iterable
+from pathlib import Path
 from typing import Final, Protocol, cast
 
 from agentkit.config.loader import ConfigError
@@ -84,6 +86,151 @@ class InMemorySessionStore:
 
     def check_health(self) -> bool:
         return True
+
+
+class FileSessionStore:
+    def __init__(self, root: Path) -> None:
+        self._root = root
+        self._lock = threading.Lock()
+        self._root.mkdir(parents=True, exist_ok=True)
+
+    def _path_for(self, session_id: str) -> Path:
+        if not session_id or "/" in session_id or "\\" in session_id:
+            raise ValueError("session_id must be a non-empty file-safe string")
+        return self._root / f"{session_id}.json"
+
+    def save(self, session_id: str, data: SessionPayload) -> None:
+        path = self._path_for(session_id)
+        payload = json.dumps(data, sort_keys=True)
+        tmp_path = path.with_suffix(".json.tmp")
+        with self._lock:
+            self._root.mkdir(parents=True, exist_ok=True)
+            tmp_path.write_text(payload, encoding="utf-8")
+            tmp_path.replace(path)
+
+    def load(self, session_id: str) -> SessionPayload | None:
+        path = self._path_for(session_id)
+        with self._lock:
+            if not path.exists():
+                return None
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise TypeError("file session payload must be a JSON object")
+        return cast(SessionPayload, raw)
+
+    def count_sessions(self) -> int:
+        return len(self.list_sessions())
+
+    def list_sessions(self) -> list[str]:
+        with self._lock:
+            if not self._root.exists():
+                return []
+            return sorted(path.stem for path in self._root.glob("*.json"))
+
+    def delete(self, session_id: str) -> None:
+        path = self._path_for(session_id)
+        with self._lock:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                return
+
+    def check_health(self) -> bool:
+        try:
+            self._root.mkdir(parents=True, exist_ok=True)
+            return self._root.is_dir()
+        except Exception:
+            return False
+
+
+class SQLiteSessionStore:
+    _CREATE_TABLE_SQL: Final[str] = """
+    CREATE TABLE IF NOT EXISTS agent_http_sessions (
+        session_id TEXT PRIMARY KEY,
+        payload TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._lock = threading.Lock()
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        with self._connect() as connection:
+            connection.execute(self._CREATE_TABLE_SQL)
+
+    def _connect(self) -> sqlite3.Connection:
+        return sqlite3.connect(self._path)
+
+    def save(self, session_id: str, data: SessionPayload) -> None:
+        if not session_id:
+            raise ValueError("session_id must be non-empty")
+        payload = json.dumps(data, sort_keys=True)
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO agent_http_sessions (session_id, payload, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(session_id)
+                DO UPDATE SET payload = excluded.payload,
+                              updated_at = CURRENT_TIMESTAMP
+                """,
+                (session_id, payload),
+            )
+
+    def load(self, session_id: str) -> SessionPayload | None:
+        if not session_id:
+            raise ValueError("session_id must be non-empty")
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload FROM agent_http_sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = json.loads(str(row[0]))
+        if not isinstance(payload, dict):
+            raise TypeError("sqlite session payload must be a JSON object")
+        return cast(SessionPayload, payload)
+
+    def count_sessions(self) -> int:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM agent_http_sessions"
+            ).fetchone()
+        if row is None or not isinstance(row[0], int):
+            raise TypeError("sqlite session count must be an int")
+        return row[0]
+
+    def list_sessions(self) -> list[str]:
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                "SELECT session_id FROM agent_http_sessions ORDER BY session_id"
+            ).fetchall()
+        session_ids: list[str] = []
+        for row in rows:
+            session_id = row[0]
+            if not isinstance(session_id, str):
+                raise TypeError("sqlite session row must include string session_id")
+            session_ids.append(session_id)
+        return session_ids
+
+    def delete(self, session_id: str) -> None:
+        if not session_id:
+            raise ValueError("session_id must be non-empty")
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "DELETE FROM agent_http_sessions WHERE session_id = ?",
+                (session_id,),
+            )
+
+    def check_health(self) -> bool:
+        try:
+            with self._lock, self._connect() as connection:
+                row = connection.execute("SELECT 1").fetchone()
+            return row is not None
+        except Exception:
+            return False
 
 
 class RedisSessionStore:
@@ -426,6 +573,7 @@ def create_session_store(
     redis_url: str | None = None,
     redis_client_factory: Callable[[str], RedisClient] | None = None,
     pg_pool: AsyncPGSessionPool | None = None,
+    file_path: Path | str | None = None,
 ) -> SessionStore:
     resolved_backend = (
         (backend or os.environ.get("AGENT_SESSION_BACKEND") or "").strip().lower()
@@ -449,6 +597,27 @@ def create_session_store(
 
     if resolved_backend == "memory":
         return InMemorySessionStore()
+
+    if resolved_backend in {"fs", "file", "json"}:
+        resolved_path = (
+            Path(file_path)
+            if file_path is not None
+            else Path(
+                os.environ.get(
+                    "AGENT_SESSION_STORE_DIR",
+                    str(Path(os.environ.get("AGENT_DATA_DIR", "./data")) / "sessions"),
+                )
+            )
+        )
+        return FileSessionStore(resolved_path)
+
+    if resolved_backend == "sqlite":
+        resolved_path = (
+            Path(file_path)
+            if file_path is not None
+            else Path(os.environ.get("AGENT_DATA_DIR", "./data")) / "sessions.sqlite3"
+        )
+        return SQLiteSessionStore(resolved_path)
 
     if resolved_backend not in {"", "redis"}:
         raise ValueError(f"unsupported session store backend: {resolved_backend}")

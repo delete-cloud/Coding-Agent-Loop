@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import types
 from datetime import UTC, datetime, timedelta
@@ -11,6 +12,7 @@ from unittest.mock import patch
 import pytest
 
 from agentkit.runtime.context import AgentRunContext
+from agentkit.checkpoint.models import CheckpointMeta
 from agentkit.tools import FatalToolExecutionError
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
@@ -31,6 +33,7 @@ from coding_agent.runtime_store import (
 from coding_agent.server.binding_resolver import DefaultBindingResolver
 from coding_agent.server.execution_binding import (
     CloudWorkspaceBinding,
+    ExternalWorkerBinding,
     LocalExecutionBinding,
 )
 from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictError
@@ -67,6 +70,29 @@ class FakeRuntimeStore:
     async def create_agent_run(self, record: AgentRunRecord) -> AgentRunRecord:
         self.created.append(record)
         return record
+
+    async def load_agent_run(self, run_id: str) -> AgentRunRecord | None:
+        records: dict[str, AgentRunRecord] = {
+            record.run_id: record for record in self.created
+        }
+        for update in self.updated:
+            record = records.get(cast(str, update["run_id"]))
+            if record is None:
+                continue
+            records[record.run_id] = AgentRunRecord(
+                run_id=record.run_id,
+                session_id=record.session_id,
+                tape_id=record.tape_id,
+                parent_run_id=record.parent_run_id,
+                agent_id=record.agent_id,
+                status=cast(str, update["status"]),
+                started_at=record.started_at,
+                ended_at=cast(datetime | None, update["ended_at"]),
+                metadata=cast(dict[str, JSONValue], update["metadata"]),
+                result=cast(dict[str, JSONValue], update["result"]),
+                error=cast(str | None, update["error"]),
+            )
+        return records.get(run_id)
 
     async def update_agent_run(
         self,
@@ -125,12 +151,90 @@ class FakeRuntimeStore:
                 )
         return records
 
+    async def claim_attached_executor_run(
+        self,
+        *,
+        session_id: str | None,
+        executor_kind: str,
+        claim_metadata: dict[str, object],
+    ) -> AgentRunRecord | None:
+        for record in list(self.created):
+            if session_id is not None and record.session_id != session_id:
+                continue
+            if record.status not in {"requested", "expired"}:
+                continue
+            if record.metadata.get("executor_kind") != executor_kind:
+                continue
+            claimed = AgentRunRecord(
+                run_id=record.run_id,
+                session_id=record.session_id,
+                tape_id=record.tape_id,
+                parent_run_id=record.parent_run_id,
+                agent_id=record.agent_id,
+                status="claimed",
+                started_at=record.started_at,
+                ended_at=record.ended_at,
+                metadata={**record.metadata, **claim_metadata},
+                result=record.result,
+                error=record.error,
+            )
+            self.created[self.created.index(record)] = claimed
+            return claimed
+        return None
+
+    async def claim_external_worker_run(
+        self,
+        *,
+        session_id: str | None,
+        executor_kind: str,
+        claim_metadata: dict[str, object],
+    ) -> AgentRunRecord | None:
+        return await self.claim_attached_executor_run(
+            session_id=session_id,
+            executor_kind=executor_kind,
+            claim_metadata=claim_metadata,
+        )
+
     async def append_runtime_event(
         self,
         record: RuntimeEventRecord,
     ) -> RuntimeEventRecord:
-        self.events.append(record)
-        return record
+        sequence = len(self.events) + 1
+        sequenced = RuntimeEventRecord(
+            event_id=record.event_id,
+            run_id=record.run_id,
+            event_kind=record.event_kind,
+            payload=record.payload,
+            created_at=record.created_at,
+            sequence=sequence,
+        )
+        self.events.append(sequenced)
+        return sequenced
+
+    async def load_runtime_event(
+        self,
+        event_id: str,
+    ) -> RuntimeEventRecord | None:
+        for event in self.events:
+            if event.event_id == event_id:
+                return event
+        return None
+
+    async def replay_runtime_events(
+        self,
+        run_id: str,
+        *,
+        after_sequence: int = 0,
+        limit: int = 1000,
+    ) -> list[RuntimeEventRecord]:
+        events = [
+            event
+            for event in self.events
+            if event.run_id == run_id
+            and event.sequence is not None
+            and event.sequence > after_sequence
+        ]
+        return events[:limit]
 
     async def save_message_snapshot(
         self,
@@ -138,6 +242,15 @@ class FakeRuntimeStore:
     ) -> RunMessageSnapshotRecord:
         self.snapshots.append(record)
         return record
+
+    async def load_message_snapshot(
+        self,
+        snapshot_id: str,
+    ) -> RunMessageSnapshotRecord | None:
+        for snapshot in self.snapshots:
+            if snapshot.snapshot_id == snapshot_id:
+                return snapshot
+        return None
 
     async def create_agent_interaction(
         self,
@@ -408,6 +521,8 @@ async def test_run_agent_persists_agent_run_lifecycle_when_store_configured() ->
         "model_name": "test-model",
         "approval_policy": "auto",
         "max_steps": 30,
+        "execution_binding_kind": "local",
+        "execution_placement": "server_embedded",
     }
     assert running_update == {
         "run_id": created.run_id,
@@ -583,6 +698,362 @@ async def test_agent_run_marks_interrupted_outcome_as_interrupted() -> None:
         "steps_taken": 1,
     }
     assert runtime_store.updated[-1]["error"] == "manual interrupt"
+
+
+@pytest.mark.asyncio
+async def test_resume_session_creates_new_run_linked_to_interrupted_run(
+    tmp_path: Path,
+) -> None:
+    runtime_store = FakeRuntimeStore()
+    observation_store = JsonlAgentObservationStore(tmp_path)
+    manager = SessionManager(
+        runtime_store=runtime_store,
+        observation_store=observation_store,
+    )
+    session_id = await manager.create_session()
+    session = await manager.get_session_async(session_id)
+    stable_tape_id = f"{session_id}-stable-tape"
+    session.tape_id = stable_tape_id
+    interrupted_at = datetime(2026, 5, 19, 12, 0, tzinfo=UTC)
+    previous_run = AgentRunRecord(
+        run_id="run-interrupted",
+        session_id=session_id,
+        tape_id=stable_tape_id,
+        parent_run_id=None,
+        agent_id=None,
+        status="interrupted",
+        started_at=interrupted_at - timedelta(minutes=5),
+        ended_at=interrupted_at,
+        metadata={"provider_name": "test-provider"},
+        result={"steps_taken": 2},
+        error="runtime interrupted",
+    )
+    runtime_store.created.append(previous_run)
+    await manager._tape_store.save(
+        stable_tape_id,
+        [
+            Entry(
+                kind="message",
+                payload={"role": "user", "content": "implement resume"},
+                id="entry-user",
+            ).to_dict(),
+            Entry(
+                kind="tool_call",
+                payload={
+                    "tool_name": "todo_write",
+                    "tasks": [
+                        {
+                            "title": "Wire resume context to tape tail",
+                            "status": "in_progress",
+                        }
+                    ],
+                },
+                id="entry-plan",
+            ).to_dict(),
+            Entry(
+                kind="message",
+                payload={"role": "assistant", "content": "partial progress"},
+                id="entry-assistant",
+            ).to_dict(),
+        ],
+    )
+    await runtime_store.append_runtime_event(
+        RuntimeEventRecord(
+            event_id="event-last",
+            run_id=previous_run.run_id,
+            event_kind="wire.StreamDelta",
+            payload={"content": "partial"},
+            created_at=interrupted_at,
+        )
+    )
+    await runtime_store.save_message_snapshot(
+        RunMessageSnapshotRecord(
+            snapshot_id=f"{previous_run.run_id}:latest",
+            run_id=previous_run.run_id,
+            messages=[
+                {"role": "user", "content": "implement resume"},
+                {"role": "assistant", "content": "partial progress"},
+            ],
+            metadata={
+                "session_id": session_id,
+                "tape_id": stable_tape_id,
+                "snapshot_kind": "latest_context",
+            },
+            created_at=interrupted_at,
+        )
+    )
+    observed_prompt: list[str] = []
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, ctx, consumer
+
+        async def run_turn(self, prompt: str) -> TurnOutcome:
+            observed_prompt.append(prompt)
+            return TurnOutcome(stop_reason=StopReason.NO_TOOL_CALLS)
+
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        )
+    )
+
+    def fake_create_agent(**kwargs):
+        environment = kwargs["environment"]
+        if not isinstance(environment, LocalEnvironment):
+            raise TypeError("expected local environment")
+        return fake_pipeline, types.SimpleNamespace(
+            session_id=kwargs["session_id_override"],
+            config={},
+            tape=kwargs.get("tape") or Tape(tape_id=stable_tape_id),
+            run_context=AgentRunContext(
+                session_id=kwargs["session_id_override"],
+                run_id=kwargs["run_id_override"],
+                agent_id=None,
+                environment=environment,
+            ),
+        )
+
+    class FakeCheckpointService:
+        async def list(self, tape_id: str):
+            assert tape_id == session.tape_id
+            return [
+                CheckpointMeta(
+                    checkpoint_id="cp-latest",
+                    tape_id=tape_id,
+                    session_id=session_id,
+                    entry_count=2,
+                    window_start=0,
+                    created_at=interrupted_at + timedelta(seconds=1),
+                    label="latest",
+                )
+            ]
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr(manager, "_checkpoint_service", FakeCheckpointService())
+
+        new_run = await manager.resume_session(
+            session_id,
+            prompt="continue the implementation",
+            resume_reason="user_resume",
+        )
+
+    assert new_run.run_id != previous_run.run_id
+    assert new_run.parent_run_id == previous_run.run_id
+    assert new_run.metadata["previous_run_id"] == previous_run.run_id
+    assert new_run.metadata["resume_from_run_id"] == previous_run.run_id
+    assert new_run.metadata["resume_from_event_id"] == "event-last"
+    assert new_run.metadata["resume_reason"] == "user_resume"
+    assert new_run.metadata["resume_context_injected"] is True
+    assert new_run.metadata["resume_context_strategy"] == (
+        "checkpoint+tape_tail+message_snapshot"
+    )
+    assert isinstance(new_run.metadata["resume_boundary_anchor_id"], str)
+    assert new_run.metadata["resume_boundary_anchor_type"] == "resume_boundary"
+    assert new_run.metadata["checkpoint_count"] == 1
+    assert new_run.metadata["latest_checkpoint_id"] == "cp-latest"
+    assert new_run.metadata["latest_checkpoint_label"] == "latest"
+    assert new_run.metadata["tape_entry_count"] == 3
+    assert new_run.metadata["resume_tape_tail_entry_count"] == 3
+    assert new_run.metadata["resume_plan_note_included"] is True
+    assert new_run.metadata["latest_message_snapshot_id"] == "run-interrupted:latest"
+    assert new_run.metadata["latest_message_snapshot_message_count"] == 2
+    assert runtime_store.created[0] == previous_run
+    assert runtime_store.created[1].run_id == new_run.run_id
+    assert runtime_store.updated[-1]["status"] == "completed"
+    assert "Previous run was interrupted." in observed_prompt[0]
+    assert "Latest checkpoint: cp-latest (latest)." in observed_prompt[0]
+    assert (
+        "Latest runtime message snapshot: run-interrupted:latest (2 messages)."
+        in observed_prompt[0]
+    )
+    assert "Latest tape tail (3 of 3 entries):" in observed_prompt[0]
+    assert "todo_write" in observed_prompt[0]
+    assert "Wire resume context to tape tail" in observed_prompt[0]
+    assert "Latest plan/checkpoint note:" in observed_prompt[0]
+    assert "it does not restore or roll back to a checkpoint" in observed_prompt[0]
+    assert "continue the implementation" in observed_prompt[0]
+    assert "resume_boundary" not in observed_prompt[0]
+    tape_entries = await manager._tape_store.load(stable_tape_id)
+    boundary_entry = tape_entries[3]
+    assert len(tape_entries) == 4
+    assert boundary_entry["kind"] == "anchor"
+    assert boundary_entry["anchor_type"] == "context"
+    assert boundary_entry["id"] == new_run.metadata["resume_boundary_anchor_id"]
+    assert boundary_entry["payload"] == {"label": "Resume boundary"}
+    boundary_meta = cast(dict[str, object], boundary_entry["meta"])
+    assert boundary_meta["product_anchor_type"] == "resume_boundary"
+    assert boundary_meta["skip"] is True
+    assert boundary_meta["previous_run_id"] == previous_run.run_id
+    assert boundary_meta["resume_from_run_id"] == previous_run.run_id
+    assert boundary_meta["resume_from_event_id"] == "event-last"
+    assert boundary_meta["resume_reason"] == "user_resume"
+    assert boundary_meta["resume_context_strategy"] == (
+        "checkpoint+tape_tail+message_snapshot"
+    )
+    observation_path = tmp_path / "runs" / new_run.run_id / "observations.jsonl"
+    observation = json.loads(
+        observation_path.read_text(encoding="utf-8").splitlines()[0]
+    )
+    assert observation["attributes"]["previous_run_id"] == previous_run.run_id
+    assert observation["attributes"]["resume_from_run_id"] == previous_run.run_id
+    assert observation["attributes"]["resume_from_event_id"] == "event-last"
+    assert (
+        observation["attributes"]["resume_boundary_anchor_id"]
+        == (new_run.metadata["resume_boundary_anchor_id"])
+    )
+    assert observation["attributes"]["resume_boundary_anchor_type"] == (
+        "resume_boundary"
+    )
+    assert observation["attributes"]["tape_id"] == stable_tape_id
+    assert observation["attributes"]["execution_placement"] == "server_embedded"
+    assert observation["attributes"]["execution_binding_kind"] == "local"
+
+
+@pytest.mark.asyncio
+async def test_resume_session_rejects_active_runtime_run() -> None:
+    runtime_store = FakeRuntimeStore()
+    manager = SessionManager(runtime_store=runtime_store)
+    session_id = await manager.create_session()
+    runtime_store.created.append(
+        AgentRunRecord(
+            run_id="run-active",
+            session_id=session_id,
+            tape_id="stable-tape",
+            parent_run_id=None,
+            agent_id=None,
+            status="running",
+            started_at=datetime(2026, 5, 19, 12, 0, tzinfo=UTC),
+            metadata={},
+            result={},
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="latest run is still active"):
+        await manager.resume_session(session_id)
+
+
+@pytest.mark.asyncio
+async def test_resume_external_executor_session_requests_linked_run() -> None:
+    runtime_store = FakeRuntimeStore()
+    manager = SessionManager(runtime_store=runtime_store)
+    session_id = await manager.create_session(
+        execution_binding=ExternalWorkerBinding(executor_kind="local_cli")
+    )
+    stable_tape_id = f"{session_id}-tape"
+    previous_run = AgentRunRecord(
+        run_id="run-cancelled",
+        session_id=session_id,
+        tape_id=stable_tape_id,
+        parent_run_id=None,
+        agent_id=None,
+        status="cancelled",
+        started_at=datetime(2026, 5, 19, 12, 0, tzinfo=UTC),
+        ended_at=datetime(2026, 5, 19, 12, 1, tzinfo=UTC),
+        metadata={},
+        result={},
+        error="cancelled",
+    )
+    runtime_store.created.append(previous_run)
+
+    new_run = await manager.resume_session(
+        session_id,
+        prompt="resume locally",
+        resume_reason="remote_resume",
+    )
+
+    assert new_run.status == "requested"
+    assert new_run.parent_run_id == previous_run.run_id
+    assert new_run.metadata["prompt"].startswith("Previous run was interrupted.")
+    assert new_run.metadata["previous_run_id"] == previous_run.run_id
+    assert new_run.metadata["resume_from_run_id"] == previous_run.run_id
+    assert new_run.metadata["resume_reason"] == "remote_resume"
+    assert isinstance(new_run.metadata["resume_boundary_anchor_id"], str)
+    assert new_run.metadata["resume_boundary_anchor_type"] == "resume_boundary"
+    tape_entries = await manager._tape_store.load(stable_tape_id)
+    assert len(tape_entries) == 1
+    boundary_entry = tape_entries[0]
+    assert boundary_entry["kind"] == "anchor"
+    assert boundary_entry["anchor_type"] == "context"
+    assert boundary_entry["id"] == new_run.metadata["resume_boundary_anchor_id"]
+    boundary_meta = cast(dict[str, object], boundary_entry["meta"])
+    assert boundary_meta["product_anchor_type"] == "resume_boundary"
+    assert boundary_meta["previous_run_id"] == previous_run.run_id
+    assert boundary_meta["resume_reason"] == "remote_resume"
+
+
+@pytest.mark.asyncio
+async def test_session_resume_metadata_reports_run_and_checkpoint_context() -> None:
+    runtime_store = FakeRuntimeStore()
+    manager = SessionManager(runtime_store=runtime_store)
+    session_id = await manager.create_session()
+    session = manager.get_session(session_id)
+    session.tape_id = "stable-tape"
+    await manager._persist_session_async(session)
+    previous_run = AgentRunRecord(
+        run_id="run-interrupted",
+        session_id=session_id,
+        tape_id="stable-tape",
+        parent_run_id=None,
+        agent_id=None,
+        status="interrupted",
+        started_at=datetime(2026, 5, 19, 12, 0, tzinfo=UTC),
+        ended_at=datetime(2026, 5, 19, 12, 1, tzinfo=UTC),
+        metadata={},
+        result={},
+        error="interrupted",
+    )
+    runtime_store.created.append(previous_run)
+    await runtime_store.append_runtime_event(
+        RuntimeEventRecord(
+            event_id="event-last",
+            run_id=previous_run.run_id,
+            event_kind="wire.TurnEnd",
+            payload={"message_type": "TurnEnd"},
+            created_at=datetime(2026, 5, 19, 12, 1, tzinfo=UTC),
+        )
+    )
+
+    class FakeCheckpointService:
+        async def list(self, tape_id: str):
+            assert tape_id == "stable-tape"
+            return [
+                CheckpointMeta(
+                    checkpoint_id="cp-old",
+                    tape_id=tape_id,
+                    session_id=session_id,
+                    entry_count=1,
+                    window_start=0,
+                    created_at=datetime(2026, 5, 19, 11, 0, tzinfo=UTC),
+                    label="old",
+                ),
+                CheckpointMeta(
+                    checkpoint_id="cp-latest",
+                    tape_id=tape_id,
+                    session_id=session_id,
+                    entry_count=2,
+                    window_start=0,
+                    created_at=datetime(2026, 5, 19, 12, 2, tzinfo=UTC),
+                    label="latest",
+                ),
+            ]
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(manager, "_checkpoint_service", FakeCheckpointService())
+        metadata = await manager.session_resume_metadata(session_id)
+
+    assert metadata == {
+        "resumable": True,
+        "last_run_id": "run-interrupted",
+        "last_run_status": "interrupted",
+        "last_interrupted_run_id": "run-interrupted",
+        "resume_from_event_id": "event-last",
+        "checkpoint_count": 2,
+        "latest_checkpoint_id": "cp-latest",
+        "latest_checkpoint_label": "latest",
+    }
 
 
 @pytest.mark.asyncio
@@ -802,7 +1273,7 @@ async def test_run_agent_persists_wire_events_when_runtime_store_configured() ->
         return fake_pipeline, types.SimpleNamespace(
             session_id=kwargs["session_id_override"],
             config={},
-            tape=kwargs.get("tape") or Tape(tape_id="stable-tape"),
+            tape=kwargs.get("tape") or Tape(),
             run_context=AgentRunContext(
                 session_id=kwargs["session_id_override"],
                 run_id=kwargs["run_id_override"],
@@ -822,15 +1293,18 @@ async def test_run_agent_persists_wire_events_when_runtime_store_configured() ->
     assert event.run_id == runtime_store.created[0].run_id
     assert event.event_kind == "wire.StreamDelta"
     assert event.created_at == emitted_at
-    assert event.payload == {
-        "message_type": "StreamDelta",
-        "message": {
-            "session_id": session_id,
-            "agent_id": "root",
-            "timestamp": emitted_at.isoformat(),
-            "content": "hello",
-            "role": "assistant",
-        },
+    assert event.payload["session_id"] == session_id
+    assert event.payload["run_id"] == runtime_store.created[0].run_id
+    assert event.payload["tape_id"] == runtime_store.created[0].tape_id
+    assert event.payload["execution_placement"] == "server_embedded"
+    assert event.payload["execution_binding_kind"] == "local"
+    assert event.payload["message_type"] == "StreamDelta"
+    assert event.payload["message"] == {
+        "session_id": session_id,
+        "agent_id": "root",
+        "timestamp": emitted_at.isoformat(),
+        "content": "hello",
+        "role": "assistant",
     }
 
 
@@ -899,27 +1373,30 @@ async def test_run_agent_persists_approval_request_wire_events() -> None:
     assert event.run_id == runtime_store.created[0].run_id
     assert event.event_kind == "wire.ApprovalRequest"
     assert event.created_at == requested_at
-    assert event.payload == {
-        "message_type": "ApprovalRequest",
-        "message": {
+    assert event.payload["session_id"] == session_id
+    assert event.payload["run_id"] == runtime_store.created[0].run_id
+    assert event.payload["tape_id"] == runtime_store.created[0].tape_id
+    assert event.payload["execution_placement"] == "server_embedded"
+    assert event.payload["execution_binding_kind"] == "local"
+    assert event.payload["message_type"] == "ApprovalRequest"
+    assert event.payload["message"] == {
+        "session_id": session_id,
+        "agent_id": "",
+        "timestamp": requested_at.isoformat(),
+        "request_id": "req-runtime-event",
+        "tool_call": {
             "session_id": session_id,
             "agent_id": "",
-            "timestamp": requested_at.isoformat(),
-            "request_id": "req-runtime-event",
-            "tool_call": {
-                "session_id": session_id,
-                "agent_id": "",
-                "timestamp": tool_called_at.isoformat(),
-                "tool_name": "bash",
-                "arguments": {"command": "pwd"},
-                "call_id": "call-runtime-event",
-            },
-            "timeout_seconds": 0,
-            "call_id": "req-runtime-event",
-            "tool": "bash",
-            "args": {"command": "pwd"},
-            "risk_level": "low",
+            "timestamp": tool_called_at.isoformat(),
+            "tool_name": "bash",
+            "arguments": {"command": "pwd"},
+            "call_id": "call-runtime-event",
         },
+        "timeout_seconds": 0,
+        "call_id": "req-runtime-event",
+        "tool": "bash",
+        "args": {"command": "pwd"},
+        "risk_level": "low",
     }
 
 

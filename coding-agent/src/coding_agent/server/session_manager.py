@@ -5,15 +5,16 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import importlib
+import json
 import logging
 import os
 import secrets
+import threading
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import Enum
-from functools import partial
 from inspect import isawaitable
 from math import isfinite
 from pathlib import Path
@@ -40,7 +41,7 @@ from agentkit.storage.protocols import TapeDebugStore, TapeInfo, TapeSearchResul
 from agentkit.tape.extract import TurnTrace, extract_turns
 from agentkit.tape.tape import Tape
 from agentkit.tools import FatalToolExecutionError
-from agentkit.tape.models import Entry
+from agentkit.tape.models import Anchor, Entry
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.agent_observability import (
     AgentObservationRecorder,
@@ -63,6 +64,7 @@ from coding_agent.adapter_types import StopReason, TurnOutcome
 from coding_agent.runtime_store import (
     AgentInteractionRecord,
     AgentRunRecord,
+    JSONLRuntimeStore,
     JSONObject,
     PGRuntimeStore,
     RunMessageSnapshotRecord,
@@ -179,6 +181,42 @@ def _wire_message_event_payload(message: WireMessage) -> JSONObject:
     }
 
 
+def _runtime_event_correlation_from_run(run: AgentRunRecord) -> JSONObject:
+    metadata = run.metadata
+    payload: JSONObject = {
+        "session_id": run.session_id,
+        "run_id": run.run_id,
+    }
+    if run.tape_id is not None:
+        payload["tape_id"] = run.tape_id
+    for key in (
+        "execution_placement",
+        "execution_binding_kind",
+        "previous_run_id",
+        "resume_from_run_id",
+        "resume_from_event_id",
+        "resume_reason",
+        "resume_context_strategy",
+        "resume_boundary_anchor_id",
+        "resume_boundary_anchor_type",
+        "executor_id",
+        "worker_id",
+    ):
+        value = metadata.get(key)
+        if isinstance(value, str) and value:
+            payload[key] = value
+    if metadata.get("resume_context_injected") is True:
+        payload["resume_context_injected"] = True
+    return payload
+
+
+def _with_runtime_event_correlation(
+    payload: JSONObject,
+    correlation: JSONObject,
+) -> JSONObject:
+    return {**correlation, **payload}
+
+
 def _approval_request_payload(request: ApprovalRequest) -> JSONObject:
     payload: JSONObject = {
         "session_id": request.session_id,
@@ -210,6 +248,11 @@ def _approval_interaction_status(response: ApprovalResponse) -> str:
 
 _STALE_RUNTIME_RUN_ERROR = "runtime run was still running during startup recovery"
 _STALE_RUNTIME_RUN_RECOVERY_REASON = "startup_stale_running_run"
+_RESUME_TAPE_TAIL_LIMIT = 5
+_RESUME_CONTEXT_JSON_LIMIT = 4000
+_RESUME_PLAN_NOTE_LIMIT = 1200
+_RESUME_BOUNDARY_PRODUCT_ANCHOR_TYPE = "resume_boundary"
+_RESUME_CONTEXT_STRATEGY = "checkpoint+tape_tail+message_snapshot"
 
 
 def _runtime_message_snapshot(messages: object) -> list[JSONObject] | None:
@@ -228,6 +271,174 @@ def _runtime_message_snapshot(messages: object) -> list[JSONObject] | None:
     return snapshot
 
 
+def _truncate_resume_text(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return f"{value[: limit - 14]}...[truncated]"
+
+
+def _compact_resume_json(
+    value: object, *, limit: int = _RESUME_CONTEXT_JSON_LIMIT
+) -> str:
+    rendered = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return _truncate_resume_text(rendered, limit)
+
+
+def _resume_tape_entry_summary(entry: Mapping[str, object]) -> JSONObject:
+    kind = entry.get("kind")
+    if not isinstance(kind, str) or not kind:
+        raise TypeError("tape entry kind must be a non-empty string")
+    payload = entry.get("payload")
+    if not isinstance(payload, dict):
+        raise TypeError("tape entry payload must be a JSON object")
+    summary: JSONObject = {
+        "kind": kind,
+        "payload": cast(JSONObject, payload),
+    }
+    entry_id = entry.get("id")
+    if isinstance(entry_id, str) and entry_id:
+        summary["id"] = entry_id
+    meta = entry.get("meta")
+    if isinstance(meta, dict) and meta:
+        summary["meta"] = cast(JSONObject, meta)
+    anchor_type = entry.get("anchor_type")
+    if isinstance(anchor_type, str) and anchor_type:
+        summary["anchor_type"] = anchor_type
+    return summary
+
+
+def _entry_has_plan_signal(kind: str, payload: Mapping[str, object]) -> bool:
+    kind_lower = kind.lower()
+    if "plan" in kind_lower or "todo" in kind_lower:
+        return True
+    for key in payload:
+        key_lower = key.lower()
+        if key_lower in {"plan", "tasks", "todos"} or "plan" in key_lower:
+            return True
+    for key in ("tool_name", "name", "function", "tool"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.lower() in {
+            "plan",
+            "planner",
+            "todo_read",
+            "todo_write",
+        }:
+            return True
+    rendered = _compact_resume_json(payload, limit=_RESUME_PLAN_NOTE_LIMIT).lower()
+    return (
+        "todo_write" in rendered
+        or "todo_read" in rendered
+        or "current plan" in rendered
+    )
+
+
+def _latest_plan_note_from_tape_tail(
+    tape_tail: tuple[JSONObject, ...],
+) -> str | None:
+    for entry in reversed(tape_tail):
+        kind = entry.get("kind")
+        payload = entry.get("payload")
+        if not isinstance(kind, str) or not isinstance(payload, dict):
+            continue
+        if not _entry_has_plan_signal(kind, payload):
+            continue
+        return _compact_resume_json(entry, limit=_RESUME_PLAN_NOTE_LIMIT)
+    return None
+
+
+def _resume_prompt(
+    resume_context: SessionResumeContext,
+    *,
+    prompt: str | None,
+) -> str:
+    user_prompt = (
+        prompt if prompt is not None and prompt.strip() else _DEFAULT_RESUME_PROMPT
+    )
+    event_line = (
+        f"Last known event id: {resume_context.resume_from_event_id}."
+        if resume_context.resume_from_event_id is not None
+        else "No runtime events were recorded for the previous run."
+    )
+    checkpoint_line = _resume_checkpoint_line(resume_context)
+    message_snapshot_line = _resume_message_snapshot_line(resume_context)
+    tape_tail_lines = _resume_tape_tail_lines(resume_context)
+    plan_note_lines = _resume_plan_note_lines(resume_context)
+    return "\n".join(
+        [
+            "Previous run was interrupted.",
+            f"Previous run id: {resume_context.previous_run_id}.",
+            f"Resume from run id: {resume_context.resume_from_run_id}.",
+            event_line,
+            checkpoint_line,
+            message_snapshot_line,
+            "Resume continues from current session history; it does not restore or roll back to a checkpoint.",
+            *tape_tail_lines,
+            *plan_note_lines,
+            "Continue from the last known state.",
+            "Do not repeat completed work unless needed.",
+            "",
+            "User resume request:",
+            user_prompt,
+        ]
+    )
+
+
+def _resume_message_snapshot_line(resume_context: SessionResumeContext) -> str:
+    if resume_context.latest_message_snapshot_id is None:
+        return "No runtime message snapshot is available for the previous run."
+    count = resume_context.latest_message_snapshot_message_count
+    count_text = f" ({count} messages)" if count is not None else ""
+    return (
+        "Latest runtime message snapshot: "
+        f"{resume_context.latest_message_snapshot_id}{count_text}."
+    )
+
+
+def _resume_tape_tail_lines(resume_context: SessionResumeContext) -> list[str]:
+    if not resume_context.tape_tail:
+        return ["No tape tail is available for this session."]
+    return [
+        (
+            f"Latest tape tail ({len(resume_context.tape_tail)} of "
+            f"{resume_context.tape_entry_count} entries):"
+        ),
+        _compact_resume_json(list(resume_context.tape_tail)),
+    ]
+
+
+def _resume_plan_note_lines(resume_context: SessionResumeContext) -> list[str]:
+    if resume_context.latest_plan_note is None:
+        return ["No recent plan note was found in the tape tail."]
+    return ["Latest plan/checkpoint note:", resume_context.latest_plan_note]
+
+
+def _resume_checkpoint_line(resume_context: SessionResumeContext) -> str:
+    if resume_context.latest_checkpoint_id is None:
+        return "No checkpoint is available for this session."
+    label = (
+        f" ({resume_context.latest_checkpoint_label})"
+        if resume_context.latest_checkpoint_label is not None
+        else ""
+    )
+    return f"Latest checkpoint: {resume_context.latest_checkpoint_id}{label}."
+
+
+def _resume_boundary_anchor_meta(
+    resume_context: SessionResumeContext,
+) -> JSONObject:
+    metadata = resume_context.metadata()
+    metadata["product_anchor_type"] = _RESUME_BOUNDARY_PRODUCT_ANCHOR_TYPE
+    metadata["skip"] = True
+    metadata["included_anchor_ids"] = []
+    return metadata
+
+
 @dataclass(frozen=True, slots=True)
 class _PublishedApprovalDecision:
     sequence: int
@@ -236,6 +447,15 @@ class _PublishedApprovalDecision:
 
 TurnStatus = Literal["idle", "running", "cancelling", "cancelled", "failed"]
 CancelTurnStatus = Literal["idle", "cancelling", "cancelled", "failed"]
+_ACTIVE_RESUME_BLOCKING_RUN_STATUSES = {
+    "queued",
+    "requested",
+    "claimed",
+    "running",
+    "cancelling",
+}
+_DEFAULT_RESUME_PROMPT = "Continue from the last known state."
+_ATTACHED_EXECUTOR_BINDING_KINDS = {"external_worker", "local_attached"}
 
 
 @dataclass(frozen=True)
@@ -251,6 +471,58 @@ class ExternalWorkerClaim:
     claim_token: str
     prompt: str
     session: Session
+
+
+AttachedExecutorClaim = ExternalWorkerClaim
+
+
+@dataclass(frozen=True)
+class SessionResumeContext:
+    previous_run_id: str
+    resume_from_run_id: str
+    resume_from_event_id: str | None
+    resume_reason: str
+    checkpoint_count: int = 0
+    latest_checkpoint_id: str | None = None
+    latest_checkpoint_label: str | None = None
+    tape_entry_count: int = 0
+    tape_tail: tuple[JSONObject, ...] = ()
+    latest_plan_note: str | None = None
+    latest_message_snapshot_id: str | None = None
+    latest_message_snapshot_message_count: int | None = None
+    resume_boundary_anchor_id: str | None = None
+    resume_context_strategy: str = _RESUME_CONTEXT_STRATEGY
+
+    def metadata(self) -> JSONObject:
+        metadata: JSONObject = {
+            "previous_run_id": self.previous_run_id,
+            "resume_from_run_id": self.resume_from_run_id,
+            "resume_reason": self.resume_reason,
+            "resume_context_injected": True,
+            "resume_context_strategy": self.resume_context_strategy,
+            "checkpoint_count": self.checkpoint_count,
+            "tape_entry_count": self.tape_entry_count,
+            "resume_tape_tail_entry_count": len(self.tape_tail),
+            "resume_plan_note_included": self.latest_plan_note is not None,
+        }
+        if self.resume_from_event_id is not None:
+            metadata["resume_from_event_id"] = self.resume_from_event_id
+        if self.latest_checkpoint_id is not None:
+            metadata["latest_checkpoint_id"] = self.latest_checkpoint_id
+        if self.latest_checkpoint_label is not None:
+            metadata["latest_checkpoint_label"] = self.latest_checkpoint_label
+        if self.latest_message_snapshot_id is not None:
+            metadata["latest_message_snapshot_id"] = self.latest_message_snapshot_id
+        if self.latest_message_snapshot_message_count is not None:
+            metadata["latest_message_snapshot_message_count"] = (
+                self.latest_message_snapshot_message_count
+            )
+        if self.resume_boundary_anchor_id is not None:
+            metadata["resume_boundary_anchor_id"] = self.resume_boundary_anchor_id
+            metadata["resume_boundary_anchor_type"] = (
+                _RESUME_BOUNDARY_PRODUCT_ANCHOR_TYPE
+            )
+        return metadata
 
 
 class WorkspaceMetadataStoreProtocol(Protocol):
@@ -301,7 +573,7 @@ class RuntimeStoreProtocol(Protocol):
 
     async def list_agent_runs(self, session_id: str) -> list[AgentRunRecord]: ...
 
-    async def claim_external_worker_run(
+    async def claim_attached_executor_run(
         self,
         *,
         session_id: str | None,
@@ -806,14 +1078,14 @@ class SessionManager:
         self._storage_config = storage_config or {}
         self._pg_pool = pg_pool
         self._owns_pg_pool = False
+        data_dir = Path(os.environ.get("AGENT_DATA_DIR", "./data"))
         self._store = store or self._create_http_session_store()
         self._session_cache: dict[str, Session] = {}
         self._approval_stores: dict[str, ApprovalStore] = {}
         self._lock = asyncio.Lock()
-        self._store_io_guard = asyncio.Lock()
+        self._store_io_guard = threading.Lock()
         self._session_turn_locks: dict[str, asyncio.Lock] = {}
         self._session_workspace_export_counts: dict[str, int] = {}
-        data_dir = Path(os.environ.get("AGENT_DATA_DIR", "./data"))
         self._tape_store = tape_store or self._create_tape_store(data_dir)
         self._agent_observation_store = observation_store or JsonlAgentObservationStore(
             data_dir / "observability"
@@ -901,6 +1173,71 @@ class SessionManager:
         store = self._require_runtime_store()
         return await store.list_agent_runs(session_id)
 
+    async def session_resume_metadata(self, session_id: str) -> dict[str, Any]:
+        session = await self.get_session_async(session_id)
+        metadata: dict[str, Any] = {
+            "resumable": False,
+            "last_run_id": None,
+            "last_run_status": None,
+            "last_interrupted_run_id": None,
+            "resume_from_event_id": None,
+            "checkpoint_count": 0,
+            "latest_checkpoint_id": None,
+            "latest_checkpoint_label": None,
+        }
+        try:
+            latest_run = await self._latest_runtime_run(session_id)
+        except RuntimeError:
+            latest_run = None
+        if latest_run is not None:
+            metadata["last_run_id"] = latest_run.run_id
+            metadata["last_run_status"] = latest_run.status
+            metadata["resumable"] = (
+                latest_run.status not in _ACTIVE_RESUME_BLOCKING_RUN_STATUSES
+            )
+            metadata["resume_from_event_id"] = await self._latest_runtime_event_id(
+                latest_run
+            )
+            interrupted_runs = [
+                run
+                for run in await self.list_runtime_runs(session_id)
+                if run.status == "interrupted"
+            ]
+            if interrupted_runs:
+                metadata["last_interrupted_run_id"] = max(
+                    interrupted_runs,
+                    key=lambda run: (run.started_at, run.run_id),
+                ).run_id
+        if session.tape_id is not None:
+            checkpoints = await self.list_checkpoints(session_id)
+            metadata["checkpoint_count"] = len(checkpoints)
+            if checkpoints:
+                latest_checkpoint = max(
+                    checkpoints,
+                    key=lambda checkpoint: (
+                        checkpoint.created_at,
+                        checkpoint.checkpoint_id,
+                    ),
+                )
+                metadata["latest_checkpoint_id"] = latest_checkpoint.checkpoint_id
+                metadata["latest_checkpoint_label"] = latest_checkpoint.label
+        return metadata
+
+    async def _latest_runtime_run(self, session_id: str) -> AgentRunRecord | None:
+        runs = await self.list_runtime_runs(session_id)
+        if not runs:
+            return None
+        return max(runs, key=lambda run: (run.started_at, run.run_id))
+
+    async def _latest_runtime_event_id(self, run: AgentRunRecord) -> str | None:
+        events = await self.replay_runtime_events(run.run_id, limit=1000)
+        if not events:
+            return None
+        sequenced_events = [event for event in events if event.sequence is not None]
+        if sequenced_events:
+            return max(sequenced_events, key=lambda event: event.sequence or 0).event_id
+        return max(events, key=lambda event: event.created_at).event_id
+
     async def list_runtime_interactions(
         self,
         run_id: str,
@@ -981,34 +1318,44 @@ class SessionManager:
             limit=limit,
         )
 
-    async def request_external_worker_run(
+    async def request_attached_executor_run(
         self,
         session_id: str,
         prompt: str,
+        *,
+        run_id: str | None = None,
+        resume_context: SessionResumeContext | None = None,
     ) -> AgentRunRecord:
         store = self._require_runtime_store()
         async with self._lock:
             await self._assert_owner(session_id)
             session = await self.get_session_async(session_id)
             if not isinstance(session.execution_binding, ExternalWorkerBinding):
-                raise ValueError("session does not use external worker execution")
+                raise ValueError("session does not use attached executor execution")
             if session.turn_in_progress or session.turn_status in {
                 "running",
                 "cancelling",
             }:
                 raise RuntimeError("turn already in progress")
-            run_id = uuid.uuid4().hex
+            resolved_run_id = run_id or uuid.uuid4().hex
             now = datetime.now(UTC)
-            metadata = self._run_metadata_for_session(session)
+            metadata = self._run_metadata_for_session(
+                session,
+                resume_context=resume_context,
+            )
             metadata["prompt"] = prompt
             metadata["requested_at"] = now.isoformat()
             metadata["run_request_status"] = "requested"
             record = await store.create_agent_run(
                 AgentRunRecord(
-                    run_id=run_id,
+                    run_id=resolved_run_id,
                     session_id=session.id,
                     tape_id=session.tape_id,
-                    parent_run_id=None,
+                    parent_run_id=(
+                        None
+                        if resume_context is None
+                        else resume_context.previous_run_id
+                    ),
                     agent_id=None,
                     status="requested",
                     started_at=now,
@@ -1017,7 +1364,7 @@ class SessionManager:
                     error=None,
                 )
             )
-            session.current_turn_id = run_id
+            session.current_turn_id = resolved_run_id
             session.turn_in_progress = True
             session.turn_status = "running"
             session.last_activity = now
@@ -1025,10 +1372,186 @@ class SessionManager:
             await self._persist_session_async(session)
             return record
 
-    async def claim_external_worker_run(
+    async def request_external_worker_run(
+        self,
+        session_id: str,
+        prompt: str,
+        *,
+        run_id: str | None = None,
+        resume_context: SessionResumeContext | None = None,
+    ) -> AgentRunRecord:
+        """Compatibility wrapper for the legacy external-worker API."""
+        return await self.request_attached_executor_run(
+            session_id,
+            prompt,
+            run_id=run_id,
+            resume_context=resume_context,
+        )
+
+    async def resume_session(
+        self,
+        session_id: str,
+        *,
+        prompt: str | None = None,
+        resume_reason: str = "user_resume",
+    ) -> AgentRunRecord:
+        if not resume_reason.strip():
+            raise ValueError("resume_reason must be non-empty")
+        store = self._require_runtime_store()
+        await self._assert_owner(session_id)
+        session = await self.get_session_async(session_id)
+        if session.turn_in_progress or session.turn_status in {
+            "running",
+            "cancelling",
+        }:
+            raise RuntimeError("turn already in progress")
+        previous_run = await self._latest_runtime_run(session_id)
+        if previous_run is None:
+            raise RuntimeError("session has no previous run to resume")
+        if previous_run.status in _ACTIVE_RESUME_BLOCKING_RUN_STATUSES:
+            raise RuntimeError("latest run is still active")
+        if session.tape_id is None and previous_run.tape_id is not None:
+            session.tape_id = previous_run.tape_id
+            await self._persist_session_async(session)
+        checkpoint_context = await self._latest_resume_checkpoint_context(session)
+        tape_context = await self._latest_resume_tape_context(session)
+        message_snapshot_context = await self._latest_resume_message_snapshot_context(
+            previous_run
+        )
+        resume_context = SessionResumeContext(
+            previous_run_id=previous_run.run_id,
+            resume_from_run_id=previous_run.run_id,
+            resume_from_event_id=await self._latest_runtime_event_id(previous_run),
+            resume_reason=resume_reason,
+            checkpoint_count=checkpoint_context["checkpoint_count"],
+            latest_checkpoint_id=checkpoint_context["latest_checkpoint_id"],
+            latest_checkpoint_label=checkpoint_context["latest_checkpoint_label"],
+            tape_entry_count=tape_context["tape_entry_count"],
+            tape_tail=tape_context["tape_tail"],
+            latest_plan_note=tape_context["latest_plan_note"],
+            latest_message_snapshot_id=message_snapshot_context[
+                "latest_message_snapshot_id"
+            ],
+            latest_message_snapshot_message_count=message_snapshot_context[
+                "latest_message_snapshot_message_count"
+            ],
+        )
+        resume_context = await self._append_resume_boundary_anchor(
+            session,
+            resume_context,
+        )
+        resume_prompt = _resume_prompt(
+            resume_context,
+            prompt=prompt,
+        )
+        run_id = uuid.uuid4().hex
+        if isinstance(session.execution_binding, ExternalWorkerBinding):
+            return await self.request_attached_executor_run(
+                session_id,
+                resume_prompt,
+                run_id=run_id,
+                resume_context=resume_context,
+            )
+        await self.run_agent(
+            session_id,
+            resume_prompt,
+            run_id_override=run_id,
+            resume_context=resume_context,
+        )
+        record = await store.load_agent_run(run_id)
+        if record is None:
+            raise RuntimeError(f"resumed runtime run was not recorded: {run_id}")
+        return record
+
+    async def _append_resume_boundary_anchor(
+        self,
+        session: Session,
+        resume_context: SessionResumeContext,
+    ) -> SessionResumeContext:
+        if not session.tape_id:
+            raise RuntimeError("session tape_id is required to append resume boundary")
+        anchor = Anchor(
+            anchor_type="context",
+            payload={"label": "Resume boundary"},
+            meta=_resume_boundary_anchor_meta(resume_context),
+        )
+        await self._tape_store.save(session.tape_id, [anchor.to_dict()])
+        runtime_ctx = session.runtime_ctx
+        tape = getattr(runtime_ctx, "tape", None)
+        if isinstance(tape, Tape) and tape.tape_id == session.tape_id:
+            tape.append(anchor)
+        return replace(resume_context, resume_boundary_anchor_id=anchor.id)
+
+    async def _latest_resume_checkpoint_context(
+        self,
+        session: Session,
+    ) -> dict[str, Any]:
+        if session.tape_id is None:
+            return {
+                "checkpoint_count": 0,
+                "latest_checkpoint_id": None,
+                "latest_checkpoint_label": None,
+            }
+        checkpoints = await self.list_checkpoints(session.id)
+        if not checkpoints:
+            return {
+                "checkpoint_count": 0,
+                "latest_checkpoint_id": None,
+                "latest_checkpoint_label": None,
+            }
+        latest_checkpoint = max(
+            checkpoints,
+            key=lambda checkpoint: (checkpoint.created_at, checkpoint.checkpoint_id),
+        )
+        return {
+            "checkpoint_count": len(checkpoints),
+            "latest_checkpoint_id": latest_checkpoint.checkpoint_id,
+            "latest_checkpoint_label": latest_checkpoint.label,
+        }
+
+    async def _latest_resume_tape_context(
+        self,
+        session: Session,
+    ) -> dict[str, Any]:
+        if session.tape_id is None:
+            return {
+                "tape_entry_count": 0,
+                "tape_tail": (),
+                "latest_plan_note": None,
+            }
+        entries = await self._tape_store.load(session.tape_id)
+        tail_entries = entries[-_RESUME_TAPE_TAIL_LIMIT:]
+        tape_tail = tuple(
+            _resume_tape_entry_summary(cast(Mapping[str, object], entry))
+            for entry in tail_entries
+        )
+        return {
+            "tape_entry_count": len(entries),
+            "tape_tail": tape_tail,
+            "latest_plan_note": _latest_plan_note_from_tape_tail(tape_tail),
+        }
+
+    async def _latest_resume_message_snapshot_context(
+        self,
+        previous_run: AgentRunRecord,
+    ) -> dict[str, Any]:
+        store = self._require_runtime_store()
+        snapshot_id = f"{previous_run.run_id}:latest"
+        snapshot = await store.load_message_snapshot(snapshot_id)
+        if snapshot is None:
+            return {
+                "latest_message_snapshot_id": None,
+                "latest_message_snapshot_message_count": None,
+            }
+        return {
+            "latest_message_snapshot_id": snapshot.snapshot_id,
+            "latest_message_snapshot_message_count": len(snapshot.messages),
+        }
+
+    async def claim_attached_executor_run(
         self,
         *,
-        worker_id: str,
+        executor_id: str,
         executor_kind: str,
         session_id: str | None = None,
         lease_seconds: int = 30,
@@ -1042,7 +1565,8 @@ class SessionManager:
         now = datetime.now(UTC)
         lease_expires_at = now + timedelta(seconds=lease_seconds)
         claim_metadata: JSONObject = {
-            "worker_id": worker_id,
+            "worker_id": executor_id,
+            "executor_id": executor_id,
             "claim_token_hash": _hash_claim_token(claim_token),
             "claimed_at": now.isoformat(),
             "lease_expires_at": lease_expires_at.isoformat(),
@@ -1055,7 +1579,7 @@ class SessionManager:
             claim_metadata["capabilities"] = capabilities
         if workspace_sync is not None:
             claim_metadata["workspace_sync"] = workspace_sync
-        run = await store.claim_external_worker_run(
+        run = await store.claim_attached_executor_run(
             session_id=session_id,
             executor_kind=executor_kind,
             claim_metadata=claim_metadata,
@@ -1071,11 +1595,35 @@ class SessionManager:
             session=session,
         )
 
-    async def heartbeat_external_worker_run(
+    async def claim_external_worker_run(
+        self,
+        *,
+        worker_id: str,
+        executor_kind: str,
+        session_id: str | None = None,
+        lease_seconds: int = 30,
+        worker_instance_id: str | None = None,
+        process_id: int | None = None,
+        capabilities: JSONObject | None = None,
+        workspace_sync: JSONObject | None = None,
+    ) -> ExternalWorkerClaim | None:
+        """Compatibility wrapper for the legacy external-worker API."""
+        return await self.claim_attached_executor_run(
+            executor_id=worker_id,
+            executor_kind=executor_kind,
+            session_id=session_id,
+            lease_seconds=lease_seconds,
+            worker_instance_id=worker_instance_id,
+            process_id=process_id,
+            capabilities=capabilities,
+            workspace_sync=workspace_sync,
+        )
+
+    async def heartbeat_attached_executor_run(
         self,
         *,
         run_id: str,
-        worker_id: str,
+        executor_id: str,
         claim_token: str,
         lease_seconds: int = 30,
         worker_instance_id: str | None = None,
@@ -1083,9 +1631,9 @@ class SessionManager:
         capabilities: JSONObject | None = None,
         workspace_sync: JSONObject | None = None,
     ) -> AgentRunRecord:
-        run = await self._load_and_authorize_external_worker_run(
+        run = await self._load_and_authorize_attached_executor_run(
             run_id=run_id,
-            worker_id=worker_id,
+            executor_id=executor_id,
             claim_token=claim_token,
         )
         metadata = dict(run.metadata)
@@ -1111,6 +1659,59 @@ class SessionManager:
             error=run.error,
         )
 
+    async def heartbeat_external_worker_run(
+        self,
+        *,
+        run_id: str,
+        worker_id: str,
+        claim_token: str,
+        lease_seconds: int = 30,
+        worker_instance_id: str | None = None,
+        process_id: int | None = None,
+        capabilities: JSONObject | None = None,
+        workspace_sync: JSONObject | None = None,
+    ) -> AgentRunRecord:
+        """Compatibility wrapper for the legacy external-worker API."""
+        return await self.heartbeat_attached_executor_run(
+            run_id=run_id,
+            executor_id=worker_id,
+            claim_token=claim_token,
+            lease_seconds=lease_seconds,
+            worker_instance_id=worker_instance_id,
+            process_id=process_id,
+            capabilities=capabilities,
+            workspace_sync=workspace_sync,
+        )
+
+    async def append_attached_executor_event(
+        self,
+        *,
+        run_id: str,
+        executor_id: str,
+        claim_token: str,
+        event_id: str,
+        event_kind: str,
+        payload: JSONObject,
+        created_at: datetime,
+    ) -> RuntimeEventRecord:
+        run = await self._load_and_authorize_attached_executor_run(
+            run_id=run_id,
+            executor_id=executor_id,
+            claim_token=claim_token,
+        )
+        return await self._require_runtime_store().append_runtime_event(
+            RuntimeEventRecord(
+                event_id=event_id,
+                run_id=run_id,
+                event_kind=event_kind,
+                payload=_with_runtime_event_correlation(
+                    payload,
+                    _runtime_event_correlation_from_run(run),
+                ),
+                created_at=created_at,
+            )
+        )
+
     async def append_external_worker_event(
         self,
         *,
@@ -1122,26 +1723,22 @@ class SessionManager:
         payload: JSONObject,
         created_at: datetime,
     ) -> RuntimeEventRecord:
-        _ = await self._load_and_authorize_external_worker_run(
+        """Compatibility wrapper for the legacy external-worker API."""
+        return await self.append_attached_executor_event(
             run_id=run_id,
-            worker_id=worker_id,
+            executor_id=worker_id,
             claim_token=claim_token,
-        )
-        return await self._require_runtime_store().append_runtime_event(
-            RuntimeEventRecord(
-                event_id=event_id,
-                run_id=run_id,
-                event_kind=event_kind,
-                payload=payload,
-                created_at=created_at,
-            )
+            event_id=event_id,
+            event_kind=event_kind,
+            payload=payload,
+            created_at=created_at,
         )
 
-    async def finalize_external_worker_run(
+    async def finalize_attached_executor_run(
         self,
         *,
         run_id: str,
-        worker_id: str,
+        executor_id: str,
         claim_token: str,
         status: str,
         result: JSONObject,
@@ -1149,13 +1746,13 @@ class SessionManager:
         tape_id: str | None,
         tape_entries: list[JSONObject] | None = None,
     ) -> AgentRunRecord:
-        run = await self._load_and_authorize_external_worker_run(
+        run = await self._load_and_authorize_attached_executor_run(
             run_id=run_id,
-            worker_id=worker_id,
+            executor_id=executor_id,
             claim_token=claim_token,
         )
         if status not in {"completed", "cancelled", "failed"}:
-            raise ValueError("external worker final status is invalid")
+            raise ValueError("attached executor final status is invalid")
         metadata = dict(run.metadata)
         metadata["finalized_at"] = datetime.now(UTC).isoformat()
         if tape_id is not None:
@@ -1186,6 +1783,60 @@ class SessionManager:
             await self._persist_session_async(session)
         return updated
 
+    async def finalize_external_worker_run(
+        self,
+        *,
+        run_id: str,
+        worker_id: str,
+        claim_token: str,
+        status: str,
+        result: JSONObject,
+        error: str | None,
+        tape_id: str | None,
+        tape_entries: list[JSONObject] | None = None,
+    ) -> AgentRunRecord:
+        """Compatibility wrapper for the legacy external-worker API."""
+        return await self.finalize_attached_executor_run(
+            run_id=run_id,
+            executor_id=worker_id,
+            claim_token=claim_token,
+            status=status,
+            result=result,
+            error=error,
+            tape_id=tape_id,
+            tape_entries=tape_entries,
+        )
+
+    async def _load_and_authorize_attached_executor_run(
+        self,
+        *,
+        run_id: str,
+        executor_id: str,
+        claim_token: str,
+    ) -> AgentRunRecord:
+        run = await self.load_runtime_run(run_id)
+        metadata = run.metadata
+        if (
+            metadata.get("execution_binding_kind")
+            not in _ATTACHED_EXECUTOR_BINDING_KINDS
+        ):
+            raise ValueError("runtime run is not attached executor owned")
+        owner_id = metadata.get("executor_id") or metadata.get("worker_id")
+        if owner_id != executor_id:
+            raise PermissionError("attached executor does not own this run")
+        token_hash = metadata.get("claim_token_hash")
+        if not isinstance(token_hash, str) or not secrets.compare_digest(
+            token_hash,
+            _hash_claim_token(claim_token),
+        ):
+            raise PermissionError("attached executor claim token is invalid")
+        if run.status not in {"claimed", "running", "cancelling"}:
+            raise PermissionError("attached executor claim is expired or inactive")
+        lease_expires_at = _optional_metadata_datetime(metadata, "lease_expires_at")
+        if lease_expires_at is None or lease_expires_at <= datetime.now(UTC):
+            raise PermissionError("attached executor claim is expired or inactive")
+        return run
+
     async def _load_and_authorize_external_worker_run(
         self,
         *,
@@ -1193,24 +1844,12 @@ class SessionManager:
         worker_id: str,
         claim_token: str,
     ) -> AgentRunRecord:
-        run = await self.load_runtime_run(run_id)
-        metadata = run.metadata
-        if metadata.get("execution_binding_kind") != "external_worker":
-            raise ValueError("runtime run is not external worker owned")
-        if metadata.get("worker_id") != worker_id:
-            raise PermissionError("external worker does not own this run")
-        token_hash = metadata.get("claim_token_hash")
-        if not isinstance(token_hash, str) or not secrets.compare_digest(
-            token_hash,
-            _hash_claim_token(claim_token),
-        ):
-            raise PermissionError("external worker claim token is invalid")
-        if run.status not in {"claimed", "running", "cancelling"}:
-            raise PermissionError("external worker claim is expired or inactive")
-        lease_expires_at = _optional_metadata_datetime(metadata, "lease_expires_at")
-        if lease_expires_at is None or lease_expires_at <= datetime.now(UTC):
-            raise PermissionError("external worker claim is expired or inactive")
-        return run
+        """Compatibility wrapper for the legacy external-worker API."""
+        return await self._load_and_authorize_attached_executor_run(
+            run_id=run_id,
+            executor_id=worker_id,
+            claim_token=claim_token,
+        )
 
     async def list_workspace_records(self) -> list[WorkspaceRecord]:
         if self._workspace_metadata_store is None:
@@ -1304,10 +1943,12 @@ class SessionManager:
             else None
         )
         dsn = self._storage_config.get("dsn")
+        session_path = self._storage_config.get("http_session_path")
         return create_session_store(
             backend=backend,
             dsn=dsn if isinstance(dsn, str) else None,
             pg_pool=None,
+            file_path=session_path if isinstance(session_path, str) else None,
         )
 
     def _create_tape_store(self, data_dir: Path) -> TapeStore:
@@ -1343,6 +1984,14 @@ class SessionManager:
             return None
         if backend == "pg":
             return PGRuntimeStore(pool=self._get_pg_pool())
+        if backend in {"jsonl", "fs", "file"}:
+            path_obj = self._storage_config.get("runtime_path")
+            root = (
+                Path(path_obj)
+                if isinstance(path_obj, str) and path_obj.strip()
+                else Path(os.environ.get("AGENT_DATA_DIR", "./data")) / "runtime"
+            )
+            return JSONLRuntimeStore(root)
         raise ValueError(f"unsupported storage.runtime_backend: {backend}")
 
     async def _close_runtime(self, session: Session) -> None:
@@ -1452,7 +2101,14 @@ class SessionManager:
     def _bind_subagent_message_publisher(self, ctx: Any) -> None:
         ctx.config["subagent_message_publisher"] = self.publish_subagent_message
 
-    def _bind_root_run_identity(self, session: Session, ctx: Any, run_id: str) -> None:
+    def _bind_root_run_identity(
+        self,
+        session: Session,
+        ctx: Any,
+        run_id: str,
+        *,
+        resume_context: SessionResumeContext | None = None,
+    ) -> None:
         if hasattr(ctx, "session_id"):
             ctx.session_id = session.id
         run_context = getattr(ctx, "run_context", None)
@@ -1462,22 +2118,36 @@ class SessionManager:
             trace_metadata = dict(run_context.trace_metadata)
             trace_metadata["turn_id"] = run_id
             trace_metadata["tape_id"] = ctx.tape.tape_id
+            trace_metadata["execution_placement"] = self._execution_placement(session)
+            trace_metadata["execution_binding_kind"] = session.execution_binding.kind
+            if resume_context is not None:
+                trace_metadata.update(resume_context.metadata())
             ctx.run_context = replace(
                 run_context,
                 session_id=session.id,
                 run_id=run_id,
-                parent_run_id=None,
+                parent_run_id=(
+                    None if resume_context is None else resume_context.previous_run_id
+                ),
                 trace_metadata=trace_metadata,
             )
 
-    def _run_metadata_for_session(self, session: Session) -> JSONObject:
+    def _run_metadata_for_session(
+        self,
+        session: Session,
+        *,
+        resume_context: SessionResumeContext | None = None,
+    ) -> JSONObject:
         metadata: JSONObject = {
             "provider_name": session.provider_name,
             "model_name": session.model_name,
             "approval_policy": session.approval_policy.value,
             "max_steps": session.max_steps,
             "execution_binding_kind": session.execution_binding.kind,
+            "execution_placement": self._execution_placement(session),
         }
+        if resume_context is not None:
+            metadata.update(resume_context.metadata())
         if isinstance(session.execution_binding, ExternalWorkerBinding):
             metadata["executor_kind"] = session.execution_binding.executor_kind
             metadata["worker_pool"] = session.execution_binding.worker_pool
@@ -1487,6 +2157,29 @@ class SessionManager:
                     dict(session.execution_binding.workspace_ref),
                 )
         return metadata
+
+    def _observation_attributes_for_session(
+        self,
+        session: Session,
+        ctx: Any,
+        *,
+        resume_context: SessionResumeContext | None = None,
+    ) -> JSONObject:
+        attributes: JSONObject = {
+            "tape_id": getattr(getattr(ctx, "tape", None), "tape_id", None),
+            "execution_placement": self._execution_placement(session),
+            "execution_binding_kind": session.execution_binding.kind,
+        }
+        if resume_context is not None:
+            attributes.update(resume_context.metadata())
+        return attributes
+
+    def _execution_placement(self, session: Session) -> str:
+        if isinstance(session.execution_binding, ExternalWorkerBinding):
+            return "local_attached"
+        if isinstance(session.execution_binding, CloudWorkspaceBinding):
+            return "cloud_workspace"
+        return "server_embedded"
 
     def _result_from_turn_outcome(self, outcome: TurnOutcome) -> JSONObject:
         return {
@@ -1533,6 +2226,7 @@ class SessionManager:
         ctx: Any,
         run_id: str,
         prompt: str,
+        resume_context: SessionResumeContext | None = None,
     ) -> AgentObservationRecorder | None:
         config = getattr(ctx, "config", None)
         if not isinstance(config, dict):
@@ -1542,7 +2236,16 @@ class SessionManager:
             sink=self._agent_observation_sink(ctx),
         )
         config["agent_observation_recorder"] = recorder
-        recorder.start_turn(session_id=session.id, run_id=run_id, prompt=prompt)
+        recorder.start_turn(
+            session_id=session.id,
+            run_id=run_id,
+            prompt=prompt,
+            attributes=self._observation_attributes_for_session(
+                session,
+                ctx,
+                resume_context=resume_context,
+            ),
+        )
         return recorder
 
     def _complete_agent_observation(
@@ -1570,6 +2273,7 @@ class SessionManager:
         *,
         run_id: str,
         started_at: datetime,
+        resume_context: SessionResumeContext | None = None,
     ) -> bool:
         if self._runtime_store is None:
             return False
@@ -1578,11 +2282,16 @@ class SessionManager:
                 run_id=run_id,
                 session_id=session.id,
                 tape_id=session.tape_id,
-                parent_run_id=None,
+                parent_run_id=(
+                    None if resume_context is None else resume_context.previous_run_id
+                ),
                 agent_id=None,
                 status="queued",
                 started_at=started_at,
-                metadata=self._run_metadata_for_session(session),
+                metadata=self._run_metadata_for_session(
+                    session,
+                    resume_context=resume_context,
+                ),
                 result={},
                 error=None,
             )
@@ -1598,6 +2307,7 @@ class SessionManager:
         ended_at: datetime | None,
         result: JSONObject,
         error: str | None,
+        resume_context: SessionResumeContext | None = None,
     ) -> None:
         if self._runtime_store is None:
             return
@@ -1605,7 +2315,10 @@ class SessionManager:
             run_id,
             status=status,
             ended_at=ended_at,
-            metadata=self._run_metadata_for_session(session),
+            metadata=self._run_metadata_for_session(
+                session,
+                resume_context=resume_context,
+            ),
             result=result,
             error=error,
         )
@@ -1618,6 +2331,7 @@ class SessionManager:
         status: str,
         result: JSONObject,
         error: str | None,
+        resume_context: SessionResumeContext | None = None,
     ) -> None:
         await self._update_runtime_agent_run(
             session,
@@ -1626,6 +2340,7 @@ class SessionManager:
             ended_at=datetime.now(UTC),
             result=result,
             error=error,
+            resume_context=resume_context,
         )
 
     async def recover_stale_runtime_runs(
@@ -1644,7 +2359,7 @@ class SessionManager:
                 continue
             runs = await self._runtime_store.list_agent_runs(session_id)
             for run in runs:
-                if await self._recover_expired_external_worker_run(
+                if await self._recover_expired_attached_executor_run(
                     run,
                     recovered_at=recovery_time,
                 ):
@@ -1669,7 +2384,7 @@ class SessionManager:
                 recovered_count += 1
         return recovered_count
 
-    async def _recover_expired_external_worker_run(
+    async def _recover_expired_attached_executor_run(
         self,
         run: AgentRunRecord,
         *,
@@ -1677,7 +2392,10 @@ class SessionManager:
     ) -> bool:
         if self._runtime_store is None:
             return False
-        if run.metadata.get("execution_binding_kind") != "external_worker":
+        if (
+            run.metadata.get("execution_binding_kind")
+            not in _ATTACHED_EXECUTOR_BINDING_KINDS
+        ):
             return False
         if run.status not in {"claimed", "running", "cancelling"}:
             return False
@@ -1690,7 +2408,8 @@ class SessionManager:
         metadata = dict(run.metadata)
         metadata["reclaimable"] = True
         metadata["recovered_at"] = recovered_at.isoformat()
-        metadata["recovery_reason"] = "external_worker_lease_expired"
+        metadata["recovery_reason"] = "attached_executor_lease_expired"
+        metadata["legacy_recovery_reason"] = "external_worker_lease_expired"
         metadata["previous_status"] = run.status
         if self._owner_id is not None:
             metadata["recovered_by_owner_id"] = self._owner_id
@@ -1704,6 +2423,18 @@ class SessionManager:
         )
         return True
 
+    async def _recover_expired_external_worker_run(
+        self,
+        run: AgentRunRecord,
+        *,
+        recovered_at: datetime,
+    ) -> bool:
+        """Compatibility wrapper for the legacy external-worker API."""
+        return await self._recover_expired_attached_executor_run(
+            run,
+            recovered_at=recovered_at,
+        )
+
     async def _append_runtime_wire_event(
         self,
         session: Session,
@@ -1714,12 +2445,27 @@ class SessionManager:
         run_id = session.current_turn_id
         if run_id is None:
             return
+        run = await self._runtime_store.load_agent_run(run_id)
+        if run is None:
+            correlation: JSONObject = {
+                "session_id": session.id,
+                "run_id": run_id,
+                "execution_placement": self._execution_placement(session),
+                "execution_binding_kind": session.execution_binding.kind,
+            }
+            if session.tape_id is not None:
+                correlation["tape_id"] = session.tape_id
+        else:
+            correlation = _runtime_event_correlation_from_run(run)
         await self._runtime_store.append_runtime_event(
             RuntimeEventRecord(
                 event_id=f"{run_id}:wire:{uuid.uuid4().hex}",
                 run_id=run_id,
                 event_kind=f"wire.{type(message).__name__}",
-                payload=_wire_message_event_payload(message),
+                payload=_with_runtime_event_correlation(
+                    _wire_message_event_payload(message),
+                    correlation,
+                ),
                 created_at=message.timestamp,
             )
         )
@@ -1891,9 +2637,12 @@ class SessionManager:
         await self._assert_owner(session_id)
 
     async def _run_store_io(self, func: Callable[..., T], /, *args: object) -> T:
-        async with self._store_io_guard:
-            loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(None, partial(func, *args))
+        def run_guarded() -> T:
+            with self._store_io_guard:
+                return func(*args)
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, run_guarded)
 
     async def _persist_session_async(self, session: Session) -> None:
         self._session_cache[session.id] = session
@@ -2826,6 +3575,9 @@ class SessionManager:
         self,
         session_id: str,
         prompt: str,
+        *,
+        run_id_override: str | None = None,
+        resume_context: SessionResumeContext | None = None,
     ) -> None:
         turn_lock = self._turn_lock_for(session_id)
         if turn_lock.locked():
@@ -2839,7 +3591,7 @@ class SessionManager:
             session.last_activity = datetime.now(UTC)
             session.turn_in_progress = True
             session.turn_status = "running"
-            run_id = uuid.uuid4().hex
+            run_id = run_id_override or uuid.uuid4().hex
             started_at = datetime.now(UTC)
             session.current_turn_id = run_id
             session.last_failure_details = None
@@ -2894,11 +3646,17 @@ class SessionManager:
                     session.runtime_ctx = ctx
                     session.runtime_adapter = adapter
 
-                self._bind_root_run_identity(session, ctx, run_id)
+                self._bind_root_run_identity(
+                    session,
+                    ctx,
+                    run_id,
+                    resume_context=resume_context,
+                )
                 agent_run_created = await self._create_runtime_agent_run(
                     session,
                     run_id=run_id,
                     started_at=started_at,
+                    resume_context=resume_context,
                 )
                 if agent_run_created:
                     await self._update_runtime_agent_run(
@@ -2908,6 +3666,7 @@ class SessionManager:
                         ended_at=None,
                         result={},
                         error=None,
+                        resume_context=resume_context,
                     )
                 set_consumer = getattr(adapter, "set_consumer", None)
                 if callable(set_consumer):
@@ -2920,6 +3679,7 @@ class SessionManager:
                     ctx=ctx,
                     run_id=run_id,
                     prompt=prompt,
+                    resume_context=resume_context,
                 )
                 outcome = await adapter.run_turn(prompt)
                 if self._runtime_store is not None:
@@ -2937,6 +3697,7 @@ class SessionManager:
                         status=turn_status,
                         result=self._result_from_turn_outcome(turn_outcome),
                         error=turn_outcome.error,
+                        resume_context=resume_context,
                     )
                     if turn_status == "failed":
                         session.turn_status = "failed"
@@ -2975,6 +3736,7 @@ class SessionManager:
                         status="failed",
                         result={},
                         error=str(exc),
+                        resume_context=resume_context,
                     )
                 session.turn_status = "failed"
                 session.last_failure_details = f"Fatal tool execution failed: {exc}"
@@ -2990,6 +3752,7 @@ class SessionManager:
                         status="cancelled",
                         result={},
                         error="cancelled",
+                        resume_context=resume_context,
                     )
                 raise
             except Exception as exc:
@@ -3002,6 +3765,7 @@ class SessionManager:
                         status="failed",
                         result={},
                         error=str(exc),
+                        resume_context=resume_context,
                     )
                 session.turn_status = "failed"
                 session.last_failure_details = f"HTTP session turn failed: {exc}"

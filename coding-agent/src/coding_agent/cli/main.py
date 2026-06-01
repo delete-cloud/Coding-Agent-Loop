@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import sys
+import asyncio
+from pathlib import Path
 from typing import get_args
 
 import click
 
-from coding_agent.adapter import PipelineAdapter
 from coding_agent.app import create_agent, create_child_pipeline  # noqa: F401
 from coding_agent.cli.kb_commands import kb
 from coding_agent.cli.oauth_commands import oauth_cli
@@ -18,8 +19,10 @@ from coding_agent.cli.stats_command import stats
 from coding_agent.cli.verify_command import verify
 from coding_agent.core.config import Config, load_config
 from coding_agent.remote.approval import APPROVAL_POLICIES
+from coding_agent.server.session_manager import ApprovalPolicy, SessionManager
 from coding_agent.ui.headless import HeadlessConsumer
 from coding_agent.ui.rich_tui import CodingAgentTUI
+from coding_agent.wire.protocol import TurnEnd, WireMessage
 
 
 CLI_PROVIDER_CHOICES = click.Choice(
@@ -97,7 +100,10 @@ def main(ctx, model, provider_name, base_url, api_key):
 
         if not sys.stdout.isatty():
             raise click.UsageError(
-                "interactive REPL mode requires an interactive terminal; use 'python -m coding_agent run --goal \"<task>\"' for batch mode"
+                "interactive REPL mode requires an interactive terminal; use "
+                "'python -m coding_agent repl' in a terminal, or "
+                "'python -m coding_agent run --goal \"<task>\"' for a managed "
+                "one-shot session"
             )
 
         config = _build_runtime_config(ctx)
@@ -171,44 +177,272 @@ def repl(ctx, repo, max_steps):
     asyncio.run(run_repl(config))
 
 
+@main.command()
+@click.option("--session", "session_id", default=None, help="Session id to resume.")
+@click.option("--last", "resume_last", is_flag=True, help="Resume latest session.")
+@click.option("--prompt", default=None, help="Optional resume instruction.")
+@click.pass_context
+def resume(ctx, session_id, resume_last, prompt):
+    """Resume a managed local session from durable context."""
+    import asyncio
+
+    config = _build_runtime_config(ctx)
+    asyncio.run(_resume_managed_session(config, session_id, resume_last, prompt))
+
+
+@main.group("sessions")
+def local_sessions() -> None:
+    """Inspect local managed sessions."""
+
+
+@local_sessions.command("list")
+def local_sessions_list() -> None:
+    """List local managed sessions."""
+    asyncio.run(_print_local_sessions())
+
+
+@local_sessions.command("status")
+@click.argument("session_id")
+def local_sessions_status(session_id: str) -> None:
+    """Show one local managed session."""
+    asyncio.run(_print_local_session(session_id))
+
+
+@local_sessions.command("checkpoints")
+@click.argument("session_id")
+def local_sessions_checkpoints(session_id: str) -> None:
+    """List checkpoints for a local managed session."""
+    asyncio.run(_print_local_session_checkpoints(session_id))
+
+
+@main.command("session")
+@click.argument("session_id")
+def local_session(session_id: str) -> None:
+    """Show one local managed session."""
+    asyncio.run(_print_local_session(session_id))
+
+
 async def _run_with_tui(config, goal):
-    """Run agent with TUI display."""
-    api_key = config.api_key.get_secret_value() if config.api_key else None
-    pipeline, ctx = create_agent(
-        api_key=api_key,
-        model_override=config.model,
-        provider_override=config.provider,
-        base_url_override=config.base_url,
-        workspace_root=config.repo,
-        max_steps_override=config.max_steps,
-        approval_mode_override=config.approval_mode,
-    )
+    """Run a managed one-shot local session with TUI display."""
     tui = CodingAgentTUI(model_name=config.model, max_steps=config.max_steps)
-    adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=tui.consumer)
     with tui:
         tui.add_user_message(goal)
-        result = await adapter.run_turn(goal)
-        click.echo(f"\n--- Result ({result.stop_reason}) ---")
+        await _run_managed_one_shot(config, goal, tui.consumer)
 
 
 async def _run_headless(config, goal):
-    """Run agent in headless mode."""
-    api_key = config.api_key.get_secret_value() if config.api_key else None
-    pipeline, ctx = create_agent(
-        api_key=api_key,
-        model_override=config.model,
-        provider_override=config.provider,
-        base_url_override=config.base_url,
-        workspace_root=config.repo,
-        max_steps_override=config.max_steps,
-        approval_mode_override=config.approval_mode,
+    """Run a managed one-shot local session in headless mode."""
+    consumer = HeadlessConsumer(auto_approve=config.approval_mode == "yolo")
+    await _run_managed_one_shot(config, goal, consumer)
+
+
+async def _resume_managed_session(
+    config: Config,
+    session_id: str | None,
+    resume_last: bool,
+    prompt: str | None,
+) -> None:
+    if session_id is not None and resume_last:
+        raise click.UsageError("Pass either --session or --last, not both.")
+    session_manager = _local_session_manager()
+    try:
+        resolved_session_id = session_id
+        if resolved_session_id is None:
+            if not resume_last:
+                raise click.UsageError("Pass --session <id> or --last.")
+            resolved_session_id = await _latest_managed_session_id(session_manager)
+        session = await session_manager.get_session_async(resolved_session_id)
+        consumer = HeadlessConsumer(auto_approve=config.approval_mode == "yolo")
+        task = asyncio.create_task(
+            session_manager.resume_session(
+                resolved_session_id,
+                prompt=prompt,
+                resume_reason="local_cli_resume",
+            )
+        )
+        await _stream_managed_session_wire(session.wire, task, consumer)
+        await task
+    finally:
+        await session_manager.close()
+
+
+async def _latest_managed_session_id(session_manager: SessionManager) -> str:
+    session_ids = await session_manager.list_sessions_async()
+    if not session_ids:
+        raise click.ClickException("No local sessions found.")
+    sessions = [
+        await session_manager.get_session_async(session_id)
+        for session_id in session_ids
+    ]
+    latest = max(sessions, key=lambda session: (session.last_activity, session.id))
+    return latest.id
+
+
+async def _print_local_sessions() -> None:
+    session_manager = _local_session_manager()
+    try:
+        summaries = await _local_session_summaries(session_manager)
+    finally:
+        await session_manager.close()
+    if not summaries:
+        click.echo("No local sessions found.")
+        return
+    for summary in summaries:
+        click.echo(
+            "\t".join(
+                [
+                    str(summary.get("session_id", "")),
+                    str(summary.get("status", "")),
+                    str(summary.get("turn_status", "")),
+                    str(summary.get("workspace_id", "")),
+                    str(summary.get("last_run_status", "")),
+                    "resumable" if summary.get("resumable") is True else "",
+                    str(summary.get("last_interrupted_run_id", "")),
+                    str(summary.get("latest_checkpoint_id", "")),
+                ]
+            )
+        )
+
+
+async def _print_local_session(session_id: str) -> None:
+    session_manager = _local_session_manager()
+    try:
+        session = await session_manager.get_session_async(session_id)
+        summary = await _local_session_summary(session_manager, session)
+    finally:
+        await session_manager.close()
+    for key in sorted(summary):
+        value = summary[key]
+        click.echo(f"{key}: {value}")
+
+
+async def _print_local_session_checkpoints(session_id: str) -> None:
+    session_manager = _local_session_manager()
+    try:
+        checkpoints = await session_manager.list_checkpoints(session_id)
+    finally:
+        await session_manager.close()
+    if not checkpoints:
+        click.echo("No checkpoints found.")
+        return
+    for checkpoint in sorted(
+        checkpoints,
+        key=lambda item: (item.created_at, item.checkpoint_id),
+        reverse=True,
+    ):
+        click.echo(
+            "\t".join(
+                [
+                    checkpoint.checkpoint_id,
+                    checkpoint.created_at.isoformat(),
+                    str(checkpoint.entry_count),
+                    str(checkpoint.window_start),
+                    checkpoint.label or "",
+                ]
+            )
+        )
+
+
+async def _local_session_summaries(
+    session_manager: SessionManager,
+) -> list[dict[str, object]]:
+    sessions = [
+        await session_manager.get_session_async(session_id)
+        for session_id in await session_manager.list_sessions_async()
+    ]
+    summaries = [
+        await _local_session_summary(session_manager, session) for session in sessions
+    ]
+    return sorted(
+        summaries,
+        key=lambda summary: (
+            str(summary.get("last_activity", "")),
+            str(summary.get("session_id", "")),
+        ),
+        reverse=True,
     )
-    consumer = HeadlessConsumer()
-    adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
-    result = await adapter.run_turn(goal)
-    click.echo(f"\n--- Result ({result.stop_reason}) ---")
-    if result.final_message:
-        click.echo(result.final_message)
+
+
+async def _local_session_summary(
+    session_manager: SessionManager,
+    session,
+) -> dict[str, object]:
+    summary = dict(session.as_dict())
+    summary.update(await session_manager.session_resume_metadata(session.id))
+    return summary
+
+
+async def _run_managed_one_shot(config: Config, goal: str, consumer) -> None:
+    """Execute a one-shot local session through SessionManager."""
+    session_manager = _local_session_manager()
+    try:
+        session_id = await session_manager.create_session(
+            repo_path=Path(config.repo),
+            approval_policy=_approval_policy_from_config(config.approval_mode),
+            provider_name=config.provider,
+            model_name=config.model,
+            base_url=config.base_url,
+            max_steps=config.max_steps,
+        )
+        session = await session_manager.get_session_async(session_id)
+        task = asyncio.create_task(session_manager.run_agent(session_id, goal))
+        await _stream_managed_session_wire(session.wire, task, consumer)
+        await task
+    finally:
+        await session_manager.close()
+
+
+async def _stream_managed_session_wire(
+    wire, task: asyncio.Task[object], consumer
+) -> None:
+    while True:
+        if task.done() and task.exception() is not None:
+            await task
+        message_task = asyncio.create_task(wire.get_next_outgoing())
+        done, pending = await asyncio.wait(
+            {message_task, task},
+            timeout=1.0 if task.done() else None,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if message_task in done:
+            message = message_task.result()
+            await consumer.emit(message)
+            if _is_root_turn_end(message):
+                break
+            continue
+        message_task.cancel()
+        try:
+            await message_task
+        except asyncio.CancelledError:
+            pass
+        if task in done:
+            await task
+            continue
+        if task.done():
+            break
+
+
+def _is_root_turn_end(message: WireMessage) -> bool:
+    return isinstance(message, TurnEnd) and not message.agent_id
+
+
+def _approval_policy_from_config(value: str) -> ApprovalPolicy:
+    if value == "yolo":
+        return ApprovalPolicy.YOLO
+    if value == "interactive":
+        return ApprovalPolicy.INTERACTIVE
+    if value == "auto":
+        return ApprovalPolicy.AUTO
+    raise ValueError(f"unsupported approval mode: {value}")
+
+
+def _local_session_manager() -> SessionManager:
+    return SessionManager(
+        storage_config={
+            "http_session_backend": "fs",
+            "runtime_backend": "jsonl",
+        }
+    )
 
 
 def _create_provider(config):

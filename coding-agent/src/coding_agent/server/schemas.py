@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 from coding_agent.core.config import ProviderName
 
@@ -58,6 +58,19 @@ class ExternalWorkerBindingRequest(BaseModel):
     )
 
 
+class LocalAttachedExecutionBindingRequest(BaseModel):
+    kind: Literal["local_attached"]
+    executor_kind: str = Field(..., min_length=1, max_length=100)
+    worker_pool: str = Field("default", min_length=1, max_length=100)
+    workspace_ref: dict[str, Any] | None = None
+    provider_instance_id: str | None = Field(
+        None,
+        min_length=1,
+        max_length=200,
+        pattern=r"^.*\S.*$",
+    )
+
+
 class DockerWorkspaceSourceRequest(BaseModel):
     kind: Literal["docker"]
     snapshot_archive_base64: str | None = Field(None, min_length=1)
@@ -78,6 +91,7 @@ class GitWorkspaceSourceRequest(BaseModel):
 ExecutionBindingRequest = (
     LocalExecutionBindingRequest
     | CloudWorkspaceBindingRequest
+    | LocalAttachedExecutionBindingRequest
     | ExternalWorkerBindingRequest
 )
 WorkspaceSourceRequest = DockerWorkspaceSourceRequest | GitWorkspaceSourceRequest
@@ -87,6 +101,13 @@ class PromptRequest(BaseModel):
     """Request schema for sending a prompt."""
 
     prompt: str = Field(..., min_length=1, max_length=10000)
+
+
+class ResumeSessionRequest(BaseModel):
+    """Request schema for resuming a session from durable context."""
+
+    prompt: str | None = Field(None, min_length=1, max_length=10000)
+    resume_reason: str = Field("user_resume", min_length=1, max_length=100)
 
 
 class CreateSessionRequest(BaseModel):
@@ -143,6 +164,14 @@ class SessionSummaryResponse(BaseModel):
     origin: dict[str, str] | None = None
     execution_binding: dict[str, object]
     workspace_id: str | None = None
+    resumable: bool = False
+    last_run_id: str | None = None
+    last_run_status: str | None = None
+    last_interrupted_run_id: str | None = None
+    resume_from_event_id: str | None = None
+    checkpoint_count: int = 0
+    latest_checkpoint_id: str | None = None
+    latest_checkpoint_label: str | None = None
 
 
 class SessionListResponse(BaseModel):
@@ -230,7 +259,12 @@ class RuntimeEventsResponse(BaseModel):
 
 
 class WorkerClaimRequest(BaseModel):
-    worker_id: str = Field(..., min_length=1, max_length=200)
+    worker_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=200,
+        validation_alias=AliasChoices("worker_id", "executor_id"),
+    )
     executor_kind: str = Field("local_cli", min_length=1, max_length=100)
     session_id: str | None = Field(None, min_length=1, max_length=100)
     lease_seconds: int = Field(30, ge=5, le=300)
@@ -254,7 +288,12 @@ class WorkerClaimResponse(BaseModel):
 
 
 class WorkerHeartbeatRequest(BaseModel):
-    worker_id: str = Field(..., min_length=1, max_length=200)
+    worker_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=200,
+        validation_alias=AliasChoices("worker_id", "executor_id"),
+    )
     claim_token: str = Field(..., min_length=1, max_length=500)
     lease_seconds: int = Field(30, ge=5, le=300)
     worker_instance_id: str | None = Field(None, min_length=1, max_length=200)
@@ -277,13 +316,23 @@ class WorkerRuntimeEventRequest(BaseModel):
 
 
 class WorkerRuntimeEventsRequest(BaseModel):
-    worker_id: str = Field(..., min_length=1, max_length=200)
+    worker_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=200,
+        validation_alias=AliasChoices("worker_id", "executor_id"),
+    )
     claim_token: str = Field(..., min_length=1, max_length=500)
     events: list[WorkerRuntimeEventRequest] = Field(..., min_length=1, max_length=100)
 
 
 class WorkerRunCompleteRequest(BaseModel):
-    worker_id: str = Field(..., min_length=1, max_length=200)
+    worker_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=200,
+        validation_alias=AliasChoices("worker_id", "executor_id"),
+    )
     claim_token: str = Field(..., min_length=1, max_length=500)
     status: Literal["completed", "cancelled", "failed"] = "completed"
     result: dict[str, Any] = Field(default_factory=dict)
@@ -293,7 +342,12 @@ class WorkerRunCompleteRequest(BaseModel):
 
 
 class WorkerApprovalRequest(BaseModel):
-    worker_id: str = Field(..., min_length=1, max_length=200)
+    worker_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=200,
+        validation_alias=AliasChoices("worker_id", "executor_id"),
+    )
     claim_token: str = Field(..., min_length=1, max_length=500)
     request_id: str = Field(..., min_length=1, max_length=100)
     tool_name: str = Field(..., min_length=1, max_length=200)
@@ -310,6 +364,7 @@ class WorkerApprovalResponse(BaseModel):
 
 class WorkerStatusResponse(BaseModel):
     worker_id: str
+    executor_id: str | None = None
     status: Literal["idle", "running", "stale", "offline"]
     executor_kind: str | None = None
     worker_pool: str | None = None
@@ -328,6 +383,10 @@ class WorkerStatusResponse(BaseModel):
 
 class WorkerListResponse(BaseModel):
     workers: list[WorkerStatusResponse]
+
+
+class ExecutorListResponse(BaseModel):
+    executors: list[WorkerStatusResponse]
 
 
 class RuntimeInteractionResponse(BaseModel):

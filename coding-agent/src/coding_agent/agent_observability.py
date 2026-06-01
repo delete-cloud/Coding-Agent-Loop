@@ -128,6 +128,7 @@ class AgentObservationRecorder:
         self._sequence_no = 0
         self._turn_span_id: str | None = None
         self._turn_start_time: float | None = None
+        self._turn_attributes: dict[str, Any] = {}
         # Wall-clock high-water mark used to give generation spans a plausible
         # start time: the LLM ran between the previous observable activity and
         # the usage report (the runtime only surfaces usage at completion).
@@ -135,18 +136,32 @@ class AgentObservationRecorder:
         self._pending_tool_calls: dict[str, _PendingToolCall] = {}
         self._pending_child_spans: list[SpanRecord] = []
 
-    def start_turn(self, *, session_id: str, run_id: str, prompt: str) -> None:
+    def start_turn(
+        self,
+        *,
+        session_id: str,
+        run_id: str,
+        prompt: str,
+        attributes: Mapping[str, Any] | None = None,
+    ) -> None:
         self._session_id = session_id
         self._run_id = run_id
         self._turn_id = run_id
         self._sequence_no = 0
         self._turn_span_id = secrets.token_hex(8)
+        self._turn_attributes = {}
         self._pending_tool_calls = {}
         self._pending_child_spans = []
+        event_attributes = {"user_length": len(prompt)}
+        if attributes is not None:
+            event_attributes.update(
+                {key: value for key, value in attributes.items() if _key_allowed(key)}
+            )
+        self._turn_attributes = _safe_attributes(event_attributes)
         event = self._record(
             kind="turn.started",
             status="started",
-            attributes={"user_length": len(prompt)},
+            attributes=self._turn_attributes,
         )
         started_at = event.occurred_at if event is not None else time.time()
         self._turn_start_time = started_at
@@ -335,6 +350,7 @@ class AgentObservationRecorder:
                     "session_id": self._session_id,
                     "run_id": self._run_id,
                     "turn_id": self._turn_id or self._run_id,
+                    **self._turn_attributes,
                     **attributes,
                 },
             )
@@ -364,6 +380,7 @@ class AgentObservationRecorder:
                     "session_id": self._session_id,
                     "run_id": self._run_id,
                     "turn_id": self._turn_id or self._run_id,
+                    **self._turn_attributes,
                     "gen_ai.operation.name": "invoke_agent",
                     "langfuse.observation.type": "agent",
                     "langfuse.observation.input": json.dumps(

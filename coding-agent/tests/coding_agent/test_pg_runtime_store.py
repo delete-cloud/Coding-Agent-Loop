@@ -69,7 +69,10 @@ class FakePool:
                 if row["status"] not in {"requested", "expired"}:
                     continue
                 metadata = cast(dict[str, object], row["metadata"])
-                if metadata.get("execution_binding_kind") != "external_worker":
+                if metadata.get("execution_binding_kind") not in {
+                    "external_worker",
+                    "local_attached",
+                }:
                     continue
                 if metadata.get("executor_kind") != executor_kind:
                     continue
@@ -340,6 +343,47 @@ async def test_claim_external_worker_run_marks_requested_run_claimed(
     assert claimed.status == "claimed"
     assert claimed.metadata["worker_id"] == "worker-1"
     assert claimed.metadata["prompt"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_claim_attached_executor_run_accepts_local_attached_binding(
+    store: PGRuntimeStore,
+) -> None:
+    await store.create_agent_run(
+        AgentRunRecord(
+            run_id="run-local-attached",
+            session_id="session-local-attached",
+            tape_id=None,
+            parent_run_id=None,
+            agent_id=None,
+            status="requested",
+            started_at=_dt(9),
+            ended_at=None,
+            metadata={
+                "execution_binding_kind": "local_attached",
+                "execution_placement": "local_attached",
+                "executor_kind": "local_cli",
+                "prompt": "hello",
+            },
+            result={},
+            error=None,
+        )
+    )
+
+    claimed = await store.claim_attached_executor_run(
+        session_id="session-local-attached",
+        executor_kind="local_cli",
+        claim_metadata={
+            "worker_id": "worker-1",
+            "claim_token_hash": "hash",
+        },
+    )
+
+    assert claimed is not None
+    assert claimed.run_id == "run-local-attached"
+    assert claimed.status == "claimed"
+    assert claimed.metadata["execution_binding_kind"] == "local_attached"
+    assert claimed.metadata["worker_id"] == "worker-1"
 
 
 @pytest.mark.asyncio

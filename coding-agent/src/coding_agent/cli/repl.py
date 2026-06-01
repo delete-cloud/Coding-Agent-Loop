@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import sys
 from typing import Any, Literal
@@ -25,6 +26,7 @@ from coding_agent.ui.stream_renderer import StreamingRenderer
 from coding_agent.ui.rich_consumer import RichConsumer
 from coding_agent.ui.status_footer import StatusFooter
 from coding_agent.server.session_manager import SessionManager
+from coding_agent.wire.protocol import TurnEnd, WireMessage
 
 
 console = Console(force_terminal=True, soft_wrap=False)
@@ -51,7 +53,7 @@ class InteractiveSession:
 
     def __init__(self, config: Config):
         self.config = config
-        self._session_manager = SessionManager()
+        self._session_manager = _local_session_manager()
         self._pipeline: Any | None = None
         self._pipeline_ctx: Any | None = None
         self._pipeline_adapter: Any | None = None
@@ -282,9 +284,11 @@ class InteractiveSession:
             return
 
         try:
-            managed_session = await self._session_manager.replace_session_runtime_config(
-                session_id,
-                model_name=model_name,
+            managed_session = (
+                await self._session_manager.replace_session_runtime_config(
+                    session_id,
+                    model_name=model_name,
+                )
             )
         except Exception:
             self.config.model = old_model_name
@@ -404,15 +408,74 @@ class InteractiveSession:
 
         if self._pipeline_adapter is None:
             raise RuntimeError("REPL pipeline adapter is not initialized")
-        result = await self._pipeline_adapter.run_turn(full_message)
+        session_id = self.context.get("session_id")
+        if isinstance(session_id, str):
+            await self._run_managed_turn(session_id, full_message)
+        else:
+            result = await self._pipeline_adapter.run_turn(full_message)
+            if result.stop_reason == result.stop_reason.ERROR and result.error:
+                print_pt(
+                    f"\nError: {result.error}\n",
+                    output=get_prompt_output(sys.__stdout__),
+                )
 
         if self._footer.enabled:
             self._footer.update(phase="idle")
 
-        if result.stop_reason == result.stop_reason.ERROR and result.error:
-            print_pt(
-                f"\nError: {result.error}\n", output=get_prompt_output(sys.__stdout__)
+    async def _run_managed_turn(self, session_id: str, message: str) -> None:
+        managed_session = await self._session_manager.get_session_async(session_id)
+        task = asyncio.create_task(self._session_manager.run_agent(session_id, message))
+        await self._stream_managed_wire(managed_session.wire, task)
+        await task
+        refreshed_session = await self._session_manager.get_session_async(session_id)
+        self._pipeline = refreshed_session.runtime_pipeline
+        self._pipeline_ctx = refreshed_session.runtime_ctx
+        self._pipeline_adapter = refreshed_session.runtime_adapter
+        if self._pipeline_adapter is not None:
+            self._pipeline_adapter.set_consumer(self._consumer)
+        if self._pipeline_ctx is not None:
+            self._pipeline_ctx.config["wire_consumer"] = self._consumer
+            self._refresh_command_context_from_pipeline_ctx(self._pipeline_ctx)
+
+    async def _stream_managed_wire(self, wire: Any, task: asyncio.Task[object]) -> None:
+        while True:
+            if task.done() and task.exception() is not None:
+                await task
+            message_task = asyncio.create_task(wire.get_next_outgoing())
+            done, _pending = await asyncio.wait(
+                {message_task, task},
+                timeout=1.0 if task.done() else None,
+                return_when=asyncio.FIRST_COMPLETED,
             )
+            if message_task in done:
+                message = message_task.result()
+                await self._consumer.emit(message)
+                if _is_root_turn_end(message):
+                    break
+                continue
+            message_task.cancel()
+            try:
+                await message_task
+            except asyncio.CancelledError:
+                pass
+            if task in done:
+                await task
+                continue
+            if task.done():
+                break
+
+
+def _is_root_turn_end(message: WireMessage) -> bool:
+    return isinstance(message, TurnEnd) and not message.agent_id
+
+
+def _local_session_manager() -> SessionManager:
+    return SessionManager(
+        storage_config={
+            "http_session_backend": "fs",
+            "runtime_backend": "jsonl",
+        }
+    )
 
 
 async def run_repl(config: Config):
