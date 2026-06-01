@@ -90,6 +90,24 @@ async def test_migrate_jsonl_tapes_dry_run_does_not_create_sqlite(
 
 
 @pytest.mark.asyncio
+async def test_migrate_jsonl_tapes_skips_empty_files(tmp_path: Path) -> None:
+    tapes_dir = tmp_path / "tapes"
+    tapes_dir.mkdir()
+    (tapes_dir / "empty-tape.jsonl").write_text("", encoding="utf-8")
+    sqlite_path = tmp_path / "tape.sqlite3"
+
+    first = await migrate_jsonl_tapes_to_sqlite(tapes_dir, sqlite_path)
+    second = await migrate_jsonl_tapes_to_sqlite(tapes_dir, sqlite_path)
+
+    assert first.scanned == 1
+    assert first.migrated == 0
+    assert first.skipped == 1
+    assert second.scanned == 1
+    assert second.migrated == 0
+    assert second.skipped == 1
+
+
+@pytest.mark.asyncio
 async def test_migrate_fs_checkpoints_to_sqlite_round_trips_snapshot(
     tmp_path: Path,
 ) -> None:
