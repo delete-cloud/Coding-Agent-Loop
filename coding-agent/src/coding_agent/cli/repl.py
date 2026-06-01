@@ -189,11 +189,12 @@ class InteractiveSession:
         )
         self.context["session_id"] = session_id
         managed_session = self._session_manager.get_session(session_id)
-        managed_session.runtime_pipeline = self._pipeline
-        managed_session.runtime_ctx = self._pipeline_ctx
-        managed_session.runtime_adapter = self._pipeline_adapter
-        managed_session.tape_id = self._pipeline_ctx.tape.tape_id
-        self._session_manager._persist_session(managed_session)
+        self._session_manager.attach_runtime(
+            managed_session,
+            pipeline=self._pipeline,
+            pipeline_ctx=self._pipeline_ctx,
+            pipeline_adapter=self._pipeline_adapter,
+        )
         self._managed_session_initialized = True
 
     async def _create_managed_session(self) -> str:

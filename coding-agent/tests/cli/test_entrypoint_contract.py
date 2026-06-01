@@ -111,7 +111,9 @@ def test_run_command_uses_managed_session(
         async def close(self) -> None:
             calls.append(("close", None))
 
-    monkeypatch.setattr(cli_main, "SessionManager", FakeSessionManager)
+    monkeypatch.setattr(
+        cli_main, "create_local_cli_session_manager", FakeSessionManager
+    )
     runner = CliRunner(env=_click_credential_free_env())
 
     result = runner.invoke(
@@ -293,7 +295,9 @@ def test_resume_command_uses_managed_session(
         async def close(self) -> None:
             calls.append(("close", None))
 
-    monkeypatch.setattr(cli_main, "SessionManager", FakeSessionManager)
+    monkeypatch.setattr(
+        cli_main, "create_local_cli_session_manager", FakeSessionManager
+    )
     runner = CliRunner(env=_click_credential_free_env())
 
     result = runner.invoke(
@@ -384,7 +388,9 @@ def test_local_sessions_list_reports_resume_context(
         async def close(self) -> None:
             calls.append(("close", None))
 
-    monkeypatch.setattr(cli_main, "SessionManager", FakeSessionManager)
+    monkeypatch.setattr(
+        cli_main, "create_local_cli_session_manager", FakeSessionManager
+    )
     runner = CliRunner(env=_click_credential_free_env())
 
     result = runner.invoke(
@@ -464,7 +470,9 @@ def test_local_session_status_reports_checkpoint_and_resume_fields(
         async def close(self) -> None:
             pass
 
-    monkeypatch.setattr(cli_main, "SessionManager", FakeSessionManager)
+    monkeypatch.setattr(
+        cli_main, "create_local_cli_session_manager", FakeSessionManager
+    )
     runner = CliRunner(env=_click_credential_free_env())
 
     result = runner.invoke(
@@ -519,7 +527,9 @@ def test_local_sessions_checkpoints_lists_newest_first(
         async def close(self) -> None:
             calls.append(("close", None))
 
-    monkeypatch.setattr(cli_main, "SessionManager", FakeSessionManager)
+    monkeypatch.setattr(
+        cli_main, "create_local_cli_session_manager", FakeSessionManager
+    )
     runner = CliRunner(env=_click_credential_free_env())
 
     result = runner.invoke(

@@ -292,6 +292,18 @@ class TestREPLImports:
         )
         assert "create_local_cli_session_manager" in source
 
+    def test_cli_main_does_not_import_server_session_manager_for_local_runtime(self):
+        import coding_agent.cli.main as cli_main_module
+
+        source = getsource(cli_main_module)
+
+        assert (
+            "from coding_agent.server.session_manager import "
+            "ApprovalPolicy, SessionManager" not in source
+        )
+        assert "from coding_agent.approval import ApprovalPolicy" in source
+        assert "create_local_cli_session_manager" in source
+
 
 class TestBashIntegration:
     def test_bang_detected_in_repl(self):
@@ -1385,7 +1397,18 @@ class TestReplInitialization:
                     tape_id=None,
                 )
 
-            def _persist_session(self, managed_session):
+            def attach_runtime(
+                self,
+                managed_session,
+                *,
+                pipeline,
+                pipeline_ctx,
+                pipeline_adapter,
+            ):
+                managed_session.runtime_pipeline = pipeline
+                managed_session.runtime_ctx = pipeline_ctx
+                managed_session.runtime_adapter = pipeline_adapter
+                managed_session.tape_id = pipeline_ctx.tape.tape_id
                 assert managed_session.tape_id == "repl-init-tape"
 
         fake_pipeline = object()
@@ -1468,7 +1491,18 @@ class TestReplInitialization:
             def register_session(self, managed_session):
                 raise AssertionError("initialize should not re-register live runtime")
 
-            def _persist_session(self, managed_session):
+            def attach_runtime(
+                self,
+                managed_session,
+                *,
+                pipeline,
+                pipeline_ctx,
+                pipeline_adapter,
+            ):
+                managed_session.runtime_pipeline = pipeline
+                managed_session.runtime_ctx = pipeline_ctx
+                managed_session.runtime_adapter = pipeline_adapter
+                managed_session.tape_id = pipeline_ctx.tape.tape_id
                 return None
 
         fake_pipeline = object()
