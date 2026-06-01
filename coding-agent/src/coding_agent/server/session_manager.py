@@ -69,6 +69,7 @@ from coding_agent.runtime_store import (
     PGRuntimeStore,
     RunMessageSnapshotRecord,
     RuntimeEventRecord,
+    SQLiteRuntimeStore,
     JSONValue as RuntimeJSONValue,
 )
 from coding_agent.wire.local import LocalWire
@@ -1992,6 +1993,15 @@ class SessionManager:
                 else Path(os.environ.get("AGENT_DATA_DIR", "./data")) / "runtime"
             )
             return JSONLRuntimeStore(root)
+        if backend == "sqlite":
+            path_obj = self._storage_config.get("runtime_path")
+            path = (
+                Path(path_obj)
+                if isinstance(path_obj, str) and path_obj.strip()
+                else Path(os.environ.get("AGENT_DATA_DIR", "./data"))
+                / "runtime.sqlite3"
+            )
+            return SQLiteRuntimeStore(path)
         raise ValueError(f"unsupported storage.runtime_backend: {backend}")
 
     async def _close_runtime(self, session: Session) -> None:

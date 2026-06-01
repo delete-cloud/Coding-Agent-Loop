@@ -602,6 +602,21 @@ def test_session_manager_creates_jsonl_runtime_store_when_storage_config_request
     assert isinstance(manager._runtime_store, JSONLRuntimeStore)
 
 
+def test_session_manager_creates_sqlite_runtime_store_when_storage_config_requests_sqlite(
+    tmp_path,
+) -> None:
+    from coding_agent.runtime_store import SQLiteRuntimeStore
+
+    manager = SessionManager(
+        storage_config={
+            "runtime_backend": "sqlite",
+            "runtime_path": str(tmp_path / "runtime.sqlite3"),
+        }
+    )
+
+    assert isinstance(manager._runtime_store, SQLiteRuntimeStore)
+
+
 def test_session_manager_creates_file_session_store_for_local_cli_storage(
     tmp_path,
 ) -> None:
