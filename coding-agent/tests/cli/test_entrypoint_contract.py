@@ -39,14 +39,14 @@ def test_module_help_lists_release_entrypoint_commands_without_credentials() -> 
 
     assert completed.returncode == 0
     assert "Coding Agent CLI" in completed.stdout
-    for command in ("run", "repl", "resume", "sessions", "serve", "verify"):
+    for command in ("run", "repl", "resume", "sessions", "serve", "storage", "verify"):
         assert command in completed.stdout
 
 
 def test_subcommand_help_is_available_without_provider_credentials() -> None:
     runner = CliRunner(env=_click_credential_free_env())
 
-    for command in ("run", "repl", "resume", "sessions", "serve", "verify"):
+    for command in ("run", "repl", "resume", "sessions", "serve", "storage", "verify"):
         result = runner.invoke(main, [command, "--help"], catch_exceptions=False)
 
         assert result.exit_code == 0
@@ -471,6 +471,63 @@ def test_local_sessions_checkpoints_lists_newest_first(
             },
         },
     )
+
+
+def test_storage_migrate_sqlite_command_reports_counts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from coding_agent.cli import main as cli_main
+    from coding_agent.storage_migration import (
+        LegacySQLiteMigrationReport,
+        StoreMigrationReport,
+    )
+
+    calls: list[dict[str, object]] = []
+
+    async def fake_migrate_legacy_storage_to_sqlite(*args, **kwargs):
+        calls.append({"args": args, "kwargs": kwargs})
+        return LegacySQLiteMigrationReport(
+            tapes=StoreMigrationReport(scanned=2, migrated=1, skipped=1),
+            checkpoints=StoreMigrationReport(scanned=3, migrated=3, skipped=0),
+        )
+
+    monkeypatch.setattr(
+        cli_main,
+        "migrate_legacy_storage_to_sqlite",
+        fake_migrate_legacy_storage_to_sqlite,
+    )
+    runner = CliRunner(env=_click_credential_free_env())
+
+    result = runner.invoke(
+        main,
+        [
+            "storage",
+            "migrate-sqlite",
+            "--data-dir",
+            str(tmp_path),
+            "--replace-tapes",
+            "--dry-run",
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "tapes: scanned=2 migrated=1 skipped=1" in result.output
+    assert "checkpoints: scanned=3 migrated=3 skipped=0" in result.output
+    assert calls == [
+        {
+            "args": (tmp_path,),
+            "kwargs": {
+                "tapes_dir": None,
+                "checkpoints_dir": None,
+                "tape_sqlite_path": None,
+                "checkpoint_sqlite_path": None,
+                "replace_tapes": True,
+                "dry_run": True,
+            },
+        }
+    ]
 
 
 def _credential_free_env() -> dict[str, str]:
