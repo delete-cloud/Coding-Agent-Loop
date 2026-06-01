@@ -2088,4 +2088,5 @@ __all__ = [
     "PGRuntimeStore",
     "RunMessageSnapshotRecord",
     "RuntimeEventRecord",
+    "SQLiteRuntimeStore",
 ]
