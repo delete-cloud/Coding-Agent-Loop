@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-import sys
 import asyncio
+from dataclasses import dataclass
 import os
 from pathlib import Path
+import shlex
+import subprocess
+import sys
 from typing import get_args
 
 import click
@@ -35,6 +38,12 @@ CLI_PROVIDER_CHOICES = click.Choice(
     [str(provider) for provider in get_args(Config.model_fields["provider"].annotation)]
 )
 REMOTE_APPROVAL_CHOICES = click.Choice(APPROVAL_POLICIES)
+
+
+@dataclass(frozen=True)
+class WorktreeSnapshot:
+    status: str
+    diff: str
 
 
 def _collect_shared_cli_args(
@@ -128,6 +137,18 @@ def main(ctx, model, provider_name, base_url, api_key):
 @click.option("--cache/--no-cache", default=True, help="Enable tool result caching")
 @click.option("--cache-size", default=100, help="Maximum cached entries")
 @click.option("--tui", is_flag=True, help="Use Rich TUI interface (batch mode)")
+@click.option(
+    "--patch",
+    "patch_mode",
+    is_flag=True,
+    help="Require the run to produce repository changes.",
+)
+@click.option(
+    "--verify-cmd",
+    "verify_commands",
+    multiple=True,
+    help="Post-run verification command. Repeat for multiple commands.",
+)
 @click.pass_context
 def run(
     ctx,
@@ -140,6 +161,8 @@ def run(
     cache,
     cache_size,
     tui,
+    patch_mode,
+    verify_commands,
 ):
     """Run agent on a goal (batch mode)."""
     import asyncio
@@ -157,10 +180,107 @@ def run(
         },
     )
 
+    repo_root = Path(config.repo).expanduser().resolve()
+    before_snapshot = _capture_worktree_snapshot(repo_root) if patch_mode else None
+    effective_goal = (
+        _patch_oriented_goal(goal, tuple(verify_commands)) if patch_mode else goal
+    )
+
     if tui:
-        asyncio.run(_run_with_tui(config, goal))
+        asyncio.run(_run_with_tui(config, effective_goal))
     else:
-        asyncio.run(_run_headless(config, goal))
+        asyncio.run(_run_headless(config, effective_goal))
+
+    if before_snapshot is not None:
+        after_snapshot = _capture_worktree_snapshot(repo_root)
+        _ensure_patch_run_changed_worktree(before_snapshot, after_snapshot)
+    if verify_commands:
+        _run_post_run_verification(repo_root, tuple(verify_commands))
+
+
+def _patch_oriented_goal(goal: str, verify_commands: tuple[str, ...]) -> str:
+    lines = [
+        goal,
+        "",
+        "Patch-oriented run contract:",
+        "- Modify repository files when the task asks for code, tests, docs, or config changes.",
+        "- Do not stop after planning; inspect the relevant files and produce a concrete patch.",
+        "- Before finishing, inspect git status/diff and run focused validation.",
+        "- If validation fails, fix the issue and rerun the same validation once.",
+        "- Final response must summarize changed files and validation commands.",
+    ]
+    if verify_commands:
+        lines.append("- Required validation commands:")
+        lines.extend(f"  - {command}" for command in verify_commands)
+    return "\n".join(lines)
+
+
+def _capture_worktree_snapshot(repo_root: Path) -> WorktreeSnapshot:
+    return WorktreeSnapshot(
+        status=_git_capture(
+            repo_root,
+            ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        ),
+        diff="\n".join(
+            [
+                _git_capture(
+                    repo_root,
+                    ["git", "diff", "--binary", "--no-ext-diff", "--"],
+                ),
+                _git_capture(
+                    repo_root,
+                    ["git", "diff", "--cached", "--binary", "--no-ext-diff", "--"],
+                ),
+            ]
+        ),
+    )
+
+
+def _git_capture(repo_root: Path, command: list[str]) -> str:
+    completed = subprocess.run(
+        command,
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        stderr = completed.stderr.strip()
+        raise click.ClickException(
+            f"patch run requires a git worktree; {' '.join(command)} failed"
+            + (f": {stderr}" if stderr else "")
+        )
+    return completed.stdout
+
+
+def _ensure_patch_run_changed_worktree(
+    before: WorktreeSnapshot, after: WorktreeSnapshot
+) -> None:
+    if before == after:
+        raise click.ClickException(
+            "patch run produced no repository changes; retry in REPL or use a more "
+            "specific task packet"
+        )
+
+
+def _run_post_run_verification(repo_root: Path, commands: tuple[str, ...]) -> None:
+    for command in commands:
+        args = shlex.split(command)
+        if not args:
+            raise click.ClickException("--verify-cmd must not be empty")
+        completed = subprocess.run(
+            args,
+            cwd=repo_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            output = (completed.stdout + completed.stderr).strip()
+            raise click.ClickException(
+                f"verification command failed ({completed.returncode}): {command}"
+                + (f"\n{output}" if output else "")
+            )
 
 
 @main.command()
