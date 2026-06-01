@@ -20,7 +20,7 @@ from coding_agent.runtime_store import (
 )
 from coding_agent.ui import http_server
 from coding_agent.environment.binding_resolver import DefaultBindingResolver
-from coding_agent.server.execution_binding import CloudWorkspaceBinding
+from coding_agent.environment.execution_binding import CloudWorkspaceBinding
 from coding_agent.server.http_server import app
 from coding_agent.server.session_manager import MockProvider, SessionManager
 from coding_agent.server.stores.session_store import InMemorySessionStore

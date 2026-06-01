@@ -21,7 +21,7 @@ from coding_agent.environment import (
     workspace_provider_capabilities_from_config,
     provision_cloud_binding_from_config,
 )
-from coding_agent.server.execution_binding import CloudWorkspaceBinding
+from coding_agent.environment.execution_binding import CloudWorkspaceBinding
 from coding_agent.workspace_archive import create_workspace_archive_base64
 
 

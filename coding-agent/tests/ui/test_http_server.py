@@ -50,7 +50,7 @@ from coding_agent.environment.workspace_provider import (
     WorkspaceInventoryEntry,
     WorkspacePatch,
 )
-from coding_agent.server.execution_binding import (
+from coding_agent.environment.execution_binding import (
     CloudWorkspaceBinding,
     ExternalWorkerBinding,
     LocalExecutionBinding,

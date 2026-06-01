@@ -10,7 +10,7 @@ from coding_agent.environment.cloud import (
     CloudWorkspaceClient,
 )
 from coding_agent.environment.local import LocalEnvironment
-from coding_agent.server.execution_binding import (
+from coding_agent.environment.execution_binding import (
     CloudWorkspaceBinding,
     ExecutionBinding,
     ExternalWorkerBinding,

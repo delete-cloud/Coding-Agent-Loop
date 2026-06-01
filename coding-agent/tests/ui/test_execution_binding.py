@@ -25,7 +25,7 @@ from coding_agent.environment.workspace_provider import (
     workspace_provider_capabilities_from_config,
     WorkspaceProvider,
 )
-from coding_agent.server.execution_binding import (
+from coding_agent.environment.execution_binding import (
     CloudWorkspaceBinding,
     ExecutionBinding,
     ExternalWorkerBinding,

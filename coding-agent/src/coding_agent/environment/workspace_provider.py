@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias
 from .cloud import CloudWorkspaceClient
 
 if TYPE_CHECKING:
-    from ..ui.execution_binding import CloudWorkspaceBinding
+    from .execution_binding import CloudWorkspaceBinding
 
 
 CloudWorkspaceClientFactory: TypeAlias = Callable[

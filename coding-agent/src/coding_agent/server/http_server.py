@@ -169,7 +169,7 @@ from coding_agent.server.developer_console import (
     safe_label_value,
     safe_text_value,
 )
-from coding_agent.server.execution_binding import (
+from coding_agent.environment.execution_binding import (
     CloudWorkspaceBinding,
     ExecutionBinding,
     ExternalWorkerBinding,
