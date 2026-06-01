@@ -3,9 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable, Any
+import importlib
+from typing import Any, Protocol, runtime_checkable
 
+from coding_agent.adapter import PipelineAdapter
+from coding_agent.core.config import Config
 from coding_agent.server.session_manager import SessionManager
+
+
+@dataclass(frozen=True)
+class LocalCliRuntime:
+    """In-process runtime components for a local CLI session."""
+
+    pipeline: Any
+    pipeline_ctx: Any
+    pipeline_adapter: Any
 
 
 @runtime_checkable
@@ -142,6 +154,38 @@ def create_local_cli_session_manager(
 
 __all__ = [
     "LocalCliSessionManager",
+    "LocalCliRuntime",
     "ServerBackedLocalCliSessionManager",
+    "create_local_cli_runtime",
     "create_local_cli_session_manager",
 ]
+
+
+def create_agent(*args: Any, **kwargs: Any) -> tuple[Any, Any]:
+    return importlib.import_module("coding_agent.app").create_agent(*args, **kwargs)
+
+
+def create_local_cli_runtime(config: Config, consumer: Any) -> LocalCliRuntime:
+    """Compose the in-process agent runtime used by local CLI products."""
+
+    pipeline, pipeline_ctx = create_agent(
+        api_key=str(config.api_key.get_secret_value()) if config.api_key else None,
+        model_override=config.model,
+        provider_override=config.provider,
+        base_url_override=config.base_url,
+        workspace_root=config.repo,
+        max_steps_override=config.max_steps,
+        approval_mode_override=config.approval_mode,
+    )
+    pipeline_adapter = PipelineAdapter(
+        pipeline=pipeline,
+        ctx=pipeline_ctx,
+        consumer=consumer,
+    )
+    pipeline_ctx.config["wire_consumer"] = consumer
+    pipeline_ctx.config["agent_id"] = ""
+    return LocalCliRuntime(
+        pipeline=pipeline,
+        pipeline_ctx=pipeline_ctx,
+        pipeline_adapter=pipeline_adapter,
+    )

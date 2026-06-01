@@ -291,6 +291,8 @@ class TestREPLImports:
             not in source
         )
         assert "create_local_cli_session_manager" in source
+        assert "from coding_agent.adapter import PipelineAdapter" not in source
+        assert "create_local_cli_runtime" in source
 
     def test_cli_main_does_not_import_server_session_manager_for_local_runtime(self):
         import coding_agent.cli.main as cli_main_module
@@ -1179,8 +1181,12 @@ class TestReplInitialization:
                 tape=tape,
             )
 
-        monkeypatch.setattr("coding_agent.cli.repl.create_agent", fake_create_agent)
-        monkeypatch.setattr("coding_agent.cli.repl.PipelineAdapter", FakeAdapter)
+        monkeypatch.setattr(
+            "coding_agent.cli.local_runtime.create_agent", fake_create_agent
+        )
+        monkeypatch.setattr(
+            "coding_agent.cli.local_runtime.PipelineAdapter", FakeAdapter
+        )
         session = InteractiveSession(Config(model="gpt-4o-test", max_steps=10))
 
         handled = await handle_command("/model claude-next", session.context)
@@ -1430,10 +1436,12 @@ class TestReplInitialization:
                 return None
 
         monkeypatch.setattr(
-            "coding_agent.cli.repl.create_agent",
+            "coding_agent.cli.local_runtime.create_agent",
             lambda *args, **kwargs: (fake_pipeline, fake_ctx),
         )
-        monkeypatch.setattr("coding_agent.cli.repl.PipelineAdapter", FakeAdapter)
+        monkeypatch.setattr(
+            "coding_agent.cli.local_runtime.PipelineAdapter", FakeAdapter
+        )
         session = InteractiveSession(TestFooterIntegration()._make_config())
 
         fake_session_manager = FakeSessionManager()
@@ -1461,7 +1469,7 @@ class TestReplInitialization:
         mock_ctx.config["mcp_plugin"] = MagicMock()
 
         monkeypatch.setattr(
-            "coding_agent.cli.repl.create_agent",
+            "coding_agent.cli.local_runtime.create_agent",
             lambda *args, **kwargs: (mock_pipeline, mock_ctx),
         )
 
@@ -1522,10 +1530,12 @@ class TestReplInitialization:
                 return None
 
         monkeypatch.setattr(
-            "coding_agent.cli.repl.create_agent",
+            "coding_agent.cli.local_runtime.create_agent",
             lambda *args, **kwargs: (fake_pipeline, fake_ctx),
         )
-        monkeypatch.setattr("coding_agent.cli.repl.PipelineAdapter", FakeAdapter)
+        monkeypatch.setattr(
+            "coding_agent.cli.local_runtime.PipelineAdapter", FakeAdapter
+        )
         session = InteractiveSession(TestFooterIntegration()._make_config())
 
         fake_session_manager = FakeSessionManager()

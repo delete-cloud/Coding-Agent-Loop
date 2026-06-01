@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
 import sys
 from typing import Any, Literal
 
@@ -16,6 +15,7 @@ from coding_agent.cli.commands import handle_command
 from coding_agent.cli.input_handler import InputHandler, expand_pasted_refs
 from coding_agent.cli.local_runtime import (
     LocalCliSessionManager,
+    create_local_cli_runtime,
     create_local_cli_session_manager,
 )
 from coding_agent.cli.terminal_output import (
@@ -25,7 +25,6 @@ from coding_agent.cli.terminal_output import (
 )
 from coding_agent.cli.bash_executor import BashExecutor
 from coding_agent.core.config import Config
-from coding_agent.adapter import PipelineAdapter
 from coding_agent.ui.stream_renderer import StreamingRenderer
 from coding_agent.ui.rich_consumer import RichConsumer
 from coding_agent.ui.status_footer import StatusFooter
@@ -45,10 +44,6 @@ class _InteractiveApprovalMemory:
     def remember(self, req, response) -> None:
         if response.approved and response.scope in {"session", "always"}:
             self._coordinator.remember_session_approval(req)
-
-
-def create_agent(*args: Any, **kwargs: Any):
-    return importlib.import_module("coding_agent.app").create_agent(*args, **kwargs)
 
 
 class InteractiveSession:
@@ -143,25 +138,11 @@ class InteractiveSession:
         self.context["switch_session"] = self._switch_session
         self.context["restore_checkpoint"] = self._restore_checkpoint
         self.context["on_model_change"] = self._change_model_for_next_turn
-        pipeline, pipeline_ctx = create_agent(
-            api_key=str(self.config.api_key.get_secret_value())
-            if self.config.api_key
-            else None,
-            model_override=self.config.model,
-            provider_override=self.config.provider,
-            base_url_override=self.config.base_url,
-            workspace_root=self.config.repo,
-            max_steps_override=self.config.max_steps,
-            approval_mode_override=self.config.approval_mode,
-        )
-        self._pipeline = pipeline
-        self._pipeline_adapter = PipelineAdapter(
-            pipeline=pipeline, ctx=pipeline_ctx, consumer=self._consumer
-        )
-        pipeline_ctx.config["wire_consumer"] = self._consumer
-        pipeline_ctx.config["agent_id"] = ""
-        self._pipeline_ctx = pipeline_ctx
-        self._refresh_command_context_from_pipeline_ctx(pipeline_ctx)
+        runtime = create_local_cli_runtime(self.config, self._consumer)
+        self._pipeline = runtime.pipeline
+        self._pipeline_ctx = runtime.pipeline_ctx
+        self._pipeline_adapter = runtime.pipeline_adapter
+        self._refresh_command_context_from_pipeline_ctx(runtime.pipeline_ctx)
 
     def _approval_policy(self) -> ApprovalPolicy:
         if self.config.approval_mode == "yolo":
