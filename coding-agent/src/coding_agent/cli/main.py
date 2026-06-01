@@ -20,7 +20,11 @@ from coding_agent.cli.stats_command import stats
 from coding_agent.cli.verify_command import verify
 from coding_agent.core.config import Config, load_config
 from coding_agent.remote.approval import APPROVAL_POLICIES
-from coding_agent.server.session_manager import ApprovalPolicy, SessionManager
+from coding_agent.approval import ApprovalPolicy
+from coding_agent.cli.local_runtime import (
+    LocalCliSessionManager,
+    create_local_cli_session_manager,
+)
 from coding_agent.storage_migration import migrate_legacy_storage_to_sqlite
 from coding_agent.ui.headless import HeadlessConsumer
 from coding_agent.ui.rich_tui import CodingAgentTUI
@@ -346,7 +350,7 @@ async def _resume_managed_session(
         await session_manager.close()
 
 
-async def _latest_managed_session_id(session_manager: SessionManager) -> str:
+async def _latest_managed_session_id(session_manager: LocalCliSessionManager) -> str:
     session_ids = await session_manager.list_sessions_async()
     if not session_ids:
         raise click.ClickException("No local sessions found.")
@@ -424,7 +428,7 @@ async def _print_local_session_checkpoints(session_id: str) -> None:
 
 
 async def _local_session_summaries(
-    session_manager: SessionManager,
+    session_manager: LocalCliSessionManager,
 ) -> list[dict[str, object]]:
     sessions = [
         await session_manager.get_session_async(session_id)
@@ -444,7 +448,7 @@ async def _local_session_summaries(
 
 
 async def _local_session_summary(
-    session_manager: SessionManager,
+    session_manager: LocalCliSessionManager,
     session,
 ) -> dict[str, object]:
     summary = dict(session.as_dict())
@@ -453,7 +457,7 @@ async def _local_session_summary(
 
 
 async def _run_managed_one_shot(config: Config, goal: str, consumer) -> None:
-    """Execute a one-shot local session through SessionManager."""
+    """Execute a one-shot local session through the local CLI runtime."""
     session_manager = _local_session_manager()
     try:
         session_id = await session_manager.create_session(
@@ -516,8 +520,8 @@ def _approval_policy_from_config(value: str) -> ApprovalPolicy:
     raise ValueError(f"unsupported approval mode: {value}")
 
 
-def _local_session_manager() -> SessionManager:
-    return SessionManager(
+def _local_session_manager() -> LocalCliSessionManager:
+    return create_local_cli_session_manager(
         storage_config={
             "http_session_backend": "fs",
             "runtime_backend": "jsonl",

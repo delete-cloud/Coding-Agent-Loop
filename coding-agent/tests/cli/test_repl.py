@@ -292,6 +292,18 @@ class TestREPLImports:
         )
         assert "create_local_cli_session_manager" in source
 
+    def test_cli_main_does_not_import_server_session_manager_for_local_runtime(self):
+        import coding_agent.cli.main as cli_main_module
+
+        source = getsource(cli_main_module)
+
+        assert (
+            "from coding_agent.server.session_manager import "
+            "ApprovalPolicy, SessionManager" not in source
+        )
+        assert "from coding_agent.approval import ApprovalPolicy" in source
+        assert "create_local_cli_session_manager" in source
+
 
 class TestBashIntegration:
     def test_bang_detected_in_repl(self):
