@@ -1397,7 +1397,18 @@ class TestReplInitialization:
                     tape_id=None,
                 )
 
-            def _persist_session(self, managed_session):
+            def attach_runtime(
+                self,
+                managed_session,
+                *,
+                pipeline,
+                pipeline_ctx,
+                pipeline_adapter,
+            ):
+                managed_session.runtime_pipeline = pipeline
+                managed_session.runtime_ctx = pipeline_ctx
+                managed_session.runtime_adapter = pipeline_adapter
+                managed_session.tape_id = pipeline_ctx.tape.tape_id
                 assert managed_session.tape_id == "repl-init-tape"
 
         fake_pipeline = object()
@@ -1480,7 +1491,18 @@ class TestReplInitialization:
             def register_session(self, managed_session):
                 raise AssertionError("initialize should not re-register live runtime")
 
-            def _persist_session(self, managed_session):
+            def attach_runtime(
+                self,
+                managed_session,
+                *,
+                pipeline,
+                pipeline_ctx,
+                pipeline_adapter,
+            ):
+                managed_session.runtime_pipeline = pipeline
+                managed_session.runtime_ctx = pipeline_ctx
+                managed_session.runtime_adapter = pipeline_adapter
+                managed_session.tape_id = pipeline_ctx.tape.tape_id
                 return None
 
         fake_pipeline = object()
