@@ -45,7 +45,7 @@ from ..workspace_archive import (
 
 if TYPE_CHECKING:
     from .cloud import CloudWorkspaceClient
-    from ..ui.execution_binding import CloudWorkspaceBinding
+    from .execution_binding import CloudWorkspaceBinding
 
 
 logger = logging.getLogger(__name__)
@@ -397,7 +397,7 @@ class DockerWorkspaceProvider(WorkspaceProvider):
         config: dict[str, object],
         source: CloudWorkspaceSource,
     ) -> CloudWorkspaceBinding:
-        from ..ui.execution_binding import CloudWorkspaceBinding
+        from .execution_binding import CloudWorkspaceBinding
 
         kind = source.get("kind")
         if kind not in {"docker", "git"}:

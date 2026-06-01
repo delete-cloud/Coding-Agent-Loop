@@ -95,7 +95,7 @@ from coding_agent.environment.binding_resolver import (
     BindingResolver,
     DefaultBindingResolver,
 )
-from coding_agent.server.execution_binding import (
+from coding_agent.environment.execution_binding import (
     CloudWorkspaceBinding,
     ExecutionBinding,
     ExternalWorkerBinding,

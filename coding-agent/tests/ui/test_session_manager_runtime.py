@@ -31,7 +31,7 @@ from coding_agent.runtime_store import (
     RuntimeEventRecord,
 )
 from coding_agent.environment.binding_resolver import DefaultBindingResolver
-from coding_agent.server.execution_binding import (
+from coding_agent.environment.execution_binding import (
     CloudWorkspaceBinding,
     ExternalWorkerBinding,
     LocalExecutionBinding,

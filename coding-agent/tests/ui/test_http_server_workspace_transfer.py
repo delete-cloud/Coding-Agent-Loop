@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
-from coding_agent.server.execution_binding import CloudWorkspaceBinding
+from coding_agent.environment.execution_binding import CloudWorkspaceBinding
 from coding_agent.server.http_server import app, session_manager
 from coding_agent.server.rate_limit import limiter
 from coding_agent.server.session_manager import Session

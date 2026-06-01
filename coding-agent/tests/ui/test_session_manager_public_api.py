@@ -21,7 +21,7 @@ from agentkit.tape.tape import Tape
 from coding_agent.approval.store import ApprovalStore
 from coding_agent.approval import ApprovalPolicy
 from agentkit.config.loader import ConfigError
-from coding_agent.server.execution_binding import (
+from coding_agent.environment.execution_binding import (
     CloudWorkspaceBinding,
     LocalExecutionBinding,
 )
