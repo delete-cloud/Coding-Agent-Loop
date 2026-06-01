@@ -2364,6 +2364,8 @@ class TestPromptStreaming:
         assert run.status == "requested"
         assert run.metadata["prompt"] == "run locally"
         assert run.metadata["execution_binding_kind"] == "external_worker"
+        assert run.metadata["workspace_surface"] == "external_worker_workspace_ref"
+        assert run.metadata["execution_plane"] == "executor_plane"
         assert run.metadata["execution_placement"] == "local_attached"
         assert run.metadata["executor_kind"] == "local_cli"
 
@@ -2410,6 +2412,8 @@ class TestPromptStreaming:
         assert run.status == "requested"
         assert run.metadata["prompt"] == "run locally"
         assert run.metadata["execution_binding_kind"] == "local_attached"
+        assert run.metadata["workspace_surface"] == "local_attached_workspace"
+        assert run.metadata["execution_plane"] == "executor_plane"
         assert run.metadata["execution_placement"] == "local_attached"
         assert run.metadata["executor_kind"] == "local_cli"
 
@@ -2472,6 +2476,10 @@ class TestPromptStreaming:
         assert stored_event.payload["run_id"] == run.run_id
         assert stored_event.payload["execution_placement"] == "local_attached"
         assert stored_event.payload["execution_binding_kind"] == "external_worker"
+        assert (
+            stored_event.payload["workspace_surface"] == "external_worker_workspace_ref"
+        )
+        assert stored_event.payload["execution_plane"] == "executor_plane"
         assert stored_event.payload["executor_id"] == "worker-1"
         assert stored_event.payload["message_type"] == "StreamDelta"
         assert rebroadcast["event"] == "StreamDelta"

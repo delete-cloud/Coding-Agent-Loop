@@ -194,6 +194,8 @@ def _runtime_event_correlation_from_run(run: AgentRunRecord) -> JSONObject:
     for key in (
         "execution_placement",
         "execution_binding_kind",
+        "workspace_surface",
+        "execution_plane",
         "previous_run_id",
         "resume_from_run_id",
         "resume_from_event_id",
@@ -2147,6 +2149,12 @@ class SessionManager:
             trace_metadata["tape_id"] = ctx.tape.tape_id
             trace_metadata["execution_placement"] = self._execution_placement(session)
             trace_metadata["execution_binding_kind"] = session.execution_binding.kind
+            trace_metadata["workspace_surface"] = (
+                session.execution_binding.workspace_surface
+            )
+            trace_metadata["execution_plane"] = (
+                session.execution_binding.execution_plane
+            )
             if resume_context is not None:
                 trace_metadata.update(resume_context.metadata())
             ctx.run_context = replace(
@@ -2171,6 +2179,8 @@ class SessionManager:
             "approval_policy": session.approval_policy.value,
             "max_steps": session.max_steps,
             "execution_binding_kind": session.execution_binding.kind,
+            "workspace_surface": session.execution_binding.workspace_surface,
+            "execution_plane": session.execution_binding.execution_plane,
             "execution_placement": self._execution_placement(session),
         }
         if resume_context is not None:
@@ -2196,6 +2206,8 @@ class SessionManager:
             "tape_id": getattr(getattr(ctx, "tape", None), "tape_id", None),
             "execution_placement": self._execution_placement(session),
             "execution_binding_kind": session.execution_binding.kind,
+            "workspace_surface": session.execution_binding.workspace_surface,
+            "execution_plane": session.execution_binding.execution_plane,
         }
         if resume_context is not None:
             attributes.update(resume_context.metadata())
@@ -2479,6 +2491,8 @@ class SessionManager:
                 "run_id": run_id,
                 "execution_placement": self._execution_placement(session),
                 "execution_binding_kind": session.execution_binding.kind,
+                "workspace_surface": session.execution_binding.workspace_surface,
+                "execution_plane": session.execution_binding.execution_plane,
             }
             if session.tape_id is not None:
                 correlation["tape_id"] = session.tape_id

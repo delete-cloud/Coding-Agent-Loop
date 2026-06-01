@@ -522,6 +522,8 @@ async def test_run_agent_persists_agent_run_lifecycle_when_store_configured() ->
         "approval_policy": "auto",
         "max_steps": 30,
         "execution_binding_kind": "local",
+        "workspace_surface": "local_workspace",
+        "execution_plane": "control_plane",
         "execution_placement": "server_embedded",
     }
     assert running_update == {
@@ -910,6 +912,8 @@ async def test_resume_session_creates_new_run_linked_to_interrupted_run(
     assert observation["attributes"]["tape_id"] == stable_tape_id
     assert observation["attributes"]["execution_placement"] == "server_embedded"
     assert observation["attributes"]["execution_binding_kind"] == "local"
+    assert observation["attributes"]["workspace_surface"] == "local_workspace"
+    assert observation["attributes"]["execution_plane"] == "control_plane"
 
 
 @pytest.mark.asyncio
@@ -1298,6 +1302,8 @@ async def test_run_agent_persists_wire_events_when_runtime_store_configured() ->
     assert event.payload["tape_id"] == runtime_store.created[0].tape_id
     assert event.payload["execution_placement"] == "server_embedded"
     assert event.payload["execution_binding_kind"] == "local"
+    assert event.payload["workspace_surface"] == "local_workspace"
+    assert event.payload["execution_plane"] == "control_plane"
     assert event.payload["message_type"] == "StreamDelta"
     assert event.payload["message"] == {
         "session_id": session_id,
@@ -1378,6 +1384,8 @@ async def test_run_agent_persists_approval_request_wire_events() -> None:
     assert event.payload["tape_id"] == runtime_store.created[0].tape_id
     assert event.payload["execution_placement"] == "server_embedded"
     assert event.payload["execution_binding_kind"] == "local"
+    assert event.payload["workspace_surface"] == "local_workspace"
+    assert event.payload["execution_plane"] == "control_plane"
     assert event.payload["message_type"] == "ApprovalRequest"
     assert event.payload["message"] == {
         "session_id": session_id,
@@ -3109,6 +3117,7 @@ class FakeCloudClient:
 @pytest.mark.asyncio
 async def test_run_agent_passes_cloud_environment_from_execution_binding() -> None:
     captured_kwargs: dict[str, object] = {}
+    runtime_store = FakeRuntimeStore()
     fake_pipeline = types.SimpleNamespace(
         _registry=types.SimpleNamespace(
             get=lambda _: types.SimpleNamespace(_instance=None)
@@ -3122,6 +3131,7 @@ async def test_run_agent_passes_cloud_environment_from_execution_binding() -> No
 
     manager = SessionManager(
         store=InMemorySessionStore(),
+        runtime_store=runtime_store,
         create_agent_fn=fake_create_agent,
         binding_resolver=DefaultBindingResolver(
             cloud_client_factory=lambda binding: FakeCloudClient()
@@ -3152,6 +3162,8 @@ async def test_run_agent_passes_cloud_environment_from_execution_binding() -> No
         "workspace_id": "ws-123",
         "workspace_url": "https://workspace.example.com",
     }
+    assert runtime_store.created[0].metadata["workspace_surface"] == "cloud_workspace"
+    assert runtime_store.created[0].metadata["execution_plane"] == "control_plane"
 
 
 @pytest.mark.asyncio

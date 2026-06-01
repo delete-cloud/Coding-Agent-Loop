@@ -10,6 +10,7 @@ WorkspaceSurface = Literal[
     "external_worker_workspace_ref",
     "local_attached_workspace",
 ]
+ExecutionPlane = Literal["control_plane", "executor_plane"]
 
 
 def _optional_metadata_str(data: dict[str, Any], key: str) -> str | None:
@@ -29,6 +30,10 @@ class ExecutionBinding:
 
     @property
     def workspace_surface(self) -> WorkspaceSurface:
+        raise NotImplementedError
+
+    @property
+    def execution_plane(self) -> ExecutionPlane:
         raise NotImplementedError
 
     def to_dict(self) -> dict[str, Any]:
@@ -58,6 +63,10 @@ class LocalExecutionBinding(ExecutionBinding):
     @property
     def workspace_surface(self) -> WorkspaceSurface:
         return "local_workspace"
+
+    @property
+    def execution_plane(self) -> ExecutionPlane:
+        return "control_plane"
 
     def to_dict(self) -> dict[str, Any]:
         payload = {"kind": self.kind, "workspace_root": self.workspace_root}
@@ -93,6 +102,10 @@ class CloudWorkspaceBinding(ExecutionBinding):
     @property
     def workspace_surface(self) -> WorkspaceSurface:
         return "cloud_workspace"
+
+    @property
+    def execution_plane(self) -> ExecutionPlane:
+        return "control_plane"
 
     def to_dict(self) -> dict[str, Any]:
         payload = {
@@ -146,6 +159,10 @@ class ExternalWorkerBinding(ExecutionBinding):
     def workspace_surface(self) -> WorkspaceSurface:
         return "external_worker_workspace_ref"
 
+    @property
+    def execution_plane(self) -> ExecutionPlane:
+        return "executor_plane"
+
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "kind": self.kind,
@@ -188,3 +205,7 @@ class LocalAttachedExecutionBinding(ExternalWorkerBinding):
     @property
     def workspace_surface(self) -> WorkspaceSurface:
         return "local_attached_workspace"
+
+    @property
+    def execution_plane(self) -> ExecutionPlane:
+        return "executor_plane"
