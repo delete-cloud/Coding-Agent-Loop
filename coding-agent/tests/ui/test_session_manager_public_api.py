@@ -617,6 +617,24 @@ def test_session_manager_creates_sqlite_runtime_store_when_storage_config_reques
     assert isinstance(manager._runtime_store, SQLiteRuntimeStore)
 
 
+def test_session_manager_creates_sqlite_tape_and_checkpoint_stores(
+    tmp_path,
+) -> None:
+    from agentkit.storage.sqlite import SQLiteCheckpointStore, SQLiteTapeStore
+
+    manager = SessionManager(
+        storage_config={
+            "tape_backend": "sqlite",
+            "tape_path": str(tmp_path / "tape.sqlite3"),
+            "checkpoint_backend": "sqlite",
+            "checkpoint_path": str(tmp_path / "checkpoints.sqlite3"),
+        }
+    )
+
+    assert isinstance(manager._tape_store, SQLiteTapeStore)
+    assert isinstance(manager._checkpoint_service._store, SQLiteCheckpointStore)
+
+
 def test_session_manager_creates_file_session_store_for_local_cli_storage(
     tmp_path,
 ) -> None:

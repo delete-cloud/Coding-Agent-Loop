@@ -3,7 +3,7 @@ from pathlib import Path
 import coding_agent.plugins.storage as storage_module
 from coding_agent.plugins.storage import StoragePlugin
 from coding_agent.plugins.storage import JSONLTapeStore
-from agentkit.storage.protocols import TapeStore, SessionStore
+from agentkit.storage.protocols import SessionStore
 from agentkit.tape.store import ForkTapeStore
 
 
@@ -28,6 +28,28 @@ class TestStoragePlugin:
         state = hooks["mount"]()
         assert "session_store" in state
         assert isinstance(state["session_store"], SessionStore)
+
+    def test_sqlite_tape_backend_returns_fork_store(self, tmp_path):
+        plugin = StoragePlugin(
+            data_dir=tmp_path,
+            config={"tape_backend": "sqlite", "tape_path": str(tmp_path / "tape.db")},
+        )
+
+        result = plugin.provide_storage()
+
+        assert isinstance(result, ForkTapeStore)
+
+    def test_sqlite_tape_backend_routes_memory_records_to_sqlite_store(self, tmp_path):
+        plugin = StoragePlugin(
+            data_dir=tmp_path,
+            config={"tape_backend": "sqlite", "tape_path": str(tmp_path / "tape.db")},
+        )
+
+        plugin.append_memory_record("session-1", {"summary": "first"})
+        plugin.replace_memory_records("session-1", [{"summary": "replacement"}])
+
+        assert plugin.load_memory_records("session-1") == [{"summary": "replacement"}]
+        assert not (tmp_path / "tapes" / "session-1.jsonl").exists()
 
 
 class TestJSONLTapeStore:
