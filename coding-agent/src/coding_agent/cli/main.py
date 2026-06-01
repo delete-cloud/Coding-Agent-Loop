@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-import sys
 import asyncio
+from dataclasses import dataclass
 import os
 from pathlib import Path
+import shlex
+import subprocess
+import sys
 from typing import get_args
 
 import click
@@ -20,7 +23,11 @@ from coding_agent.cli.stats_command import stats
 from coding_agent.cli.verify_command import verify
 from coding_agent.core.config import Config, load_config
 from coding_agent.remote.approval import APPROVAL_POLICIES
-from coding_agent.server.session_manager import ApprovalPolicy, SessionManager
+from coding_agent.approval import ApprovalPolicy
+from coding_agent.cli.local_runtime import (
+    LocalCliSessionManager,
+    create_local_cli_session_manager,
+)
 from coding_agent.storage_migration import migrate_legacy_storage_to_sqlite
 from coding_agent.ui.headless import HeadlessConsumer
 from coding_agent.ui.rich_tui import CodingAgentTUI
@@ -31,6 +38,12 @@ CLI_PROVIDER_CHOICES = click.Choice(
     [str(provider) for provider in get_args(Config.model_fields["provider"].annotation)]
 )
 REMOTE_APPROVAL_CHOICES = click.Choice(APPROVAL_POLICIES)
+
+
+@dataclass(frozen=True)
+class WorktreeSnapshot:
+    status: str
+    diff: str
 
 
 def _collect_shared_cli_args(
@@ -124,6 +137,18 @@ def main(ctx, model, provider_name, base_url, api_key):
 @click.option("--cache/--no-cache", default=True, help="Enable tool result caching")
 @click.option("--cache-size", default=100, help="Maximum cached entries")
 @click.option("--tui", is_flag=True, help="Use Rich TUI interface (batch mode)")
+@click.option(
+    "--patch",
+    "patch_mode",
+    is_flag=True,
+    help="Require the run to produce repository changes.",
+)
+@click.option(
+    "--verify-cmd",
+    "verify_commands",
+    multiple=True,
+    help="Post-run verification command. Repeat for multiple commands.",
+)
 @click.pass_context
 def run(
     ctx,
@@ -136,6 +161,8 @@ def run(
     cache,
     cache_size,
     tui,
+    patch_mode,
+    verify_commands,
 ):
     """Run agent on a goal (batch mode)."""
     import asyncio
@@ -153,10 +180,107 @@ def run(
         },
     )
 
+    repo_root = Path(config.repo).expanduser().resolve()
+    before_snapshot = _capture_worktree_snapshot(repo_root) if patch_mode else None
+    effective_goal = (
+        _patch_oriented_goal(goal, tuple(verify_commands)) if patch_mode else goal
+    )
+
     if tui:
-        asyncio.run(_run_with_tui(config, goal))
+        asyncio.run(_run_with_tui(config, effective_goal))
     else:
-        asyncio.run(_run_headless(config, goal))
+        asyncio.run(_run_headless(config, effective_goal))
+
+    if before_snapshot is not None:
+        after_snapshot = _capture_worktree_snapshot(repo_root)
+        _ensure_patch_run_changed_worktree(before_snapshot, after_snapshot)
+    if verify_commands:
+        _run_post_run_verification(repo_root, tuple(verify_commands))
+
+
+def _patch_oriented_goal(goal: str, verify_commands: tuple[str, ...]) -> str:
+    lines = [
+        goal,
+        "",
+        "Patch-oriented run contract:",
+        "- Modify repository files when the task asks for code, tests, docs, or config changes.",
+        "- Do not stop after planning; inspect the relevant files and produce a concrete patch.",
+        "- Before finishing, inspect git status/diff and run focused validation.",
+        "- If validation fails, fix the issue and rerun the same validation once.",
+        "- Final response must summarize changed files and validation commands.",
+    ]
+    if verify_commands:
+        lines.append("- Required validation commands:")
+        lines.extend(f"  - {command}" for command in verify_commands)
+    return "\n".join(lines)
+
+
+def _capture_worktree_snapshot(repo_root: Path) -> WorktreeSnapshot:
+    return WorktreeSnapshot(
+        status=_git_capture(
+            repo_root,
+            ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        ),
+        diff="\n".join(
+            [
+                _git_capture(
+                    repo_root,
+                    ["git", "diff", "--binary", "--no-ext-diff", "--"],
+                ),
+                _git_capture(
+                    repo_root,
+                    ["git", "diff", "--cached", "--binary", "--no-ext-diff", "--"],
+                ),
+            ]
+        ),
+    )
+
+
+def _git_capture(repo_root: Path, command: list[str]) -> str:
+    completed = subprocess.run(
+        command,
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        stderr = completed.stderr.strip()
+        raise click.ClickException(
+            f"patch run requires a git worktree; {' '.join(command)} failed"
+            + (f": {stderr}" if stderr else "")
+        )
+    return completed.stdout
+
+
+def _ensure_patch_run_changed_worktree(
+    before: WorktreeSnapshot, after: WorktreeSnapshot
+) -> None:
+    if before == after:
+        raise click.ClickException(
+            "patch run produced no repository changes; retry in REPL or use a more "
+            "specific task packet"
+        )
+
+
+def _run_post_run_verification(repo_root: Path, commands: tuple[str, ...]) -> None:
+    for command in commands:
+        args = shlex.split(command)
+        if not args:
+            raise click.ClickException("--verify-cmd must not be empty")
+        completed = subprocess.run(
+            args,
+            cwd=repo_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            output = (completed.stdout + completed.stderr).strip()
+            raise click.ClickException(
+                f"verification command failed ({completed.returncode}): {command}"
+                + (f"\n{output}" if output else "")
+            )
 
 
 @main.command()
@@ -346,7 +470,7 @@ async def _resume_managed_session(
         await session_manager.close()
 
 
-async def _latest_managed_session_id(session_manager: SessionManager) -> str:
+async def _latest_managed_session_id(session_manager: LocalCliSessionManager) -> str:
     session_ids = await session_manager.list_sessions_async()
     if not session_ids:
         raise click.ClickException("No local sessions found.")
@@ -424,7 +548,7 @@ async def _print_local_session_checkpoints(session_id: str) -> None:
 
 
 async def _local_session_summaries(
-    session_manager: SessionManager,
+    session_manager: LocalCliSessionManager,
 ) -> list[dict[str, object]]:
     sessions = [
         await session_manager.get_session_async(session_id)
@@ -444,7 +568,7 @@ async def _local_session_summaries(
 
 
 async def _local_session_summary(
-    session_manager: SessionManager,
+    session_manager: LocalCliSessionManager,
     session,
 ) -> dict[str, object]:
     summary = dict(session.as_dict())
@@ -453,7 +577,7 @@ async def _local_session_summary(
 
 
 async def _run_managed_one_shot(config: Config, goal: str, consumer) -> None:
-    """Execute a one-shot local session through SessionManager."""
+    """Execute a one-shot local session through the local CLI runtime."""
     session_manager = _local_session_manager()
     try:
         session_id = await session_manager.create_session(
@@ -516,8 +640,8 @@ def _approval_policy_from_config(value: str) -> ApprovalPolicy:
     raise ValueError(f"unsupported approval mode: {value}")
 
 
-def _local_session_manager() -> SessionManager:
-    return SessionManager(
+def _local_session_manager() -> LocalCliSessionManager:
+    return create_local_cli_session_manager(
         storage_config={
             "http_session_backend": "fs",
             "runtime_backend": "jsonl",

@@ -111,7 +111,9 @@ def test_run_command_uses_managed_session(
         async def close(self) -> None:
             calls.append(("close", None))
 
-    monkeypatch.setattr(cli_main, "SessionManager", FakeSessionManager)
+    monkeypatch.setattr(
+        cli_main, "create_local_cli_session_manager", FakeSessionManager
+    )
     runner = CliRunner(env=_click_credential_free_env())
 
     result = runner.invoke(
@@ -169,6 +171,96 @@ def test_run_command_uses_managed_session(
     ]
 
 
+def test_run_patch_mode_augments_goal_and_requires_worktree_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from coding_agent.cli import main as cli_main
+
+    snapshots = iter(
+        [
+            cli_main.WorktreeSnapshot(status="", diff="before"),
+            cli_main.WorktreeSnapshot(status=" M changed.py", diff="after"),
+        ]
+    )
+    verify_calls: list[tuple[Path, tuple[str, ...]]] = []
+
+    async def fake_run_headless(config, goal: str) -> None:
+        assert Path(config.repo) == tmp_path
+        assert "implement the task" in goal
+        assert "Patch-oriented run contract:" in goal
+        assert "uv run pytest tests/cli/test_entrypoint_contract.py -v" in goal
+
+    def fake_capture(repo_root: Path) -> object:
+        assert repo_root == tmp_path
+        return next(snapshots)
+
+    def fake_verify(repo_root: Path, commands: tuple[str, ...]) -> None:
+        verify_calls.append((repo_root, commands))
+
+    monkeypatch.setattr(cli_main, "_run_headless", fake_run_headless)
+    monkeypatch.setattr(cli_main, "_capture_worktree_snapshot", fake_capture)
+    monkeypatch.setattr(cli_main, "_run_post_run_verification", fake_verify)
+
+    runner = CliRunner(env=_click_credential_free_env())
+    result = runner.invoke(
+        main,
+        [
+            "run",
+            "--goal",
+            "implement the task",
+            "--repo",
+            str(tmp_path),
+            "--patch",
+            "--verify-cmd",
+            "uv run pytest tests/cli/test_entrypoint_contract.py -v",
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert verify_calls == [
+        (
+            tmp_path,
+            ("uv run pytest tests/cli/test_entrypoint_contract.py -v",),
+        )
+    ]
+
+
+def test_run_patch_mode_fails_when_agent_produces_no_diff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from coding_agent.cli import main as cli_main
+
+    snapshot = cli_main.WorktreeSnapshot(status="", diff="")
+    run_calls: list[str] = []
+
+    async def fake_run_headless(config, goal: str) -> None:
+        del config
+        run_calls.append(goal)
+
+    monkeypatch.setattr(cli_main, "_run_headless", fake_run_headless)
+    monkeypatch.setattr(cli_main, "_capture_worktree_snapshot", lambda repo: snapshot)
+
+    runner = CliRunner(env=_click_credential_free_env())
+    result = runner.invoke(
+        main,
+        [
+            "run",
+            "--goal",
+            "only plan",
+            "--repo",
+            str(tmp_path),
+            "--patch",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert run_calls
+    assert "patch run produced no repository changes" in result.output
+
+
 def test_resume_command_uses_managed_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -203,7 +295,9 @@ def test_resume_command_uses_managed_session(
         async def close(self) -> None:
             calls.append(("close", None))
 
-    monkeypatch.setattr(cli_main, "SessionManager", FakeSessionManager)
+    monkeypatch.setattr(
+        cli_main, "create_local_cli_session_manager", FakeSessionManager
+    )
     runner = CliRunner(env=_click_credential_free_env())
 
     result = runner.invoke(
@@ -294,7 +388,9 @@ def test_local_sessions_list_reports_resume_context(
         async def close(self) -> None:
             calls.append(("close", None))
 
-    monkeypatch.setattr(cli_main, "SessionManager", FakeSessionManager)
+    monkeypatch.setattr(
+        cli_main, "create_local_cli_session_manager", FakeSessionManager
+    )
     runner = CliRunner(env=_click_credential_free_env())
 
     result = runner.invoke(
@@ -374,7 +470,9 @@ def test_local_session_status_reports_checkpoint_and_resume_fields(
         async def close(self) -> None:
             pass
 
-    monkeypatch.setattr(cli_main, "SessionManager", FakeSessionManager)
+    monkeypatch.setattr(
+        cli_main, "create_local_cli_session_manager", FakeSessionManager
+    )
     runner = CliRunner(env=_click_credential_free_env())
 
     result = runner.invoke(
@@ -429,7 +527,9 @@ def test_local_sessions_checkpoints_lists_newest_first(
         async def close(self) -> None:
             calls.append(("close", None))
 
-    monkeypatch.setattr(cli_main, "SessionManager", FakeSessionManager)
+    monkeypatch.setattr(
+        cli_main, "create_local_cli_session_manager", FakeSessionManager
+    )
     runner = CliRunner(env=_click_credential_free_env())
 
     result = runner.invoke(
