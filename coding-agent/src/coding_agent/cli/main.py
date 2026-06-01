@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import asyncio
+import os
 from pathlib import Path
 from typing import get_args
 
@@ -20,6 +21,7 @@ from coding_agent.cli.verify_command import verify
 from coding_agent.core.config import Config, load_config
 from coding_agent.remote.approval import APPROVAL_POLICIES
 from coding_agent.server.session_manager import ApprovalPolicy, SessionManager
+from coding_agent.storage_migration import migrate_legacy_storage_to_sqlite
 from coding_agent.ui.headless import HeadlessConsumer
 from coding_agent.ui.rich_tui import CodingAgentTUI
 from coding_agent.wire.protocol import TurnEnd, WireMessage
@@ -220,6 +222,84 @@ def local_sessions_checkpoints(session_id: str) -> None:
 def local_session(session_id: str) -> None:
     """Show one local managed session."""
     asyncio.run(_print_local_session(session_id))
+
+
+@main.group("storage")
+def storage() -> None:
+    """Manage local storage backends."""
+
+
+@storage.command("migrate-sqlite")
+@click.option(
+    "--data-dir",
+    type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
+    default=None,
+    help="Data directory containing legacy tapes/checkpoints.",
+)
+@click.option(
+    "--tapes-dir",
+    type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
+    default=None,
+    help="Legacy JSONL tape directory. Defaults to DATA_DIR/tapes.",
+)
+@click.option(
+    "--checkpoints-dir",
+    type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
+    default=None,
+    help="Legacy FS checkpoint directory. Defaults to DATA_DIR/checkpoints.",
+)
+@click.option(
+    "--tape-sqlite",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=None,
+    help="SQLite tape database path. Defaults to DATA_DIR/tape.sqlite3.",
+)
+@click.option(
+    "--checkpoint-sqlite",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=None,
+    help="SQLite checkpoint database path. Defaults to DATA_DIR/checkpoints.sqlite3.",
+)
+@click.option(
+    "--replace-tapes",
+    is_flag=True,
+    help="Replace existing SQLite tape rows when source JSONL differs.",
+)
+@click.option("--dry-run", is_flag=True, help="Report work without writing SQLite.")
+def storage_migrate_sqlite(
+    data_dir: Path | None,
+    tapes_dir: Path | None,
+    checkpoints_dir: Path | None,
+    tape_sqlite: Path | None,
+    checkpoint_sqlite: Path | None,
+    replace_tapes: bool,
+    dry_run: bool,
+) -> None:
+    """Migrate legacy JSONL tape and FS checkpoint storage to SQLite."""
+    resolved_data_dir = data_dir or Path(os.environ.get("AGENT_DATA_DIR", "./data"))
+    report = asyncio.run(
+        migrate_legacy_storage_to_sqlite(
+            resolved_data_dir,
+            tapes_dir=tapes_dir,
+            checkpoints_dir=checkpoints_dir,
+            tape_sqlite_path=tape_sqlite,
+            checkpoint_sqlite_path=checkpoint_sqlite,
+            replace_tapes=replace_tapes,
+            dry_run=dry_run,
+        )
+    )
+    click.echo(
+        "tapes: "
+        f"scanned={report.tapes.scanned} "
+        f"migrated={report.tapes.migrated} "
+        f"skipped={report.tapes.skipped}"
+    )
+    click.echo(
+        "checkpoints: "
+        f"scanned={report.checkpoints.scanned} "
+        f"migrated={report.checkpoints.migrated} "
+        f"skipped={report.checkpoints.skipped}"
+    )
 
 
 async def _run_with_tui(config, goal):
