@@ -28,6 +28,7 @@ from coding_agent.environment.workspace_provider import (
 from coding_agent.server.execution_binding import (
     CloudWorkspaceBinding,
     ExecutionBinding,
+    LocalAttachedExecutionBinding,
     LocalExecutionBinding,
 )
 
@@ -137,6 +138,24 @@ def test_cloud_binding_round_trip_preserves_runtime_profile() -> None:
 
     assert isinstance(restored, CloudWorkspaceBinding)
     assert restored.runtime_profile == "universal"
+
+
+def test_local_attached_binding_round_trip() -> None:
+    binding = LocalAttachedExecutionBinding(
+        executor_kind="local_cli",
+        worker_pool="default",
+        workspace_ref={"path": "/repo"},
+        provider_instance_id="macbook",
+    )
+
+    restored = ExecutionBinding.from_dict(binding.to_dict())
+
+    assert isinstance(restored, LocalAttachedExecutionBinding)
+    assert restored.executor_kind == "local_cli"
+    assert restored.worker_pool == "default"
+    assert restored.workspace_ref == {"path": "/repo"}
+    assert restored.provider_instance_id == "macbook"
+    assert restored.to_dict()["kind"] == "local_attached"
 
 
 def test_unknown_binding_kind_raises() -> None:

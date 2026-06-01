@@ -17,7 +17,7 @@ def _optional_metadata_str(data: dict[str, Any], key: str) -> str | None:
 
 @dataclass(frozen=True)
 class ExecutionBinding:
-    kind: ClassVar[Literal["local", "cloud", "external_worker"]]
+    kind: ClassVar[Literal["local", "cloud", "external_worker", "local_attached"]]
 
     def to_dict(self) -> dict[str, Any]:
         raise NotImplementedError
@@ -31,6 +31,8 @@ class ExecutionBinding:
             return CloudWorkspaceBinding.from_dict(data)
         if kind == "external_worker":
             return ExternalWorkerBinding.from_dict(data)
+        if kind == "local_attached":
+            return LocalAttachedExecutionBinding.from_dict(data)
         raise ValueError(f"unknown binding kind: {kind}")
 
 
@@ -153,3 +155,8 @@ class ExternalWorkerBinding(ExecutionBinding):
             workspace_ref=None if workspace_ref is None else dict(workspace_ref),
             provider_instance_id=_optional_metadata_str(data, "provider_instance_id"),
         )
+
+
+@dataclass(frozen=True)
+class LocalAttachedExecutionBinding(ExternalWorkerBinding):
+    kind: ClassVar[Literal["local_attached"]] = "local_attached"

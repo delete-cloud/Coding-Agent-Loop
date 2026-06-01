@@ -302,12 +302,10 @@ def _remote_run_once(
                         "python",
                         "-m",
                         "coding_agent",
+                        "remote",
                         "attach",
                         name,
-                        "--session",
                         session_id,
-                        "--goal",
-                        "<goal>",
                     ]
                 )
             )
@@ -357,10 +355,16 @@ def _remote_run_once(
     default="yolo",
     show_default=True,
     type=REMOTE_APPROVAL_CHOICES,
-    help="Local worker approval policy.",
+    help="Local attached executor approval policy.",
 )
 @click.option("--max-steps", default=30, show_default=True, help="Max steps per turn.")
-@click.option("--worker-id", default=None, help="Stable external worker id.")
+@click.option(
+    "--executor-id",
+    "--worker-id",
+    "worker_id",
+    default=None,
+    help="Stable local attached executor id.",
+)
 def remote_local_run(
     name: str,
     repo: str,
@@ -374,15 +378,15 @@ def remote_local_run(
     import uuid
 
     from coding_agent.remote.client import auth_headers, get_remote
-    from coding_agent.remote.worker import run_local_worker_once
+    from coding_agent.remote.worker import run_local_attached_executor_once
 
     endpoint = get_remote(name)
     repo_path = Path(repo).expanduser().resolve()
     if not repo_path.is_dir():
         raise click.ClickException(f"--repo must be an existing directory: {repo}")
-    resolved_worker_id = worker_id or f"local-cli-{uuid.uuid4().hex}"
+    resolved_executor_id = worker_id or f"local-cli-{uuid.uuid4().hex}"
     status = asyncio.run(
-        run_local_worker_once(
+        run_local_attached_executor_once(
             base_url=endpoint.url,
             headers=auth_headers(endpoint),
             repo_path=repo_path,
@@ -392,10 +396,73 @@ def remote_local_run(
             model_name=None,
             base_url_override=None,
             max_steps=max_steps,
-            worker_id=resolved_worker_id,
+            worker_id=resolved_executor_id,
         )
     )
     raise SystemExit(status)
+
+
+def _run_remote_attached_executor(
+    *,
+    name: str,
+    repo: str,
+    executor_id: str,
+    once: bool,
+    poll_interval: float,
+) -> None:
+    import asyncio
+
+    from coding_agent.remote.client import auth_headers, get_remote
+    from coding_agent.remote.worker import run_attached_executor_loop
+
+    endpoint = get_remote(name)
+    repo_path = Path(repo).expanduser().resolve()
+    if not repo_path.is_dir():
+        raise click.ClickException(f"--repo must be an existing directory: {repo}")
+    status = asyncio.run(
+        run_attached_executor_loop(
+            base_url=endpoint.url,
+            headers=auth_headers(endpoint),
+            repo_path=repo_path,
+            worker_id=executor_id,
+            once=once,
+            poll_interval_seconds=poll_interval,
+        )
+    )
+    raise SystemExit(status)
+
+
+@remote.command("executor")
+@click.argument("name")
+@click.option("--repo", default=".", help="Run claimed jobs against this workspace.")
+@click.option("--executor-id", required=True, help="Stable local attached executor id.")
+@click.option(
+    "--once",
+    is_flag=True,
+    help="Exit after one claimed run or after one empty poll.",
+)
+@click.option(
+    "--poll-interval",
+    default=2.0,
+    show_default=True,
+    type=click.FloatRange(min=0.0, min_open=True),
+    help="Seconds between empty claim polls.",
+)
+def remote_executor(
+    name: str,
+    repo: str,
+    executor_id: str,
+    once: bool,
+    poll_interval: float,
+) -> None:
+    """Run a local attached executor for o6n-managed sessions."""
+    _run_remote_attached_executor(
+        name=name,
+        repo=repo,
+        executor_id=executor_id,
+        once=once,
+        poll_interval=poll_interval,
+    )
 
 
 @remote.command("worker")
@@ -421,27 +488,14 @@ def remote_worker(
     once: bool,
     poll_interval: float,
 ) -> None:
-    """Run a local external worker for o6n-managed sessions."""
-    import asyncio
-
-    from coding_agent.remote.client import auth_headers, get_remote
-    from coding_agent.remote.worker import run_worker_loop
-
-    endpoint = get_remote(name)
-    repo_path = Path(repo).expanduser().resolve()
-    if not repo_path.is_dir():
-        raise click.ClickException(f"--repo must be an existing directory: {repo}")
-    status = asyncio.run(
-        run_worker_loop(
-            base_url=endpoint.url,
-            headers=auth_headers(endpoint),
-            repo_path=repo_path,
-            worker_id=worker_id,
-            once=once,
-            poll_interval_seconds=poll_interval,
-        )
+    """Compatibility alias for `remote executor`."""
+    _run_remote_attached_executor(
+        name=name,
+        repo=repo,
+        executor_id=worker_id,
+        once=once,
+        poll_interval=poll_interval,
     )
-    raise SystemExit(status)
 
 
 def _format_cli_command(args: list[str]) -> str:
@@ -692,6 +746,9 @@ def _print_remote_sessions(name: str) -> None:
                     str(session.get("status", "")),
                     str(session.get("turn_status", "")),
                     str(session.get("workspace_id", "")),
+                    str(session.get("last_run_status", "")),
+                    "resumable" if session.get("resumable") is True else "",
+                    str(session.get("latest_checkpoint_id", "")),
                 ]
             )
         )
@@ -734,9 +791,9 @@ def remote_runs(name: str, session_id: str) -> None:
         return
     for run in runs:
         metadata = run.get("metadata")
-        worker_id = (
-            metadata.get("worker_id")
-            if isinstance(metadata, dict) and isinstance(metadata.get("worker_id"), str)
+        executor_id = (
+            metadata.get("executor_id") or metadata.get("worker_id")
+            if isinstance(metadata, dict)
             else ""
         )
         click.echo(
@@ -744,7 +801,7 @@ def remote_runs(name: str, session_id: str) -> None:
                 [
                     str(run.get("run_id", "")),
                     str(run.get("status", "")),
-                    worker_id,
+                    str(executor_id),
                     str(run.get("tape_id", "")),
                 ]
             )
@@ -885,23 +942,34 @@ def remote_resolve_interaction(
 @remote.command("workers")
 @click.argument("name")
 def remote_workers(name: str) -> None:
-    """List external worker health derived from durable runs."""
-    from coding_agent.remote.client import get_remote, list_remote_workers
+    """Compatibility alias for `remote executors`."""
+    _print_remote_executors(name, empty_message="No remote workers found.")
+
+
+@remote.command("executors")
+@click.argument("name")
+def remote_executors(name: str) -> None:
+    """List attached executor health derived from durable runs."""
+    _print_remote_executors(name, empty_message="No remote executors found.")
+
+
+def _print_remote_executors(name: str, *, empty_message: str) -> None:
+    from coding_agent.remote.client import get_remote, list_remote_executors
 
     endpoint = get_remote(name)
-    workers = list_remote_workers(endpoint)
-    if not workers:
-        click.echo("No remote workers found.")
+    executors = list_remote_executors(endpoint)
+    if not executors:
+        click.echo(empty_message)
         return
-    for worker in workers:
+    for executor in executors:
         click.echo(
             "\t".join(
                 [
-                    str(worker.get("worker_id", "")),
-                    str(worker.get("status", "")),
-                    str(worker.get("executor_kind", "")),
-                    str(worker.get("current_run_id", "")),
-                    str(worker.get("last_seen_at", "")),
+                    str(executor.get("executor_id") or executor.get("worker_id", "")),
+                    str(executor.get("status", "")),
+                    str(executor.get("executor_kind", "")),
+                    str(executor.get("current_run_id", "")),
+                    str(executor.get("last_seen_at", "")),
                 ]
             )
         )
@@ -911,11 +979,23 @@ def remote_workers(name: str) -> None:
 @click.argument("name")
 @click.argument("worker_id")
 def remote_worker_status(name: str, worker_id: str) -> None:
-    """Show one external worker status."""
-    from coding_agent.remote.client import get_remote, get_remote_worker
+    """Compatibility alias for `remote executor-status`."""
+    _print_remote_executor_status(name, worker_id)
+
+
+@remote.command("executor-status")
+@click.argument("name")
+@click.argument("executor_id")
+def remote_executor_status(name: str, executor_id: str) -> None:
+    """Show one attached executor status."""
+    _print_remote_executor_status(name, executor_id)
+
+
+def _print_remote_executor_status(name: str, executor_id: str) -> None:
+    from coding_agent.remote.client import get_remote, get_remote_executor
 
     endpoint = get_remote(name)
-    _print_mapping(get_remote_worker(endpoint, worker_id))
+    _print_mapping(get_remote_executor(endpoint, executor_id))
 
 
 @remote.command("prompt")
@@ -935,6 +1015,28 @@ def remote_prompt(name: str, session_id: str, goal: str) -> None:
         base_url=endpoint.url,
         session_id=session_id,
         prompt=goal,
+        headers=auth_headers(endpoint),
+    )
+    raise SystemExit(status)
+
+
+@remote.command("resume")
+@click.argument("name")
+@click.option("--session", "session_id", required=True, help="Session id to resume.")
+@click.option("--prompt", default=None, help="Optional resume instruction.")
+def remote_resume(name: str, session_id: str, prompt: str | None) -> None:
+    """Resume an existing remote session from durable context."""
+    from coding_agent.remote.client import (
+        auth_headers,
+        get_remote,
+        stream_resume_or_run_request,
+    )
+
+    endpoint = get_remote(name)
+    status = stream_resume_or_run_request(
+        base_url=endpoint.url,
+        session_id=session_id,
+        prompt=prompt,
         headers=auth_headers(endpoint),
     )
     raise SystemExit(status)

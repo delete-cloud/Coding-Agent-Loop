@@ -306,11 +306,29 @@ def list_remote_workers(endpoint: RemoteEndpoint) -> list[dict[str, object]]:
     return [dict(_expect_mapping(item, "Remote worker entry")) for item in workers]
 
 
+def list_remote_executors(endpoint: RemoteEndpoint) -> list[dict[str, object]]:
+    data = _get_remote_json(endpoint, "/executors", "list remote executors")
+    executors = data.get("executors")
+    if not isinstance(executors, list):
+        raise click.ClickException("Remote executors response missing executors")
+    return [dict(_expect_mapping(item, "Remote executor entry")) for item in executors]
+
+
 def get_remote_worker(endpoint: RemoteEndpoint, worker_id: str) -> dict[str, object]:
     return _get_remote_json(
         endpoint,
         f"/workers/{worker_id}",
         "get remote worker",
+    )
+
+
+def get_remote_executor(
+    endpoint: RemoteEndpoint, executor_id: str
+) -> dict[str, object]:
+    return _get_remote_json(
+        endpoint,
+        f"/executors/{executor_id}",
+        "get remote executor",
     )
 
 
@@ -640,6 +658,48 @@ def stream_prompt(
 def stream_prompt_or_run_request(
     *, base_url: str, session_id: str, prompt: str, headers: dict[str, str]
 ) -> int:
+    return _stream_prompt_like_request(
+        base_url=base_url,
+        session_id=session_id,
+        path=f"/sessions/{session_id}/prompt",
+        payload={"prompt": prompt},
+        headers=headers,
+        action="stream remote prompt",
+        truncated_message="Remote prompt stream ended without RunRequested or TurnEnd",
+    )
+
+
+def stream_resume_or_run_request(
+    *,
+    base_url: str,
+    session_id: str,
+    prompt: str | None,
+    headers: dict[str, str],
+) -> int:
+    payload: dict[str, str] = {"resume_reason": "remote_cli_resume"}
+    if prompt is not None:
+        payload["prompt"] = prompt
+    return _stream_prompt_like_request(
+        base_url=base_url,
+        session_id=session_id,
+        path=f"/sessions/{session_id}/resume",
+        payload=payload,
+        headers=headers,
+        action="stream remote resume",
+        truncated_message="Remote resume stream ended without RunRequested or TurnEnd",
+    )
+
+
+def _stream_prompt_like_request(
+    *,
+    base_url: str,
+    session_id: str,
+    path: str,
+    payload: dict[str, str],
+    headers: dict[str, str],
+    action: str,
+    truncated_message: str,
+) -> int:
     timeout = httpx.Timeout(connect=10.0, write=30.0, pool=30.0, read=None)
     line_open = False
     try:
@@ -649,10 +709,10 @@ def stream_prompt_or_run_request(
             with connect_sse(
                 client,
                 "POST",
-                f"/sessions/{session_id}/prompt",
-                json={"prompt": prompt},
+                path,
+                json=payload,
             ) as event_source:
-                _raise_remote_http_error(event_source.response, "stream remote prompt")
+                _raise_remote_http_error(event_source.response, action)
                 for sse in event_source.iter_sse():
                     if sse.event == "RunRequested":
                         if line_open:
@@ -663,7 +723,7 @@ def stream_prompt_or_run_request(
                             raise click.ClickException(
                                 "Remote RunRequested event missing run_id"
                             )
-                        click.echo(f"Requested external worker run {run_id}")
+                        click.echo(f"Requested local attached executor run {run_id}")
                         return 0
                     status, line_open = handle_sse_event(
                         base_url=base_url,
@@ -680,12 +740,10 @@ def stream_prompt_or_run_request(
     except httpx.RequestError as exc:
         if line_open:
             click.echo()
-        raise click.ClickException(f"Failed to stream remote prompt: {exc}") from exc
+        raise click.ClickException(f"Failed to {action}: {exc}") from exc
     if line_open:
         click.echo()
-    raise click.ClickException(
-        "Remote prompt stream ended without RunRequested or TurnEnd"
-    )
+    raise click.ClickException(truncated_message)
 
 
 def attach_remote_session(

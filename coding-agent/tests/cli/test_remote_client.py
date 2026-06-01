@@ -333,13 +333,13 @@ def test_remote_local_run_uses_external_worker_binding(
     monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
     calls: list[dict[str, object]] = []
 
-    async def fake_run_local_worker_once(**kwargs):
+    async def fake_run_local_attached_executor_once(**kwargs):
         calls.append(kwargs)
         return 0
 
     monkeypatch.setattr(
-        "coding_agent.remote.worker.run_local_worker_once",
-        fake_run_local_worker_once,
+        "coding_agent.remote.worker.run_local_attached_executor_once",
+        fake_run_local_attached_executor_once,
     )
     runner = CliRunner()
     runner.invoke(
@@ -385,6 +385,113 @@ def test_remote_local_run_uses_external_worker_binding(
     ]
 
 
+@pytest.mark.asyncio
+async def test_attached_executor_client_creates_local_attached_session(
+    tmp_path: Path,
+) -> None:
+    from coding_agent.remote import worker as remote_worker
+
+    requests: list[dict[str, object]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(
+            {
+                "method": request.method,
+                "path": request.url.path,
+                "json": json.loads(request.content.decode("utf-8")),
+            }
+        )
+        return httpx.Response(200, json={"session_id": "sess-local-attached"})
+
+    async with httpx.AsyncClient(
+        base_url="http://agent.example",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        session_id = await remote_worker._create_attached_executor_session(
+            client=client,
+            repo_path=tmp_path,
+            approval_policy="yolo",
+            provider_name=None,
+            model_name=None,
+            base_url_override=None,
+            max_steps=7,
+            worker_id="executor-1",
+        )
+
+    assert session_id == "sess-local-attached"
+    assert requests == [
+        {
+            "method": "POST",
+            "path": "/sessions",
+            "json": {
+                "approval_policy": "yolo",
+                "max_steps": 7,
+                "execution_binding": {
+                    "kind": "local_attached",
+                    "executor_kind": "local_cli",
+                    "worker_pool": "default",
+                    "workspace_ref": {
+                        "kind": "local_path",
+                        "display_path": str(tmp_path),
+                    },
+                    "provider_instance_id": "executor-1",
+                },
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_attached_executor_client_claims_via_executor_endpoint(
+    tmp_path: Path,
+) -> None:
+    from coding_agent.remote import worker as remote_worker
+
+    requests: list[dict[str, object]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(
+            {
+                "method": request.method,
+                "path": request.url.path,
+                "json": json.loads(request.content.decode("utf-8")),
+            }
+        )
+        return httpx.Response(
+            200,
+            json={
+                "run_id": "run-1",
+                "session_id": "sess-1",
+                "claim_token": "claim-token",
+                "prompt": "hello",
+                "approval_policy": "yolo",
+                "max_steps": 7,
+            },
+        )
+
+    async with httpx.AsyncClient(
+        base_url="http://agent.example",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        claim = await remote_worker._claim_run(
+            client=client,
+            session_id="sess-1",
+            worker_id="executor-1",
+            worker_instance_id="executor-1:instance",
+            repo_path=tmp_path,
+        )
+
+    assert claim is not None
+    assert claim["run_id"] == "run-1"
+    assert requests[0]["method"] == "POST"
+    assert requests[0]["path"] == "/executor/runs/claim"
+    payload = requests[0]["json"]
+    assert isinstance(payload, dict)
+    assert payload["executor_id"] == "executor-1"
+    assert payload["executor_kind"] == "local_cli"
+    assert payload["session_id"] == "sess-1"
+
+
 def test_remote_worker_runs_external_worker_loop(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "remotes.json"
     repo_path = tmp_path / "repo"
@@ -392,13 +499,13 @@ def test_remote_worker_runs_external_worker_loop(tmp_path: Path, monkeypatch) ->
     monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
     calls: list[dict[str, object]] = []
 
-    async def fake_run_worker_loop(**kwargs):
+    async def fake_run_attached_executor_loop(**kwargs):
         calls.append(kwargs)
         return 0
 
     monkeypatch.setattr(
-        "coding_agent.remote.worker.run_worker_loop",
-        fake_run_worker_loop,
+        "coding_agent.remote.worker.run_attached_executor_loop",
+        fake_run_attached_executor_loop,
     )
     runner = CliRunner()
     runner.invoke(
@@ -437,6 +544,60 @@ def test_remote_worker_runs_external_worker_loop(tmp_path: Path, monkeypatch) ->
     ]
 
 
+def test_remote_executor_alias_runs_existing_attached_executor_loop(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_path = tmp_path / "remotes.json"
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    calls: list[dict[str, object]] = []
+
+    async def fake_run_attached_executor_loop(**kwargs):
+        calls.append(kwargs)
+        return 0
+
+    monkeypatch.setattr(
+        "coding_agent.remote.worker.run_attached_executor_loop",
+        fake_run_attached_executor_loop,
+    )
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example", "--token", "secret-token"],
+        catch_exceptions=False,
+    )
+
+    result = runner.invoke(
+        main,
+        [
+            "remote",
+            "executor",
+            "dev",
+            "--repo",
+            str(repo_path),
+            "--executor-id",
+            "executor-test",
+            "--once",
+            "--poll-interval",
+            "0.5",
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        {
+            "base_url": "http://agent.example",
+            "headers": {"Authorization": "Bearer secret-token"},
+            "repo_path": repo_path.resolve(),
+            "worker_id": "executor-test",
+            "once": True,
+            "poll_interval_seconds": 0.5,
+        }
+    ]
+
+
 def test_remote_prompt_streams_existing_external_worker_session(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -462,6 +623,51 @@ def test_remote_prompt_streams_existing_external_worker_session(
     result = runner.invoke(
         main,
         ["remote", "prompt", "dev", "sess-1", "--goal", "continue work"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        {
+            "base_url": "http://agent.example",
+            "session_id": "sess-1",
+            "prompt": "continue work",
+            "headers": {"Authorization": "Bearer secret-token"},
+        }
+    ]
+
+
+def test_remote_resume_streams_existing_session(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "remotes.json"
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    calls: list[dict[str, object]] = []
+
+    def fake_stream_resume_or_run_request(**kwargs: object) -> int:
+        calls.append(kwargs)
+        return 0
+
+    monkeypatch.setattr(
+        "coding_agent.remote.client.stream_resume_or_run_request",
+        fake_stream_resume_or_run_request,
+    )
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example", "--token", "secret-token"],
+        catch_exceptions=False,
+    )
+
+    result = runner.invoke(
+        main,
+        [
+            "remote",
+            "resume",
+            "dev",
+            "--session",
+            "sess-1",
+            "--prompt",
+            "continue work",
+        ],
         catch_exceptions=False,
     )
 
@@ -520,11 +726,11 @@ def test_remote_workers_lists_external_worker_status(
     config_path = tmp_path / "remotes.json"
     monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
 
-    def fake_list_remote_workers(endpoint):
+    def fake_list_remote_executors(endpoint):
         assert endpoint.name == "dev"
         return [
             {
-                "worker_id": "worker-1",
+                "executor_id": "worker-1",
                 "status": "running",
                 "executor_kind": "local_cli",
                 "current_run_id": "run-1",
@@ -533,8 +739,8 @@ def test_remote_workers_lists_external_worker_status(
         ]
 
     monkeypatch.setattr(
-        "coding_agent.remote.client.list_remote_workers",
-        fake_list_remote_workers,
+        "coding_agent.remote.client.list_remote_executors",
+        fake_list_remote_executors,
     )
     runner = CliRunner()
     runner.invoke(
@@ -551,6 +757,47 @@ def test_remote_workers_lists_external_worker_status(
 
     assert result.exit_code == 0
     assert "worker-1\trunning\tlocal_cli\trun-1\t2026-05-31T12:00:00+00:00" in (
+        result.output
+    )
+
+
+def test_remote_executors_alias_lists_existing_executor_status(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_path = tmp_path / "remotes.json"
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+
+    def fake_list_remote_executors(endpoint):
+        assert endpoint.name == "dev"
+        return [
+            {
+                "executor_id": "executor-1",
+                "status": "running",
+                "executor_kind": "local_cli",
+                "current_run_id": "run-1",
+                "last_seen_at": "2026-05-31T12:00:00+00:00",
+            }
+        ]
+
+    monkeypatch.setattr(
+        "coding_agent.remote.client.list_remote_executors",
+        fake_list_remote_executors,
+    )
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example", "--token", "secret-token"],
+        catch_exceptions=False,
+    )
+
+    result = runner.invoke(
+        main,
+        ["remote", "executors", "dev"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "executor-1\trunning\tlocal_cli\trun-1\t2026-05-31T12:00:00+00:00" in (
         result.output
     )
 
@@ -656,7 +903,7 @@ def test_remote_runs_lists_session_runs(tmp_path: Path, monkeypatch) -> None:
                 "run_id": "run-1",
                 "status": "running",
                 "tape_id": "tape-1",
-                "metadata": {"worker_id": "worker-1"},
+                "metadata": {"executor_id": "executor-1", "worker_id": "worker-1"},
             }
         ]
 
@@ -678,7 +925,7 @@ def test_remote_runs_lists_session_runs(tmp_path: Path, monkeypatch) -> None:
     )
 
     assert result.exit_code == 0
-    assert "run-1\trunning\tworker-1\ttape-1" in result.output
+    assert "run-1\trunning\texecutor-1\ttape-1" in result.output
 
 
 def test_remote_repl_creates_cloud_session_and_streams_prompt_events(
@@ -1117,6 +1364,9 @@ def test_remote_sessions_commands_call_operations_api(
                                 "status": "running",
                                 "turn_status": "running",
                                 "workspace_id": "ws-1",
+                                "last_run_status": "interrupted",
+                                "resumable": True,
+                                "latest_checkpoint_id": "cp-1",
                             }
                         ]
                     }
@@ -1167,7 +1417,9 @@ def test_remote_sessions_commands_call_operations_api(
     )
 
     assert listed.exit_code == 0
-    assert "sess-1\trunning\trunning\tws-1" in listed.output
+    assert "sess-1\trunning\trunning\tws-1\tinterrupted\tresumable\tcp-1" in (
+        listed.output
+    )
     assert status.exit_code == 0
     assert "session_id: sess-1" in status.output
     assert "workspace_id: ws-1" in status.output
@@ -3145,7 +3397,7 @@ def test_remote_repl_with_repo_retains_session_when_extract_fails(
         + shlex.quote(str(repo_path))
         in result.output
     )
-    assert "python -m coding_agent attach dev --session sess-upload" in result.output
+    assert "python -m coding_agent remote attach dev sess-upload" in result.output
     assert calls == [
         (
             "post",
@@ -3291,7 +3543,7 @@ def test_remote_repl_with_repo_retains_session_when_stream_and_extract_fail(
         + shlex.quote(str(repo_path))
         in result.output
     )
-    assert "python -m coding_agent attach dev --session sess-upload" in result.output
+    assert "python -m coding_agent remote attach dev sess-upload" in result.output
     assert calls == [
         (
             "post",

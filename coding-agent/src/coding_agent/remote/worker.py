@@ -29,11 +29,14 @@ from coding_agent.wire.protocol import (
 _CONTROL_TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=30.0)
 
 
-class ExternalWorkerError(RuntimeError):
-    """Raised when the external worker control-plane contract fails."""
+class AttachedExecutorError(RuntimeError):
+    """Raised when the attached executor control-plane contract fails."""
 
 
-class RemoteWorkerConsumer:
+ExternalWorkerError = AttachedExecutorError
+
+
+class AttachedExecutorConsumer:
     def __init__(
         self,
         *,
@@ -60,9 +63,9 @@ class RemoteWorkerConsumer:
         if self._headless.auto_approve:
             return await self._headless.request_approval(req)
         response = await self._client.post(
-            f"/worker/runs/{self._run_id}/approval",
+            f"/executor/runs/{self._run_id}/approval",
             json={
-                "worker_id": self._worker_id,
+                "executor_id": self._worker_id,
                 "claim_token": self._claim_token,
                 "request_id": req.request_id,
                 "tool_name": req.tool_call.tool_name
@@ -78,7 +81,7 @@ class RemoteWorkerConsumer:
         payload = response.json()
         approved = payload.get("approved")
         if not isinstance(approved, bool):
-            raise ExternalWorkerError("worker approval response missing approved")
+            raise AttachedExecutorError("executor approval response missing approved")
         return ApprovalResponse(
             session_id=self._session_id,
             request_id=_required_claim_str(payload, "request_id"),
@@ -95,13 +98,13 @@ class RemoteWorkerConsumer:
         if event_name == "TurnEnd":
             payload["turn_id"] = self._run_id
         response = await self._client.post(
-            f"/worker/runs/{self._run_id}/events",
+            f"/executor/runs/{self._run_id}/events",
             json={
-                "worker_id": self._worker_id,
+                "executor_id": self._worker_id,
                 "claim_token": self._claim_token,
                 "events": [
                     {
-                        "event_id": f"{self._run_id}:worker:{uuid.uuid4().hex}",
+                        "event_id": f"{self._run_id}:executor:{uuid.uuid4().hex}",
                         "event": event_name,
                         "data": payload,
                     }
@@ -111,7 +114,10 @@ class RemoteWorkerConsumer:
         response.raise_for_status()
 
 
-async def run_local_worker_once(
+RemoteWorkerConsumer = AttachedExecutorConsumer
+
+
+async def run_local_attached_executor_once(
     *,
     base_url: str,
     headers: dict[str, str],
@@ -130,7 +136,7 @@ async def run_local_worker_once(
         timeout=_CONTROL_TIMEOUT,
     ) as client:
         worker_instance_id = _new_worker_instance_id(worker_id)
-        session_id = await _create_external_worker_session(
+        session_id = await _create_attached_executor_session(
             client=client,
             repo_path=repo_path,
             approval_policy=approval_policy,
@@ -140,7 +146,7 @@ async def run_local_worker_once(
             max_steps=max_steps,
             worker_id=worker_id,
         )
-        run_id = await _request_external_worker_run(
+        run_id = await _request_attached_executor_run(
             client=client,
             session_id=session_id,
             goal=goal,
@@ -153,9 +159,9 @@ async def run_local_worker_once(
             repo_path=repo_path,
         )
         if claim is None:
-            raise ExternalWorkerError("requested run was not available to claim")
+            raise AttachedExecutorError("requested run was not available to claim")
         if claim["run_id"] != run_id:
-            raise ExternalWorkerError("claimed run does not match requested run")
+            raise AttachedExecutorError("claimed run does not match requested run")
         return await _execute_claimed_run(
             client=client,
             claim=claim,
@@ -165,7 +171,14 @@ async def run_local_worker_once(
         )
 
 
-async def run_worker_loop(
+async def run_local_worker_once(
+    **kwargs: Any,
+) -> int:
+    """Compatibility wrapper for old local worker naming."""
+    return await run_local_attached_executor_once(**kwargs)
+
+
+async def run_attached_executor_loop(
     *,
     base_url: str,
     headers: dict[str, str],
@@ -205,7 +218,14 @@ async def run_worker_loop(
                 return status
 
 
-async def _create_external_worker_session(
+async def run_worker_loop(
+    **kwargs: Any,
+) -> int:
+    """Compatibility wrapper for old worker naming."""
+    return await run_attached_executor_loop(**kwargs)
+
+
+async def _create_attached_executor_session(
     *,
     client: httpx.AsyncClient,
     repo_path: Path,
@@ -220,7 +240,7 @@ async def _create_external_worker_session(
         "approval_policy": approval_policy,
         "max_steps": max_steps,
         "execution_binding": {
-            "kind": "external_worker",
+            "kind": "local_attached",
             "executor_kind": "local_cli",
             "worker_pool": "default",
             "workspace_ref": {
@@ -240,11 +260,11 @@ async def _create_external_worker_session(
     response.raise_for_status()
     session_id = response.json().get("session_id")
     if not isinstance(session_id, str) or not session_id:
-        raise ExternalWorkerError("create session response missing session_id")
+        raise AttachedExecutorError("create session response missing session_id")
     return session_id
 
 
-async def _request_external_worker_run(
+async def _request_attached_executor_run(
     *,
     client: httpx.AsyncClient,
     session_id: str,
@@ -263,9 +283,9 @@ async def _request_external_worker_run(
             payload = json.loads(sse.data)
             run_id = payload.get("run_id")
             if not isinstance(run_id, str) or not run_id:
-                raise ExternalWorkerError("RunRequested payload missing run_id")
+                raise AttachedExecutorError("RunRequested payload missing run_id")
             return run_id
-    raise ExternalWorkerError("prompt stream ended before RunRequested")
+    raise AttachedExecutorError("prompt stream ended before RunRequested")
 
 
 async def _claim_run(
@@ -278,17 +298,17 @@ async def _claim_run(
     allow_empty: bool = False,
 ) -> dict[str, Any] | None:
     payload: dict[str, Any] = {
-        "worker_id": worker_id,
+        "executor_id": worker_id,
         "executor_kind": "local_cli",
         "worker_instance_id": worker_instance_id,
         "process_id": os.getpid(),
-        "capabilities": _worker_capabilities(),
+        "capabilities": _attached_executor_capabilities(),
         "workspace_sync": _workspace_sync_metadata(repo_path),
     }
     if session_id is not None:
         payload["session_id"] = session_id
     response = await client.post(
-        "/worker/runs/claim",
+        "/executor/runs/claim",
         json=payload,
     )
     if allow_empty and response.status_code == 404:
@@ -296,7 +316,7 @@ async def _claim_run(
     response.raise_for_status()
     response_payload = response.json()
     if not isinstance(response_payload, dict):
-        raise ExternalWorkerError("worker claim response must be an object")
+        raise AttachedExecutorError("executor claim response must be an object")
     return response_payload
 
 
@@ -314,7 +334,7 @@ async def _execute_claimed_run(
     prompt = _required_claim_str(claim, "prompt")
     approval_policy = _required_claim_str(claim, "approval_policy")
     max_steps = _required_claim_int(claim, "max_steps")
-    consumer = RemoteWorkerConsumer(
+    consumer = AttachedExecutorConsumer(
         client=client,
         run_id=run_id,
         session_id=session_id,
@@ -386,13 +406,13 @@ async def _execute_claimed_run(
                     session_id=session_id,
                     agent_id="",
                     turn_id=run_id,
-                    completion_status=_completion_status_for_worker_status(status),
+                    completion_status=_completion_status_for_executor_status(status),
                 )
             )
         response = await client.post(
-            f"/worker/runs/{run_id}/complete",
+            f"/executor/runs/{run_id}/complete",
             json={
-                "worker_id": worker_id,
+                "executor_id": worker_id,
                 "claim_token": claim_token,
                 "status": status,
                 "result": result,
@@ -405,7 +425,7 @@ async def _execute_claimed_run(
     return 0 if status == "completed" else 1
 
 
-def _completion_status_for_worker_status(status: str) -> CompletionStatus:
+def _completion_status_for_executor_status(status: str) -> CompletionStatus:
     if status == "completed":
         return CompletionStatus.COMPLETED
     if status == "cancelled":
@@ -425,12 +445,12 @@ async def _heartbeat_until_complete(
 ) -> None:
     while not run_task.done():
         response = await client.post(
-            f"/worker/runs/{run_id}/heartbeat",
+            f"/executor/runs/{run_id}/heartbeat",
             json={
-                "worker_id": worker_id,
+                "executor_id": worker_id,
                 "worker_instance_id": worker_instance_id,
                 "process_id": os.getpid(),
-                "capabilities": _worker_capabilities(),
+                "capabilities": _attached_executor_capabilities(),
                 "workspace_sync": _workspace_sync_metadata(repo_path),
                 "claim_token": claim_token,
                 "lease_seconds": 30,
@@ -448,7 +468,7 @@ def _new_worker_instance_id(worker_id: str) -> str:
     return f"{worker_id}:{uuid.uuid4().hex}"
 
 
-def _worker_capabilities() -> dict[str, Any]:
+def _attached_executor_capabilities() -> dict[str, Any]:
     return {
         "executor": "local_cli",
         "process_reconnect": "metadata_only",
@@ -468,14 +488,14 @@ def _workspace_sync_metadata(repo_path: Path) -> dict[str, Any]:
 def _required_claim_str(claim: dict[str, Any], key: str) -> str:
     value = claim.get(key)
     if not isinstance(value, str) or not value:
-        raise ExternalWorkerError(f"worker claim response missing {key}")
+        raise AttachedExecutorError(f"executor claim response missing {key}")
     return value
 
 
 def _required_claim_int(claim: dict[str, Any], key: str) -> int:
     value = claim.get(key)
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ExternalWorkerError(f"worker claim response missing integer {key}")
+        raise AttachedExecutorError(f"executor claim response missing integer {key}")
     return value
 
 

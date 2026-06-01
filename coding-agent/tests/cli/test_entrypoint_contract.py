@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
+from datetime import UTC, datetime
 import subprocess
 import sys
 
 from click.testing import CliRunner
+import pytest
 
+from agentkit.checkpoint.models import CheckpointMeta
 from coding_agent.__main__ import main
+from coding_agent.wire.protocol import CompletionStatus, StreamDelta, TurnEnd
 
 
 _CREDENTIAL_ENV_KEYS = (
@@ -34,14 +39,14 @@ def test_module_help_lists_release_entrypoint_commands_without_credentials() -> 
 
     assert completed.returncode == 0
     assert "Coding Agent CLI" in completed.stdout
-    for command in ("run", "repl", "serve", "verify"):
+    for command in ("run", "repl", "resume", "sessions", "serve", "verify"):
         assert command in completed.stdout
 
 
 def test_subcommand_help_is_available_without_provider_credentials() -> None:
     runner = CliRunner(env=_click_credential_free_env())
 
-    for command in ("run", "repl", "serve", "verify"):
+    for command in ("run", "repl", "resume", "sessions", "serve", "verify"):
         result = runner.invoke(main, [command, "--help"], catch_exceptions=False)
 
         assert result.exit_code == 0
@@ -56,7 +61,416 @@ def test_default_non_interactive_entrypoint_points_to_batch_mode() -> None:
 
     assert result.exit_code != 0
     assert "interactive REPL mode requires an interactive terminal" in result.output
-    assert "python -m coding_agent run --goal" in result.output
+    assert "python -m coding_agent repl" in result.output
+
+
+def test_run_command_uses_managed_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from coding_agent.cli import main as cli_main
+    from coding_agent.wire.local import LocalWire
+
+    calls: list[tuple[str, object]] = []
+    wire = LocalWire("session-managed")
+
+    async def fake_get_next_outgoing():
+        if not hasattr(fake_get_next_outgoing, "count"):
+            fake_get_next_outgoing.count = 0  # type: ignore[attr-defined]
+        fake_get_next_outgoing.count += 1  # type: ignore[attr-defined]
+        if fake_get_next_outgoing.count == 1:  # type: ignore[attr-defined]
+            return StreamDelta(
+                session_id="session-managed",
+                agent_id="",
+                content="managed output",
+            )
+        return TurnEnd(
+            session_id="session-managed",
+            agent_id="",
+            turn_id="run-managed",
+            completion_status=CompletionStatus.COMPLETED,
+        )
+
+    monkeypatch.setattr(wire, "get_next_outgoing", fake_get_next_outgoing)
+
+    class FakeSessionManager:
+        def __init__(self, *args, **kwargs) -> None:
+            calls.append(("init", {"args": args, "kwargs": kwargs}))
+
+        async def create_session(self, **kwargs):
+            calls.append(("create_session", kwargs))
+            return "session-managed"
+
+        async def get_session_async(self, session_id: str):
+            calls.append(("get_session_async", session_id))
+            return SimpleNamespace(wire=wire)
+
+        async def run_agent(self, session_id: str, prompt: str) -> None:
+            calls.append(("run_agent", {"session_id": session_id, "prompt": prompt}))
+
+        async def close(self) -> None:
+            calls.append(("close", None))
+
+    monkeypatch.setattr(cli_main, "SessionManager", FakeSessionManager)
+    runner = CliRunner(env=_click_credential_free_env())
+
+    result = runner.invoke(
+        main,
+        [
+            "run",
+            "--goal",
+            "use the managed path",
+            "--repo",
+            str(tmp_path),
+            "--max-steps",
+            "3",
+            "--approval",
+            "yolo",
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "managed output" in result.output
+    assert calls[0] == (
+        "init",
+        {
+            "args": (),
+            "kwargs": {
+                "storage_config": {
+                    "http_session_backend": "fs",
+                    "runtime_backend": "jsonl",
+                }
+            },
+        },
+    )
+    assert calls == [
+        calls[0],
+        (
+            "create_session",
+            {
+                "repo_path": tmp_path,
+                "approval_policy": cli_main.ApprovalPolicy.YOLO,
+                "provider_name": "openai",
+                "model_name": "gpt-4o",
+                "base_url": None,
+                "max_steps": 3,
+            },
+        ),
+        ("get_session_async", "session-managed"),
+        (
+            "run_agent",
+            {
+                "session_id": "session-managed",
+                "prompt": "use the managed path",
+            },
+        ),
+        ("close", None),
+    ]
+
+
+def test_resume_command_uses_managed_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from coding_agent.cli import main as cli_main
+    from coding_agent.wire.local import LocalWire
+
+    calls: list[tuple[str, object]] = []
+    wire = LocalWire("session-managed")
+
+    async def fake_get_next_outgoing():
+        return TurnEnd(
+            session_id="session-managed",
+            agent_id="",
+            turn_id="run-resumed",
+            completion_status=CompletionStatus.COMPLETED,
+        )
+
+    monkeypatch.setattr(wire, "get_next_outgoing", fake_get_next_outgoing)
+
+    class FakeSessionManager:
+        def __init__(self, *args, **kwargs) -> None:
+            calls.append(("init", {"args": args, "kwargs": kwargs}))
+
+        async def get_session_async(self, session_id: str):
+            calls.append(("get_session_async", session_id))
+            return SimpleNamespace(wire=wire)
+
+        async def resume_session(self, session_id: str, **kwargs):
+            calls.append(("resume_session", {"session_id": session_id, **kwargs}))
+            return SimpleNamespace(run_id="run-resumed")
+
+        async def close(self) -> None:
+            calls.append(("close", None))
+
+    monkeypatch.setattr(cli_main, "SessionManager", FakeSessionManager)
+    runner = CliRunner(env=_click_credential_free_env())
+
+    result = runner.invoke(
+        main,
+        [
+            "resume",
+            "--session",
+            "session-managed",
+            "--prompt",
+            "continue",
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert calls[0] == (
+        "init",
+        {
+            "args": (),
+            "kwargs": {
+                "storage_config": {
+                    "http_session_backend": "fs",
+                    "runtime_backend": "jsonl",
+                }
+            },
+        },
+    )
+    assert calls == [
+        calls[0],
+        ("get_session_async", "session-managed"),
+        (
+            "resume_session",
+            {
+                "session_id": "session-managed",
+                "prompt": "continue",
+                "resume_reason": "local_cli_resume",
+            },
+        ),
+        ("close", None),
+    ]
+
+
+def test_local_sessions_list_reports_resume_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from coding_agent.cli import main as cli_main
+
+    calls: list[tuple[str, object]] = []
+
+    class FakeSession:
+        id = "session-local"
+        last_activity = "2026-06-01T10:00:00+00:00"
+
+        def as_dict(self) -> dict[str, object]:
+            return {
+                "session_id": self.id,
+                "status": "created",
+                "turn_status": "idle",
+                "workspace_id": None,
+                "last_activity": self.last_activity,
+            }
+
+    class FakeSessionManager:
+        def __init__(self, *args, **kwargs) -> None:
+            calls.append(("init", {"args": args, "kwargs": kwargs}))
+
+        async def list_sessions_async(self):
+            calls.append(("list_sessions_async", None))
+            return ["session-local"]
+
+        async def get_session_async(self, session_id: str):
+            calls.append(("get_session_async", session_id))
+            return FakeSession()
+
+        async def session_resume_metadata(self, session_id: str):
+            calls.append(("session_resume_metadata", session_id))
+            return {
+                "resumable": True,
+                "last_run_id": "run-2",
+                "last_run_status": "interrupted",
+                "last_interrupted_run_id": "run-2",
+                "resume_from_event_id": "event-9",
+                "checkpoint_count": 1,
+                "latest_checkpoint_id": "cp-1",
+                "latest_checkpoint_label": "latest",
+            }
+
+        async def close(self) -> None:
+            calls.append(("close", None))
+
+    monkeypatch.setattr(cli_main, "SessionManager", FakeSessionManager)
+    runner = CliRunner(env=_click_credential_free_env())
+
+    result = runner.invoke(
+        main,
+        ["sessions", "list"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert result.output.strip().split("\t") == [
+        "session-local",
+        "created",
+        "idle",
+        "None",
+        "interrupted",
+        "resumable",
+        "run-2",
+        "cp-1",
+    ]
+    assert calls == [
+        calls[0],
+        ("list_sessions_async", None),
+        ("get_session_async", "session-local"),
+        ("session_resume_metadata", "session-local"),
+        ("close", None),
+    ]
+    assert calls[0] == (
+        "init",
+        {
+            "args": (),
+            "kwargs": {
+                "storage_config": {
+                    "http_session_backend": "fs",
+                    "runtime_backend": "jsonl",
+                }
+            },
+        },
+    )
+
+
+def test_local_session_status_reports_checkpoint_and_resume_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from coding_agent.cli import main as cli_main
+
+    class FakeSession:
+        id = "session-local"
+
+        def as_dict(self) -> dict[str, object]:
+            return {
+                "session_id": self.id,
+                "status": "created",
+                "turn_status": "idle",
+            }
+
+    class FakeSessionManager:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def get_session_async(self, session_id: str):
+            assert session_id == "session-local"
+            return FakeSession()
+
+        async def session_resume_metadata(self, session_id: str):
+            assert session_id == "session-local"
+            return {
+                "resumable": True,
+                "last_run_id": "run-2",
+                "last_run_status": "interrupted",
+                "last_interrupted_run_id": "run-2",
+                "resume_from_event_id": "event-9",
+                "checkpoint_count": 2,
+                "latest_checkpoint_id": "cp-2",
+                "latest_checkpoint_label": "latest",
+            }
+
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(cli_main, "SessionManager", FakeSessionManager)
+    runner = CliRunner(env=_click_credential_free_env())
+
+    result = runner.invoke(
+        main,
+        ["session", "session-local"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "session_id: session-local" in result.output
+    assert "last_run_status: interrupted" in result.output
+    assert "last_interrupted_run_id: run-2" in result.output
+    assert "checkpoint_count: 2" in result.output
+    assert "latest_checkpoint_id: cp-2" in result.output
+    assert "resumable: True" in result.output
+
+
+def test_local_sessions_checkpoints_lists_newest_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from coding_agent.cli import main as cli_main
+
+    calls: list[tuple[str, object]] = []
+
+    class FakeSessionManager:
+        def __init__(self, *args, **kwargs) -> None:
+            calls.append(("init", {"args": args, "kwargs": kwargs}))
+
+        async def list_checkpoints(self, session_id: str):
+            calls.append(("list_checkpoints", session_id))
+            return [
+                CheckpointMeta(
+                    checkpoint_id="cp-old",
+                    tape_id="tape-local",
+                    session_id=session_id,
+                    entry_count=1,
+                    window_start=0,
+                    created_at=datetime(2026, 6, 1, 9, 0, tzinfo=UTC),
+                    label="old",
+                ),
+                CheckpointMeta(
+                    checkpoint_id="cp-new",
+                    tape_id="tape-local",
+                    session_id=session_id,
+                    entry_count=3,
+                    window_start=1,
+                    created_at=datetime(2026, 6, 1, 10, 0, tzinfo=UTC),
+                    label="new",
+                ),
+            ]
+
+        async def close(self) -> None:
+            calls.append(("close", None))
+
+    monkeypatch.setattr(cli_main, "SessionManager", FakeSessionManager)
+    runner = CliRunner(env=_click_credential_free_env())
+
+    result = runner.invoke(
+        main,
+        ["sessions", "checkpoints", "session-local"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    lines = result.output.strip().splitlines()
+    assert lines[0].split("\t") == [
+        "cp-new",
+        "2026-06-01T10:00:00+00:00",
+        "3",
+        "1",
+        "new",
+    ]
+    assert lines[1].split("\t") == [
+        "cp-old",
+        "2026-06-01T09:00:00+00:00",
+        "1",
+        "0",
+        "old",
+    ]
+    assert calls == [
+        calls[0],
+        ("list_checkpoints", "session-local"),
+        ("close", None),
+    ]
+    assert calls[0] == (
+        "init",
+        {
+            "args": (),
+            "kwargs": {
+                "storage_config": {
+                    "http_session_backend": "fs",
+                    "runtime_backend": "jsonl",
+                }
+            },
+        },
+    )
 
 
 def _credential_free_env() -> dict[str, str]:

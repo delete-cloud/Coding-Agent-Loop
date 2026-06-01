@@ -362,7 +362,16 @@ def test_recorder_emits_nested_typed_spans_with_real_times(tmp_path, monkeypatch
     sink = RecordingSink()
     recorder = AgentObservationRecorder(store=store, sink=sink)
 
-    recorder.start_turn(session_id="session-1", run_id="run-1", prompt="hello")
+    recorder.start_turn(
+        session_id="session-1",
+        run_id="run-1",
+        prompt="hello",
+        attributes={
+            "tape_id": "tape-1",
+            "execution_placement": "server_embedded",
+            "resume_from_run_id": "run-0",
+        },
+    )
     recorder.observe_llm_usage(
         input_tokens=2527, output_tokens=263, provider_name="openai"
     )
@@ -397,6 +406,10 @@ def test_recorder_emits_nested_typed_spans_with_real_times(tmp_path, monkeypatch
     assert turn_span.attributes["langfuse.observation.type"] == "agent"
     assert generation_span.attributes["langfuse.observation.type"] == "generation"
     assert tool_span.attributes["langfuse.observation.type"] == "tool"
+    for span in (turn_span, generation_span, tool_span):
+        assert span.attributes["tape_id"] == "tape-1"
+        assert span.attributes["execution_placement"] == "server_embedded"
+        assert span.attributes["resume_from_run_id"] == "run-0"
 
     # Generation carries token usage; tool span has a non-zero duration.
     assert generation_span.attributes["gen_ai.usage.input_tokens"] == 2527
