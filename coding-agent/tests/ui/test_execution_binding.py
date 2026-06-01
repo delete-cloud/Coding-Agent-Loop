@@ -28,6 +28,7 @@ from coding_agent.environment.workspace_provider import (
 from coding_agent.server.execution_binding import (
     CloudWorkspaceBinding,
     ExecutionBinding,
+    ExternalWorkerBinding,
     LocalAttachedExecutionBinding,
     LocalExecutionBinding,
 )
@@ -79,6 +80,8 @@ def test_local_binding_round_trip(tmp_path: Path) -> None:
 
     assert isinstance(restored, LocalExecutionBinding)
     assert restored.workspace_root == str(workspace)
+    assert restored.workspace_surface == "local_workspace"
+    assert restored.execution_plane == "control_plane"
 
 
 def test_local_binding_round_trips_explicit_workspace_provider_metadata(
@@ -110,6 +113,8 @@ def test_cloud_binding_round_trip() -> None:
     assert isinstance(restored, CloudWorkspaceBinding)
     assert restored.workspace_url == "https://workspace.example.com"
     assert restored.workspace_id == "ws-123"
+    assert restored.workspace_surface == "cloud_workspace"
+    assert restored.execution_plane == "control_plane"
 
 
 def test_cloud_binding_round_trips_explicit_workspace_provider_metadata() -> None:
@@ -156,6 +161,27 @@ def test_local_attached_binding_round_trip() -> None:
     assert restored.workspace_ref == {"path": "/repo"}
     assert restored.provider_instance_id == "macbook"
     assert restored.to_dict()["kind"] == "local_attached"
+    assert restored.workspace_surface == "local_attached_workspace"
+    assert restored.execution_plane == "executor_plane"
+
+
+def test_external_worker_binding_round_trip() -> None:
+    binding = ExternalWorkerBinding(
+        executor_kind="docker",
+        worker_pool="gpu",
+        workspace_ref={"workspace_id": "ws-123"},
+        provider_instance_id="worker-a",
+    )
+
+    restored = ExecutionBinding.from_dict(binding.to_dict())
+
+    assert isinstance(restored, ExternalWorkerBinding)
+    assert restored.executor_kind == "docker"
+    assert restored.worker_pool == "gpu"
+    assert restored.workspace_ref == {"workspace_id": "ws-123"}
+    assert restored.provider_instance_id == "worker-a"
+    assert restored.workspace_surface == "external_worker_workspace_ref"
+    assert restored.execution_plane == "executor_plane"
 
 
 def test_unknown_binding_kind_raises() -> None:
