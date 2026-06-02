@@ -10,6 +10,7 @@ from .coordinator import (
 )
 from .lifecycle import (
     RuntimeRunLifecycle,
+    RuntimeRunLifecycleStore,
     RuntimeRunMetadataProvider,
     RuntimeRunResumeContext,
     RuntimeRunSession,
@@ -63,6 +64,7 @@ __all__ = [
     "RunTargetSerializationError",
     "RuntimeExecution",
     "RuntimeRunLifecycle",
+    "RuntimeRunLifecycleStore",
     "RuntimeRunExecutor",
     "RuntimeRunMetadataProvider",
     "RuntimeRunResumeContext",

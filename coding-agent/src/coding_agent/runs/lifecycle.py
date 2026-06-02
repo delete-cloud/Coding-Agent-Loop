@@ -6,6 +6,9 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 from coding_agent.runtime_store import AgentRunRecord, JSONObject
+from coding_agent.stores import RuntimeRunLifecycleStore
+
+RuntimeRunStore = RuntimeRunLifecycleStore
 
 
 class RuntimeRunSession(Protocol):
@@ -26,28 +29,13 @@ class RuntimeRunMetadataProvider(Protocol):
     ) -> JSONObject: ...
 
 
-class RuntimeRunStore(Protocol):
-    async def create_agent_run(self, record: AgentRunRecord) -> AgentRunRecord: ...
-
-    async def update_agent_run(
-        self,
-        run_id: str,
-        *,
-        status: str,
-        ended_at: datetime | None,
-        metadata: JSONObject,
-        result: JSONObject,
-        error: str | None,
-    ) -> AgentRunRecord: ...
-
-
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
 @dataclass(frozen=True)
 class RuntimeRunLifecycle:
-    store: RuntimeRunStore | None
+    store: RuntimeRunLifecycleStore | None
     metadata_for_session: RuntimeRunMetadataProvider
     now: Callable[[], datetime] = _utc_now
 
@@ -157,6 +145,7 @@ class RuntimeRunLifecycle:
 
 __all__ = [
     "RuntimeRunLifecycle",
+    "RuntimeRunLifecycleStore",
     "RuntimeRunMetadataProvider",
     "RuntimeRunResumeContext",
     "RuntimeRunSession",
