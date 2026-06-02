@@ -80,13 +80,23 @@ class RunExecutor(Protocol):
     async def submit_run(self, request: RunRequest) -> RunSubmission: ...
 
 
+class RuntimeExecution(Protocol):
+    request: RunRequest
+
+
+class RuntimeRunExecutor(RunExecutor, Protocol):
+    async def execute_runtime(self, execution: RuntimeExecution) -> object: ...
+
+
 class RunCoordinator(Protocol):
     async def submit_run(self, request: RunRequest) -> RunSubmission: ...
+
+    async def execute_runtime(self, execution: RuntimeExecution) -> object: ...
 
 
 @dataclass
 class DefaultRunCoordinator:
-    local_daemon_executor: RunExecutor | None = None
+    local_daemon_executor: RuntimeRunExecutor | None = None
 
     async def submit_run(self, request: RunRequest) -> RunSubmission:
         if (
@@ -102,6 +112,19 @@ class DefaultRunCoordinator:
             metadata=request.metadata,
         )
 
+    async def execute_runtime(self, execution: RuntimeExecution) -> object:
+        request = execution.request
+        if not isinstance(request.target.executor, LocalDaemonExecutorRef):
+            executor_kind = request.target.executor.kind
+            raise RunCoordinatorError(
+                f"{executor_kind} runtime execution is not available through this coordinator"
+            )
+        if self.local_daemon_executor is None:
+            raise RunCoordinatorError(
+                "local_daemon runtime executor is not configured"
+            )
+        return await self.local_daemon_executor.execute_runtime(execution)
+
 
 __all__ = [
     "DefaultRunCoordinator",
@@ -110,4 +133,6 @@ __all__ = [
     "RunExecutor",
     "RunRequest",
     "RunSubmission",
+    "RuntimeExecution",
+    "RuntimeRunExecutor",
 ]
