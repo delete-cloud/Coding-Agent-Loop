@@ -10,6 +10,7 @@ from coding_agent.adapter_types import StopReason, TurnOutcome
 from coding_agent.runtime_store import AgentRunRecord, JSONObject
 from coding_agent.runs import (
     RuntimeRunLifecycle,
+    RuntimeTurnObservationState,
     RuntimeTurnErrorHandler,
     RuntimeTurnErrorState,
     RuntimeTurnFinalizer,
@@ -65,6 +66,17 @@ class FakeRuntimeAdapter:
 class FakeRuntimeBinding:
     ctx: FakeRuntimeContext
     adapter: FakeRuntimeAdapter
+
+
+class FakeObservationRecorder:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str]] = []
+
+    def fail_turn(self, *, error_type: str) -> None:
+        self.events.append(("fail", error_type))
+
+    def cancel_turn(self) -> None:
+        self.events.append(("cancel", ""))
 
 
 class RecordingRuntimeStore:
@@ -272,6 +284,44 @@ async def test_runtime_turn_finalizer_records_storeless_failure_outcome() -> Non
     assert finishes == []
     assert persisted == [session]
     assert observations == ["failed"]
+
+
+def test_runtime_turn_observation_state_tracks_recorder_actions() -> None:
+    recorder = FakeObservationRecorder()
+    ctx = FakeRuntimeContext("tape-observed")
+    completions: list[tuple[object | None, str, str]] = []
+
+    state = RuntimeTurnObservationState(
+        complete_observation=lambda recorder, *, ctx, turn_status: completions.append(
+            (recorder, ctx.tape.tape_id, turn_status)
+        )
+    )
+
+    state.set(recorder)
+    state.complete(ctx=ctx, turn_status="completed")
+    state.fail("RuntimeError")
+    state.cancel()
+
+    assert completions == [(recorder, "tape-observed", "completed")]
+    assert recorder.events == [("fail", "RuntimeError"), ("cancel", "")]
+
+
+def test_runtime_turn_observation_state_ignores_missing_recorder() -> None:
+    ctx = FakeRuntimeContext("tape-missing")
+    completions: list[tuple[object | None, str, str]] = []
+
+    state = RuntimeTurnObservationState(
+        complete_observation=lambda recorder, *, ctx, turn_status: completions.append(
+            (recorder, ctx.tape.tape_id, turn_status)
+        )
+    )
+
+    state.complete(ctx=ctx, turn_status="completed")
+    state.fail("RuntimeError")
+    state.cancel()
+
+    assert completions == [(None, "tape-missing", "completed")]
+    assert state.recorder is None
 
 
 @pytest.mark.asyncio

@@ -94,6 +94,7 @@ from coding_agent.runs import (
     RuntimeTurnErrorState,
     RuntimeTurnErrorHandler,
     RuntimeTurnFinalizer,
+    RuntimeTurnObservationState,
     RuntimeTurnRunTracker,
     RuntimeTurnStarter,
     RunTarget,
@@ -3915,16 +3916,10 @@ class SessionManager:
                 started_at=started_at,
                 resume_context=resume_context,
             )
-            observation_recorder: AgentObservationRecorder | None = None
+            observation = RuntimeTurnObservationState(
+                complete_observation=self._complete_agent_observation
+            )
             turn_error_state = RuntimeTurnErrorState()
-
-            def _fail_local_daemon_turn_observation(error_type: str) -> None:
-                if observation_recorder is not None:
-                    observation_recorder.fail_turn(error_type=error_type)
-
-            def _cancel_local_daemon_turn_observation() -> None:
-                if observation_recorder is not None:
-                    observation_recorder.cancel_turn()
 
             async def _notify_generic_local_daemon_turn_error(
                 session: Session,
@@ -3953,8 +3948,8 @@ class SessionManager:
                 turn_run=turn_run,
                 close_runtime=self._close_runtime,
                 notify_generic_error=_notify_generic_local_daemon_turn_error,
-                fail_observation=_fail_local_daemon_turn_observation,
-                cancel_observation=_cancel_local_daemon_turn_observation,
+                fail_observation=observation.fail,
+                cancel_observation=observation.cancel,
             )
 
             async def _on_local_daemon_turn_error(
@@ -3999,11 +3994,7 @@ class SessionManager:
                 async def _before_local_daemon_turn(
                     binding: LocalDaemonRuntimeBinding,
                 ) -> None:
-                    nonlocal observation_recorder
-                    observation_recorder = await turn_starter.start(
-                        session,
-                        binding,
-                    )
+                    observation.set(await turn_starter.start(session, binding))
 
                 async def _after_local_daemon_turn(
                     binding: LocalDaemonRuntimeBinding,
@@ -4011,19 +4002,8 @@ class SessionManager:
                 ) -> None:
                     ctx = binding.ctx
 
-                    def _complete_local_daemon_turn_observation(
-                        *,
-                        ctx: Any,
-                        turn_status: str,
-                    ) -> None:
-                        self._complete_agent_observation(
-                            observation_recorder,
-                            ctx=ctx,
-                            turn_status=turn_status,
-                        )
-
                     await self._runtime_turn_finalizer(
-                        complete_observation=_complete_local_daemon_turn_observation
+                        complete_observation=observation.complete
                     ).complete(
                         session,
                         ctx=ctx,

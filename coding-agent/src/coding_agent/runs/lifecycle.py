@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from coding_agent.adapter_types import StopReason, TurnOutcome
 from coding_agent.runtime_store import AgentRunRecord, JSONObject
@@ -69,6 +69,22 @@ class RuntimeSessionPersister(Protocol):
 
 class RuntimeObservationCompleter(Protocol):
     def __call__(self, *, ctx: Any, turn_status: str) -> None: ...
+
+
+class RuntimeTurnObservationRecorder(Protocol):
+    def fail_turn(self, *, error_type: str) -> None: ...
+
+    def cancel_turn(self) -> None: ...
+
+
+class RuntimeTurnObservationCompleter(Protocol):
+    def __call__(
+        self,
+        recorder: RuntimeTurnObservationRecorder | None,
+        *,
+        ctx: Any,
+        turn_status: str,
+    ) -> None: ...
 
 
 class RuntimeTurnErrorAction(Protocol):
@@ -324,6 +340,34 @@ class RuntimeTurnErrorState:
         self.handled = True
 
 
+@dataclass
+class RuntimeTurnObservationState:
+    complete_observation: RuntimeTurnObservationCompleter | None = None
+    recorder: RuntimeTurnObservationRecorder | None = None
+
+    def set(self, recorder: object | None) -> None:
+        self.recorder = cast(RuntimeTurnObservationRecorder | None, recorder)
+
+    def complete(self, *, ctx: Any, turn_status: str) -> None:
+        if self.complete_observation is None:
+            return
+        self.complete_observation(
+            self.recorder,
+            ctx=ctx,
+            turn_status=turn_status,
+        )
+
+    def fail(self, error_type: str) -> None:
+        if self.recorder is None:
+            return
+        self.recorder.fail_turn(error_type=error_type)
+
+    def cancel(self) -> None:
+        if self.recorder is None:
+            return
+        self.recorder.cancel_turn()
+
+
 @dataclass(frozen=True)
 class RuntimeTurnErrorHandler:
     turn_run: RuntimeTurnRunTracker
@@ -493,6 +537,9 @@ __all__ = [
     "RuntimeTurnErrorSession",
     "RuntimeTurnErrorState",
     "RuntimeTurnFinalizer",
+    "RuntimeTurnObservationCompleter",
+    "RuntimeTurnObservationRecorder",
+    "RuntimeTurnObservationState",
     "RuntimeTurnRunTracker",
     "RuntimeTurnStartSession",
     "RuntimeTurnStarter",
