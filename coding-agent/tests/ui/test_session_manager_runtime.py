@@ -3337,6 +3337,71 @@ async def test_run_agent_passes_cloud_environment_from_execution_binding() -> No
 
 
 @pytest.mark.asyncio
+async def test_run_agent_does_not_route_cloud_runtime_through_local_daemon_executor() -> None:
+    local_executor = RecordingLocalDaemonExecutor()
+    runtime_store = FakeRuntimeStore()
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        )
+    )
+
+    def fake_create_agent(**kwargs):
+        environment = kwargs["environment"]
+        if not isinstance(environment, CloudEnvironment):
+            raise TypeError("expected cloud environment")
+        return fake_pipeline, types.SimpleNamespace(
+            session_id=kwargs["session_id_override"],
+            config={},
+            tape=kwargs.get("tape") or Tape(tape_id="stable-tape"),
+            run_context=AgentRunContext(
+                session_id=kwargs["session_id_override"],
+                run_id=kwargs["run_id_override"],
+                agent_id=None,
+                environment=environment,
+            ),
+        )
+
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        runtime_store=cast(Any, runtime_store),
+        create_agent_fn=fake_create_agent,
+        local_daemon_executor=local_executor,
+        binding_resolver=DefaultBindingResolver(
+            cloud_client_factory=lambda binding: FakeCloudClient()
+        ),
+    )
+    session_id = await manager.create_session(
+        execution_binding=CloudWorkspaceBinding(
+            workspace_url="https://workspace.example.com",
+            workspace_id="ws-123",
+        )
+    )
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+            self.ctx = ctx
+
+        async def run_turn(self, prompt: str) -> TurnOutcome:
+            del prompt
+            return TurnOutcome(
+                stop_reason=StopReason.NO_TOOL_CALLS,
+                steps_taken=1,
+            )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
+
+        await manager.run_agent(session_id, "hello cloud")
+
+    assert local_executor.executions == []
+    assert runtime_store.created[0].metadata["workspace_surface"] == "cloud_workspace"
+    assert runtime_store.updated[0]["status"] == "running"
+    assert runtime_store.updated[-1]["status"] == "completed"
+
+
+@pytest.mark.asyncio
 async def test_restore_checkpoint_preserves_cloud_execution_binding() -> None:
     captured_kwargs: dict[str, object] = {}
     fake_pipeline = types.SimpleNamespace(
