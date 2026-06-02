@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from inspect import isawaitable
 from typing import Protocol
 
 from coding_agent.runs import (
@@ -20,18 +22,44 @@ class RuntimeTurnAdapter(Protocol):
 
 
 @dataclass(frozen=True)
+class LocalDaemonRuntimeBinding:
+    pipeline: object
+    ctx: object
+    adapter: RuntimeTurnAdapter
+
+
+class LocalDaemonRuntimeProvider(Protocol):
+    async def prepare_runtime(self, request: RunRequest) -> LocalDaemonRuntimeBinding:
+        ...
+
+
+RuntimePreparedHook = Callable[
+    [LocalDaemonRuntimeBinding],
+    Awaitable[None] | None,
+]
+
+
+@dataclass(frozen=True)
 class LocalDaemonRuntimeExecution:
     request: RunRequest
-    adapter: RuntimeTurnAdapter
+    runtime_provider: LocalDaemonRuntimeProvider
     prompt: str
+    before_turn: RuntimePreparedHook | None = None
+
+
+@dataclass(frozen=True)
+class LocalDaemonRuntimeResult:
+    binding: LocalDaemonRuntimeBinding
+    outcome: object
 
 
 @dataclass(frozen=True)
 class LocalDaemonExecutor:
     """Local daemon run executor boundary.
 
-    This slice owns the local adapter turn invocation. Full pipeline/context
-    preparation still moves in later ADR-0058 slices.
+    This boundary owns local runtime preparation and adapter turn invocation.
+    Session-specific persistence is still supplied by the caller while that
+    state moves out of SessionManager in later ADR-0058 slices.
     """
 
     async def submit_run(self, request: RunRequest) -> RunSubmission:
@@ -44,9 +72,18 @@ class LocalDaemonExecutor:
             metadata=request.metadata,
         )
 
-    async def execute_runtime(self, execution: LocalDaemonRuntimeExecution) -> object:
+    async def execute_runtime(
+        self,
+        execution: LocalDaemonRuntimeExecution,
+    ) -> LocalDaemonRuntimeResult:
         self._validate_request_target(execution.request)
-        return await execution.adapter.run_turn(execution.prompt)
+        binding = await execution.runtime_provider.prepare_runtime(execution.request)
+        if execution.before_turn is not None:
+            before_turn_result = execution.before_turn(binding)
+            if isawaitable(before_turn_result):
+                await before_turn_result
+        outcome = await binding.adapter.run_turn(execution.prompt)
+        return LocalDaemonRuntimeResult(binding=binding, outcome=outcome)
 
     def _validate_request_target(self, request: RunRequest) -> None:
         if not isinstance(request.target.executor, LocalDaemonExecutorRef):

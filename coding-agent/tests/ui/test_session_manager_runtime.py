@@ -24,7 +24,11 @@ from coding_agent.environment import (
     CloudEnvironment,
     LocalEnvironment,
 )
-from coding_agent.executors import LocalDaemonExecutor, LocalDaemonRuntimeExecution
+from coding_agent.executors import (
+    LocalDaemonExecutor,
+    LocalDaemonRuntimeExecution,
+    LocalDaemonRuntimeResult,
+)
 from coding_agent.runtime_store import (
     AgentInteractionRecord,
     AgentRunRecord,
@@ -326,14 +330,20 @@ class RecordingLocalDaemonExecutor(LocalDaemonExecutor):
     def __init__(self) -> None:
         self.submissions: list[RunRequest] = []
         self.executions: list[LocalDaemonRuntimeExecution] = []
+        self.results: list[LocalDaemonRuntimeResult] = []
 
     async def submit_run(self, request: RunRequest) -> RunSubmission:
         self.submissions.append(request)
         return await super().submit_run(request)
 
-    async def execute_runtime(self, execution: LocalDaemonRuntimeExecution) -> object:
+    async def execute_runtime(
+        self,
+        execution: LocalDaemonRuntimeExecution,
+    ) -> LocalDaemonRuntimeResult:
         self.executions.append(execution)
-        return await super().execute_runtime(execution)
+        result = await super().execute_runtime(execution)
+        self.results.append(result)
+        return result
 
 
 @pytest.mark.asyncio
@@ -723,10 +733,11 @@ async def test_run_agent_executes_local_runtime_through_local_daemon_executor(
     assert execution.request.run_id == created_run.run_id
     assert execution.request.input_summary == "implement runtime ownership"
     assert execution.prompt == "implement runtime ownership"
-    assert isinstance(execution.adapter, FakeAdapter)
     assert isinstance(execution.request.target.executor, LocalDaemonExecutorRef)
     assert isinstance(execution.request.target.workspace, LocalPathWorkspaceRef)
     assert execution.request.target.workspace.path == str(workspace.resolve())
+    assert len(local_executor.results) == 1
+    assert isinstance(local_executor.results[0].binding.adapter, FakeAdapter)
     assert runtime_store.updated[0]["status"] == "running"
     assert runtime_store.updated[-1]["status"] == "completed"
 
@@ -3300,19 +3311,13 @@ class FakeCloudClient:
 
 
 @pytest.mark.asyncio
-async def test_run_agent_passes_cloud_environment_from_execution_binding() -> None:
-    captured_kwargs: dict[str, object] = {}
+async def test_run_agent_does_not_bootstrap_cloud_runtime_from_execution_binding() -> (
+    None
+):
     runtime_store = FakeRuntimeStore()
-    fake_pipeline = types.SimpleNamespace(
-        _registry=types.SimpleNamespace(
-            get=lambda _: types.SimpleNamespace(_instance=None)
-        )
-    )
-    fake_ctx = types.SimpleNamespace(config={}, tape=Tape())
 
     def fake_create_agent(**kwargs):
-        captured_kwargs.update(kwargs)
-        return fake_pipeline, fake_ctx
+        raise AssertionError(f"cloud runtime must not be bootstrapped: {kwargs!r}")
 
     manager = SessionManager(
         store=InMemorySessionStore(),
@@ -3329,26 +3334,14 @@ async def test_run_agent_passes_cloud_environment_from_execution_binding() -> No
         )
     )
 
-    class FakeAdapter:
-        def __init__(self, pipeline, ctx, consumer) -> None:
-            del pipeline, consumer
-            self.ctx = ctx
+    await manager.run_agent(session_id, "hello")
 
-        async def run_turn(self, prompt: str) -> None:
-            del prompt
-
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
-        await manager.run_agent(session_id, "hello")
-
-    assert captured_kwargs["workspace_root"] is None
-    assert isinstance(captured_kwargs["environment"], CloudEnvironment)
-    assert captured_kwargs["environment"].tool_config() == {
-        "workspace_id": "ws-123",
-        "workspace_url": "https://workspace.example.com",
-    }
     assert runtime_store.created[0].metadata["workspace_surface"] == "cloud_workspace"
     assert runtime_store.created[0].metadata["execution_plane"] == "control_plane"
+    assert runtime_store.updated[0]["status"] == "running"
+    assert runtime_store.updated[-1]["status"] == "failed"
+    assert runtime_store.updated[-1]["error"] is not None
+    assert "managed_pool" in str(runtime_store.updated[-1]["error"])
 
 
 @pytest.mark.asyncio

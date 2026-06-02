@@ -73,7 +73,11 @@ from coding_agent.runtime_store import (
     SQLiteRuntimeStore,
     JSONValue as RuntimeJSONValue,
 )
-from coding_agent.executors import LocalDaemonExecutor, LocalDaemonRuntimeExecution
+from coding_agent.executors import (
+    LocalDaemonExecutor,
+    LocalDaemonRuntimeBinding,
+    LocalDaemonRuntimeExecution,
+)
 from coding_agent.runs import (
     DefaultRunCoordinator,
     LocalDaemonExecutorRef,
@@ -714,6 +718,14 @@ def _executor_ref_kind(executor: object) -> str:
     if isinstance(kind, str) and kind.strip():
         return kind
     return type(executor).__name__
+
+
+@dataclass(frozen=True)
+class _SessionLocalDaemonRuntimeProvider:
+    prepare: Callable[[RunRequest], Awaitable[LocalDaemonRuntimeBinding]]
+
+    async def prepare_runtime(self, request: RunRequest) -> LocalDaemonRuntimeBinding:
+        return await self.prepare(request)
 
 
 @dataclass
@@ -3400,6 +3412,57 @@ class SessionManager:
         await self._run_coordinator.submit_run(request)
         return request
 
+    async def _prepare_local_daemon_runtime(
+        self,
+        session: Session,
+        *,
+        consumer: _WireConsumer,
+        run_id: str,
+    ) -> LocalDaemonRuntimeBinding:
+        pipeline = session.runtime_pipeline
+        ctx = session.runtime_ctx
+        adapter = session.runtime_adapter
+        if pipeline is None or ctx is None or adapter is None:
+            approval_mode_map = {
+                ApprovalPolicy.YOLO: "yolo",
+                ApprovalPolicy.INTERACTIVE: "interactive",
+                ApprovalPolicy.AUTO: "auto",
+            }
+            environment = self._resolve_environment(session)
+            workspace_root = self._environment_workspace_root(environment)
+            pipeline, ctx = self._create_agent_for_session(
+                workspace_root=workspace_root,
+                environment=environment,
+                model_override=session.model_name,
+                provider_override=session.provider_name,
+                base_url_override=session.base_url,
+                max_steps_override=session.max_steps,
+                approval_mode_override=approval_mode_map[session.approval_policy],
+                session_id_override=session.id,
+                run_id_override=run_id,
+                api_key=None,
+                tape=await self._restore_tape(session.tape_id),
+            )
+            session.tape_id = ctx.tape.tape_id
+            await self._persist_session_async(session)
+            ctx.runtime_message_bus = session.runtime_message_bus
+            ctx.config["wire_consumer"] = None
+            ctx.config["agent_id"] = ""
+
+            llm_plugin = pipeline._registry.get("llm_provider")
+            if session.provider is not None:
+                llm_plugin._instance = session.provider
+
+            adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
+            session.runtime_pipeline = pipeline
+            session.runtime_ctx = ctx
+            session.runtime_adapter = adapter
+        return LocalDaemonRuntimeBinding(
+            pipeline=pipeline,
+            ctx=ctx,
+            adapter=adapter,
+        )
+
     def _invalidate_runtime(self, session: Session) -> None:
         session.runtime_pipeline = None
         session.runtime_ctx = None
@@ -3839,109 +3902,96 @@ class SessionManager:
             observation_recorder: AgentObservationRecorder | None = None
 
             try:
-                approval_mode_map = {
-                    ApprovalPolicy.YOLO: "yolo",
-                    ApprovalPolicy.INTERACTIVE: "interactive",
-                    ApprovalPolicy.AUTO: "auto",
-                }
-
                 consumer = self._make_session_consumer(session)
-                pipeline = session.runtime_pipeline
-                ctx = session.runtime_ctx
-                adapter = session.runtime_adapter
-
-                if pipeline is None or ctx is None or adapter is None:
-                    environment = self._resolve_environment(session)
-                    workspace_root = self._environment_workspace_root(environment)
-                    pipeline, ctx = self._create_agent_for_session(
-                        workspace_root=workspace_root,
-                        environment=environment,
-                        model_override=session.model_name,
-                        provider_override=session.provider_name,
-                        base_url_override=session.base_url,
-                        max_steps_override=session.max_steps,
-                        approval_mode_override=approval_mode_map[
-                            session.approval_policy
-                        ],
-                        session_id_override=session_id,
-                        run_id_override=run_id,
-                        api_key=None,
-                        tape=await self._restore_tape(session.tape_id),
-                    )
-                    session.tape_id = ctx.tape.tape_id
-                    await self._persist_session_async(session)
-                    ctx.runtime_message_bus = session.runtime_message_bus
-                    ctx.config["wire_consumer"] = None
-                    ctx.config["agent_id"] = ""
-
-                    llm_plugin = pipeline._registry.get("llm_provider")
-                    if session.provider is not None:
-                        llm_plugin._instance = session.provider
-
-                    adapter = PipelineAdapter(
-                        pipeline=pipeline, ctx=ctx, consumer=consumer
-                    )
-                    session.runtime_pipeline = pipeline
-                    session.runtime_ctx = ctx
-                    session.runtime_adapter = adapter
-
-                self._bind_root_run_identity(
-                    session,
-                    ctx,
-                    run_id,
-                    resume_context=resume_context,
-                )
-                agent_run_created = await self._create_runtime_agent_run(
-                    session,
-                    run_id=run_id,
-                    started_at=started_at,
-                    resume_context=resume_context,
-                )
                 run_request = await self._submit_runtime_run_request(
                     session,
                     run_id=run_id,
                     prompt=prompt,
                     resume_context=resume_context,
                 )
-                if agent_run_created:
-                    await self._update_runtime_agent_run(
+
+                if not isinstance(run_request.target.executor, LocalDaemonExecutorRef):
+                    agent_run_created = await self._create_runtime_agent_run(
                         session,
                         run_id=run_id,
-                        status="running",
-                        ended_at=None,
-                        result={},
-                        error=None,
+                        started_at=started_at,
                         resume_context=resume_context,
                     )
-                set_consumer = getattr(adapter, "set_consumer", None)
-                if callable(set_consumer):
-                    set_consumer(consumer)
-                ctx.runtime_message_bus = session.runtime_message_bus
-                ctx.config["wire_consumer"] = consumer
-                self._bind_subagent_message_publisher(ctx)
-                observation_recorder = self._start_agent_observation(
-                    session=session,
-                    ctx=ctx,
-                    run_id=run_id,
-                    prompt=prompt,
-                    resume_context=resume_context,
-                )
-
-                if isinstance(run_request.target.executor, LocalDaemonExecutorRef):
-                    outcome = await self._local_daemon_executor.execute_runtime(
-                        LocalDaemonRuntimeExecution(
-                            request=run_request,
-                            adapter=adapter,
-                            prompt=prompt,
+                    if agent_run_created:
+                        await self._update_runtime_agent_run(
+                            session,
+                            run_id=run_id,
+                            status="running",
+                            ended_at=None,
+                            result={},
+                            error=None,
+                            resume_context=resume_context,
                         )
-                    )
-                else:
                     executor_kind = _executor_ref_kind(run_request.target.executor)
                     raise UnsupportedRuntimeExecutorError(
                         "executor target "
                         f"{executor_kind!r} does not have a local runtime path; "
                         "control plane cannot execute runtime directly"
                     )
+
+                async def _before_local_daemon_turn(
+                    binding: LocalDaemonRuntimeBinding,
+                ) -> None:
+                    nonlocal agent_run_created, observation_recorder
+                    ctx = binding.ctx
+                    adapter = binding.adapter
+                    self._bind_root_run_identity(
+                        session,
+                        ctx,
+                        run_id,
+                        resume_context=resume_context,
+                    )
+                    agent_run_created = await self._create_runtime_agent_run(
+                        session,
+                        run_id=run_id,
+                        started_at=started_at,
+                        resume_context=resume_context,
+                    )
+                    if agent_run_created:
+                        await self._update_runtime_agent_run(
+                            session,
+                            run_id=run_id,
+                            status="running",
+                            ended_at=None,
+                            result={},
+                            error=None,
+                            resume_context=resume_context,
+                        )
+                    set_consumer = getattr(adapter, "set_consumer", None)
+                    if callable(set_consumer):
+                        set_consumer(consumer)
+                    ctx.runtime_message_bus = session.runtime_message_bus
+                    ctx.config["wire_consumer"] = consumer
+                    self._bind_subagent_message_publisher(ctx)
+                    observation_recorder = self._start_agent_observation(
+                        session=session,
+                        ctx=ctx,
+                        run_id=run_id,
+                        prompt=prompt,
+                        resume_context=resume_context,
+                    )
+
+                execution_result = await self._local_daemon_executor.execute_runtime(
+                    LocalDaemonRuntimeExecution(
+                        request=run_request,
+                        runtime_provider=_SessionLocalDaemonRuntimeProvider(
+                            prepare=lambda _request: self._prepare_local_daemon_runtime(
+                                session,
+                                consumer=consumer,
+                                run_id=run_id,
+                            )
+                        ),
+                        prompt=prompt,
+                        before_turn=_before_local_daemon_turn,
+                    )
+                )
+                ctx = execution_result.binding.ctx
+                outcome = execution_result.outcome
                 if self._runtime_store is not None:
                     turn_outcome = self._require_turn_outcome(outcome)
                     turn_status = self._status_from_turn_outcome(turn_outcome)
