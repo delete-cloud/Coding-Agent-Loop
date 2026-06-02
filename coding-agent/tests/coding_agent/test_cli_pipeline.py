@@ -1148,11 +1148,11 @@ class TestReplApprovalWiring:
             assert result is True, f"Expected True for input '{variant}'"
 
 
-class TestBatchModeAutoApprove:
-    """In batch mode with yolo policy, approval doesn't block (returns Approve)."""
+class TestOneShotModeAutoApprove:
+    """In one-shot mode with yolo policy, approval doesn't block."""
 
     @pytest.mark.asyncio
-    async def test_batch_yolo_policy_returns_approve(self):
+    async def test_one_shot_yolo_policy_returns_approve(self):
         """ApprovalPlugin with AUTO policy always returns Approve — no AskUser."""
         from agentkit.directive.executor import DirectiveExecutor
         from agentkit.directive.types import Approve

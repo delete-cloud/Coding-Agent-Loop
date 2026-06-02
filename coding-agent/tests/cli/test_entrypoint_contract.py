@@ -54,7 +54,7 @@ def test_subcommand_help_is_available_without_provider_credentials() -> None:
         assert command in result.output
 
 
-def test_default_non_interactive_entrypoint_points_to_batch_mode() -> None:
+def test_default_non_interactive_entrypoint_points_to_one_shot_compatibility() -> None:
     runner = CliRunner(env=_click_credential_free_env())
 
     result = runner.invoke(main, [])
@@ -62,6 +62,17 @@ def test_default_non_interactive_entrypoint_points_to_batch_mode() -> None:
     assert result.exit_code != 0
     assert "interactive REPL mode requires an interactive terminal" in result.output
     assert "python -m coding_agent repl" in result.output
+    assert "dev/testkit one-shot compatibility session" in result.output
+
+
+def test_run_help_marks_command_as_dev_testkit_compatibility() -> None:
+    runner = CliRunner(env=_click_credential_free_env())
+
+    result = runner.invoke(main, ["run", "--help"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert "dev/testkit one-shot local session" in result.output
+    assert "compatibility path" in result.output
 
 
 def test_run_command_uses_managed_session(
@@ -121,7 +132,7 @@ def test_run_command_uses_managed_session(
         [
             "run",
             "--goal",
-            "use the managed path",
+            "use the one-shot compatibility path",
             "--repo",
             str(tmp_path),
             "--max-steps",
@@ -164,7 +175,7 @@ def test_run_command_uses_managed_session(
             "run_agent",
             {
                 "session_id": "session-managed",
-                "prompt": "use the managed path",
+                "prompt": "use the one-shot compatibility path",
             },
         ),
         ("close", None),

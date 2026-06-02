@@ -22,7 +22,7 @@ semantics of any completed phase.
 
 ## Local Runtime Entrypoints
 
-- Batch mode: `uv run python -m coding_agent run --goal "..." --repo .`
+- Dev/testkit one-shot compatibility: `uv run python -m coding_agent run --goal "..." --repo .`
 - REPL mode: `uv run python -m coding_agent repl`
 - HTTP server: `uv run python -m coding_agent serve --host 127.0.0.1 --port 8080`
 - HTTP session creation: `POST /sessions`
@@ -34,6 +34,8 @@ semantics of any completed phase.
 
 The HTTP path is the best dogfood candidate because it exercises the runtime,
 durable records, console, health, and metrics surfaces in one local flow.
+The `run` command remains useful for task packets and quick checks, but it is
+not the target local product path.
 
 ## Developer Console Surfaces
 
