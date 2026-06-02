@@ -170,11 +170,13 @@ This ADR does not implement that path.
   - Completed: local daemon fatal/cancelled/generic turn error actions are
     delegated to `RuntimeTurnErrorHandler` instead of living inside
     `run_agent`.
+  - Completed: local daemon turn observation recorder state is tracked by
+    `RuntimeTurnObservationState` instead of `run_agent` nonlocal closures.
   - Remaining: `SessionManager` still owns run lifecycle bookkeeping,
-    checkpoint restore preparation details, observation callbacks, wire consumer
-    setup, and some runtime close/error policy. These should move behind
-    narrower RunService/EventStore/Executor lifecycle boundaries before this
-    item is considered complete.
+    checkpoint restore preparation details, wire consumer setup, and some
+    runtime close/error policy. These should move behind narrower
+    RunService/EventStore/Executor lifecycle boundaries before this item is
+    considered complete.
 - [x] Demote `coding_agent run` to an inline testkit/devkit compatibility path.
   - `run` records `origin.mode = inline_testkit`.
   - CLI and README describe `run` as dev/testkit one-shot compatibility.
