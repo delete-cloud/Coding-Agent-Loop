@@ -81,8 +81,11 @@ from coding_agent.executors import (
 from coding_agent.runs import (
     DefaultRunCoordinator,
     LocalDaemonExecutorRef,
+    LocalPathWorkspaceRef,
     RunCoordinator,
     RunRequest,
+    RunTarget,
+    run_target_from_dict,
     run_target_from_execution_binding,
 )
 from coding_agent.wire.local import LocalWire
@@ -113,6 +116,7 @@ from coding_agent.environment.execution_binding import (
     ExternalWorkerBinding,
     LocalExecutionBinding,
 )
+from coding_agent.environment.local import LocalEnvironment
 from coding_agent.server.stores.workspace_store import (
     JSONValue,
     WorkspaceRecord,
@@ -759,6 +763,7 @@ class SessionRecord:
     repo_path: Path | None
     origin: dict[str, str] | None
     execution_binding: ExecutionBinding
+    default_run_target: RunTarget
     approval_policy: ApprovalPolicy
     provider_name: str | None
     model_name: str | None
@@ -777,6 +782,7 @@ class SessionRecord:
             "repo_path": None if self.repo_path is None else str(self.repo_path),
             "origin": None if self.origin is None else dict(self.origin),
             "execution_binding": self.execution_binding.to_dict(),
+            "default_run_target": self.default_run_target.to_dict(),
             "approval_policy": self.approval_policy.value,
             "provider_name": self.provider_name,
             "model_name": self.model_name,
@@ -833,6 +839,13 @@ class SessionRecord:
                 else str(Path.cwd().resolve())
             )
             execution_binding = LocalExecutionBinding(workspace_root=workspace_root)
+        default_run_target_raw = data.get("default_run_target")
+        if default_run_target_raw is None:
+            default_run_target = run_target_from_execution_binding(execution_binding)
+        else:
+            if not isinstance(default_run_target_raw, dict):
+                raise TypeError("session metadata has invalid default_run_target")
+            default_run_target = run_target_from_dict(default_run_target_raw)
         return cls(
             id=_required_session_str(data, "id"),
             created_at=datetime.fromisoformat(
@@ -844,6 +857,7 @@ class SessionRecord:
             repo_path=None if repo_path_raw is None else Path(repo_path_raw),
             origin=origin,
             execution_binding=execution_binding,
+            default_run_target=default_run_target,
             approval_policy=ApprovalPolicy(approval_policy_raw),
             provider_name=provider_name_raw,
             model_name=model_name_raw,
@@ -862,6 +876,7 @@ class SessionRecord:
             repo_path=self.repo_path,
             origin=self.origin,
             execution_binding=self.execution_binding,
+            default_run_target=self.default_run_target,
             approval_policy=self.approval_policy,
             provider_name=self.provider_name,
             model_name=self.model_name,
@@ -891,6 +906,7 @@ class Session:
     execution_binding: ExecutionBinding = field(  # type: ignore[assignment]
         default=cast(ExecutionBinding, _DEFAULT_EXECUTION_BINDING),
     )
+    default_run_target: RunTarget | None = None
     approval_policy: ApprovalPolicy = ApprovalPolicy.AUTO
     provider: Any | None = None
     provider_name: str | None = None
@@ -951,6 +967,15 @@ class Session:
             if handle is not None:
                 handle.approval_coordinator = ApprovalCoordinator(
                     cast(ApprovalStore, value)
+            )
+            return
+        if name == "execution_binding":
+            object.__setattr__(self, name, value)
+            if value is not cast(ExecutionBinding, _DEFAULT_EXECUTION_BINDING):
+                object.__setattr__(
+                    self,
+                    "default_run_target",
+                    run_target_from_execution_binding(cast(ExecutionBinding, value)),
                 )
             return
         if name in self._RUNTIME_HANDLE_FIELD_NAMES:
@@ -970,6 +995,10 @@ class Session:
             )
             self.execution_binding = LocalExecutionBinding(
                 workspace_root=workspace_root
+            )
+        if self.default_run_target is None:
+            self.default_run_target = run_target_from_execution_binding(
+                self.execution_binding
             )
         self.wire = LocalWire(self.id)
         handle = SessionRuntimeHandle(
@@ -1059,6 +1088,7 @@ class Session:
             "max_steps": self.max_steps,
             "origin": None if self.origin is None else dict(self.origin),
             "execution_binding": self.execution_binding.to_dict(),
+            "default_run_target": self.default_run_target.to_dict(),
             "workspace_id": workspace_id,
         }
 
@@ -1073,6 +1103,7 @@ class Session:
             repo_path=self.repo_path,
             origin=None if self.origin is None else dict(self.origin),
             execution_binding=self.execution_binding,
+            default_run_target=self.default_run_target,
             approval_policy=self.approval_policy,
             provider_name=self.provider_name,
             model_name=self.model_name,
@@ -3385,11 +3416,23 @@ class SessionManager:
     def _resolve_environment(self, session: Session) -> Environment:
         return self._binding_resolver.resolve_environment(session.execution_binding)
 
+    def _resolve_local_daemon_environment(self, target: RunTarget) -> Environment:
+        if not isinstance(target.workspace, LocalPathWorkspaceRef):
+            raise ValueError("local daemon runs require a local_path workspace target")
+        return LocalEnvironment(Path(target.workspace.path).expanduser().resolve())
+
     def _environment_workspace_root(self, environment: Environment) -> Path | None:
         local_root = environment.workspace_summary().local_root
         if local_root is None:
             return None
         return Path(local_root).expanduser().resolve()
+
+    def _runtime_environment_workspace_root(self, ctx: object) -> Path | None:
+        run_context = getattr(ctx, "run_context", None)
+        environment = getattr(run_context, "environment", None)
+        if environment is None:
+            return None
+        return self._environment_workspace_root(cast(Environment, environment))
 
     async def _submit_runtime_run_request(
         self,
@@ -3403,7 +3446,7 @@ class SessionManager:
         request = RunRequest(
             session_id=session.id,
             run_id=run_id,
-            target=run_target_from_execution_binding(session.execution_binding),
+            target=session.default_run_target,
             input_summary=input_summary,
             resume_from_run_id=(
                 None if resume_context is None else resume_context.previous_run_id
@@ -3417,19 +3460,30 @@ class SessionManager:
         session: Session,
         *,
         consumer: _WireConsumer,
-        run_id: str,
+        request: RunRequest,
     ) -> LocalDaemonRuntimeBinding:
         pipeline = session.runtime_pipeline
         ctx = session.runtime_ctx
         adapter = session.runtime_adapter
+        environment = self._resolve_local_daemon_environment(request.target)
+        workspace_root = self._environment_workspace_root(environment)
+        if pipeline is not None and ctx is not None and adapter is not None:
+            cached_workspace_root = self._runtime_environment_workspace_root(ctx)
+            if (
+                cached_workspace_root is not None
+                and workspace_root is not None
+                and cached_workspace_root != workspace_root
+            ):
+                await self._close_runtime(session)
+                pipeline = None
+                ctx = None
+                adapter = None
         if pipeline is None or ctx is None or adapter is None:
             approval_mode_map = {
                 ApprovalPolicy.YOLO: "yolo",
                 ApprovalPolicy.INTERACTIVE: "interactive",
                 ApprovalPolicy.AUTO: "auto",
             }
-            environment = self._resolve_environment(session)
-            workspace_root = self._environment_workspace_root(environment)
             pipeline, ctx = self._create_agent_for_session(
                 workspace_root=workspace_root,
                 environment=environment,
@@ -3439,7 +3493,7 @@ class SessionManager:
                 max_steps_override=session.max_steps,
                 approval_mode_override=approval_mode_map[session.approval_policy],
                 session_id_override=session.id,
-                run_id_override=run_id,
+                run_id_override=request.run_id,
                 api_key=None,
                 tape=await self._restore_tape(session.tape_id),
             )
@@ -4133,10 +4187,10 @@ class SessionManager:
                     LocalDaemonRuntimeExecution(
                         request=run_request,
                         runtime_provider=_SessionLocalDaemonRuntimeProvider(
-                            prepare=lambda _request: self._prepare_local_daemon_runtime(
+                            prepare=lambda request: self._prepare_local_daemon_runtime(
                                 session,
                                 consumer=consumer,
-                                run_id=run_id,
+                                request=request,
                             )
                         ),
                         prompt=prompt,

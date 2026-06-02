@@ -18,7 +18,9 @@ from coding_agent.runs import (
     ManagedPoolExecutorRef,
     RunConstraints,
     RunTarget,
+    RunTargetSerializationError,
     IsolationPolicy,
+    run_target_from_dict,
     run_target_from_execution_binding,
 )
 
@@ -40,6 +42,32 @@ def test_local_execution_binding_maps_to_local_daemon_run_target() -> None:
     assert target.executor.kind == "local_daemon"
     assert target.isolation.kind == "default_local_sandbox"
     assert target.isolation.filesystem == "workspace_scoped"
+
+
+def test_run_target_round_trips_local_daemon_metadata() -> None:
+    target = RunTarget(
+        workspace=LocalPathWorkspaceRef(
+            path="/repo",
+            workspace_provider="local",
+            provider_instance_id="local-1",
+        ),
+        executor=LocalDaemonExecutorRef(),
+        isolation=IsolationPolicy(kind="default_local_sandbox"),
+        constraints=RunConstraints(max_steps=12, timeout_seconds=300),
+        annotations={"origin": "test"},
+    )
+
+    payload = target.to_dict()
+    reloaded = run_target_from_dict(payload)
+
+    assert reloaded == target
+    assert payload["workspace"] == {
+        "kind": "local_path",
+        "path": "/repo",
+        "workspace_provider": "local",
+        "provider_instance_id": "local-1",
+    }
+    assert payload["executor"] == {"kind": "local_daemon"}
 
 
 def test_cloud_execution_binding_maps_to_managed_pool_run_target() -> None:
@@ -65,6 +93,20 @@ def test_cloud_execution_binding_maps_to_managed_pool_run_target() -> None:
     assert target.isolation.network == "provider_managed"
 
 
+def test_run_target_round_trips_cloud_metadata() -> None:
+    target = run_target_from_execution_binding(
+        CloudWorkspaceBinding(
+            workspace_url="docker://workspace/ws-1",
+            workspace_id="ws-1",
+            runtime_profile="python",
+            workspace_provider="docker",
+            provider_instance_id="docker-1",
+        )
+    )
+
+    assert run_target_from_dict(target.to_dict()) == target
+
+
 def test_external_worker_binding_maps_to_external_worker_run_target() -> None:
     binding = ExternalWorkerBinding(
         executor_kind="local_cli",
@@ -84,6 +126,19 @@ def test_external_worker_binding_maps_to_external_worker_run_target() -> None:
     assert target.isolation.kind == "external_worker_policy"
 
 
+def test_run_target_round_trips_external_worker_metadata() -> None:
+    target = run_target_from_execution_binding(
+        ExternalWorkerBinding(
+            executor_kind="local_cli",
+            worker_pool="pool-a",
+            workspace_ref={"path": "/repo", "label": "checkout"},
+            provider_instance_id="worker-1",
+        )
+    )
+
+    assert run_target_from_dict(target.to_dict()) == target
+
+
 def test_local_attached_binding_maps_to_local_attached_run_target() -> None:
     binding = LocalAttachedExecutionBinding(
         executor_kind="local_cli",
@@ -99,6 +154,32 @@ def test_local_attached_binding_maps_to_local_attached_run_target() -> None:
     assert target.executor.executor_kind == "local_cli"
     assert target.executor.worker_pool == "attached"
     assert target.isolation.kind == "external_worker_policy"
+
+
+def test_run_target_round_trips_local_attached_metadata() -> None:
+    target = run_target_from_execution_binding(
+        LocalAttachedExecutionBinding(
+            executor_kind="local_cli",
+            worker_pool="attached",
+            workspace_ref={"socket": "local-daemon.sock"},
+        )
+    )
+
+    assert run_target_from_dict(target.to_dict()) == target
+
+
+def test_run_target_from_dict_rejects_unknown_workspace_kind() -> None:
+    with pytest.raises(
+        RunTargetSerializationError,
+        match="unknown workspace ref kind",
+    ):
+        run_target_from_dict(
+            {
+                "workspace": {"kind": "mystery"},
+                "executor": {"kind": "local_daemon"},
+                "isolation": {"kind": "default_local_sandbox"},
+            }
+        )
 
 
 def test_run_target_rejects_empty_annotations_key() -> None:
