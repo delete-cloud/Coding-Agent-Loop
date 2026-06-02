@@ -1579,12 +1579,37 @@ class SessionManager:
         last_event_id: str | None = None,
         limit: int = 1000,
     ) -> list[DisplayEvent]:
-        runtime_events = await self.replay_runtime_events(
-            run_id,
-            last_event_id=last_event_id,
-            limit=limit,
-        )
-        return project_runtime_events_to_display(runtime_events)
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        store = self._require_runtime_store()
+        after_sequence = 0
+        if last_event_id is not None:
+            last_event = await store.load_runtime_event(last_event_id)
+            if last_event is None or last_event.run_id != run_id:
+                raise KeyError(f"runtime event not found: {last_event_id}")
+            if last_event.sequence is None:
+                raise RuntimeError(
+                    f"runtime event has no replay sequence: {last_event_id}"
+                )
+            after_sequence = last_event.sequence
+
+        display_events: list[DisplayEvent] = []
+        while len(display_events) < limit:
+            runtime_events = await store.replay_runtime_events(
+                run_id,
+                after_sequence=after_sequence,
+                limit=limit,
+            )
+            if not runtime_events:
+                break
+            display_events.extend(project_runtime_events_to_display(runtime_events))
+            sequenced_events = [
+                event for event in runtime_events if event.sequence is not None
+            ]
+            if not sequenced_events:
+                break
+            after_sequence = max(event.sequence or 0 for event in sequenced_events)
+        return display_events[:limit]
 
     async def request_attached_executor_run(
         self,
