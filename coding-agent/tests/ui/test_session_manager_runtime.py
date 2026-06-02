@@ -24,6 +24,7 @@ from coding_agent.environment import (
     CloudEnvironment,
     LocalEnvironment,
 )
+from coding_agent.executors import LocalDaemonExecutor, LocalDaemonRuntimeExecution
 from coding_agent.runtime_store import (
     AgentInteractionRecord,
     AgentRunRecord,
@@ -319,6 +320,15 @@ class RecordingRunCoordinator:
             executor=request.target.executor,
             metadata=request.metadata,
         )
+
+
+class RecordingLocalDaemonExecutor(LocalDaemonExecutor):
+    def __init__(self) -> None:
+        self.executions: list[LocalDaemonRuntimeExecution] = []
+
+    async def execute_runtime(self, execution: LocalDaemonRuntimeExecution) -> object:
+        self.executions.append(execution)
+        return await super().execute_runtime(execution)
 
 
 @pytest.mark.asyncio
@@ -633,6 +643,75 @@ async def test_run_agent_submits_run_request_to_run_coordinator(
     assert isinstance(request.target.executor, LocalDaemonExecutorRef)
     assert isinstance(request.target.workspace, LocalPathWorkspaceRef)
     assert request.target.workspace.path == str(workspace.resolve())
+    assert runtime_store.updated[0]["status"] == "running"
+    assert runtime_store.updated[-1]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_run_agent_executes_local_runtime_through_local_daemon_executor(
+    tmp_path: Path,
+) -> None:
+    runtime_store = FakeRuntimeStore()
+    local_executor = RecordingLocalDaemonExecutor()
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    manager = SessionManager(
+        runtime_store=cast(Any, runtime_store),
+        local_daemon_executor=local_executor,
+    )
+    session_id = await manager.create_session(
+        execution_binding=LocalExecutionBinding(workspace_root=str(workspace)),
+    )
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+            self.ctx = ctx
+
+        async def run_turn(self, prompt: str) -> TurnOutcome:
+            del prompt
+            return TurnOutcome(
+                stop_reason=StopReason.NO_TOOL_CALLS,
+                steps_taken=1,
+            )
+
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        )
+    )
+
+    def fake_create_agent(**kwargs):
+        environment = kwargs["environment"]
+        if not isinstance(environment, LocalEnvironment):
+            raise TypeError("expected local environment")
+        return fake_pipeline, types.SimpleNamespace(
+            session_id=kwargs["session_id_override"],
+            config={},
+            tape=kwargs.get("tape") or Tape(tape_id="stable-tape"),
+            run_context=AgentRunContext(
+                session_id=kwargs["session_id_override"],
+                run_id=kwargs["run_id_override"],
+                agent_id=None,
+                environment=environment,
+            ),
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
+
+        await manager.run_agent(session_id, "implement runtime ownership")
+
+    created_run = runtime_store.created[0]
+    assert len(local_executor.executions) == 1
+    execution = local_executor.executions[0]
+    assert execution.request.session_id == session_id
+    assert execution.request.run_id == created_run.run_id
+    assert execution.request.input_summary == "implement runtime ownership"
+    assert isinstance(execution.request.target.executor, LocalDaemonExecutorRef)
+    assert isinstance(execution.request.target.workspace, LocalPathWorkspaceRef)
+    assert execution.request.target.workspace.path == str(workspace.resolve())
     assert runtime_store.updated[0]["status"] == "running"
     assert runtime_store.updated[-1]["status"] == "completed"
 

@@ -73,9 +73,10 @@ from coding_agent.runtime_store import (
     SQLiteRuntimeStore,
     JSONValue as RuntimeJSONValue,
 )
-from coding_agent.executors import LocalDaemonExecutor
+from coding_agent.executors import LocalDaemonExecutor, LocalDaemonRuntimeExecution
 from coding_agent.runs import (
     DefaultRunCoordinator,
+    LocalDaemonExecutorRef,
     RunCoordinator,
     RunRequest,
     run_target_from_execution_binding,
@@ -1229,6 +1230,7 @@ class SessionManager:
         fencing_token: int | None = None,
         owner_lease_seconds: float = 30.0,
         run_coordinator: RunCoordinator | None = None,
+        local_daemon_executor: LocalDaemonExecutor | None = None,
     ):
         self._storage_config = storage_config or {}
         self._pg_pool = pg_pool
@@ -1253,8 +1255,13 @@ class SessionManager:
         )
         self._create_agent = create_agent_fn
         self._binding_resolver = binding_resolver or DefaultBindingResolver()
+        self._local_daemon_executor = (
+            LocalDaemonExecutor()
+            if local_daemon_executor is None
+            else local_daemon_executor
+        )
         self._run_coordinator = (
-            DefaultRunCoordinator(local_daemon_executor=LocalDaemonExecutor())
+            DefaultRunCoordinator(local_daemon_executor=self._local_daemon_executor)
             if run_coordinator is None
             else run_coordinator
         )
@@ -3368,7 +3375,7 @@ class SessionManager:
         run_id: str,
         prompt: str,
         resume_context: SessionResumeContext | None = None,
-    ) -> None:
+    ) -> RunRequest:
         input_summary = prompt if prompt.strip() else None
         request = RunRequest(
             session_id=session.id,
@@ -3380,6 +3387,7 @@ class SessionManager:
             ),
         )
         await self._run_coordinator.submit_run(request)
+        return request
 
     def _invalidate_runtime(self, session: Session) -> None:
         session.runtime_pipeline = None
@@ -3878,7 +3886,7 @@ class SessionManager:
                     started_at=started_at,
                     resume_context=resume_context,
                 )
-                await self._submit_runtime_run_request(
+                run_request = await self._submit_runtime_run_request(
                     session,
                     run_id=run_id,
                     prompt=prompt,
@@ -3907,7 +3915,19 @@ class SessionManager:
                     prompt=prompt,
                     resume_context=resume_context,
                 )
-                outcome = await adapter.run_turn(prompt)
+
+                async def run_runtime_turn() -> object:
+                    return await adapter.run_turn(prompt)
+
+                if isinstance(run_request.target.executor, LocalDaemonExecutorRef):
+                    outcome = await self._local_daemon_executor.execute_runtime(
+                        LocalDaemonRuntimeExecution(
+                            request=run_request,
+                            run=run_runtime_turn,
+                        )
+                    )
+                else:
+                    outcome = await run_runtime_turn()
                 if self._runtime_store is not None:
                     turn_outcome = self._require_turn_outcome(outcome)
                     turn_status = self._status_from_turn_outcome(turn_outcome)
