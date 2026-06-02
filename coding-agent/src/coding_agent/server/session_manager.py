@@ -89,10 +89,8 @@ from coding_agent.runs import (
     RunCoordinator,
     RunCoordinatorError,
     RunRequest,
-    RuntimeObservationCompleter,
-    RuntimeRunLifecycle,
+    RuntimeRunPersistenceService,
     RuntimeTurnErrorHandler,
-    RuntimeTurnFinalizer,
     RuntimeTurnObservationState,
     RuntimeTurnRunTracker,
     RuntimeTurnSessionState,
@@ -289,22 +287,6 @@ _RESUME_CONTEXT_JSON_LIMIT = 4000
 _RESUME_PLAN_NOTE_LIMIT = 1200
 _RESUME_BOUNDARY_PRODUCT_ANCHOR_TYPE = "resume_boundary"
 _RESUME_CONTEXT_STRATEGY = "checkpoint+tape_tail+message_snapshot"
-
-
-def _runtime_message_snapshot(messages: object) -> list[JSONObject] | None:
-    if messages is None:
-        return None
-    if not isinstance(messages, list):
-        raise TypeError("runtime message snapshot source must be a list")
-    payload = _json_compatible_value(messages)
-    if not isinstance(payload, list):
-        raise TypeError("runtime message snapshot must serialize to a JSON array")
-    snapshot: list[JSONObject] = []
-    for message in payload:
-        if not isinstance(message, dict):
-            raise TypeError("runtime message snapshot entries must be JSON objects")
-        snapshot.append(cast(JSONObject, message))
-    return snapshot
 
 
 def _truncate_resume_text(value: str, limit: int) -> str:
@@ -2450,42 +2432,11 @@ class SessionManager:
             turn=self._latest_turn_trace(ctx),
         )
 
-    def _runtime_run_lifecycle(self) -> RuntimeRunLifecycle:
-        return RuntimeRunLifecycle(
-            store=self._runtime_store,
+    def _runtime_run_persistence(self) -> RuntimeRunPersistenceService:
+        return RuntimeRunPersistenceService(
+            run_store=self._runtime_store,
+            checkpoint_store=self._runtime_store,
             metadata_for_session=self._run_metadata_for_session,
-        )
-
-    def _runtime_turn_finalizer(
-        self,
-        *,
-        complete_observation: RuntimeObservationCompleter | None = None,
-    ) -> RuntimeTurnFinalizer:
-        return RuntimeTurnFinalizer(
-            has_runtime_store=self._runtime_store is not None,
-            save_message_snapshot=self._save_runtime_message_snapshot,
-            finish_run=self._finish_runtime_agent_run,
-            persist_session=self._persist_session_async,
-            complete_observation=complete_observation,
-        )
-
-    async def _finish_runtime_agent_run(
-        self,
-        session: Session,
-        *,
-        run_id: str,
-        status: str,
-        result: JSONObject,
-        error: str | None,
-        resume_context: SessionResumeContext | None = None,
-    ) -> None:
-        await self._runtime_run_lifecycle().finish(
-            session,
-            run_id=run_id,
-            status=status,
-            result=result,
-            error=error,
-            resume_context=resume_context,
         )
 
     async def recover_stale_runtime_runs(
@@ -2614,33 +2565,6 @@ class SessionManager:
                     correlation,
                 ),
                 created_at=message.timestamp,
-            )
-        )
-
-    async def _save_runtime_message_snapshot(
-        self,
-        session: Session,
-        ctx: Any,
-        *,
-        run_id: str,
-    ) -> None:
-        if self._runtime_store is None:
-            return
-        messages = _runtime_message_snapshot(getattr(ctx, "messages", None))
-        if messages is None:
-            return
-        await self._runtime_store.save_message_snapshot(
-            RunMessageSnapshotRecord(
-                snapshot_id=f"{run_id}:latest",
-                run_id=run_id,
-                messages=messages,
-                metadata={
-                    "session_id": session.id,
-                    "tape_id": session.tape_id,
-                    "message_count": len(messages),
-                    "snapshot_kind": "latest_context",
-                },
-                created_at=datetime.now(UTC),
             )
         )
 
@@ -3886,8 +3810,9 @@ class SessionManager:
                 persist_session=self._persist_session_async
             )
             started_at = await turn_session_state.begin(session, run_id=run_id)
+            runtime_run_persistence = self._runtime_run_persistence()
             turn_run = RuntimeTurnRunTracker(
-                lifecycle=self._runtime_run_lifecycle(),
+                lifecycle=runtime_run_persistence.lifecycle(),
                 run_id=run_id,
                 started_at=started_at,
                 resume_context=resume_context,
@@ -3941,8 +3866,9 @@ class SessionManager:
                     start_observation=self._start_agent_observation,
                     resume_context=resume_context,
                 )
-                turn_controller.finalizer = self._runtime_turn_finalizer(
-                    complete_observation=observation.complete
+                turn_controller.finalizer = runtime_run_persistence.turn_finalizer(
+                    persist_session=self._persist_session_async,
+                    complete_observation=observation.complete,
                 )
 
                 async def _before_local_daemon_turn(

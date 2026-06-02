@@ -43,6 +43,10 @@ from .lifecycle import (
     runtime_result_from_turn_outcome,
     runtime_status_from_turn_outcome,
 )
+from .persistence import (
+    RuntimeMessageSnapshotSession,
+    RuntimeRunPersistenceService,
+)
 from .target import (
     CloudWorkspaceRef,
     ExecutionBindingRunTargetError,
@@ -90,6 +94,7 @@ __all__ = [
     "RunTarget",
     "RunTargetSerializationError",
     "RuntimeExecution",
+    "RuntimeMessageSnapshotSession",
     "RuntimeMessageSnapshotSaver",
     "RuntimeObservationCompleter",
     "RuntimeObservationStarter",
@@ -99,6 +104,7 @@ __all__ = [
     "RuntimeRunExecutor",
     "RuntimeRunFinisher",
     "RuntimeRunMetadataProvider",
+    "RuntimeRunPersistenceService",
     "RuntimeRunResumeContext",
     "RuntimeRunSession",
     "RuntimeRunStore",

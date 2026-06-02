@@ -180,6 +180,9 @@ This ADR does not implement that path.
     `RuntimeTurnWire` instead of being assembled inline in `run_agent`.
   - Completed: local wire consumer adapter behavior is delegated to
     `LocalWireConsumer` instead of a private `SessionManager` class.
+  - Completed: runtime run lifecycle and latest message snapshot persistence
+    are delegated to `RuntimeRunPersistenceService` instead of `SessionManager`
+    helper methods.
   - Remaining: `SessionManager` still owns checkpoint restore preparation
     details, approval-driven consumer setup/session mutation, and some runtime
     close/error policy. These should move behind narrower
@@ -219,14 +222,17 @@ This ADR does not implement that path.
     instead of an inline server-local protocol.
   - Completed: runtime event replay consumes the narrower `RuntimeEventStore`
     contract through `RuntimeEventReplayService`.
-  - Remaining: run, approval, and checkpoint service ownership is still
-    combined around a single runtime store dependency; those services should
-    consume narrower contracts independently.
+  - Completed: runtime run lifecycle and latest message snapshot persistence
+    consume narrower `RuntimeRunLifecycleStore` and `RuntimeCheckpointStore`
+    contracts through `RuntimeRunPersistenceService`.
+  - Remaining: approval, stale-run recovery, and checkpoint restore service
+    ownership is still combined around a single runtime store dependency; those
+    services should consume narrower contracts independently.
 
 ## Remaining Implementation Gaps
 
-- Extract durable run lifecycle operations from `SessionManager` into a
-  run/service boundary instead of inline `run_agent` closures.
+- Extract remaining stale-run recovery, approval, and checkpoint restore
+  ownership from `SessionManager` into narrower durable service boundaries.
 - Make sandbox policy the default executor environment wrapper rather than a
   mixed local/cloud environment concern.
 - Add daemon-backed client surfaces for the local product path. REPL/TUI/CLI
