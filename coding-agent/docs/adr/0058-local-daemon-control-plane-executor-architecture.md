@@ -180,13 +180,20 @@ This ADR does not implement that path.
     user-facing replay endpoint without changing `GET /runs/{run_id}/events`.
   - Remaining: live SSE/UI rendering still uses existing wire/runtime event
     paths and should move to `DisplayEvent` projection separately.
+- [~] Establish explicit Store contracts for durable runtime state.
+  - Completed: `coding_agent.stores` defines runtime store contracts split into
+    run lifecycle, run, runtime event, runtime interaction, and runtime
+    checkpoint surfaces.
+  - Completed: `SessionManager` depends on the shared `RuntimeStore` contract
+    instead of an inline server-local protocol.
+  - Remaining: service ownership is still combined around a single runtime
+    store dependency; run/event/approval/checkpoint services should consume the
+    narrower contracts independently.
 
 ## Remaining Implementation Gaps
 
 - Extract durable run lifecycle operations from `SessionManager` into a
   run/service boundary instead of inline `run_agent` closures.
-- Establish explicit Store contracts for session, run, event, approval, and
-  checkpoint stores.
 - Make sandbox policy the default executor environment wrapper rather than a
   mixed local/cloud environment concern.
 - Add daemon-backed client surfaces for the local product path. REPL/TUI/CLI

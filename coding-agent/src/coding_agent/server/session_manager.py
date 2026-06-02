@@ -73,6 +73,7 @@ from coding_agent.runtime_store import (
     SQLiteRuntimeStore,
     JSONValue as RuntimeJSONValue,
 )
+from coding_agent.stores import RuntimeStore
 from coding_agent.executors import (
     LocalDaemonExecutor,
     LocalDaemonRuntimeBinding,
@@ -594,85 +595,6 @@ class WorkspaceMetadataStoreProtocol(Protocol):
     ) -> None: ...
 
 
-class RuntimeStoreProtocol(Protocol):
-    async def create_agent_run(self, record: AgentRunRecord) -> AgentRunRecord: ...
-
-    async def load_agent_run(self, run_id: str) -> AgentRunRecord | None: ...
-
-    async def list_agent_runs(self, session_id: str) -> list[AgentRunRecord]: ...
-
-    async def claim_attached_executor_run(
-        self,
-        *,
-        session_id: str | None,
-        executor_kind: str,
-        claim_metadata: JSONObject,
-    ) -> AgentRunRecord | None: ...
-
-    async def append_runtime_event(
-        self,
-        record: RuntimeEventRecord,
-    ) -> RuntimeEventRecord: ...
-
-    async def load_runtime_event(
-        self,
-        event_id: str,
-    ) -> RuntimeEventRecord | None: ...
-
-    async def replay_runtime_events(
-        self,
-        run_id: str,
-        *,
-        after_sequence: int = 0,
-        limit: int = 1000,
-    ) -> list[RuntimeEventRecord]: ...
-
-    async def save_message_snapshot(
-        self,
-        record: RunMessageSnapshotRecord,
-    ) -> RunMessageSnapshotRecord: ...
-
-    async def load_message_snapshot(
-        self,
-        snapshot_id: str,
-    ) -> RunMessageSnapshotRecord | None: ...
-
-    async def create_agent_interaction(
-        self,
-        record: AgentInteractionRecord,
-    ) -> AgentInteractionRecord: ...
-
-    async def load_agent_interaction(
-        self,
-        interaction_id: str,
-    ) -> AgentInteractionRecord | None: ...
-
-    async def list_agent_interactions(
-        self,
-        run_id: str,
-    ) -> list[AgentInteractionRecord]: ...
-
-    async def resolve_agent_interaction(
-        self,
-        interaction_id: str,
-        *,
-        status: str,
-        response_payload: JSONObject,
-        resolved_at: datetime,
-    ) -> AgentInteractionRecord: ...
-
-    async def update_agent_run(
-        self,
-        run_id: str,
-        *,
-        status: str,
-        ended_at: datetime | None,
-        metadata: JSONObject,
-        result: JSONObject,
-        error: str | None,
-    ) -> AgentRunRecord: ...
-
-
 class MockProvider:
     """Mock provider for testing that simulates LLM responses."""
 
@@ -976,7 +898,7 @@ class Session:
             if handle is not None:
                 handle.approval_coordinator = ApprovalCoordinator(
                     cast(ApprovalStore, value)
-            )
+                )
             return
         if name == "execution_binding":
             instance_dict = object.__getattribute__(self, "__dict__")
@@ -1307,7 +1229,7 @@ class SessionManager:
             Callable[[CloudWorkspaceBinding], None] | None
         ) = None,
         workspace_metadata_store: WorkspaceMetadataStoreProtocol | None = None,
-        runtime_store: RuntimeStoreProtocol | None = None,
+        runtime_store: RuntimeStore | None = None,
         observation_store: AgentObservationStore | None = None,
         owner_store: SessionOwnerStoreProtocol | None = None,
         owner_id: str | None = None,
@@ -1404,14 +1326,14 @@ class SessionManager:
 
     def configure_runtime_store(
         self,
-        runtime_store: RuntimeStoreProtocol | None,
+        runtime_store: RuntimeStore | None,
     ) -> None:
         self._runtime_store = runtime_store
 
     def configure_run_coordinator(self, run_coordinator: RunCoordinator) -> None:
         self._run_coordinator = run_coordinator
 
-    def _require_runtime_store(self) -> RuntimeStoreProtocol:
+    def _require_runtime_store(self) -> RuntimeStore:
         if self._runtime_store is None:
             raise RuntimeError("runtime store is not configured")
         return self._runtime_store
@@ -2282,7 +2204,7 @@ class SessionManager:
             return SQLiteCheckpointStore(path)
         return FSCheckpointStore(data_dir / "checkpoints")
 
-    def _create_runtime_store(self) -> RuntimeStoreProtocol | None:
+    def _create_runtime_store(self) -> RuntimeStore | None:
         configured_backend = self._storage_config.get("runtime_backend")
         if configured_backend is None:
             return None
