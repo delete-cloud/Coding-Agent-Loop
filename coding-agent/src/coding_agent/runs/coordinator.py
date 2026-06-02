@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
-from .target import ExecutorRef, RunTarget
+from .target import ExecutorRef, LocalDaemonExecutorRef, RunTarget
 
 
 def _empty_metadata() -> dict[str, str]:
@@ -76,12 +76,24 @@ class RunCoordinatorError(RuntimeError):
     """Base error for run coordination failures."""
 
 
+class RunExecutor(Protocol):
+    async def submit_run(self, request: RunRequest) -> RunSubmission: ...
+
+
 class RunCoordinator(Protocol):
     async def submit_run(self, request: RunRequest) -> RunSubmission: ...
 
 
+@dataclass
 class DefaultRunCoordinator:
+    local_daemon_executor: RunExecutor | None = None
+
     async def submit_run(self, request: RunRequest) -> RunSubmission:
+        if (
+            isinstance(request.target.executor, LocalDaemonExecutorRef)
+            and self.local_daemon_executor is not None
+        ):
+            return await self.local_daemon_executor.submit_run(request)
         return RunSubmission(
             session_id=request.session_id,
             run_id=request.run_id,
@@ -95,6 +107,7 @@ __all__ = [
     "DefaultRunCoordinator",
     "RunCoordinator",
     "RunCoordinatorError",
+    "RunExecutor",
     "RunRequest",
     "RunSubmission",
 ]

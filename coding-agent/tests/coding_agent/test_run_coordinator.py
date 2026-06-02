@@ -16,6 +16,21 @@ from coding_agent.runs import (
 )
 
 
+class RecordingRunExecutor:
+    def __init__(self) -> None:
+        self.requests: list[RunRequest] = []
+
+    async def submit_run(self, request: RunRequest) -> RunSubmission:
+        self.requests.append(request)
+        return RunSubmission(
+            session_id=request.session_id,
+            run_id=request.run_id,
+            target=request.target,
+            executor=request.target.executor,
+            metadata={"delegated": "local_daemon"},
+        )
+
+
 def _local_target() -> RunTarget:
     return RunTarget(
         workspace=LocalPathWorkspaceRef(path="/repo"),
@@ -87,6 +102,20 @@ async def test_default_run_coordinator_preserves_managed_pool_executor() -> None
     assert isinstance(submission.executor, ManagedPoolExecutorRef)
     assert submission.executor.pool == "cloud"
     assert submission.target.workspace is target.workspace
+
+
+@pytest.mark.asyncio
+async def test_default_run_coordinator_delegates_local_daemon_executor() -> None:
+    executor = RecordingRunExecutor()
+    target = _local_target()
+    request = RunRequest(session_id="session-1", run_id="run-1", target=target)
+
+    submission = await DefaultRunCoordinator(
+        local_daemon_executor=executor,
+    ).submit_run(request)
+
+    assert executor.requests == [request]
+    assert submission.metadata == {"delegated": "local_daemon"}
 
 
 def test_run_request_rejects_empty_ids_and_metadata() -> None:

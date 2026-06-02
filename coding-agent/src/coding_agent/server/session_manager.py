@@ -73,6 +73,7 @@ from coding_agent.runtime_store import (
     SQLiteRuntimeStore,
     JSONValue as RuntimeJSONValue,
 )
+from coding_agent.executors import LocalDaemonExecutor
 from coding_agent.runs import (
     DefaultRunCoordinator,
     RunCoordinator,
@@ -1253,7 +1254,9 @@ class SessionManager:
         self._create_agent = create_agent_fn
         self._binding_resolver = binding_resolver or DefaultBindingResolver()
         self._run_coordinator = (
-            DefaultRunCoordinator() if run_coordinator is None else run_coordinator
+            DefaultRunCoordinator(local_daemon_executor=LocalDaemonExecutor())
+            if run_coordinator is None
+            else run_coordinator
         )
         self._provisioned_cloud_binding_cleanup = provisioned_cloud_binding_cleanup
         self._workspace_metadata_store = workspace_metadata_store
