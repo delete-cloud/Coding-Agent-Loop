@@ -324,7 +324,12 @@ class RecordingRunCoordinator:
 
 class RecordingLocalDaemonExecutor(LocalDaemonExecutor):
     def __init__(self) -> None:
+        self.submissions: list[RunRequest] = []
         self.executions: list[LocalDaemonRuntimeExecution] = []
+
+    async def submit_run(self, request: RunRequest) -> RunSubmission:
+        self.submissions.append(request)
+        return await super().submit_run(request)
 
     async def execute_runtime(self, execution: LocalDaemonRuntimeExecution) -> object:
         self.executions.append(execution)
@@ -704,6 +709,14 @@ async def test_run_agent_executes_local_runtime_through_local_daemon_executor(
         await manager.run_agent(session_id, "implement runtime ownership")
 
     created_run = runtime_store.created[0]
+    assert len(local_executor.submissions) == 1
+    submission_request = local_executor.submissions[0]
+    assert submission_request.session_id == session_id
+    assert submission_request.run_id == created_run.run_id
+    assert submission_request.input_summary == "implement runtime ownership"
+    assert isinstance(submission_request.target.executor, LocalDaemonExecutorRef)
+    assert isinstance(submission_request.target.workspace, LocalPathWorkspaceRef)
+    assert submission_request.target.workspace.path == str(workspace.resolve())
     assert len(local_executor.executions) == 1
     execution = local_executor.executions[0]
     assert execution.request.session_id == session_id

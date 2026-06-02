@@ -105,6 +105,34 @@ async def test_default_run_coordinator_preserves_managed_pool_executor() -> None
 
 
 @pytest.mark.asyncio
+async def test_default_run_coordinator_does_not_delegate_managed_pool_target() -> None:
+    executor = RecordingRunExecutor()
+    target = RunTarget(
+        workspace=CloudWorkspaceRef(
+            workspace_url="docker://workspace/ws-1",
+            workspace_id="ws-1",
+        ),
+        executor=ManagedPoolExecutorRef(pool="cloud"),
+        isolation=IsolationPolicy(
+            kind="provider_sandbox",
+            network="provider_managed",
+            filesystem="provider_managed",
+            secrets="provider_managed",
+        ),
+    )
+    request = RunRequest(session_id="session-1", run_id="run-1", target=target)
+
+    submission = await DefaultRunCoordinator(
+        local_daemon_executor=executor,
+    ).submit_run(request)
+
+    assert executor.requests == []
+    assert isinstance(submission.executor, ManagedPoolExecutorRef)
+    assert submission.executor.pool == "cloud"
+    assert submission.target.workspace is target.workspace
+
+
+@pytest.mark.asyncio
 async def test_default_run_coordinator_delegates_local_daemon_executor() -> None:
     executor = RecordingRunExecutor()
     target = _local_target()
