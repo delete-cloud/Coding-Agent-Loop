@@ -162,6 +162,8 @@ This ADR does not implement that path.
     closure.
   - Completed: local daemon run start/finish guard state is tracked by
     `RuntimeTurnRunTracker` instead of `run_agent` nonlocal bookkeeping.
+  - Completed: local daemon error handled/handler-failed guard state is tracked
+    by `RuntimeTurnErrorState` instead of `run_agent` nonlocal bookkeeping.
   - Remaining: `SessionManager` still owns run lifecycle bookkeeping,
     checkpoint restore preparation details, observation callbacks, wire consumer
     setup, and some runtime close/error policy. These should move behind

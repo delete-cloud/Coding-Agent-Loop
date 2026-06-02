@@ -10,6 +10,7 @@ from coding_agent.adapter_types import StopReason, TurnOutcome
 from coding_agent.runtime_store import AgentRunRecord, JSONObject
 from coding_agent.runs import (
     RuntimeRunLifecycle,
+    RuntimeTurnErrorState,
     RuntimeTurnFinalizer,
     RuntimeTurnRunTracker,
     runtime_result_from_turn_outcome,
@@ -252,6 +253,35 @@ async def test_runtime_turn_finalizer_records_storeless_failure_outcome() -> Non
     assert finishes == []
     assert persisted == [session]
     assert observations == ["failed"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_turn_error_state_marks_successful_handler_handled() -> None:
+    state = RuntimeTurnErrorState()
+    calls: list[str] = []
+
+    async def handle_error() -> None:
+        calls.append("handled")
+
+    await state.handle(handle_error)
+
+    assert calls == ["handled"]
+    assert state.handled is True
+    assert state.handler_failed is False
+
+
+@pytest.mark.asyncio
+async def test_runtime_turn_error_state_marks_handler_failure_before_reraise() -> None:
+    state = RuntimeTurnErrorState()
+
+    async def fail_error_handler() -> None:
+        raise RuntimeError("handler failed")
+
+    with pytest.raises(RuntimeError, match="handler failed"):
+        await state.handle(fail_error_handler)
+
+    assert state.handled is False
+    assert state.handler_failed is True
 
 
 @pytest.mark.asyncio
