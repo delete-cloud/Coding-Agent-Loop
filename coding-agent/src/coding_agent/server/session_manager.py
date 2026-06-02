@@ -77,6 +77,7 @@ from coding_agent.executors import (
     LocalDaemonExecutor,
     LocalDaemonRuntimeBinding,
     LocalDaemonRuntimeExecution,
+    LocalDaemonRuntimePreparation,
 )
 from coding_agent.runs import (
     CloudWorkspaceRef,
@@ -4661,10 +4662,26 @@ class SessionManager:
 
         return closed
 
-    async def _build_session_runtime(
+    def _is_local_daemon_run_target(self, target: RunTarget | None) -> bool:
+        if target is None:
+            return False
+        return isinstance(target.executor, LocalDaemonExecutorRef)
+
+    def _runtime_preparation_request(self, session: Session) -> RunRequest:
+        if session.default_run_target is None:
+            raise RuntimeError("session is missing default_run_target")
+        return RunRequest(
+            session_id=session.id,
+            run_id=f"runtime-prepare-{uuid.uuid4().hex}",
+            target=session.default_run_target,
+            metadata={"purpose": "runtime_preparation"},
+        )
+
+    async def _build_session_runtime_direct(
         self,
         session: Session,
         *,
+        target: RunTarget | None = None,
         model_name: str | None = None,
         provider_name: str | None = None,
         base_url: str | None = None,
@@ -4685,7 +4702,8 @@ class SessionManager:
         resolved_approval_policy = (
             session.approval_policy if approval_policy is None else approval_policy
         )
-        environment = self._resolve_environment_for_run_target(session.default_run_target)
+        runtime_target = session.default_run_target if target is None else target
+        environment = self._resolve_environment_for_run_target(runtime_target)
         workspace_root = self._environment_workspace_root(environment)
 
         consumer = self._make_session_consumer(session)
@@ -4722,6 +4740,56 @@ class SessionManager:
             await self._close_runtime_adapter(adapter)
             raise
         return pipeline, ctx, adapter
+
+    async def _build_session_runtime(
+        self,
+        session: Session,
+        *,
+        model_name: str | None = None,
+        provider_name: str | None = None,
+        base_url: str | None = None,
+        max_steps: int | None = None,
+        approval_policy: ApprovalPolicy | None = None,
+    ) -> tuple[Any, Any, PipelineAdapter]:
+        if not self._is_local_daemon_run_target(session.default_run_target):
+            return await self._build_session_runtime_direct(
+                session,
+                model_name=model_name,
+                provider_name=provider_name,
+                base_url=base_url,
+                max_steps=max_steps,
+                approval_policy=approval_policy,
+            )
+
+        async def prepare_runtime(request: RunRequest) -> LocalDaemonRuntimeBinding:
+            pipeline, ctx, adapter = await self._build_session_runtime_direct(
+                session,
+                target=request.target,
+                model_name=model_name,
+                provider_name=provider_name,
+                base_url=base_url,
+                max_steps=max_steps,
+                approval_policy=approval_policy,
+            )
+            return LocalDaemonRuntimeBinding(
+                pipeline=pipeline,
+                ctx=ctx,
+                adapter=adapter,
+            )
+
+        binding = await self._local_daemon_executor.prepare_runtime(
+            LocalDaemonRuntimePreparation(
+                request=self._runtime_preparation_request(session),
+                runtime_provider=_SessionLocalDaemonRuntimeProvider(
+                    prepare=prepare_runtime,
+                ),
+            )
+        )
+        return (
+            binding.pipeline,
+            binding.ctx,
+            cast(PipelineAdapter, binding.adapter),
+        )
 
     async def ensure_session_runtime(self, session_id: str) -> Any:
         await self._assert_owner(session_id)

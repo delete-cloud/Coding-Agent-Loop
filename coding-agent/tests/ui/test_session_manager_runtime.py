@@ -26,8 +26,11 @@ from coding_agent.environment import (
 )
 from coding_agent.executors import (
     LocalDaemonExecutor,
+    LocalDaemonRuntimeBinding,
     LocalDaemonRuntimeExecution,
+    LocalDaemonRuntimePreparation,
     LocalDaemonRuntimeResult,
+    RunExecutorTargetError,
 )
 from coding_agent.runtime_store import (
     AgentInteractionRecord,
@@ -333,12 +336,20 @@ class RecordingRunCoordinator:
 class RecordingLocalDaemonExecutor(LocalDaemonExecutor):
     def __init__(self) -> None:
         self.submissions: list[RunRequest] = []
+        self.preparations: list[LocalDaemonRuntimePreparation] = []
         self.executions: list[LocalDaemonRuntimeExecution] = []
         self.results: list[LocalDaemonRuntimeResult] = []
 
     async def submit_run(self, request: RunRequest) -> RunSubmission:
         self.submissions.append(request)
         return await super().submit_run(request)
+
+    async def prepare_runtime(
+        self,
+        preparation: LocalDaemonRuntimePreparation,
+    ) -> LocalDaemonRuntimeBinding:
+        self.preparations.append(preparation)
+        return await preparation.runtime_provider.prepare_runtime(preparation.request)
 
     async def execute_runtime(
         self,
@@ -2817,6 +2828,7 @@ async def test_ensure_session_runtime_uses_default_run_target_workspace(
     legacy_bound.mkdir()
     target_bound.mkdir()
     captured_kwargs: dict[str, object] = {}
+    local_executor = RecordingLocalDaemonExecutor()
     fake_pipeline = types.SimpleNamespace(
         _registry=types.SimpleNamespace(
             get=lambda _: types.SimpleNamespace(_instance=None)
@@ -2840,7 +2852,11 @@ async def test_ensure_session_runtime_uses_default_run_target_workspace(
         async def initialize(self) -> None:
             return None
 
-    manager = SessionManager(store=store, create_agent_fn=fake_create_agent)
+    manager = SessionManager(
+        store=store,
+        create_agent_fn=fake_create_agent,
+        local_daemon_executor=local_executor,
+    )
     session_id = await manager.create_session(
         execution_binding=LocalExecutionBinding(workspace_root=str(legacy_bound)),
     )
@@ -2859,6 +2875,8 @@ async def test_ensure_session_runtime_uses_default_run_target_workspace(
     assert captured_kwargs["workspace_root"] == target_bound.resolve()
     assert isinstance(captured_kwargs["environment"], LocalEnvironment)
     assert captured_kwargs["environment"].workspace_root == target_bound.resolve()
+    assert len(local_executor.preparations) == 1
+    assert local_executor.preparations[0].request.target == session.default_run_target
     assert isinstance(session.execution_binding, LocalExecutionBinding)
     assert session.execution_binding.workspace_root == str(legacy_bound)
 
@@ -2872,6 +2890,72 @@ async def test_replace_session_runtime_config_uses_default_run_target_workspace(
     target_bound = tmp_path / "target-bound"
     legacy_bound.mkdir()
     target_bound.mkdir()
+    captured_kwargs: dict[str, object] = {}
+    local_executor = RecordingLocalDaemonExecutor()
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        ),
+        _directive_executor=None,
+    )
+
+    def fake_create_agent(**kwargs):
+        captured_kwargs.update(kwargs)
+        return fake_pipeline, types.SimpleNamespace(
+            config={},
+            tape=kwargs.get("tape") or Tape(),
+            plugin_states={},
+        )
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+            self.ctx = ctx
+
+        async def initialize(self) -> None:
+            return None
+
+    manager = SessionManager(
+        store=store,
+        create_agent_fn=fake_create_agent,
+        local_daemon_executor=local_executor,
+    )
+    session_id = await manager.create_session(
+        execution_binding=LocalExecutionBinding(workspace_root=str(legacy_bound)),
+    )
+    session = manager.get_session(session_id)
+    session.default_run_target = RunTarget(
+        workspace=LocalPathWorkspaceRef(path=str(target_bound)),
+        executor=LocalDaemonExecutorRef(),
+        isolation=IsolationPolicy(kind="default_local_sandbox"),
+    )
+    manager.register_session(session)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
+        await manager.replace_session_runtime_config(
+            session_id,
+            model_name="replacement-model",
+        )
+
+    assert captured_kwargs["workspace_root"] == target_bound.resolve()
+    assert isinstance(captured_kwargs["environment"], LocalEnvironment)
+    assert captured_kwargs["environment"].workspace_root == target_bound.resolve()
+    assert len(local_executor.preparations) == 1
+    assert local_executor.preparations[0].request.target == session.default_run_target
+    assert isinstance(session.execution_binding, LocalExecutionBinding)
+    assert session.execution_binding.workspace_root == str(legacy_bound)
+
+
+@pytest.mark.asyncio
+async def test_ensure_session_runtime_builds_from_preparation_target(
+    tmp_path: Path,
+) -> None:
+    store = InMemorySessionStore()
+    original_bound = tmp_path / "original-bound"
+    mutated_bound = tmp_path / "mutated-bound"
+    original_bound.mkdir()
+    mutated_bound.mkdir()
     captured_kwargs: dict[str, object] = {}
     fake_pipeline = types.SimpleNamespace(
         _registry=types.SimpleNamespace(
@@ -2896,30 +2980,87 @@ async def test_replace_session_runtime_config_uses_default_run_target_workspace(
         async def initialize(self) -> None:
             return None
 
-    manager = SessionManager(store=store, create_agent_fn=fake_create_agent)
-    session_id = await manager.create_session(
-        execution_binding=LocalExecutionBinding(workspace_root=str(legacy_bound)),
-    )
-    session = manager.get_session(session_id)
-    session.default_run_target = RunTarget(
-        workspace=LocalPathWorkspaceRef(path=str(target_bound)),
+    mutated_target = RunTarget(
+        workspace=LocalPathWorkspaceRef(path=str(mutated_bound)),
         executor=LocalDaemonExecutorRef(),
         isolation=IsolationPolicy(kind="default_local_sandbox"),
     )
+
+    class MutatingPrepareExecutor(LocalDaemonExecutor):
+        def __init__(self) -> None:
+            self.preparations: list[LocalDaemonRuntimePreparation] = []
+            self.session: Any | None = None
+
+        async def prepare_runtime(
+            self,
+            preparation: LocalDaemonRuntimePreparation,
+        ) -> LocalDaemonRuntimeBinding:
+            self._validate_request_target(preparation.request)
+            self.preparations.append(preparation)
+            if self.session is None:
+                raise AssertionError("session must be assigned before preparation")
+            self.session.default_run_target = mutated_target
+            return await preparation.runtime_provider.prepare_runtime(
+                preparation.request
+            )
+
+    local_executor = MutatingPrepareExecutor()
+    manager = SessionManager(
+        store=store,
+        create_agent_fn=fake_create_agent,
+        local_daemon_executor=local_executor,
+    )
+    session_id = await manager.create_session(
+        execution_binding=LocalExecutionBinding(workspace_root=str(original_bound)),
+    )
+    session = manager.get_session(session_id)
+    original_target = RunTarget(
+        workspace=LocalPathWorkspaceRef(path=str(original_bound)),
+        executor=LocalDaemonExecutorRef(),
+        isolation=IsolationPolicy(kind="default_local_sandbox"),
+    )
+    session.default_run_target = original_target
+    local_executor.session = session
     manager.register_session(session)
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
-        await manager.replace_session_runtime_config(
-            session_id,
-            model_name="replacement-model",
-        )
+        await manager.ensure_session_runtime(session_id)
 
-    assert captured_kwargs["workspace_root"] == target_bound.resolve()
+    assert len(local_executor.preparations) == 1
+    assert local_executor.preparations[0].request.target == original_target
+    assert captured_kwargs["workspace_root"] == original_bound.resolve()
     assert isinstance(captured_kwargs["environment"], LocalEnvironment)
-    assert captured_kwargs["environment"].workspace_root == target_bound.resolve()
-    assert isinstance(session.execution_binding, LocalExecutionBinding)
-    assert session.execution_binding.workspace_root == str(legacy_bound)
+    assert captured_kwargs["environment"].workspace_root == original_bound.resolve()
+
+
+@pytest.mark.asyncio
+async def test_ensure_session_runtime_rejects_local_daemon_non_local_workspace() -> None:
+    def fake_create_agent(**kwargs):
+        del kwargs
+        raise AssertionError("agent builder should not run for invalid target")
+
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        create_agent_fn=fake_create_agent,
+    )
+    session_id = await manager.create_session()
+    session = manager.get_session(session_id)
+    session.default_run_target = RunTarget(
+        workspace=CloudWorkspaceRef(
+            workspace_url="docker://workspace/ws-1",
+            workspace_id="ws-1",
+        ),
+        executor=LocalDaemonExecutorRef(),
+        isolation=IsolationPolicy(kind="provider_sandbox"),
+    )
+    manager.register_session(session)
+
+    with pytest.raises(
+        RunExecutorTargetError,
+        match="LocalDaemonExecutor requires a local_path workspace target",
+    ):
+        await manager.ensure_session_runtime(session_id)
 
 
 @pytest.mark.asyncio
