@@ -3315,33 +3315,17 @@ class SessionManager:
             ),
         )
 
-    async def _restore_checkpoint(self, session: Session, checkpoint_id: str) -> None:
-        snapshot = await self._checkpoint_service.restore(checkpoint_id)
-        meta = snapshot.meta
-        if session.tape_id is None:
-            raise ValueError("session has no stable tape id")
-        if meta.tape_id != session.tape_id:
-            raise ValueError(
-                f"Checkpoint {checkpoint_id} belongs to tape {meta.tape_id}, not session tape {session.tape_id}"
-            )
-        if meta.entry_count != len(snapshot.tape_entries):
-            raise ValueError(
-                "checkpoint entry_count does not match snapshot tape_entries length"
-            )
-        if meta.window_start > meta.entry_count:
-            raise ValueError("checkpoint window_start must be <= entry_count")
-
-        restored_tape = Tape(
-            entries=[Entry.from_dict(entry) for entry in snapshot.tape_entries],
-            tape_id=session.tape_id,
-            _window_start=meta.window_start,
-        )
-
-        restored_config = _checkpoint_session_config_from_extra(session, snapshot.extra)
-        previous_provider_name = session.provider_name
-        previous_model_name = session.model_name
-        previous_base_url = session.base_url
-        environment = self._resolve_environment_for_run_target(session.default_run_target)
+    async def _build_restored_session_runtime_direct(
+        self,
+        session: Session,
+        *,
+        target: RunTarget | None = None,
+        restored_tape: Tape,
+        restored_config: _CheckpointSessionConfig,
+        plugin_states: Mapping[str, Any],
+    ) -> tuple[Any, Any, PipelineAdapter]:
+        runtime_target = session.default_run_target if target is None else target
+        environment = self._resolve_environment_for_run_target(runtime_target)
         workspace_root = self._environment_workspace_root(environment)
 
         approval_mode_map = {
@@ -3370,7 +3354,7 @@ class SessionManager:
             session.provider is not None
             and session.provider_name == restored_config.provider_name
             and provider_model_name == restored_config.model_name
-            and previous_base_url == restored_config.base_url
+            and session.base_url == restored_config.base_url
         )
         if can_reuse_provider:
             llm_plugin = pipeline._registry.get("llm_provider")
@@ -3378,7 +3362,7 @@ class SessionManager:
 
         consumer = self._make_restore_consumer(session.wire)
         ctx.config["wire_consumer"] = consumer
-        for key, value in snapshot.plugin_states.items():
+        for key, value in plugin_states.items():
             ctx.plugin_states.setdefault(key, value)
         adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
         initialize = getattr(adapter, "initialize", None)
@@ -3386,6 +3370,87 @@ class SessionManager:
             initialize_result = initialize()
             if isawaitable(initialize_result):
                 await initialize_result
+        return pipeline, ctx, adapter
+
+    async def _build_restored_session_runtime(
+        self,
+        session: Session,
+        *,
+        restored_tape: Tape,
+        restored_config: _CheckpointSessionConfig,
+        plugin_states: Mapping[str, Any],
+    ) -> tuple[Any, Any, PipelineAdapter]:
+        if not self._is_local_daemon_run_target(session.default_run_target):
+            return await self._build_restored_session_runtime_direct(
+                session,
+                restored_tape=restored_tape,
+                restored_config=restored_config,
+                plugin_states=plugin_states,
+            )
+
+        async def prepare_runtime(request: RunRequest) -> LocalDaemonRuntimeBinding:
+            pipeline, ctx, adapter = await self._build_restored_session_runtime_direct(
+                session,
+                target=request.target,
+                restored_tape=restored_tape,
+                restored_config=restored_config,
+                plugin_states=plugin_states,
+            )
+            return LocalDaemonRuntimeBinding(
+                pipeline=pipeline,
+                ctx=ctx,
+                adapter=adapter,
+            )
+
+        binding = await self._local_daemon_executor.prepare_runtime(
+            LocalDaemonRuntimePreparation(
+                request=self._runtime_preparation_request(
+                    session,
+                    purpose="checkpoint_restore",
+                ),
+                runtime_provider=_SessionLocalDaemonRuntimeProvider(
+                    prepare=prepare_runtime,
+                ),
+            )
+        )
+        return (
+            binding.pipeline,
+            binding.ctx,
+            cast(PipelineAdapter, binding.adapter),
+        )
+
+    async def _restore_checkpoint(self, session: Session, checkpoint_id: str) -> None:
+        snapshot = await self._checkpoint_service.restore(checkpoint_id)
+        meta = snapshot.meta
+        if session.tape_id is None:
+            raise ValueError("session has no stable tape id")
+        if meta.tape_id != session.tape_id:
+            raise ValueError(
+                f"Checkpoint {checkpoint_id} belongs to tape {meta.tape_id}, not session tape {session.tape_id}"
+            )
+        if meta.entry_count != len(snapshot.tape_entries):
+            raise ValueError(
+                "checkpoint entry_count does not match snapshot tape_entries length"
+            )
+        if meta.window_start > meta.entry_count:
+            raise ValueError("checkpoint window_start must be <= entry_count")
+
+        restored_tape = Tape(
+            entries=[Entry.from_dict(entry) for entry in snapshot.tape_entries],
+            tape_id=session.tape_id,
+            _window_start=meta.window_start,
+        )
+
+        restored_config = _checkpoint_session_config_from_extra(session, snapshot.extra)
+        previous_provider_name = session.provider_name
+        previous_model_name = session.model_name
+        previous_base_url = session.base_url
+        pipeline, ctx, adapter = await self._build_restored_session_runtime(
+            session,
+            restored_tape=restored_tape,
+            restored_config=restored_config,
+            plugin_states=snapshot.plugin_states,
+        )
 
         await self._close_runtime(session)
         await self._tape_store.truncate(session.tape_id, meta.entry_count)
@@ -4667,14 +4732,19 @@ class SessionManager:
             return False
         return isinstance(target.executor, LocalDaemonExecutorRef)
 
-    def _runtime_preparation_request(self, session: Session) -> RunRequest:
+    def _runtime_preparation_request(
+        self,
+        session: Session,
+        *,
+        purpose: str = "runtime_preparation",
+    ) -> RunRequest:
         if session.default_run_target is None:
             raise RuntimeError("session is missing default_run_target")
         return RunRequest(
             session_id=session.id,
             run_id=f"runtime-prepare-{uuid.uuid4().hex}",
             target=session.default_run_target,
-            metadata={"purpose": "runtime_preparation"},
+            metadata={"purpose": purpose},
         )
 
     async def _build_session_runtime_direct(

@@ -3667,7 +3667,8 @@ async def test_restore_checkpoint_uses_default_run_target_workspace(
     tmp_path: Path,
 ) -> None:
     store = InMemorySessionStore()
-    manager = SessionManager(store=store)
+    local_executor = RecordingLocalDaemonExecutor()
+    manager = SessionManager(store=store, local_daemon_executor=local_executor)
     legacy_bound = tmp_path / "legacy-bound"
     target_bound = tmp_path / "target-bound"
     legacy_bound.mkdir()
@@ -3745,8 +3746,186 @@ async def test_restore_checkpoint_uses_default_run_target_workspace(
     assert captured_kwargs["workspace_root"] == target_bound.resolve()
     assert isinstance(captured_kwargs["environment"], LocalEnvironment)
     assert captured_kwargs["environment"].workspace_root == target_bound.resolve()
+    assert len(local_executor.preparations) == 1
+    assert local_executor.preparations[0].request.target == session.default_run_target
     assert isinstance(session.execution_binding, LocalExecutionBinding)
     assert session.execution_binding.workspace_root == str(legacy_bound)
+
+
+@pytest.mark.asyncio
+async def test_restore_checkpoint_builds_from_preparation_target(
+    tmp_path: Path,
+) -> None:
+    store = InMemorySessionStore()
+    original_bound = tmp_path / "original-bound"
+    mutated_bound = tmp_path / "mutated-bound"
+    original_bound.mkdir()
+    mutated_bound.mkdir()
+    captured_kwargs: dict[str, object] = {}
+    snapshot = types.SimpleNamespace(
+        meta=types.SimpleNamespace(
+            checkpoint_id="cp-preparation-target",
+            tape_id="restore-preparation-tape",
+            entry_count=0,
+            window_start=0,
+        ),
+        tape_entries=(),
+        plugin_states={},
+        extra={},
+    )
+
+    class FakeCheckpointService:
+        async def restore(self, checkpoint_id: str):
+            assert checkpoint_id == "cp-preparation-target"
+            return snapshot
+
+        async def list(self, tape_id: str):
+            assert tape_id == "restore-preparation-tape"
+            return [snapshot.meta]
+
+        async def delete(self, checkpoint_id: str) -> None:
+            return None
+
+    class FakeTapeStore:
+        async def truncate(self, tape_id: str, keep: int) -> None:
+            return None
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+            self.ctx = ctx
+
+        async def initialize(self) -> None:
+            return None
+
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        )
+    )
+
+    def fake_create_agent(**kwargs):
+        captured_kwargs.update(kwargs)
+        return fake_pipeline, types.SimpleNamespace(
+            config={}, tape=kwargs.get("tape"), plugin_states={}
+        )
+
+    mutated_target = RunTarget(
+        workspace=LocalPathWorkspaceRef(path=str(mutated_bound)),
+        executor=LocalDaemonExecutorRef(),
+        isolation=IsolationPolicy(kind="default_local_sandbox"),
+    )
+
+    class MutatingPrepareExecutor(LocalDaemonExecutor):
+        def __init__(self) -> None:
+            self.preparations: list[LocalDaemonRuntimePreparation] = []
+            self.session: Any | None = None
+
+        async def prepare_runtime(
+            self,
+            preparation: LocalDaemonRuntimePreparation,
+        ) -> LocalDaemonRuntimeBinding:
+            self._validate_request_target(preparation.request)
+            self.preparations.append(preparation)
+            if self.session is None:
+                raise AssertionError("session must be assigned before preparation")
+            self.session.default_run_target = mutated_target
+            return await preparation.runtime_provider.prepare_runtime(
+                preparation.request
+            )
+
+    local_executor = MutatingPrepareExecutor()
+    manager = SessionManager(
+        store=store,
+        create_agent_fn=fake_create_agent,
+        local_daemon_executor=local_executor,
+    )
+    session_id = await manager.create_session(
+        execution_binding=LocalExecutionBinding(workspace_root=str(original_bound)),
+    )
+    session = manager.get_session(session_id)
+    session.tape_id = "restore-preparation-tape"
+    original_target = RunTarget(
+        workspace=LocalPathWorkspaceRef(path=str(original_bound)),
+        executor=LocalDaemonExecutorRef(),
+        isolation=IsolationPolicy(kind="default_local_sandbox"),
+    )
+    session.default_run_target = original_target
+    local_executor.session = session
+    manager.register_session(session)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr(
+            manager, "_checkpoint_service", FakeCheckpointService(), raising=False
+        )
+        mp.setattr(manager, "_tape_store", FakeTapeStore(), raising=False)
+        await manager._restore_checkpoint(session, "cp-preparation-target")
+
+    assert len(local_executor.preparations) == 1
+    assert local_executor.preparations[0].request.target == original_target
+    assert captured_kwargs["workspace_root"] == original_bound.resolve()
+    assert isinstance(captured_kwargs["environment"], LocalEnvironment)
+    assert captured_kwargs["environment"].workspace_root == original_bound.resolve()
+
+
+@pytest.mark.asyncio
+async def test_restore_checkpoint_rejects_local_daemon_non_local_workspace() -> None:
+    def fake_create_agent(**kwargs):
+        del kwargs
+        raise AssertionError("agent builder should not run for invalid target")
+
+    snapshot = types.SimpleNamespace(
+        meta=types.SimpleNamespace(
+            checkpoint_id="cp-invalid-target",
+            tape_id="invalid-target-tape",
+            entry_count=0,
+            window_start=0,
+        ),
+        tape_entries=(),
+        plugin_states={},
+        extra={},
+    )
+
+    class FakeCheckpointService:
+        async def restore(self, checkpoint_id: str):
+            assert checkpoint_id == "cp-invalid-target"
+            return snapshot
+
+        async def list(self, tape_id: str):
+            assert tape_id == "invalid-target-tape"
+            return [snapshot.meta]
+
+        async def delete(self, checkpoint_id: str) -> None:
+            return None
+
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        create_agent_fn=fake_create_agent,
+    )
+    session_id = await manager.create_session()
+    session = manager.get_session(session_id)
+    session.tape_id = "invalid-target-tape"
+    session.default_run_target = RunTarget(
+        workspace=CloudWorkspaceRef(
+            workspace_url="docker://workspace/ws-1",
+            workspace_id="ws-1",
+        ),
+        executor=LocalDaemonExecutorRef(),
+        isolation=IsolationPolicy(kind="provider_sandbox"),
+    )
+    manager.register_session(session)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            manager, "_checkpoint_service", FakeCheckpointService(), raising=False
+        )
+        with pytest.raises(
+            RunExecutorTargetError,
+            match="LocalDaemonExecutor requires a local_path workspace target",
+        ):
+            await manager._restore_checkpoint(session, "cp-invalid-target")
 
 
 class FakeCloudClient:
