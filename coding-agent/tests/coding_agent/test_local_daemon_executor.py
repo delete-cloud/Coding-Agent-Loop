@@ -31,6 +31,16 @@ def _local_request() -> RunRequest:
     )
 
 
+class FakeRuntimeAdapter:
+    def __init__(self, *, result: object = "completed") -> None:
+        self.result: object = result
+        self.prompts: list[str] = []
+
+    async def run_turn(self, prompt: str) -> object:
+        self.prompts.append(prompt)
+        return self.result
+
+
 @pytest.mark.asyncio
 async def test_local_daemon_executor_accepts_local_daemon_target() -> None:
     request = _local_request()
@@ -45,20 +55,20 @@ async def test_local_daemon_executor_accepts_local_daemon_target() -> None:
 
 
 @pytest.mark.asyncio
-async def test_local_daemon_executor_executes_runtime_callable() -> None:
+async def test_local_daemon_executor_runs_adapter_turn() -> None:
     request = _local_request()
-    executed: list[str] = []
-
-    async def run_runtime() -> str:
-        executed.append(request.run_id)
-        return "completed"
+    adapter = FakeRuntimeAdapter(result="completed")
 
     result = await LocalDaemonExecutor().execute_runtime(
-        LocalDaemonRuntimeExecution(request=request, run=run_runtime)
+        LocalDaemonRuntimeExecution(
+            request=request,
+            adapter=adapter,
+            prompt="implement the task",
+        )
     )
 
     assert result == "completed"
-    assert executed == ["run-1"]
+    assert adapter.prompts == ["implement the task"]
 
 
 @pytest.mark.asyncio
@@ -130,13 +140,18 @@ async def test_local_daemon_executor_rejects_runtime_for_non_local_target() -> N
         ),
     )
 
-    async def run_runtime() -> str:
-        raise AssertionError("runtime should not execute")
+    adapter = FakeRuntimeAdapter(result="should not execute")
 
     with pytest.raises(
         RunExecutorTargetError,
         match="LocalDaemonExecutor requires a local_daemon executor target",
     ):
         _ = await LocalDaemonExecutor().execute_runtime(
-            LocalDaemonRuntimeExecution(request=request, run=run_runtime)
+            LocalDaemonRuntimeExecution(
+                request=request,
+                adapter=adapter,
+                prompt="should not run",
+            )
         )
+
+    assert adapter.prompts == []

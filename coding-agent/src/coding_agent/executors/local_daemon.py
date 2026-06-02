@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Protocol
 
 from coding_agent.runs import (
     LocalDaemonExecutorRef,
@@ -11,25 +11,27 @@ from coding_agent.runs import (
 )
 
 
-RuntimeTurnCallable = Callable[[], Awaitable[object]]
-
-
 class RunExecutorTargetError(ValueError):
     """Raised when a run executor receives an incompatible target."""
+
+
+class RuntimeTurnAdapter(Protocol):
+    async def run_turn(self, prompt: str) -> object: ...
 
 
 @dataclass(frozen=True)
 class LocalDaemonRuntimeExecution:
     request: RunRequest
-    run: RuntimeTurnCallable
+    adapter: RuntimeTurnAdapter
+    prompt: str
 
 
 @dataclass(frozen=True)
 class LocalDaemonExecutor:
     """Local daemon run executor boundary.
 
-    This first slice validates and accepts local daemon run targets. Runtime
-    ownership still moves in a later ADR-0058 slice.
+    This slice owns the local adapter turn invocation. Full pipeline/context
+    preparation still moves in later ADR-0058 slices.
     """
 
     async def submit_run(self, request: RunRequest) -> RunSubmission:
@@ -44,7 +46,7 @@ class LocalDaemonExecutor:
 
     async def execute_runtime(self, execution: LocalDaemonRuntimeExecution) -> object:
         self._validate_request_target(execution.request)
-        return await execution.run()
+        return await execution.adapter.run_turn(execution.prompt)
 
     def _validate_request_target(self, request: RunRequest) -> None:
         if not isinstance(request.target.executor, LocalDaemonExecutorRef):
