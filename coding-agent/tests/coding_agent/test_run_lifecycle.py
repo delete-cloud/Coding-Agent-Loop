@@ -13,6 +13,7 @@ from coding_agent.runs import (
     RuntimeTurnErrorState,
     RuntimeTurnFinalizer,
     RuntimeTurnRunTracker,
+    RuntimeTurnStarter,
     runtime_result_from_turn_outcome,
     runtime_status_from_turn_outcome,
 )
@@ -36,6 +37,7 @@ class FakeTurnSession:
     tape_id: str | None
     turn_status: str = "running"
     last_failure_details: str | None = None
+    runtime_message_bus: object | None = None
 
 
 class FakeTape:
@@ -46,6 +48,22 @@ class FakeTape:
 class FakeRuntimeContext:
     def __init__(self, tape_id: str) -> None:
         self.tape = FakeTape(tape_id)
+        self.config: dict[str, object] = {}
+        self.runtime_message_bus: object | None = None
+
+
+class FakeRuntimeAdapter:
+    def __init__(self) -> None:
+        self.consumer: object | None = None
+
+    def set_consumer(self, consumer: object) -> None:
+        self.consumer = consumer
+
+
+@dataclass
+class FakeRuntimeBinding:
+    ctx: FakeRuntimeContext
+    adapter: FakeRuntimeAdapter
 
 
 class RecordingRuntimeStore:
@@ -253,6 +271,90 @@ async def test_runtime_turn_finalizer_records_storeless_failure_outcome() -> Non
     assert finishes == []
     assert persisted == [session]
     assert observations == ["failed"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_turn_starter_wires_runtime_context_and_observation() -> None:
+    store = RecordingRuntimeStore()
+    lifecycle = RuntimeRunLifecycle(
+        store=store,
+        metadata_for_session=lambda session, *, resume_context=None: {
+            "session_id": session.id,
+            "resume_from": None
+            if resume_context is None
+            else resume_context.previous_run_id,
+        },
+    )
+    resume_context = FakeResumeContext(previous_run_id="previous-run")
+    turn_run = RuntimeTurnRunTracker(
+        lifecycle=lifecycle,
+        run_id="run-1",
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        resume_context=resume_context,
+    )
+    message_bus = object()
+    consumer = object()
+    session = FakeTurnSession(
+        id="session-1",
+        tape_id="tape-1",
+        runtime_message_bus=message_bus,
+    )
+    ctx = FakeRuntimeContext("tape-1")
+    adapter = FakeRuntimeAdapter()
+    binding = FakeRuntimeBinding(ctx=ctx, adapter=adapter)
+    calls: list[tuple[str, str]] = []
+
+    def bind_root_run_identity(
+        session: FakeTurnSession,
+        ctx: FakeRuntimeContext,
+        run_id: str,
+        *,
+        resume_context: FakeResumeContext | None = None,
+    ) -> None:
+        del ctx
+        assert resume_context is not None
+        calls.append((session.id, f"root:{run_id}:{resume_context.previous_run_id}"))
+
+    def bind_subagent_message_publisher(ctx: FakeRuntimeContext) -> None:
+        calls.append(("ctx", f"publisher:{ctx.tape.tape_id}"))
+
+    def start_observation(
+        *,
+        session: FakeTurnSession,
+        ctx: FakeRuntimeContext,
+        run_id: str,
+        prompt: str,
+        resume_context: FakeResumeContext | None = None,
+    ) -> str:
+        assert resume_context is not None
+        calls.append((session.id, f"observe:{run_id}:{prompt}:{ctx.tape.tape_id}"))
+        return "recorder"
+
+    starter = RuntimeTurnStarter(
+        turn_run=turn_run,
+        consumer=consumer,
+        run_id="run-1",
+        prompt="hello",
+        bind_root_run_identity=bind_root_run_identity,
+        bind_subagent_message_publisher=bind_subagent_message_publisher,
+        start_observation=start_observation,
+        resume_context=resume_context,
+    )
+
+    recorder = await starter.start(session, binding)
+
+    assert recorder == "recorder"
+    assert adapter.consumer is consumer
+    assert ctx.runtime_message_bus is message_bus
+    assert ctx.config["wire_consumer"] is consumer
+    assert turn_run.created is True
+    assert len(store.created) == 1
+    assert store.updated[0]["status"] == "running"
+    assert calls == [
+        ("session-1", "root:run-1:previous-run"),
+        ("ctx", "publisher:tape-1"),
+        ("session-1", "observe:run-1:hello:tape-1"),
+    ]
 
 
 @pytest.mark.asyncio

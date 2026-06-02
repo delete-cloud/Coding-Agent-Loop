@@ -94,6 +94,7 @@ from coding_agent.runs import (
     RuntimeTurnErrorState,
     RuntimeTurnFinalizer,
     RuntimeTurnRunTracker,
+    RuntimeTurnStarter,
     RunTarget,
     run_target_from_dict,
     run_target_from_execution_binding,
@@ -4002,32 +4003,24 @@ class SessionManager:
                     prompt=prompt,
                     resume_context=resume_context,
                 )
+                turn_starter = RuntimeTurnStarter(
+                    turn_run=turn_run,
+                    consumer=consumer,
+                    run_id=run_id,
+                    prompt=prompt,
+                    bind_root_run_identity=self._bind_root_run_identity,
+                    bind_subagent_message_publisher=self._bind_subagent_message_publisher,
+                    start_observation=self._start_agent_observation,
+                    resume_context=resume_context,
+                )
 
                 async def _before_local_daemon_turn(
                     binding: LocalDaemonRuntimeBinding,
                 ) -> None:
                     nonlocal observation_recorder
-                    ctx = binding.ctx
-                    adapter = binding.adapter
-                    self._bind_root_run_identity(
+                    observation_recorder = await turn_starter.start(
                         session,
-                        ctx,
-                        run_id,
-                        resume_context=resume_context,
-                    )
-                    await turn_run.ensure_started(session)
-                    set_consumer = getattr(adapter, "set_consumer", None)
-                    if callable(set_consumer):
-                        set_consumer(consumer)
-                    ctx.runtime_message_bus = session.runtime_message_bus
-                    ctx.config["wire_consumer"] = consumer
-                    self._bind_subagent_message_publisher(ctx)
-                    observation_recorder = self._start_agent_observation(
-                        session=session,
-                        ctx=ctx,
-                        run_id=run_id,
-                        prompt=prompt,
-                        resume_context=resume_context,
+                        binding,
                     )
 
                 async def _after_local_daemon_turn(
