@@ -58,6 +58,10 @@ class RuntimeObservationCompleter(Protocol):
     def __call__(self, *, ctx: Any, turn_status: str) -> None: ...
 
 
+class RuntimeTurnErrorAction(Protocol):
+    async def __call__(self) -> None: ...
+
+
 class RuntimeRunMetadataProvider(Protocol):
     def __call__(
         self,
@@ -254,6 +258,20 @@ class RuntimeTurnRunTracker:
         )
 
 
+@dataclass
+class RuntimeTurnErrorState:
+    handled: bool = False
+    handler_failed: bool = False
+
+    async def handle(self, action: RuntimeTurnErrorAction) -> None:
+        try:
+            await action()
+        except BaseException:
+            self.handler_failed = True
+            raise
+        self.handled = True
+
+
 @dataclass(frozen=True)
 class RuntimeTurnFinalizer:
     has_runtime_store: bool
@@ -316,6 +334,8 @@ __all__ = [
     "RuntimeRunSession",
     "RuntimeRunStore",
     "RuntimeSessionPersister",
+    "RuntimeTurnErrorAction",
+    "RuntimeTurnErrorState",
     "RuntimeTurnFinalizer",
     "RuntimeTurnRunTracker",
     "RuntimeTurnSession",
