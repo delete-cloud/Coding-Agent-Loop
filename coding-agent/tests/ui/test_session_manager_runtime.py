@@ -44,6 +44,7 @@ from coding_agent.runs import (
     LocalDaemonExecutorRef,
     LocalPathWorkspaceRef,
     ManagedPoolExecutorRef,
+    RunCoordinatorError,
     RunRequest,
     RunSubmission,
     RunTarget,
@@ -342,6 +343,30 @@ class RecordingRunCoordinator:
         result = await LocalDaemonExecutor().execute_runtime(execution)
         self.results.append(result)
         return result
+
+
+class RejectingRunCoordinator:
+    def __init__(self, *, error: str) -> None:
+        self.error = error
+        self.requests: list[RunRequest] = []
+        self.executions: list[LocalDaemonRuntimeExecution] = []
+
+    async def submit_run(self, request: RunRequest) -> RunSubmission:
+        self.requests.append(request)
+        return RunSubmission(
+            session_id=request.session_id,
+            run_id=request.run_id,
+            target=request.target,
+            executor=request.target.executor,
+            metadata=request.metadata,
+        )
+
+    async def execute_runtime(
+        self,
+        execution: LocalDaemonRuntimeExecution,
+    ) -> LocalDaemonRuntimeResult:
+        self.executions.append(execution)
+        raise RunCoordinatorError(self.error)
 
 
 class RecordingLocalDaemonExecutor(LocalDaemonExecutor):
@@ -4014,6 +4039,45 @@ async def test_run_agent_does_not_bootstrap_cloud_runtime_from_execution_binding
     assert runtime_store.updated[-1]["status"] == "failed"
     assert runtime_store.updated[-1]["error"] is not None
     assert "managed_pool" in str(runtime_store.updated[-1]["error"])
+
+
+@pytest.mark.asyncio
+async def test_run_agent_routes_unsupported_runtime_through_run_coordinator() -> None:
+    runtime_store = FakeRuntimeStore()
+    coordinator = RejectingRunCoordinator(
+        error="managed_pool runtime execution is not available through this coordinator"
+    )
+
+    def fake_create_agent(**kwargs):
+        raise AssertionError(f"cloud runtime must not be bootstrapped: {kwargs!r}")
+
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        runtime_store=runtime_store,
+        create_agent_fn=fake_create_agent,
+        run_coordinator=coordinator,
+        binding_resolver=DefaultBindingResolver(
+            cloud_client_factory=lambda binding: FakeCloudClient()
+        ),
+    )
+    session_id = await manager.create_session(
+        execution_binding=CloudWorkspaceBinding(
+            workspace_url="https://workspace.example.com",
+            workspace_id="ws-123",
+        )
+    )
+
+    await manager.run_agent(session_id, "hello")
+
+    assert len(coordinator.requests) == 1
+    assert len(coordinator.executions) == 1
+    assert isinstance(coordinator.executions[0], LocalDaemonRuntimeExecution)
+    assert coordinator.executions[0].request == coordinator.requests[0]
+    assert isinstance(coordinator.executions[0].request.target.executor, ManagedPoolExecutorRef)
+    assert runtime_store.created[0].metadata["workspace_surface"] == "cloud_workspace"
+    assert runtime_store.updated[0]["status"] == "running"
+    assert runtime_store.updated[-1]["status"] == "failed"
+    assert runtime_store.updated[-1]["error"] == coordinator.error
 
 
 @pytest.mark.asyncio
