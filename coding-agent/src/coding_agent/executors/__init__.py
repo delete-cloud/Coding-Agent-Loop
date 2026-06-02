@@ -4,6 +4,7 @@ from .local_daemon import (
     LocalDaemonRuntimeExecution,
     LocalDaemonRuntimeProvider,
     LocalDaemonRuntimeResult,
+    RuntimeTurnCompletedHook,
     RuntimeTurnAdapter,
     RunExecutorTargetError,
 )
@@ -14,6 +15,7 @@ __all__ = [
     "LocalDaemonRuntimeExecution",
     "LocalDaemonRuntimeProvider",
     "LocalDaemonRuntimeResult",
+    "RuntimeTurnCompletedHook",
     "RuntimeTurnAdapter",
     "RunExecutorTargetError",
 ]

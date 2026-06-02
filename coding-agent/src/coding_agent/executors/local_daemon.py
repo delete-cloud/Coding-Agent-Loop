@@ -37,6 +37,10 @@ RuntimePreparedHook = Callable[
     [LocalDaemonRuntimeBinding],
     Awaitable[None] | None,
 ]
+RuntimeTurnCompletedHook = Callable[
+    [LocalDaemonRuntimeBinding, object],
+    Awaitable[None] | None,
+]
 
 
 @dataclass(frozen=True)
@@ -45,6 +49,7 @@ class LocalDaemonRuntimeExecution:
     runtime_provider: LocalDaemonRuntimeProvider
     prompt: str
     before_turn: RuntimePreparedHook | None = None
+    after_turn: RuntimeTurnCompletedHook | None = None
 
 
 @dataclass(frozen=True)
@@ -83,6 +88,10 @@ class LocalDaemonExecutor:
             if isawaitable(before_turn_result):
                 await before_turn_result
         outcome = await binding.adapter.run_turn(execution.prompt)
+        if execution.after_turn is not None:
+            after_turn_result = execution.after_turn(binding, outcome)
+            if isawaitable(after_turn_result):
+                await after_turn_result
         return LocalDaemonRuntimeResult(binding=binding, outcome=outcome)
 
     def _validate_request_target(self, request: RunRequest) -> None:

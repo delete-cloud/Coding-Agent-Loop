@@ -3976,7 +3976,61 @@ class SessionManager:
                         resume_context=resume_context,
                     )
 
-                execution_result = await self._local_daemon_executor.execute_runtime(
+                async def _after_local_daemon_turn(
+                    binding: LocalDaemonRuntimeBinding,
+                    outcome: object,
+                ) -> None:
+                    ctx = binding.ctx
+                    if self._runtime_store is not None:
+                        turn_outcome = self._require_turn_outcome(outcome)
+                        turn_status = self._status_from_turn_outcome(turn_outcome)
+                        session.tape_id = ctx.tape.tape_id
+                        await self._save_runtime_message_snapshot(
+                            session,
+                            ctx,
+                            run_id=run_id,
+                        )
+                        await self._finish_runtime_agent_run(
+                            session,
+                            run_id=run_id,
+                            status=turn_status,
+                            result=self._result_from_turn_outcome(turn_outcome),
+                            error=turn_outcome.error,
+                            resume_context=resume_context,
+                        )
+                        if turn_status == "failed":
+                            session.turn_status = "failed"
+                            reason = (
+                                turn_outcome.error or turn_outcome.stop_reason.value
+                            )
+                            session.last_failure_details = (
+                                f"Agent turn failed: {reason}"
+                            )
+                        else:
+                            session.last_failure_details = None
+                    else:
+                        session.tape_id = ctx.tape.tape_id
+                        turn_status = "completed"
+                        if isinstance(outcome, TurnOutcome):
+                            turn_status = self._status_from_turn_outcome(outcome)
+                            if turn_status == "failed":
+                                session.turn_status = "failed"
+                                reason = outcome.error or outcome.stop_reason.value
+                                session.last_failure_details = (
+                                    f"Agent turn failed: {reason}"
+                                )
+                            else:
+                                session.last_failure_details = None
+                        else:
+                            session.last_failure_details = None
+                    self._complete_agent_observation(
+                        observation_recorder,
+                        ctx=ctx,
+                        turn_status=turn_status,
+                    )
+                    await self._persist_session_async(session)
+
+                await self._local_daemon_executor.execute_runtime(
                     LocalDaemonRuntimeExecution(
                         request=run_request,
                         runtime_provider=_SessionLocalDaemonRuntimeProvider(
@@ -3988,54 +4042,9 @@ class SessionManager:
                         ),
                         prompt=prompt,
                         before_turn=_before_local_daemon_turn,
+                        after_turn=_after_local_daemon_turn,
                     )
                 )
-                ctx = execution_result.binding.ctx
-                outcome = execution_result.outcome
-                if self._runtime_store is not None:
-                    turn_outcome = self._require_turn_outcome(outcome)
-                    turn_status = self._status_from_turn_outcome(turn_outcome)
-                    session.tape_id = ctx.tape.tape_id
-                    await self._save_runtime_message_snapshot(
-                        session,
-                        ctx,
-                        run_id=run_id,
-                    )
-                    await self._finish_runtime_agent_run(
-                        session,
-                        run_id=run_id,
-                        status=turn_status,
-                        result=self._result_from_turn_outcome(turn_outcome),
-                        error=turn_outcome.error,
-                        resume_context=resume_context,
-                    )
-                    if turn_status == "failed":
-                        session.turn_status = "failed"
-                        reason = turn_outcome.error or turn_outcome.stop_reason.value
-                        session.last_failure_details = f"Agent turn failed: {reason}"
-                    else:
-                        session.last_failure_details = None
-                else:
-                    session.tape_id = ctx.tape.tape_id
-                    turn_status = "completed"
-                    if isinstance(outcome, TurnOutcome):
-                        turn_status = self._status_from_turn_outcome(outcome)
-                        if turn_status == "failed":
-                            session.turn_status = "failed"
-                            reason = outcome.error or outcome.stop_reason.value
-                            session.last_failure_details = (
-                                f"Agent turn failed: {reason}"
-                            )
-                        else:
-                            session.last_failure_details = None
-                    else:
-                        session.last_failure_details = None
-                self._complete_agent_observation(
-                    observation_recorder,
-                    ctx=ctx,
-                    turn_status=turn_status,
-                )
-                await self._persist_session_async(session)
             except FatalToolExecutionError as exc:
                 if observation_recorder is not None:
                     observation_recorder.fail_turn(error_type=type(exc).__name__)
