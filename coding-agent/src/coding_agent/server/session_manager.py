@@ -106,11 +106,9 @@ from coding_agent.wire.local import LocalWire
 from coding_agent.wire.protocol import (
     ApprovalRequest,
     ApprovalResponse,
-    CompletionStatus,
-    StreamDelta,
-    TurnEnd,
     WireMessage,
 )
+from coding_agent.wire.runtime import RuntimeTurnWire
 from coding_agent.server.stores.session_store import (
     SessionStore,
     create_session_store,
@@ -3917,34 +3915,17 @@ class SessionManager:
             observation = RuntimeTurnObservationState(
                 complete_observation=self._complete_agent_observation
             )
-
-            async def _notify_generic_local_daemon_turn_error(
-                session: Session,
-                exc: Exception,
-            ) -> None:
-                logger.exception("HTTP session turn failed")
-                await self._send_session_wire_message(
-                    session,
-                    StreamDelta(
-                        session_id=session_id,
-                        agent_id="",
-                        content=f"Error: {exc}",
-                    ),
-                )
-                await self._send_session_wire_message(
-                    session,
-                    TurnEnd(
-                        session_id=session_id,
-                        agent_id="",
-                        turn_id=run_id,
-                        completion_status=CompletionStatus.ERROR,
-                    ),
-                )
+            turn_wire = RuntimeTurnWire(
+                session_id=session_id,
+                run_id=run_id,
+                emit_message=self._send_session_wire_message,
+                log_exception=lambda message: logger.exception(message),
+            )
 
             turn_error_handler = RuntimeTurnErrorHandler(
                 turn_run=turn_run,
                 close_runtime=self._close_runtime,
-                notify_generic_error=_notify_generic_local_daemon_turn_error,
+                notify_generic_error=turn_wire.notify_generic_error,
                 fail_observation=observation.fail,
                 cancel_observation=observation.cancel,
             )

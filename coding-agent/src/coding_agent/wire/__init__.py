@@ -22,6 +22,7 @@ from coding_agent.wire.protocol import (
     TurnEnd,
     WireMessage,
 )
+from coding_agent.wire.runtime import RuntimeTurnWire
 
 # Additional message types used by loop.py (backward compatible)
 from dataclasses import dataclass, field
@@ -87,6 +88,7 @@ __all__ = [
     "ToolCallEnd",
     "StepInfo",
     "ErrorMessage",
+    "RuntimeTurnWire",
     # Wire implementations
     "LocalWire",
 ]
