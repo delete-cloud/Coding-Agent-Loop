@@ -27,6 +27,10 @@ class RuntimeTurnSession(Protocol):
     last_failure_details: str | None
 
 
+class RuntimeTurnErrorSession(RuntimeTurnSession, RuntimeRunSession, Protocol):
+    pass
+
+
 class RuntimeTurnStartSession(RuntimeRunSession, Protocol):
     runtime_message_bus: object
 
@@ -69,6 +73,18 @@ class RuntimeObservationCompleter(Protocol):
 
 class RuntimeTurnErrorAction(Protocol):
     async def __call__(self) -> None: ...
+
+
+class RuntimeSessionCloser(Protocol):
+    async def __call__(self, session: RuntimeTurnErrorSession) -> None: ...
+
+
+class RuntimeGenericErrorNotifier(Protocol):
+    async def __call__(
+        self,
+        session: RuntimeTurnErrorSession,
+        exc: Exception,
+    ) -> None: ...
 
 
 class RuntimeRootRunIdentityBinder(Protocol):
@@ -309,6 +325,64 @@ class RuntimeTurnErrorState:
 
 
 @dataclass(frozen=True)
+class RuntimeTurnErrorHandler:
+    turn_run: RuntimeTurnRunTracker
+    close_runtime: RuntimeSessionCloser
+    notify_generic_error: RuntimeGenericErrorNotifier
+    fail_observation: Callable[[str], None] | None = None
+    cancel_observation: Callable[[], None] | None = None
+
+    async def handle_fatal(
+        self,
+        session: RuntimeTurnErrorSession,
+        exc: BaseException,
+    ) -> None:
+        if self.fail_observation is not None:
+            self.fail_observation(type(exc).__name__)
+        await self.turn_run.finish_if_started(
+            session,
+            status="failed",
+            result={},
+            error=str(exc),
+        )
+        session.turn_status = "failed"
+        session.last_failure_details = f"Fatal tool execution failed: {exc}"
+        await self.close_runtime(session)
+
+    async def handle_cancelled(self, session: RuntimeTurnErrorSession) -> None:
+        if self.cancel_observation is not None:
+            self.cancel_observation()
+        await self.turn_run.finish_if_started(
+            session,
+            status="cancelled",
+            result={},
+            error="cancelled",
+        )
+
+    async def handle_generic(
+        self,
+        session: RuntimeTurnErrorSession,
+        exc: Exception,
+        *,
+        ensure_started: bool = False,
+    ) -> None:
+        if ensure_started:
+            await self.turn_run.ensure_started(session)
+        if self.fail_observation is not None:
+            self.fail_observation(type(exc).__name__)
+        await self.turn_run.finish_if_started(
+            session,
+            status="failed",
+            result={},
+            error=str(exc),
+        )
+        session.turn_status = "failed"
+        session.last_failure_details = f"HTTP session turn failed: {exc}"
+        await self.close_runtime(session)
+        await self.notify_generic_error(session, exc)
+
+
+@dataclass(frozen=True)
 class RuntimeTurnStarter:
     turn_run: RuntimeTurnRunTracker
     consumer: object
@@ -415,6 +489,8 @@ __all__ = [
     "RuntimeSubagentMessagePublisherBinder",
     "RuntimeTurnBinding",
     "RuntimeTurnErrorAction",
+    "RuntimeTurnErrorHandler",
+    "RuntimeTurnErrorSession",
     "RuntimeTurnErrorState",
     "RuntimeTurnFinalizer",
     "RuntimeTurnRunTracker",

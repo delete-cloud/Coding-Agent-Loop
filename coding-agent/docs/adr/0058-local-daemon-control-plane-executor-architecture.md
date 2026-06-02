@@ -167,6 +167,9 @@ This ADR does not implement that path.
   - Completed: local daemon before-turn runtime wiring is delegated to
     `RuntimeTurnStarter` instead of living inside `run_agent`'s before-turn
     closure.
+  - Completed: local daemon fatal/cancelled/generic turn error actions are
+    delegated to `RuntimeTurnErrorHandler` instead of living inside
+    `run_agent`.
   - Remaining: `SessionManager` still owns run lifecycle bookkeeping,
     checkpoint restore preparation details, observation callbacks, wire consumer
     setup, and some runtime close/error policy. These should move behind

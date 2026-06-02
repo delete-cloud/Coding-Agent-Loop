@@ -10,6 +10,7 @@ from coding_agent.adapter_types import StopReason, TurnOutcome
 from coding_agent.runtime_store import AgentRunRecord, JSONObject
 from coding_agent.runs import (
     RuntimeRunLifecycle,
+    RuntimeTurnErrorHandler,
     RuntimeTurnErrorState,
     RuntimeTurnFinalizer,
     RuntimeTurnRunTracker,
@@ -384,6 +385,143 @@ async def test_runtime_turn_error_state_marks_handler_failure_before_reraise() -
 
     assert state.handled is False
     assert state.handler_failed is True
+
+
+@pytest.mark.asyncio
+async def test_runtime_turn_error_handler_records_generic_failure() -> None:
+    store = RecordingRuntimeStore()
+    lifecycle = RuntimeRunLifecycle(
+        store=store,
+        metadata_for_session=lambda session, *, resume_context=None: {
+            "session_id": session.id,
+        },
+    )
+    tracker = RuntimeTurnRunTracker(
+        lifecycle=lifecycle,
+        run_id="run-1",
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    session = FakeTurnSession(id="session-1", tape_id="tape-1")
+    observation_failures: list[str] = []
+    closed: list[str] = []
+    notifications: list[tuple[str, str]] = []
+
+    async def close_runtime(session: FakeTurnSession) -> None:
+        closed.append(session.id)
+
+    async def notify_generic_error(
+        session: FakeTurnSession,
+        exc: Exception,
+    ) -> None:
+        notifications.append((session.id, str(exc)))
+
+    await tracker.ensure_started(session)
+    handler = RuntimeTurnErrorHandler(
+        turn_run=tracker,
+        close_runtime=close_runtime,
+        notify_generic_error=notify_generic_error,
+        fail_observation=observation_failures.append,
+    )
+
+    await handler.handle_generic(session, RuntimeError("boom"))
+
+    assert session.turn_status == "failed"
+    assert session.last_failure_details == "HTTP session turn failed: boom"
+    assert observation_failures == ["RuntimeError"]
+    assert closed == ["session-1"]
+    assert notifications == [("session-1", "boom")]
+    assert [update["status"] for update in store.updated] == ["running", "failed"]
+    assert store.updated[-1]["error"] == "boom"
+
+
+@pytest.mark.asyncio
+async def test_runtime_turn_error_handler_records_cancel_without_closing_runtime() -> (
+    None
+):
+    store = RecordingRuntimeStore()
+    lifecycle = RuntimeRunLifecycle(
+        store=store,
+        metadata_for_session=lambda session, *, resume_context=None: {
+            "session_id": session.id,
+        },
+    )
+    tracker = RuntimeTurnRunTracker(
+        lifecycle=lifecycle,
+        run_id="run-1",
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    session = FakeTurnSession(id="session-1", tape_id="tape-1")
+    cancelled: list[str] = []
+    closed: list[str] = []
+    notifications: list[str] = []
+
+    async def close_runtime(session: FakeTurnSession) -> None:
+        closed.append(session.id)
+
+    async def notify_generic_error(
+        session: FakeTurnSession,
+        exc: Exception,
+    ) -> None:
+        del session
+        notifications.append(str(exc))
+
+    await tracker.ensure_started(session)
+    handler = RuntimeTurnErrorHandler(
+        turn_run=tracker,
+        close_runtime=close_runtime,
+        notify_generic_error=notify_generic_error,
+        cancel_observation=lambda: cancelled.append("cancelled"),
+    )
+
+    await handler.handle_cancelled(session)
+
+    assert cancelled == ["cancelled"]
+    assert closed == []
+    assert notifications == []
+    assert store.updated[-1]["status"] == "cancelled"
+    assert store.updated[-1]["error"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_runtime_turn_error_handler_can_start_before_generic_failure() -> None:
+    store = RecordingRuntimeStore()
+    lifecycle = RuntimeRunLifecycle(
+        store=store,
+        metadata_for_session=lambda session, *, resume_context=None: {
+            "session_id": session.id,
+        },
+    )
+    tracker = RuntimeTurnRunTracker(
+        lifecycle=lifecycle,
+        run_id="run-1",
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    session = FakeTurnSession(id="session-1", tape_id="tape-1")
+
+    async def close_runtime(session: FakeTurnSession) -> None:
+        del session
+
+    async def notify_generic_error(
+        session: FakeTurnSession,
+        exc: Exception,
+    ) -> None:
+        del session, exc
+
+    handler = RuntimeTurnErrorHandler(
+        turn_run=tracker,
+        close_runtime=close_runtime,
+        notify_generic_error=notify_generic_error,
+    )
+
+    await handler.handle_generic(
+        session,
+        RuntimeError("submit failed"),
+        ensure_started=True,
+    )
+
+    assert tracker.created is True
+    assert store.created[0].status == "queued"
+    assert [update["status"] for update in store.updated] == ["running", "failed"]
 
 
 @pytest.mark.asyncio
