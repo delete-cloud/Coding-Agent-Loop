@@ -176,9 +176,11 @@ This ADR does not implement that path.
     to `RuntimeTurnSessionState`.
   - Completed: local daemon before/after/error hook orchestration is delegated
     to `RuntimeTurnController` instead of living inside `run_agent`.
+  - Completed: local daemon generic error wire notification is delegated to
+    `RuntimeTurnWire` instead of being assembled inline in `run_agent`.
   - Remaining: `SessionManager` still owns checkpoint restore preparation
-    details, wire consumer setup, and some runtime close/error policy. These
-    should move behind narrower RunService/EventStore/Executor lifecycle
+    details, wire consumer setup/binding, and some runtime close/error policy.
+    These should move behind narrower RunService/EventStore/Executor lifecycle
     boundaries before this item is considered complete.
 - [x] Demote `coding_agent run` to an inline testkit/devkit compatibility path.
   - `run` records `origin.mode = inline_testkit`.
