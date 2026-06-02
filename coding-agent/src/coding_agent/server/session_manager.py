@@ -61,7 +61,6 @@ from coding_agent.approval.store import ApprovalStore
 from coding_agent.core import config as core_config
 from coding_agent.plugins.storage import JSONLTapeStore
 from coding_agent.providers.base import ToolSchema
-from coding_agent.adapter_types import StopReason, TurnOutcome
 from coding_agent.runtime_store import (
     AgentInteractionRecord,
     AgentRunRecord,
@@ -90,7 +89,9 @@ from coding_agent.runs import (
     RunCoordinator,
     RunCoordinatorError,
     RunRequest,
+    RuntimeObservationCompleter,
     RuntimeRunLifecycle,
+    RuntimeTurnFinalizer,
     RunTarget,
     run_target_from_dict,
     run_target_from_execution_binding,
@@ -2397,19 +2398,6 @@ class SessionManager:
             return "cloud_workspace"
         return "server_embedded"
 
-    def _result_from_turn_outcome(self, outcome: TurnOutcome) -> JSONObject:
-        return {
-            "stop_reason": outcome.stop_reason.value,
-            "steps_taken": outcome.steps_taken,
-        }
-
-    def _status_from_turn_outcome(self, outcome: TurnOutcome) -> str:
-        if outcome.stop_reason == StopReason.INTERRUPTED:
-            return "interrupted"
-        if outcome.error is not None or outcome.stop_reason == StopReason.ERROR:
-            return "failed"
-        return "completed"
-
     def _agent_observation_status(self, turn_status: str) -> AgentObservationStatus:
         if turn_status in {"cancelled", "interrupted"}:
             return "cancelled"
@@ -2478,15 +2466,23 @@ class SessionManager:
             turn=self._latest_turn_trace(ctx),
         )
 
-    def _require_turn_outcome(self, outcome: object) -> TurnOutcome:
-        if not isinstance(outcome, TurnOutcome):
-            raise TypeError("runtime store requires PipelineAdapter.run_turn outcome")
-        return outcome
-
     def _runtime_run_lifecycle(self) -> RuntimeRunLifecycle:
         return RuntimeRunLifecycle(
             store=self._runtime_store,
             metadata_for_session=self._run_metadata_for_session,
+        )
+
+    def _runtime_turn_finalizer(
+        self,
+        *,
+        complete_observation: RuntimeObservationCompleter | None = None,
+    ) -> RuntimeTurnFinalizer:
+        return RuntimeTurnFinalizer(
+            has_runtime_store=self._runtime_store is not None,
+            save_message_snapshot=self._save_runtime_message_snapshot,
+            finish_run=self._finish_runtime_agent_run,
+            persist_session=self._persist_session_async,
+            complete_observation=complete_observation,
         )
 
     async def _finish_runtime_agent_run(
@@ -4063,54 +4059,27 @@ class SessionManager:
                     outcome: object,
                 ) -> None:
                     ctx = binding.ctx
-                    if self._runtime_store is not None:
-                        turn_outcome = self._require_turn_outcome(outcome)
-                        turn_status = self._status_from_turn_outcome(turn_outcome)
-                        session.tape_id = ctx.tape.tape_id
-                        await self._save_runtime_message_snapshot(
-                            session,
-                            ctx,
-                            run_id=run_id,
+
+                    def _complete_local_daemon_turn_observation(
+                        *,
+                        ctx: Any,
+                        turn_status: str,
+                    ) -> None:
+                        self._complete_agent_observation(
+                            observation_recorder,
+                            ctx=ctx,
+                            turn_status=turn_status,
                         )
-                        await self._finish_runtime_agent_run(
-                            session,
-                            run_id=run_id,
-                            status=turn_status,
-                            result=self._result_from_turn_outcome(turn_outcome),
-                            error=turn_outcome.error,
-                            resume_context=resume_context,
-                        )
-                        if turn_status == "failed":
-                            session.turn_status = "failed"
-                            reason = (
-                                turn_outcome.error or turn_outcome.stop_reason.value
-                            )
-                            session.last_failure_details = (
-                                f"Agent turn failed: {reason}"
-                            )
-                        else:
-                            session.last_failure_details = None
-                    else:
-                        session.tape_id = ctx.tape.tape_id
-                        turn_status = "completed"
-                        if isinstance(outcome, TurnOutcome):
-                            turn_status = self._status_from_turn_outcome(outcome)
-                            if turn_status == "failed":
-                                session.turn_status = "failed"
-                                reason = outcome.error or outcome.stop_reason.value
-                                session.last_failure_details = (
-                                    f"Agent turn failed: {reason}"
-                                )
-                            else:
-                                session.last_failure_details = None
-                        else:
-                            session.last_failure_details = None
-                    self._complete_agent_observation(
-                        observation_recorder,
+
+                    await self._runtime_turn_finalizer(
+                        complete_observation=_complete_local_daemon_turn_observation
+                    ).complete(
+                        session,
                         ctx=ctx,
-                        turn_status=turn_status,
+                        outcome=outcome,
+                        run_id=run_id,
+                        resume_context=resume_context,
                     )
-                    await self._persist_session_async(session)
 
                 await self._run_coordinator.execute_runtime(
                     LocalDaemonRuntimeExecution(
