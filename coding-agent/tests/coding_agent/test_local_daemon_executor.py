@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from coding_agent.executors import (
@@ -50,6 +52,16 @@ class FakeRuntimeProvider:
     async def prepare_runtime(self, request: RunRequest) -> LocalDaemonRuntimeBinding:
         self.requests.append(request)
         return self.binding
+
+
+class FailingRuntimeAdapter:
+    def __init__(self, exc: BaseException) -> None:
+        self.exc = exc
+        self.prompts: list[str] = []
+
+    async def run_turn(self, prompt: str) -> object:
+        self.prompts.append(prompt)
+        raise self.exc
 
 
 @pytest.mark.asyncio
@@ -153,6 +165,73 @@ async def test_local_daemon_executor_runs_after_turn_after_adapter() -> None:
         ("after_turn", ["implement the task"], {"status": "completed"})
     ]
     assert adapter.prompts == ["implement the task"]
+
+
+@pytest.mark.asyncio
+async def test_local_daemon_executor_runs_turn_error_hook_and_reraises() -> None:
+    request = _local_request()
+    error = RuntimeError("turn exploded")
+    adapter = FailingRuntimeAdapter(error)
+    binding = LocalDaemonRuntimeBinding(
+        pipeline=object(),
+        ctx=object(),
+        adapter=adapter,
+    )
+    provider = FakeRuntimeProvider(binding)
+    events: list[tuple[str, list[str], BaseException]] = []
+
+    async def on_turn_error(
+        prepared: LocalDaemonRuntimeBinding,
+        exc: BaseException,
+    ) -> None:
+        assert prepared is binding
+        events.append(("on_turn_error", list(adapter.prompts), exc))
+
+    with pytest.raises(RuntimeError, match="turn exploded"):
+        _ = await LocalDaemonExecutor().execute_runtime(
+            LocalDaemonRuntimeExecution(
+                request=request,
+                runtime_provider=provider,
+                prompt="implement the task",
+                on_turn_error=on_turn_error,
+            )
+        )
+
+    assert events == [("on_turn_error", ["implement the task"], error)]
+
+
+@pytest.mark.asyncio
+async def test_local_daemon_executor_runs_turn_error_hook_for_cancel() -> None:
+    request = _local_request()
+    error = asyncio.CancelledError()
+    adapter = FailingRuntimeAdapter(error)
+    binding = LocalDaemonRuntimeBinding(
+        pipeline=object(),
+        ctx=object(),
+        adapter=adapter,
+    )
+    provider = FakeRuntimeProvider(binding)
+    events: list[BaseException] = []
+
+    async def on_turn_error(
+        prepared: LocalDaemonRuntimeBinding,
+        exc: BaseException,
+    ) -> None:
+        assert prepared is binding
+        events.append(exc)
+
+    with pytest.raises(asyncio.CancelledError):
+        _ = await LocalDaemonExecutor().execute_runtime(
+            LocalDaemonRuntimeExecution(
+                request=request,
+                runtime_provider=provider,
+                prompt="cancel the task",
+                on_turn_error=on_turn_error,
+            )
+        )
+
+    assert events == [error]
+    assert adapter.prompts == ["cancel the task"]
 
 
 @pytest.mark.asyncio

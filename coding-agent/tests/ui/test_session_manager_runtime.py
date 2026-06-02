@@ -735,6 +735,7 @@ async def test_run_agent_executes_local_runtime_through_local_daemon_executor(
     assert execution.prompt == "implement runtime ownership"
     assert execution.before_turn is not None
     assert execution.after_turn is not None
+    assert execution.on_turn_error is not None
     assert isinstance(execution.request.target.executor, LocalDaemonExecutorRef)
     assert isinstance(execution.request.target.workspace, LocalPathWorkspaceRef)
     assert execution.request.target.workspace.path == str(workspace.resolve())
