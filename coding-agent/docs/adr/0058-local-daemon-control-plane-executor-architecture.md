@@ -173,8 +173,10 @@ This ADR does not implement that path.
   checkpoint stores.
 - Make sandbox policy the default executor environment wrapper rather than a
   mixed local/cloud environment concern.
-- Add the daemon-backed non-interactive client path that should eventually
-  replace one-shot inline `run` for product dogfood.
+- Add daemon-backed client surfaces for the local product path. REPL/TUI/CLI
+  clients should pair with or connect to the local daemon instead of owning an
+  in-process runtime manager, and a daemon-backed non-interactive client should
+  eventually replace one-shot inline `run` for product dogfood.
 
 ## References
 
