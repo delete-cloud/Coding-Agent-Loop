@@ -73,6 +73,12 @@ from coding_agent.runtime_store import (
     SQLiteRuntimeStore,
     JSONValue as RuntimeJSONValue,
 )
+from coding_agent.runs import (
+    DefaultRunCoordinator,
+    RunCoordinator,
+    RunRequest,
+    run_target_from_execution_binding,
+)
 from coding_agent.wire.local import LocalWire
 from coding_agent.wire.protocol import (
     ApprovalRequest,
@@ -1221,6 +1227,7 @@ class SessionManager:
         owner_id: str | None = None,
         fencing_token: int | None = None,
         owner_lease_seconds: float = 30.0,
+        run_coordinator: RunCoordinator | None = None,
     ):
         self._storage_config = storage_config or {}
         self._pg_pool = pg_pool
@@ -1245,6 +1252,9 @@ class SessionManager:
         )
         self._create_agent = create_agent_fn
         self._binding_resolver = binding_resolver or DefaultBindingResolver()
+        self._run_coordinator = (
+            DefaultRunCoordinator() if run_coordinator is None else run_coordinator
+        )
         self._provisioned_cloud_binding_cleanup = provisioned_cloud_binding_cleanup
         self._workspace_metadata_store = workspace_metadata_store
         self._runtime_store = (
@@ -1303,6 +1313,9 @@ class SessionManager:
         runtime_store: RuntimeStoreProtocol | None,
     ) -> None:
         self._runtime_store = runtime_store
+
+    def configure_run_coordinator(self, run_coordinator: RunCoordinator) -> None:
+        self._run_coordinator = run_coordinator
 
     def _require_runtime_store(self) -> RuntimeStoreProtocol:
         if self._runtime_store is None:
@@ -3345,6 +3358,26 @@ class SessionManager:
             return None
         return Path(local_root).expanduser().resolve()
 
+    async def _submit_runtime_run_request(
+        self,
+        session: Session,
+        *,
+        run_id: str,
+        prompt: str,
+        resume_context: SessionResumeContext | None = None,
+    ) -> None:
+        input_summary = prompt if prompt.strip() else None
+        request = RunRequest(
+            session_id=session.id,
+            run_id=run_id,
+            target=run_target_from_execution_binding(session.execution_binding),
+            input_summary=input_summary,
+            resume_from_run_id=(
+                None if resume_context is None else resume_context.previous_run_id
+            ),
+        )
+        await self._run_coordinator.submit_run(request)
+
     def _invalidate_runtime(self, session: Session) -> None:
         session.runtime_pipeline = None
         session.runtime_ctx = None
@@ -3840,6 +3873,12 @@ class SessionManager:
                     session,
                     run_id=run_id,
                     started_at=started_at,
+                    resume_context=resume_context,
+                )
+                await self._submit_runtime_run_request(
+                    session,
+                    run_id=run_id,
+                    prompt=prompt,
                     resume_context=resume_context,
                 )
                 if agent_run_created:
