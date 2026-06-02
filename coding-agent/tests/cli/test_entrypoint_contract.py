@@ -91,6 +91,8 @@ def test_run_help_marks_command_as_dev_testkit_compatibility() -> None:
     assert result.exit_code == 0
     assert "dev/testkit one-shot local session" in result.output
     assert "compatibility path" in result.output
+    assert "--patch" not in result.output
+    assert "--verify-cmd" not in result.output
 
 
 def test_run_command_uses_managed_session(
@@ -253,6 +255,7 @@ def test_run_patch_mode_augments_goal_and_requires_worktree_change(
     )
 
     assert result.exit_code == 0
+    assert "deprecated dev/testkit compatibility flag" in result.stderr
     assert verify_calls == [
         (
             tmp_path,

@@ -93,6 +93,10 @@ uv run python -m coding_agent run \
 target local product path; the local product direction is REPL/client surfaces
 backed by durable local session/runtime management.
 
+Legacy patch-enforcing flags such as `run --patch` and `run --verify-cmd` remain
+accepted for existing dev/testkit scripts, but they are hidden compatibility
+flags and should not be treated as product dogfood surfaces.
+
 Parallel execution is enabled by default for safe independent tool calls:
 
 ```bash

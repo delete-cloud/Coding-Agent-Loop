@@ -146,13 +146,15 @@ def main(ctx, model, provider_name, base_url, api_key):
     "--patch",
     "patch_mode",
     is_flag=True,
-    help="Require the dev/testkit one-shot run to produce repository changes.",
+    hidden=True,
+    help="Deprecated dev/testkit compatibility flag.",
 )
 @click.option(
     "--verify-cmd",
     "verify_commands",
     multiple=True,
-    help="Post-run verification command. Repeat for multiple commands.",
+    hidden=True,
+    help="Deprecated dev/testkit compatibility flag. Repeat for multiple commands.",
 )
 @click.pass_context
 def run(
@@ -186,6 +188,8 @@ def run(
     )
 
     repo_root = Path(config.repo).expanduser().resolve()
+    if patch_mode or verify_commands:
+        _warn_deprecated_run_patch_flags()
     before_snapshot = _capture_worktree_snapshot(repo_root) if patch_mode else None
     effective_goal = (
         _patch_oriented_goal(goal, tuple(verify_commands)) if patch_mode else goal
@@ -201,6 +205,15 @@ def run(
         _ensure_patch_run_changed_worktree(before_snapshot, after_snapshot)
     if verify_commands:
         _run_post_run_verification(repo_root, tuple(verify_commands))
+
+
+def _warn_deprecated_run_patch_flags() -> None:
+    click.echo(
+        "Warning: coding_agent run --patch/--verify-cmd are deprecated "
+        "dev/testkit compatibility flags; use REPL or daemon-backed sessions "
+        "for product dogfood.",
+        err=True,
+    )
 
 
 def _patch_oriented_goal(goal: str, verify_commands: tuple[str, ...]) -> str:
