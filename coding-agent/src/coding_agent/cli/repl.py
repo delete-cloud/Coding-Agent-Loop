@@ -17,6 +17,7 @@ from coding_agent.cli.local_runtime import (
     LocalCliSessionManager,
     create_local_cli_runtime,
     create_local_cli_session_manager,
+    local_cli_session_origin,
 )
 from coding_agent.cli.terminal_output import (
     get_prompt_output,
@@ -162,6 +163,10 @@ class InteractiveSession:
             raise RuntimeError("REPL pipeline is not initialized")
         session_id = await self._session_manager.create_session(
             repo_path=self.config.repo,
+            origin=local_cli_session_origin(
+                entrypoint="repl",
+                mode="interactive",
+            ),
             approval_policy=self._approval_policy(),
             provider_name=self.config.provider,
             model_name=self.config.model,
@@ -181,6 +186,10 @@ class InteractiveSession:
     async def _create_managed_session(self) -> str:
         session_id = await self._session_manager.create_session(
             repo_path=self.config.repo,
+            origin=local_cli_session_origin(
+                entrypoint="repl",
+                mode="interactive",
+            ),
             approval_policy=self._approval_policy(),
             provider_name=self.config.provider,
             model_name=self.config.model,

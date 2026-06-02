@@ -1455,6 +1455,11 @@ class TestReplInitialization:
             created_sessions
             and created_sessions[0]["provider_name"] == session.config.provider
         )
+        assert created_sessions[0]["origin"] == {
+            "channel": "local_cli",
+            "entrypoint": "repl",
+            "mode": "interactive",
+        }
         assert session._pipeline_ctx is fake_ctx
 
     @pytest.mark.asyncio

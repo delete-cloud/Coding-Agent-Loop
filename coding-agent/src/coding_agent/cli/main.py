@@ -27,6 +27,7 @@ from coding_agent.approval import ApprovalPolicy
 from coding_agent.cli.local_runtime import (
     LocalCliSessionManager,
     create_local_cli_session_manager,
+    local_cli_session_origin,
 )
 from coding_agent.storage_migration import migrate_legacy_storage_to_sqlite
 from coding_agent.ui.headless import HeadlessConsumer
@@ -586,6 +587,10 @@ async def _run_managed_one_shot(config: Config, goal: str, consumer) -> None:
     try:
         session_id = await session_manager.create_session(
             repo_path=Path(config.repo),
+            origin=local_cli_session_origin(
+                entrypoint="run",
+                mode="inline_testkit",
+            ),
             approval_policy=_approval_policy_from_config(config.approval_mode),
             provider_name=config.provider,
             model_name=config.model,
