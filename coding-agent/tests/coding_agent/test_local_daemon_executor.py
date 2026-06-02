@@ -121,6 +121,41 @@ async def test_local_daemon_executor_runs_before_turn_after_preparation() -> Non
 
 
 @pytest.mark.asyncio
+async def test_local_daemon_executor_runs_after_turn_after_adapter() -> None:
+    request = _local_request()
+    adapter = FakeRuntimeAdapter(result={"status": "completed"})
+    binding = LocalDaemonRuntimeBinding(
+        pipeline=object(),
+        ctx=object(),
+        adapter=adapter,
+    )
+    provider = FakeRuntimeProvider(binding)
+    events: list[tuple[str, list[str], object]] = []
+
+    async def after_turn(
+        prepared: LocalDaemonRuntimeBinding,
+        outcome: object,
+    ) -> None:
+        assert prepared is binding
+        events.append(("after_turn", list(adapter.prompts), outcome))
+
+    result = await LocalDaemonExecutor().execute_runtime(
+        LocalDaemonRuntimeExecution(
+            request=request,
+            runtime_provider=provider,
+            prompt="implement the task",
+            after_turn=after_turn,
+        )
+    )
+
+    assert result.outcome == {"status": "completed"}
+    assert events == [
+        ("after_turn", ["implement the task"], {"status": "completed"})
+    ]
+    assert adapter.prompts == ["implement the task"]
+
+
+@pytest.mark.asyncio
 async def test_local_daemon_executor_rejects_non_local_daemon_executor() -> None:
     request = RunRequest(
         session_id="session-1",
