@@ -13,7 +13,12 @@ import pytest
 
 from coding_agent.approval.store import ApprovalStore
 from coding_agent.environment.execution_binding import LocalExecutionBinding
-from coding_agent.runs import LocalPathWorkspaceRef
+from coding_agent.runs import (
+    IsolationPolicy,
+    LocalDaemonExecutorRef,
+    LocalPathWorkspaceRef,
+    RunTarget,
+)
 from coding_agent.server.session_manager import (
     Session,
     SessionManager,
@@ -1370,7 +1375,9 @@ def test_session_record_derives_default_run_target_for_legacy_payload() -> None:
     assert reloaded.default_run_target == session.default_run_target
 
 
-def test_session_execution_binding_assignment_updates_default_run_target() -> None:
+def test_session_execution_binding_assignment_updates_derived_default_run_target() -> (
+    None
+):
     session = Session(
         id="record-session",
         created_at=datetime.now(UTC),
@@ -1382,6 +1389,91 @@ def test_session_execution_binding_assignment_updates_default_run_target() -> No
 
     assert isinstance(session.default_run_target.workspace, LocalPathWorkspaceRef)
     assert session.default_run_target.workspace.path == "/changed"
+
+
+def test_session_execution_binding_assignment_preserves_explicit_default_run_target() -> (
+    None
+):
+    session = Session(
+        id="record-session",
+        created_at=datetime.now(UTC),
+        last_activity=datetime.now(UTC),
+        approval_store=ApprovalStore(),
+        execution_binding=LocalExecutionBinding(workspace_root="/legacy"),
+    )
+    explicit_target = RunTarget(
+        workspace=LocalPathWorkspaceRef(path="/canonical-target"),
+        executor=LocalDaemonExecutorRef(),
+        isolation=IsolationPolicy(kind="default_local_sandbox"),
+    )
+    session.default_run_target = explicit_target
+
+    session.execution_binding = LocalExecutionBinding(workspace_root="/compat-changed")
+
+    assert isinstance(session.execution_binding, LocalExecutionBinding)
+    assert session.execution_binding.workspace_root == "/compat-changed"
+    assert session.default_run_target == explicit_target
+
+
+def test_session_execution_binding_assignment_preserves_explicit_equal_target() -> (
+    None
+):
+    session = Session(
+        id="record-session",
+        created_at=datetime.now(UTC),
+        last_activity=datetime.now(UTC),
+        approval_store=ApprovalStore(),
+        execution_binding=LocalExecutionBinding(workspace_root="/legacy"),
+    )
+    explicit_target = session.default_run_target
+    session.default_run_target = explicit_target
+
+    session.execution_binding = LocalExecutionBinding(workspace_root="/compat-changed")
+
+    assert isinstance(session.execution_binding, LocalExecutionBinding)
+    assert session.execution_binding.workspace_root == "/compat-changed"
+    assert session.default_run_target == explicit_target
+
+
+def test_reloaded_session_preserves_persisted_default_run_target_authority() -> None:
+    session = Session(
+        id="record-session",
+        created_at=datetime.now(UTC),
+        last_activity=datetime.now(UTC),
+        approval_store=ApprovalStore(),
+        execution_binding=LocalExecutionBinding(workspace_root="/legacy"),
+    )
+    explicit_target = session.default_run_target
+    payload = session.to_store_data()
+
+    reloaded = SessionRecord.from_store_data(payload).to_session()
+    reloaded.execution_binding = LocalExecutionBinding(workspace_root="/compat-changed")
+
+    assert isinstance(reloaded.execution_binding, LocalExecutionBinding)
+    assert reloaded.execution_binding.workspace_root == "/compat-changed"
+    assert reloaded.default_run_target == explicit_target
+
+
+def test_legacy_reloaded_session_keeps_derived_default_run_target_compat_sync() -> (
+    None
+):
+    session = Session(
+        id="record-session",
+        created_at=datetime.now(UTC),
+        last_activity=datetime.now(UTC),
+        approval_store=ApprovalStore(),
+        execution_binding=LocalExecutionBinding(workspace_root="/legacy"),
+    )
+    payload = session.to_store_data()
+    payload.pop("default_run_target")
+
+    reloaded = SessionRecord.from_store_data(payload).to_session()
+    reloaded.execution_binding = LocalExecutionBinding(workspace_root="/compat-changed")
+
+    assert isinstance(reloaded.execution_binding, LocalExecutionBinding)
+    assert reloaded.execution_binding.workspace_root == "/compat-changed"
+    assert isinstance(reloaded.default_run_target.workspace, LocalPathWorkspaceRef)
+    assert reloaded.default_run_target.workspace.path == "/compat-changed"
 
 
 def test_session_record_excludes_process_local_runtime_state() -> None:
