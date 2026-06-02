@@ -136,14 +136,47 @@ This ADR does not implement that path.
 - [x] `uv run pytest tests/coding_agent/test_run_target.py tests/ui/test_execution_binding.py -v`
 - [x] `uv run ruff check src/coding_agent/runs tests/coding_agent/test_run_target.py`
 
-## Follow-up Implementation Tasks
+## Follow-up Implementation Status
 
-- Split durable `SessionRecord` data from process-local `SessionRuntimeHandle`
-  state.
-- Introduce a `RunCoordinator` boundary that selects an executor from
+- [x] Split durable `SessionRecord` data from process-local
+  `SessionRuntimeHandle` state.
+  - Durable session payloads are represented through `SessionRecord`.
+  - Process-local runtime objects live under `SessionRuntimeHandle`.
+  - Store payload tests assert runtime handles are not persisted.
+- [x] Introduce a `RunCoordinator` boundary that selects an executor from
   `RunTarget`.
-- Move runtime ownership behind `LocalDaemonExecutor`.
-- Demote `coding_agent run` to an inline testkit/devkit compatibility path.
+  - `DefaultRunCoordinator` preserves `RunTarget.executor`.
+  - Local daemon runtime execution is delegated through
+    `RunCoordinator.execute_runtime`.
+  - Unsupported managed runtime execution is rejected by `RunCoordinator`, not
+    prefiltered by `SessionManager`.
+- [~] Move runtime ownership behind `LocalDaemonExecutor`.
+  - Completed: local daemon runtime preparation, checkpoint restore runtime
+    preparation, and runtime execution route through `LocalDaemonExecutor`.
+  - Remaining: `SessionManager` still owns run lifecycle bookkeeping,
+    observation callbacks, wire consumer setup, and some runtime close/error
+    policy. These should move behind narrower RunService/EventStore/Executor
+    lifecycle boundaries before this item is considered complete.
+- [x] Demote `coding_agent run` to an inline testkit/devkit compatibility path.
+  - `run` records `origin.mode = inline_testkit`.
+  - CLI and README describe `run` as dev/testkit one-shot compatibility.
+  - Legacy `run --patch` and `run --verify-cmd` remain accepted but hidden and
+    deprecated.
+
+## Remaining Implementation Gaps
+
+- Extract durable run lifecycle operations from `SessionManager` into a
+  run/service boundary instead of inline `run_agent` closures.
+- Split internal `RuntimeEvent` facts from user-facing `DisplayEvent`
+  projections.
+- Establish explicit Store contracts for session, run, event, approval, and
+  checkpoint stores.
+- Make sandbox policy the default executor environment wrapper rather than a
+  mixed local/cloud environment concern.
+- Add daemon-backed client surfaces for the local product path. REPL/TUI/CLI
+  clients should pair with or connect to the local daemon instead of owning an
+  in-process runtime manager, and a daemon-backed non-interactive client should
+  eventually replace one-shot inline `run` for product dogfood.
 
 ## References
 
