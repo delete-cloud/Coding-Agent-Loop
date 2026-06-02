@@ -3901,6 +3901,7 @@ class SessionManager:
             agent_run_created = False
             observation_recorder: AgentObservationRecorder | None = None
             turn_error_handled = False
+            turn_error_handler_failed = False
 
             async def _handle_fatal_local_daemon_turn_error(
                 exc: FatalToolExecutionError,
@@ -3974,18 +3975,30 @@ class SessionManager:
                 exc: BaseException,
             ) -> None:
                 del binding
-                nonlocal turn_error_handled
+                nonlocal turn_error_handled, turn_error_handler_failed
                 if isinstance(exc, FatalToolExecutionError):
+                    try:
+                        await _handle_fatal_local_daemon_turn_error(exc)
+                    except BaseException:
+                        turn_error_handler_failed = True
+                        raise
                     turn_error_handled = True
-                    await _handle_fatal_local_daemon_turn_error(exc)
                     return
                 if isinstance(exc, asyncio.CancelledError):
+                    try:
+                        await _handle_cancelled_local_daemon_turn_error()
+                    except BaseException:
+                        turn_error_handler_failed = True
+                        raise
                     turn_error_handled = True
-                    await _handle_cancelled_local_daemon_turn_error()
                     return
                 if isinstance(exc, Exception):
+                    try:
+                        await _handle_generic_local_daemon_turn_error(exc)
+                    except BaseException:
+                        turn_error_handler_failed = True
+                        raise
                     turn_error_handled = True
-                    await _handle_generic_local_daemon_turn_error(exc)
 
             try:
                 consumer = self._make_session_consumer(session)
@@ -4133,14 +4146,20 @@ class SessionManager:
                     )
                 )
             except FatalToolExecutionError as exc:
+                if turn_error_handler_failed:
+                    raise
                 if not turn_error_handled:
                     await _handle_fatal_local_daemon_turn_error(exc)
                 raise
             except asyncio.CancelledError:
+                if turn_error_handler_failed:
+                    raise
                 if not turn_error_handled:
                     await _handle_cancelled_local_daemon_turn_error()
                 raise
             except Exception as exc:
+                if turn_error_handler_failed:
+                    raise
                 if not turn_error_handled:
                     await _handle_generic_local_daemon_turn_error(exc)
             finally:

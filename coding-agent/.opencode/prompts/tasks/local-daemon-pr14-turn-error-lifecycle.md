@@ -31,7 +31,7 @@ Relevant files:
 
 Target tests:
 - `uv run pytest tests/coding_agent/test_local_daemon_executor.py -v`
-- `uv run pytest tests/ui/test_session_manager_runtime.py -k "local_daemon_executor or closes_cached_runtime_after_turn_failure or reraises_fatal_tool_execution_error or reraises_owner_conflict or cancel_session_turn or bootstrap_fails" -v`
+- `uv run pytest tests/ui/test_session_manager_runtime.py -k "local_daemon_executor or closes_cached_runtime_after_turn_failure or propagates_runtime_close_failure or reraises_fatal_tool_execution_error or reraises_owner_conflict or cancel_session_turn or bootstrap_fails" -v`
 - `uv run pytest tests/ui/test_session_manager_runtime.py -v`
 - `uv run pytest tests/ui/test_session_manager_public_api.py -k "run_agent or ensure_session_runtime" -v`
 - `uv run ruff check src/coding_agent/executors src/coding_agent/server/session_manager.py tests/coding_agent/test_local_daemon_executor.py tests/ui/test_session_manager_runtime.py tests/ui/test_session_manager_public_api.py`
