@@ -173,9 +173,12 @@ This ADR does not implement that path.
   projections.
   - Completed: `DisplayEvent` model and projection helpers exist under
     `coding_agent.events`.
-  - Completed: `SessionManager.replay_display_events()` projects stored
-    runtime events through a service boundary and scans past internal-only
+  - Completed: `RuntimeEventReplayService` projects stored runtime events
+    through a `RuntimeEventStore` service boundary and scans past internal-only
     runtime facts.
+  - Completed: `SessionManager.replay_runtime_events()` and
+    `SessionManager.replay_display_events()` are compatibility delegates to the
+    replay service.
   - Completed: `GET /runs/{run_id}/display-events` exposes an additive
     user-facing replay endpoint without changing `GET /runs/{run_id}/events`.
   - Remaining: live SSE/UI rendering still uses existing wire/runtime event
@@ -186,9 +189,11 @@ This ADR does not implement that path.
     checkpoint surfaces.
   - Completed: `SessionManager` depends on the shared `RuntimeStore` contract
     instead of an inline server-local protocol.
-  - Remaining: service ownership is still combined around a single runtime
-    store dependency; run/event/approval/checkpoint services should consume the
-    narrower contracts independently.
+  - Completed: runtime event replay consumes the narrower `RuntimeEventStore`
+    contract through `RuntimeEventReplayService`.
+  - Remaining: run, approval, and checkpoint service ownership is still
+    combined around a single runtime store dependency; those services should
+    consume narrower contracts independently.
 
 ## Remaining Implementation Gaps
 
