@@ -10,6 +10,7 @@ from coding_agent.runs import (
     LocalPathWorkspaceRef,
     ManagedPoolExecutorRef,
     RunCoordinator,
+    RunCoordinatorError,
     RunRequest,
     RunSubmission,
     RunTarget,
@@ -19,6 +20,7 @@ from coding_agent.runs import (
 class RecordingRunExecutor:
     def __init__(self) -> None:
         self.requests: list[RunRequest] = []
+        self.executions: list[object] = []
 
     async def submit_run(self, request: RunRequest) -> RunSubmission:
         self.requests.append(request)
@@ -29,6 +31,15 @@ class RecordingRunExecutor:
             executor=request.target.executor,
             metadata={"delegated": "local_daemon"},
         )
+
+    async def execute_runtime(self, execution: object) -> object:
+        self.executions.append(execution)
+        return {"delegated": "local_runtime"}
+
+
+class RuntimeExecutionStub:
+    def __init__(self, request: RunRequest) -> None:
+        self.request = request
 
 
 def _local_target() -> RunTarget:
@@ -46,8 +57,15 @@ async def _submit_through_protocol(
     return await coordinator.submit_run(request)
 
 
+async def _execute_through_protocol(
+    coordinator: RunCoordinator,
+    execution: RuntimeExecutionStub,
+) -> object:
+    return await coordinator.execute_runtime(execution)
+
+
 @pytest.mark.asyncio
-async def test_default_run_coordinator_satisfies_protocol() -> None:
+async def test_default_run_coordinator_satisfies_submit_protocol() -> None:
     target = _local_target()
     request = RunRequest(session_id="session-1", run_id="run-1", target=target)
 
@@ -55,6 +73,22 @@ async def test_default_run_coordinator_satisfies_protocol() -> None:
 
     assert submission.executor is target.executor
     assert submission.status == "accepted"
+
+
+@pytest.mark.asyncio
+async def test_default_run_coordinator_satisfies_runtime_protocol() -> None:
+    executor = RecordingRunExecutor()
+    target = _local_target()
+    request = RunRequest(session_id="session-1", run_id="run-1", target=target)
+    execution = RuntimeExecutionStub(request)
+
+    result = await _execute_through_protocol(
+        DefaultRunCoordinator(local_daemon_executor=executor),
+        execution,
+    )
+
+    assert result == {"delegated": "local_runtime"}
+    assert executor.executions == [execution]
 
 
 @pytest.mark.asyncio
@@ -144,6 +178,59 @@ async def test_default_run_coordinator_delegates_local_daemon_executor() -> None
 
     assert executor.requests == [request]
     assert submission.metadata == {"delegated": "local_daemon"}
+
+
+@pytest.mark.asyncio
+async def test_default_run_coordinator_delegates_local_runtime_execution() -> None:
+    executor = RecordingRunExecutor()
+    target = _local_target()
+    request = RunRequest(session_id="session-1", run_id="run-1", target=target)
+    execution = RuntimeExecutionStub(request)
+
+    result = await DefaultRunCoordinator(
+        local_daemon_executor=executor,
+    ).execute_runtime(execution)
+
+    assert result == {"delegated": "local_runtime"}
+    assert executor.executions == [execution]
+
+
+@pytest.mark.asyncio
+async def test_default_run_coordinator_rejects_missing_local_runtime_executor() -> None:
+    request = RunRequest(
+        session_id="session-1",
+        run_id="run-1",
+        target=_local_target(),
+    )
+
+    with pytest.raises(
+        RunCoordinatorError,
+        match="local_daemon runtime executor is not configured",
+    ):
+        _ = await DefaultRunCoordinator().execute_runtime(
+            RuntimeExecutionStub(request)
+        )
+
+
+@pytest.mark.asyncio
+async def test_default_run_coordinator_rejects_managed_runtime_execution() -> None:
+    target = RunTarget(
+        workspace=CloudWorkspaceRef(
+            workspace_url="docker://workspace/ws-1",
+            workspace_id="ws-1",
+        ),
+        executor=ManagedPoolExecutorRef(pool="cloud"),
+        isolation=IsolationPolicy(kind="provider_sandbox"),
+    )
+    request = RunRequest(session_id="session-1", run_id="run-1", target=target)
+
+    with pytest.raises(
+        RunCoordinatorError,
+        match="managed_pool runtime execution is not available through this coordinator",
+    ):
+        _ = await DefaultRunCoordinator(
+            local_daemon_executor=RecordingRunExecutor(),
+        ).execute_runtime(RuntimeExecutionStub(request))
 
 
 def test_run_request_rejects_empty_ids_and_metadata() -> None:

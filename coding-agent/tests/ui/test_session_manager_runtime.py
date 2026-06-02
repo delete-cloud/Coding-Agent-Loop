@@ -321,6 +321,8 @@ class FakeRuntimeStore:
 class RecordingRunCoordinator:
     def __init__(self) -> None:
         self.requests: list[RunRequest] = []
+        self.executions: list[LocalDaemonRuntimeExecution] = []
+        self.results: list[LocalDaemonRuntimeResult] = []
 
     async def submit_run(self, request: RunRequest) -> RunSubmission:
         self.requests.append(request)
@@ -331,6 +333,15 @@ class RecordingRunCoordinator:
             executor=request.target.executor,
             metadata=request.metadata,
         )
+
+    async def execute_runtime(
+        self,
+        execution: LocalDaemonRuntimeExecution,
+    ) -> LocalDaemonRuntimeResult:
+        self.executions.append(execution)
+        result = await LocalDaemonExecutor().execute_runtime(execution)
+        self.results.append(result)
+        return result
 
 
 class RecordingLocalDaemonExecutor(LocalDaemonExecutor):
@@ -684,6 +695,11 @@ async def test_run_agent_submits_run_request_to_run_coordinator(
     assert isinstance(request.target.executor, LocalDaemonExecutorRef)
     assert isinstance(request.target.workspace, LocalPathWorkspaceRef)
     assert request.target.workspace.path == str(target_workspace.resolve())
+    assert len(run_coordinator.executions) == 1
+    execution = run_coordinator.executions[0]
+    assert execution.request is request
+    assert execution.prompt == "implement coordinator integration"
+    assert len(run_coordinator.results) == 1
     assert runtime_store.updated[0]["status"] == "running"
     assert runtime_store.updated[-1]["status"] == "completed"
 

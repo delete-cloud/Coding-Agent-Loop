@@ -4275,7 +4275,7 @@ class SessionManager:
                     )
                     await self._persist_session_async(session)
 
-                await self._local_daemon_executor.execute_runtime(
+                await self._run_coordinator.execute_runtime(
                     LocalDaemonRuntimeExecution(
                         request=run_request,
                         runtime_provider=_SessionLocalDaemonRuntimeProvider(
