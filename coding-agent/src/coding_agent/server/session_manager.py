@@ -79,6 +79,7 @@ from coding_agent.executors import (
     LocalDaemonRuntimeBinding,
     LocalDaemonRuntimeExecution,
     LocalDaemonRuntimePreparation,
+    LocalDaemonSessionRuntimeProvider,
 )
 from coding_agent.events import DisplayEvent, RuntimeEventReplayService
 from coding_agent.runs import (
@@ -3457,60 +3458,21 @@ class SessionManager:
         consumer: _WireConsumer,
         request: RunRequest,
     ) -> LocalDaemonRuntimeBinding:
-        pipeline = session.runtime_pipeline
-        ctx = session.runtime_ctx
-        adapter = session.runtime_adapter
-        environment = self._resolve_local_daemon_environment(request.target)
-        workspace_root = self._environment_workspace_root(environment)
-        if pipeline is not None and ctx is not None and adapter is not None:
-            cached_workspace_root = self._runtime_environment_workspace_root(ctx)
-            if (
-                cached_workspace_root is not None
-                and workspace_root is not None
-                and cached_workspace_root != workspace_root
-            ):
-                await self._close_runtime(session)
-                pipeline = None
-                ctx = None
-                adapter = None
-        if pipeline is None or ctx is None or adapter is None:
-            approval_mode_map = {
-                ApprovalPolicy.YOLO: "yolo",
-                ApprovalPolicy.INTERACTIVE: "interactive",
-                ApprovalPolicy.AUTO: "auto",
-            }
-            pipeline, ctx = self._create_agent_for_session(
-                workspace_root=workspace_root,
-                environment=environment,
-                model_override=session.model_name,
-                provider_override=session.provider_name,
-                base_url_override=session.base_url,
-                max_steps_override=session.max_steps,
-                approval_mode_override=approval_mode_map[session.approval_policy],
-                session_id_override=session.id,
-                run_id_override=request.run_id,
-                api_key=None,
-                tape=await self._restore_tape(session.tape_id),
-            )
-            session.tape_id = ctx.tape.tape_id
-            await self._persist_session_async(session)
-            ctx.runtime_message_bus = session.runtime_message_bus
-            ctx.config["wire_consumer"] = None
-            ctx.config["agent_id"] = ""
-
-            llm_plugin = pipeline._registry.get("llm_provider")
-            if session.provider is not None:
-                llm_plugin._instance = session.provider
-
-            adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
-            session.runtime_pipeline = pipeline
-            session.runtime_ctx = ctx
-            session.runtime_adapter = adapter
-        return LocalDaemonRuntimeBinding(
-            pipeline=pipeline,
-            ctx=ctx,
-            adapter=adapter,
-        )
+        return await LocalDaemonSessionRuntimeProvider(
+            session=session,
+            resolve_environment=self._resolve_local_daemon_environment,
+            workspace_root_for_environment=self._environment_workspace_root,
+            workspace_root_for_runtime=self._runtime_environment_workspace_root,
+            close_runtime=self._close_runtime,
+            create_agent_for_session=self._create_agent_for_session,
+            restore_tape=self._restore_tape,
+            persist_session=self._persist_session_async,
+            adapter_factory=lambda pipeline, ctx: PipelineAdapter(
+                pipeline=pipeline,
+                ctx=ctx,
+                consumer=consumer,
+            ),
+        ).prepare_runtime(request)
 
     def _invalidate_runtime(self, session: Session) -> None:
         session.runtime_pipeline = None

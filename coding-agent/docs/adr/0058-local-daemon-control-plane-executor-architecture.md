@@ -151,12 +151,17 @@ This ADR does not implement that path.
   - Unsupported managed runtime execution is rejected by `RunCoordinator`, not
     prefiltered by `SessionManager`.
 - [~] Move runtime ownership behind `LocalDaemonExecutor`.
-  - Completed: local daemon runtime preparation, checkpoint restore runtime
-    preparation, and runtime execution route through `LocalDaemonExecutor`.
+  - Completed: local daemon runtime execution routes through
+    `RunCoordinator.execute_runtime()` and `LocalDaemonExecutor`.
+  - Completed: normal local runtime preparation is delegated from
+    `SessionManager` to `LocalDaemonSessionRuntimeProvider`.
+  - Completed: checkpoint restore runtime preparation still routes through
+    `LocalDaemonExecutor.prepare_runtime()`.
   - Remaining: `SessionManager` still owns run lifecycle bookkeeping,
-    observation callbacks, wire consumer setup, and some runtime close/error
-    policy. These should move behind narrower RunService/EventStore/Executor
-    lifecycle boundaries before this item is considered complete.
+    checkpoint restore preparation details, observation callbacks, wire consumer
+    setup, and some runtime close/error policy. These should move behind
+    narrower RunService/EventStore/Executor lifecycle boundaries before this
+    item is considered complete.
 - [x] Demote `coding_agent run` to an inline testkit/devkit compatibility path.
   - `run` records `origin.mode = inline_testkit`.
   - CLI and README describe `run` as dev/testkit one-shot compatibility.
