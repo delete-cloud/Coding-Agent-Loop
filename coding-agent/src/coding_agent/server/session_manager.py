@@ -87,6 +87,7 @@ from coding_agent.runs import (
     RunCoordinator,
     RunCoordinatorError,
     RunRequest,
+    RuntimeRunLifecycle,
     RunTarget,
     run_target_from_dict,
     run_target_from_execution_binding,
@@ -2518,60 +2519,10 @@ class SessionManager:
             raise TypeError("runtime store requires PipelineAdapter.run_turn outcome")
         return outcome
 
-    async def _create_runtime_agent_run(
-        self,
-        session: Session,
-        *,
-        run_id: str,
-        started_at: datetime,
-        resume_context: SessionResumeContext | None = None,
-    ) -> bool:
-        if self._runtime_store is None:
-            return False
-        await self._runtime_store.create_agent_run(
-            AgentRunRecord(
-                run_id=run_id,
-                session_id=session.id,
-                tape_id=session.tape_id,
-                parent_run_id=(
-                    None if resume_context is None else resume_context.previous_run_id
-                ),
-                agent_id=None,
-                status="queued",
-                started_at=started_at,
-                metadata=self._run_metadata_for_session(
-                    session,
-                    resume_context=resume_context,
-                ),
-                result={},
-                error=None,
-            )
-        )
-        return True
-
-    async def _update_runtime_agent_run(
-        self,
-        session: Session,
-        *,
-        run_id: str,
-        status: str,
-        ended_at: datetime | None,
-        result: JSONObject,
-        error: str | None,
-        resume_context: SessionResumeContext | None = None,
-    ) -> None:
-        if self._runtime_store is None:
-            return
-        await self._runtime_store.update_agent_run(
-            run_id,
-            status=status,
-            ended_at=ended_at,
-            metadata=self._run_metadata_for_session(
-                session,
-                resume_context=resume_context,
-            ),
-            result=result,
-            error=error,
+    def _runtime_run_lifecycle(self) -> RuntimeRunLifecycle:
+        return RuntimeRunLifecycle(
+            store=self._runtime_store,
+            metadata_for_session=self._run_metadata_for_session,
         )
 
     async def _finish_runtime_agent_run(
@@ -2584,11 +2535,10 @@ class SessionManager:
         error: str | None,
         resume_context: SessionResumeContext | None = None,
     ) -> None:
-        await self._update_runtime_agent_run(
+        await self._runtime_run_lifecycle().finish(
             session,
             run_id=run_id,
             status=status,
-            ended_at=datetime.now(UTC),
             result=result,
             error=error,
             resume_context=resume_context,
@@ -4110,22 +4060,12 @@ class SessionManager:
                 nonlocal agent_run_created
                 if agent_run_created:
                     return
-                agent_run_created = await self._create_runtime_agent_run(
+                agent_run_created = await self._runtime_run_lifecycle().start(
                     session,
                     run_id=run_id,
                     started_at=started_at,
                     resume_context=resume_context,
                 )
-                if agent_run_created:
-                    await self._update_runtime_agent_run(
-                        session,
-                        run_id=run_id,
-                        status="running",
-                        ended_at=None,
-                        result={},
-                        error=None,
-                        resume_context=resume_context,
-                    )
 
             async def _on_local_daemon_turn_error(
                 binding: LocalDaemonRuntimeBinding,

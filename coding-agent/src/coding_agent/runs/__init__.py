@@ -8,6 +8,13 @@ from .coordinator import (
     RuntimeExecution,
     RuntimeRunExecutor,
 )
+from .lifecycle import (
+    RuntimeRunLifecycle,
+    RuntimeRunMetadataProvider,
+    RuntimeRunResumeContext,
+    RuntimeRunSession,
+    RuntimeRunStore,
+)
 from .target import (
     CloudWorkspaceRef,
     ExecutionBindingRunTargetError,
@@ -55,7 +62,12 @@ __all__ = [
     "RunTarget",
     "RunTargetSerializationError",
     "RuntimeExecution",
+    "RuntimeRunLifecycle",
     "RuntimeRunExecutor",
+    "RuntimeRunMetadataProvider",
+    "RuntimeRunResumeContext",
+    "RuntimeRunSession",
+    "RuntimeRunStore",
     "SnapshotWorkspaceRef",
     "WorkspaceRef",
     "executor_ref_from_dict",
