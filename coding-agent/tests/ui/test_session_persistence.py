@@ -11,7 +11,12 @@ from unittest.mock import patch
 import pytest
 
 from coding_agent.approval.store import ApprovalStore
-from coding_agent.server.session_manager import Session, SessionManager
+from coding_agent.server.session_manager import (
+    Session,
+    SessionManager,
+    SessionRecord,
+    SessionRuntimeHandle,
+)
 from coding_agent.server.stores.session_store import (
     InMemorySessionStore,
     PGSessionMetadataStore,
@@ -23,6 +28,7 @@ from coding_agent.server.stores.workspace_store import (
     PGWorkspaceMetadataStore,
     WorkspaceRecord,
 )
+from coding_agent.wire.protocol import ApprovalRequest
 
 
 def test_register_session_uses_public_api() -> None:
@@ -1238,6 +1244,133 @@ def test_rehydrate_clears_non_restart_safe_runtime_state() -> None:
     assert reloaded.turn_in_progress is False
     assert reloaded.pending_approval is None
     assert reloaded.approval_response is None
+
+
+def test_session_runtime_state_lives_on_runtime_handle() -> None:
+    session = Session(
+        id="runtime-handle-session",
+        created_at=datetime.now(),
+        last_activity=datetime.now(),
+        approval_store=ApprovalStore(),
+    )
+    runtime_ctx = object()
+    runtime_adapter = object()
+
+    session.runtime_ctx = runtime_ctx
+    session.runtime_adapter = runtime_adapter
+    session.event_queues.append(asyncio.Queue())
+    session.pending_approval = {"request_id": "req-123", "tool_name": "bash"}
+
+    assert isinstance(session.runtime_handle, SessionRuntimeHandle)
+    assert session.runtime_handle.runtime_ctx is runtime_ctx
+    assert session.runtime_handle.runtime_adapter is runtime_adapter
+    assert session.runtime_handle.event_queues == session.event_queues
+    assert session.runtime_handle.pending_approval == {
+        "request_id": "req-123",
+        "tool_name": "bash",
+    }
+    instance_dict = object.__getattribute__(session, "__dict__")
+    assert "runtime_ctx" not in instance_dict
+    assert "runtime_adapter" not in instance_dict
+    assert "event_queues" not in instance_dict
+    assert "pending_approval" not in instance_dict
+
+
+def test_session_store_data_excludes_runtime_handle_state() -> None:
+    session = Session(
+        id="runtime-handle-session",
+        created_at=datetime.now(),
+        last_activity=datetime.now(),
+        approval_store=ApprovalStore(),
+    )
+    session.runtime_pipeline = object()
+    session.runtime_ctx = object()
+    session.runtime_adapter = object()
+    session.event_queues.append(asyncio.Queue())
+    session.pending_approval = {"request_id": "req-123", "tool_name": "bash"}
+
+    payload = session.to_store_data()
+
+    assert "runtime_handle" not in payload
+    assert "runtime_pipeline" not in payload
+    assert "runtime_ctx" not in payload
+    assert "runtime_adapter" not in payload
+    assert "event_queues" not in payload
+    assert "pending_approval" not in payload
+
+
+def test_session_record_round_trips_existing_store_payload() -> None:
+    session = Session(
+        id="record-session",
+        created_at=datetime.now(UTC),
+        last_activity=datetime.now(UTC),
+        approval_store=ApprovalStore(),
+        provider_name="openai",
+        model_name="gpt-4o",
+        base_url="https://api.example.test",
+        max_steps=12,
+        tape_id="tape-123",
+        last_failure_details="previous failure",
+    )
+
+    payload = session.to_store_data()
+    record = SessionRecord.from_store_data(payload)
+    reloaded = record.to_session()
+
+    assert record.to_store_data() == payload
+    assert reloaded.id == session.id
+    assert reloaded.provider_name == "openai"
+    assert reloaded.model_name == "gpt-4o"
+    assert reloaded.base_url == "https://api.example.test"
+    assert reloaded.max_steps == 12
+    assert reloaded.tape_id == "tape-123"
+    assert reloaded.last_failure_details == "previous failure"
+    assert isinstance(reloaded.runtime_handle, SessionRuntimeHandle)
+    assert reloaded.runtime_ctx is None
+    assert reloaded.event_queues == []
+
+
+def test_session_record_excludes_process_local_runtime_state() -> None:
+    session = Session(
+        id="record-session",
+        created_at=datetime.now(UTC),
+        last_activity=datetime.now(UTC),
+        approval_store=ApprovalStore(),
+    )
+    session.runtime_ctx = object()
+    session.runtime_adapter = object()
+    session.event_queues.append(asyncio.Queue())
+    session.pending_approval = {"request_id": "req-123", "tool_name": "bash"}
+
+    record = session.to_record()
+
+    assert isinstance(record, SessionRecord)
+    assert not hasattr(record, "runtime_handle")
+    assert not hasattr(record, "runtime_ctx")
+    assert not hasattr(record, "event_queues")
+    assert not hasattr(record, "pending_approval")
+
+
+def test_session_rebinds_approval_coordinator_when_store_changes() -> None:
+    session = Session(
+        id="approval-rebind-session",
+        created_at=datetime.now(UTC),
+        last_activity=datetime.now(UTC),
+        approval_store=ApprovalStore(),
+    )
+    replacement_store = ApprovalStore()
+    request = ApprovalRequest(
+        session_id=session.id,
+        request_id="req-rebound",
+        tool="bash",
+        args={"cmd": "pwd"},
+    )
+
+    session.approval_store = replacement_store
+    session.approval_coordinator.add_request(request)
+
+    assert session.runtime_handle.approval_coordinator is session.approval_coordinator
+    assert replacement_store.get_request("req-rebound") == request
 
 
 def test_redis_session_store_reports_health_from_ping() -> None:

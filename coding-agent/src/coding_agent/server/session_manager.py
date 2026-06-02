@@ -18,7 +18,7 @@ from enum import Enum
 from inspect import isawaitable
 from math import isfinite
 from pathlib import Path
-from typing import Any, Literal, Protocol, TypeVar, cast
+from typing import Any, ClassVar, Literal, Protocol, TypeVar, cast
 
 from agentkit.environment import Environment
 from agentkit.storage.checkpoint_fs import FSCheckpointStore
@@ -698,6 +698,150 @@ class EventBroadcastResult:
 
 
 @dataclass
+class SessionRuntimeHandle:
+    """Process-local runtime state associated with a session record."""
+
+    approval_coordinator: ApprovalCoordinator
+    task: asyncio.Task[Any] | None = None
+    pending_approval: dict[str, Any] | None = None
+    approval_event: asyncio.Event = field(default_factory=asyncio.Event)
+    approval_response: dict[str, Any] | None = None
+    event_queues: list[asyncio.Queue[dict[str, Any]]] = field(default_factory=list)
+    runtime_pipeline: Any | None = None
+    runtime_ctx: Any | None = None
+    runtime_adapter: Any | None = None
+    runtime_message_bus: RuntimeMessageBus = field(
+        default_factory=InMemoryRuntimeMessageBus
+    )
+    approval_decision_cursor: RuntimeMessageCursor = field(
+        default_factory=RuntimeMessageCursor
+    )
+
+
+@dataclass(frozen=True)
+class SessionRecord:
+    """Durable session metadata stored across process restarts."""
+
+    id: str
+    created_at: datetime
+    last_activity: datetime
+    repo_path: Path | None
+    origin: dict[str, str] | None
+    execution_binding: ExecutionBinding
+    approval_policy: ApprovalPolicy
+    provider_name: str | None
+    model_name: str | None
+    base_url: str | None
+    max_steps: int
+    tape_id: str | None
+    last_failure_details: str | None
+
+    def to_store_data(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "created_at": self.created_at.isoformat(),
+            "last_activity": self.last_activity.isoformat(),
+            # repo_path remains backward-compatible metadata and seeds the
+            # default local binding when execution_binding is omitted.
+            "repo_path": None if self.repo_path is None else str(self.repo_path),
+            "origin": None if self.origin is None else dict(self.origin),
+            "execution_binding": self.execution_binding.to_dict(),
+            "approval_policy": self.approval_policy.value,
+            "provider_name": self.provider_name,
+            "model_name": self.model_name,
+            "base_url": self.base_url,
+            "max_steps": self.max_steps,
+            "tape_id": self.tape_id,
+            "last_failure_details": self.last_failure_details,
+        }
+
+    @classmethod
+    def from_store_data(cls, data: dict[str, Any]) -> SessionRecord:
+        repo_path_raw = data.get("repo_path")
+        if repo_path_raw is not None and not isinstance(repo_path_raw, str):
+            raise TypeError("session metadata has invalid repo_path")
+        origin_raw = data.get("origin")
+        if origin_raw is not None:
+            if not isinstance(origin_raw, dict):
+                raise TypeError("session metadata has invalid origin")
+            origin = {
+                key: _required_session_str(cast(dict[str, Any], origin_raw), key)
+                for key in cast(dict[str, Any], origin_raw)
+            }
+        else:
+            origin = None
+        approval_policy_raw = data.get("approval_policy")
+        if not isinstance(approval_policy_raw, str):
+            raise TypeError("session metadata is missing approval_policy")
+        provider_name_raw = data.get("provider_name")
+        if provider_name_raw is not None and not isinstance(provider_name_raw, str):
+            raise TypeError("session metadata has invalid provider_name")
+        model_name_raw = data.get("model_name")
+        if model_name_raw is not None and not isinstance(model_name_raw, str):
+            raise TypeError("session metadata has invalid model_name")
+        base_url_raw = data.get("base_url")
+        if base_url_raw is not None and not isinstance(base_url_raw, str):
+            raise TypeError("session metadata has invalid base_url")
+        tape_id_raw = data.get("tape_id")
+        if tape_id_raw is not None and not isinstance(tape_id_raw, str):
+            raise TypeError("session metadata has invalid tape_id")
+        last_failure_details_raw = data.get("last_failure_details")
+        if last_failure_details_raw is not None and not isinstance(
+            last_failure_details_raw, str
+        ):
+            raise TypeError("session metadata has invalid last_failure_details")
+        binding_raw = data.get("execution_binding")
+        if binding_raw is not None:
+            if not isinstance(binding_raw, dict):
+                raise TypeError("session metadata has invalid execution_binding")
+            execution_binding = ExecutionBinding.from_dict(binding_raw)
+        else:
+            workspace_root = (
+                str(Path(repo_path_raw).resolve())
+                if repo_path_raw is not None
+                else str(Path.cwd().resolve())
+            )
+            execution_binding = LocalExecutionBinding(workspace_root=workspace_root)
+        return cls(
+            id=_required_session_str(data, "id"),
+            created_at=datetime.fromisoformat(
+                _required_session_str(data, "created_at")
+            ),
+            last_activity=datetime.fromisoformat(
+                _required_session_str(data, "last_activity")
+            ),
+            repo_path=None if repo_path_raw is None else Path(repo_path_raw),
+            origin=origin,
+            execution_binding=execution_binding,
+            approval_policy=ApprovalPolicy(approval_policy_raw),
+            provider_name=provider_name_raw,
+            model_name=model_name_raw,
+            base_url=base_url_raw,
+            max_steps=_required_session_int(data, "max_steps"),
+            tape_id=tape_id_raw,
+            last_failure_details=last_failure_details_raw,
+        )
+
+    def to_session(self) -> Session:
+        return Session(
+            id=self.id,
+            created_at=self.created_at,
+            last_activity=self.last_activity,
+            approval_store=ApprovalStore(),
+            repo_path=self.repo_path,
+            origin=self.origin,
+            execution_binding=self.execution_binding,
+            approval_policy=self.approval_policy,
+            provider_name=self.provider_name,
+            model_name=self.model_name,
+            base_url=self.base_url,
+            max_steps=self.max_steps,
+            tape_id=self.tape_id,
+            last_failure_details=self.last_failure_details,
+        )
+
+
+@dataclass
 class Session:
     """A managed agent session.
 
@@ -722,6 +866,7 @@ class Session:
     model_name: str | None = None
     base_url: str | None = None
     max_steps: int = 30
+    runtime_handle: SessionRuntimeHandle = field(init=False, repr=False)
     task: asyncio.Task[Any] | None = None
     turn_in_progress: bool = False
     turn_status: TurnStatus = "idle"
@@ -743,6 +888,48 @@ class Session:
     )
     approval_coordinator: ApprovalCoordinator = field(init=False)
 
+    _RUNTIME_HANDLE_FIELD_NAMES: ClassVar[frozenset[str]] = frozenset(
+        {
+            "task",
+            "pending_approval",
+            "approval_event",
+            "approval_response",
+            "event_queues",
+            "runtime_pipeline",
+            "runtime_ctx",
+            "runtime_adapter",
+            "runtime_message_bus",
+            "approval_decision_cursor",
+            "approval_coordinator",
+        }
+    )
+
+    def __getattribute__(self, name: str) -> Any:
+        if name in object.__getattribute__(self, "_RUNTIME_HANDLE_FIELD_NAMES"):
+            instance_dict = object.__getattribute__(self, "__dict__")
+            handle = instance_dict.get("runtime_handle")
+            if handle is not None:
+                return getattr(handle, name)
+        return object.__getattribute__(self, name)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name == "approval_store":
+            object.__setattr__(self, name, value)
+            instance_dict = object.__getattribute__(self, "__dict__")
+            handle = instance_dict.get("runtime_handle")
+            if handle is not None:
+                handle.approval_coordinator = ApprovalCoordinator(
+                    cast(ApprovalStore, value)
+                )
+            return
+        if name in self._RUNTIME_HANDLE_FIELD_NAMES:
+            instance_dict = object.__getattribute__(self, "__dict__")
+            handle = instance_dict.get("runtime_handle")
+            if handle is not None:
+                setattr(handle, name, value)
+                return
+        object.__setattr__(self, name, value)
+
     def __post_init__(self) -> None:
         if self.execution_binding is cast(ExecutionBinding, _DEFAULT_EXECUTION_BINDING):
             workspace_root = (
@@ -754,7 +941,23 @@ class Session:
                 workspace_root=workspace_root
             )
         self.wire = LocalWire(self.id)
-        self.approval_coordinator = ApprovalCoordinator(self.approval_store)
+        handle = SessionRuntimeHandle(
+            approval_coordinator=ApprovalCoordinator(self.approval_store),
+            task=self.task,
+            pending_approval=self.pending_approval,
+            approval_event=self.approval_event,
+            approval_response=self.approval_response,
+            event_queues=self.event_queues,
+            runtime_pipeline=self.runtime_pipeline,
+            runtime_ctx=self.runtime_ctx,
+            runtime_adapter=self.runtime_adapter,
+            runtime_message_bus=self.runtime_message_bus,
+            approval_decision_cursor=self.approval_decision_cursor,
+        )
+        object.__setattr__(self, "runtime_handle", handle)
+        instance_dict = object.__getattribute__(self, "__dict__")
+        for field_name in self._RUNTIME_HANDLE_FIELD_NAMES:
+            instance_dict.pop(field_name, None)
 
     def broadcast_event_nowait(self, event: dict[str, Any]) -> EventBroadcastResult:
         active_queues: list[asyncio.Queue[dict[str, Any]]] = []
@@ -829,91 +1032,28 @@ class Session:
         }
 
     def to_store_data(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "created_at": self.created_at.isoformat(),
-            "last_activity": self.last_activity.isoformat(),
-            # repo_path remains backward-compatible metadata and seeds the
-            # default local binding when execution_binding is omitted.
-            "repo_path": None if self.repo_path is None else str(self.repo_path),
-            "origin": None if self.origin is None else dict(self.origin),
-            "execution_binding": self.execution_binding.to_dict(),
-            "approval_policy": self.approval_policy.value,
-            "provider_name": self.provider_name,
-            "model_name": self.model_name,
-            "base_url": self.base_url,
-            "max_steps": self.max_steps,
-            "tape_id": self.tape_id,
-            "last_failure_details": self.last_failure_details,
-        }
+        return self.to_record().to_store_data()
+
+    def to_record(self) -> SessionRecord:
+        return SessionRecord(
+            id=self.id,
+            created_at=self.created_at,
+            last_activity=self.last_activity,
+            repo_path=self.repo_path,
+            origin=None if self.origin is None else dict(self.origin),
+            execution_binding=self.execution_binding,
+            approval_policy=self.approval_policy,
+            provider_name=self.provider_name,
+            model_name=self.model_name,
+            base_url=self.base_url,
+            max_steps=self.max_steps,
+            tape_id=self.tape_id,
+            last_failure_details=self.last_failure_details,
+        )
 
     @classmethod
     def from_store_data(cls, data: dict[str, Any]) -> Session:
-        repo_path_raw = data.get("repo_path")
-        if repo_path_raw is not None and not isinstance(repo_path_raw, str):
-            raise TypeError("session metadata has invalid repo_path")
-        origin_raw = data.get("origin")
-        if origin_raw is not None:
-            if not isinstance(origin_raw, dict):
-                raise TypeError("session metadata has invalid origin")
-            origin = {
-                key: _required_session_str(cast(dict[str, Any], origin_raw), key)
-                for key in cast(dict[str, Any], origin_raw)
-            }
-        else:
-            origin = None
-        approval_policy_raw = data.get("approval_policy")
-        if not isinstance(approval_policy_raw, str):
-            raise TypeError("session metadata is missing approval_policy")
-        provider_name_raw = data.get("provider_name")
-        if provider_name_raw is not None and not isinstance(provider_name_raw, str):
-            raise TypeError("session metadata has invalid provider_name")
-        model_name_raw = data.get("model_name")
-        if model_name_raw is not None and not isinstance(model_name_raw, str):
-            raise TypeError("session metadata has invalid model_name")
-        base_url_raw = data.get("base_url")
-        if base_url_raw is not None and not isinstance(base_url_raw, str):
-            raise TypeError("session metadata has invalid base_url")
-        tape_id_raw = data.get("tape_id")
-        if tape_id_raw is not None and not isinstance(tape_id_raw, str):
-            raise TypeError("session metadata has invalid tape_id")
-        last_failure_details_raw = data.get("last_failure_details")
-        if last_failure_details_raw is not None and not isinstance(
-            last_failure_details_raw, str
-        ):
-            raise TypeError("session metadata has invalid last_failure_details")
-        binding_raw = data.get("execution_binding")
-        if binding_raw is not None:
-            if not isinstance(binding_raw, dict):
-                raise TypeError("session metadata has invalid execution_binding")
-            execution_binding = ExecutionBinding.from_dict(binding_raw)
-        else:
-            workspace_root = (
-                str(Path(repo_path_raw).resolve())
-                if repo_path_raw is not None
-                else str(Path.cwd().resolve())
-            )
-            execution_binding = LocalExecutionBinding(workspace_root=workspace_root)
-        session = cls(
-            id=_required_session_str(data, "id"),
-            created_at=datetime.fromisoformat(
-                _required_session_str(data, "created_at")
-            ),
-            last_activity=datetime.fromisoformat(
-                _required_session_str(data, "last_activity")
-            ),
-            approval_store=ApprovalStore(),
-            repo_path=None if repo_path_raw is None else Path(repo_path_raw),
-            origin=origin,
-            execution_binding=execution_binding,
-            approval_policy=ApprovalPolicy(approval_policy_raw),
-            provider_name=provider_name_raw,
-            model_name=model_name_raw,
-            base_url=base_url_raw,
-            max_steps=_required_session_int(data, "max_steps"),
-            tape_id=tape_id_raw,
-            last_failure_details=last_failure_details_raw,
-        )
+        session = SessionRecord.from_store_data(data).to_session()
         session.turn_in_progress = False
         session.pending_approval = None
         session.approval_response = None
