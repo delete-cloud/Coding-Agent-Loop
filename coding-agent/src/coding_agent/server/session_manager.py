@@ -92,6 +92,7 @@ from coding_agent.runs import (
     RuntimeObservationCompleter,
     RuntimeRunLifecycle,
     RuntimeTurnErrorState,
+    RuntimeTurnErrorHandler,
     RuntimeTurnFinalizer,
     RuntimeTurnRunTracker,
     RuntimeTurnStarter,
@@ -3917,45 +3918,18 @@ class SessionManager:
             observation_recorder: AgentObservationRecorder | None = None
             turn_error_state = RuntimeTurnErrorState()
 
-            async def _handle_fatal_local_daemon_turn_error(
-                exc: FatalToolExecutionError,
-            ) -> None:
+            def _fail_local_daemon_turn_observation(error_type: str) -> None:
                 if observation_recorder is not None:
-                    observation_recorder.fail_turn(error_type=type(exc).__name__)
-                await turn_run.finish_if_started(
-                    session,
-                    status="failed",
-                    result={},
-                    error=str(exc),
-                )
-                session.turn_status = "failed"
-                session.last_failure_details = f"Fatal tool execution failed: {exc}"
-                await self._close_runtime(session)
+                    observation_recorder.fail_turn(error_type=error_type)
 
-            async def _handle_cancelled_local_daemon_turn_error() -> None:
+            def _cancel_local_daemon_turn_observation() -> None:
                 if observation_recorder is not None:
                     observation_recorder.cancel_turn()
-                await turn_run.finish_if_started(
-                    session,
-                    status="cancelled",
-                    result={},
-                    error="cancelled",
-                )
 
-            async def _handle_generic_local_daemon_turn_error(
+            async def _notify_generic_local_daemon_turn_error(
+                session: Session,
                 exc: Exception,
             ) -> None:
-                if observation_recorder is not None:
-                    observation_recorder.fail_turn(error_type=type(exc).__name__)
-                await turn_run.finish_if_started(
-                    session,
-                    status="failed",
-                    result={},
-                    error=str(exc),
-                )
-                session.turn_status = "failed"
-                session.last_failure_details = f"HTTP session turn failed: {exc}"
-                await self._close_runtime(session)
                 logger.exception("HTTP session turn failed")
                 await self._send_session_wire_message(
                     session,
@@ -3975,6 +3949,14 @@ class SessionManager:
                     ),
                 )
 
+            turn_error_handler = RuntimeTurnErrorHandler(
+                turn_run=turn_run,
+                close_runtime=self._close_runtime,
+                notify_generic_error=_notify_generic_local_daemon_turn_error,
+                fail_observation=_fail_local_daemon_turn_observation,
+                cancel_observation=_cancel_local_daemon_turn_observation,
+            )
+
             async def _on_local_daemon_turn_error(
                 binding: LocalDaemonRuntimeBinding,
                 exc: BaseException,
@@ -3982,17 +3964,17 @@ class SessionManager:
                 del binding
                 if isinstance(exc, FatalToolExecutionError):
                     await turn_error_state.handle(
-                        lambda: _handle_fatal_local_daemon_turn_error(exc)
+                        lambda: turn_error_handler.handle_fatal(session, exc)
                     )
                     return
                 if isinstance(exc, asyncio.CancelledError):
                     await turn_error_state.handle(
-                        _handle_cancelled_local_daemon_turn_error
+                        lambda: turn_error_handler.handle_cancelled(session)
                     )
                     return
                 if isinstance(exc, Exception):
                     await turn_error_state.handle(
-                        lambda: _handle_generic_local_daemon_turn_error(exc)
+                        lambda: turn_error_handler.handle_generic(session, exc)
                     )
 
             try:
@@ -4070,25 +4052,28 @@ class SessionManager:
                 if turn_error_state.handler_failed:
                     raise
                 if not turn_error_state.handled:
-                    await _handle_fatal_local_daemon_turn_error(exc)
+                    await turn_error_handler.handle_fatal(session, exc)
                 raise
             except asyncio.CancelledError:
                 if turn_error_state.handler_failed:
                     raise
                 if not turn_error_state.handled:
-                    await _handle_cancelled_local_daemon_turn_error()
+                    await turn_error_handler.handle_cancelled(session)
                 raise
             except RunCoordinatorError as exc:
                 if turn_error_state.handler_failed:
                     raise
                 if not turn_error_state.handled:
-                    await turn_run.ensure_started(session)
-                    await _handle_generic_local_daemon_turn_error(exc)
+                    await turn_error_handler.handle_generic(
+                        session,
+                        exc,
+                        ensure_started=True,
+                    )
             except Exception as exc:
                 if turn_error_state.handler_failed:
                     raise
                 if not turn_error_state.handled:
-                    await _handle_generic_local_daemon_turn_error(exc)
+                    await turn_error_handler.handle_generic(session, exc)
             finally:
                 current_task = asyncio.current_task()
                 if session.task is None or session.task is not current_task:
