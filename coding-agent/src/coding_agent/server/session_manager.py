@@ -764,6 +764,7 @@ class SessionRecord:
     max_steps: int
     tape_id: str | None
     last_failure_details: str | None
+    default_run_target_explicit: bool = True
 
     def to_store_data(self) -> dict[str, Any]:
         return {
@@ -839,6 +840,7 @@ class SessionRecord:
             if not isinstance(default_run_target_raw, dict):
                 raise TypeError("session metadata has invalid default_run_target")
             default_run_target = run_target_from_dict(default_run_target_raw)
+        default_run_target_explicit = default_run_target_raw is not None
         return cls(
             id=_required_session_str(data, "id"),
             created_at=datetime.fromisoformat(
@@ -851,6 +853,7 @@ class SessionRecord:
             origin=origin,
             execution_binding=execution_binding,
             default_run_target=default_run_target,
+            default_run_target_explicit=default_run_target_explicit,
             approval_policy=ApprovalPolicy(approval_policy_raw),
             provider_name=provider_name_raw,
             model_name=model_name_raw,
@@ -869,7 +872,9 @@ class SessionRecord:
             repo_path=self.repo_path,
             origin=self.origin,
             execution_binding=self.execution_binding,
-            default_run_target=self.default_run_target,
+            default_run_target=(
+                self.default_run_target if self.default_run_target_explicit else None
+            ),
             approval_policy=self.approval_policy,
             provider_name=self.provider_name,
             model_name=self.model_name,
@@ -880,13 +885,23 @@ class SessionRecord:
         )
 
 
+def _default_run_target_is_derived_from_binding(
+    *,
+    current_target: object,
+    target_explicit: object,
+) -> bool:
+    if current_target is None:
+        return True
+    return not bool(target_explicit)
+
+
 @dataclass
 class Session:
     """A managed agent session.
 
-    Note: ``execution_binding`` is the authoritative workspace contract.
-    ``repo_path`` remains backward-compatible metadata and supplies the
-    default local workspace root when no explicit execution binding is provided.
+    Note: ``default_run_target`` is the canonical run placement contract.
+    ``execution_binding`` remains backward-compatible metadata and seeds the
+    default run target when no explicit target has been assigned.
     """
 
     id: str
@@ -963,13 +978,28 @@ class Session:
             )
             return
         if name == "execution_binding":
+            instance_dict = object.__getattribute__(self, "__dict__")
+            current_target = instance_dict.get("default_run_target")
+            target_explicit = instance_dict.get("_default_run_target_explicit", False)
             object.__setattr__(self, name, value)
-            if value is not cast(ExecutionBinding, _DEFAULT_EXECUTION_BINDING):
+            should_sync_target = _default_run_target_is_derived_from_binding(
+                current_target=current_target,
+                target_explicit=target_explicit,
+            )
+            if (
+                value is not cast(ExecutionBinding, _DEFAULT_EXECUTION_BINDING)
+                and should_sync_target
+            ):
                 object.__setattr__(
                     self,
                     "default_run_target",
                     run_target_from_execution_binding(cast(ExecutionBinding, value)),
                 )
+                object.__setattr__(self, "_default_run_target_explicit", False)
+            return
+        if name == "default_run_target":
+            object.__setattr__(self, name, value)
+            object.__setattr__(self, "_default_run_target_explicit", value is not None)
             return
         if name in self._RUNTIME_HANDLE_FIELD_NAMES:
             instance_dict = object.__getattribute__(self, "__dict__")
@@ -990,9 +1020,12 @@ class Session:
                 workspace_root=workspace_root
             )
         if self.default_run_target is None:
-            self.default_run_target = run_target_from_execution_binding(
-                self.execution_binding
+            object.__setattr__(
+                self,
+                "default_run_target",
+                run_target_from_execution_binding(self.execution_binding),
             )
+            object.__setattr__(self, "_default_run_target_explicit", False)
         self.wire = LocalWire(self.id)
         handle = SessionRuntimeHandle(
             approval_coordinator=ApprovalCoordinator(self.approval_store),
@@ -1104,6 +1137,9 @@ class Session:
             max_steps=self.max_steps,
             tape_id=self.tape_id,
             last_failure_details=self.last_failure_details,
+            default_run_target_explicit=bool(
+                getattr(self, "_default_run_target_explicit", True)
+            ),
         )
 
     @classmethod
