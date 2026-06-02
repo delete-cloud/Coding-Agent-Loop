@@ -2,6 +2,7 @@ from .coordinator import (
     DefaultRunCoordinator,
     RunCoordinator,
     RunCoordinatorError,
+    RunExecutor,
     RunRequest,
     RunSubmission,
 )
@@ -39,6 +40,7 @@ __all__ = [
     "ManagedPoolExecutorRef",
     "RunCoordinator",
     "RunCoordinatorError",
+    "RunExecutor",
     "RunConstraints",
     "RunRequest",
     "RunSubmission",
