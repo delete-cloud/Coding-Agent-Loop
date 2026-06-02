@@ -600,18 +600,20 @@ async def test_run_agent_submits_run_request_to_run_coordinator(
 ) -> None:
     runtime_store = FakeRuntimeStore()
     run_coordinator = RecordingRunCoordinator()
-    workspace = tmp_path / "repo"
-    workspace.mkdir()
+    legacy_workspace = tmp_path / "legacy-repo"
+    legacy_workspace.mkdir()
+    target_workspace = tmp_path / "target-repo"
+    target_workspace.mkdir()
     manager = SessionManager(
         runtime_store=cast(Any, runtime_store),
         run_coordinator=run_coordinator,
     )
     session_id = await manager.create_session(
-        execution_binding=LocalExecutionBinding(workspace_root=str(workspace)),
+        execution_binding=LocalExecutionBinding(workspace_root=str(legacy_workspace)),
     )
     session = manager.get_session(session_id)
     session.default_run_target = RunTarget(
-        workspace=LocalPathWorkspaceRef(path=str(workspace.resolve())),
+        workspace=LocalPathWorkspaceRef(path=str(target_workspace.resolve())),
         executor=LocalDaemonExecutorRef(),
         isolation=IsolationPolicy(kind="default_local_sandbox"),
         annotations={"source": "session-default"},
@@ -639,6 +641,7 @@ async def test_run_agent_submits_run_request_to_run_coordinator(
         environment = kwargs["environment"]
         if not isinstance(environment, LocalEnvironment):
             raise TypeError("expected local environment")
+        assert environment.workspace_root == target_workspace.resolve()
         return fake_pipeline, types.SimpleNamespace(
             session_id=kwargs["session_id_override"],
             config={},
@@ -667,7 +670,7 @@ async def test_run_agent_submits_run_request_to_run_coordinator(
     assert request.target.annotations == {"source": "session-default"}
     assert isinstance(request.target.executor, LocalDaemonExecutorRef)
     assert isinstance(request.target.workspace, LocalPathWorkspaceRef)
-    assert request.target.workspace.path == str(workspace.resolve())
+    assert request.target.workspace.path == str(target_workspace.resolve())
     assert runtime_store.updated[0]["status"] == "running"
     assert runtime_store.updated[-1]["status"] == "completed"
 
@@ -2071,6 +2074,78 @@ async def test_run_agent_reuses_live_runtime_for_hot_turns() -> None:
     assert len(observed_run_ids) == 2
     assert observed_run_ids[0] != observed_run_ids[1]
     assert manager.get_session(session_id).current_turn_id == observed_run_ids[1]
+
+
+@pytest.mark.asyncio
+async def test_run_agent_rebuilds_live_runtime_when_default_run_target_changes(
+    tmp_path: Path,
+) -> None:
+    store = InMemorySessionStore()
+    manager = SessionManager(store=store)
+    first_workspace = tmp_path / "first"
+    first_workspace.mkdir()
+    second_workspace = tmp_path / "second"
+    second_workspace.mkdir()
+    session_id = await manager.create_session(
+        execution_binding=LocalExecutionBinding(workspace_root=str(first_workspace)),
+    )
+
+    create_agent_roots: list[Path] = []
+    close_calls: list[str] = []
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+            self.ctx = ctx
+
+        async def run_turn(self, prompt: str) -> None:
+            del prompt
+
+        async def close(self) -> None:
+            close_calls.append(str(self.ctx.run_context.environment.workspace_root))
+
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        ),
+        _directive_executor=None,
+    )
+
+    def fake_create_agent(**kwargs):
+        environment = kwargs["environment"]
+        if not isinstance(environment, LocalEnvironment):
+            raise TypeError("expected local environment")
+        create_agent_roots.append(environment.workspace_root)
+        return fake_pipeline, types.SimpleNamespace(
+            session_id=kwargs["session_id_override"],
+            config={},
+            tape=kwargs.get("tape") or Tape(),
+            run_context=AgentRunContext(
+                session_id=kwargs["session_id_override"],
+                run_id=kwargs["run_id_override"],
+                agent_id=None,
+                environment=environment,
+            ),
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
+
+        await manager.run_agent(session_id, "first")
+        session = manager.get_session(session_id)
+        session.default_run_target = RunTarget(
+            workspace=LocalPathWorkspaceRef(path=str(second_workspace)),
+            executor=LocalDaemonExecutorRef(),
+            isolation=IsolationPolicy(kind="default_local_sandbox"),
+        )
+        await manager.run_agent(session_id, "second")
+
+    assert create_agent_roots == [
+        first_workspace.resolve(),
+        second_workspace.resolve(),
+    ]
+    assert close_calls == [str(first_workspace.resolve())]
 
 
 @pytest.mark.asyncio

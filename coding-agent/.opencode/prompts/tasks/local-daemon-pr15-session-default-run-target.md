@@ -29,7 +29,7 @@ Relevant files:
 Target tests:
 - `uv run pytest tests/coding_agent/test_run_target.py -v`
 - `uv run pytest tests/ui/test_session_persistence.py -k "SessionRecord or default_run_target or runtime_state" -v`
-- `uv run pytest tests/ui/test_session_manager_runtime.py -k "run_agent_submits_run_request_to_run_coordinator or local_daemon_executor or cloud_runtime" -v`
+- `uv run pytest tests/ui/test_session_manager_runtime.py -k "run_agent_submits_run_request_to_run_coordinator or rebuilds_live_runtime_when_default_run_target_changes or local_daemon_executor or cloud_runtime" -v`
 - `uv run ruff check src/coding_agent/runs src/coding_agent/server/session_manager.py tests/coding_agent/test_run_target.py tests/ui/test_session_persistence.py tests/ui/test_session_manager_runtime.py`
 - `git diff --check`
 

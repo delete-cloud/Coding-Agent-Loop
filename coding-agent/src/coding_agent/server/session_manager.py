@@ -81,6 +81,7 @@ from coding_agent.executors import (
 from coding_agent.runs import (
     DefaultRunCoordinator,
     LocalDaemonExecutorRef,
+    LocalPathWorkspaceRef,
     RunCoordinator,
     RunRequest,
     RunTarget,
@@ -115,6 +116,7 @@ from coding_agent.environment.execution_binding import (
     ExternalWorkerBinding,
     LocalExecutionBinding,
 )
+from coding_agent.environment.local import LocalEnvironment
 from coding_agent.server.stores.workspace_store import (
     JSONValue,
     WorkspaceRecord,
@@ -3414,11 +3416,23 @@ class SessionManager:
     def _resolve_environment(self, session: Session) -> Environment:
         return self._binding_resolver.resolve_environment(session.execution_binding)
 
+    def _resolve_local_daemon_environment(self, target: RunTarget) -> Environment:
+        if not isinstance(target.workspace, LocalPathWorkspaceRef):
+            raise ValueError("local daemon runs require a local_path workspace target")
+        return LocalEnvironment(Path(target.workspace.path).expanduser().resolve())
+
     def _environment_workspace_root(self, environment: Environment) -> Path | None:
         local_root = environment.workspace_summary().local_root
         if local_root is None:
             return None
         return Path(local_root).expanduser().resolve()
+
+    def _runtime_environment_workspace_root(self, ctx: object) -> Path | None:
+        run_context = getattr(ctx, "run_context", None)
+        environment = getattr(run_context, "environment", None)
+        if environment is None:
+            return None
+        return self._environment_workspace_root(cast(Environment, environment))
 
     async def _submit_runtime_run_request(
         self,
@@ -3446,19 +3460,30 @@ class SessionManager:
         session: Session,
         *,
         consumer: _WireConsumer,
-        run_id: str,
+        request: RunRequest,
     ) -> LocalDaemonRuntimeBinding:
         pipeline = session.runtime_pipeline
         ctx = session.runtime_ctx
         adapter = session.runtime_adapter
+        environment = self._resolve_local_daemon_environment(request.target)
+        workspace_root = self._environment_workspace_root(environment)
+        if pipeline is not None and ctx is not None and adapter is not None:
+            cached_workspace_root = self._runtime_environment_workspace_root(ctx)
+            if (
+                cached_workspace_root is not None
+                and workspace_root is not None
+                and cached_workspace_root != workspace_root
+            ):
+                await self._close_runtime(session)
+                pipeline = None
+                ctx = None
+                adapter = None
         if pipeline is None or ctx is None or adapter is None:
             approval_mode_map = {
                 ApprovalPolicy.YOLO: "yolo",
                 ApprovalPolicy.INTERACTIVE: "interactive",
                 ApprovalPolicy.AUTO: "auto",
             }
-            environment = self._resolve_environment(session)
-            workspace_root = self._environment_workspace_root(environment)
             pipeline, ctx = self._create_agent_for_session(
                 workspace_root=workspace_root,
                 environment=environment,
@@ -3468,7 +3493,7 @@ class SessionManager:
                 max_steps_override=session.max_steps,
                 approval_mode_override=approval_mode_map[session.approval_policy],
                 session_id_override=session.id,
-                run_id_override=run_id,
+                run_id_override=request.run_id,
                 api_key=None,
                 tape=await self._restore_tape(session.tape_id),
             )
@@ -4162,10 +4187,10 @@ class SessionManager:
                     LocalDaemonRuntimeExecution(
                         request=run_request,
                         runtime_provider=_SessionLocalDaemonRuntimeProvider(
-                            prepare=lambda _request: self._prepare_local_daemon_runtime(
+                            prepare=lambda request: self._prepare_local_daemon_runtime(
                                 session,
                                 consumer=consumer,
-                                run_id=run_id,
+                                request=request,
                             )
                         ),
                         prompt=prompt,
