@@ -735,6 +735,7 @@ async def test_run_agent_executes_local_runtime_through_local_daemon_executor(
     assert execution.prompt == "implement runtime ownership"
     assert execution.before_turn is not None
     assert execution.after_turn is not None
+    assert execution.on_turn_error is not None
     assert isinstance(execution.request.target.executor, LocalDaemonExecutorRef)
     assert isinstance(execution.request.target.workspace, LocalPathWorkspaceRef)
     assert execution.request.target.workspace.path == str(workspace.resolve())
@@ -2104,6 +2105,50 @@ async def test_run_agent_closes_cached_runtime_after_turn_failure() -> None:
     assert session.runtime_pipeline is None
     assert session.runtime_ctx is None
     assert session.runtime_adapter is None
+
+
+@pytest.mark.asyncio
+async def test_run_agent_propagates_runtime_close_failure_during_turn_error() -> None:
+    store = InMemorySessionStore()
+    manager = SessionManager(store=store)
+    session_id = await manager.create_session()
+
+    close_calls: list[str] = []
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+            self.ctx = ctx
+
+        async def run_turn(self, prompt: str) -> None:
+            del prompt
+            raise RuntimeError("turn exploded")
+
+        async def close(self) -> None:
+            close_calls.append("closed")
+            raise RuntimeError("close exploded")
+
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        ),
+        _directive_executor=None,
+    )
+
+    def fake_create_agent(**kwargs):
+        return fake_pipeline, types.SimpleNamespace(
+            config={}, tape=kwargs.get("tape") or Tape()
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
+        with pytest.raises(RuntimeError, match="close exploded"):
+            await manager.run_agent(session_id, "boom")
+
+    session = manager.get_session(session_id)
+    assert close_calls == ["closed"]
+    assert session.turn_in_progress is False
 
 
 @pytest.mark.asyncio

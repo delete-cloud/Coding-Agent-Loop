@@ -41,6 +41,10 @@ RuntimeTurnCompletedHook = Callable[
     [LocalDaemonRuntimeBinding, object],
     Awaitable[None] | None,
 ]
+RuntimeTurnFailedHook = Callable[
+    [LocalDaemonRuntimeBinding, BaseException],
+    Awaitable[None] | None,
+]
 
 
 @dataclass(frozen=True)
@@ -50,6 +54,7 @@ class LocalDaemonRuntimeExecution:
     prompt: str
     before_turn: RuntimePreparedHook | None = None
     after_turn: RuntimeTurnCompletedHook | None = None
+    on_turn_error: RuntimeTurnFailedHook | None = None
 
 
 @dataclass(frozen=True)
@@ -87,7 +92,14 @@ class LocalDaemonExecutor:
             before_turn_result = execution.before_turn(binding)
             if isawaitable(before_turn_result):
                 await before_turn_result
-        outcome = await binding.adapter.run_turn(execution.prompt)
+        try:
+            outcome = await binding.adapter.run_turn(execution.prompt)
+        except BaseException as exc:
+            if execution.on_turn_error is not None:
+                turn_error_result = execution.on_turn_error(binding, exc)
+                if isawaitable(turn_error_result):
+                    await turn_error_result
+            raise
         if execution.after_turn is not None:
             after_turn_result = execution.after_turn(binding, outcome)
             if isawaitable(after_turn_result):
