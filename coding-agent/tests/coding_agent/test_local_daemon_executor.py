@@ -8,6 +8,7 @@ from coding_agent.executors import (
     LocalDaemonExecutor,
     LocalDaemonRuntimeBinding,
     LocalDaemonRuntimeExecution,
+    LocalDaemonRuntimePreparation,
     RunExecutorTargetError,
 )
 from coding_agent.runs import (
@@ -100,6 +101,29 @@ async def test_local_daemon_executor_runs_adapter_turn() -> None:
     assert result.outcome == "completed"
     assert provider.requests == [request]
     assert adapter.prompts == ["implement the task"]
+
+
+@pytest.mark.asyncio
+async def test_local_daemon_executor_prepares_runtime() -> None:
+    request = _local_request()
+    adapter = FakeRuntimeAdapter(result="prepared")
+    binding = LocalDaemonRuntimeBinding(
+        pipeline=object(),
+        ctx=object(),
+        adapter=adapter,
+    )
+    provider = FakeRuntimeProvider(binding)
+
+    prepared = await LocalDaemonExecutor().prepare_runtime(
+        LocalDaemonRuntimePreparation(
+            request=request,
+            runtime_provider=provider,
+        )
+    )
+
+    assert prepared is binding
+    assert provider.requests == [request]
+    assert adapter.prompts == []
 
 
 @pytest.mark.asyncio
@@ -321,6 +345,147 @@ async def test_local_daemon_executor_rejects_runtime_for_non_local_target() -> N
                 request=request,
                 runtime_provider=provider,
                 prompt="should not run",
+            )
+        )
+
+    assert provider.requests == []
+    assert adapter.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_local_daemon_executor_validates_runtime_before_overridden_prepare() -> None:
+    request = RunRequest(
+        session_id="session-1",
+        run_id="run-1",
+        target=RunTarget(
+            workspace=CloudWorkspaceRef(
+                workspace_url="docker://workspace/ws-1",
+                workspace_id="ws-1",
+            ),
+            executor=ManagedPoolExecutorRef(),
+            isolation=IsolationPolicy(
+                kind="provider_sandbox",
+                network="provider_managed",
+                filesystem="provider_managed",
+                secrets="provider_managed",
+            ),
+        ),
+    )
+    adapter = FakeRuntimeAdapter(result="should not execute")
+    provider = FakeRuntimeProvider(
+        LocalDaemonRuntimeBinding(
+            pipeline=object(),
+            ctx=object(),
+            adapter=adapter,
+        )
+    )
+
+    class UnsafePrepareExecutor(LocalDaemonExecutor):
+        async def prepare_runtime(
+            self,
+            preparation: LocalDaemonRuntimePreparation,
+        ) -> LocalDaemonRuntimeBinding:
+            return await preparation.runtime_provider.prepare_runtime(
+                preparation.request
+            )
+
+    with pytest.raises(
+        RunExecutorTargetError,
+        match="LocalDaemonExecutor requires a local_daemon executor target",
+    ):
+        _ = await UnsafePrepareExecutor().execute_runtime(
+            LocalDaemonRuntimeExecution(
+                request=request,
+                runtime_provider=provider,
+                prompt="should not run",
+            )
+        )
+
+    assert provider.requests == []
+    assert adapter.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_local_daemon_executor_rejects_runtime_preparation_for_non_local_target() -> None:
+    request = RunRequest(
+        session_id="session-1",
+        run_id="run-1",
+        target=RunTarget(
+            workspace=CloudWorkspaceRef(
+                workspace_url="docker://workspace/ws-1",
+                workspace_id="ws-1",
+            ),
+            executor=ManagedPoolExecutorRef(),
+            isolation=IsolationPolicy(
+                kind="provider_sandbox",
+                network="provider_managed",
+                filesystem="provider_managed",
+                secrets="provider_managed",
+            ),
+        ),
+    )
+
+    adapter = FakeRuntimeAdapter(result="should not prepare")
+    provider = FakeRuntimeProvider(
+        LocalDaemonRuntimeBinding(
+            pipeline=object(),
+            ctx=object(),
+            adapter=adapter,
+        )
+    )
+
+    with pytest.raises(
+        RunExecutorTargetError,
+        match="LocalDaemonExecutor requires a local_daemon executor target",
+    ):
+        _ = await LocalDaemonExecutor().prepare_runtime(
+            LocalDaemonRuntimePreparation(
+                request=request,
+                runtime_provider=provider,
+            )
+        )
+
+    assert provider.requests == []
+    assert adapter.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_local_daemon_executor_rejects_runtime_preparation_for_non_local_workspace() -> None:
+    request = RunRequest(
+        session_id="session-1",
+        run_id="run-1",
+        target=RunTarget(
+            workspace=CloudWorkspaceRef(
+                workspace_url="docker://workspace/ws-1",
+                workspace_id="ws-1",
+            ),
+            executor=LocalDaemonExecutorRef(),
+            isolation=IsolationPolicy(
+                kind="provider_sandbox",
+                network="provider_managed",
+                filesystem="provider_managed",
+                secrets="provider_managed",
+            ),
+        ),
+    )
+
+    adapter = FakeRuntimeAdapter(result="should not prepare")
+    provider = FakeRuntimeProvider(
+        LocalDaemonRuntimeBinding(
+            pipeline=object(),
+            ctx=object(),
+            adapter=adapter,
+        )
+    )
+
+    with pytest.raises(
+        RunExecutorTargetError,
+        match="LocalDaemonExecutor requires a local_path workspace target",
+    ):
+        _ = await LocalDaemonExecutor().prepare_runtime(
+            LocalDaemonRuntimePreparation(
+                request=request,
+                runtime_provider=provider,
             )
         )
 

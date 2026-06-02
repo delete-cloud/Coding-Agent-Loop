@@ -58,6 +58,12 @@ class LocalDaemonRuntimeExecution:
 
 
 @dataclass(frozen=True)
+class LocalDaemonRuntimePreparation:
+    request: RunRequest
+    runtime_provider: LocalDaemonRuntimeProvider
+
+
+@dataclass(frozen=True)
 class LocalDaemonRuntimeResult:
     binding: LocalDaemonRuntimeBinding
     outcome: object
@@ -82,12 +88,24 @@ class LocalDaemonExecutor:
             metadata=request.metadata,
         )
 
+    async def prepare_runtime(
+        self,
+        preparation: LocalDaemonRuntimePreparation,
+    ) -> LocalDaemonRuntimeBinding:
+        self._validate_request_target(preparation.request)
+        return await preparation.runtime_provider.prepare_runtime(preparation.request)
+
     async def execute_runtime(
         self,
         execution: LocalDaemonRuntimeExecution,
     ) -> LocalDaemonRuntimeResult:
         self._validate_request_target(execution.request)
-        binding = await execution.runtime_provider.prepare_runtime(execution.request)
+        binding = await self.prepare_runtime(
+            LocalDaemonRuntimePreparation(
+                request=execution.request,
+                runtime_provider=execution.runtime_provider,
+            )
+        )
         if execution.before_turn is not None:
             before_turn_result = execution.before_turn(binding)
             if isawaitable(before_turn_result):
