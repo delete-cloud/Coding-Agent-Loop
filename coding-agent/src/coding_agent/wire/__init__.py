@@ -11,6 +11,7 @@ Example:
     >>> await wire.send(StreamDelta(session_id="session-123", content="Hello"))
 """
 
+from coding_agent.wire.consumer import LocalWireConsumer
 from coding_agent.wire.local import LocalWire
 from coding_agent.wire.protocol import (
     ApprovalRequest,
@@ -88,6 +89,7 @@ __all__ = [
     "ToolCallEnd",
     "StepInfo",
     "ErrorMessage",
+    "LocalWireConsumer",
     "RuntimeTurnWire",
     # Wire implementations
     "LocalWire",
