@@ -12,6 +12,7 @@ Today the repo contains both:
 ## Current Capabilities
 
 - Interactive REPL with Rich streaming output and shell mode
+- Foreground local daemon control plane via `python -m coding_agent daemon`
 - HTTP server mode via `python -m coding_agent serve`
 - Dev/testkit one-shot compatibility runs via `python -m coding_agent run --goal ...`
 - Hook-driven runtime built from `agentkit` pipeline stages and plugins
@@ -103,11 +104,16 @@ uv run python -m coding_agent run --goal "..." --max-parallel 10
 ### HTTP Server
 
 ```bash
+uv run python -m coding_agent daemon --host 127.0.0.1 --port 8080
 uv run python -m coding_agent serve --host 127.0.0.1 --port 8080
 ```
 
-The HTTP server uses the same pipeline stack as REPL and compatibility
-one-shot mode through the `coding_agent.app.create_agent()` factory and
+`daemon` is the local product entrypoint for a foreground local control plane.
+It currently reuses the same HTTP app as `serve`; background lifecycle, IPC
+socket transport, and daemon client pairing are future slices.
+
+The HTTP app uses the same pipeline stack as REPL and compatibility one-shot
+mode through the `coding_agent.app.create_agent()` factory and
 `PipelineAdapter`.
 
 ## Providers And Environment

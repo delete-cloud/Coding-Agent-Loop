@@ -44,18 +44,13 @@ def _server_cli_port(server_config: dict[str, Any], port: int | None) -> int:
     return configured_port
 
 
-@click.command()
-@click.option("--port", default=None, type=int, help="Server port")
-@click.option("--host", default=None, help="Server host")
-@click.option(
-    "--config",
-    "config_path",
-    default=None,
-    type=click.Path(exists=True, dir_okay=False, path_type=Path),
-    help="Explicit server config file.",
-)
-def serve(port: int | None, host: str | None, config_path: Path | None):
-    """Start HTTP API server."""
+def _run_http_control_plane(
+    *,
+    config_path: Path | None,
+    host: str | None,
+    port: int | None,
+    label: str,
+) -> None:
     import uvicorn
 
     previous_server_config = os.environ.get("CODING_AGENT_SERVER_CONFIG")
@@ -68,9 +63,7 @@ def serve(port: int | None, host: str | None, config_path: Path | None):
 
         from coding_agent.server.http_server import app
 
-        click.echo(
-            f"Starting Coding Agent HTTP server on {resolved_host}:{resolved_port}"
-        )
+        click.echo(f"Starting Coding Agent {label} on {resolved_host}:{resolved_port}")
         uvicorn.run(app, host=resolved_host, port=resolved_port)
     finally:
         if config_path is not None:
@@ -78,3 +71,43 @@ def serve(port: int | None, host: str | None, config_path: Path | None):
                 os.environ.pop("CODING_AGENT_SERVER_CONFIG", None)
             else:
                 os.environ["CODING_AGENT_SERVER_CONFIG"] = previous_server_config
+
+
+@click.command()
+@click.option("--port", default=None, type=int, help="Server port")
+@click.option("--host", default=None, help="Server host")
+@click.option(
+    "--config",
+    "config_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Explicit server config file.",
+)
+def serve(port: int | None, host: str | None, config_path: Path | None):
+    """Start HTTP API server."""
+    _run_http_control_plane(
+        config_path=config_path,
+        host=host,
+        port=port,
+        label="HTTP server",
+    )
+
+
+@click.command()
+@click.option("--port", default=None, type=int, help="Daemon port")
+@click.option("--host", default=None, help="Daemon host")
+@click.option(
+    "--config",
+    "config_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Explicit daemon config file.",
+)
+def daemon(port: int | None, host: str | None, config_path: Path | None):
+    """Start local daemon control plane in the foreground."""
+    _run_http_control_plane(
+        config_path=config_path,
+        host=host,
+        port=port,
+        label="local daemon control plane",
+    )
