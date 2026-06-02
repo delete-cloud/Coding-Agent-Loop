@@ -24,6 +24,7 @@ from coding_agent.environment import (
     CloudEnvironment,
     LocalEnvironment,
 )
+from coding_agent.events import DisplayEvent
 from coding_agent.executors import (
     LocalDaemonExecutor,
     LocalDaemonRuntimeBinding,
@@ -395,6 +396,147 @@ class RecordingLocalDaemonExecutor(LocalDaemonExecutor):
         result = await super().execute_runtime(execution)
         self.results.append(result)
         return result
+
+
+@pytest.mark.asyncio
+async def test_replay_display_events_projects_runtime_events() -> None:
+    runtime_store = FakeRuntimeStore()
+    manager = SessionManager(store=InMemorySessionStore(), runtime_store=runtime_store)
+    run = AgentRunRecord(
+        run_id="run-display",
+        session_id="session-display",
+        tape_id=None,
+        parent_run_id=None,
+        agent_id=None,
+        status="running",
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    await runtime_store.create_agent_run(run)
+    first = await runtime_store.append_runtime_event(
+        RuntimeEventRecord(
+            event_id="event-1",
+            run_id=run.run_id,
+            event_kind="wire.StreamDelta",
+            payload={
+                "message_type": "StreamDelta",
+                "message": {
+                    "agent_id": "agent-1",
+                    "content": "hello",
+                    "role": "assistant",
+                },
+            },
+            created_at=datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC),
+        )
+    )
+    await runtime_store.append_runtime_event(
+        RuntimeEventRecord(
+            event_id="event-2",
+            run_id=run.run_id,
+            event_kind="model_request_started",
+            payload={"request_id": "model-1"},
+            created_at=datetime(2026, 1, 1, 0, 0, 2, tzinfo=UTC),
+        )
+    )
+    await runtime_store.append_runtime_event(
+        RuntimeEventRecord(
+            event_id="event-3",
+            run_id=run.run_id,
+            event_kind="wire.TurnEnd",
+            payload={
+                "message_type": "TurnEnd",
+                "message": {
+                    "agent_id": "agent-1",
+                    "turn_id": "turn-1",
+                    "completion_status": "completed",
+                },
+            },
+            created_at=datetime(2026, 1, 1, 0, 0, 3, tzinfo=UTC),
+        )
+    )
+
+    display_events = await manager.replay_display_events(run.run_id)
+
+    assert display_events == [
+        DisplayEvent(
+            source_event_id=first.event_id,
+            run_id=run.run_id,
+            sequence=1,
+            display_kind="assistant_text_delta",
+            payload={
+                "agent_id": "agent-1",
+                "content": "hello",
+                "role": "assistant",
+            },
+            created_at=datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC),
+        ),
+        DisplayEvent(
+            source_event_id="event-3",
+            run_id=run.run_id,
+            sequence=3,
+            display_kind="final_result",
+            payload={
+                "agent_id": "agent-1",
+                "turn_id": "turn-1",
+                "completion_status": "completed",
+            },
+            created_at=datetime(2026, 1, 1, 0, 0, 3, tzinfo=UTC),
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_replay_display_events_uses_runtime_event_cursor() -> None:
+    runtime_store = FakeRuntimeStore()
+    manager = SessionManager(store=InMemorySessionStore(), runtime_store=runtime_store)
+    run = AgentRunRecord(
+        run_id="run-display",
+        session_id="session-display",
+        tape_id=None,
+        parent_run_id=None,
+        agent_id=None,
+        status="running",
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    await runtime_store.create_agent_run(run)
+    first = await runtime_store.append_runtime_event(
+        RuntimeEventRecord(
+            event_id="event-1",
+            run_id=run.run_id,
+            event_kind="wire.StreamDelta",
+            payload={
+                "message_type": "StreamDelta",
+                "message": {"content": "first", "role": "assistant"},
+            },
+            created_at=datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC),
+        )
+    )
+    await runtime_store.append_runtime_event(
+        RuntimeEventRecord(
+            event_id="event-2",
+            run_id=run.run_id,
+            event_kind="wire.StreamDelta",
+            payload={
+                "message_type": "StreamDelta",
+                "message": {"content": "second", "role": "assistant"},
+            },
+            created_at=datetime(2026, 1, 1, 0, 0, 2, tzinfo=UTC),
+        )
+    )
+
+    display_events = await manager.replay_display_events(
+        run.run_id,
+        last_event_id=first.event_id,
+    )
+
+    assert [event.payload["content"] for event in display_events] == ["second"]
+
+
+@pytest.mark.asyncio
+async def test_replay_display_events_skips_storeless_runtime() -> None:
+    manager = SessionManager(store=InMemorySessionStore(), runtime_store=None)
+
+    with pytest.raises(RuntimeError, match="runtime store is not configured"):
+        await manager.replay_display_events("run-display")
 
 
 @pytest.mark.asyncio

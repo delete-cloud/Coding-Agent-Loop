@@ -79,6 +79,7 @@ from coding_agent.executors import (
     LocalDaemonRuntimeExecution,
     LocalDaemonRuntimePreparation,
 )
+from coding_agent.events import DisplayEvent, project_runtime_events_to_display
 from coding_agent.runs import (
     CloudWorkspaceRef,
     DefaultRunCoordinator,
@@ -1570,6 +1571,20 @@ class SessionManager:
             after_sequence=after_sequence,
             limit=limit,
         )
+
+    async def replay_display_events(
+        self,
+        run_id: str,
+        *,
+        last_event_id: str | None = None,
+        limit: int = 1000,
+    ) -> list[DisplayEvent]:
+        runtime_events = await self.replay_runtime_events(
+            run_id,
+            last_event_id=last_event_id,
+            limit=limit,
+        )
+        return project_runtime_events_to_display(runtime_events)
 
     async def request_attached_executor_run(
         self,
