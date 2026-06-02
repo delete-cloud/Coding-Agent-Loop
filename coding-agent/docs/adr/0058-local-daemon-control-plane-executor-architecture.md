@@ -157,6 +157,9 @@ This ADR does not implement that path.
     `SessionManager` to `LocalDaemonSessionRuntimeProvider`.
   - Completed: checkpoint restore runtime preparation still routes through
     `LocalDaemonExecutor.prepare_runtime()`.
+  - Completed: local daemon turn completion finalization is delegated to
+    `RuntimeTurnFinalizer` instead of living inside `run_agent`'s after-turn
+    closure.
   - Remaining: `SessionManager` still owns run lifecycle bookkeeping,
     checkpoint restore preparation details, observation callbacks, wire consumer
     setup, and some runtime close/error policy. These should move behind

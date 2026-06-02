@@ -3,8 +3,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Any, Protocol
 
+from coding_agent.adapter_types import StopReason, TurnOutcome
 from coding_agent.runtime_store import AgentRunRecord, JSONObject
 from coding_agent.stores import RuntimeRunLifecycleStore
 
@@ -20,6 +21,43 @@ class RuntimeRunResumeContext(Protocol):
     previous_run_id: str
 
 
+class RuntimeTurnSession(Protocol):
+    tape_id: str | None
+    turn_status: str
+    last_failure_details: str | None
+
+
+class RuntimeMessageSnapshotSaver(Protocol):
+    async def __call__(
+        self,
+        session: RuntimeTurnSession,
+        ctx: Any,
+        *,
+        run_id: str,
+    ) -> None: ...
+
+
+class RuntimeRunFinisher(Protocol):
+    async def __call__(
+        self,
+        session: RuntimeTurnSession,
+        *,
+        run_id: str,
+        status: str,
+        result: JSONObject,
+        error: str | None,
+        resume_context: RuntimeRunResumeContext | None = None,
+    ) -> None: ...
+
+
+class RuntimeSessionPersister(Protocol):
+    async def __call__(self, session: RuntimeTurnSession) -> None: ...
+
+
+class RuntimeObservationCompleter(Protocol):
+    def __call__(self, *, ctx: Any, turn_status: str) -> None: ...
+
+
 class RuntimeRunMetadataProvider(Protocol):
     def __call__(
         self,
@@ -31,6 +69,41 @@ class RuntimeRunMetadataProvider(Protocol):
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def runtime_result_from_turn_outcome(outcome: TurnOutcome) -> JSONObject:
+    return {
+        "stop_reason": outcome.stop_reason.value,
+        "steps_taken": outcome.steps_taken,
+    }
+
+
+def runtime_status_from_turn_outcome(outcome: TurnOutcome) -> str:
+    if outcome.stop_reason == StopReason.INTERRUPTED:
+        return "interrupted"
+    if outcome.error is not None or outcome.stop_reason == StopReason.ERROR:
+        return "failed"
+    return "completed"
+
+
+def require_runtime_turn_outcome(outcome: object) -> TurnOutcome:
+    if not isinstance(outcome, TurnOutcome):
+        raise TypeError("runtime store requires PipelineAdapter.run_turn outcome")
+    return outcome
+
+
+def _set_failure_details_from_outcome(
+    session: RuntimeTurnSession,
+    *,
+    turn_status: str,
+    outcome: TurnOutcome,
+) -> None:
+    if turn_status == "failed":
+        session.turn_status = "failed"
+        reason = outcome.error or outcome.stop_reason.value
+        session.last_failure_details = f"Agent turn failed: {reason}"
+        return
+    session.last_failure_details = None
 
 
 @dataclass(frozen=True)
@@ -143,11 +216,71 @@ class RuntimeRunLifecycle:
         )
 
 
+@dataclass(frozen=True)
+class RuntimeTurnFinalizer:
+    has_runtime_store: bool
+    save_message_snapshot: RuntimeMessageSnapshotSaver
+    finish_run: RuntimeRunFinisher
+    persist_session: RuntimeSessionPersister
+    complete_observation: RuntimeObservationCompleter | None = None
+
+    async def complete(
+        self,
+        session: RuntimeTurnSession,
+        *,
+        ctx: Any,
+        outcome: object,
+        run_id: str,
+        resume_context: RuntimeRunResumeContext | None = None,
+    ) -> None:
+        session.tape_id = ctx.tape.tape_id
+        if self.has_runtime_store:
+            turn_outcome = require_runtime_turn_outcome(outcome)
+            turn_status = runtime_status_from_turn_outcome(turn_outcome)
+            await self.save_message_snapshot(session, ctx, run_id=run_id)
+            await self.finish_run(
+                session,
+                run_id=run_id,
+                status=turn_status,
+                result=runtime_result_from_turn_outcome(turn_outcome),
+                error=turn_outcome.error,
+                resume_context=resume_context,
+            )
+            _set_failure_details_from_outcome(
+                session,
+                turn_status=turn_status,
+                outcome=turn_outcome,
+            )
+        else:
+            turn_status = "completed"
+            if isinstance(outcome, TurnOutcome):
+                turn_status = runtime_status_from_turn_outcome(outcome)
+                _set_failure_details_from_outcome(
+                    session,
+                    turn_status=turn_status,
+                    outcome=outcome,
+                )
+            else:
+                session.last_failure_details = None
+        if self.complete_observation is not None:
+            self.complete_observation(ctx=ctx, turn_status=turn_status)
+        await self.persist_session(session)
+
+
 __all__ = [
+    "RuntimeMessageSnapshotSaver",
+    "RuntimeObservationCompleter",
     "RuntimeRunLifecycle",
     "RuntimeRunLifecycleStore",
+    "RuntimeRunFinisher",
     "RuntimeRunMetadataProvider",
     "RuntimeRunResumeContext",
     "RuntimeRunSession",
     "RuntimeRunStore",
+    "RuntimeSessionPersister",
+    "RuntimeTurnFinalizer",
+    "RuntimeTurnSession",
+    "require_runtime_turn_outcome",
+    "runtime_result_from_turn_outcome",
+    "runtime_status_from_turn_outcome",
 ]

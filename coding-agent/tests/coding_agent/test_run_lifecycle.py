@@ -2,12 +2,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
+from coding_agent.adapter_types import StopReason, TurnOutcome
 from coding_agent.runtime_store import AgentRunRecord, JSONObject
-from coding_agent.runs import RuntimeRunLifecycle
+from coding_agent.runs import (
+    RuntimeRunLifecycle,
+    RuntimeTurnFinalizer,
+    runtime_result_from_turn_outcome,
+    runtime_status_from_turn_outcome,
+)
 
 
 @dataclass
@@ -20,6 +26,24 @@ class FakeSession:
 @dataclass
 class FakeResumeContext:
     previous_run_id: str
+
+
+@dataclass
+class FakeTurnSession:
+    id: str
+    tape_id: str | None
+    turn_status: str = "running"
+    last_failure_details: str | None = None
+
+
+class FakeTape:
+    def __init__(self, tape_id: str) -> None:
+        self.tape_id = tape_id
+
+
+class FakeRuntimeContext:
+    def __init__(self, tape_id: str) -> None:
+        self.tape = FakeTape(tape_id)
 
 
 class RecordingRuntimeStore:
@@ -67,15 +91,176 @@ class RecordingRuntimeStore:
         )
 
 
+def test_runtime_turn_outcome_helpers_map_result_and_status() -> None:
+    completed = TurnOutcome(
+        stop_reason=StopReason.NO_TOOL_CALLS,
+        final_message="not persisted",
+        steps_taken=3,
+    )
+    failed = TurnOutcome(stop_reason=StopReason.ERROR, error="model failed")
+    interrupted = TurnOutcome(
+        stop_reason=StopReason.INTERRUPTED,
+        error="manual interrupt",
+        steps_taken=1,
+    )
+
+    assert runtime_result_from_turn_outcome(completed) == {
+        "stop_reason": "no_tool_calls",
+        "steps_taken": 3,
+    }
+    assert runtime_status_from_turn_outcome(completed) == "completed"
+    assert runtime_status_from_turn_outcome(failed) == "failed"
+    assert runtime_status_from_turn_outcome(interrupted) == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_runtime_turn_finalizer_finishes_store_backed_outcome() -> None:
+    session = FakeTurnSession(id="session-1", tape_id=None)
+    ctx = FakeRuntimeContext("tape-finished")
+    snapshots: list[tuple[str, str, str]] = []
+    finishes: list[dict[str, Any]] = []
+    persisted: list[FakeTurnSession] = []
+    observations: list[tuple[str, str]] = []
+
+    async def save_snapshot(
+        session: FakeTurnSession,
+        ctx: FakeRuntimeContext,
+        *,
+        run_id: str,
+    ) -> None:
+        snapshots.append((session.id, ctx.tape.tape_id, run_id))
+
+    async def finish_run(
+        session: FakeTurnSession,
+        *,
+        run_id: str,
+        status: str,
+        result: JSONObject,
+        error: str | None,
+        resume_context: FakeResumeContext | None = None,
+    ) -> None:
+        finishes.append(
+            {
+                "session_id": session.id,
+                "run_id": run_id,
+                "status": status,
+                "result": result,
+                "error": error,
+                "resume_context": resume_context,
+            }
+        )
+
+    async def persist_session(session: FakeTurnSession) -> None:
+        persisted.append(session)
+
+    finalizer = RuntimeTurnFinalizer(
+        has_runtime_store=True,
+        save_message_snapshot=save_snapshot,
+        finish_run=finish_run,
+        persist_session=persist_session,
+        complete_observation=lambda *, ctx, turn_status: observations.append(
+            (ctx.tape.tape_id, turn_status)
+        ),
+    )
+    resume_context = FakeResumeContext(previous_run_id="previous-run")
+
+    await finalizer.complete(
+        session,
+        ctx=ctx,
+        outcome=TurnOutcome(
+            stop_reason=StopReason.NO_TOOL_CALLS,
+            final_message="not persisted",
+            steps_taken=2,
+        ),
+        run_id="run-1",
+        resume_context=resume_context,
+    )
+
+    assert session.tape_id == "tape-finished"
+    assert session.turn_status == "running"
+    assert session.last_failure_details is None
+    assert snapshots == [("session-1", "tape-finished", "run-1")]
+    assert finishes == [
+        {
+            "session_id": "session-1",
+            "run_id": "run-1",
+            "status": "completed",
+            "result": {"stop_reason": "no_tool_calls", "steps_taken": 2},
+            "error": None,
+            "resume_context": resume_context,
+        }
+    ]
+    assert persisted == [session]
+    assert observations == [("tape-finished", "completed")]
+
+
+@pytest.mark.asyncio
+async def test_runtime_turn_finalizer_records_storeless_failure_outcome() -> None:
+    session = FakeTurnSession(id="session-1", tape_id=None)
+    ctx = FakeRuntimeContext("tape-failed")
+    snapshots: list[str] = []
+    finishes: list[str] = []
+    persisted: list[FakeTurnSession] = []
+    observations: list[str] = []
+
+    async def save_snapshot(
+        session: FakeTurnSession,
+        ctx: FakeRuntimeContext,
+        *,
+        run_id: str,
+    ) -> None:
+        del session, ctx
+        snapshots.append(run_id)
+
+    async def finish_run(
+        session: FakeTurnSession,
+        *,
+        run_id: str,
+        status: str,
+        result: JSONObject,
+        error: str | None,
+        resume_context: FakeResumeContext | None = None,
+    ) -> None:
+        del session, status, result, error, resume_context
+        finishes.append(run_id)
+
+    async def persist_session(session: FakeTurnSession) -> None:
+        persisted.append(session)
+
+    finalizer = RuntimeTurnFinalizer(
+        has_runtime_store=False,
+        save_message_snapshot=save_snapshot,
+        finish_run=finish_run,
+        persist_session=persist_session,
+        complete_observation=lambda *, ctx, turn_status: observations.append(
+            turn_status
+        ),
+    )
+
+    await finalizer.complete(
+        session,
+        ctx=ctx,
+        outcome=TurnOutcome(stop_reason=StopReason.ERROR, error="provider failed"),
+        run_id="run-1",
+    )
+
+    assert session.tape_id == "tape-failed"
+    assert session.turn_status == "failed"
+    assert session.last_failure_details == "Agent turn failed: provider failed"
+    assert snapshots == []
+    assert finishes == []
+    assert persisted == [session]
+    assert observations == ["failed"]
+
+
 @pytest.mark.asyncio
 async def test_runtime_run_lifecycle_skips_storeless_runs() -> None:
     metadata_calls: list[FakeSession] = []
     lifecycle = RuntimeRunLifecycle(
         store=None,
-        metadata_for_session=lambda session, *, resume_context=None: metadata_calls.append(
-            session
-        )
-        or {},
+        metadata_for_session=lambda session, *, resume_context=None: (
+            metadata_calls.append(session) or {}
+        ),
     )
 
     created = await lifecycle.create(
@@ -99,7 +284,10 @@ async def test_runtime_run_lifecycle_starts_queued_then_running_run() -> None:
         resume_context: FakeResumeContext | None = None,
     ) -> JSONObject:
         metadata_calls.append(
-            (session.id, None if resume_context is None else resume_context.previous_run_id)
+            (
+                session.id,
+                None if resume_context is None else resume_context.previous_run_id,
+            )
         )
         return {
             "provider_name": session.provider,
@@ -124,7 +312,10 @@ async def test_runtime_run_lifecycle_starts_queued_then_running_run() -> None:
     )
 
     assert created is True
-    assert metadata_calls == [("session-1", "previous-run"), ("session-1", "previous-run")]
+    assert metadata_calls == [
+        ("session-1", "previous-run"),
+        ("session-1", "previous-run"),
+    ]
     assert store.created == [
         AgentRunRecord(
             run_id="run-1",
