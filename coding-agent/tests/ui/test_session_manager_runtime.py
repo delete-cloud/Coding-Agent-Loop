@@ -36,9 +36,11 @@ from coding_agent.runtime_store import (
     RuntimeEventRecord,
 )
 from coding_agent.runs import (
+    CloudWorkspaceRef,
     IsolationPolicy,
     LocalDaemonExecutorRef,
     LocalPathWorkspaceRef,
+    ManagedPoolExecutorRef,
     RunRequest,
     RunSubmission,
     RunTarget,
@@ -2806,6 +2808,121 @@ async def test_failover_rebuilds_from_persisted_state_without_resuming_local_run
 
 
 @pytest.mark.asyncio
+async def test_ensure_session_runtime_uses_default_run_target_workspace(
+    tmp_path: Path,
+) -> None:
+    store = InMemorySessionStore()
+    legacy_bound = tmp_path / "legacy-bound"
+    target_bound = tmp_path / "target-bound"
+    legacy_bound.mkdir()
+    target_bound.mkdir()
+    captured_kwargs: dict[str, object] = {}
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        ),
+        _directive_executor=None,
+    )
+
+    def fake_create_agent(**kwargs):
+        captured_kwargs.update(kwargs)
+        return fake_pipeline, types.SimpleNamespace(
+            config={},
+            tape=kwargs.get("tape") or Tape(),
+            plugin_states={},
+        )
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+            self.ctx = ctx
+
+        async def initialize(self) -> None:
+            return None
+
+    manager = SessionManager(store=store, create_agent_fn=fake_create_agent)
+    session_id = await manager.create_session(
+        execution_binding=LocalExecutionBinding(workspace_root=str(legacy_bound)),
+    )
+    session = manager.get_session(session_id)
+    session.default_run_target = RunTarget(
+        workspace=LocalPathWorkspaceRef(path=str(target_bound)),
+        executor=LocalDaemonExecutorRef(),
+        isolation=IsolationPolicy(kind="default_local_sandbox"),
+    )
+    manager.register_session(session)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
+        await manager.ensure_session_runtime(session_id)
+
+    assert captured_kwargs["workspace_root"] == target_bound.resolve()
+    assert isinstance(captured_kwargs["environment"], LocalEnvironment)
+    assert captured_kwargs["environment"].workspace_root == target_bound.resolve()
+    assert isinstance(session.execution_binding, LocalExecutionBinding)
+    assert session.execution_binding.workspace_root == str(legacy_bound)
+
+
+@pytest.mark.asyncio
+async def test_replace_session_runtime_config_uses_default_run_target_workspace(
+    tmp_path: Path,
+) -> None:
+    store = InMemorySessionStore()
+    legacy_bound = tmp_path / "legacy-bound"
+    target_bound = tmp_path / "target-bound"
+    legacy_bound.mkdir()
+    target_bound.mkdir()
+    captured_kwargs: dict[str, object] = {}
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        ),
+        _directive_executor=None,
+    )
+
+    def fake_create_agent(**kwargs):
+        captured_kwargs.update(kwargs)
+        return fake_pipeline, types.SimpleNamespace(
+            config={},
+            tape=kwargs.get("tape") or Tape(),
+            plugin_states={},
+        )
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+            self.ctx = ctx
+
+        async def initialize(self) -> None:
+            return None
+
+    manager = SessionManager(store=store, create_agent_fn=fake_create_agent)
+    session_id = await manager.create_session(
+        execution_binding=LocalExecutionBinding(workspace_root=str(legacy_bound)),
+    )
+    session = manager.get_session(session_id)
+    session.default_run_target = RunTarget(
+        workspace=LocalPathWorkspaceRef(path=str(target_bound)),
+        executor=LocalDaemonExecutorRef(),
+        isolation=IsolationPolicy(kind="default_local_sandbox"),
+    )
+    manager.register_session(session)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
+        await manager.replace_session_runtime_config(
+            session_id,
+            model_name="replacement-model",
+        )
+
+    assert captured_kwargs["workspace_root"] == target_bound.resolve()
+    assert isinstance(captured_kwargs["environment"], LocalEnvironment)
+    assert captured_kwargs["environment"].workspace_root == target_bound.resolve()
+    assert isinstance(session.execution_binding, LocalExecutionBinding)
+    assert session.execution_binding.workspace_root == str(legacy_bound)
+
+
+@pytest.mark.asyncio
 async def test_session_store_persists_tape_id_for_cold_recovery() -> None:
     store = InMemorySessionStore()
     manager = SessionManager(store=store)
@@ -3404,6 +3521,93 @@ async def test_restore_checkpoint_preserves_execution_binding(tmp_path: Path) ->
     assert session.execution_binding.workspace_root == str(restore_bound)
 
 
+@pytest.mark.asyncio
+async def test_restore_checkpoint_uses_default_run_target_workspace(
+    tmp_path: Path,
+) -> None:
+    store = InMemorySessionStore()
+    manager = SessionManager(store=store)
+    legacy_bound = tmp_path / "legacy-bound"
+    target_bound = tmp_path / "target-bound"
+    legacy_bound.mkdir()
+    target_bound.mkdir()
+    session_id = await manager.create_session(
+        execution_binding=LocalExecutionBinding(workspace_root=str(legacy_bound)),
+    )
+    session = manager.get_session(session_id)
+    session.tape_id = "target-restore-tape"
+    session.default_run_target = RunTarget(
+        workspace=LocalPathWorkspaceRef(path=str(target_bound)),
+        executor=LocalDaemonExecutorRef(),
+        isolation=IsolationPolicy(kind="default_local_sandbox"),
+    )
+    manager.register_session(session)
+
+    snapshot = types.SimpleNamespace(
+        meta=types.SimpleNamespace(
+            checkpoint_id="cp-target-binding",
+            tape_id="target-restore-tape",
+            entry_count=0,
+            window_start=0,
+        ),
+        tape_entries=(),
+        plugin_states={},
+        extra={},
+    )
+    captured_kwargs: dict[str, object] = {}
+
+    class FakeCheckpointService:
+        async def restore(self, checkpoint_id: str):
+            assert checkpoint_id == "cp-target-binding"
+            return snapshot
+
+        async def list(self, tape_id: str):
+            assert tape_id == "target-restore-tape"
+            return [snapshot.meta]
+
+        async def delete(self, checkpoint_id: str) -> None:
+            return None
+
+    class FakeTapeStore:
+        async def truncate(self, tape_id: str, keep: int) -> None:
+            return None
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+            self.ctx = ctx
+
+        async def initialize(self) -> None:
+            return None
+
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        )
+    )
+
+    def fake_create_agent(**kwargs):
+        captured_kwargs.update(kwargs)
+        return fake_pipeline, types.SimpleNamespace(
+            config={}, tape=kwargs.get("tape"), plugin_states={}
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr(
+            manager, "_checkpoint_service", FakeCheckpointService(), raising=False
+        )
+        mp.setattr(manager, "_tape_store", FakeTapeStore(), raising=False)
+        await manager._restore_checkpoint(session, "cp-target-binding")
+
+    assert captured_kwargs["workspace_root"] == target_bound.resolve()
+    assert isinstance(captured_kwargs["environment"], LocalEnvironment)
+    assert captured_kwargs["environment"].workspace_root == target_bound.resolve()
+    assert isinstance(session.execution_binding, LocalExecutionBinding)
+    assert session.execution_binding.workspace_root == str(legacy_bound)
+
+
 class FakeCloudClient:
     workspace_id = "ws-123"
     workspace_url = "https://workspace.example.com"
@@ -3626,6 +3830,106 @@ async def test_restore_checkpoint_preserves_cloud_execution_binding() -> None:
     assert isinstance(captured_kwargs["environment"], CloudEnvironment)
     assert isinstance(session.execution_binding, CloudWorkspaceBinding)
     assert session.execution_binding.workspace_id == "ws-123"
+
+
+@pytest.mark.asyncio
+async def test_restore_checkpoint_preserves_cloud_run_target_metadata() -> None:
+    observed_bindings: list[CloudWorkspaceBinding] = []
+
+    def fake_create_agent(**kwargs):
+        return fake_pipeline, types.SimpleNamespace(
+            config={}, tape=kwargs.get("tape"), plugin_states={}
+        )
+
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        )
+    )
+
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        create_agent_fn=fake_create_agent,
+        binding_resolver=DefaultBindingResolver(
+            cloud_client_factory=lambda binding: (
+                observed_bindings.append(binding) or FakeCloudClient()
+            )
+        ),
+    )
+    session_id = await manager.create_session(
+        execution_binding=CloudWorkspaceBinding(
+            workspace_url="https://legacy.example.com",
+            workspace_id="legacy-ws",
+        )
+    )
+    session = manager.get_session(session_id)
+    session.tape_id = "cloud-target-restore-tape"
+    session.default_run_target = RunTarget(
+        workspace=CloudWorkspaceRef(
+            workspace_url="https://target.example.com",
+            workspace_id="target-ws",
+            runtime_profile="gpu-large",
+            workspace_provider="docker",
+            provider_instance_id="docker-host-a",
+        ),
+        executor=ManagedPoolExecutorRef(pool="gpu"),
+        isolation=IsolationPolicy(kind="provider_sandbox"),
+    )
+    manager.register_session(session)
+
+    snapshot = types.SimpleNamespace(
+        meta=types.SimpleNamespace(
+            checkpoint_id="cp-cloud-target",
+            tape_id="cloud-target-restore-tape",
+            entry_count=0,
+            window_start=0,
+        ),
+        tape_entries=(),
+        plugin_states={},
+        extra={},
+    )
+
+    class FakeCheckpointService:
+        async def restore(self, checkpoint_id: str):
+            assert checkpoint_id == "cp-cloud-target"
+            return snapshot
+
+        async def list(self, tape_id: str):
+            assert tape_id == "cloud-target-restore-tape"
+            return [snapshot.meta]
+
+        async def delete(self, checkpoint_id: str) -> None:
+            del checkpoint_id
+
+    class FakeTapeStore:
+        async def truncate(self, tape_id: str, keep: int) -> None:
+            del tape_id, keep
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+            self.ctx = ctx
+
+        async def initialize(self) -> None:
+            return None
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
+        mp.setattr(
+            manager, "_checkpoint_service", FakeCheckpointService(), raising=False
+        )
+        mp.setattr(manager, "_tape_store", FakeTapeStore(), raising=False)
+        await manager._restore_checkpoint(session, "cp-cloud-target")
+
+    assert observed_bindings == [
+        CloudWorkspaceBinding(
+            workspace_url="https://target.example.com",
+            workspace_id="target-ws",
+            runtime_profile="gpu-large",
+            workspace_provider="docker",
+            provider_instance_id="docker-host-a",
+        )
+    ]
 
 
 @pytest.mark.asyncio

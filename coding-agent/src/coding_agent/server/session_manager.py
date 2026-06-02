@@ -79,6 +79,7 @@ from coding_agent.executors import (
     LocalDaemonRuntimeExecution,
 )
 from coding_agent.runs import (
+    CloudWorkspaceRef,
     DefaultRunCoordinator,
     LocalDaemonExecutorRef,
     LocalPathWorkspaceRef,
@@ -3339,7 +3340,7 @@ class SessionManager:
         previous_provider_name = session.provider_name
         previous_model_name = session.model_name
         previous_base_url = session.base_url
-        environment = self._resolve_environment(session)
+        environment = self._resolve_environment_for_run_target(session.default_run_target)
         workspace_root = self._environment_workspace_root(environment)
 
         approval_mode_map = {
@@ -3416,10 +3417,35 @@ class SessionManager:
     def _resolve_environment(self, session: Session) -> Environment:
         return self._binding_resolver.resolve_environment(session.execution_binding)
 
+    def _resolve_environment_for_run_target(
+        self,
+        target: RunTarget | None,
+    ) -> Environment:
+        if target is None:
+            raise RuntimeError("session is missing default_run_target")
+        workspace = target.workspace
+        if isinstance(workspace, LocalPathWorkspaceRef):
+            return LocalEnvironment(Path(workspace.path).expanduser().resolve())
+        if isinstance(workspace, CloudWorkspaceRef):
+            return self._binding_resolver.resolve_environment(
+                CloudWorkspaceBinding(
+                    workspace_url=workspace.workspace_url,
+                    workspace_id=workspace.workspace_id,
+                    runtime_profile=workspace.runtime_profile,
+                    workspace_provider=workspace.workspace_provider,
+                    provider_instance_id=workspace.provider_instance_id,
+                )
+            )
+        raise ValueError(
+            f"runtime builders cannot resolve workspace target: {workspace.kind}"
+        )
+
     def _resolve_local_daemon_environment(self, target: RunTarget) -> Environment:
+        if not isinstance(target.executor, LocalDaemonExecutorRef):
+            raise ValueError("local daemon runs require a local_daemon executor target")
         if not isinstance(target.workspace, LocalPathWorkspaceRef):
             raise ValueError("local daemon runs require a local_path workspace target")
-        return LocalEnvironment(Path(target.workspace.path).expanduser().resolve())
+        return self._resolve_environment_for_run_target(target)
 
     def _environment_workspace_root(self, environment: Environment) -> Path | None:
         local_root = environment.workspace_summary().local_root
@@ -4659,7 +4685,7 @@ class SessionManager:
         resolved_approval_policy = (
             session.approval_policy if approval_policy is None else approval_policy
         )
-        environment = self._resolve_environment(session)
+        environment = self._resolve_environment_for_run_target(session.default_run_target)
         workspace_root = self._environment_workspace_root(environment)
 
         consumer = self._make_session_consumer(session)
