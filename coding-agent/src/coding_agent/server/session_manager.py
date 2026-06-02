@@ -3916,18 +3916,16 @@ class SessionManager:
                     resume_context=resume_context,
                 )
 
-                async def run_runtime_turn() -> object:
-                    return await adapter.run_turn(prompt)
-
                 if isinstance(run_request.target.executor, LocalDaemonExecutorRef):
                     outcome = await self._local_daemon_executor.execute_runtime(
                         LocalDaemonRuntimeExecution(
                             request=run_request,
-                            run=run_runtime_turn,
+                            adapter=adapter,
+                            prompt=prompt,
                         )
                     )
                 else:
-                    outcome = await run_runtime_turn()
+                    outcome = await adapter.run_turn(prompt)
                 if self._runtime_store is not None:
                     turn_outcome = self._require_turn_outcome(outcome)
                     turn_status = self._status_from_turn_outcome(turn_outcome)
