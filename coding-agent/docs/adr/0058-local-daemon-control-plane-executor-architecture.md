@@ -1,6 +1,6 @@
 # ADR-0058: Local daemon control plane and executor architecture
 
-**Status**: Proposed
+**Status**: Accepted
 **Date**: 2026-06-02
 
 ## Context
@@ -121,20 +121,29 @@ This ADR does not implement that path.
 
 ## Acceptance Criteria
 
-- [ ] `RunTarget`, `WorkspaceRef`, `ExecutorRef`, `IsolationPolicy`, and
+- [x] `RunTarget`, `WorkspaceRef`, `ExecutorRef`, `IsolationPolicy`, and
   `RunConstraints` exist under `src/coding_agent/runs/`.
-- [ ] `ExecutionBinding -> RunTarget` adapter maps local, cloud,
+- [x] `ExecutionBinding -> RunTarget` adapter maps local, cloud,
   external-worker, and local-attached compatibility bindings without changing
   existing serialized `ExecutionBinding` payloads.
-- [ ] New code in the run-placement skeleton imports canonical binding models
+- [x] New code in the run-placement skeleton imports canonical binding models
   from `coding_agent.environment.execution_binding`, not server/ui aliases.
-- [ ] `test_local_execution_binding_maps_to_local_daemon_run_target`
-- [ ] `test_cloud_execution_binding_maps_to_managed_pool_run_target`
-- [ ] `test_external_worker_binding_maps_to_external_worker_run_target`
-- [ ] `test_local_attached_binding_maps_to_local_attached_run_target`
-- [ ] `test_run_target_rejects_empty_annotations_key`
-- [ ] `uv run pytest tests/coding_agent/test_run_target.py tests/ui/test_execution_binding.py -v`
-- [ ] `uv run ruff check src/coding_agent/runs tests/coding_agent/test_run_target.py`
+- [x] `test_local_execution_binding_maps_to_local_daemon_run_target`
+- [x] `test_cloud_execution_binding_maps_to_managed_pool_run_target`
+- [x] `test_external_worker_binding_maps_to_external_worker_run_target`
+- [x] `test_local_attached_binding_maps_to_local_attached_run_target`
+- [x] `test_run_target_rejects_empty_annotations_key`
+- [x] `uv run pytest tests/coding_agent/test_run_target.py tests/ui/test_execution_binding.py -v`
+- [x] `uv run ruff check src/coding_agent/runs tests/coding_agent/test_run_target.py`
+
+## Follow-up Implementation Tasks
+
+- Split durable `SessionRecord` data from process-local `SessionRuntimeHandle`
+  state.
+- Introduce a `RunCoordinator` boundary that selects an executor from
+  `RunTarget`.
+- Move runtime ownership behind `LocalDaemonExecutor`.
+- Demote `coding_agent run` to an inline testkit/devkit compatibility path.
 
 ## References
 
