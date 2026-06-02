@@ -3394,12 +3394,14 @@ async def test_run_agent_does_not_route_cloud_runtime_through_local_daemon_execu
     )
 
     class FakeAdapter:
+        prompts: list[str] = []
+
         def __init__(self, pipeline, ctx, consumer) -> None:
             del pipeline, consumer
             self.ctx = ctx
 
         async def run_turn(self, prompt: str) -> TurnOutcome:
-            del prompt
+            self.prompts.append(prompt)
             return TurnOutcome(
                 stop_reason=StopReason.NO_TOOL_CALLS,
                 steps_taken=1,
@@ -3411,9 +3413,12 @@ async def test_run_agent_does_not_route_cloud_runtime_through_local_daemon_execu
         await manager.run_agent(session_id, "hello cloud")
 
     assert local_executor.executions == []
+    assert FakeAdapter.prompts == []
     assert runtime_store.created[0].metadata["workspace_surface"] == "cloud_workspace"
     assert runtime_store.updated[0]["status"] == "running"
-    assert runtime_store.updated[-1]["status"] == "completed"
+    assert runtime_store.updated[-1]["status"] == "failed"
+    assert runtime_store.updated[-1]["error"] is not None
+    assert "managed_pool" in str(runtime_store.updated[-1]["error"])
 
 
 @pytest.mark.asyncio

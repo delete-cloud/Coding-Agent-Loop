@@ -705,6 +705,17 @@ class EventBroadcastResult:
     failed_pruned_count: int
 
 
+class UnsupportedRuntimeExecutorError(RuntimeError):
+    """Raised when a run target has no executor-backed runtime path."""
+
+
+def _executor_ref_kind(executor: object) -> str:
+    kind = getattr(executor, "kind", None)
+    if isinstance(kind, str) and kind.strip():
+        return kind
+    return type(executor).__name__
+
+
 @dataclass
 class SessionRuntimeHandle:
     """Process-local runtime state associated with a session record."""
@@ -3925,7 +3936,12 @@ class SessionManager:
                         )
                     )
                 else:
-                    outcome = await adapter.run_turn(prompt)
+                    executor_kind = _executor_ref_kind(run_request.target.executor)
+                    raise UnsupportedRuntimeExecutorError(
+                        "executor target "
+                        f"{executor_kind!r} does not have a local runtime path; "
+                        "control plane cannot execute runtime directly"
+                    )
                 if self._runtime_store is not None:
                     turn_outcome = self._require_turn_outcome(outcome)
                     turn_status = self._status_from_turn_outcome(turn_outcome)
