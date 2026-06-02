@@ -11,6 +11,19 @@ from coding_agent.core.config import Config
 from coding_agent.server.session_manager import SessionManager
 
 
+def local_cli_session_origin(*, entrypoint: str, mode: str) -> dict[str, str]:
+    """Build durable origin metadata for sessions created by local CLI surfaces."""
+    if not entrypoint.strip():
+        raise ValueError("entrypoint must be non-empty")
+    if not mode.strip():
+        raise ValueError("mode must be non-empty")
+    return {
+        "channel": "local_cli",
+        "entrypoint": entrypoint,
+        "mode": mode,
+    }
+
+
 @dataclass(frozen=True)
 class LocalCliRuntime:
     """In-process runtime components for a local CLI session."""
@@ -158,6 +171,7 @@ __all__ = [
     "ServerBackedLocalCliSessionManager",
     "create_local_cli_runtime",
     "create_local_cli_session_manager",
+    "local_cli_session_origin",
 ]
 
 

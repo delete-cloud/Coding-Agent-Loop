@@ -1455,7 +1455,39 @@ class TestReplInitialization:
             created_sessions
             and created_sessions[0]["provider_name"] == session.config.provider
         )
+        assert created_sessions[0]["origin"] == {
+            "channel": "local_cli",
+            "entrypoint": "repl",
+            "mode": "interactive",
+        }
         assert session._pipeline_ctx is fake_ctx
+
+    @pytest.mark.asyncio
+    async def test_session_new_hook_creates_repl_origin_session(self, monkeypatch):
+        from coding_agent.cli.repl import InteractiveSession
+
+        created_sessions: list[dict[str, object]] = []
+
+        class FakeSessionManager:
+            async def create_session(self, **kwargs):
+                created_sessions.append(dict(kwargs))
+                return "session-new"
+
+        session = InteractiveSession(TestFooterIntegration()._make_config())
+        fake_session_manager = FakeSessionManager()
+        monkeypatch.setattr(session, "_session_manager", fake_session_manager)
+        session.context["session_manager"] = fake_session_manager
+
+        create_session = session.context["create_session"]
+        assert callable(create_session)
+        session_id = await create_session()
+
+        assert session_id == "session-new"
+        assert created_sessions[0]["origin"] == {
+            "channel": "local_cli",
+            "entrypoint": "repl",
+            "mode": "interactive",
+        }
 
     @pytest.mark.asyncio
     async def test_initialize_mounts_pipeline_before_first_command(self, monkeypatch):

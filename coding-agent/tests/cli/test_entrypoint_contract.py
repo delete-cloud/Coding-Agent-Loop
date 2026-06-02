@@ -181,6 +181,11 @@ def test_run_command_uses_managed_session(
             "create_session",
             {
                 "repo_path": tmp_path,
+                "origin": {
+                    "channel": "local_cli",
+                    "entrypoint": "run",
+                    "mode": "inline_testkit",
+                },
                 "approval_policy": cli_main.ApprovalPolicy.YOLO,
                 "provider_name": "openai",
                 "model_name": "gpt-4o",
