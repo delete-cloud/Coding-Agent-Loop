@@ -27,6 +27,15 @@ class RuntimeTurnSession(Protocol):
     last_failure_details: str | None
 
 
+class RuntimeTurnStartSession(RuntimeRunSession, Protocol):
+    runtime_message_bus: object
+
+
+class RuntimeTurnBinding(Protocol):
+    ctx: Any
+    adapter: object
+
+
 class RuntimeMessageSnapshotSaver(Protocol):
     async def __call__(
         self,
@@ -60,6 +69,33 @@ class RuntimeObservationCompleter(Protocol):
 
 class RuntimeTurnErrorAction(Protocol):
     async def __call__(self) -> None: ...
+
+
+class RuntimeRootRunIdentityBinder(Protocol):
+    def __call__(
+        self,
+        session: RuntimeTurnStartSession,
+        ctx: Any,
+        run_id: str,
+        *,
+        resume_context: RuntimeRunResumeContext | None = None,
+    ) -> None: ...
+
+
+class RuntimeSubagentMessagePublisherBinder(Protocol):
+    def __call__(self, ctx: Any) -> None: ...
+
+
+class RuntimeObservationStarter(Protocol):
+    def __call__(
+        self,
+        *,
+        session: RuntimeTurnStartSession,
+        ctx: Any,
+        run_id: str,
+        prompt: str,
+        resume_context: RuntimeRunResumeContext | None = None,
+    ) -> object | None: ...
 
 
 class RuntimeRunMetadataProvider(Protocol):
@@ -273,6 +309,46 @@ class RuntimeTurnErrorState:
 
 
 @dataclass(frozen=True)
+class RuntimeTurnStarter:
+    turn_run: RuntimeTurnRunTracker
+    consumer: object
+    run_id: str
+    prompt: str
+    bind_root_run_identity: RuntimeRootRunIdentityBinder
+    bind_subagent_message_publisher: RuntimeSubagentMessagePublisherBinder
+    start_observation: RuntimeObservationStarter
+    resume_context: RuntimeRunResumeContext | None = None
+
+    async def start(
+        self,
+        session: RuntimeTurnStartSession,
+        binding: RuntimeTurnBinding,
+    ) -> object | None:
+        ctx = binding.ctx
+        adapter = binding.adapter
+        self.bind_root_run_identity(
+            session,
+            ctx,
+            self.run_id,
+            resume_context=self.resume_context,
+        )
+        await self.turn_run.ensure_started(session)
+        set_consumer = getattr(adapter, "set_consumer", None)
+        if callable(set_consumer):
+            set_consumer(self.consumer)
+        ctx.runtime_message_bus = session.runtime_message_bus
+        ctx.config["wire_consumer"] = self.consumer
+        self.bind_subagent_message_publisher(ctx)
+        return self.start_observation(
+            session=session,
+            ctx=ctx,
+            run_id=self.run_id,
+            prompt=self.prompt,
+            resume_context=self.resume_context,
+        )
+
+
+@dataclass(frozen=True)
 class RuntimeTurnFinalizer:
     has_runtime_store: bool
     save_message_snapshot: RuntimeMessageSnapshotSaver
@@ -329,15 +405,21 @@ __all__ = [
     "RuntimeRunLifecycle",
     "RuntimeRunLifecycleStore",
     "RuntimeRunFinisher",
+    "RuntimeRootRunIdentityBinder",
     "RuntimeRunMetadataProvider",
     "RuntimeRunResumeContext",
     "RuntimeRunSession",
     "RuntimeRunStore",
     "RuntimeSessionPersister",
+    "RuntimeObservationStarter",
+    "RuntimeSubagentMessagePublisherBinder",
+    "RuntimeTurnBinding",
     "RuntimeTurnErrorAction",
     "RuntimeTurnErrorState",
     "RuntimeTurnFinalizer",
     "RuntimeTurnRunTracker",
+    "RuntimeTurnStartSession",
+    "RuntimeTurnStarter",
     "RuntimeTurnSession",
     "require_runtime_turn_outcome",
     "runtime_result_from_turn_outcome",
