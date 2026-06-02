@@ -6,7 +6,7 @@ import threading
 import types
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
@@ -29,6 +29,12 @@ from coding_agent.runtime_store import (
     AgentRunRecord,
     RunMessageSnapshotRecord,
     RuntimeEventRecord,
+)
+from coding_agent.runs import (
+    LocalDaemonExecutorRef,
+    LocalPathWorkspaceRef,
+    RunRequest,
+    RunSubmission,
 )
 from coding_agent.environment.binding_resolver import DefaultBindingResolver
 from coding_agent.environment.execution_binding import (
@@ -300,6 +306,21 @@ class FakeRuntimeStore:
         raise KeyError(f"agent interaction not found: {interaction_id}")
 
 
+class RecordingRunCoordinator:
+    def __init__(self) -> None:
+        self.requests: list[RunRequest] = []
+
+    async def submit_run(self, request: RunRequest) -> RunSubmission:
+        self.requests.append(request)
+        return RunSubmission(
+            session_id=request.session_id,
+            run_id=request.run_id,
+            target=request.target,
+            executor=request.target.executor,
+            metadata=request.metadata,
+        )
+
+
 @pytest.mark.asyncio
 async def test_run_agent_does_not_hardcode_api_key() -> None:
     manager = SessionManager()
@@ -544,6 +565,76 @@ async def test_run_agent_persists_agent_run_lifecycle_when_store_configured() ->
     }
     assert "final_message" not in completed_update["result"]
     assert completed_update["error"] is None
+
+
+@pytest.mark.asyncio
+async def test_run_agent_submits_run_request_to_run_coordinator(
+    tmp_path: Path,
+) -> None:
+    runtime_store = FakeRuntimeStore()
+    run_coordinator = RecordingRunCoordinator()
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    manager = SessionManager(
+        runtime_store=cast(Any, runtime_store),
+        run_coordinator=run_coordinator,
+    )
+    session_id = await manager.create_session(
+        execution_binding=LocalExecutionBinding(workspace_root=str(workspace)),
+    )
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+            self.ctx = ctx
+
+        async def run_turn(self, prompt: str) -> TurnOutcome:
+            del prompt
+            return TurnOutcome(
+                stop_reason=StopReason.NO_TOOL_CALLS,
+                steps_taken=1,
+            )
+
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        )
+    )
+
+    def fake_create_agent(**kwargs):
+        environment = kwargs["environment"]
+        if not isinstance(environment, LocalEnvironment):
+            raise TypeError("expected local environment")
+        return fake_pipeline, types.SimpleNamespace(
+            session_id=kwargs["session_id_override"],
+            config={},
+            tape=kwargs.get("tape") or Tape(tape_id="stable-tape"),
+            run_context=AgentRunContext(
+                session_id=kwargs["session_id_override"],
+                run_id=kwargs["run_id_override"],
+                agent_id=None,
+                environment=environment,
+            ),
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
+
+        await manager.run_agent(session_id, "implement coordinator integration")
+
+    created_run = runtime_store.created[0]
+    assert len(run_coordinator.requests) == 1
+    request = run_coordinator.requests[0]
+    assert request.session_id == session_id
+    assert request.run_id == created_run.run_id
+    assert request.input_summary == "implement coordinator integration"
+    assert request.resume_from_run_id is None
+    assert isinstance(request.target.executor, LocalDaemonExecutorRef)
+    assert isinstance(request.target.workspace, LocalPathWorkspaceRef)
+    assert request.target.workspace.path == str(workspace.resolve())
+    assert runtime_store.updated[0]["status"] == "running"
+    assert runtime_store.updated[-1]["status"] == "completed"
 
 
 @pytest.mark.asyncio
