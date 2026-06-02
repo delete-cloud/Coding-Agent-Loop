@@ -1,4 +1,4 @@
-"""CLI package for interactive and batch modes."""
+"""CLI package for interactive client and compatibility one-shot modes."""
 
 from coding_agent.cli.commands import (
     get_command_completions,

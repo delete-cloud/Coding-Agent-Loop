@@ -117,8 +117,8 @@ def main(ctx, model, provider_name, base_url, api_key):
             raise click.UsageError(
                 "interactive REPL mode requires an interactive terminal; use "
                 "'python -m coding_agent repl' in a terminal, or "
-                "'python -m coding_agent run --goal \"<task>\"' for a managed "
-                "one-shot session"
+                "'python -m coding_agent run --goal \"<task>\"' for a dev/testkit "
+                "one-shot compatibility session"
             )
 
         config = _build_runtime_config(ctx)
@@ -136,12 +136,16 @@ def main(ctx, model, provider_name, base_url, api_key):
 @click.option("--max-parallel", default=5, help="Maximum parallel tool executions")
 @click.option("--cache/--no-cache", default=True, help="Enable tool result caching")
 @click.option("--cache-size", default=100, help="Maximum cached entries")
-@click.option("--tui", is_flag=True, help="Use Rich TUI interface (batch mode)")
+@click.option(
+    "--tui",
+    is_flag=True,
+    help="Use Rich TUI interface for the dev/testkit one-shot run",
+)
 @click.option(
     "--patch",
     "patch_mode",
     is_flag=True,
-    help="Require the run to produce repository changes.",
+    help="Require the dev/testkit one-shot run to produce repository changes.",
 )
 @click.option(
     "--verify-cmd",
@@ -164,7 +168,7 @@ def run(
     patch_mode,
     verify_commands,
 ):
-    """Run agent on a goal (batch mode)."""
+    """Run a dev/testkit one-shot local session (compatibility path)."""
     import asyncio
 
     config = _build_runtime_config(
@@ -427,7 +431,7 @@ def storage_migrate_sqlite(
 
 
 async def _run_with_tui(config, goal):
-    """Run a managed one-shot local session with TUI display."""
+    """Run a dev/testkit one-shot local session with TUI display."""
     tui = CodingAgentTUI(model_name=config.model, max_steps=config.max_steps)
     with tui:
         tui.add_user_message(goal)
@@ -435,7 +439,7 @@ async def _run_with_tui(config, goal):
 
 
 async def _run_headless(config, goal):
-    """Run a managed one-shot local session in headless mode."""
+    """Run a dev/testkit one-shot local session in headless mode."""
     consumer = HeadlessConsumer(auto_approve=config.approval_mode == "yolo")
     await _run_managed_one_shot(config, goal, consumer)
 
@@ -577,7 +581,7 @@ async def _local_session_summary(
 
 
 async def _run_managed_one_shot(config: Config, goal: str, consumer) -> None:
-    """Execute a one-shot local session through the local CLI runtime."""
+    """Execute a compatibility one-shot session through the local CLI runtime."""
     session_manager = _local_session_manager()
     try:
         session_id = await session_manager.create_session(

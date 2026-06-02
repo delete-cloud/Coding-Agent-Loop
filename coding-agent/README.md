@@ -12,8 +12,8 @@ Today the repo contains both:
 ## Current Capabilities
 
 - Interactive REPL with Rich streaming output and shell mode
-- Batch execution via `python -m coding_agent run --goal ...`
 - HTTP server mode via `python -m coding_agent serve`
+- Dev/testkit one-shot compatibility runs via `python -m coding_agent run --goal ...`
 - Hook-driven runtime built from `agentkit` pipeline stages and plugins
 - Tooling for file reads/writes, grep/glob, shell commands, file patching, planning, web search, and subagents
 - Provider support for `openai`, `anthropic`, `copilot`, `kimi`, `kimi-code`, `kimi-code-anthropic`, and `deepseek`
@@ -73,7 +73,7 @@ Supported slash commands today:
 | `/thinking ...` | Toggle thinking mode and effort |
 | `/mcp [reload]` | Inspect or reload MCP servers |
 
-### Batch Mode
+### Dev/Testkit One-Shot Compatibility
 
 ```bash
 # Headless
@@ -81,12 +81,16 @@ uv run python -m coding_agent run \
   --goal "fix the bug in utils.py" \
   --repo .
 
-# Rich streaming TUI in batch mode
+# Rich streaming TUI in compatibility one-shot mode
 uv run python -m coding_agent run \
   --goal "refactor main.py" \
   --repo . \
   --tui
 ```
+
+`run` is retained for scripts, tests, and dogfood task packets. It is not the
+target local product path; the local product direction is REPL/client surfaces
+backed by durable local session/runtime management.
 
 Parallel execution is enabled by default for safe independent tool calls:
 
@@ -102,8 +106,9 @@ uv run python -m coding_agent run --goal "..." --max-parallel 10
 uv run python -m coding_agent serve --host 127.0.0.1 --port 8080
 ```
 
-The HTTP server uses the same pipeline stack as REPL and batch mode through the
-`coding_agent.app.create_agent()` factory and `PipelineAdapter`.
+The HTTP server uses the same pipeline stack as REPL and compatibility
+one-shot mode through the `coding_agent.app.create_agent()` factory and
+`PipelineAdapter`.
 
 ## Providers And Environment
 

@@ -1,9 +1,9 @@
-"""Headless consumer for batch mode (logs to console, auto-approves)."""
+"""Headless consumer for compatibility one-shot mode."""
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Protocol
+from typing import Protocol
 
 from coding_agent.wire.protocol import (
     ApprovalRequest,
@@ -30,7 +30,7 @@ class WireConsumer(Protocol):
 
 
 class HeadlessConsumer:
-    """WireConsumer implementation for batch/headless mode.
+    """WireConsumer implementation for one-shot/headless mode.
 
     - Logs all messages to console
     - Auto-approves tool calls (yolo mode)
