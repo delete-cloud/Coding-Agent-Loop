@@ -4,6 +4,7 @@ import pytest
 
 from coding_agent.executors import (
     LocalDaemonExecutor,
+    LocalDaemonRuntimeBinding,
     LocalDaemonRuntimeExecution,
     RunExecutorTargetError,
 )
@@ -41,6 +42,16 @@ class FakeRuntimeAdapter:
         return self.result
 
 
+class FakeRuntimeProvider:
+    def __init__(self, binding: LocalDaemonRuntimeBinding) -> None:
+        self.binding = binding
+        self.requests: list[RunRequest] = []
+
+    async def prepare_runtime(self, request: RunRequest) -> LocalDaemonRuntimeBinding:
+        self.requests.append(request)
+        return self.binding
+
+
 @pytest.mark.asyncio
 async def test_local_daemon_executor_accepts_local_daemon_target() -> None:
     request = _local_request()
@@ -58,16 +69,54 @@ async def test_local_daemon_executor_accepts_local_daemon_target() -> None:
 async def test_local_daemon_executor_runs_adapter_turn() -> None:
     request = _local_request()
     adapter = FakeRuntimeAdapter(result="completed")
+    binding = LocalDaemonRuntimeBinding(
+        pipeline=object(),
+        ctx=object(),
+        adapter=adapter,
+    )
+    provider = FakeRuntimeProvider(binding)
 
     result = await LocalDaemonExecutor().execute_runtime(
         LocalDaemonRuntimeExecution(
             request=request,
-            adapter=adapter,
+            runtime_provider=provider,
             prompt="implement the task",
         )
     )
 
-    assert result == "completed"
+    assert result.binding is binding
+    assert result.outcome == "completed"
+    assert provider.requests == [request]
+    assert adapter.prompts == ["implement the task"]
+
+
+@pytest.mark.asyncio
+async def test_local_daemon_executor_runs_before_turn_after_preparation() -> None:
+    request = _local_request()
+    adapter = FakeRuntimeAdapter(result="completed")
+    binding = LocalDaemonRuntimeBinding(
+        pipeline=object(),
+        ctx=object(),
+        adapter=adapter,
+    )
+    provider = FakeRuntimeProvider(binding)
+    events: list[tuple[str, list[str]]] = []
+
+    async def before_turn(prepared: LocalDaemonRuntimeBinding) -> None:
+        assert prepared is binding
+        events.append(("before_turn", list(adapter.prompts)))
+
+    result = await LocalDaemonExecutor().execute_runtime(
+        LocalDaemonRuntimeExecution(
+            request=request,
+            runtime_provider=provider,
+            prompt="implement the task",
+            before_turn=before_turn,
+        )
+    )
+
+    assert result.outcome == "completed"
+    assert events == [("before_turn", [])]
     assert adapter.prompts == ["implement the task"]
 
 
@@ -141,6 +190,13 @@ async def test_local_daemon_executor_rejects_runtime_for_non_local_target() -> N
     )
 
     adapter = FakeRuntimeAdapter(result="should not execute")
+    provider = FakeRuntimeProvider(
+        LocalDaemonRuntimeBinding(
+            pipeline=object(),
+            ctx=object(),
+            adapter=adapter,
+        )
+    )
 
     with pytest.raises(
         RunExecutorTargetError,
@@ -149,9 +205,10 @@ async def test_local_daemon_executor_rejects_runtime_for_non_local_target() -> N
         _ = await LocalDaemonExecutor().execute_runtime(
             LocalDaemonRuntimeExecution(
                 request=request,
-                adapter=adapter,
+                runtime_provider=provider,
                 prompt="should not run",
             )
         )
 
+    assert provider.requests == []
     assert adapter.prompts == []
