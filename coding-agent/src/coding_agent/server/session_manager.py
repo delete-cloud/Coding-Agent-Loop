@@ -102,6 +102,7 @@ from coding_agent.runs import (
     run_target_from_dict,
     run_target_from_execution_binding,
 )
+from coding_agent.wire.consumer import LocalWireConsumer
 from coding_agent.wire.local import LocalWire
 from coding_agent.wire.protocol import (
     ApprovalRequest,
@@ -1194,27 +1195,6 @@ def _load_pg_storage_types() -> tuple[Any, Any, Any]:
         getattr(pg_module, "PGTapeStore"),
         getattr(pg_module, "PGCheckpointStore"),
     )
-
-
-class _WireConsumer:
-    def __init__(
-        self,
-        wire: LocalWire,
-        approval_handler: Any,
-        emit_handler: Callable[[WireMessage], Awaitable[None]] | None = None,
-    ) -> None:
-        self._wire = wire
-        self._approval_handler = approval_handler
-        self._emit_handler = emit_handler
-
-    async def emit(self, msg: WireMessage) -> None:
-        if self._emit_handler is not None:
-            await self._emit_handler(msg)
-            return
-        await self._wire.send(msg)
-
-    async def request_approval(self, req: ApprovalRequest) -> ApprovalResponse:
-        return await self._approval_handler(req)
 
 
 class SessionManager:
@@ -3126,7 +3106,7 @@ class SessionManager:
             return Tape(tape_id=tape_id)
         return Tape.from_list(entries, tape_id=tape_id)
 
-    def _make_restore_consumer(self, wire: LocalWire) -> _WireConsumer:
+    def _make_restore_consumer(self, wire: LocalWire) -> LocalWireConsumer:
         async def _reject_approval(req: ApprovalRequest) -> ApprovalResponse:
             return ApprovalResponse(
                 session_id=req.session_id,
@@ -3135,9 +3115,9 @@ class SessionManager:
                 feedback="Checkpoint restore does not support approval prompts",
             )
 
-        return _WireConsumer(wire, _reject_approval)
+        return LocalWireConsumer(wire, _reject_approval)
 
-    def _make_session_consumer(self, session: Session) -> _WireConsumer:
+    def _make_session_consumer(self, session: Session) -> LocalWireConsumer:
         async def _request_approval(req: ApprovalRequest) -> ApprovalResponse:
             if session.approval_coordinator.is_session_approved(req):
                 response = ApprovalResponse(
@@ -3210,7 +3190,7 @@ class SessionManager:
                 session.approval_response = None
                 await self._persist_session_async(session)
 
-        return _WireConsumer(
+        return LocalWireConsumer(
             session.wire,
             _request_approval,
             emit_handler=lambda message: self._send_session_wire_message(
@@ -3455,7 +3435,7 @@ class SessionManager:
         self,
         session: Session,
         *,
-        consumer: _WireConsumer,
+        consumer: LocalWireConsumer,
         request: RunRequest,
     ) -> LocalDaemonRuntimeBinding:
         return await LocalDaemonSessionRuntimeProvider(
