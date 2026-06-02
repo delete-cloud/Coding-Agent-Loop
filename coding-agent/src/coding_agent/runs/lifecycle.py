@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol, cast
 
@@ -471,6 +471,108 @@ class RuntimeTurnErrorHandler:
         await self.notify_generic_error(session, exc)
 
 
+@dataclass
+class RuntimeTurnController:
+    error_handler: RuntimeTurnErrorHandler
+    starter: RuntimeTurnStarter | None = None
+    finalizer: RuntimeTurnFinalizer | None = None
+    observation: RuntimeTurnObservationState | None = None
+    error_state: RuntimeTurnErrorState = field(default_factory=RuntimeTurnErrorState)
+    fatal_error_types: tuple[type[BaseException], ...] = ()
+    cancelled_error_types: tuple[type[BaseException], ...] = ()
+
+    async def before_turn(
+        self,
+        session: RuntimeTurnStartSession,
+        binding: RuntimeTurnBinding,
+    ) -> None:
+        if self.starter is None:
+            raise RuntimeError("RuntimeTurnController requires starter for before_turn")
+        recorder = await self.starter.start(session, binding)
+        if self.observation is not None:
+            self.observation.set(recorder)
+
+    async def after_turn(
+        self,
+        session: RuntimeTurnSession,
+        binding: RuntimeTurnBinding,
+        outcome: object,
+    ) -> None:
+        if self.finalizer is None:
+            raise RuntimeError(
+                "RuntimeTurnController requires finalizer for after_turn"
+            )
+        await self.finalizer.complete(
+            session,
+            ctx=binding.ctx,
+            outcome=outcome,
+            run_id=self._require_run_id(),
+            resume_context=None
+            if self.starter is None
+            else self.starter.resume_context,
+        )
+
+    async def on_turn_error(
+        self,
+        session: RuntimeTurnErrorSession,
+        exc: BaseException,
+    ) -> None:
+        if self._is_fatal(exc):
+            await self.error_state.handle(
+                lambda: self.error_handler.handle_fatal(session, exc)
+            )
+            return
+        if self._is_cancelled(exc):
+            await self.error_state.handle(
+                lambda: self.error_handler.handle_cancelled(session)
+            )
+            return
+        if isinstance(exc, Exception):
+            await self.error_state.handle(
+                lambda: self.error_handler.handle_generic(session, exc)
+            )
+
+    async def handle_outer_exception(
+        self,
+        session: RuntimeTurnErrorSession,
+        exc: BaseException,
+        *,
+        ensure_started: bool = False,
+    ) -> bool:
+        if self.error_state.handler_failed:
+            return True
+        if self.error_state.handled:
+            return self._is_fatal(exc) or self._is_cancelled(exc)
+        if self._is_fatal(exc):
+            await self.error_handler.handle_fatal(session, exc)
+            return True
+        if self._is_cancelled(exc):
+            await self.error_handler.handle_cancelled(session)
+            return True
+        if isinstance(exc, Exception):
+            await self.error_handler.handle_generic(
+                session,
+                exc,
+                ensure_started=ensure_started,
+            )
+            return False
+        return True
+
+    def _is_fatal(self, exc: BaseException) -> bool:
+        return bool(self.fatal_error_types) and isinstance(exc, self.fatal_error_types)
+
+    def _is_cancelled(self, exc: BaseException) -> bool:
+        return bool(self.cancelled_error_types) and isinstance(
+            exc,
+            self.cancelled_error_types,
+        )
+
+    def _require_run_id(self) -> str:
+        if self.starter is None:
+            raise RuntimeError("RuntimeTurnController requires starter for after_turn")
+        return self.starter.run_id
+
+
 @dataclass(frozen=True)
 class RuntimeTurnStarter:
     turn_run: RuntimeTurnRunTracker
@@ -577,6 +679,7 @@ __all__ = [
     "RuntimeObservationStarter",
     "RuntimeSubagentMessagePublisherBinder",
     "RuntimeTurnBinding",
+    "RuntimeTurnController",
     "RuntimeTurnErrorAction",
     "RuntimeTurnErrorHandler",
     "RuntimeTurnErrorSession",

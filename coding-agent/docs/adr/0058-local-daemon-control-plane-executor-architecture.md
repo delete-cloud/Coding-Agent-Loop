@@ -174,6 +174,8 @@ This ADR does not implement that path.
     `RuntimeTurnObservationState` instead of `run_agent` nonlocal closures.
   - Completed: local daemon turn begin/final cleanup bookkeeping is delegated
     to `RuntimeTurnSessionState`.
+  - Completed: local daemon before/after/error hook orchestration is delegated
+    to `RuntimeTurnController` instead of living inside `run_agent`.
   - Remaining: `SessionManager` still owns checkpoint restore preparation
     details, wire consumer setup, and some runtime close/error policy. These
     should move behind narrower RunService/EventStore/Executor lifecycle

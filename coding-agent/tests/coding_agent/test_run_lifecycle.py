@@ -10,6 +10,7 @@ from coding_agent.adapter_types import StopReason, TurnOutcome
 from coding_agent.runtime_store import AgentRunRecord, JSONObject
 from coding_agent.runs import (
     RuntimeRunLifecycle,
+    RuntimeTurnController,
     RuntimeTurnSessionState,
     RuntimeTurnObservationState,
     RuntimeTurnErrorHandler,
@@ -426,6 +427,161 @@ async def test_runtime_turn_session_state_preserves_owned_running_turn() -> None
     assert session.turn_status == "running"
     assert session.last_activity == datetime(2026, 1, 2, tzinfo=UTC)
     assert persisted == [session]
+
+
+@pytest.mark.asyncio
+async def test_runtime_turn_controller_routes_before_and_after_hooks() -> None:
+    store = RecordingRuntimeStore()
+    lifecycle = RuntimeRunLifecycle(
+        store=store,
+        metadata_for_session=lambda session, *, resume_context=None: {
+            "session_id": session.id,
+        },
+    )
+    turn_run = RuntimeTurnRunTracker(
+        lifecycle=lifecycle,
+        run_id="run-1",
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    message_bus = object()
+    consumer = object()
+    session = FakeTurnSession(
+        id="session-1",
+        tape_id="tape-1",
+        runtime_message_bus=message_bus,
+    )
+    ctx = FakeRuntimeContext("tape-1")
+    adapter = FakeRuntimeAdapter()
+    binding = FakeRuntimeBinding(ctx=ctx, adapter=adapter)
+    recorder = FakeObservationRecorder()
+    completions: list[tuple[object | None, str, str]] = []
+    persisted: list[FakeTurnSession] = []
+    snapshots: list[str] = []
+    finishes: list[str] = []
+
+    async def save_snapshot(
+        session: FakeTurnSession,
+        ctx: FakeRuntimeContext,
+        *,
+        run_id: str,
+    ) -> None:
+        del session, ctx
+        snapshots.append(run_id)
+
+    async def finish_run(
+        session: FakeTurnSession,
+        *,
+        run_id: str,
+        status: str,
+        result: JSONObject,
+        error: str | None,
+        resume_context: FakeResumeContext | None = None,
+    ) -> None:
+        del session, status, result, error, resume_context
+        finishes.append(run_id)
+
+    async def persist_session(session: FakeTurnSession) -> None:
+        persisted.append(session)
+
+    observation = RuntimeTurnObservationState(
+        complete_observation=lambda recorder, *, ctx, turn_status: completions.append(
+            (recorder, ctx.tape.tape_id, turn_status)
+        )
+    )
+    controller = RuntimeTurnController(
+        starter=RuntimeTurnStarter(
+            turn_run=turn_run,
+            consumer=consumer,
+            run_id="run-1",
+            prompt="hello",
+            bind_root_run_identity=lambda session, ctx, run_id, *, resume_context=None: (
+                None
+            ),
+            bind_subagent_message_publisher=lambda ctx: None,
+            start_observation=lambda **kwargs: recorder,
+        ),
+        finalizer=RuntimeTurnFinalizer(
+            has_runtime_store=True,
+            save_message_snapshot=save_snapshot,
+            finish_run=finish_run,
+            persist_session=persist_session,
+            complete_observation=observation.complete,
+        ),
+        observation=observation,
+        error_handler=RuntimeTurnErrorHandler(
+            turn_run=turn_run,
+            close_runtime=lambda session: persist_session(session),
+            notify_generic_error=lambda session, exc: persist_session(session),
+        ),
+    )
+
+    await controller.before_turn(session, binding)
+    await controller.after_turn(
+        session,
+        binding,
+        TurnOutcome(stop_reason=StopReason.NO_TOOL_CALLS, steps_taken=1),
+    )
+
+    assert adapter.consumer is consumer
+    assert ctx.runtime_message_bus is message_bus
+    assert ctx.config["wire_consumer"] is consumer
+    assert store.updated[0]["status"] == "running"
+    assert snapshots == ["run-1"]
+    assert finishes == ["run-1"]
+    assert persisted == [session]
+    assert completions == [(recorder, "tape-1", "completed")]
+
+
+@pytest.mark.asyncio
+async def test_runtime_turn_controller_does_not_double_handle_inner_error() -> None:
+    store = RecordingRuntimeStore()
+    lifecycle = RuntimeRunLifecycle(
+        store=store,
+        metadata_for_session=lambda session, *, resume_context=None: {
+            "session_id": session.id,
+        },
+    )
+    turn_run = RuntimeTurnRunTracker(
+        lifecycle=lifecycle,
+        run_id="run-1",
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    session = FakeTurnSession(id="session-1", tape_id="tape-1")
+    failures: list[str] = []
+    notifications: list[str] = []
+    closed: list[str] = []
+
+    async def close_runtime(session: FakeTurnSession) -> None:
+        closed.append(session.id)
+
+    async def notify_generic_error(
+        session: FakeTurnSession,
+        exc: Exception,
+    ) -> None:
+        del session
+        notifications.append(str(exc))
+
+    await turn_run.ensure_started(session)
+    controller = RuntimeTurnController(
+        starter=None,
+        finalizer=None,
+        error_handler=RuntimeTurnErrorHandler(
+            turn_run=turn_run,
+            close_runtime=close_runtime,
+            notify_generic_error=notify_generic_error,
+            fail_observation=failures.append,
+        ),
+    )
+    exc = RuntimeError("boom")
+
+    await controller.on_turn_error(session, exc)
+    should_reraise = await controller.handle_outer_exception(session, exc)
+
+    assert should_reraise is False
+    assert failures == ["RuntimeError"]
+    assert notifications == ["boom"]
+    assert closed == ["session-1"]
+    assert [update["status"] for update in store.updated] == ["running", "failed"]
 
 
 @pytest.mark.asyncio

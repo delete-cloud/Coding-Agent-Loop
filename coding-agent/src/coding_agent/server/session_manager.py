@@ -91,12 +91,12 @@ from coding_agent.runs import (
     RunRequest,
     RuntimeObservationCompleter,
     RuntimeRunLifecycle,
-    RuntimeTurnErrorState,
     RuntimeTurnErrorHandler,
     RuntimeTurnFinalizer,
     RuntimeTurnObservationState,
     RuntimeTurnRunTracker,
     RuntimeTurnSessionState,
+    RuntimeTurnController,
     RuntimeTurnStarter,
     RunTarget,
     run_target_from_dict,
@@ -3917,7 +3917,6 @@ class SessionManager:
             observation = RuntimeTurnObservationState(
                 complete_observation=self._complete_agent_observation
             )
-            turn_error_state = RuntimeTurnErrorState()
 
             async def _notify_generic_local_daemon_turn_error(
                 session: Session,
@@ -3949,26 +3948,19 @@ class SessionManager:
                 fail_observation=observation.fail,
                 cancel_observation=observation.cancel,
             )
+            turn_controller = RuntimeTurnController(
+                error_handler=turn_error_handler,
+                observation=observation,
+                fatal_error_types=(FatalToolExecutionError,),
+                cancelled_error_types=(asyncio.CancelledError,),
+            )
 
             async def _on_local_daemon_turn_error(
                 binding: LocalDaemonRuntimeBinding,
                 exc: BaseException,
             ) -> None:
                 del binding
-                if isinstance(exc, FatalToolExecutionError):
-                    await turn_error_state.handle(
-                        lambda: turn_error_handler.handle_fatal(session, exc)
-                    )
-                    return
-                if isinstance(exc, asyncio.CancelledError):
-                    await turn_error_state.handle(
-                        lambda: turn_error_handler.handle_cancelled(session)
-                    )
-                    return
-                if isinstance(exc, Exception):
-                    await turn_error_state.handle(
-                        lambda: turn_error_handler.handle_generic(session, exc)
-                    )
+                await turn_controller.on_turn_error(session, exc)
 
             try:
                 consumer = self._make_session_consumer(session)
@@ -3978,7 +3970,7 @@ class SessionManager:
                     prompt=prompt,
                     resume_context=resume_context,
                 )
-                turn_starter = RuntimeTurnStarter(
+                turn_controller.starter = RuntimeTurnStarter(
                     turn_run=turn_run,
                     consumer=consumer,
                     run_id=run_id,
@@ -3988,27 +3980,20 @@ class SessionManager:
                     start_observation=self._start_agent_observation,
                     resume_context=resume_context,
                 )
+                turn_controller.finalizer = self._runtime_turn_finalizer(
+                    complete_observation=observation.complete
+                )
 
                 async def _before_local_daemon_turn(
                     binding: LocalDaemonRuntimeBinding,
                 ) -> None:
-                    observation.set(await turn_starter.start(session, binding))
+                    await turn_controller.before_turn(session, binding)
 
                 async def _after_local_daemon_turn(
                     binding: LocalDaemonRuntimeBinding,
                     outcome: object,
                 ) -> None:
-                    ctx = binding.ctx
-
-                    await self._runtime_turn_finalizer(
-                        complete_observation=observation.complete
-                    ).complete(
-                        session,
-                        ctx=ctx,
-                        outcome=outcome,
-                        run_id=run_id,
-                        resume_context=resume_context,
-                    )
+                    await turn_controller.after_turn(session, binding, outcome)
 
                 await self._run_coordinator.execute_runtime(
                     LocalDaemonRuntimeExecution(
@@ -4027,31 +4012,21 @@ class SessionManager:
                     )
                 )
             except FatalToolExecutionError as exc:
-                if turn_error_state.handler_failed:
+                if await turn_controller.handle_outer_exception(session, exc):
                     raise
-                if not turn_error_state.handled:
-                    await turn_error_handler.handle_fatal(session, exc)
-                raise
-            except asyncio.CancelledError:
-                if turn_error_state.handler_failed:
+            except asyncio.CancelledError as exc:
+                if await turn_controller.handle_outer_exception(session, exc):
                     raise
-                if not turn_error_state.handled:
-                    await turn_error_handler.handle_cancelled(session)
-                raise
             except RunCoordinatorError as exc:
-                if turn_error_state.handler_failed:
+                if await turn_controller.handle_outer_exception(
+                    session,
+                    exc,
+                    ensure_started=True,
+                ):
                     raise
-                if not turn_error_state.handled:
-                    await turn_error_handler.handle_generic(
-                        session,
-                        exc,
-                        ensure_started=True,
-                    )
             except Exception as exc:
-                if turn_error_state.handler_failed:
+                if await turn_controller.handle_outer_exception(session, exc):
                     raise
-                if not turn_error_state.handled:
-                    await turn_error_handler.handle_generic(session, exc)
             finally:
                 await turn_session_state.finalize(
                     session,
