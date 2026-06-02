@@ -28,6 +28,7 @@ from coding_agent.server.stores.workspace_store import (
     PGWorkspaceMetadataStore,
     WorkspaceRecord,
 )
+from coding_agent.wire.protocol import ApprovalRequest
 
 
 def test_register_session_uses_public_api() -> None:
@@ -1348,6 +1349,28 @@ def test_session_record_excludes_process_local_runtime_state() -> None:
     assert not hasattr(record, "runtime_ctx")
     assert not hasattr(record, "event_queues")
     assert not hasattr(record, "pending_approval")
+
+
+def test_session_rebinds_approval_coordinator_when_store_changes() -> None:
+    session = Session(
+        id="approval-rebind-session",
+        created_at=datetime.now(UTC),
+        last_activity=datetime.now(UTC),
+        approval_store=ApprovalStore(),
+    )
+    replacement_store = ApprovalStore()
+    request = ApprovalRequest(
+        session_id=session.id,
+        request_id="req-rebound",
+        tool="bash",
+        args={"cmd": "pwd"},
+    )
+
+    session.approval_store = replacement_store
+    session.approval_coordinator.add_request(request)
+
+    assert session.runtime_handle.approval_coordinator is session.approval_coordinator
+    assert replacement_store.get_request("req-rebound") == request
 
 
 def test_redis_session_store_reports_health_from_ping() -> None:

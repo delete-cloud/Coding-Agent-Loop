@@ -913,6 +913,15 @@ class Session:
         return object.__getattribute__(self, name)
 
     def __setattr__(self, name: str, value: object) -> None:
+        if name == "approval_store":
+            object.__setattr__(self, name, value)
+            instance_dict = object.__getattribute__(self, "__dict__")
+            handle = instance_dict.get("runtime_handle")
+            if handle is not None:
+                handle.approval_coordinator = ApprovalCoordinator(
+                    cast(ApprovalStore, value)
+                )
+            return
         if name in self._RUNTIME_HANDLE_FIELD_NAMES:
             instance_dict = object.__getattribute__(self, "__dict__")
             handle = instance_dict.get("runtime_handle")

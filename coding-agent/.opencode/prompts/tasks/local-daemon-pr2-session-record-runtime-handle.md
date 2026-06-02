@@ -42,9 +42,9 @@ Context:
   - `tests/ui/test_http_server_failover.py`
 
 Target tests:
-- `uv run pytest tests/ui/test_session_persistence.py tests/ui/test_session_manager_runtime.py -k "session or runtime or resume or checkpoint" -v`
-- `uv run pytest tests/ui/test_session_manager_public_api.py tests/ui/test_http_server_failover.py -k "event or queue or owner or close or delete" -v`
-- `uv run ruff check src/coding_agent/server/session_manager.py tests/ui/test_session_persistence.py tests/ui/test_session_manager_runtime.py`
+- `uv run pytest tests/agentkit/ tests/coding_agent/ tests/cli/ -k "session or runtime or resume or checkpoint" -v`
+- `uv run pytest tests/agentkit/ tests/coding_agent/ tests/cli/ -k "event or queue or owner or close or delete" -v`
+- `uv run ruff check src/coding_agent/server/session_manager.py tests/coding_agent/ tests/cli/`
 
 Loop policy:
 - Engineer implements the smallest correct change and runs the target tests.
