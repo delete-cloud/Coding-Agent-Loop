@@ -7962,6 +7962,105 @@ class TestRuntimeReplayEndpoints:
             ],
         }
 
+    async def test_display_events_endpoint_projects_runtime_events(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        session_id = "display-events-session"
+        run_id = "display-run"
+        register_session(session_id)
+        run = AgentRunRecord(
+            run_id=run_id,
+            session_id=session_id,
+            tape_id="tape-display",
+            parent_run_id=None,
+            agent_id=None,
+            status="completed",
+            started_at=datetime(2026, 1, 2, 3, 4, 5),
+            ended_at=datetime(2026, 1, 2, 3, 6, 0),
+            metadata={"provider_name": "test-provider"},
+            result={"stop_reason": "no_tool_calls"},
+            error=None,
+        )
+        first_event = RuntimeEventRecord(
+            sequence=1,
+            event_id="event-1",
+            run_id=run_id,
+            event_kind="wire.StreamDelta",
+            payload={
+                "message_type": "StreamDelta",
+                "message": {
+                    "agent_id": "agent-1",
+                    "content": "hello",
+                    "role": "assistant",
+                },
+            },
+            created_at=datetime(2026, 1, 2, 3, 5, 1),
+        )
+        second_event = RuntimeEventRecord(
+            sequence=2,
+            event_id="event-2",
+            run_id=run_id,
+            event_kind="wire.ToolResultDelta",
+            payload={
+                "message_type": "ToolResultDelta",
+                "message": {
+                    "agent_id": "agent-1",
+                    "call_id": "call-1",
+                    "tool_name": "bash_run",
+                    "result": {"stdout": "SECRET=abc123"},
+                    "display_result": "command succeeded",
+                    "is_error": False,
+                },
+            },
+            created_at=datetime(2026, 1, 2, 3, 5, 2),
+        )
+        third_event = RuntimeEventRecord(
+            sequence=3,
+            event_id="event-3",
+            run_id=run_id,
+            event_kind="model_request_started",
+            payload={"request_id": "model-1"},
+            created_at=datetime(2026, 1, 2, 3, 5, 3),
+        )
+        session_manager.configure_runtime_store(
+            FakeRuntimeReplayStore(
+                run=run,
+                events=[first_event, second_event, third_event],
+            )
+        )
+
+        display_response = await client.get(
+            f"/runs/{run_id}/display-events",
+            params={"last_event_id": "event-1"},
+        )
+        runtime_response = await client.get(f"/runs/{run_id}/events")
+
+        assert display_response.status_code == 200
+        assert display_response.json() == {
+            "run_id": run_id,
+            "events": [
+                {
+                    "source_event_id": "event-2",
+                    "run_id": run_id,
+                    "sequence": 2,
+                    "display_kind": "tool_result",
+                    "payload": {
+                        "agent_id": "agent-1",
+                        "call_id": "call-1",
+                        "tool_name": "bash_run",
+                        "display_result": "command succeeded",
+                        "is_error": False,
+                    },
+                    "created_at": "2026-01-02T03:05:02",
+                }
+            ],
+        }
+        assert runtime_response.status_code == 200
+        assert runtime_response.json()["events"][1]["payload"]["message"][
+            "result"
+        ] == {"stdout": "SECRET=abc123"}
+
     async def test_get_runtime_run_returns_404_when_store_is_not_configured(
         self,
         client: AsyncClient,

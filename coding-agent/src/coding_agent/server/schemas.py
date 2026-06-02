@@ -258,6 +258,20 @@ class RuntimeEventsResponse(BaseModel):
     events: list[RuntimeEventResponse]
 
 
+class DisplayEventResponse(BaseModel):
+    source_event_id: str
+    run_id: str
+    sequence: int | None = None
+    display_kind: str
+    payload: dict[str, Any]
+    created_at: datetime
+
+
+class DisplayEventsResponse(BaseModel):
+    run_id: str
+    events: list[DisplayEventResponse]
+
+
 class WorkerClaimRequest(BaseModel):
     worker_id: str = Field(
         ...,

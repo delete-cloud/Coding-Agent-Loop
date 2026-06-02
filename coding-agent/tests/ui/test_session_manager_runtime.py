@@ -532,6 +532,65 @@ async def test_replay_display_events_uses_runtime_event_cursor() -> None:
 
 
 @pytest.mark.asyncio
+async def test_replay_display_events_scans_past_internal_runtime_events() -> None:
+    runtime_store = FakeRuntimeStore()
+    manager = SessionManager(store=InMemorySessionStore(), runtime_store=runtime_store)
+    run = AgentRunRecord(
+        run_id="run-display",
+        session_id="session-display",
+        tape_id=None,
+        parent_run_id=None,
+        agent_id=None,
+        status="running",
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    await runtime_store.create_agent_run(run)
+    first = await runtime_store.append_runtime_event(
+        RuntimeEventRecord(
+            event_id="event-1",
+            run_id=run.run_id,
+            event_kind="wire.StreamDelta",
+            payload={
+                "message_type": "StreamDelta",
+                "message": {"content": "first", "role": "assistant"},
+            },
+            created_at=datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC),
+        )
+    )
+    for index in range(2, 6):
+        await runtime_store.append_runtime_event(
+            RuntimeEventRecord(
+                event_id=f"event-{index}",
+                run_id=run.run_id,
+                event_kind="model_request_started",
+                payload={"request_id": f"model-{index}"},
+                created_at=datetime(2026, 1, 1, 0, 0, index, tzinfo=UTC),
+            )
+        )
+    await runtime_store.append_runtime_event(
+        RuntimeEventRecord(
+            event_id="event-6",
+            run_id=run.run_id,
+            event_kind="wire.StreamDelta",
+            payload={
+                "message_type": "StreamDelta",
+                "message": {"content": "second", "role": "assistant"},
+            },
+            created_at=datetime(2026, 1, 1, 0, 0, 6, tzinfo=UTC),
+        )
+    )
+
+    display_events = await manager.replay_display_events(
+        run.run_id,
+        last_event_id=first.event_id,
+        limit=1,
+    )
+
+    assert [event.source_event_id for event in display_events] == ["event-6"]
+    assert [event.payload["content"] for event in display_events] == ["second"]
+
+
+@pytest.mark.asyncio
 async def test_replay_display_events_skips_storeless_runtime() -> None:
     manager = SessionManager(store=InMemorySessionStore(), runtime_store=None)
 

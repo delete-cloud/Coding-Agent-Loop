@@ -82,6 +82,7 @@ from coding_agent.runtime_store import (
     RunMessageSnapshotRecord,
     RuntimeEventRecord,
 )
+from coding_agent.events import DisplayEvent
 from coding_agent.scheduled_runs import (
     PGScheduledRunStore,
     ProactiveSignalRecord,
@@ -187,6 +188,8 @@ from coding_agent.server.schemas import (
     CheckpointRestoreResponse,
     CloseSessionResponse,
     CreateSessionRequest,
+    DisplayEventResponse,
+    DisplayEventsResponse,
     HealthResponse,
     PromptRequest,
     PublishSessionRequest,
@@ -3387,6 +3390,17 @@ def _runtime_event_response(record: RuntimeEventRecord) -> RuntimeEventResponse:
     )
 
 
+def _display_event_response(record: DisplayEvent) -> DisplayEventResponse:
+    return DisplayEventResponse(
+        source_event_id=record.source_event_id,
+        run_id=record.run_id,
+        sequence=record.sequence,
+        display_kind=record.display_kind,
+        payload=record.payload,
+        created_at=record.created_at,
+    )
+
+
 def _runtime_interaction_response(
     record: AgentInteractionRecord,
 ) -> RuntimeInteractionResponse:
@@ -5360,6 +5374,33 @@ async def get_runtime_events(
     return RuntimeEventsResponse(
         run_id=run_id,
         events=[_runtime_event_response(event) for event in events],
+    )
+
+
+@app.get("/runs/{run_id}/display-events", response_model=DisplayEventsResponse)
+@limiter.limit(RateLimits.GET_SESSION)
+async def get_display_events(
+    request: Request,
+    run_id: str,
+    last_event_id: str | None = Query(None, min_length=1, max_length=200),
+    limit: int = Query(1000, ge=1, le=1000),
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> DisplayEventsResponse:
+    del request
+    _ = await _get_visible_runtime_run(run_id, auth_context)
+    try:
+        events = await session_manager.replay_display_events(
+            run_id,
+            last_event_id=last_event_id,
+            limit=limit,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Runtime event not found") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=404, detail="Runtime run not found") from exc
+    return DisplayEventsResponse(
+        run_id=run_id,
+        events=[_display_event_response(event) for event in events],
     )
 
 
