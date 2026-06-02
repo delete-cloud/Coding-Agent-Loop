@@ -162,13 +162,29 @@ This ADR does not implement that path.
   - CLI and README describe `run` as dev/testkit one-shot compatibility.
   - Legacy `run --patch` and `run --verify-cmd` remain accepted but hidden and
     deprecated.
+- [x] Make explicit `Session.default_run_target` placement authoritative while
+  preserving `ExecutionBinding` compatibility.
+  - Modern session payloads persist `default_run_target`.
+  - Legacy payloads without `default_run_target` still derive placement from
+    `execution_binding`.
+  - Compatibility `execution_binding` assignment only updates derived targets;
+    explicitly assigned or persisted targets remain authoritative.
+- [~] Split internal `RuntimeEvent` facts from user-facing `DisplayEvent`
+  projections.
+  - Completed: `DisplayEvent` model and projection helpers exist under
+    `coding_agent.events`.
+  - Completed: `SessionManager.replay_display_events()` projects stored
+    runtime events through a service boundary and scans past internal-only
+    runtime facts.
+  - Completed: `GET /runs/{run_id}/display-events` exposes an additive
+    user-facing replay endpoint without changing `GET /runs/{run_id}/events`.
+  - Remaining: live SSE/UI rendering still uses existing wire/runtime event
+    paths and should move to `DisplayEvent` projection separately.
 
 ## Remaining Implementation Gaps
 
 - Extract durable run lifecycle operations from `SessionManager` into a
   run/service boundary instead of inline `run_agent` closures.
-- Split internal `RuntimeEvent` facts from user-facing `DisplayEvent`
-  projections.
 - Establish explicit Store contracts for session, run, event, approval, and
   checkpoint stores.
 - Make sandbox policy the default executor environment wrapper rather than a
