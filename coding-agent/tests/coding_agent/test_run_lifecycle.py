@@ -11,6 +11,7 @@ from coding_agent.runtime_store import AgentRunRecord, JSONObject
 from coding_agent.runs import (
     RuntimeRunLifecycle,
     RuntimeTurnFinalizer,
+    RuntimeTurnRunTracker,
     runtime_result_from_turn_outcome,
     runtime_status_from_turn_outcome,
 )
@@ -251,6 +252,75 @@ async def test_runtime_turn_finalizer_records_storeless_failure_outcome() -> Non
     assert finishes == []
     assert persisted == [session]
     assert observations == ["failed"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_turn_run_tracker_starts_only_once() -> None:
+    store = RecordingRuntimeStore()
+    lifecycle = RuntimeRunLifecycle(
+        store=store,
+        metadata_for_session=lambda session, *, resume_context=None: {
+            "session_id": session.id,
+        },
+    )
+    tracker = RuntimeTurnRunTracker(
+        lifecycle=lifecycle,
+        run_id="run-1",
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    session = FakeSession(id="session-1", tape_id="tape-1")
+
+    await tracker.ensure_started(session)
+    await tracker.ensure_started(session)
+
+    assert tracker.created is True
+    assert len(store.created) == 1
+    assert len(store.updated) == 1
+    assert store.created[0].status == "queued"
+    assert store.updated[0]["status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_runtime_turn_run_tracker_finishes_only_when_started() -> None:
+    store = RecordingRuntimeStore()
+    finished_at = datetime(2026, 1, 2, tzinfo=UTC)
+    lifecycle = RuntimeRunLifecycle(
+        store=store,
+        metadata_for_session=lambda session, *, resume_context=None: {
+            "session_id": session.id,
+        },
+        now=lambda: finished_at,
+    )
+    tracker = RuntimeTurnRunTracker(
+        lifecycle=lifecycle,
+        run_id="run-1",
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    session = FakeSession(id="session-1", tape_id="tape-1")
+
+    await tracker.finish_if_started(
+        session,
+        status="failed",
+        result=cast(JSONObject, {}),
+        error="before start",
+    )
+    await tracker.ensure_started(session)
+    await tracker.finish_if_started(
+        session,
+        status="failed",
+        result=cast(JSONObject, {"stop_reason": "error"}),
+        error="after start",
+    )
+
+    assert [update["status"] for update in store.updated] == ["running", "failed"]
+    assert store.updated[-1] == {
+        "run_id": "run-1",
+        "status": "failed",
+        "ended_at": finished_at,
+        "metadata": {"session_id": "session-1"},
+        "result": {"stop_reason": "error"},
+        "error": "after start",
+    }
 
 
 @pytest.mark.asyncio
