@@ -92,6 +92,7 @@ from coding_agent.runs import (
     RuntimeObservationCompleter,
     RuntimeRunLifecycle,
     RuntimeTurnFinalizer,
+    RuntimeTurnRunTracker,
     RunTarget,
     run_target_from_dict,
     run_target_from_execution_binding,
@@ -3905,7 +3906,12 @@ class SessionManager:
             session.current_turn_id = run_id
             session.last_failure_details = None
             await self._persist_session_async(session)
-            agent_run_created = False
+            turn_run = RuntimeTurnRunTracker(
+                lifecycle=self._runtime_run_lifecycle(),
+                run_id=run_id,
+                started_at=started_at,
+                resume_context=resume_context,
+            )
             observation_recorder: AgentObservationRecorder | None = None
             turn_error_handled = False
             turn_error_handler_failed = False
@@ -3915,15 +3921,12 @@ class SessionManager:
             ) -> None:
                 if observation_recorder is not None:
                     observation_recorder.fail_turn(error_type=type(exc).__name__)
-                if agent_run_created:
-                    await self._finish_runtime_agent_run(
-                        session,
-                        run_id=run_id,
-                        status="failed",
-                        result={},
-                        error=str(exc),
-                        resume_context=resume_context,
-                    )
+                await turn_run.finish_if_started(
+                    session,
+                    status="failed",
+                    result={},
+                    error=str(exc),
+                )
                 session.turn_status = "failed"
                 session.last_failure_details = f"Fatal tool execution failed: {exc}"
                 await self._close_runtime(session)
@@ -3931,30 +3934,24 @@ class SessionManager:
             async def _handle_cancelled_local_daemon_turn_error() -> None:
                 if observation_recorder is not None:
                     observation_recorder.cancel_turn()
-                if agent_run_created:
-                    await self._finish_runtime_agent_run(
-                        session,
-                        run_id=run_id,
-                        status="cancelled",
-                        result={},
-                        error="cancelled",
-                        resume_context=resume_context,
-                    )
+                await turn_run.finish_if_started(
+                    session,
+                    status="cancelled",
+                    result={},
+                    error="cancelled",
+                )
 
             async def _handle_generic_local_daemon_turn_error(
                 exc: Exception,
             ) -> None:
                 if observation_recorder is not None:
                     observation_recorder.fail_turn(error_type=type(exc).__name__)
-                if agent_run_created:
-                    await self._finish_runtime_agent_run(
-                        session,
-                        run_id=run_id,
-                        status="failed",
-                        result={},
-                        error=str(exc),
-                        resume_context=resume_context,
-                    )
+                await turn_run.finish_if_started(
+                    session,
+                    status="failed",
+                    result={},
+                    error=str(exc),
+                )
                 session.turn_status = "failed"
                 session.last_failure_details = f"HTTP session turn failed: {exc}"
                 await self._close_runtime(session)
@@ -3975,17 +3972,6 @@ class SessionManager:
                         turn_id=run_id,
                         completion_status=CompletionStatus.ERROR,
                     ),
-                )
-
-            async def _ensure_runtime_agent_run_started() -> None:
-                nonlocal agent_run_created
-                if agent_run_created:
-                    return
-                agent_run_created = await self._runtime_run_lifecycle().start(
-                    session,
-                    run_id=run_id,
-                    started_at=started_at,
-                    resume_context=resume_context,
                 )
 
             async def _on_local_daemon_turn_error(
@@ -4039,7 +4025,7 @@ class SessionManager:
                         run_id,
                         resume_context=resume_context,
                     )
-                    await _ensure_runtime_agent_run_started()
+                    await turn_run.ensure_started(session)
                     set_consumer = getattr(adapter, "set_consumer", None)
                     if callable(set_consumer):
                         set_consumer(consumer)
@@ -4113,7 +4099,7 @@ class SessionManager:
                 if turn_error_handler_failed:
                     raise
                 if not turn_error_handled:
-                    await _ensure_runtime_agent_run_started()
+                    await turn_run.ensure_started(session)
                     await _handle_generic_local_daemon_turn_error(exc)
             except Exception as exc:
                 if turn_error_handler_failed:

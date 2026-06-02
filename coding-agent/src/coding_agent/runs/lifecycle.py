@@ -216,6 +216,44 @@ class RuntimeRunLifecycle:
         )
 
 
+@dataclass
+class RuntimeTurnRunTracker:
+    lifecycle: RuntimeRunLifecycle
+    run_id: str
+    started_at: datetime
+    resume_context: RuntimeRunResumeContext | None = None
+    created: bool = False
+
+    async def ensure_started(self, session: RuntimeRunSession) -> None:
+        if self.created:
+            return
+        self.created = await self.lifecycle.start(
+            session,
+            run_id=self.run_id,
+            started_at=self.started_at,
+            resume_context=self.resume_context,
+        )
+
+    async def finish_if_started(
+        self,
+        session: RuntimeRunSession,
+        *,
+        status: str,
+        result: JSONObject,
+        error: str | None,
+    ) -> None:
+        if not self.created:
+            return
+        await self.lifecycle.finish(
+            session,
+            run_id=self.run_id,
+            status=status,
+            result=result,
+            error=error,
+            resume_context=self.resume_context,
+        )
+
+
 @dataclass(frozen=True)
 class RuntimeTurnFinalizer:
     has_runtime_store: bool
@@ -279,6 +317,7 @@ __all__ = [
     "RuntimeRunStore",
     "RuntimeSessionPersister",
     "RuntimeTurnFinalizer",
+    "RuntimeTurnRunTracker",
     "RuntimeTurnSession",
     "require_runtime_turn_outcome",
     "runtime_result_from_turn_outcome",
