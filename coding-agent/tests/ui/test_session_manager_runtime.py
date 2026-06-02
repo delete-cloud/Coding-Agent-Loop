@@ -36,10 +36,12 @@ from coding_agent.runtime_store import (
     RuntimeEventRecord,
 )
 from coding_agent.runs import (
+    IsolationPolicy,
     LocalDaemonExecutorRef,
     LocalPathWorkspaceRef,
     RunRequest,
     RunSubmission,
+    RunTarget,
 )
 from coding_agent.environment.binding_resolver import DefaultBindingResolver
 from coding_agent.environment.execution_binding import (
@@ -607,6 +609,13 @@ async def test_run_agent_submits_run_request_to_run_coordinator(
     session_id = await manager.create_session(
         execution_binding=LocalExecutionBinding(workspace_root=str(workspace)),
     )
+    session = manager.get_session(session_id)
+    session.default_run_target = RunTarget(
+        workspace=LocalPathWorkspaceRef(path=str(workspace.resolve())),
+        executor=LocalDaemonExecutorRef(),
+        isolation=IsolationPolicy(kind="default_local_sandbox"),
+        annotations={"source": "session-default"},
+    )
 
     class FakeAdapter:
         def __init__(self, pipeline, ctx, consumer) -> None:
@@ -655,6 +664,7 @@ async def test_run_agent_submits_run_request_to_run_coordinator(
     assert request.run_id == created_run.run_id
     assert request.input_summary == "implement coordinator integration"
     assert request.resume_from_run_id is None
+    assert request.target.annotations == {"source": "session-default"}
     assert isinstance(request.target.executor, LocalDaemonExecutorRef)
     assert isinstance(request.target.workspace, LocalPathWorkspaceRef)
     assert request.target.workspace.path == str(workspace.resolve())

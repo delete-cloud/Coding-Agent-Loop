@@ -20,9 +20,15 @@ from .target import (
     ManagedPoolExecutorRef,
     RunConstraints,
     RunTarget,
+    RunTargetSerializationError,
     SnapshotWorkspaceRef,
     WorkspaceRef,
+    executor_ref_from_dict,
+    executor_ref_to_dict,
+    run_target_from_dict,
     run_target_from_execution_binding,
+    workspace_ref_from_dict,
+    workspace_ref_to_dict,
 )
 
 __all__ = [
@@ -45,7 +51,13 @@ __all__ = [
     "RunRequest",
     "RunSubmission",
     "RunTarget",
+    "RunTargetSerializationError",
     "SnapshotWorkspaceRef",
     "WorkspaceRef",
+    "executor_ref_from_dict",
+    "executor_ref_to_dict",
+    "run_target_from_dict",
     "run_target_from_execution_binding",
+    "workspace_ref_from_dict",
+    "workspace_ref_to_dict",
 ]

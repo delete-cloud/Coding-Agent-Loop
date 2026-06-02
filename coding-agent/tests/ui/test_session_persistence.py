@@ -4,6 +4,7 @@ import asyncio
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Callable, cast
 from unittest.mock import MagicMock, call
 from unittest.mock import patch
@@ -11,6 +12,8 @@ from unittest.mock import patch
 import pytest
 
 from coding_agent.approval.store import ApprovalStore
+from coding_agent.environment.execution_binding import LocalExecutionBinding
+from coding_agent.runs import LocalPathWorkspaceRef
 from coding_agent.server.session_manager import (
     Session,
     SessionManager,
@@ -1325,9 +1328,60 @@ def test_session_record_round_trips_existing_store_payload() -> None:
     assert reloaded.max_steps == 12
     assert reloaded.tape_id == "tape-123"
     assert reloaded.last_failure_details == "previous failure"
+    assert reloaded.default_run_target == session.default_run_target
     assert isinstance(reloaded.runtime_handle, SessionRuntimeHandle)
     assert reloaded.runtime_ctx is None
     assert reloaded.event_queues == []
+
+
+def test_session_record_persists_default_run_target() -> None:
+    session = Session(
+        id="record-session",
+        created_at=datetime.now(UTC),
+        last_activity=datetime.now(UTC),
+        approval_store=ApprovalStore(),
+        repo_path=Path("/repo"),
+    )
+
+    payload = session.to_store_data()
+    record = SessionRecord.from_store_data(payload)
+    reloaded = record.to_session()
+
+    assert payload["default_run_target"] == session.default_run_target.to_dict()
+    assert record.default_run_target == session.default_run_target
+    assert reloaded.default_run_target == session.default_run_target
+
+
+def test_session_record_derives_default_run_target_for_legacy_payload() -> None:
+    session = Session(
+        id="record-session",
+        created_at=datetime.now(UTC),
+        last_activity=datetime.now(UTC),
+        approval_store=ApprovalStore(),
+        repo_path=Path("/repo"),
+    )
+    payload = session.to_store_data()
+    payload.pop("default_run_target")
+
+    record = SessionRecord.from_store_data(payload)
+    reloaded = record.to_session()
+
+    assert record.default_run_target == session.default_run_target
+    assert reloaded.default_run_target == session.default_run_target
+
+
+def test_session_execution_binding_assignment_updates_default_run_target() -> None:
+    session = Session(
+        id="record-session",
+        created_at=datetime.now(UTC),
+        last_activity=datetime.now(UTC),
+        approval_store=ApprovalStore(),
+    )
+
+    session.execution_binding = LocalExecutionBinding(workspace_root="/changed")
+
+    assert isinstance(session.default_run_target.workspace, LocalPathWorkspaceRef)
+    assert session.default_run_target.workspace.path == "/changed"
 
 
 def test_session_record_excludes_process_local_runtime_state() -> None:
