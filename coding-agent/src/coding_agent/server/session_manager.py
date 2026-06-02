@@ -85,6 +85,7 @@ from coding_agent.runs import (
     LocalDaemonExecutorRef,
     LocalPathWorkspaceRef,
     RunCoordinator,
+    RunCoordinatorError,
     RunRequest,
     RunTarget,
     run_target_from_dict,
@@ -713,17 +714,6 @@ class EventBroadcastResult:
     delivered_count: int
     full_pruned_count: int
     failed_pruned_count: int
-
-
-class UnsupportedRuntimeExecutorError(RuntimeError):
-    """Raised when a run target has no executor-backed runtime path."""
-
-
-def _executor_ref_kind(executor: object) -> str:
-    kind = getattr(executor, "kind", None)
-    if isinstance(kind, str) and kind.strip():
-        return kind
-    return type(executor).__name__
 
 
 @dataclass(frozen=True)
@@ -4116,6 +4106,27 @@ class SessionManager:
                     ),
                 )
 
+            async def _ensure_runtime_agent_run_started() -> None:
+                nonlocal agent_run_created
+                if agent_run_created:
+                    return
+                agent_run_created = await self._create_runtime_agent_run(
+                    session,
+                    run_id=run_id,
+                    started_at=started_at,
+                    resume_context=resume_context,
+                )
+                if agent_run_created:
+                    await self._update_runtime_agent_run(
+                        session,
+                        run_id=run_id,
+                        status="running",
+                        ended_at=None,
+                        result={},
+                        error=None,
+                        resume_context=resume_context,
+                    )
+
             async def _on_local_daemon_turn_error(
                 binding: LocalDaemonRuntimeBinding,
                 exc: BaseException,
@@ -4155,34 +4166,10 @@ class SessionManager:
                     resume_context=resume_context,
                 )
 
-                if not isinstance(run_request.target.executor, LocalDaemonExecutorRef):
-                    agent_run_created = await self._create_runtime_agent_run(
-                        session,
-                        run_id=run_id,
-                        started_at=started_at,
-                        resume_context=resume_context,
-                    )
-                    if agent_run_created:
-                        await self._update_runtime_agent_run(
-                            session,
-                            run_id=run_id,
-                            status="running",
-                            ended_at=None,
-                            result={},
-                            error=None,
-                            resume_context=resume_context,
-                        )
-                    executor_kind = _executor_ref_kind(run_request.target.executor)
-                    raise UnsupportedRuntimeExecutorError(
-                        "executor target "
-                        f"{executor_kind!r} does not have a local runtime path; "
-                        "control plane cannot execute runtime directly"
-                    )
-
                 async def _before_local_daemon_turn(
                     binding: LocalDaemonRuntimeBinding,
                 ) -> None:
-                    nonlocal agent_run_created, observation_recorder
+                    nonlocal observation_recorder
                     ctx = binding.ctx
                     adapter = binding.adapter
                     self._bind_root_run_identity(
@@ -4191,22 +4178,7 @@ class SessionManager:
                         run_id,
                         resume_context=resume_context,
                     )
-                    agent_run_created = await self._create_runtime_agent_run(
-                        session,
-                        run_id=run_id,
-                        started_at=started_at,
-                        resume_context=resume_context,
-                    )
-                    if agent_run_created:
-                        await self._update_runtime_agent_run(
-                            session,
-                            run_id=run_id,
-                            status="running",
-                            ended_at=None,
-                            result={},
-                            error=None,
-                            resume_context=resume_context,
-                        )
+                    await _ensure_runtime_agent_run_started()
                     set_consumer = getattr(adapter, "set_consumer", None)
                     if callable(set_consumer):
                         set_consumer(consumer)
@@ -4303,6 +4275,12 @@ class SessionManager:
                 if not turn_error_handled:
                     await _handle_cancelled_local_daemon_turn_error()
                 raise
+            except RunCoordinatorError as exc:
+                if turn_error_handler_failed:
+                    raise
+                if not turn_error_handled:
+                    await _ensure_runtime_agent_run_started()
+                    await _handle_generic_local_daemon_turn_error(exc)
             except Exception as exc:
                 if turn_error_handler_failed:
                     raise
