@@ -10,6 +10,7 @@ from coding_agent.adapter_types import StopReason, TurnOutcome
 from coding_agent.runtime_store import AgentRunRecord, JSONObject
 from coding_agent.runs import (
     RuntimeRunLifecycle,
+    RuntimeTurnSessionState,
     RuntimeTurnObservationState,
     RuntimeTurnErrorHandler,
     RuntimeTurnErrorState,
@@ -40,6 +41,18 @@ class FakeTurnSession:
     turn_status: str = "running"
     last_failure_details: str | None = None
     runtime_message_bus: object | None = None
+
+
+@dataclass
+class FakeTurnStateSession:
+    id: str
+    tape_id: str | None
+    last_activity: datetime
+    turn_in_progress: bool = False
+    turn_status: str = "idle"
+    current_turn_id: str | None = None
+    last_failure_details: str | None = "previous failure"
+    task: object | None = None
 
 
 class FakeTape:
@@ -322,6 +335,97 @@ def test_runtime_turn_observation_state_ignores_missing_recorder() -> None:
 
     assert completions == [(None, "tape-missing", "completed")]
     assert state.recorder is None
+
+
+@pytest.mark.asyncio
+async def test_runtime_turn_session_state_begins_turn_and_persists() -> None:
+    times = iter(
+        [
+            datetime(2026, 1, 1, 1, tzinfo=UTC),
+            datetime(2026, 1, 1, 2, tzinfo=UTC),
+        ]
+    )
+    persisted: list[FakeTurnStateSession] = []
+    session = FakeTurnStateSession(
+        id="session-1",
+        tape_id="tape-1",
+        last_activity=datetime(2025, 1, 1, tzinfo=UTC),
+    )
+
+    async def persist_session(session: FakeTurnStateSession) -> None:
+        persisted.append(session)
+
+    state = RuntimeTurnSessionState(
+        persist_session=persist_session,
+        now=lambda: next(times),
+    )
+
+    started_at = await state.begin(session, run_id="run-1")
+
+    assert started_at == datetime(2026, 1, 1, 2, tzinfo=UTC)
+    assert session.last_activity == datetime(2026, 1, 1, 1, tzinfo=UTC)
+    assert session.turn_in_progress is True
+    assert session.turn_status == "running"
+    assert session.current_turn_id == "run-1"
+    assert session.last_failure_details is None
+    assert persisted == [session]
+
+
+@pytest.mark.asyncio
+async def test_runtime_turn_session_state_finalizes_detached_running_turn() -> None:
+    persisted: list[FakeTurnStateSession] = []
+    session = FakeTurnStateSession(
+        id="session-1",
+        tape_id="tape-1",
+        last_activity=datetime(2025, 1, 1, tzinfo=UTC),
+        turn_in_progress=True,
+        turn_status="running",
+        task=object(),
+    )
+
+    async def persist_session(session: FakeTurnStateSession) -> None:
+        persisted.append(session)
+
+    state = RuntimeTurnSessionState(
+        persist_session=persist_session,
+        now=lambda: datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    await state.finalize(session, current_task=object())
+
+    assert session.turn_in_progress is False
+    assert session.turn_status == "idle"
+    assert session.last_activity == datetime(2026, 1, 2, tzinfo=UTC)
+    assert persisted == [session]
+
+
+@pytest.mark.asyncio
+async def test_runtime_turn_session_state_preserves_owned_running_turn() -> None:
+    current_task = object()
+    persisted: list[FakeTurnStateSession] = []
+    session = FakeTurnStateSession(
+        id="session-1",
+        tape_id="tape-1",
+        last_activity=datetime(2025, 1, 1, tzinfo=UTC),
+        turn_in_progress=True,
+        turn_status="running",
+        task=current_task,
+    )
+
+    async def persist_session(session: FakeTurnStateSession) -> None:
+        persisted.append(session)
+
+    state = RuntimeTurnSessionState(
+        persist_session=persist_session,
+        now=lambda: datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    await state.finalize(session, current_task=current_task)
+
+    assert session.turn_in_progress is True
+    assert session.turn_status == "running"
+    assert session.last_activity == datetime(2026, 1, 2, tzinfo=UTC)
+    assert persisted == [session]
 
 
 @pytest.mark.asyncio

@@ -96,6 +96,7 @@ from coding_agent.runs import (
     RuntimeTurnFinalizer,
     RuntimeTurnObservationState,
     RuntimeTurnRunTracker,
+    RuntimeTurnSessionState,
     RuntimeTurnStarter,
     RunTarget,
     run_target_from_dict,
@@ -3902,14 +3903,11 @@ class SessionManager:
                 raise RuntimeError("turn already in progress")
             await self._assert_owner(session_id)
             session = await self.get_session_async(session_id)
-            session.last_activity = datetime.now(UTC)
-            session.turn_in_progress = True
-            session.turn_status = "running"
             run_id = run_id_override or uuid.uuid4().hex
-            started_at = datetime.now(UTC)
-            session.current_turn_id = run_id
-            session.last_failure_details = None
-            await self._persist_session_async(session)
+            turn_session_state = RuntimeTurnSessionState(
+                persist_session=self._persist_session_async
+            )
+            started_at = await turn_session_state.begin(session, run_id=run_id)
             turn_run = RuntimeTurnRunTracker(
                 lifecycle=self._runtime_run_lifecycle(),
                 run_id=run_id,
@@ -4055,13 +4053,10 @@ class SessionManager:
                 if not turn_error_state.handled:
                     await turn_error_handler.handle_generic(session, exc)
             finally:
-                current_task = asyncio.current_task()
-                if session.task is None or session.task is not current_task:
-                    session.turn_in_progress = False
-                    if session.turn_status == "running":
-                        session.turn_status = "idle"
-                session.last_activity = datetime.now(UTC)
-                await self._persist_session_async(session)
+                await turn_session_state.finalize(
+                    session,
+                    current_task=asyncio.current_task(),
+                )
 
     async def _consume_approval_decisions_for_session(
         self,

@@ -27,6 +27,13 @@ class RuntimeTurnSession(Protocol):
     last_failure_details: str | None
 
 
+class RuntimeTurnStateSession(RuntimeTurnSession, Protocol):
+    last_activity: datetime
+    turn_in_progress: bool
+    current_turn_id: str | None
+    task: object | None
+
+
 class RuntimeTurnErrorSession(RuntimeTurnSession, RuntimeRunSession, Protocol):
     pass
 
@@ -65,6 +72,10 @@ class RuntimeRunFinisher(Protocol):
 
 class RuntimeSessionPersister(Protocol):
     async def __call__(self, session: RuntimeTurnSession) -> None: ...
+
+
+class RuntimeTurnStatePersister(Protocol):
+    async def __call__(self, session: RuntimeTurnStateSession) -> None: ...
 
 
 class RuntimeObservationCompleter(Protocol):
@@ -369,6 +380,40 @@ class RuntimeTurnObservationState:
 
 
 @dataclass(frozen=True)
+class RuntimeTurnSessionState:
+    persist_session: RuntimeTurnStatePersister
+    now: Callable[[], datetime] = _utc_now
+
+    async def begin(
+        self,
+        session: RuntimeTurnStateSession,
+        *,
+        run_id: str,
+    ) -> datetime:
+        session.last_activity = self.now()
+        session.turn_in_progress = True
+        session.turn_status = "running"
+        started_at = self.now()
+        session.current_turn_id = run_id
+        session.last_failure_details = None
+        await self.persist_session(session)
+        return started_at
+
+    async def finalize(
+        self,
+        session: RuntimeTurnStateSession,
+        *,
+        current_task: object | None,
+    ) -> None:
+        if session.task is None or session.task is not current_task:
+            session.turn_in_progress = False
+            if session.turn_status == "running":
+                session.turn_status = "idle"
+        session.last_activity = self.now()
+        await self.persist_session(session)
+
+
+@dataclass(frozen=True)
 class RuntimeTurnErrorHandler:
     turn_run: RuntimeTurnRunTracker
     close_runtime: RuntimeSessionCloser
@@ -541,6 +586,9 @@ __all__ = [
     "RuntimeTurnObservationRecorder",
     "RuntimeTurnObservationState",
     "RuntimeTurnRunTracker",
+    "RuntimeTurnSessionState",
+    "RuntimeTurnStatePersister",
+    "RuntimeTurnStateSession",
     "RuntimeTurnStartSession",
     "RuntimeTurnStarter",
     "RuntimeTurnSession",
