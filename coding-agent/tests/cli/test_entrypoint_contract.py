@@ -39,14 +39,32 @@ def test_module_help_lists_release_entrypoint_commands_without_credentials() -> 
 
     assert completed.returncode == 0
     assert "Coding Agent CLI" in completed.stdout
-    for command in ("run", "repl", "resume", "sessions", "serve", "storage", "verify"):
+    for command in (
+        "daemon",
+        "run",
+        "repl",
+        "resume",
+        "sessions",
+        "serve",
+        "storage",
+        "verify",
+    ):
         assert command in completed.stdout
 
 
 def test_subcommand_help_is_available_without_provider_credentials() -> None:
     runner = CliRunner(env=_click_credential_free_env())
 
-    for command in ("run", "repl", "resume", "sessions", "serve", "storage", "verify"):
+    for command in (
+        "daemon",
+        "run",
+        "repl",
+        "resume",
+        "sessions",
+        "serve",
+        "storage",
+        "verify",
+    ):
         result = runner.invoke(main, [command, "--help"], catch_exceptions=False)
 
         assert result.exit_code == 0

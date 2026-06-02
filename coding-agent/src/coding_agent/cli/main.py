@@ -18,7 +18,7 @@ from coding_agent.cli.kb_commands import kb
 from coding_agent.cli.oauth_commands import oauth_cli
 from coding_agent.cli.postmortem_commands import postmortem
 from coding_agent.cli.remote_commands import attach, remote
-from coding_agent.cli.serve_command import serve
+from coding_agent.cli.serve_command import daemon, serve
 from coding_agent.cli.stats_command import stats
 from coding_agent.cli.verify_command import verify
 from coding_agent.core.config import Config, load_config
@@ -676,6 +676,7 @@ main.add_command(kb)
 main.add_command(oauth_cli)
 main.add_command(postmortem)
 main.add_command(stats)
+main.add_command(daemon)
 main.add_command(serve)
 main.add_command(remote)
 main.add_command(attach)

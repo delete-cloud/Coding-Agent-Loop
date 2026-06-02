@@ -24,6 +24,7 @@ semantics of any completed phase.
 
 - Dev/testkit one-shot compatibility: `uv run python -m coding_agent run --goal "..." --repo .`
 - REPL mode: `uv run python -m coding_agent repl`
+- Local daemon control plane: `uv run python -m coding_agent daemon --host 127.0.0.1 --port 8080`
 - HTTP server: `uv run python -m coding_agent serve --host 127.0.0.1 --port 8080`
 - HTTP session creation: `POST /sessions`
 - HTTP prompt streaming: `POST /sessions/{session_id}/prompt`
@@ -36,6 +37,9 @@ The HTTP path is the best dogfood candidate because it exercises the runtime,
 durable records, console, health, and metrics surfaces in one local flow.
 The `run` command remains useful for task packets and quick checks, but it is
 not the target local product path.
+`daemon` is the local product entrypoint for a foreground control plane; it
+does not yet provide background lifecycle, IPC socket transport, or daemon
+client pairing.
 
 ## Developer Console Surfaces
 

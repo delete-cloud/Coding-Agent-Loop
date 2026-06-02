@@ -187,6 +187,30 @@ def test_serve_config_sets_explicit_server_config(
     }
 
 
+def test_daemon_command_starts_foreground_local_control_plane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_uvicorn_run(app: object, *, host: str, port: int) -> None:
+        del app
+        captured["host"] = host
+        captured["port"] = port
+
+    monkeypatch.setattr("uvicorn.run", fake_uvicorn_run)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        main,
+        ["daemon", "--host", "127.0.0.1", "--port", "8765"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert captured == {"host": "127.0.0.1", "port": 8765}
+    assert "Starting Coding Agent local daemon control plane" in result.output
+
+
 def test_serve_config_uses_server_host_and_port_when_cli_omits_them(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
