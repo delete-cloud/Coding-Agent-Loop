@@ -36,6 +36,12 @@ from .context_binding import (
     RuntimeContextBindingService,
     RuntimeContextBindingSession,
 )
+from .ensure import (
+    RuntimeEnsureBuilder,
+    RuntimeEnsurePersister,
+    RuntimeEnsureService,
+    RuntimeEnsureSession,
+)
 from .lifecycle import (
     RuntimeMessageSnapshotSaver,
     RuntimeObservationCompleter,
@@ -196,6 +202,10 @@ __all__ = [
     "RuntimeCancelStore",
     "RuntimeContextBindingService",
     "RuntimeContextBindingSession",
+    "RuntimeEnsureBuilder",
+    "RuntimeEnsurePersister",
+    "RuntimeEnsureService",
+    "RuntimeEnsureSession",
     "SessionRuntimeHandle",
     "RuntimeExecution",
     "RuntimeMessageSnapshotSession",

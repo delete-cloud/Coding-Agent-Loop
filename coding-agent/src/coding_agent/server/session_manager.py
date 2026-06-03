@@ -83,6 +83,7 @@ from coding_agent.runs import (
     RuntimeCancelService,
     RuntimeCloser,
     RuntimeContextBindingService,
+    RuntimeEnsureService,
     RuntimeRunMetadataService,
     RuntimeObservationService,
     RuntimePreparationRequestService,
@@ -798,6 +799,7 @@ class SessionManager:
         self._runtime_replacement_service = RuntimeReplacementService(
             close_runtime_adapter=self._runtime_closer.close_adapter,
         )
+        self._runtime_ensure_service = RuntimeEnsureService()
         self._runtime_context_binding_service = RuntimeContextBindingService(
             publish_subagent_message=self.publish_subagent_message,
         )
@@ -2812,19 +2814,11 @@ class SessionManager:
     async def ensure_session_runtime(self, session_id: str) -> Any:
         await self._assert_owner(session_id)
         session = await self.get_session_async(session_id)
-        if session.runtime_ctx is not None and session.runtime_adapter is not None:
-            return session.runtime_ctx
-
-        pipeline, ctx, adapter = await self._build_session_runtime(session)
-
-        session.attach_runtime_binding(
-            pipeline=pipeline,
-            ctx=ctx,
-            adapter=adapter,
+        return await self._runtime_ensure_service.ensure_runtime(
+            session,
+            build_runtime=self._build_session_runtime,
+            persist_session=self._persist_session_async,
         )
-        session.tape_id = ctx.tape.tape_id
-        await self._persist_session_async(session)
-        return ctx
 
     async def replace_session_runtime_config(
         self,
