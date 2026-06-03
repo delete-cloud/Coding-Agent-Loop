@@ -51,6 +51,14 @@ class LocalDaemonRuntimeSession(Protocol):
     runtime_ctx: object | None
     runtime_adapter: RuntimeTurnAdapter | None
 
+    def attach_runtime_binding(
+        self,
+        *,
+        pipeline: object,
+        ctx: object,
+        adapter: object,
+    ) -> None: ...
+
 
 RuntimeEnvironmentResolver = Callable[[RunTarget], object]
 RuntimeWorkspaceRootResolver = Callable[[object], Path | None]
@@ -158,9 +166,11 @@ class LocalDaemonSessionRuntimeProvider:
                 llm_plugin._instance = session.provider
 
             adapter = self.adapter_factory(pipeline, ctx)
-            session.runtime_pipeline = pipeline
-            session.runtime_ctx = ctx
-            session.runtime_adapter = adapter
+            session.attach_runtime_binding(
+                pipeline=pipeline,
+                ctx=ctx,
+                adapter=adapter,
+            )
         return LocalDaemonRuntimeBinding(
             pipeline=pipeline,
             ctx=ctx,

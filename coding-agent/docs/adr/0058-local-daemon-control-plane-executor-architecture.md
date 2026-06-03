@@ -158,6 +158,9 @@ This ADR does not implement that path.
   - Runtime binding detach/invalidations are owned by `SessionRuntimeHandle`;
     `RuntimeCloser` asks the session to detach the adapter before closing it
     instead of clearing runtime binding fields directly.
+  - Runtime binding attachment for daemon/runtime preparation and checkpoint
+    restore is owned by `SessionRuntimeHandle`; callers attach through session
+    compatibility delegates instead of writing binding fields directly.
   - Store payload tests assert runtime handles are not persisted.
 - [x] Introduce a `RunCoordinator` boundary that selects an executor from
   `RunTarget`.

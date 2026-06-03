@@ -29,6 +29,17 @@ class FakeRestoreSession:
     runtime_ctx: object | None = None
     runtime_adapter: object | None = None
 
+    def attach_runtime_binding(
+        self,
+        *,
+        pipeline: object,
+        ctx: object,
+        adapter: object,
+    ) -> None:
+        self.runtime_pipeline = pipeline
+        self.runtime_ctx = ctx
+        self.runtime_adapter = adapter
+
 
 def _entry(content: str) -> dict[str, Any]:
     return {

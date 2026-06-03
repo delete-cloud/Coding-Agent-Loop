@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import types
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -87,6 +88,17 @@ class FakeRuntimeSession:
         self.runtime_pipeline: object | None = None
         self.runtime_ctx: object | None = None
         self.runtime_adapter: FakeRuntimeAdapter | None = None
+
+    def attach_runtime_binding(
+        self,
+        *,
+        pipeline: object,
+        ctx: object,
+        adapter: object,
+    ) -> None:
+        self.runtime_pipeline = pipeline
+        self.runtime_ctx = ctx
+        self.runtime_adapter = cast(FakeRuntimeAdapter, adapter)
 
 
 @pytest.mark.asyncio

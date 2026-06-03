@@ -39,9 +39,14 @@ class CheckpointRestoreSession(Protocol):
     max_steps: int
     approval_policy: ApprovalPolicy
     provider: Any | None
-    runtime_pipeline: Any | None
-    runtime_ctx: Any | None
-    runtime_adapter: Any | None
+
+    def attach_runtime_binding(
+        self,
+        *,
+        pipeline: object,
+        ctx: object,
+        adapter: object,
+    ) -> None: ...
 
 
 PrepareCheckpointRuntime = Callable[
@@ -181,9 +186,11 @@ class CheckpointRestoreService:
             or previous_base_url != restored_config.base_url
         ):
             session.provider = None
-        session.runtime_pipeline = runtime.pipeline
-        session.runtime_ctx = runtime.ctx
-        session.runtime_adapter = runtime.adapter
+        session.attach_runtime_binding(
+            pipeline=runtime.pipeline,
+            ctx=runtime.ctx,
+            adapter=runtime.adapter,
+        )
         await self.persist_session(session)
 
         checkpoints = await self.checkpoint_service.list(runtime.ctx.tape.tape_id)
