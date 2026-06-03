@@ -176,6 +176,29 @@ async def test_approval_interaction_service_resolves_interaction() -> None:
 
 
 @pytest.mark.asyncio
+async def test_approval_interaction_service_rejects_mismatched_resolution_request_id() -> (
+    None
+):
+    store = RecordingInteractionStore()
+    service = ApprovalInteractionService(store=store)
+    session = FakeSession(id="session-1", current_turn_id="run-1")
+    request = ApprovalRequest(session_id="session-1", request_id="request-1")
+    await service.create(session, request)
+    response = ApprovalResponse(
+        session_id="session-1",
+        request_id="request-2",
+        approved=True,
+    )
+
+    with pytest.raises(ValueError, match="approval response request_id"):
+        await service.resolve(session, "request-1", response)
+
+    assert store.interactions[0].status == "pending"
+    assert store.interactions[0].response_payload == {}
+    assert store.interactions[0].resolved_at is None
+
+
+@pytest.mark.asyncio
 async def test_approval_interaction_service_respects_explicit_resolution_status() -> (
     None
 ):

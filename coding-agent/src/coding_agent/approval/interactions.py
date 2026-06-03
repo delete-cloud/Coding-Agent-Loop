@@ -98,6 +98,11 @@ class ApprovalInteractionService:
         run_id = session.current_turn_id
         if run_id is None:
             return
+        if request_id != response.request_id:
+            raise ValueError(
+                "approval response request_id does not match "
+                "interaction request_id"
+            )
         await self.store.resolve_agent_interaction(
             approval_interaction_id(run_id, request_id),
             status=status or approval_interaction_status(response),
