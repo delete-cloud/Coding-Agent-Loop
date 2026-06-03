@@ -8,7 +8,10 @@ import pytest
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.environment.execution_binding import ExternalWorkerBinding
 from coding_agent.runtime_store import AgentRunRecord, JSONObject, RuntimeEventRecord
-from coding_agent.runs import RuntimeAttachedExecutorService
+from coding_agent.runs import (
+    RuntimeAttachedExecutorRequestService,
+    RuntimeAttachedExecutorService,
+)
 
 
 @dataclass
@@ -22,6 +25,11 @@ class FakeSession:
     execution_binding: ExternalWorkerBinding = ExternalWorkerBinding(
         executor_kind="local_cli"
     )
+    turn_in_progress: bool = False
+    turn_status: str = "idle"
+    current_turn_id: str | None = None
+    last_activity: datetime = datetime(2026, 6, 3, 11, 0, tzinfo=UTC)
+    last_failure_details: object | None = "previous failure"
 
 
 @dataclass(frozen=True)
@@ -30,6 +38,18 @@ class FakeResumeContext:
 
     def metadata(self) -> JSONObject:
         return {"resume_reason": "user_resume"}
+
+
+class RecordingLock:
+    def __init__(self, calls: list[str]) -> None:
+        self.calls = calls
+
+    async def __aenter__(self) -> None:
+        self.calls.append("lock_enter")
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        del exc_type, exc, tb
+        self.calls.append("lock_exit")
 
 
 @pytest.mark.asyncio
@@ -133,6 +153,125 @@ async def test_attached_executor_service_rejects_wrong_executor_owner() -> None:
             executor_id="executor-2",
             claim_token=claim.claim_token,
         )
+
+
+@pytest.mark.asyncio
+async def test_attached_executor_request_service_marks_session_turn_running() -> None:
+    now = datetime(2026, 6, 3, 12, 0, tzinfo=UTC)
+    session = FakeSession()
+    calls: list[str] = []
+    store = FakeAttachedExecutorStore()
+    attached_service = RuntimeAttachedExecutorService(
+        store=store,
+        metadata_for_session=_metadata_for_session,
+        now=lambda: now,
+    )
+    persisted_sessions: list[FakeSession] = []
+
+    async def assert_owner(session_id: str) -> None:
+        calls.append(f"assert_owner:{session_id}")
+
+    async def load_session(session_id: str) -> FakeSession:
+        calls.append(f"load_session:{session_id}")
+        return session
+
+    async def persist_session(persisted_session: FakeSession) -> None:
+        persisted_sessions.append(persisted_session)
+
+    record = await RuntimeAttachedExecutorRequestService(
+        lock=RecordingLock(calls),
+        assert_owner=assert_owner,
+        load_session=load_session,
+        attached_executor=lambda: attached_service,
+        persist_session=persist_session,
+        session_is_attached=lambda session: isinstance(
+            session.execution_binding,
+            ExternalWorkerBinding,
+        ),
+        run_id_factory=lambda: "run-requested",
+    ).request_run(
+        "session-1",
+        "run attached",
+        resume_context=FakeResumeContext(),
+    )
+
+    assert record.run_id == "run-requested"
+    assert record.status == "requested"
+    assert record.metadata["prompt"] == "run attached"
+    assert record.metadata["resume_reason"] == "user_resume"
+    assert session.current_turn_id == "run-requested"
+    assert session.turn_in_progress is True
+    assert session.turn_status == "running"
+    assert session.last_activity == now
+    assert session.last_failure_details is None
+    assert persisted_sessions == [session]
+    assert calls == [
+        "lock_enter",
+        "assert_owner:session-1",
+        "load_session:session-1",
+        "lock_exit",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_attached_executor_request_service_rejects_non_attached_session() -> None:
+    session = FakeSession()
+
+    async def assert_owner(session_id: str) -> None:
+        del session_id
+
+    async def load_session(session_id: str) -> FakeSession:
+        del session_id
+        return session
+
+    async def persist_session(persisted_session: FakeSession) -> None:
+        del persisted_session
+        raise AssertionError("non-attached request should not persist")
+
+    with pytest.raises(
+        ValueError,
+        match="session does not use attached executor execution",
+    ):
+        await RuntimeAttachedExecutorRequestService(
+            lock=RecordingLock([]),
+            assert_owner=assert_owner,
+            load_session=load_session,
+            attached_executor=lambda: RuntimeAttachedExecutorService(
+                store=FakeAttachedExecutorStore(),
+                metadata_for_session=_metadata_for_session,
+            ),
+            persist_session=persist_session,
+            session_is_attached=lambda session: False,
+        ).request_run("session-1", "run attached")
+
+
+@pytest.mark.asyncio
+async def test_attached_executor_request_service_rejects_active_turn() -> None:
+    session = FakeSession(turn_in_progress=True)
+
+    async def assert_owner(session_id: str) -> None:
+        del session_id
+
+    async def load_session(session_id: str) -> FakeSession:
+        del session_id
+        return session
+
+    async def persist_session(persisted_session: FakeSession) -> None:
+        del persisted_session
+        raise AssertionError("active turn request should not persist")
+
+    with pytest.raises(RuntimeError, match="turn already in progress"):
+        await RuntimeAttachedExecutorRequestService(
+            lock=RecordingLock([]),
+            assert_owner=assert_owner,
+            load_session=load_session,
+            attached_executor=lambda: RuntimeAttachedExecutorService(
+                store=FakeAttachedExecutorStore(),
+                metadata_for_session=_metadata_for_session,
+            ),
+            persist_session=persist_session,
+            session_is_attached=lambda session: True,
+        ).request_run("session-1", "run attached")
 
 
 def _metadata_for_session(

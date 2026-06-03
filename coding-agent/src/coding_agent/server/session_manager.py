@@ -71,6 +71,7 @@ from coding_agent.runs import (
     LocalDaemonExecutorRef,
     RunCoordinator,
     RuntimeAgentFactoryService,
+    RuntimeAttachedExecutorRequestService,
     RuntimeBindingSnapshot,
     RuntimeCancelObservationFinalizer,
     RuntimeCancelOrchestrationService,
@@ -976,6 +977,19 @@ class SessionManager:
                 resume_orchestration=self._runtime_resume_orchestration,
             )
         )
+        self._runtime_attached_executor_request_service = (
+            RuntimeAttachedExecutorRequestService(
+                lock=self._lock,
+                assert_owner=self._assert_owner,
+                load_session=self.get_session_async,
+                attached_executor=self._runtime_control_services.attached_executor,
+                persist_session=self._persist_session_async,
+                session_is_attached=lambda session: isinstance(
+                    session.execution_binding,
+                    ExternalWorkerBinding,
+                ),
+            )
+        )
         self._runtime_turn_service_factory = RuntimeTurnServiceFactory(
             runtime_control_services=self._runtime_control_services,
             persist_session=self._persist_session_async,
@@ -1160,33 +1174,12 @@ class SessionManager:
         run_id: str | None = None,
         resume_context: SessionResumeContext | None = None,
     ) -> AgentRunRecord:
-        async with self._lock:
-            await self._assert_owner(session_id)
-            session = await self.get_session_async(session_id)
-            if not isinstance(session.execution_binding, ExternalWorkerBinding):
-                raise ValueError("session does not use attached executor execution")
-            if session.turn_in_progress or session.turn_status in {
-                "running",
-                "cancelling",
-            }:
-                raise RuntimeError("turn already in progress")
-            resolved_run_id = run_id or uuid.uuid4().hex
-            record = (
-                await self._runtime_control_services.attached_executor().request_run(
-                    session,
-                    prompt=prompt,
-                    run_id=resolved_run_id,
-                    resume_context=resume_context,
-                )
-            )
-            now = record.started_at
-            session.current_turn_id = resolved_run_id
-            session.turn_in_progress = True
-            session.turn_status = "running"
-            session.last_activity = now
-            session.last_failure_details = None
-            await self._persist_session_async(session)
-            return record
+        return await self._runtime_attached_executor_request_service.request_run(
+            session_id,
+            prompt,
+            run_id=run_id,
+            resume_context=resume_context,
+        )
 
     async def request_external_worker_run(
         self,
