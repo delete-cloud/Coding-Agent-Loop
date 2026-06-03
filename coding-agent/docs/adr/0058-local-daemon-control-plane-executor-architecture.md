@@ -203,9 +203,12 @@ This ADR does not implement that path.
   - Completed: checkpoint-restored runtime construction, provider reuse,
     checkpoint plugin-state injection, and local-daemon restore preparation are
     delegated to `CheckpointRuntimeBuilder`.
-  - Remaining: `SessionManager` still owns some runtime close/error policy.
-    This should move behind narrower RunService/EventStore/Executor lifecycle
-    boundaries before this item is considered complete.
+  - Completed: runtime-handle invalidation and adapter close semantics are
+    delegated to `RuntimeCloser` instead of being implemented inline in
+    `SessionManager`.
+  - Remaining: `SessionManager` still owns some runtime error orchestration
+    policy. This should move behind narrower RunService/EventStore/Executor
+    lifecycle boundaries before this item is considered complete.
 - [x] Demote `coding_agent run` to an inline testkit/devkit compatibility path.
   - `run` records `origin.mode = inline_testkit`.
   - CLI and README describe `run` as dev/testkit one-shot compatibility.
@@ -256,8 +259,8 @@ This ADR does not implement that path.
 
 ## Remaining Implementation Gaps
 
-- Move runtime close/error policy out of `SessionManager` into narrower
-  runtime/executor lifecycle boundaries.
+- Move remaining runtime error orchestration policy out of `SessionManager`
+  into narrower runtime/executor lifecycle boundaries.
 - Make sandbox policy the default executor environment wrapper rather than a
   mixed local/cloud environment concern.
 - Add daemon-backed client surfaces for the local product path. REPL/TUI/CLI

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from inspect import isawaitable
 from typing import Any, Protocol, cast
 
 from coding_agent.adapter_types import StopReason, TurnOutcome
@@ -106,6 +108,12 @@ class RuntimeSessionCloser(Protocol):
     async def __call__(self, session: RuntimeTurnErrorSession) -> None: ...
 
 
+class RuntimeHandleSession(Protocol):
+    runtime_pipeline: object | None
+    runtime_ctx: object | None
+    runtime_adapter: object | None
+
+
 class RuntimeGenericErrorNotifier(Protocol):
     async def __call__(
         self,
@@ -187,6 +195,38 @@ def _set_failure_details_from_outcome(
         session.last_failure_details = f"Agent turn failed: {reason}"
         return
     session.last_failure_details = None
+
+
+@dataclass(frozen=True)
+class RuntimeCloser:
+    async def close(self, session: RuntimeHandleSession) -> None:
+        adapter = session.runtime_adapter
+        self.invalidate(session)
+        await self.close_adapter(adapter)
+
+    async def close_adapter(self, adapter: object | None) -> None:
+        if adapter is None:
+            return
+        close = getattr(adapter, "close", None)
+        if callable(close):
+            close_result = close()
+            if isawaitable(close_result):
+                await close_result
+
+    def close_sync_safe(self, session: RuntimeHandleSession) -> None:
+        adapter = session.runtime_adapter
+        self.invalidate(session)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(self.close_adapter(adapter))
+            return
+        _ = loop.create_task(self.close_adapter(adapter))
+
+    def invalidate(self, session: RuntimeHandleSession) -> None:
+        session.runtime_pipeline = None
+        session.runtime_ctx = None
+        session.runtime_adapter = None
 
 
 @dataclass(frozen=True)
