@@ -895,6 +895,9 @@ class Session:
             signal_event=signal_event,
         )
 
+    def detach_runtime_adapter(self) -> object | None:
+        return self.runtime_handle.detach_runtime_adapter()
+
     def as_dict(self) -> dict[str, Any]:
         workspace_id = (
             self.execution_binding.workspace_id

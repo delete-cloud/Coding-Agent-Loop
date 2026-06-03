@@ -64,6 +64,13 @@ class FakeRuntimeHandleSession:
     runtime_ctx: object | None = None
     runtime_adapter: object | None = None
 
+    def detach_runtime_adapter(self) -> object | None:
+        adapter = self.runtime_adapter
+        self.runtime_pipeline = None
+        self.runtime_ctx = None
+        self.runtime_adapter = None
+        return adapter
+
 
 class FakeTape:
     def __init__(self, tape_id: str) -> None:
