@@ -88,11 +88,13 @@ from coding_agent.runs import (
     RunRequest,
     RuntimeBindingSnapshot,
     RuntimeCloser,
+    RuntimeRunMetadataService,
     RuntimeObservationService,
     RuntimeRunPersistenceService,
     RuntimeRunRecoveryService,
     RunTarget,
     SessionRuntimeHandle,
+    runtime_execution_placement,
     run_target_from_dict,
     run_target_from_execution_binding,
     serialize_checkpoint_session_config,
@@ -1078,6 +1080,7 @@ class SessionManager:
         self._runtime_observation_service = RuntimeObservationService(
             self._agent_observation_store
         )
+        self._runtime_metadata_service = RuntimeRunMetadataService()
         resolved_checkpoint_store = checkpoint_store or self._create_checkpoint_store(
             data_dir
         )
@@ -1383,7 +1386,7 @@ class SessionManager:
                 raise RuntimeError("turn already in progress")
             resolved_run_id = run_id or uuid.uuid4().hex
             now = datetime.now(UTC)
-            metadata = self._run_metadata_for_session(
+            metadata = self._runtime_metadata_service.metadata_for_session(
                 session,
                 resume_context=resume_context,
             )
@@ -2172,7 +2175,9 @@ class SessionManager:
             trace_metadata = dict(run_context.trace_metadata)
             trace_metadata["turn_id"] = run_id
             trace_metadata["tape_id"] = ctx.tape.tape_id
-            trace_metadata["execution_placement"] = self._execution_placement(session)
+            trace_metadata["execution_placement"] = runtime_execution_placement(
+                session.execution_binding
+            )
             trace_metadata["execution_binding_kind"] = session.execution_binding.kind
             trace_metadata["workspace_surface"] = (
                 session.execution_binding.workspace_surface
@@ -2192,46 +2197,11 @@ class SessionManager:
                 trace_metadata=trace_metadata,
             )
 
-    def _run_metadata_for_session(
-        self,
-        session: Session,
-        *,
-        resume_context: SessionResumeContext | None = None,
-    ) -> JSONObject:
-        metadata: JSONObject = {
-            "provider_name": session.provider_name,
-            "model_name": session.model_name,
-            "approval_policy": session.approval_policy.value,
-            "max_steps": session.max_steps,
-            "execution_binding_kind": session.execution_binding.kind,
-            "workspace_surface": session.execution_binding.workspace_surface,
-            "execution_plane": session.execution_binding.execution_plane,
-            "execution_placement": self._execution_placement(session),
-        }
-        if resume_context is not None:
-            metadata.update(resume_context.metadata())
-        if isinstance(session.execution_binding, ExternalWorkerBinding):
-            metadata["executor_kind"] = session.execution_binding.executor_kind
-            metadata["worker_pool"] = session.execution_binding.worker_pool
-            if session.execution_binding.workspace_ref is not None:
-                metadata["workspace_ref"] = cast(
-                    RuntimeJSONValue,
-                    dict(session.execution_binding.workspace_ref),
-                )
-        return metadata
-
-    def _execution_placement(self, session: Session) -> str:
-        if isinstance(session.execution_binding, ExternalWorkerBinding):
-            return "local_attached"
-        if isinstance(session.execution_binding, CloudWorkspaceBinding):
-            return "cloud_workspace"
-        return "server_embedded"
-
     def _runtime_run_persistence(self) -> RuntimeRunPersistenceService:
         return RuntimeRunPersistenceService(
             run_store=self._runtime_store,
             checkpoint_store=self._runtime_store,
-            metadata_for_session=self._run_metadata_for_session,
+            metadata_for_session=self._runtime_metadata_service.metadata_for_session,
         )
 
     def _runtime_run_recovery(self) -> RuntimeRunRecoveryService:
@@ -2271,7 +2241,9 @@ class SessionManager:
             correlation: JSONObject = {
                 "session_id": session.id,
                 "run_id": run_id,
-                "execution_placement": self._execution_placement(session),
+                "execution_placement": runtime_execution_placement(
+                    session.execution_binding
+                ),
                 "execution_binding_kind": session.execution_binding.kind,
                 "workspace_surface": session.execution_binding.workspace_surface,
                 "execution_plane": session.execution_binding.execution_plane,

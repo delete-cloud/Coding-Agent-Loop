@@ -209,6 +209,9 @@ This ADR does not implement that path.
   - Completed: runtime run lifecycle and latest message snapshot persistence
     are delegated to `RuntimeRunPersistenceService` instead of `SessionManager`
     helper methods.
+  - Completed: runtime run metadata construction and execution-placement
+    classification are delegated to `RuntimeRunMetadataService` instead of
+    `SessionManager` helper methods.
   - Completed: stale runtime run recovery and expired attached executor claim
     recovery are delegated to `RuntimeRunRecoveryService` instead of
     `SessionManager` helper methods.

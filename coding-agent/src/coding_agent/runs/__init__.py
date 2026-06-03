@@ -55,6 +55,11 @@ from .lifecycle import (
     runtime_status_from_turn_outcome,
 )
 from .observation import RuntimeObservationService, RuntimeObservationSession
+from .metadata import (
+    RuntimeMetadataSession,
+    RuntimeRunMetadataService,
+    runtime_execution_placement,
+)
 from .persistence import (
     RuntimeMessageSnapshotSession,
     RuntimeRunPersistenceService,
@@ -126,6 +131,7 @@ __all__ = [
     "RuntimeExecution",
     "RuntimeMessageSnapshotSession",
     "RuntimeMessageSnapshotSaver",
+    "RuntimeMetadataSession",
     "RuntimeObservationService",
     "RuntimeObservationSession",
     "RuntimeObservationCompleter",
@@ -138,6 +144,7 @@ __all__ = [
     "RuntimeRunExecutor",
     "RuntimeRunFinisher",
     "RuntimeRunMetadataProvider",
+    "RuntimeRunMetadataService",
     "RuntimeRunPersistenceService",
     "RuntimeRunRecoveryEligibility",
     "RuntimeRunRecoveryService",
@@ -171,6 +178,7 @@ __all__ = [
     "require_runtime_turn_outcome",
     "runtime_result_from_turn_outcome",
     "runtime_status_from_turn_outcome",
+    "runtime_execution_placement",
     "run_target_from_dict",
     "run_target_from_execution_binding",
     "workspace_ref_from_dict",

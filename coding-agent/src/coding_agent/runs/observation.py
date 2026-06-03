@@ -11,13 +11,10 @@ from coding_agent.agent_observability import (
     AgentObservationStatus,
     AgentObservationStore,
 )
-from coding_agent.environment.execution_binding import (
-    CloudWorkspaceBinding,
-    ExecutionBinding,
-    ExternalWorkerBinding,
-)
+from coding_agent.environment.execution_binding import ExecutionBinding
 from coding_agent.runtime_store import JSONObject
 from coding_agent.runs.lifecycle import RuntimeRunResumeContext
+from coding_agent.runs.metadata import runtime_execution_placement
 
 
 class RuntimeObservationSession(Protocol):
@@ -82,7 +79,7 @@ def _observation_attributes(
     binding = session.execution_binding
     attributes: JSONObject = {
         "tape_id": getattr(getattr(ctx, "tape", None), "tape_id", None),
-        "execution_placement": _execution_placement(binding),
+        "execution_placement": runtime_execution_placement(binding),
         "execution_binding_kind": binding.kind,
         "workspace_surface": binding.workspace_surface,
         "execution_plane": binding.execution_plane,
@@ -90,15 +87,6 @@ def _observation_attributes(
     if resume_context is not None:
         attributes.update(resume_context.metadata())
     return attributes
-
-
-def _execution_placement(binding: ExecutionBinding) -> str:
-    if isinstance(binding, ExternalWorkerBinding):
-        return "local_attached"
-    if isinstance(binding, CloudWorkspaceBinding):
-        return "cloud_workspace"
-    return "server_embedded"
-
 
 def _observation_status(turn_status: str) -> AgentObservationStatus:
     if turn_status in {"cancelled", "interrupted"}:

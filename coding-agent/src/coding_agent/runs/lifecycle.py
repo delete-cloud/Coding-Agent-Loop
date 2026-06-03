@@ -22,6 +22,8 @@ class RuntimeRunSession(Protocol):
 class RuntimeRunResumeContext(Protocol):
     previous_run_id: str
 
+    def metadata(self) -> JSONObject: ...
+
 
 class RuntimeTurnSession(Protocol):
     tape_id: str | None
