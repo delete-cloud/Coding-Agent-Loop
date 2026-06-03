@@ -88,6 +88,7 @@ from coding_agent.runs import (
     RuntimeResumeContext as SessionResumeContext,
     RuntimeResumeOrchestrationService,
     RuntimeTurnAdmissionService,
+    RuntimeWorkspaceExportService,
     RuntimeWireEventRecorder,
     RunTarget,
     SessionRuntimeHandle,
@@ -824,6 +825,13 @@ class SessionManager:
             workspace_export_in_progress=self._workspace_export_in_progress,
             assert_owner=self._assert_owner,
             load_session=self.get_session_async,
+        )
+        self._runtime_workspace_export_service = RuntimeWorkspaceExportService(
+            turn_lock_for=self._turn_lock_for,
+            assert_owner=self._assert_owner,
+            load_session=self.get_session_async,
+            begin_export=self._begin_workspace_export,
+            end_export=self._end_workspace_export,
         )
         self._runtime_maintenance_admission = RuntimeMaintenanceAdmissionService(
             turn_lock_for=self._turn_lock_for,
@@ -2794,23 +2802,10 @@ class SessionManager:
         session_id: str,
         export_archive: Callable[[CloudWorkspaceBinding], T],
     ) -> T:
-        turn_lock = self._turn_lock_for(session_id)
-        if turn_lock.locked():
-            raise RuntimeError("turn already in progress")
-
-        await self._assert_owner(session_id)
-        session = await self.get_session_async(session_id)
-        if session.turn_in_progress or (session.task and not session.task.done()):
-            raise RuntimeError("turn already in progress")
-        if not isinstance(session.execution_binding, CloudWorkspaceBinding):
-            raise ValueError("Workspace export requires cloud session")
-        self._begin_workspace_export(session_id)
-        try:
-            result = await asyncio.to_thread(export_archive, session.execution_binding)
-            await self._assert_owner(session_id)
-            return result
-        finally:
-            self._end_workspace_export(session_id)
+        return await self._runtime_workspace_export_service.export_archive(
+            session_id,
+            export_archive,
+        )
 
     async def list_checkpoints(self, session_id: str) -> list[CheckpointMeta]:
         session = await self.get_session_async(session_id)

@@ -359,6 +359,10 @@ This ADR does not implement that path.
     ensure invocation, runtime builder wiring, and session persistence wiring
     are delegated to `RuntimeEnsureOrchestrationService` instead of living
     inline in `SessionManager.ensure_session_runtime()`.
+  - Completed: workspace archive export admission, cloud-session validation,
+    export-in-progress bookkeeping, thread offload, and post-export owner
+    revalidation are delegated to `RuntimeWorkspaceExportService` instead of
+    living inline in `SessionManager.export_workspace_archive()`.
   - Completed: runtime control service construction for persistence, recovery,
     query, resume, attached-executor, cancel, and task-stopper services is
     delegated to `RuntimeControlServices` instead of `SessionManager` private
