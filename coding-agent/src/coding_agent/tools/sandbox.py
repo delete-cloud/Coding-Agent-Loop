@@ -16,7 +16,7 @@ try:
 except ImportError:
     resource = None
 
-SandboxMode = Literal["none", "nsjail", "docker"]
+SandboxMode = Literal["none", "native", "podman", "docker"]
 
 
 class SandboxError(RuntimeError):
@@ -56,11 +56,30 @@ class SandboxRunner(Protocol):
 def build_sandbox(config: SandboxConfig) -> SandboxRunner:
     if config.mode == "none":
         return NoneSandboxRunner(config)
-    if config.mode == "nsjail":
-        return NsjailSandboxRunner(config)
+    if config.mode == "native":
+        return _resolve_native(config)
+    if config.mode == "podman":
+        return PodmanSandboxRunner(config)
     if config.mode == "docker":
         return DockerSandboxRunner(config)
     raise ValueError(f"Unsupported sandbox mode: {config.mode}")
+
+
+def _resolve_native(config: SandboxConfig) -> SandboxRunner:
+    """Resolve ``sandbox_mode=native`` to a platform-specific backend (ADR-0060).
+
+    ``native`` is a platform resolution, not a single backend: macOS uses a
+    Codex-style Seatbelt profile, Linux uses a Codex-style bubblewrap jail.
+    Unsupported platforms fail closed rather than silently downgrading.
+    """
+    system = platform.system()
+    if system == "Darwin":
+        return MacosSeatbeltSandboxRunner(config)
+    if system == "Linux":
+        return LinuxNativeSandboxRunner(config)
+    raise SandboxUnavailableError(
+        f"native sandbox mode is not supported on {system}"
+    )
 
 
 class NoneSandboxRunner:
@@ -84,7 +103,117 @@ class NoneSandboxRunner:
         )
 
 
+class MacosSeatbeltSandboxRunner:
+    """macOS native sandbox via ``sandbox-exec`` (ADR-0060, Codex-style).
+
+    Deny-by-default Seatbelt profile: reads are broadly allowed, writes are
+    confined to the workspace plus standard scratch devices, and network is
+    denied (no network-allow rule is emitted). The command runs with ``cwd``
+    pinned inside the workspace.
+    """
+
+    def __init__(self, config: SandboxConfig) -> None:
+        self._config: SandboxConfig = config
+
+    def run(self, request: SandboxRequest) -> subprocess.CompletedProcess[str]:
+        if which("sandbox-exec") is None:
+            raise SandboxUnavailableError("sandbox-exec binary not found on PATH")
+
+        cwd = _validate_cwd(request.cwd, self._config.workspace_root)
+        profile = self._profile()
+        command = ["sandbox-exec", "-p", profile, *request.args]
+        return subprocess.run(
+            command,
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=request.timeout_seconds,
+            cwd=str(cwd),
+            env=request.env,
+        )
+
+    def _profile(self) -> str:
+        workspace = self._config.workspace_root.resolve()
+        return "\n".join(
+            [
+                "(version 1)",
+                "(deny default)",
+                "(allow process-exec)",
+                "(allow process-fork)",
+                "(allow signal (target self))",
+                "(allow sysctl-read)",
+                "(allow file-read*)",
+                "(allow file-write*",
+                f'    (subpath "{workspace}")',
+                '    (subpath "/dev/null")',
+                '    (subpath "/dev/stdout")',
+                '    (subpath "/dev/stderr")',
+                f'    (subpath "{_macos_tmpdir()}"))',
+            ]
+        )
+
+
+class LinuxNativeSandboxRunner:
+    """Linux native sandbox via bubblewrap (ADR-0060, Codex-style).
+
+    The whole root filesystem is bind-mounted read-only, the workspace is
+    bind-mounted read-write on top, network is unshared (denied by default),
+    and the command runs with ``cwd`` pinned inside the workspace. Landlock is
+    reserved as an internal hardening detail and is not a user-visible mode.
+    """
+
+    def __init__(self, config: SandboxConfig) -> None:
+        self._config: SandboxConfig = config
+
+    def run(self, request: SandboxRequest) -> subprocess.CompletedProcess[str]:
+        if which("bwrap") is None:
+            raise SandboxUnavailableError(
+                "bubblewrap (bwrap) binary not found on PATH"
+            )
+
+        cwd = _validate_cwd(request.cwd, self._config.workspace_root)
+        command = self._bwrap_command(request, cwd)
+        return subprocess.run(
+            command,
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=request.timeout_seconds,
+            env=request.env,
+        )
+
+    def _bwrap_command(self, request: SandboxRequest, cwd: Path) -> list[str]:
+        workspace = str(self._config.workspace_root.resolve())
+        command = [
+            "bwrap",
+            "--die-with-parent",
+            "--unshare-user",
+            "--unshare-pid",
+            "--unshare-net",
+            "--ro-bind",
+            "/",
+            "/",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "--tmpfs",
+            "/tmp",
+            "--bind",
+            workspace,
+            workspace,
+            "--chdir",
+            str(cwd),
+            "--",
+        ]
+        command.extend(request.args)
+        return command
+
+
 class NsjailSandboxRunner:
+    # ADR-0060: nsjail is dropped from accepted sandbox_mode values and is no
+    # longer reachable through build_sandbox(). This class is retained only to
+    # stage its removal and must not be extended.
     def __init__(self, config: SandboxConfig) -> None:
         self._config: SandboxConfig = config
 
@@ -171,6 +300,64 @@ class DockerSandboxRunner:
         command.append(self._config.docker_image)
         command.extend(request.args)
         return command
+
+
+class PodmanSandboxRunner:
+    """Explicit Podman container backend (ADR-0060).
+
+    Mirrors the Docker backend's command shape with rootless-friendly hardening:
+    no network, workspace bind mount, workdir pinned to ``cwd``, and
+    ``no-new-privileges``. Podman is an explicit mode and is never selected by
+    ``native``.
+    """
+
+    def __init__(self, config: SandboxConfig) -> None:
+        self._config: SandboxConfig = config
+
+    def run(self, request: SandboxRequest) -> subprocess.CompletedProcess[str]:
+        if which("podman") is None:
+            raise SandboxUnavailableError("podman binary not found on PATH")
+
+        cwd = _validate_cwd(request.cwd, self._config.workspace_root)
+        command = self._podman_command(request, cwd)
+        return subprocess.run(
+            command,
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=request.timeout_seconds,
+            env=None,
+        )
+
+    def _podman_command(self, request: SandboxRequest, cwd: Path) -> list[str]:
+        workspace = self._config.workspace_root.resolve()
+        command = [
+            "podman",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--security-opt",
+            "no-new-privileges",
+            "--workdir",
+            str(cwd),
+            "--mount",
+            f"type=bind,src={workspace},dst={workspace}",
+        ]
+        if self._config.limits.cpu_limit_seconds is not None:
+            command.extend(["--ulimit", f"cpu={self._config.limits.cpu_limit_seconds}"])
+        if self._config.limits.memory_limit_mb is not None:
+            command.extend(["--memory", f"{self._config.limits.memory_limit_mb}m"])
+        for key, value in _docker_container_env(request.env).items():
+            command.extend(["-e", f"{key}={value}"])
+        command.append(self._config.docker_image)
+        command.extend(request.args)
+        return command
+
+
+def _macos_tmpdir() -> str:
+    """Per-user temp dir used as a writable scratch root in the Seatbelt profile."""
+    return str(Path(os.environ.get("TMPDIR", "/tmp")).resolve())
 
 
 def _validate_cwd(cwd: Path, workspace_root: Path) -> Path:

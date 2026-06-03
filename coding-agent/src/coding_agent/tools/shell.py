@@ -81,7 +81,8 @@ def _sandbox_mode(shell_config: dict[str, object]) -> str:
     mode_value = shell_config.get("sandbox_mode", "none")
     if not isinstance(mode_value, str):
         raise ValueError("sandbox_mode must be a string")
-    if mode_value not in ("none", "nsjail", "docker"):
+    # ADR-0060: converged user-visible modes; nsjail dropped from validation.
+    if mode_value not in ("none", "native", "podman", "docker"):
         raise ValueError(f"Unsupported sandbox mode: {mode_value}")
     return mode_value
 

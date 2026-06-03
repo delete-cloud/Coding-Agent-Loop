@@ -410,3 +410,273 @@ class TestShellTool:
             sandbox_module.SandboxError, match="(?i)unsafe environment variable name"
         ):
             runner.run(request)
+
+
+class TestNativeSandboxResolution:
+    """ADR-0060: `native` resolves to a platform-specific backend."""
+
+    def _native_config(self, tmp_path: Path):
+        sandbox_module = importlib.import_module("coding_agent.tools.sandbox")
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        return sandbox_module, sandbox_module.SandboxConfig(
+            mode="native",
+            workspace_root=workspace,
+            limits=sandbox_module.SandboxLimits(),
+        )
+
+    def test_native_mode_on_darwin_selects_macos_seatbelt_runner(
+        self, monkeypatch, tmp_path: Path
+    ):
+        sandbox_module, config = self._native_config(tmp_path)
+        monkeypatch.setattr(sandbox_module.platform, "system", lambda: "Darwin")
+        runner = sandbox_module.build_sandbox(config)
+        assert isinstance(runner, sandbox_module.MacosSeatbeltSandboxRunner)
+
+    def test_native_mode_on_linux_selects_linux_bwrap_runner(
+        self, monkeypatch, tmp_path: Path
+    ):
+        sandbox_module, config = self._native_config(tmp_path)
+        monkeypatch.setattr(sandbox_module.platform, "system", lambda: "Linux")
+        runner = sandbox_module.build_sandbox(config)
+        assert isinstance(runner, sandbox_module.LinuxNativeSandboxRunner)
+
+    def test_native_mode_on_windows_fails_closed(self, monkeypatch, tmp_path: Path):
+        sandbox_module, config = self._native_config(tmp_path)
+        monkeypatch.setattr(sandbox_module.platform, "system", lambda: "Windows")
+        with pytest.raises(
+            sandbox_module.SandboxUnavailableError, match="(?i)native.*not supported"
+        ):
+            sandbox_module.build_sandbox(config)
+
+    def test_nsjail_mode_is_rejected_by_validation(self):
+        from coding_agent.tools.shell import _sandbox_mode
+
+        with pytest.raises(ValueError, match="(?i)unsupported sandbox mode"):
+            _sandbox_mode({"sandbox_mode": "nsjail"})
+
+    def test_existing_none_and_docker_modes_unchanged(self, tmp_path: Path):
+        from coding_agent.tools.shell import _sandbox_mode
+
+        sandbox_module = importlib.import_module("coding_agent.tools.sandbox")
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+
+        assert _sandbox_mode({"sandbox_mode": "none"}) == "none"
+        assert _sandbox_mode({"sandbox_mode": "docker"}) == "docker"
+
+        none_runner = sandbox_module.build_sandbox(
+            sandbox_module.SandboxConfig(mode="none", workspace_root=workspace)
+        )
+        docker_runner = sandbox_module.build_sandbox(
+            sandbox_module.SandboxConfig(mode="docker", workspace_root=workspace)
+        )
+        assert isinstance(none_runner, sandbox_module.NoneSandboxRunner)
+        assert isinstance(docker_runner, sandbox_module.DockerSandboxRunner)
+
+
+class TestMacosSeatbeltSandbox:
+    """ADR-0060 step 2: macOS native sandbox via sandbox-exec."""
+
+    def _runner(self, tmp_path: Path):
+        sandbox_module = importlib.import_module("coding_agent.tools.sandbox")
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        config = sandbox_module.SandboxConfig(
+            mode="native",
+            workspace_root=workspace,
+            limits=sandbox_module.SandboxLimits(),
+        )
+        return sandbox_module, workspace, sandbox_module.MacosSeatbeltSandboxRunner(
+            config
+        )
+
+    def test_macos_native_builds_sandbox_exec_profile_with_workspace_rw_and_network_deny(
+        self, monkeypatch, tmp_path: Path
+    ):
+        sandbox_module, workspace, runner = self._runner(tmp_path)
+        monkeypatch.setattr(sandbox_module.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(
+            sandbox_module, "which", lambda _: "/usr/bin/sandbox-exec"
+        )
+
+        captured: dict[str, object] = {}
+
+        def fake_run(command, **kwargs):
+            captured["command"] = command
+            captured["cwd"] = kwargs.get("cwd")
+            return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+        monkeypatch.setattr(sandbox_module.subprocess, "run", fake_run)
+        result = runner.run(
+            sandbox_module.SandboxRequest(
+                args=["echo", "hi"], cwd=workspace, env=None, timeout_seconds=1
+            )
+        )
+
+        assert result.returncode == 0
+        command = cast(list[str], captured["command"])
+        assert command[0] == "sandbox-exec"
+        assert command[-2:] == ["echo", "hi"]
+        # cwd is enforced inside the workspace
+        assert captured["cwd"] == str(workspace.resolve())
+        profile = command[command.index("-p") + 1]
+        assert "(deny default)" in profile
+        assert "(allow file-read*)" in profile
+        assert f'(subpath "{workspace.resolve()}")' in profile
+        # network is denied: no network-allow rule is emitted
+        assert "allow network" not in profile
+
+    def test_macos_native_fails_closed_when_sandbox_exec_missing(
+        self, monkeypatch, tmp_path: Path
+    ):
+        sandbox_module, workspace, runner = self._runner(tmp_path)
+        monkeypatch.setattr(sandbox_module.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(sandbox_module, "which", lambda _: None)
+        monkeypatch.setattr(
+            sandbox_module.subprocess,
+            "run",
+            lambda *a, **k: pytest.fail("subprocess.run should not be called"),
+        )
+        with pytest.raises(
+            sandbox_module.SandboxUnavailableError, match="(?i)sandbox-exec"
+        ):
+            runner.run(
+                sandbox_module.SandboxRequest(
+                    args=["echo", "hi"], cwd=workspace, env=None, timeout_seconds=1
+                )
+            )
+
+
+class TestLinuxNativeSandbox:
+    """ADR-0060 step 3: Linux native sandbox via bubblewrap."""
+
+    def _runner(self, tmp_path: Path):
+        sandbox_module = importlib.import_module("coding_agent.tools.sandbox")
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        config = sandbox_module.SandboxConfig(
+            mode="native",
+            workspace_root=workspace,
+            limits=sandbox_module.SandboxLimits(),
+        )
+        return sandbox_module, workspace, sandbox_module.LinuxNativeSandboxRunner(config)
+
+    def test_linux_native_command_includes_network_off_workspace_bind_and_cwd(
+        self, monkeypatch, tmp_path: Path
+    ):
+        sandbox_module, workspace, runner = self._runner(tmp_path)
+        monkeypatch.setattr(sandbox_module.platform, "system", lambda: "Linux")
+        monkeypatch.setattr(sandbox_module, "which", lambda _: "/usr/bin/bwrap")
+
+        captured: dict[str, object] = {}
+
+        def fake_run(command, **kwargs):
+            captured["command"] = command
+            return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+        monkeypatch.setattr(sandbox_module.subprocess, "run", fake_run)
+        result = runner.run(
+            sandbox_module.SandboxRequest(
+                args=["echo", "hi"], cwd=workspace, env=None, timeout_seconds=1
+            )
+        )
+
+        assert result.returncode == 0
+        command = cast(list[str], captured["command"])
+        assert command[0] == "bwrap"
+        assert "--unshare-net" in command
+        root = str(workspace.resolve())
+        bind_idx = command.index("--bind")
+        assert command[bind_idx + 1] == root
+        assert command[bind_idx + 2] == root
+        chdir_idx = command.index("--chdir")
+        assert command[chdir_idx + 1] == root
+        assert command[-2:] == ["echo", "hi"]
+
+    def test_linux_native_fails_closed_when_bwrap_missing(
+        self, monkeypatch, tmp_path: Path
+    ):
+        sandbox_module, workspace, runner = self._runner(tmp_path)
+        monkeypatch.setattr(sandbox_module.platform, "system", lambda: "Linux")
+        monkeypatch.setattr(sandbox_module, "which", lambda _: None)
+        monkeypatch.setattr(
+            sandbox_module.subprocess,
+            "run",
+            lambda *a, **k: pytest.fail("subprocess.run should not be called"),
+        )
+        with pytest.raises(
+            sandbox_module.SandboxUnavailableError, match="(?i)bubblewrap|bwrap"
+        ):
+            runner.run(
+                sandbox_module.SandboxRequest(
+                    args=["echo", "hi"], cwd=workspace, env=None, timeout_seconds=1
+                )
+            )
+
+
+class TestPodmanSandbox:
+    """ADR-0060 step 4: explicit podman container backend."""
+
+    def test_podman_mode_is_accepted_by_validation(self):
+        from coding_agent.tools.shell import _sandbox_mode
+
+        assert _sandbox_mode({"sandbox_mode": "podman"}) == "podman"
+
+    def test_podman_runner_builds_podman_run_with_network_none_and_workspace_bind(
+        self, monkeypatch, tmp_path: Path
+    ):
+        sandbox_module = importlib.import_module("coding_agent.tools.sandbox")
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        config = sandbox_module.SandboxConfig(
+            mode="podman",
+            workspace_root=workspace,
+            limits=sandbox_module.SandboxLimits(),
+        )
+        runner = sandbox_module.build_sandbox(config)
+        assert isinstance(runner, sandbox_module.PodmanSandboxRunner)
+
+        monkeypatch.setattr(sandbox_module, "which", lambda _: "/usr/bin/podman")
+        captured: dict[str, object] = {}
+
+        def fake_run(command, **kwargs):
+            captured["command"] = command
+            return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+        monkeypatch.setattr(sandbox_module.subprocess, "run", fake_run)
+        result = runner.run(
+            sandbox_module.SandboxRequest(
+                args=["echo", "hi"], cwd=workspace, env=None, timeout_seconds=1
+            )
+        )
+
+        assert result.returncode == 0
+        command = cast(list[str], captured["command"])
+        assert command[:3] == ["podman", "run", "--rm"]
+        assert "--network" in command
+        assert command[command.index("--network") + 1] == "none"
+        root = str(workspace.resolve())
+        assert any(
+            f"type=bind,src={root},dst={root}" in part for part in command
+        )
+        assert command[-2:] == ["echo", "hi"]
+
+    def test_podman_runner_fails_closed_when_binary_missing(
+        self, monkeypatch, tmp_path: Path
+    ):
+        sandbox_module = importlib.import_module("coding_agent.tools.sandbox")
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        runner = sandbox_module.PodmanSandboxRunner(
+            sandbox_module.SandboxConfig(mode="podman", workspace_root=workspace)
+        )
+        monkeypatch.setattr(sandbox_module, "which", lambda _: None)
+        with pytest.raises(
+            sandbox_module.SandboxUnavailableError, match="(?i)podman"
+        ):
+            runner.run(
+                sandbox_module.SandboxRequest(
+                    args=["echo", "hi"], cwd=workspace, env=None, timeout_seconds=1
+                )
+            )
