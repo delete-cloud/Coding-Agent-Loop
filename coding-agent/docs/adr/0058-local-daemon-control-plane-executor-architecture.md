@@ -350,6 +350,11 @@ This ADR does not implement that path.
     replacement, checkpoint capture, and checkpoint restore is delegated to
     `RuntimeMaintenanceAdmissionService` instead of living inline in
     `SessionManager`.
+  - Completed: checkpoint capture runtime ensuring, reserved metadata
+    validation, restart-safe session config stamping, checkpoint service
+    capture, tape-id synchronization, and session persistence are delegated to
+    `RuntimeCheckpointCaptureService` instead of living inline in
+    `SessionManager.capture_checkpoint()`.
   - Completed: runtime control service construction for persistence, recovery,
     query, resume, attached-executor, cancel, and task-stopper services is
     delegated to `RuntimeControlServices` instead of `SessionManager` private

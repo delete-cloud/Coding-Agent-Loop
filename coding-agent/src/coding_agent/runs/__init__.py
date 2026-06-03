@@ -17,6 +17,15 @@ from .checkpoint_restore import (
     checkpoint_session_config_from_extra,
     serialize_checkpoint_session_config,
 )
+from .checkpoint_capture import (
+    RuntimeCheckpointCaptureBackend,
+    RuntimeCheckpointCaptureBackendProvider,
+    RuntimeCheckpointCaptureContext,
+    RuntimeCheckpointCapturePersister,
+    RuntimeCheckpointCaptureService,
+    RuntimeCheckpointCaptureSession,
+    RuntimeCheckpointRuntimeEnsurer,
+)
 from .attached_executor import (
     ATTACHED_EXECUTOR_BINDING_KINDS,
     RuntimeAttachedExecutorClaim,
@@ -234,6 +243,13 @@ __all__ = [
     "RuntimeCancelStatus",
     "RuntimeCancelStore",
     "RuntimeCancelTurnIdFactory",
+    "RuntimeCheckpointCaptureBackend",
+    "RuntimeCheckpointCaptureBackendProvider",
+    "RuntimeCheckpointCaptureContext",
+    "RuntimeCheckpointCapturePersister",
+    "RuntimeCheckpointCaptureService",
+    "RuntimeCheckpointCaptureSession",
+    "RuntimeCheckpointRuntimeEnsurer",
     "RuntimeContextBindingService",
     "RuntimeContextBindingSession",
     "RuntimeControlServices",
