@@ -10,6 +10,7 @@ from coding_agent.remote.approval import APPROVAL_POLICIES
 
 
 DAEMON_APPROVAL_CHOICES = click.Choice(APPROVAL_POLICIES)
+DAEMON_REPL_EXIT_COMMANDS = frozenset({"/exit", "/quit"})
 
 
 def _load_server_cli_settings(config_path: Path | None) -> dict[str, Any]:
@@ -160,26 +161,15 @@ def daemon_run(
 ) -> None:
     """Run one prompt through an already-running local daemon."""
     from coding_agent.remote.client import (
-        RemoteEndpoint,
         auth_headers,
-        create_local_daemon_session,
         delete_remote_session,
         stream_prompt_or_run_request,
     )
 
-    repo_path = Path(repo).expanduser().resolve()
-    if not repo_path.is_dir():
-        raise click.ClickException(f"--repo must be an existing directory: {repo}")
-    endpoint = RemoteEndpoint(
-        name="local-daemon",
-        url=url.rstrip("/"),
+    endpoint, session_id = _create_daemon_local_session(
+        repo=repo,
+        url=url,
         token=token,
-    )
-    if not endpoint.url:
-        raise click.ClickException("--url must not be empty")
-    session_id = create_local_daemon_session(
-        endpoint,
-        repo_path=repo_path,
         approval_policy=approval_policy,
     )
     click.echo(f"Created daemon-backed local session {session_id} at {endpoint.url}")
@@ -200,3 +190,111 @@ def daemon_run(
             )
             click.echo(f"Cleaned up daemon-backed local session {session_id}")
     raise SystemExit(status)
+
+
+@daemon.command("repl")
+@click.option("--repo", default=".", help="Local repository path for the session.")
+@click.option(
+    "--url",
+    default="http://127.0.0.1:8080",
+    show_default=True,
+    help="Local daemon HTTP URL.",
+)
+@click.option(
+    "--approval",
+    "approval_policy",
+    default="auto",
+    show_default=True,
+    type=DAEMON_APPROVAL_CHOICES,
+    help="Tool approval policy for the daemon session.",
+)
+@click.option("--token", default=None, help="Bearer token for the daemon.")
+@click.option(
+    "--keep-session/--cleanup-session",
+    default=True,
+    show_default=True,
+    help="Keep the created daemon session after the REPL exits.",
+)
+def daemon_repl(
+    repo: str,
+    url: str,
+    approval_policy: str,
+    token: str | None,
+    keep_session: bool,
+) -> None:
+    """Start an interactive REPL through an already-running local daemon."""
+    from coding_agent.remote.client import (
+        auth_headers,
+        delete_remote_session,
+        stream_prompt_or_run_request,
+    )
+
+    endpoint, session_id = _create_daemon_local_session(
+        repo=repo,
+        url=url,
+        token=token,
+        approval_policy=approval_policy,
+    )
+    click.echo(
+        f"Created daemon-backed local REPL session {session_id} at {endpoint.url}"
+    )
+    click.echo("Type /exit or /quit to leave.")
+    headers = auth_headers(endpoint)
+    try:
+        while True:
+            try:
+                prompt = click.prompt("daemon>", prompt_suffix=" ", type=str)
+            except click.Abort:
+                click.echo()
+                break
+            stripped = prompt.strip()
+            if not stripped:
+                continue
+            if stripped in DAEMON_REPL_EXIT_COMMANDS:
+                break
+            status = stream_prompt_or_run_request(
+                base_url=endpoint.url,
+                session_id=session_id,
+                prompt=prompt,
+                headers=headers,
+            )
+            if status != 0:
+                raise SystemExit(status)
+    finally:
+        if not keep_session:
+            delete_remote_session(
+                base_url=endpoint.url,
+                session_id=session_id,
+                headers=headers,
+            )
+            click.echo(f"Cleaned up daemon-backed local REPL session {session_id}")
+
+
+def _create_daemon_local_session(
+    *,
+    repo: str,
+    url: str,
+    token: str | None,
+    approval_policy: str,
+):
+    from coding_agent.remote.client import (
+        RemoteEndpoint,
+        create_local_daemon_session,
+    )
+
+    repo_path = Path(repo).expanduser().resolve()
+    if not repo_path.is_dir():
+        raise click.ClickException(f"--repo must be an existing directory: {repo}")
+    endpoint = RemoteEndpoint(
+        name="local-daemon",
+        url=url.rstrip("/"),
+        token=token,
+    )
+    if not endpoint.url:
+        raise click.ClickException("--url must not be empty")
+    session_id = create_local_daemon_session(
+        endpoint,
+        repo_path=repo_path,
+        approval_policy=approval_policy,
+    )
+    return endpoint, session_id
