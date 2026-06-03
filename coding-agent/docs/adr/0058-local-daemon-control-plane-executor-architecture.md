@@ -331,6 +331,9 @@ This ADR does not implement that path.
   - Completed: runtime config replacement, persistence rollback, and previous
     adapter close handling are delegated to `RuntimeReplacementService` instead
     of inline `SessionManager` logic.
+  - Completed: ensure-runtime rebuild, runtime binding attachment, tape id
+    synchronization, and session persistence are delegated to
+    `RuntimeEnsureService` instead of inline `SessionManager` logic.
   - Completed: runtime run lifecycle and latest message snapshot persistence
     consume narrower `RuntimeRunLifecycleStore` and `RuntimeCheckpointStore`
     contracts through `RuntimeRunPersistenceService`.
