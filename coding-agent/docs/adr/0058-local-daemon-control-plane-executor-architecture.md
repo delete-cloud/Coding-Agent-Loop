@@ -141,7 +141,10 @@ This ADR does not implement that path.
 - [x] Split durable `SessionRecord` data from process-local
   `SessionRuntimeHandle` state.
   - Durable session payloads are represented through `SessionRecord`.
-  - Process-local runtime objects live under `SessionRuntimeHandle`.
+  - Process-local runtime objects live under
+    `coding_agent.runs.SessionRuntimeHandle`.
+  - `SessionManager` consumes the runtime-layer handle instead of defining the
+    runtime handle type in the server module.
   - Store payload tests assert runtime handles are not persisted.
 - [x] Introduce a `RunCoordinator` boundary that selects an executor from
   `RunTarget`.

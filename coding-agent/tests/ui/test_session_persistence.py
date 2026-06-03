@@ -18,12 +18,12 @@ from coding_agent.runs import (
     LocalDaemonExecutorRef,
     LocalPathWorkspaceRef,
     RunTarget,
+    SessionRuntimeHandle,
 )
 from coding_agent.server.session_manager import (
     Session,
     SessionManager,
     SessionRecord,
-    SessionRuntimeHandle,
 )
 from coding_agent.server.stores.session_store import (
     InMemorySessionStore,
