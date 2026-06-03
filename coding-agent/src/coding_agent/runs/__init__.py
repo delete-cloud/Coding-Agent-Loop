@@ -17,6 +17,13 @@ from .checkpoint_restore import (
     checkpoint_session_config_from_extra,
     serialize_checkpoint_session_config,
 )
+from .attached_executor import (
+    ATTACHED_EXECUTOR_BINDING_KINDS,
+    RuntimeAttachedExecutorClaim,
+    RuntimeAttachedExecutorSession,
+    RuntimeAttachedExecutorService,
+    RuntimeAttachedExecutorStore,
+)
 from .lifecycle import (
     RuntimeMessageSnapshotSaver,
     RuntimeObservationCompleter,
@@ -122,6 +129,7 @@ from .target import (
 
 __all__ = [
     "CloudWorkspaceRef",
+    "ATTACHED_EXECUTOR_BINDING_KINDS",
     "CHECKPOINT_SESSION_CONFIG_KEY",
     "CheckpointRestoreService",
     "CheckpointRestoreSession",
@@ -151,6 +159,10 @@ __all__ = [
     "RunTarget",
     "RunTargetSerializationError",
     "RuntimeBindingSnapshot",
+    "RuntimeAttachedExecutorClaim",
+    "RuntimeAttachedExecutorSession",
+    "RuntimeAttachedExecutorService",
+    "RuntimeAttachedExecutorStore",
     "SessionRuntimeHandle",
     "RuntimeExecution",
     "RuntimeMessageSnapshotSession",
