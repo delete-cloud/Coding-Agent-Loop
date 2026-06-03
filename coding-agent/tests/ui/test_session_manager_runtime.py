@@ -4292,6 +4292,33 @@ async def test_run_agent_routes_unsupported_runtime_through_run_coordinator() ->
 
 
 @pytest.mark.asyncio
+async def test_configure_run_coordinator_updates_runtime_turn_service() -> None:
+    runtime_store = FakeRuntimeStore()
+    coordinator = RejectingRunCoordinator(error="configured coordinator")
+
+    def fake_create_agent(**kwargs):
+        raise AssertionError(f"runtime should not be prepared: {kwargs!r}")
+
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        runtime_store=runtime_store,
+        create_agent_fn=fake_create_agent,
+    )
+    manager.configure_run_coordinator(coordinator)
+    session_id = await manager.create_session(
+        execution_binding=LocalExecutionBinding(workspace_root="/tmp/repo")
+    )
+
+    await manager.run_agent(session_id, "hello")
+
+    assert len(coordinator.requests) == 1
+    assert len(coordinator.executions) == 1
+    assert coordinator.executions[0].request == coordinator.requests[0]
+    assert runtime_store.updated[-1]["status"] == "failed"
+    assert runtime_store.updated[-1]["error"] == coordinator.error
+
+
+@pytest.mark.asyncio
 async def test_run_agent_does_not_route_cloud_runtime_through_local_daemon_executor() -> None:
     local_executor = RecordingLocalDaemonExecutor()
     runtime_store = FakeRuntimeStore()

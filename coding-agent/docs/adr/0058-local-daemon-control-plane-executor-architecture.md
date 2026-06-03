@@ -236,6 +236,9 @@ This ADR does not implement that path.
   - Completed: run-turn composition root and runtime execution callback
     assembly are delegated to `RuntimeTurnService` instead of living inside
     `SessionManager.run_agent()`.
+  - Completed: `SessionManager.run_agent()` invokes a configured
+    `RuntimeTurnService` instead of constructing the runtime turn service
+    inline for every turn.
   - Completed: normal local-daemon runtime preparation, environment resolution,
     workspace-root compatibility checks, and `LocalDaemonSessionRuntimeProvider`
     assembly are delegated to `LocalDaemonRuntimePreparationService`.

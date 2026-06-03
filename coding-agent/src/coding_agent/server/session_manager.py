@@ -1119,6 +1119,7 @@ class SessionManager:
                 consumer=consumer,
             ),
         )
+        self._runtime_turn_service = self._build_runtime_turn_service()
         self.configure_owner_leases(
             owner_store=owner_store,
             owner_id=owner_id,
@@ -1172,9 +1173,30 @@ class SessionManager:
         runtime_store: RuntimeStore | None,
     ) -> None:
         self._runtime_store = runtime_store
+        self._runtime_turn_service = self._build_runtime_turn_service()
 
     def configure_run_coordinator(self, run_coordinator: RunCoordinator) -> None:
         self._run_coordinator = run_coordinator
+        self._runtime_turn_service = self._build_runtime_turn_service()
+
+    def _build_runtime_turn_service(self) -> RuntimeTurnService:
+        return RuntimeTurnService(
+            run_coordinator=self._run_coordinator,
+            runtime_run_persistence=self._runtime_run_persistence(),
+            persist_session=self._persist_session_async,
+            make_consumer=self._make_session_consumer,
+            submit_run_request=self._submit_runtime_run_request,
+            prepare_runtime=self._local_daemon_runtime_preparation.prepare_runtime,
+            close_runtime=self._close_runtime,
+            emit_message=self._send_session_wire_message,
+            bind_root_run_identity=self._bind_root_run_identity,
+            bind_subagent_message_publisher=self._bind_subagent_message_publisher,
+            start_observation=self._start_agent_observation,
+            complete_observation=self._complete_agent_observation,
+            log_turn_exception=lambda message: logger.exception(message),
+            fatal_error_types=(FatalToolExecutionError,),
+            cancelled_error_types=(asyncio.CancelledError,),
+        )
 
     def _require_runtime_store(self) -> RuntimeStore:
         if self._runtime_store is None:
@@ -3354,23 +3376,7 @@ class SessionManager:
             await self._assert_owner(session_id)
             session = await self.get_session_async(session_id)
             run_id = run_id_override or uuid.uuid4().hex
-            await RuntimeTurnService(
-                run_coordinator=self._run_coordinator,
-                runtime_run_persistence=self._runtime_run_persistence(),
-                persist_session=self._persist_session_async,
-                make_consumer=self._make_session_consumer,
-                submit_run_request=self._submit_runtime_run_request,
-                prepare_runtime=self._local_daemon_runtime_preparation.prepare_runtime,
-                close_runtime=self._close_runtime,
-                emit_message=self._send_session_wire_message,
-                bind_root_run_identity=self._bind_root_run_identity,
-                bind_subagent_message_publisher=self._bind_subagent_message_publisher,
-                start_observation=self._start_agent_observation,
-                complete_observation=self._complete_agent_observation,
-                log_turn_exception=lambda message: logger.exception(message),
-                fatal_error_types=(FatalToolExecutionError,),
-                cancelled_error_types=(asyncio.CancelledError,),
-            ).run(
+            await self._runtime_turn_service.run(
                 session,
                 prompt=prompt,
                 run_id=run_id,
