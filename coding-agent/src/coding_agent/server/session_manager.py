@@ -66,7 +66,6 @@ from coding_agent.executors import (
 )
 from coding_agent.events import DisplayEvent
 from coding_agent.runs import (
-    CHECKPOINT_SESSION_CONFIG_KEY,
     DefaultRunCoordinator,
     EventBroadcastResult,
     LocalDaemonExecutorRef,
@@ -75,6 +74,7 @@ from coding_agent.runs import (
     RuntimeBindingSnapshot,
     RuntimeCancelObservationFinalizer,
     RuntimeCancelOrchestrationService,
+    RuntimeCheckpointCaptureService,
     RuntimeControlServices,
     RuntimeCloser,
     RuntimeContextBindingService,
@@ -92,7 +92,6 @@ from coding_agent.runs import (
     SessionRuntimeHandle,
     run_target_from_dict,
     run_target_from_execution_binding,
-    serialize_checkpoint_session_config,
 )
 from coding_agent.runs.environment import RuntimeEnvironmentResolverService
 from coding_agent.runs.runtime_preparation import LocalDaemonRuntimePreparationService
@@ -136,7 +135,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_CHECKPOINT_SESSION_CONFIG_KEY = CHECKPOINT_SESSION_CONFIG_KEY
 _DEFAULT_EXECUTION_BINDING = object()
 T = TypeVar("T")
 
@@ -896,6 +894,11 @@ class SessionManager:
             ),
             close_runtime=self._runtime_closer.close,
             persist_session=self._persist_session_async,
+        )
+        self._runtime_checkpoint_capture_service = RuntimeCheckpointCaptureService(
+            checkpoint_service=lambda: self._checkpoint_service,
+            ensure_runtime=lambda session_id: self.ensure_session_runtime(session_id),
+            persist_session=lambda session: self._persist_session_async(session),
         )
         self._runtime_turn_service_factory = RuntimeTurnServiceFactory(
             runtime_control_services=self._runtime_control_services,
@@ -2764,22 +2767,11 @@ class SessionManager:
         extra: dict[str, Any] | None = None,
     ) -> CheckpointMeta:
         async def capture_admitted_checkpoint(session: object) -> CheckpointMeta:
-            admitted_session = cast(Session, session)
-            ctx = await self.ensure_session_runtime(session_id)
-            payload = dict(extra or {})
-            if _CHECKPOINT_SESSION_CONFIG_KEY in payload:
-                raise ValueError(
-                    f"'{_CHECKPOINT_SESSION_CONFIG_KEY}' is a reserved checkpoint metadata key and cannot be provided via extra"
-                )
-            payload[_CHECKPOINT_SESSION_CONFIG_KEY] = (
-                serialize_checkpoint_session_config(admitted_session)
+            return await self._runtime_checkpoint_capture_service.capture(
+                cast(Session, session),
+                label=label,
+                extra=extra,
             )
-            checkpoint = await self._checkpoint_service.capture(
-                ctx, label=label, extra=payload
-            )
-            admitted_session.tape_id = ctx.tape.tape_id
-            await self._persist_session_async(admitted_session)
-            return checkpoint
 
         return cast(
             CheckpointMeta,
