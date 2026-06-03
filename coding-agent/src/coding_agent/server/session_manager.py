@@ -59,6 +59,7 @@ from coding_agent.approval import (
 )
 from coding_agent.approval.store import ApprovalStore
 from coding_agent.core import config as core_config
+from coding_agent.environment.sandboxed import sandbox_environment
 from coding_agent.plugins.storage import JSONLTapeStore
 from coding_agent.providers.base import ToolSchema
 from coding_agent.runtime_store import (
@@ -2893,10 +2894,12 @@ class SessionManager:
         if target is None:
             raise RuntimeError("session is missing default_run_target")
         workspace = target.workspace
+        environment: Environment
         if isinstance(workspace, LocalPathWorkspaceRef):
-            return LocalEnvironment(Path(workspace.path).expanduser().resolve())
+            environment = LocalEnvironment(Path(workspace.path).expanduser().resolve())
+            return sandbox_environment(environment, target.isolation)
         if isinstance(workspace, CloudWorkspaceRef):
-            return self._binding_resolver.resolve_environment(
+            environment = self._binding_resolver.resolve_environment(
                 CloudWorkspaceBinding(
                     workspace_url=workspace.workspace_url,
                     workspace_id=workspace.workspace_id,
@@ -2905,6 +2908,7 @@ class SessionManager:
                     provider_instance_id=workspace.provider_instance_id,
                 )
             )
+            return sandbox_environment(environment, target.isolation)
         raise ValueError(
             f"runtime builders cannot resolve workspace target: {workspace.kind}"
         )

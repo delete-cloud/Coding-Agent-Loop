@@ -72,6 +72,25 @@ def _run_trace_metadata(
     return metadata
 
 
+def _environment_tool_config(environment: Environment) -> dict[str, Any]:
+    config = environment.tool_config()
+    return dict(config)
+
+
+def _merge_shell_config(
+    environment_config: Mapping[str, object],
+    file_config: Mapping[str, object],
+) -> dict[str, object]:
+    env_shell = environment_config.get("shell", {})
+    if env_shell is None:
+        env_shell = {}
+    if not isinstance(env_shell, Mapping):
+        raise ValueError("environment shell tool config must be a mapping")
+    merged = dict(env_shell)
+    merged.update(file_config)
+    return merged
+
+
 def _child_system_prompt_suffix(tool_filter: ToolFilter) -> str:
     if tool_filter is None:
         return ""
@@ -164,6 +183,7 @@ def create_child_pipeline(
     if environment is None:
         environment = LocalEnvironment(workspace_root or Path.cwd())
     local_workspace_root = _local_workspace_root(environment)
+    environment_config = _environment_tool_config(environment)
 
     cfg = load_config(config_path)
 
@@ -192,6 +212,8 @@ def create_child_pipeline(
     subagent_cfg = cfg.extra.get("subagent", {})
     web_search_cfg = cfg.extra.get("web_search", {})
     shell_cfg = cfg.extra.get("shell", {})
+    if not isinstance(shell_cfg, dict):
+        raise ValueError("[shell] config must be a table")
     policy_str = approval_mode_override or approval_cfg.get("policy", "auto")
     approval_policy_map = {
         "yolo": ApprovalPolicy.YOLO,
@@ -375,9 +397,11 @@ def create_child_pipeline(
         "child_worker_coordinator": ChildWorkerCoordinator(),
         "web_search": web_search_cfg,
         "environment": environment,
-        "shell": shell_cfg,
+        "shell": _merge_shell_config(environment_config, shell_cfg),
         "structured_tool_result_scope": structured_tool_result_scope,
     }
+    if "isolation_policy" in environment_config:
+        ctx_config["isolation_policy"] = environment_config["isolation_policy"]
     if observation_sink is not None:
         ctx_config["observation_sink"] = observation_sink
     if local_workspace_root is not None:
