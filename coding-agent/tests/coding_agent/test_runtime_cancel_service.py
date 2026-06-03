@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -129,6 +130,67 @@ def test_cancel_idle_or_finished_local_turn_defaults_other_status_to_idle() -> N
     assert session.turn_in_progress is False
     assert session.turn_status == "idle"
     assert session.last_activity == now
+
+
+@pytest.mark.asyncio
+async def test_observe_cancelled_local_task_returns_cancelled_for_cancelled_task() -> (
+    None
+):
+    task = asyncio.create_task(asyncio.sleep(60))
+    task.cancel()
+    service = RuntimeCancelService(store=None)
+
+    result = await service.observe_cancelled_local_task(task)
+
+    assert result == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_observe_cancelled_local_task_returns_failed_for_task_error() -> None:
+    async def fail() -> None:
+        raise RuntimeError("cleanup failed")
+
+    task = asyncio.create_task(fail())
+    service = RuntimeCancelService(store=None)
+
+    result = await service.observe_cancelled_local_task(task)
+
+    assert result == "failed"
+
+
+@pytest.mark.asyncio
+async def test_observe_cancelled_local_task_returns_cancelled_for_completed_task() -> (
+    None
+):
+    async def complete() -> None:
+        return None
+
+    task = asyncio.create_task(complete())
+    service = RuntimeCancelService(store=None)
+
+    result = await service.observe_cancelled_local_task(task)
+
+    assert result == "cancelled"
+
+
+def test_finish_observed_local_turn_updates_final_status() -> None:
+    now = datetime(2026, 6, 3, 12, 0, tzinfo=UTC)
+    session = FakeSession(turn_in_progress=True, turn_status="cancelling")
+    service = RuntimeCancelService(store=None, now=lambda: now)
+
+    service.finish_observed_local_turn(session, status="cancelled")
+
+    assert session.turn_in_progress is False
+    assert session.turn_status == "cancelled"
+    assert session.last_activity == now
+
+
+def test_finish_observed_local_turn_rejects_non_final_status() -> None:
+    session = FakeSession(turn_in_progress=True, turn_status="cancelling")
+    service = RuntimeCancelService(store=None)
+
+    with pytest.raises(ValueError, match="invalid observed cancellation status"):
+        service.finish_observed_local_turn(session, status="idle")
 
 
 def _run(
