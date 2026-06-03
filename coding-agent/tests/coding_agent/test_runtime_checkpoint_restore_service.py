@@ -23,6 +23,9 @@ from coding_agent.runs import (
     RunTarget,
 )
 from coding_agent.runs.runtime_checkpoint_restore import RuntimeCheckpointRestoreService
+from coding_agent.runs.runtime_checkpoint_restore import (
+    RuntimeCheckpointRestoreOrchestrationService,
+)
 
 
 @dataclass
@@ -74,6 +77,16 @@ class RecordingExecutor(LocalDaemonExecutor):
         self._validate_request_target(preparation.request)
         self.preparations.append(preparation)
         return await preparation.runtime_provider.prepare_runtime(preparation.request)
+
+
+class RecordingRestoreAdmission:
+    def __init__(self, session: object) -> None:
+        self.session = session
+        self.session_ids: list[str] = []
+
+    async def run_exclusive(self, session_id: str, body):
+        self.session_ids.append(session_id)
+        await body(self.session)
 
 
 def _target() -> RunTarget:
@@ -223,3 +236,23 @@ async def test_runtime_checkpoint_restore_service_composes_restore_runtime() -> 
     assert closed == ["session-1"]
     assert persisted == [("session-1", 8)]
     assert deleted == ["cp-future"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_checkpoint_restore_orchestration_runs_restore_under_admission() -> (
+    None
+):
+    session = FakeSession()
+    admission = RecordingRestoreAdmission(session)
+    restored: list[tuple[FakeSession, str]] = []
+
+    async def restore(restore_session: FakeSession, checkpoint_id: str) -> None:
+        restored.append((restore_session, checkpoint_id))
+
+    await RuntimeCheckpointRestoreOrchestrationService(
+        admission=admission,
+        restore=restore,
+    ).restore_checkpoint("session-1", "cp-1")
+
+    assert admission.session_ids == ["session-1"]
+    assert restored == [(session, "cp-1")]

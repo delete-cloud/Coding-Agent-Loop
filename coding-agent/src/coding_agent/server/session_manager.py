@@ -98,6 +98,9 @@ from coding_agent.runs import (
 )
 from coding_agent.runs.environment import RuntimeEnvironmentResolverService
 from coding_agent.runs.runtime_preparation import LocalDaemonRuntimePreparationService
+from coding_agent.runs.runtime_checkpoint_restore import (
+    RuntimeCheckpointRestoreOrchestrationService,
+)
 from coding_agent.runs.runtime_checkpoint_restore import RuntimeCheckpointRestoreService
 from coding_agent.runs.turn_service_factory import RuntimeTurnServiceFactory
 from coding_agent.wire.consumer import LocalWireConsumer
@@ -915,6 +918,17 @@ class SessionManager:
             ),
             close_runtime=self._runtime_closer.close,
             persist_session=self._persist_session_async,
+        )
+        self._runtime_checkpoint_restore_orchestration = (
+            RuntimeCheckpointRestoreOrchestrationService(
+                admission=self._runtime_maintenance_admission,
+                restore=lambda session, checkpoint_id: (
+                    self._runtime_checkpoint_restore_service.restore(
+                        session,
+                        checkpoint_id,
+                    )
+                ),
+            )
         )
         self._runtime_checkpoint_query_service = RuntimeCheckpointQueryService(
             checkpoint_service=lambda: self._checkpoint_service,
@@ -2816,10 +2830,7 @@ class SessionManager:
         return await self._runtime_checkpoint_query_service.list_checkpoints(session)
 
     async def restore_checkpoint(self, session_id: str, checkpoint_id: str) -> None:
-        async def restore_admitted_checkpoint(session: object) -> None:
-            await self._restore_checkpoint(cast(Session, session), checkpoint_id)
-
-        await self._runtime_maintenance_admission.run_exclusive(
+        await self._runtime_checkpoint_restore_orchestration.restore_checkpoint(
             session_id,
-            restore_admitted_checkpoint,
+            checkpoint_id,
         )
