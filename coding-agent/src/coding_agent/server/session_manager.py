@@ -9,7 +9,7 @@ import os
 import threading
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from inspect import isawaitable
 from pathlib import Path
@@ -30,7 +30,6 @@ from agentkit.runtime import (
     RuntimeMessageCursor,
     RuntimeMessageKind,
 )
-from agentkit.runtime.context import AgentRunContext
 from agentkit.storage.protocols import CheckpointStore, TapeStore
 from agentkit.storage.protocols import TapeDebugStore, TapeInfo, TapeSearchResult
 from agentkit.tape.tape import Tape
@@ -83,6 +82,7 @@ from coding_agent.runs import (
     RuntimeBindingSnapshot,
     RuntimeCancelService,
     RuntimeCloser,
+    RuntimeContextBindingService,
     RuntimeRunMetadataService,
     RuntimeObservationService,
     RuntimeQueryService,
@@ -94,7 +94,6 @@ from coding_agent.runs import (
     RuntimeWireEventRecorder,
     RunTarget,
     SessionRuntimeHandle,
-    runtime_execution_placement,
     run_target_from_dict,
     run_target_from_execution_binding,
     serialize_checkpoint_session_config,
@@ -790,6 +789,9 @@ class SessionManager:
             runtime_store if runtime_store is not None else self._create_runtime_store()
         )
         self._runtime_closer = RuntimeCloser()
+        self._runtime_context_binding_service = RuntimeContextBindingService(
+            publish_subagent_message=self.publish_subagent_message,
+        )
         self._local_daemon_runtime_preparation = LocalDaemonRuntimePreparationService(
             binding_resolver=self._binding_resolver,
             local_daemon_executor=self._local_daemon_executor,
@@ -799,7 +801,9 @@ class SessionManager:
             restore_tape=self._restore_tape,
             persist_session=self._persist_session_async,
             make_consumer=self._make_session_consumer,
-            bind_subagent_message_publisher=self._bind_subagent_message_publisher,
+            bind_subagent_message_publisher=(
+                self._runtime_context_binding_service.bind_subagent_message_publisher
+            ),
             runtime_preparation_request=self._runtime_preparation_request,
             adapter_factory=lambda pipeline, ctx, consumer: PipelineAdapter(
                 pipeline=pipeline,
@@ -876,8 +880,12 @@ class SessionManager:
             prepare_runtime=self._local_daemon_runtime_preparation.prepare_runtime,
             close_runtime=self._runtime_closer.close,
             emit_message=self._send_session_wire_message,
-            bind_root_run_identity=self._bind_root_run_identity,
-            bind_subagent_message_publisher=self._bind_subagent_message_publisher,
+            bind_root_run_identity=(
+                self._runtime_context_binding_service.bind_root_run_identity
+            ),
+            bind_subagent_message_publisher=(
+                self._runtime_context_binding_service.bind_subagent_message_publisher
+            ),
             start_observation=self._runtime_observation_service.start,
             complete_observation=self._runtime_observation_service.complete,
             log_turn_exception=lambda message: logger.exception(message),
@@ -1566,48 +1574,6 @@ class SessionManager:
             factory = importlib.import_module("coding_agent.__main__").create_agent
         return factory(**kwargs)
 
-    def _bind_subagent_message_publisher(self, ctx: Any) -> None:
-        ctx.config["subagent_message_publisher"] = self.publish_subagent_message
-
-    def _bind_root_run_identity(
-        self,
-        session: Session,
-        ctx: Any,
-        run_id: str,
-        *,
-        resume_context: SessionResumeContext | None = None,
-    ) -> None:
-        if hasattr(ctx, "session_id"):
-            ctx.session_id = session.id
-        run_context = getattr(ctx, "run_context", None)
-        if run_context is not None:
-            if not isinstance(run_context, AgentRunContext):
-                raise TypeError("runtime context run_context must be AgentRunContext")
-            trace_metadata = dict(run_context.trace_metadata)
-            trace_metadata["turn_id"] = run_id
-            trace_metadata["tape_id"] = ctx.tape.tape_id
-            trace_metadata["execution_placement"] = runtime_execution_placement(
-                session.execution_binding
-            )
-            trace_metadata["execution_binding_kind"] = session.execution_binding.kind
-            trace_metadata["workspace_surface"] = (
-                session.execution_binding.workspace_surface
-            )
-            trace_metadata["execution_plane"] = (
-                session.execution_binding.execution_plane
-            )
-            if resume_context is not None:
-                trace_metadata.update(resume_context.metadata())
-            ctx.run_context = replace(
-                run_context,
-                session_id=session.id,
-                run_id=run_id,
-                parent_run_id=(
-                    None if resume_context is None else resume_context.previous_run_id
-                ),
-                trace_metadata=trace_metadata,
-            )
-
     def _runtime_run_persistence(self) -> RuntimeRunPersistenceService:
         return RuntimeRunPersistenceService(
             run_store=self._runtime_store,
@@ -2149,7 +2115,9 @@ class SessionManager:
             resolve_environment_for_run_target=self._resolve_environment_for_run_target,
             workspace_root_for_environment=self._environment_workspace_root,
             create_agent_for_session=self._create_agent_for_session,
-            bind_subagent_message_publisher=self._bind_subagent_message_publisher,
+            bind_subagent_message_publisher=(
+                self._runtime_context_binding_service.bind_subagent_message_publisher
+            ),
             restore_consumer_factory=self._make_restore_consumer,
             adapter_factory=lambda pipeline, ctx, consumer: PipelineAdapter(
                 pipeline=pipeline,

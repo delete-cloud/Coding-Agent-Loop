@@ -31,6 +31,10 @@ from .cancel import (
     RuntimeCancelStatus,
     RuntimeCancelStore,
 )
+from .context_binding import (
+    RuntimeContextBindingService,
+    RuntimeContextBindingSession,
+)
 from .lifecycle import (
     RuntimeMessageSnapshotSaver,
     RuntimeObservationCompleter,
@@ -177,6 +181,8 @@ __all__ = [
     "RuntimeCancelSession",
     "RuntimeCancelStatus",
     "RuntimeCancelStore",
+    "RuntimeContextBindingService",
+    "RuntimeContextBindingSession",
     "SessionRuntimeHandle",
     "RuntimeExecution",
     "RuntimeMessageSnapshotSession",

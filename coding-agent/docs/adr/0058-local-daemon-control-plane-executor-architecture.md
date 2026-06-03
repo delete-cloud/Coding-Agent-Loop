@@ -320,6 +320,8 @@ This ADR does not implement that path.
   - Completed: runtime close hooks are wired directly from `RuntimeCloser` into
     preparation, turn execution, restore, and session cleanup paths instead of
     `SessionManager` proxy helpers.
+  - Completed: root run identity and subagent publisher binding are delegated to
+    `RuntimeContextBindingService` instead of `SessionManager` helper methods.
   - Completed: runtime run lifecycle and latest message snapshot persistence
     consume narrower `RuntimeRunLifecycleStore` and `RuntimeCheckpointStore`
     contracts through `RuntimeRunPersistenceService`.
