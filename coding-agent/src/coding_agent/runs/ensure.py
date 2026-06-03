@@ -25,6 +25,8 @@ RuntimeEnsureBuilder = Callable[
     Awaitable[tuple[object, object, object]],
 ]
 RuntimeEnsurePersister = Callable[[RuntimeEnsureSession], Awaitable[None]]
+RuntimeEnsureOwnerAsserter = Callable[[str], Awaitable[None]]
+RuntimeEnsureSessionLoader = Callable[[str], Awaitable[RuntimeEnsureSession]]
 
 
 @dataclass(frozen=True)
@@ -50,9 +52,30 @@ class RuntimeEnsureService:
         return ctx
 
 
+@dataclass(frozen=True)
+class RuntimeEnsureOrchestrationService:
+    ensure_service: RuntimeEnsureService
+    assert_owner: RuntimeEnsureOwnerAsserter
+    load_session: RuntimeEnsureSessionLoader
+    build_runtime: RuntimeEnsureBuilder
+    persist_session: RuntimeEnsurePersister
+
+    async def ensure_session_runtime(self, session_id: str) -> object:
+        await self.assert_owner(session_id)
+        session = await self.load_session(session_id)
+        return await self.ensure_service.ensure_runtime(
+            session,
+            build_runtime=self.build_runtime,
+            persist_session=self.persist_session,
+        )
+
+
 __all__ = [
     "RuntimeEnsureBuilder",
+    "RuntimeEnsureOrchestrationService",
+    "RuntimeEnsureOwnerAsserter",
     "RuntimeEnsurePersister",
     "RuntimeEnsureService",
     "RuntimeEnsureSession",
+    "RuntimeEnsureSessionLoader",
 ]

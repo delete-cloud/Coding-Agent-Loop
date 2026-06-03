@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from coding_agent.runs import RuntimeEnsureService
+import pytest
+
+from coding_agent.runs import RuntimeEnsureOrchestrationService, RuntimeEnsureService
 
 
 @dataclass
@@ -90,3 +92,64 @@ async def test_runtime_ensure_service_builds_attaches_and_persists_runtime() -> 
     assert session.runtime_adapter is adapter
     assert session.tape_id == "new-tape"
     assert persisted == [("session-1", "new-tape")]
+
+
+async def test_runtime_ensure_orchestration_asserts_owner_loads_and_builds() -> None:
+    session = FakeSession()
+    ctx = FakeContext(FakeTape("orchestrated-tape"))
+    calls: list[str] = []
+
+    async def assert_owner(session_id: str) -> None:
+        calls.append(f"owner:{session_id}")
+
+    async def load_session(session_id: str) -> FakeSession:
+        calls.append(f"load:{session_id}")
+        return session
+
+    async def build_runtime(
+        runtime_session: FakeSession,
+    ) -> tuple[object, FakeContext, object]:
+        calls.append(f"build:{runtime_session.id}")
+        return "pipeline", ctx, "adapter"
+
+    async def persist_session(runtime_session: FakeSession) -> None:
+        calls.append(f"persist:{runtime_session.id}:{runtime_session.tape_id}")
+
+    result = await RuntimeEnsureOrchestrationService(
+        ensure_service=RuntimeEnsureService(),
+        assert_owner=assert_owner,
+        load_session=load_session,
+        build_runtime=build_runtime,
+        persist_session=persist_session,
+    ).ensure_session_runtime("session-1")
+
+    assert result is ctx
+    assert calls == [
+        "owner:session-1",
+        "load:session-1",
+        "build:session-1",
+        "persist:session-1:orchestrated-tape",
+    ]
+
+
+async def test_runtime_ensure_orchestration_does_not_load_on_owner_failure() -> None:
+    calls: list[str] = []
+
+    async def assert_owner(session_id: str) -> None:
+        calls.append(f"owner:{session_id}")
+        raise RuntimeError("stale owner")
+
+    async def load_session(session_id: str) -> FakeSession:
+        calls.append(f"load:{session_id}")
+        return FakeSession()
+
+    with pytest.raises(RuntimeError, match="stale owner"):
+        await RuntimeEnsureOrchestrationService(
+            ensure_service=RuntimeEnsureService(),
+            assert_owner=assert_owner,
+            load_session=load_session,
+            build_runtime=_unexpected_build_runtime,
+            persist_session=_unexpected_persist_session,
+        ).ensure_session_runtime("session-1")
+
+    assert calls == ["owner:session-1"]

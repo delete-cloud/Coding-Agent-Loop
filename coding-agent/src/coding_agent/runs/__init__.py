@@ -59,9 +59,12 @@ from .context_binding import (
 from .control_services import RuntimeControlServices
 from .ensure import (
     RuntimeEnsureBuilder,
+    RuntimeEnsureOrchestrationService,
+    RuntimeEnsureOwnerAsserter,
     RuntimeEnsurePersister,
     RuntimeEnsureService,
     RuntimeEnsureSession,
+    RuntimeEnsureSessionLoader,
 )
 from .lifecycle import (
     RuntimeMaintenanceAdmissionBody,
@@ -254,9 +257,12 @@ __all__ = [
     "RuntimeContextBindingSession",
     "RuntimeControlServices",
     "RuntimeEnsureBuilder",
+    "RuntimeEnsureOrchestrationService",
+    "RuntimeEnsureOwnerAsserter",
     "RuntimeEnsurePersister",
     "RuntimeEnsureService",
     "RuntimeEnsureSession",
+    "RuntimeEnsureSessionLoader",
     "SessionRuntimeHandle",
     "RuntimeExecution",
     "RuntimeMessageSnapshotSession",

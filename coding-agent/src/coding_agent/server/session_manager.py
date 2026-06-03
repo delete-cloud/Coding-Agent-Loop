@@ -78,6 +78,7 @@ from coding_agent.runs import (
     RuntimeControlServices,
     RuntimeCloser,
     RuntimeContextBindingService,
+    RuntimeEnsureOrchestrationService,
     RuntimeEnsureService,
     RuntimeMaintenanceAdmissionService,
     RuntimeRunMetadataService,
@@ -838,6 +839,17 @@ class SessionManager:
             close_runtime_adapter=self._runtime_closer.close_adapter,
         )
         self._runtime_ensure_service = RuntimeEnsureService()
+        self._runtime_ensure_orchestration = RuntimeEnsureOrchestrationService(
+            ensure_service=self._runtime_ensure_service,
+            assert_owner=self._assert_owner,
+            load_session=self.get_session_async,
+            build_runtime=lambda session: self._build_session_runtime(
+                cast(Session, session)
+            ),
+            persist_session=lambda session: self._persist_session_async(
+                cast(Session, session)
+            ),
+        )
         self._runtime_environment_resolver_service = RuntimeEnvironmentResolverService(
             self._binding_resolver
         )
@@ -2728,12 +2740,8 @@ class SessionManager:
         )
 
     async def ensure_session_runtime(self, session_id: str) -> Any:
-        await self._assert_owner(session_id)
-        session = await self.get_session_async(session_id)
-        return await self._runtime_ensure_service.ensure_runtime(
-            session,
-            build_runtime=self._build_session_runtime,
-            persist_session=self._persist_session_async,
+        return await self._runtime_ensure_orchestration.ensure_session_runtime(
+            session_id
         )
 
     async def replace_session_runtime_config(
