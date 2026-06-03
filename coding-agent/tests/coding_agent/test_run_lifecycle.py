@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -9,6 +10,7 @@ import pytest
 from coding_agent.adapter_types import StopReason, TurnOutcome
 from coding_agent.runtime_store import AgentRunRecord, JSONObject
 from coding_agent.runs import (
+    RuntimeCloser,
     RuntimeRunLifecycle,
     RuntimeTurnController,
     RuntimeTurnSessionState,
@@ -54,6 +56,13 @@ class FakeTurnStateSession:
     current_turn_id: str | None = None
     last_failure_details: str | None = "previous failure"
     task: object | None = None
+
+
+@dataclass
+class FakeRuntimeHandleSession:
+    runtime_pipeline: object | None = None
+    runtime_ctx: object | None = None
+    runtime_adapter: object | None = None
 
 
 class FakeTape:
@@ -158,6 +167,97 @@ def test_runtime_turn_outcome_helpers_map_result_and_status() -> None:
     assert runtime_status_from_turn_outcome(completed) == "completed"
     assert runtime_status_from_turn_outcome(failed) == "failed"
     assert runtime_status_from_turn_outcome(interrupted) == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_runtime_closer_invalidates_runtime_before_awaiting_adapter_close() -> None:
+    close_started = asyncio.Event()
+    close_released = asyncio.Event()
+    session = FakeRuntimeHandleSession(
+        runtime_pipeline=object(),
+        runtime_ctx=object(),
+    )
+
+    class BlockingAdapter:
+        async def close(self) -> None:
+            close_started.set()
+            await close_released.wait()
+
+    session.runtime_adapter = BlockingAdapter()
+    close_task = asyncio.create_task(RuntimeCloser().close(session))
+    await asyncio.wait_for(close_started.wait(), timeout=1)
+
+    assert session.runtime_pipeline is None
+    assert session.runtime_ctx is None
+    assert session.runtime_adapter is None
+    assert close_task.done() is False
+
+    close_released.set()
+    await close_task
+
+
+@pytest.mark.asyncio
+async def test_runtime_closer_propagates_async_close_failure_after_invalidating() -> None:
+    session = FakeRuntimeHandleSession(
+        runtime_pipeline=object(),
+        runtime_ctx=object(),
+    )
+
+    class FailingAdapter:
+        async def close(self) -> None:
+            raise RuntimeError("close exploded")
+
+    session.runtime_adapter = FailingAdapter()
+
+    with pytest.raises(RuntimeError, match="close exploded"):
+        await RuntimeCloser().close(session)
+
+    assert session.runtime_pipeline is None
+    assert session.runtime_ctx is None
+    assert session.runtime_adapter is None
+
+
+@pytest.mark.asyncio
+async def test_runtime_closer_sync_safe_schedules_close_on_running_loop() -> None:
+    closed = asyncio.Event()
+    session = FakeRuntimeHandleSession(
+        runtime_pipeline=object(),
+        runtime_ctx=object(),
+    )
+
+    class AsyncAdapter:
+        async def close(self) -> None:
+            closed.set()
+
+    session.runtime_adapter = AsyncAdapter()
+
+    RuntimeCloser().close_sync_safe(session)
+
+    assert session.runtime_pipeline is None
+    assert session.runtime_ctx is None
+    assert session.runtime_adapter is None
+    await asyncio.wait_for(closed.wait(), timeout=1)
+
+
+def test_runtime_closer_sync_safe_closes_without_running_loop() -> None:
+    closed: list[str] = []
+    session = FakeRuntimeHandleSession(
+        runtime_pipeline=object(),
+        runtime_ctx=object(),
+    )
+
+    class AsyncAdapter:
+        async def close(self) -> None:
+            closed.append("closed")
+
+    session.runtime_adapter = AsyncAdapter()
+
+    RuntimeCloser().close_sync_safe(session)
+
+    assert session.runtime_pipeline is None
+    assert session.runtime_ctx is None
+    assert session.runtime_adapter is None
+    assert closed == ["closed"]
 
 
 @pytest.mark.asyncio

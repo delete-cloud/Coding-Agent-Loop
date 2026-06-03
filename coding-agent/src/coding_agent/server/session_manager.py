@@ -93,6 +93,7 @@ from coding_agent.runs import (
     RunCoordinator,
     RunCoordinatorError,
     RunRequest,
+    RuntimeCloser,
     RuntimeRunPersistenceService,
     RuntimeRunRecoveryService,
     RuntimeTurnErrorHandler,
@@ -1123,6 +1124,7 @@ class SessionManager:
         self._runtime_store = (
             runtime_store if runtime_store is not None else self._create_runtime_store()
         )
+        self._runtime_closer = RuntimeCloser()
         self.configure_owner_leases(
             owner_store=owner_store,
             owner_id=owner_id,
@@ -2047,28 +2049,13 @@ class SessionManager:
         raise ValueError(f"unsupported storage.runtime_backend: {backend}")
 
     async def _close_runtime(self, session: Session) -> None:
-        adapter = session.runtime_adapter
-        self._invalidate_runtime(session)
-        await self._close_runtime_adapter(adapter)
+        await self._runtime_closer.close(session)
 
     async def _close_runtime_adapter(self, adapter: object | None) -> None:
-        if adapter is None:
-            return
-        close = getattr(adapter, "close", None)
-        if callable(close):
-            close_result = close()
-            if isawaitable(close_result):
-                await close_result
+        await self._runtime_closer.close_adapter(adapter)
 
     def _close_runtime_sync_safe(self, session: Session) -> None:
-        adapter = session.runtime_adapter
-        self._invalidate_runtime(session)
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            asyncio.run(self._close_runtime_adapter(adapter))
-            return
-        _ = loop.create_task(self._close_runtime_adapter(adapter))
+        self._runtime_closer.close_sync_safe(session)
 
     def _session_uses_provisioned_cloud_workspace(self, session: Session) -> bool:
         origin = session.origin
@@ -2986,11 +2973,6 @@ class SessionManager:
                 consumer=consumer,
             ),
         ).prepare_runtime(request)
-
-    def _invalidate_runtime(self, session: Session) -> None:
-        session.runtime_pipeline = None
-        session.runtime_ctx = None
-        session.runtime_adapter = None
 
     def _hydrate_session(self, session: Session) -> Session:
         approval_store = self._approval_stores.get(session.id)
