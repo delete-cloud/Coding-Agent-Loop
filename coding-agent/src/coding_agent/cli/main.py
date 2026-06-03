@@ -118,8 +118,8 @@ def main(ctx, model, provider_name, base_url, api_key):
             raise click.UsageError(
                 "interactive REPL mode requires an interactive terminal; use "
                 "'python -m coding_agent repl' in a terminal, or "
-                "'python -m coding_agent run --goal \"<task>\"' for a dev/testkit "
-                "one-shot compatibility session"
+                "'python -m coding_agent daemon run --goal \"<task>\"' with a "
+                "running daemon for a daemon-backed local session"
             )
 
         config = _build_runtime_config(ctx)

@@ -286,7 +286,7 @@ This ADR does not implement that path.
 
 ## Remaining Implementation Gaps
 
-- [~] Add daemon-backed client surfaces for the local product path.
+- [x] Add daemon-backed client surfaces for the local product path.
   - Completed: `coding_agent daemon run` creates a local-path session through
     the daemon HTTP control plane and streams display events without owning an
     in-process runtime manager.
@@ -296,8 +296,9 @@ This ADR does not implement that path.
   - Completed: `coding_agent daemon tui` creates a local-path session through
     the daemon HTTP control plane and renders display-event SSEs through the
     Rich TUI consumer without owning an in-process runtime manager.
-  - Remaining: once the daemon-backed path is dogfooded, make it the documented
-    local product default while keeping inline `run` as testkit/devkit.
+  - Completed: README and CLI non-interactive guidance identify daemon-backed
+    clients as the local product path while keeping inline `run` as
+    testkit/devkit compatibility.
 
 ## References
 

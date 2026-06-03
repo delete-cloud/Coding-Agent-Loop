@@ -118,15 +118,15 @@ def test_daemon_tui_help_is_daemon_backed_client_surface() -> None:
     assert "--goal" in result.output
 
 
-def test_default_non_interactive_entrypoint_points_to_one_shot_compatibility() -> None:
+def test_default_non_interactive_entrypoint_points_to_daemon_backed_client() -> None:
     runner = CliRunner(env=_click_credential_free_env())
 
     result = runner.invoke(main, [])
 
     assert result.exit_code != 0
     assert "interactive REPL mode requires an interactive terminal" in result.output
-    assert "python -m coding_agent repl" in result.output
-    assert "dev/testkit one-shot compatibility session" in result.output
+    assert "python -m coding_agent daemon run --goal" in result.output
+    assert "daemon-backed local session" in result.output
 
 
 def test_run_help_marks_command_as_dev_testkit_compatibility() -> None:
