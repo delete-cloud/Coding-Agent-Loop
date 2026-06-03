@@ -16,6 +16,7 @@ from coding_agent.runs import (
     RunRequest,
     RunTarget,
 )
+from coding_agent.runs.environment import RuntimeEnvironmentResolverService
 from coding_agent.runs.runtime_preparation import LocalDaemonRuntimePreparationService
 
 
@@ -141,7 +142,7 @@ def _service(
         )
 
     return LocalDaemonRuntimePreparationService(
-        binding_resolver=FakeBindingResolver(),
+        environment_resolver=RuntimeEnvironmentResolverService(FakeBindingResolver()),
         local_daemon_executor=executor or FakeLocalDaemonExecutor(),
         close_runtime=close_runtime,
         close_runtime_adapter=close_runtime_adapter,

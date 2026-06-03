@@ -10,10 +10,6 @@ from agentkit.environment import Environment
 
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.approval import ApprovalPolicy
-from coding_agent.environment.binding_resolver import BindingResolver
-from coding_agent.environment.execution_binding import CloudWorkspaceBinding
-from coding_agent.environment.local import LocalEnvironment
-from coding_agent.environment.sandboxed import sandbox_environment
 from coding_agent.executors.local_daemon import (
     LocalDaemonExecutor,
     LocalDaemonRuntimeBinding,
@@ -23,8 +19,8 @@ from coding_agent.executors.local_daemon import (
     RuntimeTurnAdapter,
 )
 from coding_agent.runs.coordinator import RunRequest
+from coding_agent.runs.environment import RuntimeEnvironmentResolverService
 from coding_agent.runs.target import (
-    CloudWorkspaceRef,
     LocalDaemonExecutorRef,
     LocalPathWorkspaceRef,
     RunTarget,
@@ -66,7 +62,7 @@ class _SessionLocalDaemonRuntimeProvider:
 
 @dataclass(frozen=True)
 class LocalDaemonRuntimePreparationService:
-    binding_resolver: BindingResolver
+    environment_resolver: RuntimeEnvironmentResolverService
     local_daemon_executor: LocalDaemonExecutor
     close_runtime: RuntimeCloseHook
     close_runtime_adapter: RuntimeAdapterCloseHook
@@ -76,8 +72,8 @@ class LocalDaemonRuntimePreparationService:
     make_consumer: RuntimeConsumerFactory
     bind_subagent_message_publisher: SubagentMessagePublisherBinder
     runtime_preparation_request: RuntimePreparationRequestFactory
-    adapter_factory: RuntimeAdapterFactory = (
-        lambda pipeline, ctx, consumer: PipelineAdapter(
+    adapter_factory: RuntimeAdapterFactory = lambda pipeline, ctx, consumer: (
+        PipelineAdapter(
             pipeline=pipeline,
             ctx=ctx,
             consumer=consumer,
@@ -94,7 +90,9 @@ class LocalDaemonRuntimePreparationService:
         return await LocalDaemonSessionRuntimeProvider(
             session=session,
             resolve_environment=self._resolve_local_daemon_environment,
-            workspace_root_for_environment=self._environment_workspace_root,
+            workspace_root_for_environment=(
+                self.environment_resolver.workspace_root_for_environment
+            ),
             workspace_root_for_runtime=self._runtime_environment_workspace_root,
             close_runtime=self.close_runtime,
             create_agent_for_session=self.create_agent_for_session,
@@ -183,8 +181,12 @@ class LocalDaemonRuntimePreparationService:
         resolved_approval_policy = (
             session.approval_policy if approval_policy is None else approval_policy
         )
-        environment = self._resolve_environment_for_run_target(runtime_target)
-        workspace_root = self._environment_workspace_root(environment)
+        environment = self.environment_resolver.resolve_environment_for_run_target(
+            runtime_target
+        )
+        workspace_root = self.environment_resolver.workspace_root_for_environment(
+            environment
+        )
         consumer = self.make_consumer(session)
         pipeline, ctx = self.create_agent_for_session(
             workspace_root=workspace_root,
@@ -229,41 +231,16 @@ class LocalDaemonRuntimePreparationService:
             raise ValueError("local daemon runs require a local_daemon executor target")
         if not isinstance(target.workspace, LocalPathWorkspaceRef):
             raise ValueError("local daemon runs require a local_path workspace target")
-        return self._resolve_environment_for_run_target(target)
-
-    def _resolve_environment_for_run_target(self, target: RunTarget) -> Environment:
-        workspace = target.workspace
-        environment: Environment
-        if isinstance(workspace, LocalPathWorkspaceRef):
-            environment = LocalEnvironment(Path(workspace.path).expanduser().resolve())
-            return sandbox_environment(environment, target.isolation)
-        if isinstance(workspace, CloudWorkspaceRef):
-            environment = self.binding_resolver.resolve_environment(
-                CloudWorkspaceBinding(
-                    workspace_url=workspace.workspace_url,
-                    workspace_id=workspace.workspace_id,
-                    runtime_profile=workspace.runtime_profile,
-                    workspace_provider=workspace.workspace_provider,
-                    provider_instance_id=workspace.provider_instance_id,
-                )
-            )
-            return sandbox_environment(environment, target.isolation)
-        raise ValueError(
-            f"runtime builders cannot resolve workspace target: {workspace.kind}"
-        )
-
-    def _environment_workspace_root(self, environment: Environment) -> Path | None:
-        local_root = environment.workspace_summary().local_root
-        if local_root is None:
-            return None
-        return Path(local_root).expanduser().resolve()
+        return self.environment_resolver.resolve_environment_for_run_target(target)
 
     def _runtime_environment_workspace_root(self, ctx: object) -> Path | None:
         run_context = getattr(ctx, "run_context", None)
         environment = getattr(run_context, "environment", None)
         if environment is None:
             return None
-        return self._environment_workspace_root(cast(Environment, environment))
+        return self.environment_resolver.workspace_root_for_environment(
+            cast(Environment, environment)
+        )
 
     def _is_local_daemon_run_target(self, target: RunTarget | None) -> bool:
         if target is None:

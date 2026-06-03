@@ -250,6 +250,10 @@ This ADR does not implement that path.
   - Completed: normal local-daemon runtime preparation, environment resolution,
     workspace-root compatibility checks, and `LocalDaemonSessionRuntimeProvider`
     assembly are delegated to `LocalDaemonRuntimePreparationService`.
+  - Completed: `RunTarget` environment resolution and workspace-root extraction
+    are delegated to `RuntimeEnvironmentResolverService`, shared by normal
+    local-daemon runtime preparation and checkpoint restore runtime
+    construction.
 - [x] Demote `coding_agent run` to an inline testkit/devkit compatibility path.
   - `run` records `origin.mode = inline_testkit`.
   - CLI and README describe `run` as dev/testkit one-shot compatibility.
