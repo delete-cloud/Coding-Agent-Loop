@@ -90,6 +90,7 @@ from coding_agent.runs import (
     LocalPathWorkspaceRef,
     RunCoordinator,
     RunRequest,
+    RuntimeBindingSnapshot,
     RuntimeCloser,
     RuntimeRunPersistenceService,
     RuntimeRunRecoveryService,
@@ -910,6 +911,12 @@ class Session:
             ctx=ctx,
             adapter=adapter,
         )
+
+    def runtime_binding_snapshot(self) -> RuntimeBindingSnapshot:
+        return self.runtime_handle.runtime_binding_snapshot()
+
+    def restore_runtime_binding(self, snapshot: RuntimeBindingSnapshot) -> None:
+        self.runtime_handle.restore_runtime_binding(snapshot)
 
     def as_dict(self) -> dict[str, Any]:
         workspace_id = (
@@ -3663,9 +3670,7 @@ class SessionManager:
             old_provider = session.provider
             old_model_name = session.model_name
             old_tape_id = session.tape_id
-            old_runtime_pipeline = session.runtime_pipeline
-            old_runtime_ctx = session.runtime_ctx
-            old_runtime_adapter = session.runtime_adapter
+            old_runtime_binding = session.runtime_binding_snapshot()
 
             pipeline, ctx, adapter = await self._build_session_runtime(
                 session,
@@ -3674,24 +3679,24 @@ class SessionManager:
 
             session.provider = None
             session.model_name = model_name
-            session.runtime_pipeline = pipeline
-            session.runtime_ctx = ctx
-            session.runtime_adapter = adapter
+            session.attach_runtime_binding(
+                pipeline=pipeline,
+                ctx=ctx,
+                adapter=adapter,
+            )
             session.tape_id = ctx.tape.tape_id
             try:
                 await self._persist_session_async(session)
             except Exception:
                 session.provider = old_provider
                 session.model_name = old_model_name
-                session.runtime_pipeline = old_runtime_pipeline
-                session.runtime_ctx = old_runtime_ctx
-                session.runtime_adapter = old_runtime_adapter
+                session.restore_runtime_binding(old_runtime_binding)
                 session.tape_id = old_tape_id
                 await self._close_runtime_adapter(adapter)
                 raise
 
             try:
-                await self._close_runtime_adapter(old_runtime_adapter)
+                await self._close_runtime_adapter(old_runtime_binding.adapter)
             except Exception:
                 logger.warning(
                     "Failed to close previous runtime adapter for session %s",

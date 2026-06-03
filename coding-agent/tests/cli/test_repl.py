@@ -1295,7 +1295,25 @@ class TestReplInitialization:
                 self.closed = True
 
         replacement_adapter = ReplacementAdapter()
-        managed_session = SimpleNamespace(
+        class FakeManagedSession(SimpleNamespace):
+            def runtime_binding_snapshot(self):
+                return SimpleNamespace(
+                    pipeline=self.runtime_pipeline,
+                    ctx=self.runtime_ctx,
+                    adapter=self.runtime_adapter,
+                )
+
+            def restore_runtime_binding(self, snapshot) -> None:
+                self.runtime_pipeline = snapshot.pipeline
+                self.runtime_ctx = snapshot.ctx
+                self.runtime_adapter = snapshot.adapter
+
+            def attach_runtime_binding(self, *, pipeline, ctx, adapter) -> None:
+                self.runtime_pipeline = pipeline
+                self.runtime_ctx = ctx
+                self.runtime_adapter = adapter
+
+        managed_session = FakeManagedSession(
             id="session-a",
             provider=None,
             provider_name="openai",

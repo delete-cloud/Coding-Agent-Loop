@@ -63,7 +63,11 @@ from .recovery import (
     RuntimeRunRecoveryService,
     RuntimeRunSessionLister,
 )
-from .session_runtime import EventBroadcastResult, SessionRuntimeHandle
+from .session_runtime import (
+    EventBroadcastResult,
+    RuntimeBindingSnapshot,
+    SessionRuntimeHandle,
+)
 from .target import (
     CloudWorkspaceRef,
     ExecutionBindingRunTargetError,
@@ -116,6 +120,7 @@ __all__ = [
     "RunSubmission",
     "RunTarget",
     "RunTargetSerializationError",
+    "RuntimeBindingSnapshot",
     "SessionRuntimeHandle",
     "RuntimeExecution",
     "RuntimeMessageSnapshotSession",
