@@ -192,11 +192,14 @@ This ADR does not implement that path.
     approval decision cursor advancement, and applied-decision session
     projection mutation are delegated to `ApprovalDecisionService` instead of
     `SessionManager` helper methods.
+  - Completed: approval request registration, session-scope auto-approval,
+    pre-published decision handoff, wait-response projection, timeout
+    resolution, and wait cleanup are delegated to `ApprovalRequestService`
+    instead of living inside `SessionManager` approval callbacks.
   - Remaining: `SessionManager` still owns checkpoint restore preparation
-    details, approval request waiting/session setup, and some runtime
-    close/error policy. These should move behind narrower
-    RunService/EventStore/Executor lifecycle boundaries before this item is
-    considered complete.
+    details and some runtime close/error policy. These should move behind
+    narrower RunService/EventStore/Executor lifecycle boundaries before this
+    item is considered complete.
 - [x] Demote `coding_agent run` to an inline testkit/devkit compatibility path.
   - `run` records `origin.mode = inline_testkit`.
   - CLI and README describe `run` as dev/testkit one-shot compatibility.
@@ -240,13 +243,15 @@ This ADR does not implement that path.
     `RuntimeInteractionStore` contract through `ApprovalInteractionService`.
   - Completed: approval decision runtime-message publishing/consumption and
     applied-decision session mutation are delegated to `ApprovalDecisionService`.
-  - Remaining: approval request waiting/session setup and checkpoint restore
-    service ownership still need narrower boundaries.
+  - Completed: approval request waiting/session setup is delegated to
+    `ApprovalRequestService`.
+  - Remaining: checkpoint restore service ownership still needs a narrower
+    boundary.
 
 ## Remaining Implementation Gaps
 
-- Extract remaining approval request waiting/session setup and checkpoint restore
-  ownership from `SessionManager` into narrower durable service boundaries.
+- Extract remaining checkpoint restore ownership from `SessionManager` into a
+  narrower runtime/executor service boundary.
 - Make sandbox policy the default executor environment wrapper rather than a
   mixed local/cloud environment concern.
 - Add daemon-backed client surfaces for the local product path. REPL/TUI/CLI

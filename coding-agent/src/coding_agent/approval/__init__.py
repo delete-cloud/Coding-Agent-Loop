@@ -16,6 +16,11 @@ from coding_agent.approval.interactions import (
     approval_response_payload,
 )
 from coding_agent.approval.policy import ApprovalPolicy, PolicyConfig, PolicyEngine
+from coding_agent.approval.requests import (
+    ApprovalRequestService,
+    ApprovalRequestSession,
+    approval_wait_response_projection,
+)
 from coding_agent.approval.runtime_messages import (
     ApprovalDecisionConsumer,
     ApprovalDecisionConsumptionResult,
@@ -37,6 +42,8 @@ __all__ = [
     "ApprovalDecisionConsumptionResult",
     "ApprovalDecisionService",
     "ApprovalDecisionSession",
+    "ApprovalRequestService",
+    "ApprovalRequestSession",
     "PublishedApprovalDecision",
     "approval_interaction_id",
     "approval_interaction_status",
@@ -45,6 +52,7 @@ __all__ = [
     "approval_decision_message_id",
     "approval_response_projection",
     "approval_response_from_runtime_payload",
+    "approval_wait_response_projection",
     "PolicyConfig",
     "PolicyEngine",
     "ApprovalStore",
