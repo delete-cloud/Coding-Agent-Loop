@@ -12,6 +12,7 @@ from coding_agent.stores import (
     RuntimeEventStore,
     RuntimeInteractionStore,
     RuntimeRunLifecycleStore,
+    RuntimeRunRecoveryStore,
     RuntimeRunStore,
     RuntimeStore,
 )
@@ -25,6 +26,7 @@ def test_jsonl_runtime_store_satisfies_runtime_store_contracts(tmp_path) -> None
     store = JSONLRuntimeStore(tmp_path / "runtime")
 
     assert isinstance(store, RuntimeRunLifecycleStore)
+    assert isinstance(store, RuntimeRunRecoveryStore)
     assert isinstance(store, RuntimeRunStore)
     assert isinstance(store, RuntimeEventStore)
     assert isinstance(store, RuntimeCheckpointStore)
@@ -36,6 +38,7 @@ def test_sqlite_runtime_store_satisfies_runtime_store_contracts(tmp_path) -> Non
     store = SQLiteRuntimeStore(tmp_path / "runtime.sqlite3")
 
     assert isinstance(store, RuntimeRunLifecycleStore)
+    assert isinstance(store, RuntimeRunRecoveryStore)
     assert isinstance(store, RuntimeRunStore)
     assert isinstance(store, RuntimeEventStore)
     assert isinstance(store, RuntimeCheckpointStore)
@@ -47,6 +50,7 @@ def test_pg_runtime_store_satisfies_runtime_store_contracts() -> None:
     store = PGRuntimeStore(pool=cast(Any, _FakePGPool()))
 
     assert isinstance(store, RuntimeRunLifecycleStore)
+    assert isinstance(store, RuntimeRunRecoveryStore)
     assert isinstance(store, RuntimeRunStore)
     assert isinstance(store, RuntimeEventStore)
     assert isinstance(store, RuntimeCheckpointStore)

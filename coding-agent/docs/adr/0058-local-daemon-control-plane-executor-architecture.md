@@ -183,6 +183,9 @@ This ADR does not implement that path.
   - Completed: runtime run lifecycle and latest message snapshot persistence
     are delegated to `RuntimeRunPersistenceService` instead of `SessionManager`
     helper methods.
+  - Completed: stale runtime run recovery and expired attached executor claim
+    recovery are delegated to `RuntimeRunRecoveryService` instead of
+    `SessionManager` helper methods.
   - Remaining: `SessionManager` still owns checkpoint restore preparation
     details, approval-driven consumer setup/session mutation, and some runtime
     close/error policy. These should move behind narrower
@@ -225,14 +228,16 @@ This ADR does not implement that path.
   - Completed: runtime run lifecycle and latest message snapshot persistence
     consume narrower `RuntimeRunLifecycleStore` and `RuntimeCheckpointStore`
     contracts through `RuntimeRunPersistenceService`.
-  - Remaining: approval, stale-run recovery, and checkpoint restore service
-    ownership is still combined around a single runtime store dependency; those
-    services should consume narrower contracts independently.
+  - Completed: stale runtime run recovery consumes the narrower
+    `RuntimeRunRecoveryStore` contract through `RuntimeRunRecoveryService`.
+  - Remaining: approval and checkpoint restore service ownership is still
+    combined around a single runtime store dependency; those services should
+    consume narrower contracts independently.
 
 ## Remaining Implementation Gaps
 
-- Extract remaining stale-run recovery, approval, and checkpoint restore
-  ownership from `SessionManager` into narrower durable service boundaries.
+- Extract remaining approval and checkpoint restore ownership from
+  `SessionManager` into narrower durable service boundaries.
 - Make sandbox policy the default executor environment wrapper rather than a
   mixed local/cloud environment concern.
 - Add daemon-backed client surfaces for the local product path. REPL/TUI/CLI

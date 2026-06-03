@@ -5,6 +5,7 @@ from .runtime import (
     RuntimeEventStore,
     RuntimeInteractionStore,
     RuntimeRunLifecycleStore,
+    RuntimeRunRecoveryStore,
     RuntimeRunStore,
     RuntimeStore,
 )
@@ -14,6 +15,7 @@ __all__ = [
     "RuntimeEventStore",
     "RuntimeInteractionStore",
     "RuntimeRunLifecycleStore",
+    "RuntimeRunRecoveryStore",
     "RuntimeRunStore",
     "RuntimeStore",
 ]

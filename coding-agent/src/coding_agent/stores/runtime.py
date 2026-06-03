@@ -31,10 +31,13 @@ class RuntimeRunLifecycleStore(Protocol):
 
 
 @runtime_checkable
-class RuntimeRunStore(RuntimeRunLifecycleStore, Protocol):
-    async def load_agent_run(self, run_id: str) -> AgentRunRecord | None: ...
-
+class RuntimeRunRecoveryStore(RuntimeRunLifecycleStore, Protocol):
     async def list_agent_runs(self, session_id: str) -> list[AgentRunRecord]: ...
+
+
+@runtime_checkable
+class RuntimeRunStore(RuntimeRunRecoveryStore, Protocol):
+    async def load_agent_run(self, run_id: str) -> AgentRunRecord | None: ...
 
     async def claim_attached_executor_run(
         self,
