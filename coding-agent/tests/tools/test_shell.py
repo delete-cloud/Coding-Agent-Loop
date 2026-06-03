@@ -698,11 +698,75 @@ class TestPodmanSandbox:
         assert command[:3] == ["podman", "run", "--rm"]
         assert "--network" in command
         assert command[command.index("--network") + 1] == "none"
+        # privilege hardening mirrors Docker
+        assert "--security-opt" in command
+        assert command[command.index("--security-opt") + 1] == "no-new-privileges"
         root = str(workspace.resolve())
         assert any(
             f"type=bind,src={root},dst={root}" in part for part in command
         )
         assert command[-2:] == ["echo", "hi"]
+
+    def test_podman_forwards_explicit_env_only(self, monkeypatch, tmp_path: Path):
+        sandbox_module = importlib.import_module("coding_agent.tools.sandbox")
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        monkeypatch.setenv("HOST_ONLY", "host-secret")
+        runner = sandbox_module.PodmanSandboxRunner(
+            sandbox_module.SandboxConfig(mode="podman", workspace_root=workspace)
+        )
+        request = sandbox_module.SandboxRequest(
+            args=["python", "-V"],
+            cwd=workspace,
+            env={"SAFE_VAR": "ok"},
+            timeout_seconds=1,
+        )
+
+        monkeypatch.setattr(sandbox_module, "which", lambda _: "/usr/bin/podman")
+        captured_command: list[str] = []
+        captured_env: dict[str, str] | None = None
+
+        def fake_run(command, **kwargs):
+            nonlocal captured_command, captured_env
+            captured_command = command
+            captured_env = kwargs.get("env")
+            return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+        monkeypatch.setattr(sandbox_module.subprocess, "run", fake_run)
+        result = runner.run(request)
+
+        assert result.returncode == 0
+        # container env is injected explicitly via -e, host env is not inherited
+        assert captured_env is None
+        assert "-e" in captured_command
+        assert "SAFE_VAR=ok" in captured_command
+        assert not any("HOST_ONLY" in part for part in captured_command)
+
+    def test_podman_rejects_unsafe_env_names(self, monkeypatch, tmp_path: Path):
+        sandbox_module = importlib.import_module("coding_agent.tools.sandbox")
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        runner = sandbox_module.PodmanSandboxRunner(
+            sandbox_module.SandboxConfig(mode="podman", workspace_root=workspace)
+        )
+        request = sandbox_module.SandboxRequest(
+            args=["python", "-V"],
+            cwd=workspace,
+            env={"BAD NAME": "oops"},
+            timeout_seconds=1,
+        )
+
+        monkeypatch.setattr(sandbox_module, "which", lambda _: "/usr/bin/podman")
+        monkeypatch.setattr(
+            sandbox_module.subprocess,
+            "run",
+            lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"),
+        )
+
+        with pytest.raises(
+            sandbox_module.SandboxError, match="(?i)unsafe environment variable name"
+        ):
+            runner.run(request)
 
     def test_podman_runner_fails_closed_when_binary_missing(
         self, monkeypatch, tmp_path: Path
