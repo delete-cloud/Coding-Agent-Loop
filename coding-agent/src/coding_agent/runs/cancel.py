@@ -51,12 +51,13 @@ class RuntimeCancelService:
         if self.store is not None:
             run = await self._load_run(session.current_turn_id)
             metadata = dict(run.metadata)
-            metadata["cancel_requested_at"] = self.now().isoformat()
+            now = self.now()
+            metadata["cancel_requested_at"] = now.isoformat()
             if run.status in {"requested", "expired"}:
                 await self.store.update_agent_run(
                     run.run_id,
                     status="cancelled",
-                    ended_at=self.now(),
+                    ended_at=now,
                     metadata=cast(JSONObject, metadata),
                     result=run.result,
                     error="cancelled before claim",
