@@ -90,6 +90,7 @@ from coding_agent.runs import (
     RuntimeResumeService,
     RuntimeRunPersistenceService,
     RuntimeRunRecoveryService,
+    RuntimeTaskStopper,
     RuntimeWireEventRecorder,
     RunTarget,
     SessionRuntimeHandle,
@@ -1656,6 +1657,9 @@ class SessionManager:
     def _runtime_cancel_service(self) -> RuntimeCancelService:
         return RuntimeCancelService(store=self._runtime_store)
 
+    def _runtime_task_stopper(self) -> RuntimeTaskStopper:
+        return RuntimeTaskStopper()
+
     async def recover_stale_runtime_runs(
         self,
         *,
@@ -2471,17 +2475,10 @@ class SessionManager:
             await self._assert_owner(session_id)
             session = await self.get_session_async(session_id)
 
-            # Cancel any running task
-            if session.task and not session.task.done():
-                session.task.cancel()
-                try:
-                    await asyncio.wait_for(session.task, timeout=5.0)
-                except (asyncio.CancelledError, asyncio.TimeoutError):
-                    pass
-                if not session.task.done():
-                    raise RuntimeError(
-                        f"Session task for {session_id} did not stop after cancellation"
-                    )
+            await self._runtime_task_stopper().stop(
+                session_id=session_id,
+                task=session.task,
+            )
 
             await self._remove_session_async_no_lock(session_id)
 
@@ -2493,16 +2490,10 @@ class SessionManager:
             await self._assert_owner(session_id)
             session = await self.get_session_async(session_id)
 
-            if session.task and not session.task.done():
-                session.task.cancel()
-                try:
-                    await asyncio.wait_for(session.task, timeout=5.0)
-                except (asyncio.CancelledError, asyncio.TimeoutError):
-                    pass
-                if not session.task.done():
-                    raise RuntimeError(
-                        f"Session task for {session_id} did not stop after cancellation"
-                    )
+            await self._runtime_task_stopper().stop(
+                session_id=session_id,
+                task=session.task,
+            )
 
             await self._close_runtime(session)
             session.task = None

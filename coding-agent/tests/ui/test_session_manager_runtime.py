@@ -2690,7 +2690,7 @@ async def test_close_session_raises_if_task_survives_cancellation() -> None:
     session.task = cast(asyncio.Task[None], cast(object, fake_task))
 
     with patch(
-        "coding_agent.server.session_manager.asyncio.wait_for",
+        "coding_agent.runs.lifecycle.asyncio.wait_for",
         side_effect=asyncio.TimeoutError,
     ):
         with pytest.raises(RuntimeError, match="did not stop after cancellation"):
@@ -2720,7 +2720,7 @@ async def test_shutdown_session_runtime_raises_if_task_survives_cancellation() -
     session.task = cast(asyncio.Task[None], cast(object, fake_task))
 
     with patch(
-        "coding_agent.server.session_manager.asyncio.wait_for",
+        "coding_agent.runs.lifecycle.asyncio.wait_for",
         side_effect=asyncio.TimeoutError,
     ):
         with pytest.raises(RuntimeError, match="did not stop after cancellation"):

@@ -114,6 +114,14 @@ class RuntimeSessionCloser(Protocol):
     async def __call__(self, session: RuntimeTurnErrorSession) -> None: ...
 
 
+class RuntimeTask(Protocol):
+    def cancel(self) -> None: ...
+
+    def done(self) -> bool: ...
+
+    def __await__(self) -> Any: ...
+
+
 class RuntimeHandleSession(Protocol):
     def detach_runtime_adapter(self) -> object | None: ...
 
@@ -224,6 +232,29 @@ class RuntimeCloser:
             asyncio.run(self.close_adapter(adapter))
             return
         _ = loop.create_task(self.close_adapter(adapter))
+
+
+@dataclass(frozen=True)
+class RuntimeTaskStopper:
+    timeout: float = 5.0
+
+    async def stop(
+        self,
+        *,
+        session_id: str,
+        task: RuntimeTask | None,
+    ) -> None:
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await asyncio.wait_for(task, timeout=self.timeout)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+        if not task.done():
+            raise RuntimeError(
+                f"Session task for {session_id} did not stop after cancellation"
+            )
 
 
 @dataclass(frozen=True)
