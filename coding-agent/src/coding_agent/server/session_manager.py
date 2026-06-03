@@ -32,6 +32,7 @@ from agentkit.runtime import (
 )
 from agentkit.storage.protocols import CheckpointStore, TapeStore
 from agentkit.storage.protocols import TapeDebugStore, TapeInfo, TapeSearchResult
+from agentkit.tape.models import Anchor
 from agentkit.tape.tape import Tape
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.agent_observability import (
@@ -81,6 +82,7 @@ from coding_agent.runs import (
     RuntimePreparationRequestService,
     RuntimeReplacementService,
     RuntimeResumeContext as SessionResumeContext,
+    RuntimeResumeOrchestrationService,
     RuntimeWireEventRecorder,
     RunTarget,
     SessionRuntimeHandle,
@@ -1098,85 +1100,75 @@ class SessionManager:
         prompt: str | None = None,
         resume_reason: str = "user_resume",
     ) -> AgentRunRecord:
-        if not resume_reason.strip():
-            raise ValueError("resume_reason must be non-empty")
         store = self._require_runtime_store()
         await self._assert_owner(session_id)
         session = await self.get_session_async(session_id)
-        if session.turn_in_progress or session.turn_status in {
-            "running",
-            "cancelling",
-        }:
-            raise RuntimeError("turn already in progress")
-        previous_run = (
-            await self._runtime_control_services.queries().latest_runtime_run(
-                session_id
-            )
-        )
-        if previous_run is None:
-            raise RuntimeError("session has no previous run to resume")
-        if previous_run.status in _ACTIVE_RESUME_BLOCKING_RUN_STATUSES:
-            raise RuntimeError("latest run is still active")
-        if session.tape_id is None and previous_run.tape_id is not None:
-            session.tape_id = previous_run.tape_id
-            await self._persist_session_async(session)
-        resume_context = await self._runtime_control_services.resume().build_context(
-            session=session,
-            previous_run=previous_run,
-            resume_from_event_id=await self._runtime_control_services.queries().latest_runtime_event_id(
-                previous_run
+        return await RuntimeResumeOrchestrationService(
+            resume_service=self._runtime_control_services.resume(),
+            latest_runtime_run=(
+                self._runtime_control_services.queries().latest_runtime_run
             ),
-            resume_reason=resume_reason,
+            latest_runtime_event_id=(
+                self._runtime_control_services.queries().latest_runtime_event_id
+            ),
+            load_runtime_run=store.load_agent_run,
+            persist_session=self._persist_session_async,
             list_checkpoints=self.list_checkpoints,
             load_tape_entries=self._tape_store.load,
-            load_message_snapshot=self._require_runtime_store().load_message_snapshot,
-        )
-        resume_context = await self._append_resume_boundary_anchor(
-            session,
-            resume_context,
-        )
-        resume_prompt = self._runtime_control_services.resume().resume_prompt(
-            resume_context,
+            save_tape_entries=self._tape_store.save,
+            load_message_snapshot=store.load_message_snapshot,
+            run_local=self._run_resumed_local_session,
+            request_attached=self._request_resumed_attached_executor_run,
+            session_is_attached=lambda session: isinstance(
+                session.execution_binding,
+                ExternalWorkerBinding,
+            ),
+            append_live_boundary_anchor=self._append_live_resume_boundary_anchor,
+            active_resume_blocking_statuses=frozenset(
+                _ACTIVE_RESUME_BLOCKING_RUN_STATUSES
+            ),
+        ).resume(
+            session=session,
             prompt=prompt,
+            resume_reason=resume_reason,
         )
-        run_id = uuid.uuid4().hex
-        if isinstance(session.execution_binding, ExternalWorkerBinding):
-            return await self.request_attached_executor_run(
-                session_id,
-                resume_prompt,
-                run_id=run_id,
-                resume_context=resume_context,
-            )
+
+    async def _run_resumed_local_session(
+        self,
+        session_id: str,
+        prompt: str,
+        run_id: str,
+        resume_context: SessionResumeContext,
+    ) -> AgentRunRecord | None:
         await self.run_agent(
             session_id,
-            resume_prompt,
+            prompt,
             run_id_override=run_id,
             resume_context=resume_context,
         )
-        record = await store.load_agent_run(run_id)
-        if record is None:
-            raise RuntimeError(f"resumed runtime run was not recorded: {run_id}")
-        return record
+        return None
 
-    async def _append_resume_boundary_anchor(
+    async def _request_resumed_attached_executor_run(
         self,
-        session: Session,
+        session_id: str,
+        prompt: str,
+        run_id: str,
         resume_context: SessionResumeContext,
-    ) -> SessionResumeContext:
-        if not session.tape_id:
-            raise RuntimeError("session tape_id is required to append resume boundary")
-        anchor = self._runtime_control_services.resume().resume_boundary_anchor(
-            resume_context
+    ) -> AgentRunRecord:
+        return await self.request_attached_executor_run(
+            session_id,
+            prompt,
+            run_id=run_id,
+            resume_context=resume_context,
         )
-        await self._tape_store.save(session.tape_id, [anchor.to_dict()])
+
+    def _append_live_resume_boundary_anchor(
+        self, session: Session, anchor: Anchor
+    ) -> None:
         runtime_ctx = session.runtime_ctx
         tape = getattr(runtime_ctx, "tape", None)
         if isinstance(tape, Tape) and tape.tape_id == session.tape_id:
             tape.append(anchor)
-        return self._runtime_control_services.resume().bind_boundary_anchor(
-            resume_context,
-            anchor_id=anchor.id,
-        )
 
     async def claim_attached_executor_run(
         self,

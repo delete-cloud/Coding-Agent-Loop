@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Protocol, cast
@@ -28,9 +29,22 @@ class RuntimeResumeSession(Protocol):
     tape_id: str | None
 
 
+class RuntimeResumeOrchestrationSession(RuntimeResumeSession, Protocol):
+    turn_in_progress: bool
+    turn_status: str
+
+
 CheckpointLister = Callable[[str], Awaitable[list[CheckpointMeta]]]
 TapeEntryLoader = Callable[[str], Awaitable[list[Mapping[str, object]]]]
 MessageSnapshotLoader = Callable[[str], Awaitable[RunMessageSnapshotRecord | None]]
+TapeEntrySaver = Callable[[str, list[Mapping[str, object]]], Awaitable[None]]
+RuntimeRunLoader = Callable[[str], Awaitable[AgentRunRecord | None]]
+RuntimeSessionPersister = Callable[[RuntimeResumeOrchestrationSession], Awaitable[None]]
+RuntimeSessionAttachedPredicate = Callable[[RuntimeResumeOrchestrationSession], bool]
+RuntimeLiveBoundaryAnchorAppender = Callable[
+    [RuntimeResumeOrchestrationSession, Anchor], None
+]
+RuntimeRunIdFactory = Callable[[], str]
 
 
 @dataclass(frozen=True)
@@ -76,8 +90,112 @@ class RuntimeResumeContext:
             )
         if self.resume_boundary_anchor_id is not None:
             metadata["resume_boundary_anchor_id"] = self.resume_boundary_anchor_id
-            metadata["resume_boundary_anchor_type"] = RESUME_BOUNDARY_PRODUCT_ANCHOR_TYPE
+            metadata["resume_boundary_anchor_type"] = (
+                RESUME_BOUNDARY_PRODUCT_ANCHOR_TYPE
+            )
         return metadata
+
+
+RuntimeRunDispatcher = Callable[
+    [str, str, str, RuntimeResumeContext], Awaitable[AgentRunRecord | None]
+]
+AttachedRuntimeRunRequester = Callable[
+    [str, str, str, RuntimeResumeContext], Awaitable[AgentRunRecord]
+]
+
+
+@dataclass(frozen=True)
+class RuntimeResumeOrchestrationService:
+    resume_service: RuntimeResumeService
+    latest_runtime_run: Callable[[str], Awaitable[AgentRunRecord | None]]
+    latest_runtime_event_id: Callable[[AgentRunRecord], Awaitable[str | None]]
+    load_runtime_run: RuntimeRunLoader
+    persist_session: RuntimeSessionPersister
+    list_checkpoints: CheckpointLister
+    load_tape_entries: TapeEntryLoader
+    save_tape_entries: TapeEntrySaver
+    load_message_snapshot: MessageSnapshotLoader
+    run_local: RuntimeRunDispatcher
+    request_attached: AttachedRuntimeRunRequester
+    session_is_attached: RuntimeSessionAttachedPredicate
+    append_live_boundary_anchor: RuntimeLiveBoundaryAnchorAppender
+    active_resume_blocking_statuses: frozenset[str]
+    run_id_factory: RuntimeRunIdFactory = lambda: uuid.uuid4().hex
+
+    async def resume(
+        self,
+        session: RuntimeResumeOrchestrationSession,
+        *,
+        prompt: str | None = None,
+        resume_reason: str = "user_resume",
+    ) -> AgentRunRecord:
+        if not resume_reason.strip():
+            raise ValueError("resume_reason must be non-empty")
+        if session.turn_in_progress or session.turn_status in {
+            "running",
+            "cancelling",
+        }:
+            raise RuntimeError("turn already in progress")
+
+        previous_run = await self.latest_runtime_run(session.id)
+        if previous_run is None:
+            raise RuntimeError("session has no previous run to resume")
+        if previous_run.status in self.active_resume_blocking_statuses:
+            raise RuntimeError("latest run is still active")
+        if session.tape_id is None and previous_run.tape_id is not None:
+            session.tape_id = previous_run.tape_id
+            await self.persist_session(session)
+
+        resume_context = await self.resume_service.build_context(
+            session=session,
+            previous_run=previous_run,
+            resume_from_event_id=await self.latest_runtime_event_id(previous_run),
+            resume_reason=resume_reason,
+            list_checkpoints=self.list_checkpoints,
+            load_tape_entries=self.load_tape_entries,
+            load_message_snapshot=self.load_message_snapshot,
+        )
+        resume_context = await self.append_boundary_anchor(session, resume_context)
+        resume_prompt = self.resume_service.resume_prompt(
+            resume_context,
+            prompt=prompt,
+        )
+        run_id = self.run_id_factory()
+        if self.session_is_attached(session):
+            return await self.request_attached(
+                session.id,
+                resume_prompt,
+                run_id,
+                resume_context,
+            )
+
+        record = await self.run_local(
+            session.id,
+            resume_prompt,
+            run_id,
+            resume_context,
+        )
+        if record is not None:
+            return record
+        record = await self.load_runtime_run(run_id)
+        if record is None:
+            raise RuntimeError(f"resumed runtime run was not recorded: {run_id}")
+        return record
+
+    async def append_boundary_anchor(
+        self,
+        session: RuntimeResumeOrchestrationSession,
+        resume_context: RuntimeResumeContext,
+    ) -> RuntimeResumeContext:
+        if not session.tape_id:
+            raise RuntimeError("session tape_id is required to append resume boundary")
+        anchor = self.resume_service.resume_boundary_anchor(resume_context)
+        await self.save_tape_entries(session.tape_id, [anchor.to_dict()])
+        self.append_live_boundary_anchor(session, anchor)
+        return self.resume_service.bind_boundary_anchor(
+            resume_context,
+            anchor_id=anchor.id,
+        )
 
 
 @dataclass(frozen=True)
@@ -389,9 +507,19 @@ def _resume_boundary_anchor_meta(
 
 __all__ = [
     "DEFAULT_RESUME_PROMPT",
+    "AttachedRuntimeRunRequester",
     "MessageSnapshotLoader",
+    "RuntimeLiveBoundaryAnchorAppender",
+    "RuntimeResumeOrchestrationService",
+    "RuntimeResumeOrchestrationSession",
     "RuntimeResumeContext",
     "RuntimeResumeService",
     "RuntimeResumeSession",
+    "RuntimeRunDispatcher",
+    "RuntimeRunIdFactory",
+    "RuntimeRunLoader",
+    "RuntimeSessionAttachedPredicate",
+    "RuntimeSessionPersister",
     "TapeEntryLoader",
+    "TapeEntrySaver",
 ]

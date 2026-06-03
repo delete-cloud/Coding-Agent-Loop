@@ -318,6 +318,11 @@ This ADR does not implement that path.
   - Completed: runtime resume context construction, resume prompt rendering, and
     resume boundary anchor metadata are delegated to `RuntimeResumeService`
     instead of `SessionManager` helper methods.
+  - Completed: resume-session orchestration for previous-run selection,
+    active-run rejection, tape id repair, boundary anchor append, local/attached
+    dispatch, and resumed run lookup is delegated to
+    `RuntimeResumeOrchestrationService` instead of living inline in
+    `SessionManager.resume_session()`.
   - Completed: attached/external executor run request, claim, heartbeat, runtime
     event append, finalization metadata, and claim authorization are delegated to
     `RuntimeAttachedExecutorService` instead of `SessionManager` helper methods.
