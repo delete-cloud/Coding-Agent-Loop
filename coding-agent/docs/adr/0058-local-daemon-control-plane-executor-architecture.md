@@ -196,6 +196,8 @@ This ADR does not implement that path.
     `run_agent`.
   - Completed: local daemon turn observation recorder state is tracked by
     `RuntimeTurnObservationState` instead of `run_agent` nonlocal closures.
+  - Completed: runtime turn observation start/complete behavior is delegated to
+    `RuntimeObservationService` instead of living inside `SessionManager`.
   - Completed: local daemon turn begin/final cleanup bookkeeping is delegated
     to `RuntimeTurnSessionState`.
   - Completed: local daemon before/after/error hook orchestration is delegated

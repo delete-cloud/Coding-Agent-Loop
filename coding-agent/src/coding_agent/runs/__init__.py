@@ -54,6 +54,7 @@ from .lifecycle import (
     runtime_result_from_turn_outcome,
     runtime_status_from_turn_outcome,
 )
+from .observation import RuntimeObservationService, RuntimeObservationSession
 from .persistence import (
     RuntimeMessageSnapshotSession,
     RuntimeRunPersistenceService,
@@ -125,6 +126,8 @@ __all__ = [
     "RuntimeExecution",
     "RuntimeMessageSnapshotSession",
     "RuntimeMessageSnapshotSaver",
+    "RuntimeObservationService",
+    "RuntimeObservationSession",
     "RuntimeObservationCompleter",
     "RuntimeObservationStarter",
     "RuntimeCloser",
