@@ -1411,6 +1411,28 @@ def test_session_runtime_handle_detaches_runtime_binding() -> None:
     assert session.runtime_adapter is None
 
 
+def test_session_runtime_handle_attaches_runtime_binding() -> None:
+    session = Session(
+        id="runtime-binding-attach-session",
+        created_at=datetime.now(),
+        last_activity=datetime.now(),
+        approval_store=ApprovalStore(),
+    )
+    pipeline = object()
+    ctx = object()
+    adapter = object()
+
+    session.runtime_handle.attach_runtime_binding(
+        pipeline=pipeline,
+        ctx=ctx,
+        adapter=adapter,
+    )
+
+    assert session.runtime_pipeline is pipeline
+    assert session.runtime_ctx is ctx
+    assert session.runtime_adapter is adapter
+
+
 def test_session_store_data_excludes_runtime_handle_state() -> None:
     session = Session(
         id="runtime-handle-session",

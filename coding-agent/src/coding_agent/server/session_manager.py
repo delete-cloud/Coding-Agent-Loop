@@ -898,6 +898,19 @@ class Session:
     def detach_runtime_adapter(self) -> object | None:
         return self.runtime_handle.detach_runtime_adapter()
 
+    def attach_runtime_binding(
+        self,
+        *,
+        pipeline: object,
+        ctx: object,
+        adapter: object,
+    ) -> None:
+        self.runtime_handle.attach_runtime_binding(
+            pipeline=pipeline,
+            ctx=ctx,
+            adapter=adapter,
+        )
+
     def as_dict(self) -> dict[str, Any]:
         workspace_id = (
             self.execution_binding.workspace_id
@@ -3620,9 +3633,11 @@ class SessionManager:
 
         pipeline, ctx, adapter = await self._build_session_runtime(session)
 
-        session.runtime_pipeline = pipeline
-        session.runtime_ctx = ctx
-        session.runtime_adapter = adapter
+        session.attach_runtime_binding(
+            pipeline=pipeline,
+            ctx=ctx,
+            adapter=adapter,
+        )
         session.tape_id = ctx.tape.tape_id
         await self._persist_session_async(session)
         return ctx

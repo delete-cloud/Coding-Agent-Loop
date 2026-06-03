@@ -95,6 +95,17 @@ class SessionRuntimeHandle:
         self.runtime_adapter = None
         return adapter
 
+    def attach_runtime_binding(
+        self,
+        *,
+        pipeline: object,
+        ctx: object,
+        adapter: object,
+    ) -> None:
+        self.runtime_pipeline = pipeline
+        self.runtime_ctx = ctx
+        self.runtime_adapter = adapter
+
     def broadcast_event_nowait(
         self,
         event: dict[str, Any],
