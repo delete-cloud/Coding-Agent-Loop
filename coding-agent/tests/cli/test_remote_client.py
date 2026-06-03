@@ -744,6 +744,91 @@ def test_remote_attach_consumes_existing_session_events(
     ]
 
 
+def test_remote_attach_uses_display_event_stream(monkeypatch, capsys) -> None:
+    calls: list[tuple[str, str, str]] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+    class FakeEventSource:
+        response = FakeResponse()
+
+        def __enter__(self) -> FakeEventSource:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def iter_sse(self):
+            yield type(
+                "SSE",
+                (),
+                {
+                    "event": "assistant_text_delta",
+                    "data": json.dumps(
+                        {
+                            "source_event_id": "live:sess-1:event-1",
+                            "run_id": "run-1",
+                            "sequence": None,
+                            "display_kind": "assistant_text_delta",
+                            "payload": {"content": "hello"},
+                            "created_at": "2026-06-03T00:00:00+00:00",
+                        }
+                    ),
+                },
+            )()
+            yield type(
+                "SSE",
+                (),
+                {
+                    "event": "final_result",
+                    "data": json.dumps(
+                        {
+                            "source_event_id": "live:sess-1:event-2",
+                            "run_id": "run-1",
+                            "sequence": None,
+                            "display_kind": "final_result",
+                            "payload": {"completion_status": "completed"},
+                            "created_at": "2026-06-03T00:00:01+00:00",
+                        }
+                    ),
+                },
+            )()
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            self.base_url = str(kwargs["base_url"])
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+    def fake_connect_sse(client, method: str, path: str, **kwargs: object):
+        del kwargs
+        calls.append((client.base_url, method, path))
+        return FakeEventSource()
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+    monkeypatch.setattr("coding_agent.remote.client.connect_sse", fake_connect_sse)
+
+    from coding_agent.remote.client import attach_remote_session
+
+    status = attach_remote_session(
+        base_url="http://agent.example",
+        session_id="sess-1",
+        headers={},
+    )
+
+    assert status == 0
+    assert calls == [
+        ("http://agent.example", "GET", "/sessions/sess-1/display-events")
+    ]
+    assert capsys.readouterr().out == "hello\n"
+
+
 def test_remote_workers_lists_external_worker_status(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -950,6 +1035,114 @@ def test_remote_runs_lists_session_runs(tmp_path: Path, monkeypatch) -> None:
 
     assert result.exit_code == 0
     assert "run-1\trunning\texecutor-1\ttape-1" in result.output
+
+
+def test_list_remote_run_display_events_uses_display_replay_endpoint(
+    monkeypatch,
+) -> None:
+    from coding_agent.remote.client import (
+        RemoteEndpoint,
+        list_remote_run_display_events,
+    )
+
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "run_id": "run-1",
+                "events": [
+                    {
+                        "source_event_id": "event-1",
+                        "run_id": "run-1",
+                        "sequence": 1,
+                        "display_kind": "assistant_text_delta",
+                        "payload": {"content": "hello"},
+                        "created_at": "2026-06-03T00:00:00+00:00",
+                    }
+                ],
+            }
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            headers = kwargs.get("headers")
+            self.headers = headers if isinstance(headers, dict) else {}
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def get(self, path: str) -> FakeResponse:
+            calls.append((path, self.headers))
+            return FakeResponse()
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+
+    events = list_remote_run_display_events(
+        RemoteEndpoint("dev", "http://agent.example", "secret-token"),
+        "run-1",
+    )
+
+    assert calls == [
+        (
+            "/runs/run-1/display-events",
+            {"Authorization": "Bearer secret-token"},
+        )
+    ]
+    assert events == [
+        {
+            "source_event_id": "event-1",
+            "run_id": "run-1",
+            "sequence": 1,
+            "display_kind": "assistant_text_delta",
+            "payload": {"content": "hello"},
+            "created_at": "2026-06-03T00:00:00+00:00",
+        }
+    ]
+
+
+def test_remote_events_lists_display_events(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "remotes.json"
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+
+    def fake_list_remote_run_display_events(endpoint, run_id: str):
+        assert endpoint.name == "dev"
+        assert run_id == "run-1"
+        return [
+            {
+                "sequence": 7,
+                "display_kind": "assistant_text_delta",
+                "source_event_id": "event-7",
+                "created_at": "2026-06-03T00:00:00+00:00",
+            }
+        ]
+
+    monkeypatch.setattr(
+        "coding_agent.remote.client.list_remote_run_display_events",
+        fake_list_remote_run_display_events,
+    )
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example", "--token", "secret-token"],
+        catch_exceptions=False,
+    )
+
+    result = runner.invoke(
+        main,
+        ["remote", "events", "dev", "--run", "run-1"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "7\tassistant_text_delta\tevent-7\t2026-06-03T00:00:00+00:00" in (
+        result.output
+    )
 
 
 def test_remote_repl_creates_cloud_session_and_streams_prompt_events(
@@ -3901,6 +4094,34 @@ def test_handle_sse_event_formats_approval_after_inline_stream_output(
         '{\n  "command": "rm -rf scratch"\n}\n'
         "[y]=approve  [a]=approve all (session)  [n]=reject  [r]=reject with reason\n"
     )
+
+
+def test_handle_display_sse_event_renders_sanitized_tool_result(capsys) -> None:
+    from coding_agent.remote.client import handle_display_sse_event
+
+    status, line_open = handle_display_sse_event(
+        base_url="http://agent.example",
+        session_id="sess-1",
+        headers={},
+        event="tool_result",
+        data=json.dumps(
+            {
+                "source_event_id": "event-1",
+                "run_id": "run-1",
+                "sequence": 1,
+                "display_kind": "tool_result",
+                "payload": {
+                    "tool_name": "bash_run",
+                    "display_result": "[tool output redacted]",
+                },
+                "created_at": "2026-06-03T00:00:00+00:00",
+            }
+        ),
+    )
+
+    assert status is None
+    assert line_open is False
+    assert capsys.readouterr().out == "[tool output redacted]\n"
 
 
 def test_remote_approval_abort_reports_actionable_noninteractive_error(

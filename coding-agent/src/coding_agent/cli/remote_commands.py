@@ -823,11 +823,11 @@ def remote_run_info(name: str, run_id: str) -> None:
 @click.argument("name")
 @click.option("--run", "run_id", required=True, help="Remote run ID.")
 def remote_events(name: str, run_id: str) -> None:
-    """List replayed runtime events for a remote run."""
-    from coding_agent.remote.client import get_remote, list_remote_run_events
+    """List replayed display events for a remote run."""
+    from coding_agent.remote.client import get_remote, list_remote_run_display_events
 
     endpoint = get_remote(name)
-    events = list_remote_run_events(endpoint, run_id)
+    events = list_remote_run_display_events(endpoint, run_id)
     if not events:
         click.echo("No remote events found.")
         return
@@ -836,8 +836,8 @@ def remote_events(name: str, run_id: str) -> None:
             "\t".join(
                 [
                     str(event.get("sequence", "")),
-                    str(event.get("event_kind", "")),
-                    str(event.get("event_id", "")),
+                    str(event.get("display_kind", "")),
+                    str(event.get("source_event_id", "")),
                     str(event.get("created_at", "")),
                 ]
             )
