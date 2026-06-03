@@ -22,10 +22,26 @@ class RuntimeCancelStore(RuntimeRunLifecycleStore, Protocol):
 
 
 class RuntimeCancelSession(Protocol):
+    id: str
     current_turn_id: str | None
     turn_in_progress: bool
     turn_status: str
     last_activity: datetime
+
+
+class RuntimeCancelableTask(Protocol):
+    def done(self) -> bool: ...
+    def cancel(self) -> bool: ...
+
+
+RuntimeCancelServiceProvider = Callable[[], "RuntimeCancelService"]
+RuntimeCancelSessionPersister = Callable[[RuntimeCancelSession], Awaitable[None]]
+RuntimeCancelSessionAttachedPredicate = Callable[[RuntimeCancelSession], bool]
+RuntimeCancelObservationScheduler = Callable[
+    [str, RuntimeCancelableTask],
+    None,
+]
+RuntimeCancelTurnIdFactory = Callable[[], str]
 
 
 @dataclass(frozen=True)
@@ -36,6 +52,42 @@ class RuntimeCancelResult:
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+@dataclass(frozen=True)
+class RuntimeCancelOrchestrationService:
+    cancel_service: RuntimeCancelServiceProvider
+    persist_session: RuntimeCancelSessionPersister
+    session_is_attached: RuntimeCancelSessionAttachedPredicate
+    schedule_cancel_observation: RuntimeCancelObservationScheduler
+    turn_id_factory: RuntimeCancelTurnIdFactory
+
+    async def cancel(
+        self,
+        session: RuntimeCancelSession,
+        *,
+        task: RuntimeCancelableTask | None,
+    ) -> RuntimeCancelResult:
+        service = self.cancel_service()
+        if self.session_is_attached(session):
+            result = await service.cancel_attached_executor_turn(session)
+            await self.persist_session(session)
+            return result
+        if task is None or task.done():
+            result = service.cancel_idle_or_finished_local_turn(session)
+            await self.persist_session(session)
+            return result
+
+        if session.current_turn_id is None:
+            session.current_turn_id = self.turn_id_factory()
+        service.mark_cancelling(session)
+        await self.persist_session(session)
+        task.cancel()
+        self.schedule_cancel_observation(session.id, task)
+        return RuntimeCancelResult(
+            turn_id=session.current_turn_id,
+            status="cancelling",
+        )
 
 
 @dataclass(frozen=True)
@@ -149,9 +201,16 @@ class RuntimeCancelService:
 
 
 __all__ = [
+    "RuntimeCancelableTask",
+    "RuntimeCancelObservationScheduler",
+    "RuntimeCancelOrchestrationService",
     "RuntimeCancelResult",
     "RuntimeCancelService",
+    "RuntimeCancelServiceProvider",
     "RuntimeCancelSession",
+    "RuntimeCancelSessionAttachedPredicate",
+    "RuntimeCancelSessionPersister",
     "RuntimeCancelStore",
     "RuntimeCancelStatus",
+    "RuntimeCancelTurnIdFactory",
 ]
