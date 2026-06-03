@@ -342,6 +342,11 @@ This ADR does not implement that path.
     loading, and server-facing claim DTO construction are delegated to
     `RuntimeAttachedExecutorClaimService` instead of living inline in
     `SessionManager.claim_attached_executor_run()`.
+  - Completed: attached/external executor finalization orchestration, including
+    claim authorization, final status validation, tape-entry persistence before
+    final run status, session turn-state synchronization, and session
+    persistence, is delegated to `RuntimeAttachedExecutorFinalizeService`
+    instead of living inline in `SessionManager.finalize_attached_executor_run()`.
   - Completed: attached executor cancellation run updates, local turn
     cancellation session-state transitions, and cancelled local task observation
     are delegated to `RuntimeCancelService` instead of `SessionManager` helper

@@ -72,6 +72,7 @@ from coding_agent.runs import (
     RunCoordinator,
     RuntimeAgentFactoryService,
     RuntimeAttachedExecutorClaimService,
+    RuntimeAttachedExecutorFinalizeService,
     RuntimeAttachedExecutorRequestService,
     RuntimeBindingSnapshot,
     RuntimeCancelObservationFinalizer,
@@ -1003,6 +1004,18 @@ class SessionManager:
                 ),
             )
         )
+        self._runtime_attached_executor_finalize_service = (
+            RuntimeAttachedExecutorFinalizeService(
+                lock=self._lock,
+                load_session=self.get_session_async,
+                attached_executor=self._runtime_control_services.attached_executor,
+                save_tape_entries=lambda tape_id, entries: self._tape_store.save(
+                    tape_id,
+                    entries,
+                ),
+                persist_session=self._persist_session_async,
+            )
+        )
         self._runtime_turn_service_factory = RuntimeTurnServiceFactory(
             runtime_control_services=self._runtime_control_services,
             persist_session=self._persist_session_async,
@@ -1410,37 +1423,16 @@ class SessionManager:
         tape_id: str | None,
         tape_entries: list[JSONObject] | None = None,
     ) -> AgentRunRecord:
-        attached_executor_service = self._runtime_control_services.attached_executor()
-        run = await attached_executor_service.load_and_authorize_run(
+        return await self._runtime_attached_executor_finalize_service.finalize_run(
             run_id=run_id,
             executor_id=executor_id,
             claim_token=claim_token,
-        )
-        attached_executor_service.validate_final_status(status)
-        if tape_id is not None and tape_entries is not None:
-            await self._tape_store.save(tape_id, tape_entries)
-        updated = await attached_executor_service.finalize_authorized_run(
-            run,
             status=status,
             result=result,
             error=error,
             tape_id=tape_id,
+            tape_entries=tape_entries,
         )
-        async with self._lock:
-            session = await self.get_session_async(updated.session_id)
-            if tape_id is not None:
-                session.tape_id = tape_id
-            session.turn_in_progress = False
-            session.turn_status = (
-                cast(TurnStatus, status)
-                if status in {"cancelled", "failed"}
-                else "idle"
-            )
-            session.current_turn_id = run_id
-            session.last_activity = datetime.now(UTC)
-            session.last_failure_details = error if status == "failed" else None
-            await self._persist_session_async(session)
-        return updated
 
     async def finalize_external_worker_run(
         self,
