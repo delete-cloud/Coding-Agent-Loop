@@ -169,6 +169,43 @@ def create_remote_session(
     return session_id
 
 
+def create_local_daemon_session(
+    endpoint: RemoteEndpoint,
+    *,
+    repo_path: Path,
+    approval_policy: str = "auto",
+) -> str:
+    if approval_policy not in APPROVAL_POLICIES:
+        raise click.ClickException(f"Unsupported approval policy: {approval_policy}")
+    payload: dict[str, object] = {
+        "execution_binding": {
+            "kind": "local",
+            "workspace_root": str(repo_path.expanduser().resolve()),
+        },
+        "approval_policy": approval_policy,
+    }
+    try:
+        with httpx.Client(
+            base_url=endpoint.url,
+            headers=auth_headers(endpoint),
+            timeout=60.0,
+        ) as client:
+            response = client.post("/sessions", json=payload)
+            _raise_remote_http_error(response, "create local daemon session")
+            data = cast(object, response.json())
+    except httpx.RequestError as exc:
+        raise click.ClickException(
+            f"Failed to create local daemon session: {exc}"
+        ) from exc
+    if not isinstance(data, Mapping):
+        raise click.ClickException("Local daemon session response must be a JSON object")
+    data = cast(Mapping[str, object], data)
+    session_id = data.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        raise click.ClickException("Local daemon session response missing session_id")
+    return session_id
+
+
 def list_remote_sessions(endpoint: RemoteEndpoint) -> list[dict[str, object]]:
     data = _get_remote_json(endpoint, "/sessions", "list remote sessions")
     sessions = data.get("sessions")

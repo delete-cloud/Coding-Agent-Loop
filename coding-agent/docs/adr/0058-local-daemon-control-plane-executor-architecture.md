@@ -286,10 +286,14 @@ This ADR does not implement that path.
 
 ## Remaining Implementation Gaps
 
-- Add daemon-backed client surfaces for the local product path. REPL/TUI/CLI
-  clients should pair with or connect to the local daemon instead of owning an
-  in-process runtime manager, and a daemon-backed non-interactive client should
-  eventually replace one-shot inline `run` for product dogfood.
+- [~] Add daemon-backed client surfaces for the local product path.
+  - Completed: `coding_agent daemon run` creates a local-path session through
+    the daemon HTTP control plane and streams display events without owning an
+    in-process runtime manager.
+  - Remaining: REPL/TUI should pair with or connect to the local daemon instead
+    of owning an in-process runtime manager.
+  - Remaining: once the daemon-backed path is dogfooded, make it the documented
+    local product default while keeping inline `run` as testkit/devkit.
 
 ## References
 
