@@ -1185,7 +1185,6 @@ class SessionManager:
             runtime_run_persistence=self._runtime_run_persistence(),
             persist_session=self._persist_session_async,
             make_consumer=self._make_session_consumer,
-            build_run_request=self._build_runtime_run_request,
             prepare_runtime=self._local_daemon_runtime_preparation.prepare_runtime,
             close_runtime=self._close_runtime,
             emit_message=self._send_session_wire_message,
@@ -2932,25 +2931,6 @@ class SessionManager:
         if local_root is None:
             return None
         return Path(local_root).expanduser().resolve()
-
-    async def _build_runtime_run_request(
-        self,
-        session: Session,
-        *,
-        run_id: str,
-        prompt: str,
-        resume_context: SessionResumeContext | None = None,
-    ) -> RunRequest:
-        input_summary = prompt if prompt.strip() else None
-        return RunRequest(
-            session_id=session.id,
-            run_id=run_id,
-            target=session.default_run_target,
-            input_summary=input_summary,
-            resume_from_run_id=(
-                None if resume_context is None else resume_context.previous_run_id
-            ),
-        )
 
     def _hydrate_session(self, session: Session) -> Session:
         approval_store = self._approval_stores.get(session.id)

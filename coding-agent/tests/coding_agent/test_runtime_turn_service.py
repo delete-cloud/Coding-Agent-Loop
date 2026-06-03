@@ -27,6 +27,7 @@ from coding_agent.wire.protocol import WireMessage
 @dataclass
 class FakeSession:
     id: str = "session-1"
+    default_run_target: RunTarget | None = None
     tape_id: str | None = "tape-1"
     turn_status: str = "idle"
     last_failure_details: str | None = None
@@ -35,6 +36,10 @@ class FakeSession:
     current_turn_id: str | None = None
     task: object | None = None
     runtime_message_bus: object | None = None
+
+    def __post_init__(self) -> None:
+        if self.default_run_target is None:
+            self.default_run_target = _target()
 
 
 class FakeRuntimeContext:
@@ -61,6 +66,11 @@ class FakeObservationRecorder:
 
     def cancel_turn(self) -> None:
         self.events.append(("cancel", ""))
+
+
+@dataclass(frozen=True)
+class FakeResumeContext:
+    previous_run_id: str
 
 
 class RecordingRuntimeStore:
@@ -177,21 +187,6 @@ def _service(
     async def persist_session(session: FakeSession) -> None:
         del session
 
-    async def build_run_request(
-        session: FakeSession,
-        *,
-        run_id: str,
-        prompt: str,
-        resume_context: object | None = None,
-    ) -> RunRequest:
-        del resume_context
-        return RunRequest(
-            session_id=session.id,
-            run_id=run_id,
-            target=_target(),
-            input_summary=prompt,
-        )
-
     async def prepare_runtime(
         session: FakeSession,
         *,
@@ -221,7 +216,6 @@ def _service(
         runtime_run_persistence=_persistence(store),
         persist_session=persist_session,
         make_consumer=lambda session: f"consumer:{session.id}",
-        build_run_request=build_run_request,
         prepare_runtime=prepare_runtime,
         close_runtime=close_runtime,
         emit_message=emit_message,
@@ -272,6 +266,34 @@ async def test_runtime_turn_service_executes_coordinator_runtime_path() -> None:
         "running",
         "completed",
     ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_turn_service_builds_run_request_from_session_placement() -> None:
+    store = RecordingRuntimeStore()
+    coordinator = RecordingCoordinator()
+    target = RunTarget(
+        workspace=LocalPathWorkspaceRef(path="/custom-repo"),
+        executor=LocalDaemonExecutorRef(),
+        isolation=IsolationPolicy(kind="default_local_sandbox"),
+    )
+    session = FakeSession(default_run_target=target)
+
+    await _service(store=store, coordinator=coordinator).run(
+        session,
+        prompt="  ",
+        run_id="run-2",
+        resume_context=FakeResumeContext(previous_run_id="run-1"),
+        current_task=None,
+    )
+
+    assert len(coordinator.requests) == 1
+    request = coordinator.requests[0]
+    assert request.session_id == "session-1"
+    assert request.run_id == "run-2"
+    assert request.target is target
+    assert request.input_summary is None
+    assert request.resume_from_run_id == "run-1"
 
 
 @pytest.mark.asyncio
