@@ -36,17 +36,13 @@ from agentkit.runtime import (
     RuntimeMessageKind,
 )
 from agentkit.runtime.context import AgentRunContext
-from agentkit.observability import ObservationSink
 from agentkit.storage.protocols import CheckpointStore, TapeStore
 from agentkit.storage.protocols import TapeDebugStore, TapeInfo, TapeSearchResult
-from agentkit.tape.extract import TurnTrace, extract_turns
 from agentkit.tape.tape import Tape
 from agentkit.tools import FatalToolExecutionError
 from agentkit.tape.models import Anchor
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.agent_observability import (
-    AgentObservationRecorder,
-    AgentObservationStatus,
     AgentObservationStore,
     JsonlAgentObservationStore,
 )
@@ -92,6 +88,7 @@ from coding_agent.runs import (
     RunRequest,
     RuntimeBindingSnapshot,
     RuntimeCloser,
+    RuntimeObservationService,
     RuntimeRunPersistenceService,
     RuntimeRunRecoveryService,
     RunTarget,
@@ -1078,6 +1075,9 @@ class SessionManager:
         self._agent_observation_store = observation_store or JsonlAgentObservationStore(
             data_dir / "observability"
         )
+        self._runtime_observation_service = RuntimeObservationService(
+            self._agent_observation_store
+        )
         resolved_checkpoint_store = checkpoint_store or self._create_checkpoint_store(
             data_dir
         )
@@ -1190,8 +1190,8 @@ class SessionManager:
             emit_message=self._send_session_wire_message,
             bind_root_run_identity=self._bind_root_run_identity,
             bind_subagent_message_publisher=self._bind_subagent_message_publisher,
-            start_observation=self._start_agent_observation,
-            complete_observation=self._complete_agent_observation,
+            start_observation=self._runtime_observation_service.start,
+            complete_observation=self._runtime_observation_service.complete,
             log_turn_exception=lambda message: logger.exception(message),
             fatal_error_types=(FatalToolExecutionError,),
             cancelled_error_types=(asyncio.CancelledError,),
@@ -2220,98 +2220,12 @@ class SessionManager:
                 )
         return metadata
 
-    def _observation_attributes_for_session(
-        self,
-        session: Session,
-        ctx: Any,
-        *,
-        resume_context: SessionResumeContext | None = None,
-    ) -> JSONObject:
-        attributes: JSONObject = {
-            "tape_id": getattr(getattr(ctx, "tape", None), "tape_id", None),
-            "execution_placement": self._execution_placement(session),
-            "execution_binding_kind": session.execution_binding.kind,
-            "workspace_surface": session.execution_binding.workspace_surface,
-            "execution_plane": session.execution_binding.execution_plane,
-        }
-        if resume_context is not None:
-            attributes.update(resume_context.metadata())
-        return attributes
-
     def _execution_placement(self, session: Session) -> str:
         if isinstance(session.execution_binding, ExternalWorkerBinding):
             return "local_attached"
         if isinstance(session.execution_binding, CloudWorkspaceBinding):
             return "cloud_workspace"
         return "server_embedded"
-
-    def _agent_observation_status(self, turn_status: str) -> AgentObservationStatus:
-        if turn_status in {"cancelled", "interrupted"}:
-            return "cancelled"
-        if turn_status == "failed":
-            return "error"
-        return "ok"
-
-    def _latest_turn_trace(self, ctx: Any) -> TurnTrace | None:
-        tape = getattr(ctx, "tape", None)
-        if tape is None or not hasattr(tape, "snapshot"):
-            return None
-        turns = extract_turns(tape.snapshot())
-        if not turns:
-            return None
-        return turns[-1]
-
-    def _agent_observation_sink(self, ctx: Any) -> ObservationSink | None:
-        config = getattr(ctx, "config", None)
-        if not isinstance(config, dict):
-            return None
-        sink = config.get("observation_sink")
-        if isinstance(sink, ObservationSink):
-            return sink
-        return None
-
-    def _start_agent_observation(
-        self,
-        *,
-        session: Session,
-        ctx: Any,
-        run_id: str,
-        prompt: str,
-        resume_context: SessionResumeContext | None = None,
-    ) -> AgentObservationRecorder | None:
-        config = getattr(ctx, "config", None)
-        if not isinstance(config, dict):
-            return None
-        recorder = AgentObservationRecorder(
-            store=self._agent_observation_store,
-            sink=self._agent_observation_sink(ctx),
-        )
-        config["agent_observation_recorder"] = recorder
-        recorder.start_turn(
-            session_id=session.id,
-            run_id=run_id,
-            prompt=prompt,
-            attributes=self._observation_attributes_for_session(
-                session,
-                ctx,
-                resume_context=resume_context,
-            ),
-        )
-        return recorder
-
-    def _complete_agent_observation(
-        self,
-        recorder: AgentObservationRecorder | None,
-        *,
-        ctx: Any,
-        turn_status: str,
-    ) -> None:
-        if recorder is None:
-            return
-        recorder.complete_turn(
-            status=self._agent_observation_status(turn_status),
-            turn=self._latest_turn_trace(ctx),
-        )
 
     def _runtime_run_persistence(self) -> RuntimeRunPersistenceService:
         return RuntimeRunPersistenceService(
