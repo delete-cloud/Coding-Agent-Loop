@@ -81,6 +81,7 @@ from coding_agent.runs import (
     RunRequest,
     RuntimeAttachedExecutorService,
     RuntimeBindingSnapshot,
+    RuntimeCancelService,
     RuntimeCloser,
     RuntimeRunMetadataService,
     RuntimeObservationService,
@@ -1652,6 +1653,9 @@ class SessionManager:
             metadata_for_session=self._runtime_metadata_service.metadata_for_session,
         )
 
+    def _runtime_cancel_service(self) -> RuntimeCancelService:
+        return RuntimeCancelService(store=self._runtime_store)
+
     async def recover_stale_runtime_runs(
         self,
         *,
@@ -2512,78 +2516,33 @@ class SessionManager:
             session = await self.get_session_async(session_id)
             task = session.task
             if isinstance(session.execution_binding, ExternalWorkerBinding):
-                if session.current_turn_id is None or not session.turn_in_progress:
-                    session.turn_status = "idle"
-                    session.turn_in_progress = False
-                    session.last_activity = datetime.now(UTC)
-                    await self._persist_session_async(session)
-                    return CancelTurnResult(
-                        session_id=session_id,
-                        turn_id=session.current_turn_id,
-                        status="idle",
+                result = (
+                    await self._runtime_cancel_service().cancel_attached_executor_turn(
+                        session
                     )
-                if self._runtime_store is not None:
-                    run = await self.load_runtime_run(session.current_turn_id)
-                    metadata = dict(run.metadata)
-                    metadata["cancel_requested_at"] = datetime.now(UTC).isoformat()
-                    if run.status in {"requested", "expired"}:
-                        await self._runtime_store.update_agent_run(
-                            run.run_id,
-                            status="cancelled",
-                            ended_at=datetime.now(UTC),
-                            metadata=cast(JSONObject, metadata),
-                            result=run.result,
-                            error="cancelled before claim",
-                        )
-                        session.turn_status = "idle"
-                        session.turn_in_progress = False
-                        session.last_activity = datetime.now(UTC)
-                        await self._persist_session_async(session)
-                        return CancelTurnResult(
-                            session_id=session_id,
-                            turn_id=session.current_turn_id,
-                            status="cancelled",
-                        )
-                    await self._runtime_store.update_agent_run(
-                        run.run_id,
-                        status="cancelling",
-                        ended_at=run.ended_at,
-                        metadata=cast(JSONObject, metadata),
-                        result=run.result,
-                        error=run.error,
-                    )
-                session.turn_status = "cancelling"
-                session.turn_in_progress = True
-                session.last_activity = datetime.now(UTC)
+                )
                 await self._persist_session_async(session)
                 return CancelTurnResult(
                     session_id=session_id,
-                    turn_id=session.current_turn_id,
-                    status="cancelling",
+                    turn_id=result.turn_id,
+                    status=cast(CancelTurnStatus, result.status),
                 )
             if task is None or task.done():
-                status: CancelTurnStatus
-                if session.turn_status == "cancelling":
-                    status = "cancelling"
-                elif session.turn_status in {"cancelled", "failed"}:
-                    status = cast(CancelTurnStatus, session.turn_status)
-                else:
-                    session.turn_status = "idle"
-                    status = "idle"
-                session.turn_in_progress = False
-                session.last_activity = datetime.now(UTC)
+                result = (
+                    self._runtime_cancel_service().cancel_idle_or_finished_local_turn(
+                        session
+                    )
+                )
                 await self._persist_session_async(session)
                 return CancelTurnResult(
                     session_id=session_id,
-                    turn_id=session.current_turn_id,
-                    status=status,
+                    turn_id=result.turn_id,
+                    status=cast(CancelTurnStatus, result.status),
                 )
 
             if session.current_turn_id is None:
                 session.current_turn_id = uuid.uuid4().hex
-            session.turn_status = "cancelling"
-            session.turn_in_progress = True
-            session.last_activity = datetime.now(UTC)
+            self._runtime_cancel_service().mark_cancelling(session)
             await self._persist_session_async(session)
             task.cancel()
             _ = asyncio.create_task(
