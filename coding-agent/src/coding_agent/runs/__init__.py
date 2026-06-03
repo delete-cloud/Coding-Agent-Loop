@@ -24,6 +24,7 @@ from .attached_executor import (
     RuntimeAttachedExecutorService,
     RuntimeAttachedExecutorStore,
 )
+from .agent_factory import RuntimeAgentFactory, RuntimeAgentFactoryService
 from .cancel import (
     RuntimeCancelResult,
     RuntimeCancelService,
@@ -171,6 +172,8 @@ __all__ = [
     "RunSubmission",
     "RunTarget",
     "RunTargetSerializationError",
+    "RuntimeAgentFactory",
+    "RuntimeAgentFactoryService",
     "RuntimeBindingSnapshot",
     "RuntimeAttachedExecutorClaim",
     "RuntimeAttachedExecutorSession",
