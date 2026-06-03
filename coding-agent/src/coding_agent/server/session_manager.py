@@ -2560,14 +2560,9 @@ class SessionManager:
         session_id: str,
         task: asyncio.Task[Any],
     ) -> None:
-        final_status: TurnStatus = "cancelled"
-        try:
-            await task
-        except asyncio.CancelledError:
-            final_status = "cancelled"
-        except Exception:
-            logger.exception("Cancelled session turn failed during cleanup")
-            final_status = "failed"
+        final_status = (
+            await self._runtime_cancel_service().observe_cancelled_local_task(task)
+        )
 
         async with self._lock:
             try:
@@ -2577,9 +2572,10 @@ class SessionManager:
             if session.task is not task:
                 return
             session.task = None
-            session.turn_in_progress = False
-            session.turn_status = final_status
-            session.last_activity = datetime.now(UTC)
+            self._runtime_cancel_service().finish_observed_local_turn(
+                session,
+                status=final_status,
+            )
             await self._persist_session_async(session)
 
     async def close(self) -> None:

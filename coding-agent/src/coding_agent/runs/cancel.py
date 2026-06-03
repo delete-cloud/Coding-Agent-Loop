@@ -1,15 +1,20 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+import asyncio
+import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 
 from coding_agent.runtime_store import AgentRunRecord, JSONObject
 from coding_agent.stores import RuntimeRunLifecycleStore
 
 
 type RuntimeCancelStatus = Literal["idle", "cancelling", "cancelled", "failed"]
+
+
+logger = logging.getLogger(__name__)
 
 
 class RuntimeCancelStore(RuntimeRunLifecycleStore, Protocol):
@@ -107,6 +112,31 @@ class RuntimeCancelService:
     def mark_idle(self, session: RuntimeCancelSession) -> None:
         session.turn_status = "idle"
         session.turn_in_progress = False
+        session.last_activity = self.now()
+
+    async def observe_cancelled_local_task(
+        self,
+        task: Awaitable[Any],
+    ) -> RuntimeCancelStatus:
+        try:
+            await task
+        except asyncio.CancelledError:
+            return "cancelled"
+        except Exception:
+            logger.exception("Cancelled session turn failed during cleanup")
+            return "failed"
+        return "cancelled"
+
+    def finish_observed_local_turn(
+        self,
+        session: RuntimeCancelSession,
+        *,
+        status: RuntimeCancelStatus,
+    ) -> None:
+        if status not in {"cancelled", "failed"}:
+            raise ValueError(f"invalid observed cancellation status: {status}")
+        session.turn_in_progress = False
+        session.turn_status = status
         session.last_activity = self.now()
 
     async def _load_run(self, run_id: str) -> AgentRunRecord:
