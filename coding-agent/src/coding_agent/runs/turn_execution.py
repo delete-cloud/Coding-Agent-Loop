@@ -33,7 +33,7 @@ class RuntimeTurnConsumerFactory(Protocol):
     def __call__(self, session: RuntimeTurnServiceSession) -> object: ...
 
 
-class RuntimeRunSubmitter(Protocol):
+class RuntimeRunRequestBuilder(Protocol):
     async def __call__(
         self,
         session: RuntimeTurnServiceSession,
@@ -76,7 +76,7 @@ class RuntimeTurnService:
     runtime_run_persistence: RuntimeRunPersistenceService
     persist_session: RuntimeTurnStatePersister
     make_consumer: RuntimeTurnConsumerFactory
-    submit_run_request: RuntimeRunSubmitter
+    build_run_request: RuntimeRunRequestBuilder
     prepare_runtime: RuntimeProviderPreparer
     close_runtime: RuntimeSessionCloser
     emit_message: RuntimeTurnWireEmitter
@@ -138,12 +138,13 @@ class RuntimeTurnService:
 
         async def execute_runtime() -> None:
             consumer = self.make_consumer(session)
-            run_request = await self.submit_run_request(
+            run_request = await self.build_run_request(
                 session,
                 run_id=run_id,
                 prompt=prompt,
                 resume_context=resume_context,
             )
+            await self.run_coordinator.submit_run(run_request)
             turn_controller.starter = RuntimeTurnStarter(
                 turn_run=turn_run,
                 consumer=consumer,
@@ -197,7 +198,7 @@ class RuntimeTurnService:
 
 __all__ = [
     "RuntimeProviderPreparer",
-    "RuntimeRunSubmitter",
+    "RuntimeRunRequestBuilder",
     "RuntimeTurnConsumerFactory",
     "RuntimeTurnService",
     "RuntimeTurnServiceSession",

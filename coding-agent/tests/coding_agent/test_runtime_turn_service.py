@@ -112,15 +112,21 @@ class RecordingCoordinator:
     def __init__(
         self,
         *,
+        fail_on_submit: BaseException | None = None,
         fail_before_prepare: BaseException | None = None,
         fail_after_prepare: BaseException | None = None,
     ) -> None:
+        self.requests: list[RunRequest] = []
         self.executions: list[LocalDaemonRuntimeExecution] = []
+        self.fail_on_submit = fail_on_submit
         self.fail_before_prepare = fail_before_prepare
         self.fail_after_prepare = fail_after_prepare
 
     async def submit_run(self, request: RunRequest) -> object:
-        raise AssertionError(f"turn service should receive submitted request: {request}")
+        self.requests.append(request)
+        if self.fail_on_submit is not None:
+            raise self.fail_on_submit
+        return object()
 
     async def execute_runtime(self, execution: LocalDaemonRuntimeExecution) -> object:
         self.executions.append(execution)
@@ -171,7 +177,7 @@ def _service(
     async def persist_session(session: FakeSession) -> None:
         del session
 
-    async def submit_run_request(
+    async def build_run_request(
         session: FakeSession,
         *,
         run_id: str,
@@ -215,7 +221,7 @@ def _service(
         runtime_run_persistence=_persistence(store),
         persist_session=persist_session,
         make_consumer=lambda session: f"consumer:{session.id}",
-        submit_run_request=submit_run_request,
+        build_run_request=build_run_request,
         prepare_runtime=prepare_runtime,
         close_runtime=close_runtime,
         emit_message=emit_message,
@@ -255,8 +261,10 @@ async def test_runtime_turn_service_executes_coordinator_runtime_path() -> None:
     assert session.turn_in_progress is False
     assert session.turn_status == "idle"
     assert session.current_turn_id == "run-1"
+    assert len(coordinator.requests) == 1
     assert len(coordinator.executions) == 1
     execution = coordinator.executions[0]
+    assert execution.request == coordinator.requests[0]
     assert execution.prompt == "hello"
     assert execution.request.input_summary == "hello"
     assert store.created[0].status == "queued"
@@ -272,7 +280,7 @@ async def test_runtime_turn_service_records_submit_failure_after_starting_run() 
     emitted: list[WireMessage] = []
     closed: list[str] = []
     coordinator = RecordingCoordinator(
-        fail_before_prepare=RunCoordinatorError("no executor")
+        fail_on_submit=RunCoordinatorError("no executor")
     )
     session = FakeSession()
 
@@ -290,6 +298,8 @@ async def test_runtime_turn_service_records_submit_failure_after_starting_run() 
 
     assert session.turn_in_progress is False
     assert session.turn_status == "failed"
+    assert len(coordinator.requests) == 1
+    assert coordinator.executions == []
     assert closed == ["session-1"]
     assert [update["status"] for update in store.updated] == ["running", "failed"]
     assert store.updated[-1]["error"] == "no executor"
