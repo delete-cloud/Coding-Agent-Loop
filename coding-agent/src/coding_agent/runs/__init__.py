@@ -122,9 +122,11 @@ from .runtime_events import (
 )
 from .resume import (
     DEFAULT_RESUME_PROMPT,
+    RuntimeResumeOrchestrationService,
     MessageSnapshotLoader,
     RuntimeResumeContext,
     RuntimeResumeService,
+    RuntimeResumeOrchestrationSession,
     RuntimeResumeSession,
     TapeEntryLoader,
 )
@@ -227,6 +229,8 @@ __all__ = [
     "RuntimeReplacementService",
     "RuntimeReplacementSession",
     "RuntimeResumeContext",
+    "RuntimeResumeOrchestrationService",
+    "RuntimeResumeOrchestrationSession",
     "RuntimeResumeService",
     "RuntimeResumeSession",
     "RuntimeCloser",

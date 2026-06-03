@@ -9,13 +9,15 @@ from agentkit.checkpoint.models import CheckpointMeta
 from agentkit.tape.models import Entry
 
 from coding_agent.runtime_store import AgentRunRecord, RunMessageSnapshotRecord
-from coding_agent.runs import RuntimeResumeService
+from coding_agent.runs import RuntimeResumeOrchestrationService, RuntimeResumeService
 
 
 @dataclass
 class FakeSession:
     id: str = "session-1"
     tape_id: str | None = "tape-1"
+    turn_in_progress: bool = False
+    turn_status: str = "idle"
 
 
 @pytest.mark.asyncio
@@ -102,6 +104,99 @@ async def test_runtime_resume_service_reports_empty_context_without_tape() -> No
     assert "No tape tail is available for this session." in prompt
     assert "No recent plan note was found in the tape tail." in prompt
     assert "Continue from the last known state." in prompt
+
+
+@pytest.mark.asyncio
+async def test_runtime_resume_orchestration_runs_local_resume_with_boundary_anchor() -> (
+    None
+):
+    session = FakeSession(tape_id=None)
+    previous_run = _run("run-interrupted")
+    completed_run = _run("run-resumed")
+    persisted_sessions: list[FakeSession] = []
+    saved_tape_entries: list[tuple[str, list[dict[str, object]]]] = []
+    live_anchor_ids: list[str] = []
+    local_runs: list[tuple[str, str, str, object]] = []
+
+    async def latest_runtime_run(session_id: str) -> AgentRunRecord | None:
+        assert session_id == "session-1"
+        return previous_run
+
+    async def latest_runtime_event_id(run: AgentRunRecord) -> str | None:
+        assert run is previous_run
+        return "event-last"
+
+    async def load_runtime_run(run_id: str) -> AgentRunRecord | None:
+        assert run_id == "run-resumed"
+        return completed_run
+
+    async def persist_session(persisted_session: FakeSession) -> None:
+        persisted_sessions.append(persisted_session)
+
+    async def save_tape_entries(
+        tape_id: str,
+        entries: list[dict[str, object]],
+    ) -> None:
+        saved_tape_entries.append((tape_id, entries))
+
+    async def run_local(
+        session_id: str,
+        prompt: str,
+        run_id: str,
+        resume_context: object,
+    ) -> AgentRunRecord | None:
+        local_runs.append((session_id, prompt, run_id, resume_context))
+        return None
+
+    async def request_attached(
+        session_id: str,
+        prompt: str,
+        run_id: str,
+        resume_context: object,
+    ) -> AgentRunRecord:
+        del session_id, prompt, run_id, resume_context
+        raise AssertionError("attached resume should not run")
+
+    service = RuntimeResumeOrchestrationService(
+        resume_service=RuntimeResumeService(),
+        latest_runtime_run=latest_runtime_run,
+        latest_runtime_event_id=latest_runtime_event_id,
+        load_runtime_run=load_runtime_run,
+        persist_session=persist_session,
+        list_checkpoints=_list_checkpoints,
+        load_tape_entries=_load_tape_entries,
+        save_tape_entries=save_tape_entries,
+        load_message_snapshot=_load_message_snapshot,
+        run_local=run_local,
+        request_attached=request_attached,
+        session_is_attached=lambda session: False,
+        append_live_boundary_anchor=lambda session, anchor: live_anchor_ids.append(
+            anchor.id
+        ),
+        active_resume_blocking_statuses=frozenset({"running"}),
+        run_id_factory=lambda: "run-resumed",
+    )
+
+    resumed_run = await service.resume(
+        session,
+        prompt="continue the implementation",
+        resume_reason="user_resume",
+    )
+
+    assert resumed_run is completed_run
+    assert session.tape_id == "tape-1"
+    assert persisted_sessions == [session]
+    assert len(saved_tape_entries) == 1
+    assert saved_tape_entries[0][0] == "tape-1"
+    saved_entry = saved_tape_entries[0][1][0]
+    assert saved_entry["kind"] == "anchor"
+    assert saved_entry["anchor_type"] == "context"
+    assert saved_entry["id"] == live_anchor_ids[0]
+    assert len(local_runs) == 1
+    assert local_runs[0][0] == "session-1"
+    assert local_runs[0][2] == "run-resumed"
+    assert "Previous run was interrupted." in local_runs[0][1]
+    assert "continue the implementation" in local_runs[0][1]
 
 
 async def _list_checkpoints(session_id: str) -> list[CheckpointMeta]:
