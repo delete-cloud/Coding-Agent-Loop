@@ -305,6 +305,9 @@ This ADR does not implement that path.
   - Completed: runtime run, interaction, message snapshot, event replay, and
     resume metadata query behavior are delegated to `RuntimeQueryService`
     instead of `SessionManager` helper methods.
+  - Completed: runtime resume context construction, resume prompt rendering, and
+    resume boundary anchor metadata are delegated to `RuntimeResumeService`
+    instead of `SessionManager` helper methods.
   - Completed: runtime run lifecycle and latest message snapshot persistence
     consume narrower `RuntimeRunLifecycleStore` and `RuntimeCheckpointStore`
     contracts through `RuntimeRunPersistenceService`.
