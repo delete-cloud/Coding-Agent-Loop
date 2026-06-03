@@ -1284,6 +1284,36 @@ def test_session_runtime_state_lives_on_runtime_handle() -> None:
     assert "pending_approval" not in instance_dict
 
 
+def test_session_runtime_handle_broadcasts_and_prunes_event_queues() -> None:
+    session = Session(
+        id="runtime-broadcast-session",
+        created_at=datetime.now(),
+        last_activity=datetime.now(),
+        approval_store=ApprovalStore(),
+    )
+    full_queue: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=1)
+    full_queue.put_nowait({"event": "Old", "data": "{}"})
+
+    class BrokenQueue:
+        def put_nowait(self, item: object) -> None:
+            _ = item
+            raise RuntimeError("queue closed")
+
+    healthy_queue: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=1)
+    broken_queue = cast(asyncio.Queue[dict[str, str]], cast(object, BrokenQueue()))
+    session.runtime_handle.event_queues = [full_queue, broken_queue, healthy_queue]
+    event = {"event": "Test", "data": "{}"}
+
+    result = session.runtime_handle.broadcast_event_nowait(event)
+
+    assert result.delivered_count == 1
+    assert result.full_pruned_count == 1
+    assert result.failed_pruned_count == 1
+    assert session.event_queues == [healthy_queue]
+    assert full_queue.qsize() == 1
+    assert healthy_queue.get_nowait() == event
+
+
 def test_session_store_data_excludes_runtime_handle_state() -> None:
     session = Session(
         id="runtime-handle-session",

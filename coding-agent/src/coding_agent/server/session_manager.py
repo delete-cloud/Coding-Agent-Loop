@@ -85,6 +85,7 @@ from coding_agent.runs import (
     CheckpointRestoreService,
     CheckpointSessionConfig,
     DefaultRunCoordinator,
+    EventBroadcastResult,
     LocalDaemonExecutorRef,
     LocalPathWorkspaceRef,
     RunCoordinator,
@@ -569,13 +570,6 @@ class MockProvider:
         return "Mock response"
 
 
-@dataclass(frozen=True, slots=True)
-class EventBroadcastResult:
-    delivered_count: int
-    full_pruned_count: int
-    failed_pruned_count: int
-
-
 @dataclass(frozen=True)
 class SessionRecord:
     """Durable session metadata stored across process restarts."""
@@ -876,32 +870,7 @@ class Session:
             instance_dict.pop(field_name, None)
 
     def broadcast_event_nowait(self, event: dict[str, Any]) -> EventBroadcastResult:
-        active_queues: list[asyncio.Queue[dict[str, Any]]] = []
-        delivered_count = 0
-        full_pruned_count = 0
-        failed_pruned_count = 0
-
-        for queue in self.event_queues:
-            try:
-                queue.put_nowait(event)
-            except asyncio.QueueFull:
-                full_pruned_count += 1
-            except Exception:
-                logger.debug(
-                    "Pruning event queue after broadcast failure",
-                    exc_info=True,
-                )
-                failed_pruned_count += 1
-            else:
-                delivered_count += 1
-                active_queues.append(queue)
-
-        self.event_queues = active_queues
-        return EventBroadcastResult(
-            delivered_count=delivered_count,
-            full_pruned_count=full_pruned_count,
-            failed_pruned_count=failed_pruned_count,
-        )
+        return self.runtime_handle.broadcast_event_nowait(event)
 
     def as_dict(self) -> dict[str, Any]:
         workspace_id = (
