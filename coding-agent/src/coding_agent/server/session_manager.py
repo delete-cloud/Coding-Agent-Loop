@@ -11,7 +11,7 @@ import os
 import secrets
 import threading
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import Enum
@@ -75,9 +75,6 @@ from coding_agent.runtime_store import (
 from coding_agent.stores import RuntimeStore
 from coding_agent.executors import (
     LocalDaemonExecutor,
-    LocalDaemonRuntimeBinding,
-    LocalDaemonRuntimePreparation,
-    LocalDaemonSessionRuntimeProvider,
 )
 from coding_agent.events import DisplayEvent, RuntimeEventReplayService
 from coding_agent.runs import (
@@ -100,6 +97,7 @@ from coding_agent.runs import (
     serialize_checkpoint_session_config,
 )
 from coding_agent.runs.checkpoint_runtime import CheckpointRuntimeBuilder
+from coding_agent.runs.runtime_preparation import LocalDaemonRuntimePreparationService
 from coding_agent.runs.turn_execution import RuntimeTurnService
 from coding_agent.wire.consumer import LocalWireConsumer
 from coding_agent.wire.local import LocalWire
@@ -574,14 +572,6 @@ class EventBroadcastResult:
     delivered_count: int
     full_pruned_count: int
     failed_pruned_count: int
-
-
-@dataclass(frozen=True)
-class _SessionLocalDaemonRuntimeProvider:
-    prepare: Callable[[RunRequest], Awaitable[LocalDaemonRuntimeBinding]]
-
-    async def prepare_runtime(self, request: RunRequest) -> LocalDaemonRuntimeBinding:
-        return await self.prepare(request)
 
 
 @dataclass
@@ -1117,6 +1107,23 @@ class SessionManager:
             runtime_store if runtime_store is not None else self._create_runtime_store()
         )
         self._runtime_closer = RuntimeCloser()
+        self._local_daemon_runtime_preparation = LocalDaemonRuntimePreparationService(
+            binding_resolver=self._binding_resolver,
+            local_daemon_executor=self._local_daemon_executor,
+            close_runtime=self._close_runtime,
+            close_runtime_adapter=self._close_runtime_adapter,
+            create_agent_for_session=self._create_agent_for_session,
+            restore_tape=self._restore_tape,
+            persist_session=self._persist_session_async,
+            make_consumer=self._make_session_consumer,
+            bind_subagent_message_publisher=self._bind_subagent_message_publisher,
+            runtime_preparation_request=self._runtime_preparation_request,
+            adapter_factory=lambda pipeline, ctx, consumer: PipelineAdapter(
+                pipeline=pipeline,
+                ctx=ctx,
+                consumer=consumer,
+            ),
+        )
         self.configure_owner_leases(
             owner_store=owner_store,
             owner_id=owner_id,
@@ -2902,25 +2909,11 @@ class SessionManager:
             f"runtime builders cannot resolve workspace target: {workspace.kind}"
         )
 
-    def _resolve_local_daemon_environment(self, target: RunTarget) -> Environment:
-        if not isinstance(target.executor, LocalDaemonExecutorRef):
-            raise ValueError("local daemon runs require a local_daemon executor target")
-        if not isinstance(target.workspace, LocalPathWorkspaceRef):
-            raise ValueError("local daemon runs require a local_path workspace target")
-        return self._resolve_environment_for_run_target(target)
-
     def _environment_workspace_root(self, environment: Environment) -> Path | None:
         local_root = environment.workspace_summary().local_root
         if local_root is None:
             return None
         return Path(local_root).expanduser().resolve()
-
-    def _runtime_environment_workspace_root(self, ctx: object) -> Path | None:
-        run_context = getattr(ctx, "run_context", None)
-        environment = getattr(run_context, "environment", None)
-        if environment is None:
-            return None
-        return self._environment_workspace_root(cast(Environment, environment))
 
     async def _submit_runtime_run_request(
         self,
@@ -2942,29 +2935,6 @@ class SessionManager:
         )
         await self._run_coordinator.submit_run(request)
         return request
-
-    async def _prepare_local_daemon_runtime(
-        self,
-        session: Session,
-        *,
-        consumer: LocalWireConsumer,
-        request: RunRequest,
-    ) -> LocalDaemonRuntimeBinding:
-        return await LocalDaemonSessionRuntimeProvider(
-            session=session,
-            resolve_environment=self._resolve_local_daemon_environment,
-            workspace_root_for_environment=self._environment_workspace_root,
-            workspace_root_for_runtime=self._runtime_environment_workspace_root,
-            close_runtime=self._close_runtime,
-            create_agent_for_session=self._create_agent_for_session,
-            restore_tape=self._restore_tape,
-            persist_session=self._persist_session_async,
-            adapter_factory=lambda pipeline, ctx: PipelineAdapter(
-                pipeline=pipeline,
-                ctx=ctx,
-                consumer=consumer,
-            ),
-        ).prepare_runtime(request)
 
     def _hydrate_session(self, session: Session) -> Session:
         approval_store = self._approval_stores.get(session.id)
@@ -3395,7 +3365,7 @@ class SessionManager:
                 persist_session=self._persist_session_async,
                 make_consumer=self._make_session_consumer,
                 submit_run_request=self._submit_runtime_run_request,
-                prepare_runtime=self._prepare_local_daemon_runtime,
+                prepare_runtime=self._local_daemon_runtime_preparation.prepare_runtime,
                 close_runtime=self._close_runtime,
                 emit_message=self._send_session_wire_message,
                 bind_root_run_identity=self._bind_root_run_identity,
@@ -3643,70 +3613,6 @@ class SessionManager:
             metadata={"purpose": purpose},
         )
 
-    async def _build_session_runtime_direct(
-        self,
-        session: Session,
-        *,
-        target: RunTarget | None = None,
-        model_name: str | None = None,
-        provider_name: str | None = None,
-        base_url: str | None = None,
-        max_steps: int | None = None,
-        approval_policy: ApprovalPolicy | None = None,
-    ) -> tuple[Any, Any, PipelineAdapter]:
-        approval_mode_map = {
-            ApprovalPolicy.YOLO: "yolo",
-            ApprovalPolicy.INTERACTIVE: "interactive",
-            ApprovalPolicy.AUTO: "auto",
-        }
-        resolved_provider_name = (
-            session.provider_name if provider_name is None else provider_name
-        )
-        resolved_model_name = session.model_name if model_name is None else model_name
-        resolved_base_url = session.base_url if base_url is None else base_url
-        resolved_max_steps = session.max_steps if max_steps is None else max_steps
-        resolved_approval_policy = (
-            session.approval_policy if approval_policy is None else approval_policy
-        )
-        runtime_target = session.default_run_target if target is None else target
-        environment = self._resolve_environment_for_run_target(runtime_target)
-        workspace_root = self._environment_workspace_root(environment)
-
-        consumer = self._make_session_consumer(session)
-        pipeline, ctx = self._create_agent_for_session(
-            workspace_root=workspace_root,
-            environment=environment,
-            model_override=resolved_model_name,
-            provider_override=resolved_provider_name,
-            base_url_override=resolved_base_url,
-            max_steps_override=resolved_max_steps,
-            approval_mode_override=approval_mode_map[resolved_approval_policy],
-            session_id_override=session.id,
-            api_key=None,
-            tape=await self._restore_tape(session.tape_id),
-        )
-        ctx.config["wire_consumer"] = consumer
-        ctx.config["agent_id"] = ""
-        self._bind_subagent_message_publisher(ctx)
-
-        llm_plugin = pipeline._registry.get("llm_provider")
-        provider_model_name = getattr(session.provider, "model_name", None)
-        if (
-            session.provider is not None
-            and session.provider_name == resolved_provider_name
-            and provider_model_name == resolved_model_name
-            and session.base_url == resolved_base_url
-        ):
-            llm_plugin._instance = session.provider
-
-        adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
-        try:
-            await adapter.initialize()
-        except Exception:
-            await self._close_runtime_adapter(adapter)
-            raise
-        return pipeline, ctx, adapter
-
     async def _build_session_runtime(
         self,
         session: Session,
@@ -3717,44 +3623,18 @@ class SessionManager:
         max_steps: int | None = None,
         approval_policy: ApprovalPolicy | None = None,
     ) -> tuple[Any, Any, PipelineAdapter]:
-        if not self._is_local_daemon_run_target(session.default_run_target):
-            return await self._build_session_runtime_direct(
-                session,
-                model_name=model_name,
-                provider_name=provider_name,
-                base_url=base_url,
-                max_steps=max_steps,
-                approval_policy=approval_policy,
-            )
-
-        async def prepare_runtime(request: RunRequest) -> LocalDaemonRuntimeBinding:
-            pipeline, ctx, adapter = await self._build_session_runtime_direct(
-                session,
-                target=request.target,
-                model_name=model_name,
-                provider_name=provider_name,
-                base_url=base_url,
-                max_steps=max_steps,
-                approval_policy=approval_policy,
-            )
-            return LocalDaemonRuntimeBinding(
-                pipeline=pipeline,
-                ctx=ctx,
-                adapter=adapter,
-            )
-
-        binding = await self._local_daemon_executor.prepare_runtime(
-            LocalDaemonRuntimePreparation(
-                request=self._runtime_preparation_request(session),
-                runtime_provider=_SessionLocalDaemonRuntimeProvider(
-                    prepare=prepare_runtime,
-                ),
-            )
+        runtime = await self._local_daemon_runtime_preparation.build_runtime(
+            session,
+            model_name=model_name,
+            provider_name=provider_name,
+            base_url=base_url,
+            max_steps=max_steps,
+            approval_policy=approval_policy,
         )
         return (
-            binding.pipeline,
-            binding.ctx,
-            cast(PipelineAdapter, binding.adapter),
+            runtime.pipeline,
+            runtime.ctx,
+            cast(PipelineAdapter, runtime.adapter),
         )
 
     async def ensure_session_runtime(self, session_id: str) -> Any:
