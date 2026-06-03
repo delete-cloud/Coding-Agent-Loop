@@ -333,6 +333,11 @@ This ADR does not implement that path.
   - Completed: attached/external executor run request, claim, heartbeat, runtime
     event append, finalization metadata, and claim authorization are delegated to
     `RuntimeAttachedExecutorService` instead of `SessionManager` helper methods.
+  - Completed: attached/external executor run-request locking, owner assertion,
+    session loading, attached-session validation, session turn-state mutation,
+    and session persistence are delegated to
+    `RuntimeAttachedExecutorRequestService` instead of living inline in
+    `SessionManager.request_attached_executor_run()`.
   - Completed: attached executor cancellation run updates, local turn
     cancellation session-state transitions, and cancelled local task observation
     are delegated to `RuntimeCancelService` instead of `SessionManager` helper

@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import secrets
-from collections.abc import Callable, Mapping
+import uuid
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Protocol, cast
+from typing import Any, AsyncContextManager, Protocol, cast
 
 from coding_agent.runtime_store import AgentRunRecord, JSONObject, RuntimeEventRecord
 from coding_agent.stores import RuntimeRunStore
@@ -30,6 +31,17 @@ class RuntimeAttachedExecutorSession(RuntimeMetadataSession, Protocol):
     tape_id: str | None
 
 
+class RuntimeAttachedExecutorRequestSession(
+    RuntimeAttachedExecutorSession,
+    Protocol,
+):
+    turn_in_progress: bool
+    turn_status: str
+    current_turn_id: str | None
+    last_activity: datetime
+    last_failure_details: Any | None
+
+
 class RuntimeAttachedExecutorMetadataProvider(Protocol):
     def __call__(
         self,
@@ -44,6 +56,68 @@ class RuntimeAttachedExecutorClaim:
     run: AgentRunRecord
     claim_token: str
     prompt: str
+
+
+RuntimeAttachedExecutorRequestLock = AsyncContextManager[None]
+RuntimeAttachedExecutorOwnerAsserter = Callable[[str], Awaitable[None]]
+RuntimeAttachedExecutorSessionLoader = Callable[
+    [str],
+    Awaitable[RuntimeAttachedExecutorRequestSession],
+]
+RuntimeAttachedExecutorSessionPersister = Callable[
+    [RuntimeAttachedExecutorRequestSession],
+    Awaitable[None],
+]
+RuntimeAttachedExecutorProvider = Callable[[], "RuntimeAttachedExecutorService"]
+RuntimeAttachedExecutorSessionPredicate = Callable[
+    [RuntimeAttachedExecutorRequestSession],
+    bool,
+]
+RuntimeAttachedExecutorRunIdFactory = Callable[[], str]
+
+
+@dataclass(frozen=True)
+class RuntimeAttachedExecutorRequestService:
+    lock: RuntimeAttachedExecutorRequestLock
+    assert_owner: RuntimeAttachedExecutorOwnerAsserter
+    load_session: RuntimeAttachedExecutorSessionLoader
+    attached_executor: RuntimeAttachedExecutorProvider
+    persist_session: RuntimeAttachedExecutorSessionPersister
+    session_is_attached: RuntimeAttachedExecutorSessionPredicate
+    run_id_factory: RuntimeAttachedExecutorRunIdFactory = lambda: uuid.uuid4().hex
+
+    async def request_run(
+        self,
+        session_id: str,
+        prompt: str,
+        *,
+        run_id: str | None = None,
+        resume_context: RuntimeRunResumeContext | None = None,
+    ) -> AgentRunRecord:
+        async with self.lock:
+            await self.assert_owner(session_id)
+            session = await self.load_session(session_id)
+            if not self.session_is_attached(session):
+                raise ValueError("session does not use attached executor execution")
+            if session.turn_in_progress or session.turn_status in {
+                "running",
+                "cancelling",
+            }:
+                raise RuntimeError("turn already in progress")
+            resolved_run_id = run_id or self.run_id_factory()
+            record = await self.attached_executor().request_run(
+                session,
+                prompt=prompt,
+                run_id=resolved_run_id,
+                resume_context=resume_context,
+            )
+            session.current_turn_id = resolved_run_id
+            session.turn_in_progress = True
+            session.turn_status = "running"
+            session.last_activity = record.started_at
+            session.last_failure_details = None
+            await self.persist_session(session)
+            return record
 
 
 @dataclass(frozen=True)
@@ -310,7 +384,16 @@ def _optional_metadata_datetime(
 __all__ = [
     "ATTACHED_EXECUTOR_BINDING_KINDS",
     "RuntimeAttachedExecutorClaim",
+    "RuntimeAttachedExecutorOwnerAsserter",
+    "RuntimeAttachedExecutorProvider",
+    "RuntimeAttachedExecutorRequestLock",
+    "RuntimeAttachedExecutorRequestService",
+    "RuntimeAttachedExecutorRequestSession",
+    "RuntimeAttachedExecutorRunIdFactory",
     "RuntimeAttachedExecutorSession",
     "RuntimeAttachedExecutorService",
+    "RuntimeAttachedExecutorSessionLoader",
+    "RuntimeAttachedExecutorSessionPersister",
+    "RuntimeAttachedExecutorSessionPredicate",
     "RuntimeAttachedExecutorStore",
 ]
