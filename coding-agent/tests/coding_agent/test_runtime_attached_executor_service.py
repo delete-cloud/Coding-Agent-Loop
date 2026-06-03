@@ -11,6 +11,7 @@ from coding_agent.runtime_store import AgentRunRecord, JSONObject, RuntimeEventR
 from coding_agent.runs import (
     RuntimeAttachedExecutorClaim,
     RuntimeAttachedExecutorClaimService,
+    RuntimeAttachedExecutorFinalizeService,
     RuntimeAttachedExecutorRequestService,
     RuntimeAttachedExecutorService,
 )
@@ -363,6 +364,150 @@ async def test_attached_executor_claim_service_returns_none_without_claim() -> N
     assert loaded_sessions == []
 
 
+@pytest.mark.asyncio
+async def test_attached_executor_finalize_service_saves_tape_before_final_status() -> (
+    None
+):
+    now = datetime(2026, 6, 3, 12, 0, tzinfo=UTC)
+    session = FakeSession(turn_in_progress=True, turn_status="running")
+    calls: list[str] = []
+    store = FakeAttachedExecutorStore(calls=calls)
+    attached_service = RuntimeAttachedExecutorService(
+        store=store,
+        metadata_for_session=_metadata_for_session,
+        now=lambda: now,
+        token_urlsafe=lambda _: "claim-token",
+    )
+    await attached_service.request_run(
+        session,
+        prompt="run attached",
+        run_id="run-1",
+    )
+    claim = await attached_service.claim_run(
+        executor_id="executor-1",
+        executor_kind="local_cli",
+    )
+    assert claim is not None
+    persisted_sessions: list[FakeSession] = []
+
+    async def load_session(session_id: str) -> FakeSession:
+        calls.append(f"load_session:{session_id}")
+        return session
+
+    async def save_tape_entries(
+        tape_id: str,
+        entries: list[JSONObject],
+    ) -> None:
+        calls.append(f"save_tape:{tape_id}:{len(entries)}")
+
+    async def persist_session(persisted_session: FakeSession) -> None:
+        calls.append(f"persist_session:{persisted_session.id}")
+        persisted_sessions.append(persisted_session)
+
+    finalized = await RuntimeAttachedExecutorFinalizeService(
+        lock=RecordingLock(calls),
+        load_session=load_session,
+        attached_executor=lambda: attached_service,
+        save_tape_entries=save_tape_entries,
+        persist_session=persist_session,
+        now=lambda: now,
+    ).finalize_run(
+        run_id="run-1",
+        executor_id="executor-1",
+        claim_token=claim.claim_token,
+        status="completed",
+        result={"ok": True},
+        error=None,
+        tape_id="tape-final",
+        tape_entries=[{"kind": "message"}],
+    )
+
+    assert finalized.status == "completed"
+    assert calls == [
+        "save_tape:tape-final:1",
+        "update_run:run-1:completed",
+        "lock_enter",
+        "load_session:session-1",
+        "persist_session:session-1",
+        "lock_exit",
+    ]
+    assert session.tape_id == "tape-final"
+    assert session.turn_in_progress is False
+    assert session.turn_status == "idle"
+    assert session.current_turn_id == "run-1"
+    assert session.last_activity == now
+    assert session.last_failure_details is None
+    assert persisted_sessions == [session]
+
+
+@pytest.mark.asyncio
+async def test_attached_executor_finalize_service_does_not_finalize_when_tape_save_fails() -> (
+    None
+):
+    now = datetime(2026, 6, 3, 12, 0, tzinfo=UTC)
+    session = FakeSession(turn_in_progress=True, turn_status="running")
+    calls: list[str] = []
+    store = FakeAttachedExecutorStore(calls=calls)
+    attached_service = RuntimeAttachedExecutorService(
+        store=store,
+        metadata_for_session=_metadata_for_session,
+        now=lambda: now,
+        token_urlsafe=lambda _: "claim-token",
+    )
+    await attached_service.request_run(
+        session,
+        prompt="run attached",
+        run_id="run-1",
+    )
+    claim = await attached_service.claim_run(
+        executor_id="executor-1",
+        executor_kind="local_cli",
+    )
+    assert claim is not None
+
+    async def load_session(session_id: str) -> FakeSession:
+        del session_id
+        raise AssertionError("failed tape save should not load session")
+
+    async def save_tape_entries(
+        tape_id: str,
+        entries: list[JSONObject],
+    ) -> None:
+        del tape_id, entries
+        calls.append("save_tape_failed")
+        raise RuntimeError("tape save failed")
+
+    async def persist_session(persisted_session: FakeSession) -> None:
+        del persisted_session
+        raise AssertionError("failed tape save should not persist session")
+
+    with pytest.raises(RuntimeError, match="tape save failed"):
+        await RuntimeAttachedExecutorFinalizeService(
+            lock=RecordingLock(calls),
+            load_session=load_session,
+            attached_executor=lambda: attached_service,
+            save_tape_entries=save_tape_entries,
+            persist_session=persist_session,
+            now=lambda: now,
+        ).finalize_run(
+            run_id="run-1",
+            executor_id="executor-1",
+            claim_token=claim.claim_token,
+            status="completed",
+            result={"ok": True},
+            error=None,
+            tape_id="tape-final",
+            tape_entries=[{"kind": "message"}],
+        )
+
+    assert calls == ["save_tape_failed"]
+    loaded = await store.load_agent_run("run-1")
+    assert loaded is not None
+    assert loaded.status == "claimed"
+    assert session.turn_in_progress is True
+    assert session.turn_status == "running"
+
+
 def _metadata_for_session(
     session: FakeSession,
     *,
@@ -385,9 +530,10 @@ def _metadata_for_session(
 
 
 class FakeAttachedExecutorStore:
-    def __init__(self) -> None:
+    def __init__(self, *, calls: list[str] | None = None) -> None:
         self.runs: dict[str, AgentRunRecord] = {}
         self.events: list[RuntimeEventRecord] = []
+        self.calls = calls
 
     async def create_agent_run(self, record: AgentRunRecord) -> AgentRunRecord:
         self.runs[record.run_id] = record
@@ -403,6 +549,8 @@ class FakeAttachedExecutorStore:
         result: JSONObject,
         error: str | None,
     ) -> AgentRunRecord:
+        if self.calls is not None:
+            self.calls.append(f"update_run:{run_id}:{status}")
         existing = self.runs[run_id]
         updated = AgentRunRecord(
             run_id=existing.run_id,

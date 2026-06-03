@@ -86,6 +86,7 @@ RuntimeAttachedExecutorClaimFactory = Callable[
     RuntimeAttachedExecutorClaimEnvelope,
 ]
 RuntimeAttachedExecutorClaimSessionLoader = Callable[[str], Awaitable[object]]
+RuntimeAttachedExecutorTapeSaver = Callable[[str, list[JSONObject]], Awaitable[None]]
 
 
 @dataclass(frozen=True)
@@ -164,6 +165,58 @@ class RuntimeAttachedExecutorClaimService:
             return None
         session = await self.load_session(claim.run.session_id)
         return self.claim_factory(claim, session)
+
+
+@dataclass(frozen=True)
+class RuntimeAttachedExecutorFinalizeService:
+    lock: RuntimeAttachedExecutorRequestLock
+    load_session: RuntimeAttachedExecutorSessionLoader
+    attached_executor: RuntimeAttachedExecutorProvider
+    save_tape_entries: RuntimeAttachedExecutorTapeSaver
+    persist_session: RuntimeAttachedExecutorSessionPersister
+    now: Callable[[], datetime] = lambda: datetime.now(UTC)
+
+    async def finalize_run(
+        self,
+        *,
+        run_id: str,
+        executor_id: str,
+        claim_token: str,
+        status: str,
+        result: JSONObject,
+        error: str | None,
+        tape_id: str | None,
+        tape_entries: list[JSONObject] | None = None,
+    ) -> AgentRunRecord:
+        attached_executor = self.attached_executor()
+        run = await attached_executor.load_and_authorize_run(
+            run_id=run_id,
+            executor_id=executor_id,
+            claim_token=claim_token,
+        )
+        attached_executor.validate_final_status(status)
+        if tape_id is not None and tape_entries is not None:
+            await self.save_tape_entries(tape_id, tape_entries)
+        updated = await attached_executor.finalize_authorized_run(
+            run,
+            status=status,
+            result=result,
+            error=error,
+            tape_id=tape_id,
+        )
+        async with self.lock:
+            session = await self.load_session(updated.session_id)
+            if tape_id is not None:
+                session.tape_id = tape_id
+            session.turn_in_progress = False
+            session.turn_status = (
+                status if status in {"cancelled", "failed"} else "idle"
+            )
+            session.current_turn_id = run_id
+            session.last_activity = self.now()
+            session.last_failure_details = error if status == "failed" else None
+            await self.persist_session(session)
+        return updated
 
 
 @dataclass(frozen=True)
@@ -434,6 +487,7 @@ __all__ = [
     "RuntimeAttachedExecutorClaimFactory",
     "RuntimeAttachedExecutorClaimService",
     "RuntimeAttachedExecutorClaimSessionLoader",
+    "RuntimeAttachedExecutorFinalizeService",
     "RuntimeAttachedExecutorOwnerAsserter",
     "RuntimeAttachedExecutorProvider",
     "RuntimeAttachedExecutorRequestLock",
@@ -446,4 +500,5 @@ __all__ = [
     "RuntimeAttachedExecutorSessionPersister",
     "RuntimeAttachedExecutorSessionPredicate",
     "RuntimeAttachedExecutorStore",
+    "RuntimeAttachedExecutorTapeSaver",
 ]

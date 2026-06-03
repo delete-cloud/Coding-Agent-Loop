@@ -33,6 +33,7 @@ from .attached_executor import (
     RuntimeAttachedExecutorClaimFactory,
     RuntimeAttachedExecutorClaimService,
     RuntimeAttachedExecutorClaimSessionLoader,
+    RuntimeAttachedExecutorFinalizeService,
     RuntimeAttachedExecutorOwnerAsserter,
     RuntimeAttachedExecutorProvider,
     RuntimeAttachedExecutorRequestLock,
@@ -45,6 +46,7 @@ from .attached_executor import (
     RuntimeAttachedExecutorSessionPersister,
     RuntimeAttachedExecutorSessionPredicate,
     RuntimeAttachedExecutorStore,
+    RuntimeAttachedExecutorTapeSaver,
 )
 from .agent_factory import RuntimeAgentFactory, RuntimeAgentFactoryService
 from .cancel import (
@@ -263,6 +265,7 @@ __all__ = [
     "RuntimeAttachedExecutorClaimFactory",
     "RuntimeAttachedExecutorClaimService",
     "RuntimeAttachedExecutorClaimSessionLoader",
+    "RuntimeAttachedExecutorFinalizeService",
     "RuntimeAttachedExecutorOwnerAsserter",
     "RuntimeAttachedExecutorProvider",
     "RuntimeAttachedExecutorRequestLock",
@@ -275,6 +278,7 @@ __all__ = [
     "RuntimeAttachedExecutorSessionPersister",
     "RuntimeAttachedExecutorSessionPredicate",
     "RuntimeAttachedExecutorStore",
+    "RuntimeAttachedExecutorTapeSaver",
     "RuntimeCancelableTask",
     "RuntimeCancelObservationFinalizer",
     "RuntimeCancelObservationLock",
