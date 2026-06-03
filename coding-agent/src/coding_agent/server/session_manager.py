@@ -48,7 +48,6 @@ from coding_agent.approval import (
 )
 from coding_agent.approval.store import ApprovalStore
 from coding_agent.core import config as core_config
-from coding_agent.environment.sandboxed import sandbox_environment
 from coding_agent.plugins.storage import JSONLTapeStore
 from coding_agent.providers.base import ToolSchema
 from coding_agent.runtime_store import (
@@ -68,14 +67,12 @@ from coding_agent.executors import (
 from coding_agent.events import DisplayEvent
 from coding_agent.runs import (
     CHECKPOINT_SESSION_CONFIG_KEY,
-    CloudWorkspaceRef,
     CheckpointRestoredRuntime,
     CheckpointRestoreService,
     CheckpointSessionConfig,
     DefaultRunCoordinator,
     EventBroadcastResult,
     LocalDaemonExecutorRef,
-    LocalPathWorkspaceRef,
     RunCoordinator,
     RuntimeAttachedExecutorService,
     RuntimeAgentFactoryService,
@@ -102,6 +99,7 @@ from coding_agent.runs import (
     serialize_checkpoint_session_config,
 )
 from coding_agent.runs.checkpoint_runtime import CheckpointRuntimeBuilder
+from coding_agent.runs.environment import RuntimeEnvironmentResolverService
 from coding_agent.runs.runtime_preparation import LocalDaemonRuntimePreparationService
 from coding_agent.runs.turn_execution import RuntimeTurnService
 from coding_agent.wire.consumer import LocalWireConsumer
@@ -130,7 +128,6 @@ from coding_agent.environment.execution_binding import (
     ExternalWorkerBinding,
     LocalExecutionBinding,
 )
-from coding_agent.environment.local import LocalEnvironment
 from coding_agent.server.stores.workspace_store import (
     JSONValue,
     WorkspaceRecord,
@@ -800,11 +797,14 @@ class SessionManager:
             close_runtime_adapter=self._runtime_closer.close_adapter,
         )
         self._runtime_ensure_service = RuntimeEnsureService()
+        self._runtime_environment_resolver_service = RuntimeEnvironmentResolverService(
+            self._binding_resolver
+        )
         self._runtime_context_binding_service = RuntimeContextBindingService(
             publish_subagent_message=self.publish_subagent_message,
         )
         self._local_daemon_runtime_preparation = LocalDaemonRuntimePreparationService(
-            binding_resolver=self._binding_resolver,
+            environment_resolver=self._runtime_environment_resolver_service,
             local_daemon_executor=self._local_daemon_executor,
             close_runtime=self._runtime_closer.close,
             close_runtime_adapter=self._runtime_closer.close_adapter,
@@ -2121,8 +2121,12 @@ class SessionManager:
     def _checkpoint_restore_service(self) -> CheckpointRestoreService:
         runtime_builder = CheckpointRuntimeBuilder(
             local_daemon_executor=self._local_daemon_executor,
-            resolve_environment_for_run_target=self._resolve_environment_for_run_target,
-            workspace_root_for_environment=self._environment_workspace_root,
+            resolve_environment_for_run_target=(
+                self._runtime_environment_resolver_service.resolve_environment_for_run_target
+            ),
+            workspace_root_for_environment=(
+                self._runtime_environment_resolver_service.workspace_root_for_environment
+            ),
             create_agent_for_session=(
                 self._runtime_agent_factory_service.create_agent_for_session
             ),
@@ -2171,38 +2175,6 @@ class SessionManager:
 
     def _resolve_environment(self, session: Session) -> Environment:
         return self._binding_resolver.resolve_environment(session.execution_binding)
-
-    def _resolve_environment_for_run_target(
-        self,
-        target: RunTarget | None,
-    ) -> Environment:
-        if target is None:
-            raise RuntimeError("session is missing default_run_target")
-        workspace = target.workspace
-        environment: Environment
-        if isinstance(workspace, LocalPathWorkspaceRef):
-            environment = LocalEnvironment(Path(workspace.path).expanduser().resolve())
-            return sandbox_environment(environment, target.isolation)
-        if isinstance(workspace, CloudWorkspaceRef):
-            environment = self._binding_resolver.resolve_environment(
-                CloudWorkspaceBinding(
-                    workspace_url=workspace.workspace_url,
-                    workspace_id=workspace.workspace_id,
-                    runtime_profile=workspace.runtime_profile,
-                    workspace_provider=workspace.workspace_provider,
-                    provider_instance_id=workspace.provider_instance_id,
-                )
-            )
-            return sandbox_environment(environment, target.isolation)
-        raise ValueError(
-            f"runtime builders cannot resolve workspace target: {workspace.kind}"
-        )
-
-    def _environment_workspace_root(self, environment: Environment) -> Path | None:
-        local_root = environment.workspace_summary().local_root
-        if local_root is None:
-            return None
-        return Path(local_root).expanduser().resolve()
 
     def _hydrate_session(self, session: Session) -> Session:
         approval_store = self._approval_stores.get(session.id)
