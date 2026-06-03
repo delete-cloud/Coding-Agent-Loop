@@ -5,23 +5,7 @@ import importlib
 
 def test_ui_server_module_aliases_point_to_canonical_modules() -> None:
     module_pairs = [
-        (
-            "coding_agent.ui.binding_resolver",
-            "coding_agent.environment.binding_resolver",
-        ),
-        (
-            "coding_agent.server.binding_resolver",
-            "coding_agent.environment.binding_resolver",
-        ),
         ("coding_agent.ui.developer_console", "coding_agent.server.developer_console"),
-        (
-            "coding_agent.ui.execution_binding",
-            "coding_agent.environment.execution_binding",
-        ),
-        (
-            "coding_agent.server.execution_binding",
-            "coding_agent.environment.execution_binding",
-        ),
         ("coding_agent.ui.http_server", "coding_agent.server.http_server"),
         ("coding_agent.ui.rate_limit", "coding_agent.server.rate_limit"),
         ("coding_agent.ui.session_manager", "coding_agent.server.session_manager"),

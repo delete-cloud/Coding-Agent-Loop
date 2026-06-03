@@ -41,7 +41,13 @@ Source of truth in code:
 
 `CreateSessionRequest` (all optional unless noted):
 `repo_path`, `approval_policy` (`auto` \| `interactive` \| `yolo`, default `auto`),
-`provider`, `model`, `base_url`, `max_steps`, `execution_binding`.
+`provider`, `model`, `base_url`, `max_steps`, `run_target`,
+`default_run_target`, `workspace_source`.
+
+`repo_path` is a shortcut for a local `default_run_target`. New clients must not
+send `execution_binding`; the server rejects it. Stored legacy session payloads
+that still contain `execution_binding` are migrated server-side into
+`default_run_target` and are not returned as session state.
 
 `409 Turn already in progress` is returned if you POST `/prompt` while a turn is
 streaming. `404` = session not found (or not visible to this auth context).

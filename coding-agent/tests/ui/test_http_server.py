@@ -50,10 +50,15 @@ from coding_agent.environment.workspace_provider import (
     WorkspaceInventoryEntry,
     WorkspacePatch,
 )
-from coding_agent.environment.execution_binding import (
-    CloudWorkspaceBinding,
-    ExternalWorkerBinding,
-    LocalExecutionBinding,
+from coding_agent.runs import (
+    CloudWorkspaceRef,
+    ExternalWorkerExecutorRef,
+    ExternalWorkerWorkspaceRef,
+    IsolationPolicy,
+    LocalAttachedExecutorRef,
+    LocalDaemonExecutorRef,
+    LocalPathWorkspaceRef,
+    RunTarget,
 )
 from coding_agent.wire.local import LocalWire
 from coding_agent.server.session_manager import Session
@@ -62,7 +67,6 @@ from coding_agent.server.stores.session_owner_store import SessionOwnerRecord
 from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictError
 from coding_agent.server.http_server import (
     SESSION_IDLE_TIMEOUT_MINUTES,
-    _build_binding_resolver,
     _build_session_manager,
     _renew_owner_leases,
     _cleanup_event_queue_on_disconnect,
@@ -90,6 +94,71 @@ from coding_agent.wire.protocol import (
     TurnStatusDelta,
     TurnEnd,
 )
+
+
+def _local_run_target(path: Path | str) -> RunTarget:
+    return RunTarget(
+        workspace=LocalPathWorkspaceRef(path=str(path)),
+        executor=LocalDaemonExecutorRef(),
+        isolation=IsolationPolicy(kind="default_local_sandbox"),
+    )
+
+
+def _cloud_run_target(workspace: CloudWorkspaceRef) -> RunTarget:
+    return RunTarget(
+        workspace=workspace,
+        executor=LocalDaemonExecutorRef(),
+        isolation=IsolationPolicy(
+            kind="provider_sandbox",
+            network="provider_managed",
+            filesystem="provider_managed",
+            secrets="provider_managed",
+        ),
+    )
+
+
+def _cloud_run_target_payload(
+    *,
+    workspace_url: str = "https://workspace.example.com",
+    workspace_id: str = "ws-123",
+    workspace_provider: str | None = None,
+    provider_instance_id: str | None = None,
+) -> dict[str, object]:
+    return _cloud_run_target(
+        CloudWorkspaceRef(
+            workspace_url=workspace_url,
+            workspace_id=workspace_id,
+            workspace_provider=workspace_provider,
+            provider_instance_id=provider_instance_id,
+        )
+    ).to_dict()
+
+
+def _attached_run_target_payload(
+    *,
+    kind: str = "external_worker",
+    display_path: str = "/tmp/repo",
+) -> dict[str, object]:
+    executor = (
+        LocalAttachedExecutorRef(executor_kind="local_cli")
+        if kind == "local_attached"
+        else ExternalWorkerExecutorRef(executor_kind="local_cli")
+    )
+    return RunTarget(
+        workspace=ExternalWorkerWorkspaceRef(
+            ref={"kind": "local_path", "display_path": display_path}
+        ),
+        executor=executor,
+        isolation=IsolationPolicy(kind="external_worker_policy"),
+    ).to_dict()
+
+
+def _external_worker_run_target() -> RunTarget:
+    return RunTarget(
+        workspace=ExternalWorkerWorkspaceRef(),
+        executor=ExternalWorkerExecutorRef(executor_kind="local_cli"),
+        isolation=IsolationPolicy(kind="external_worker_policy"),
+    )
 
 
 def _test_runtime_profile_config(image: str = "python:3.11-slim") -> dict[str, object]:
@@ -1152,15 +1221,15 @@ class TestSessionCreation:
 
         assert session.provider is None
 
-    async def test_create_session_stores_local_binding_by_default(self, client):
+    async def test_create_session_stores_local_run_target_by_default(self, client):
         response = await client.post("/sessions", json={})
 
         session = session_manager.get_session(response.json()["session_id"])
 
-        assert isinstance(session.execution_binding, LocalExecutionBinding)
-        assert session.execution_binding.workspace_root == str(Path.cwd().resolve())
+        assert isinstance(session.default_run_target.workspace, LocalPathWorkspaceRef)
+        assert session.default_run_target.workspace.path == str(Path.cwd().resolve())
 
-    async def test_create_session_stores_local_binding_with_repo_path(
+    async def test_create_session_stores_local_run_target_with_repo_path(
         self, client, tmp_path
     ):
         response = await client.post(
@@ -1170,11 +1239,11 @@ class TestSessionCreation:
 
         session = session_manager.get_session(response.json()["session_id"])
 
-        assert isinstance(session.execution_binding, LocalExecutionBinding)
-        assert session.execution_binding.workspace_root == str(tmp_path.resolve())
+        assert isinstance(session.default_run_target.workspace, LocalPathWorkspaceRef)
+        assert session.default_run_target.workspace.path == str(tmp_path.resolve())
         assert session.repo_path == tmp_path.resolve()
 
-    async def test_http_create_session_stores_cloud_execution_binding(self, client):
+    async def test_http_create_session_rejects_execution_binding(self, client):
         response = await client.post(
             "/sessions",
             json={
@@ -1186,13 +1255,33 @@ class TestSessionCreation:
             },
         )
 
+        assert response.status_code == 422
+        assert response.json()["detail"][0]["type"] == "extra_forbidden"
+        assert response.json()["detail"][0]["loc"] == ["body", "execution_binding"]
+
+    async def test_http_create_session_rejects_empty_default_run_target(self, client):
+        response = await client.post(
+            "/sessions",
+            json={"default_run_target": {}},
+        )
+
+        assert response.status_code == 400
+        assert "workspace must be an object" in response.json()["detail"]
+
+    async def test_http_create_session_stores_cloud_run_target(self, client):
+        response = await client.post(
+            "/sessions",
+            json={"run_target": _cloud_run_target_payload()},
+        )
+
         assert response.status_code == 200
         session = session_manager.get_session(response.json()["session_id"])
-        assert isinstance(session.execution_binding, CloudWorkspaceBinding)
+        assert isinstance(session.default_run_target.workspace, CloudWorkspaceRef)
         assert (
-            session.execution_binding.workspace_url == "https://workspace.example.com"
+            session.default_run_target.workspace.workspace_url
+            == "https://workspace.example.com"
         )
-        assert session.execution_binding.workspace_id == "ws-123"
+        assert session.default_run_target.workspace.workspace_id == "ws-123"
 
     async def test_http_create_session_round_trips_workspace_provider_metadata(
         self, client
@@ -1200,39 +1289,33 @@ class TestSessionCreation:
         response = await client.post(
             "/sessions",
             json={
-                "execution_binding": {
-                    "kind": "cloud",
-                    "workspace_url": "https://workspace.example.com",
-                    "workspace_id": "ws-123",
-                    "workspace_provider": "docker",
-                    "provider_instance_id": "docker-host-a",
-                }
+                "run_target": _cloud_run_target_payload(
+                    workspace_provider="docker",
+                    provider_instance_id="docker-host-a",
+                )
             },
         )
 
         assert response.status_code == 200
         session = session_manager.get_session(response.json()["session_id"])
-        assert isinstance(session.execution_binding, CloudWorkspaceBinding)
-        assert session.execution_binding.workspace_provider == "docker"
-        assert session.execution_binding.provider_instance_id == "docker-host-a"
+        assert isinstance(session.default_run_target.workspace, CloudWorkspaceRef)
+        assert session.default_run_target.workspace.workspace_provider == "docker"
+        assert session.default_run_target.workspace.provider_instance_id == "docker-host-a"
 
     @pytest.mark.parametrize("field", ["workspace_provider", "provider_instance_id"])
     async def test_http_create_session_rejects_blank_workspace_provider_metadata(
         self, client, field
     ):
-        execution_binding = {
-            "kind": "cloud",
-            "workspace_url": "https://workspace.example.com",
-            "workspace_id": "ws-123",
-            field: "   ",
-        }
+        run_target = _cloud_run_target_payload()
+        workspace = cast(dict[str, object], run_target["workspace"])
+        workspace[field] = "   "
 
         response = await client.post(
             "/sessions",
-            json={"execution_binding": execution_binding},
+            json={"run_target": run_target},
         )
 
-        assert response.status_code == 422
+        assert response.status_code == 400
 
     async def test_http_create_session_provisions_docker_cloud_workspace(
         self, client, monkeypatch, tmp_path
@@ -1259,39 +1342,36 @@ class TestSessionCreation:
 
         assert response.status_code == 200
         session = session_manager.get_session(response.json()["session_id"])
-        assert isinstance(session.execution_binding, CloudWorkspaceBinding)
+        assert isinstance(session.default_run_target.workspace, CloudWorkspaceRef)
         expected_origin = {
             "channel": "http",
-            "binding_kind": "cloud",
+            "placement_kind": "cloud_workspace",
+            "executor_kind": "managed_pool",
             "workspace_source_kind": "docker",
             "workspace_provider": "docker",
             "workspace_root_ref": str(tmp_path),
         }
         assert session.origin == expected_origin
-        assert (tmp_path / session.execution_binding.workspace_id).is_dir()
+        assert (tmp_path / session.default_run_target.workspace.workspace_id).is_dir()
 
         info_response = await client.get(f"/sessions/{response.json()['session_id']}")
         assert info_response.status_code == 200
         assert info_response.json()["origin"] == expected_origin
 
-    async def test_create_session_rejects_conflicting_workspace_binding_inputs(
+    async def test_create_session_rejects_conflicting_workspace_target_inputs(
         self, client
     ):
         response = await client.post(
             "/sessions",
             json={
-                "execution_binding": {
-                    "kind": "cloud",
-                    "workspace_url": "https://workspace.example.com",
-                    "workspace_id": "ws-123",
-                },
+                "run_target": _cloud_run_target_payload(),
                 "workspace_source": {"kind": "docker"},
             },
         )
 
         assert response.status_code == 400
         assert response.json()["detail"] == (
-            "execution_binding and workspace_source cannot be set together"
+            "run_target and workspace_source cannot be set together"
         )
 
     async def test_create_session_rejects_workspace_provisioning_when_disabled(
@@ -1360,7 +1440,7 @@ class TestSessionCreation:
     async def test_create_session_provisions_git_workspace_source(
         self, client, monkeypatch, tmp_path
     ):
-        binding = CloudWorkspaceBinding(
+        binding = CloudWorkspaceRef(
             workspace_url="docker://agent-ws-git/workspace",
             workspace_id="ws-git",
         )
@@ -1414,20 +1494,20 @@ class TestSessionCreation:
             "git": {"allowed_hosts": ["github.com"]}
         }
         session = session_manager.get_session(response.json()["session_id"])
-        assert session.execution_binding == binding
+        assert session.default_run_target.workspace == binding
         assert session.origin is not None
         assert session.origin["channel"] == "http"
-        assert session.origin["binding_kind"] == "cloud"
+        assert session.origin["placement_kind"] == "cloud_workspace"
         assert session.origin["workspace_source_kind"] == "git"
 
     async def test_create_session_rolls_back_provisioned_workspace_on_failure(
         self, client, monkeypatch
     ):
-        binding = CloudWorkspaceBinding(
+        binding = CloudWorkspaceRef(
             workspace_url="docker://agent-ws-orphan/workspace",
             workspace_id="ws-orphan",
         )
-        cleaned: list[CloudWorkspaceBinding] = []
+        cleaned: list[CloudWorkspaceRef] = []
 
         monkeypatch.setattr(
             "coding_agent.server.http_server._load_cloud_workspace_config",
@@ -1463,11 +1543,11 @@ class TestSessionCreation:
     async def test_create_session_rolls_back_provisioned_workspace_on_non_runtime_failure(
         self, client, monkeypatch
     ):
-        binding = CloudWorkspaceBinding(
+        binding = CloudWorkspaceRef(
             workspace_url="docker://agent-ws-orphan/workspace",
             workspace_id="ws-orphan-nonruntime",
         )
-        cleaned: list[CloudWorkspaceBinding] = []
+        cleaned: list[CloudWorkspaceRef] = []
 
         monkeypatch.setattr(
             "coding_agent.server.http_server._load_cloud_workspace_config",
@@ -1503,7 +1583,7 @@ class TestSessionCreation:
     async def test_create_session_keeps_original_failure_when_rollback_cleanup_fails(
         self, client, monkeypatch
     ):
-        binding = CloudWorkspaceBinding(
+        binding = CloudWorkspaceRef(
             workspace_url="docker://agent-ws-orphan/workspace",
             workspace_id="ws-orphan-cleanup-fails",
         )
@@ -1546,11 +1626,11 @@ class TestSessionCreation:
     async def test_create_session_rolls_back_provisioned_workspace_on_cancellation(
         self, client, monkeypatch
     ):
-        binding = CloudWorkspaceBinding(
+        binding = CloudWorkspaceRef(
             workspace_url="docker://agent-ws-cancelled/workspace",
             workspace_id="ws-cancelled",
         )
-        cleaned: list[CloudWorkspaceBinding] = []
+        cleaned: list[CloudWorkspaceRef] = []
 
         monkeypatch.setattr(
             "coding_agent.server.http_server._load_cloud_workspace_config",
@@ -1586,7 +1666,7 @@ class TestSessionCreation:
     async def test_close_session_cleans_up_provisioned_workspace_on_delete(
         self, client, monkeypatch, tmp_path
     ):
-        cleaned: list[CloudWorkspaceBinding] = []
+        cleaned: list[CloudWorkspaceRef] = []
 
         monkeypatch.setattr(
             "coding_agent.environment.docker_workspace_provider._start_docker_workspace_container",
@@ -1615,8 +1695,8 @@ class TestSessionCreation:
         assert create_response.status_code == 200
         binding = session_manager.get_session(
             create_response.json()["session_id"]
-        ).execution_binding
-        assert isinstance(binding, CloudWorkspaceBinding)
+        ).default_run_target.workspace
+        assert isinstance(binding, CloudWorkspaceRef)
 
         close_response = await client.delete(
             f"/sessions/{create_response.json()['session_id']}"
@@ -1628,7 +1708,7 @@ class TestSessionCreation:
     async def test_close_session_cleans_up_when_new_provisioning_is_disabled(
         self, client, monkeypatch, tmp_path
     ):
-        cleaned: list[CloudWorkspaceBinding] = []
+        cleaned: list[CloudWorkspaceRef] = []
         config_enabled = True
 
         monkeypatch.setattr(
@@ -1660,8 +1740,8 @@ class TestSessionCreation:
         )
         binding = session_manager.get_session(
             create_response.json()["session_id"]
-        ).execution_binding
-        assert isinstance(binding, CloudWorkspaceBinding)
+        ).default_run_target.workspace
+        assert isinstance(binding, CloudWorkspaceRef)
         config_enabled = False
 
         close_response = await client.delete(
@@ -1776,7 +1856,7 @@ max_turns = 17
 
         assert response.status_code == 422
 
-    async def test_send_prompt_uses_cloud_environment_from_provisioned_workspace(
+    async def test_send_prompt_reports_managed_pool_unavailable_for_provisioned_workspace(
         self, client, monkeypatch, tmp_path
     ):
         monkeypatch.setattr(
@@ -1800,10 +1880,12 @@ max_turns = 17
                 **_test_runtime_profile_config(),
             },
         )
-        monkeypatch.setattr(
-            session_manager,
-            "_binding_resolver",
-            _build_binding_resolver(),
+        object.__setattr__(
+            session_manager._runtime_environment_resolver_service,
+            "cloud_client_factory",
+            http_server.cloud_client_factory_from_config(
+                http_server._load_cloud_workspace_config()
+            ),
         )
 
         captured = _CreateAgentCapture()
@@ -1825,22 +1907,8 @@ max_turns = 17
                     )
                 )
 
-        fake_pipeline = types.SimpleNamespace(
-            _registry=types.SimpleNamespace(
-                get=lambda _: types.SimpleNamespace(_instance=None)
-            ),
-            _directive_executor=None,
-        )
-
         def fake_create_agent(**kwargs):
-            environment = kwargs.get("environment")
-            assert isinstance(environment, CloudEnvironment)
-            session_id_override = kwargs.get("session_id_override")
-            assert isinstance(session_id_override, str)
-            captured.environment = environment
-            captured.session_id = session_id_override
-            captured.workspace_root = kwargs.get("workspace_root")
-            return fake_pipeline, types.SimpleNamespace(config={}, tape=Tape())
+            raise AssertionError(f"managed pool prompt must not bootstrap: {kwargs!r}")
 
         monkeypatch.setattr(session_manager, "_create_agent", fake_create_agent)
         monkeypatch.setattr(
@@ -1862,17 +1930,17 @@ max_turns = 17
         ) as event_source:
             async for sse in event_source.aiter_sse():
                 events.append(sse.event)
-                if sse.event == "TurnEnd":
+                if sse.event == "Error":
                     break
 
-        assert captured.environment is not None
-        binding = session_manager.get_session(session_id).execution_binding
-        assert isinstance(binding, CloudWorkspaceBinding)
-        assert (
-            captured.environment.tool_config()["workspace_id"] == binding.workspace_id
-        )
-        assert captured.workspace_root is None
+        assert captured.environment is None
+        session = session_manager.get_session(session_id)
+        binding = session.default_run_target.workspace
+        assert isinstance(binding, CloudWorkspaceRef)
         assert events[-1] == "TurnEnd"
+        assert session.turn_status == "failed"
+        assert session.last_failure_details is not None
+        assert "managed_pool" in session.last_failure_details
 
     def test_build_session_manager_enables_owner_store_for_pg_http_sessions(
         self, monkeypatch
@@ -2357,15 +2425,7 @@ class TestPromptStreaming:
             "/sessions",
             json={
                 "approval_policy": "yolo",
-                "execution_binding": {
-                    "kind": "external_worker",
-                    "executor_kind": "local_cli",
-                    "worker_pool": "default",
-                    "workspace_ref": {
-                        "kind": "local_path",
-                        "display_path": "/tmp/repo",
-                    },
-                },
+                "run_target": _attached_run_target_payload(kind="external_worker"),
             },
         )
         assert create_resp.status_code == 200
@@ -2391,7 +2451,7 @@ class TestPromptStreaming:
         run = store.runs[run_id]
         assert run.status == "requested"
         assert run.metadata["prompt"] == "run locally"
-        assert run.metadata["execution_binding_kind"] == "external_worker"
+        assert run.metadata["executor_ref_kind"] == "external_worker"
         assert run.metadata["workspace_surface"] == "external_worker_workspace_ref"
         assert run.metadata["execution_plane"] == "executor_plane"
         assert run.metadata["execution_placement"] == "local_attached"
@@ -2406,14 +2466,7 @@ class TestPromptStreaming:
             "/sessions",
             json={
                 "approval_policy": "yolo",
-                "execution_binding": {
-                    "kind": "local_attached",
-                    "executor_kind": "local_cli",
-                    "workspace_ref": {
-                        "kind": "local_path",
-                        "display_path": "/tmp/repo",
-                    },
-                },
+                "run_target": _attached_run_target_payload(kind="local_attached"),
             },
         )
         assert create_resp.status_code == 200
@@ -2439,7 +2492,7 @@ class TestPromptStreaming:
         run = store.runs[run_id]
         assert run.status == "requested"
         assert run.metadata["prompt"] == "run locally"
-        assert run.metadata["execution_binding_kind"] == "local_attached"
+        assert run.metadata["executor_ref_kind"] == "local_attached"
         assert run.metadata["workspace_surface"] == "local_attached_workspace"
         assert run.metadata["execution_plane"] == "executor_plane"
         assert run.metadata["execution_placement"] == "local_attached"
@@ -2452,10 +2505,7 @@ class TestPromptStreaming:
             "/sessions",
             json={
                 "approval_policy": "yolo",
-                "execution_binding": {
-                    "kind": "external_worker",
-                    "executor_kind": "local_cli",
-                },
+                "run_target": _attached_run_target_payload(kind="external_worker"),
             },
         )
         session_id = create_resp.json()["session_id"]
@@ -2503,7 +2553,7 @@ class TestPromptStreaming:
         assert stored_event.payload["session_id"] == session_id
         assert stored_event.payload["run_id"] == run.run_id
         assert stored_event.payload["execution_placement"] == "local_attached"
-        assert stored_event.payload["execution_binding_kind"] == "external_worker"
+        assert stored_event.payload["executor_ref_kind"] == "external_worker"
         assert (
             stored_event.payload["workspace_surface"] == "external_worker_workspace_ref"
         )
@@ -2550,10 +2600,7 @@ class TestPromptStreaming:
             "/sessions",
             json={
                 "approval_policy": "yolo",
-                "execution_binding": {
-                    "kind": "local_attached",
-                    "executor_kind": "local_cli",
-                },
+                "run_target": _attached_run_target_payload(kind="local_attached"),
             },
         )
         session_id = create_resp.json()["session_id"]
@@ -2601,10 +2648,7 @@ class TestPromptStreaming:
             "/sessions",
             json={
                 "approval_policy": "yolo",
-                "execution_binding": {
-                    "kind": "external_worker",
-                    "executor_kind": "local_cli",
-                },
+                "run_target": _attached_run_target_payload(kind="external_worker"),
             },
         )
         session_id = create_resp.json()["session_id"]
@@ -2635,15 +2679,10 @@ class TestPromptStreaming:
             "/sessions",
             json={
                 "approval_policy": "yolo",
-                "execution_binding": {
-                    "kind": "external_worker",
-                    "executor_kind": "local_cli",
-                    "worker_pool": "default",
-                    "workspace_ref": {
-                        "kind": "local_path",
-                        "display_path": str(tmp_path),
-                    },
-                },
+                "run_target": _attached_run_target_payload(
+                    kind="external_worker",
+                    display_path=str(tmp_path),
+                ),
             },
         )
         session_id = create_resp.json()["session_id"]
@@ -2743,15 +2782,10 @@ class TestPromptStreaming:
             "/sessions",
             json={
                 "approval_policy": "yolo",
-                "execution_binding": {
-                    "kind": "external_worker",
-                    "executor_kind": "local_cli",
-                    "worker_pool": "default",
-                    "workspace_ref": {
-                        "kind": "local_path",
-                        "display_path": str(tmp_path),
-                    },
-                },
+                "run_target": _attached_run_target_payload(
+                    kind="external_worker",
+                    display_path=str(tmp_path),
+                ),
             },
         )
         session_id = create_resp.json()["session_id"]
@@ -2809,10 +2843,7 @@ class TestPromptStreaming:
             "/sessions",
             json={
                 "approval_policy": "interactive",
-                "execution_binding": {
-                    "kind": "external_worker",
-                    "executor_kind": "local_cli",
-                },
+                "run_target": _attached_run_target_payload(kind="external_worker"),
             },
         )
         session_id = create_resp.json()["session_id"]
@@ -2871,10 +2902,7 @@ class TestPromptStreaming:
             "/sessions",
             json={
                 "approval_policy": "interactive",
-                "execution_binding": {
-                    "kind": "external_worker",
-                    "executor_kind": "local_cli",
-                },
+                "run_target": _attached_run_target_payload(kind="external_worker"),
             },
         )
         session_id = create_resp.json()["session_id"]
@@ -2916,10 +2944,7 @@ class TestPromptStreaming:
             "/sessions",
             json={
                 "approval_policy": "interactive",
-                "execution_binding": {
-                    "kind": "external_worker",
-                    "executor_kind": "local_cli",
-                },
+                "run_target": _attached_run_target_payload(kind="external_worker"),
             },
         )
         session_id = create_resp.json()["session_id"]
@@ -2964,10 +2989,7 @@ class TestPromptStreaming:
             "/sessions",
             json={
                 "approval_policy": "yolo",
-                "execution_binding": {
-                    "kind": "external_worker",
-                    "executor_kind": "local_cli",
-                },
+                "run_target": _attached_run_target_payload(kind="external_worker"),
             },
         )
         session_id = create_resp.json()["session_id"]
@@ -3016,7 +3038,7 @@ class TestPromptStreaming:
             started_at=now,
             ended_at=now,
             metadata={
-                "execution_binding_kind": "external_worker",
+                "executor_ref_kind": "external_worker",
                 "executor_kind": "local_cli",
             },
             result={},
@@ -3135,7 +3157,7 @@ class TestPromptStreaming:
         session_manager.configure_runtime_store(store)
         session_id = await session_manager.create_session(
             approval_policy=ApprovalPolicy.YOLO,
-            execution_binding=ExternalWorkerBinding(executor_kind="local_cli"),
+            default_run_target=_external_worker_run_target(),
         )
         previous_run = AgentRunRecord(
             run_id="run-cancelled",
@@ -4490,16 +4512,16 @@ class TestLifespanShutdown:
         assert events == ["startup-gc", "close"]
 
     async def test_cloud_workspace_gc_excludes_active_cloud_sessions(self, monkeypatch):
-        active_binding = CloudWorkspaceBinding(
+        active_binding = CloudWorkspaceRef(
             workspace_url="docker://agent-ws-active/workspace",
             workspace_id="ws-active",
         )
         session_id = await session_manager.create_session(
             origin={
-                "binding_kind": "cloud",
+                "placement_kind": "cloud_workspace",
                 "workspace_source_kind": "docker",
             },
-            execution_binding=active_binding,
+            default_run_target=_cloud_run_target(active_binding),
         )
         seen_configs: list[dict[str, object]] = []
 
@@ -5057,11 +5079,10 @@ class TestGetSession:
         create_resp = await client.post(
             "/sessions",
             json={
-                "execution_binding": {
-                    "kind": "cloud",
-                    "workspace_url": "docker://agent-ws-owned/workspace",
-                    "workspace_id": "ws-owned",
-                },
+                "run_target": _cloud_run_target_payload(
+                    workspace_url="docker://agent-ws-owned/workspace",
+                    workspace_id="ws-owned",
+                ),
                 "provider": "openai",
                 "model": "test-model",
                 "max_steps": 7,
@@ -5077,7 +5098,7 @@ class TestGetSession:
         assert data["id"] == session_id
         assert data["status"] == "created"
         assert data["turn_status"] == "idle"
-        assert data["execution_binding"]["kind"] == "cloud"
+        assert data["default_run_target"]["workspace"]["kind"] == "cloud_workspace"
         assert data["workspace_id"] == "ws-owned"
         assert data["provider_name"] == "openai"
         assert data["model_name"] == "test-model"
@@ -5130,10 +5151,10 @@ class TestRemoteResultPublicationContract:
     ) -> None:
         session = register_session(
             "result-agentkit-reducer",
-            execution_binding=CloudWorkspaceBinding(
+            default_run_target=_cloud_run_target(CloudWorkspaceRef(
                 workspace_url="docker://agent-ws-result/workspace",
                 workspace_id="ws-agentkit-result",
-            ),
+            )),
             provider_name="openai",
             model_name="result-model",
         )
@@ -5175,10 +5196,10 @@ class TestRemoteResultPublicationContract:
     ) -> None:
         session = register_session(
             "result-runtime-tape",
-            execution_binding=CloudWorkspaceBinding(
+            default_run_target=_cloud_run_target(CloudWorkspaceRef(
                 workspace_url="docker://agent-ws-result/workspace",
                 workspace_id="ws-runtime-result",
-            ),
+            )),
             provider_name="openai",
             model_name="result-model",
         )
@@ -5227,10 +5248,10 @@ class TestRemoteResultPublicationContract:
     ) -> None:
         session = register_session(
             "result-persisted-tape",
-            execution_binding=CloudWorkspaceBinding(
+            default_run_target=_cloud_run_target(CloudWorkspaceRef(
                 workspace_url="docker://agent-ws-result/workspace",
                 workspace_id="ws-persisted-result",
-            ),
+            )),
             provider_name="openai",
             model_name="result-model",
             tape_id="persisted-tape",
@@ -5266,10 +5287,10 @@ class TestRemoteResultPublicationContract:
     ) -> None:
         session = register_session(
             "result-failed-session",
-            execution_binding=CloudWorkspaceBinding(
+            default_run_target=_cloud_run_target(CloudWorkspaceRef(
                 workspace_url="docker://agent-ws-result/workspace",
                 workspace_id="ws-failed-result",
-            ),
+            )),
         )
         session.turn_status = "failed"
         session.last_failure_details = "HTTP session turn failed: model timeout"
@@ -5287,10 +5308,10 @@ class TestRemoteResultPublicationContract:
     ) -> None:
         session = register_session(
             "result-failed-default-details",
-            execution_binding=CloudWorkspaceBinding(
+            default_run_target=_cloud_run_target(CloudWorkspaceRef(
                 workspace_url="docker://agent-ws-result/workspace",
                 workspace_id="ws-failed-default-result",
-            ),
+            )),
         )
         session.turn_status = "failed"
         session.last_failure_details = None
@@ -5312,11 +5333,10 @@ class TestRemoteResultPublicationContract:
         create_resp = await client.post(
             "/sessions",
             json={
-                "execution_binding": {
-                    "kind": "cloud",
-                    "workspace_url": "docker://agent-ws-result/workspace",
-                    "workspace_id": "ws-result",
-                },
+                "run_target": _cloud_run_target_payload(
+                    workspace_url="docker://agent-ws-result/workspace",
+                    workspace_id="ws-result",
+                ),
                 "provider": "openai",
                 "model": "result-model",
                 "max_steps": 5,
@@ -5334,7 +5354,7 @@ class TestRemoteResultPublicationContract:
             "turn_status": "idle",
             "turn_id": None,
             "workspace_id": "ws-result",
-            "origin": {"channel": "http", "binding_kind": "cloud"},
+            "origin": {"channel": "http", "placement_kind": "cloud_workspace", "executor_kind": "local_daemon"},
             "provider_name": "openai",
             "model_name": "result-model",
             "final_answer": None,
@@ -5375,11 +5395,10 @@ class TestRemoteResultPublicationContract:
             "/sessions",
             headers={"Authorization": "Bearer admin-token"},
             json={
-                "execution_binding": {
-                    "kind": "cloud",
-                    "workspace_url": "docker://agent-ws-private/workspace",
-                    "workspace_id": "ws-private",
-                },
+                "run_target": _cloud_run_target_payload(
+                    workspace_url="docker://agent-ws-private/workspace",
+                    workspace_id="ws-private",
+                ),
             },
         )
         session_id = created.json()["session_id"]
@@ -6086,11 +6105,10 @@ class TestRemoteWorkspaceRetentionContract:
         create_resp = await client.post(
             "/sessions",
             json={
-                "execution_binding": {
-                    "kind": "cloud",
-                    "workspace_url": "docker://agent-ws-diff/workspace",
-                    "workspace_id": "ws-diff",
-                },
+                "run_target": _cloud_run_target_payload(
+                    workspace_url="docker://agent-ws-diff/workspace",
+                    workspace_id="ws-diff",
+                ),
             },
         )
         session_id = create_resp.json()["session_id"]
@@ -6149,11 +6167,10 @@ class TestRemoteWorkspaceRetentionContract:
         create_resp = await client.post(
             "/sessions",
             json={
-                "execution_binding": {
-                    "kind": "cloud",
-                    "workspace_url": "docker://agent-ws-patch/workspace",
-                    "workspace_id": "ws-patch",
-                },
+                "run_target": _cloud_run_target_payload(
+                    workspace_url="docker://agent-ws-patch/workspace",
+                    workspace_id="ws-patch",
+                ),
             },
         )
         session_id = create_resp.json()["session_id"]
@@ -6194,11 +6211,10 @@ class TestRemoteWorkspaceRetentionContract:
         create_resp = await client.post(
             "/sessions",
             json={
-                "execution_binding": {
-                    "kind": "cloud",
-                    "workspace_url": "docker://agent-ws-publish/workspace",
-                    "workspace_id": "ws-publish",
-                },
+                "run_target": _cloud_run_target_payload(
+                    workspace_url="docker://agent-ws-publish/workspace",
+                    workspace_id="ws-publish",
+                ),
             },
         )
         session_id = create_resp.json()["session_id"]
@@ -6280,11 +6296,10 @@ class TestRemoteWorkspaceRetentionContract:
         create_resp = await client.post(
             "/sessions",
             json={
-                "execution_binding": {
-                    "kind": "cloud",
-                    "workspace_url": "docker://agent-ws-result-refs/workspace",
-                    "workspace_id": "ws-result-refs",
-                },
+                "run_target": _cloud_run_target_payload(
+                    workspace_url="docker://agent-ws-result-refs/workspace",
+                    workspace_id="ws-result-refs",
+                ),
             },
         )
         session_id = create_resp.json()["session_id"]
@@ -6432,11 +6447,10 @@ class TestRemoteWorkspaceRetentionContract:
         create_resp = await client.post(
             "/sessions",
             json={
-                "execution_binding": {
-                    "kind": "cloud",
-                    "workspace_url": "docker://agent-ws-partial/workspace",
-                    "workspace_id": "ws-partial",
-                },
+                "run_target": _cloud_run_target_payload(
+                    workspace_url="docker://agent-ws-partial/workspace",
+                    workspace_id="ws-partial",
+                ),
             },
         )
         session_id = create_resp.json()["session_id"]
@@ -6493,11 +6507,10 @@ class TestRemoteWorkspaceRetentionContract:
         create_resp = await client.post(
             "/sessions",
             json={
-                "execution_binding": {
-                    "kind": "cloud",
-                    "workspace_url": "docker://agent-ws-publish/workspace",
-                    "workspace_id": "ws-publish",
-                },
+                "run_target": _cloud_run_target_payload(
+                    workspace_url="docker://agent-ws-publish/workspace",
+                    workspace_id="ws-publish",
+                ),
             },
         )
         session_id = create_resp.json()["session_id"]
@@ -6627,11 +6640,10 @@ class TestRemoteWorkspaceRetentionContract:
         create_resp = await client.post(
             "/sessions",
             json={
-                "execution_binding": {
-                    "kind": "cloud",
-                    "workspace_url": "docker://agent-ws-publish/workspace",
-                    "workspace_id": "ws-publish",
-                },
+                "run_target": _cloud_run_target_payload(
+                    workspace_url="docker://agent-ws-publish/workspace",
+                    workspace_id="ws-publish",
+                ),
             },
         )
         session_id = create_resp.json()["session_id"]
@@ -6701,11 +6713,10 @@ class TestRemoteWorkspaceRetentionContract:
         create_resp = await client.post(
             "/sessions",
             json={
-                "execution_binding": {
-                    "kind": "cloud",
-                    "workspace_url": "docker://agent-ws-publish/workspace",
-                    "workspace_id": "ws-publish",
-                },
+                "run_target": _cloud_run_target_payload(
+                    workspace_url="docker://agent-ws-publish/workspace",
+                    workspace_id="ws-publish",
+                ),
             },
         )
         session_id = create_resp.json()["session_id"]
@@ -6813,11 +6824,10 @@ class TestRemoteWorkspaceRetentionContract:
         create_resp = await client.post(
             "/sessions",
             json={
-                "execution_binding": {
-                    "kind": "cloud",
-                    "workspace_url": "docker://agent-ws-publish/workspace",
-                    "workspace_id": "ws-publish",
-                },
+                "run_target": _cloud_run_target_payload(
+                    workspace_url="docker://agent-ws-publish/workspace",
+                    workspace_id="ws-publish",
+                ),
             },
         )
         session_id = create_resp.json()["session_id"]

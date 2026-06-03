@@ -8,7 +8,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
-from coding_agent.environment.execution_binding import CloudWorkspaceBinding
+from coding_agent.runs import (
+    CloudWorkspaceRef,
+    IsolationPolicy,
+    LocalDaemonExecutorRef,
+    RunTarget,
+)
 from coding_agent.server.http_server import app, session_manager
 from coding_agent.server.rate_limit import limiter
 from coding_agent.server.session_manager import Session
@@ -156,16 +161,25 @@ def owner_store() -> FakeOwnerStore:
     return fake_owner_store
 
 
-def _register_cloud_session(session_id: str, binding: CloudWorkspaceBinding) -> None:
+def _register_cloud_session(session_id: str, binding: CloudWorkspaceRef) -> None:
     session_manager.register_session(
         Session(
             id=session_id,
             created_at=datetime.now(),
             last_activity=datetime.now(),
-            execution_binding=binding,
+            default_run_target=RunTarget(
+                workspace=binding,
+                executor=LocalDaemonExecutorRef(),
+                isolation=IsolationPolicy(
+                    kind="provider_sandbox",
+                    network="provider_managed",
+                    filesystem="provider_managed",
+                    secrets="provider_managed",
+                ),
+            ),
             origin={
                 "channel": "http",
-                "binding_kind": "cloud",
+                "placement_kind": "cloud_workspace",
                 "workspace_source_kind": "docker",
             },
         )
@@ -254,8 +268,8 @@ async def test_create_session_provisions_docker_workspace_from_snapshot(
 
     assert response.status_code == 200
     session = session_manager.get_session(response.json()["session_id"])
-    assert isinstance(session.execution_binding, CloudWorkspaceBinding)
-    workspace_root = tmp_path / session.execution_binding.workspace_id
+    assert isinstance(session.default_run_target.workspace, CloudWorkspaceRef)
+    workspace_root = tmp_path / session.default_run_target.workspace.workspace_id
     assert (workspace_root / "README.md").read_text(encoding="utf-8") == "uploaded"
     assert (workspace_root / "src" / "app.py").read_text(
         encoding="utf-8"
@@ -315,7 +329,7 @@ async def test_workspace_cleanup_skips_active_cloud_sessions(
 ) -> None:
     _configure_admin_auth(monkeypatch, tmp_path)
     _configure_workspace_server(monkeypatch, tmp_path, max_workspace_age_seconds=1)
-    binding = CloudWorkspaceBinding(
+    binding = CloudWorkspaceRef(
         workspace_url="docker://agent-ws-active/workspace",
         workspace_id="ws-active",
     )
@@ -338,7 +352,7 @@ async def test_workspace_archive_manifest_reports_counts_bytes_and_changes(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _configure_workspace_server(monkeypatch, tmp_path)
-    binding = CloudWorkspaceBinding(
+    binding = CloudWorkspaceRef(
         workspace_url="docker://agent-ws-manifest/workspace",
         workspace_id="ws-manifest",
     )
@@ -372,7 +386,7 @@ async def test_session_workspace_archive_endpoint_keeps_compatibility_alias(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _configure_workspace_server(monkeypatch, tmp_path)
-    binding = CloudWorkspaceBinding(
+    binding = CloudWorkspaceRef(
         workspace_url="docker://agent-ws-alias/workspace",
         workspace_id="ws-alias",
     )
@@ -407,7 +421,7 @@ async def test_get_workspace_archive_returns_cloud_workspace_snapshot(
         },
     )
 
-    binding = CloudWorkspaceBinding(
+    binding = CloudWorkspaceRef(
         workspace_url="docker://agent-ws-transfer/workspace",
         workspace_id="ws-transfer",
     )
@@ -448,7 +462,7 @@ async def test_get_workspace_archive_returns_409_for_active_turn(
         },
     )
 
-    binding = CloudWorkspaceBinding(
+    binding = CloudWorkspaceRef(
         workspace_url="docker://agent-ws-busy/workspace",
         workspace_id="ws-busy",
     )
@@ -483,7 +497,7 @@ async def test_get_workspace_archive_returns_409_for_stale_owner(
         },
     )
 
-    binding = CloudWorkspaceBinding(
+    binding = CloudWorkspaceRef(
         workspace_url="docker://agent-ws-stale/workspace",
         workspace_id="ws-stale",
     )
@@ -521,7 +535,7 @@ async def test_get_workspace_archive_rejects_owner_change_during_export(
         },
     )
 
-    binding = CloudWorkspaceBinding(
+    binding = CloudWorkspaceRef(
         workspace_url="docker://agent-ws-race/workspace",
         workspace_id="ws-race",
     )
@@ -574,7 +588,7 @@ async def test_get_workspace_archive_returns_500_for_unexpected_runtime_error(
         },
     )
 
-    binding = CloudWorkspaceBinding(
+    binding = CloudWorkspaceRef(
         workspace_url="docker://agent-ws-fail/workspace",
         workspace_id="ws-fail",
     )
@@ -646,7 +660,7 @@ async def test_get_workspace_archive_returns_400_for_oversized_workspace_export(
         },
     )
 
-    binding = CloudWorkspaceBinding(
+    binding = CloudWorkspaceRef(
         workspace_url="docker://agent-ws-large/workspace",
         workspace_id="ws-large",
     )

@@ -2,12 +2,6 @@ from __future__ import annotations
 
 import pytest
 
-from coding_agent.environment.execution_binding import (
-    CloudWorkspaceBinding,
-    ExternalWorkerBinding,
-    LocalAttachedExecutionBinding,
-    LocalExecutionBinding,
-)
 from coding_agent.runs import (
     CloudWorkspaceRef,
     ExternalWorkerExecutorRef,
@@ -21,18 +15,19 @@ from coding_agent.runs import (
     RunTargetSerializationError,
     IsolationPolicy,
     run_target_from_dict,
-    run_target_from_execution_binding,
+    run_target_from_legacy_session_payload,
 )
 
 
-def test_local_execution_binding_maps_to_local_daemon_run_target() -> None:
-    binding = LocalExecutionBinding(
-        workspace_root="/repo",
-        workspace_provider="local",
-        provider_instance_id="local-1",
+def test_legacy_local_session_payload_maps_to_local_daemon_run_target() -> None:
+    target = run_target_from_legacy_session_payload(
+        {
+            "kind": "local",
+            "workspace_root": "/repo",
+            "workspace_provider": "local",
+            "provider_instance_id": "local-1",
+        }
     )
-
-    target = run_target_from_execution_binding(binding)
 
     assert isinstance(target.workspace, LocalPathWorkspaceRef)
     assert target.workspace.path == "/repo"
@@ -70,16 +65,17 @@ def test_run_target_round_trips_local_daemon_metadata() -> None:
     assert payload["executor"] == {"kind": "local_daemon"}
 
 
-def test_cloud_execution_binding_maps_to_managed_pool_run_target() -> None:
-    binding = CloudWorkspaceBinding(
-        workspace_url="docker://workspace/ws-1",
-        workspace_id="ws-1",
-        runtime_profile="python",
-        workspace_provider="docker",
-        provider_instance_id="docker-1",
+def test_legacy_cloud_session_payload_maps_to_managed_pool_run_target() -> None:
+    target = run_target_from_legacy_session_payload(
+        {
+            "kind": "cloud",
+            "workspace_url": "docker://workspace/ws-1",
+            "workspace_id": "ws-1",
+            "runtime_profile": "python",
+            "workspace_provider": "docker",
+            "provider_instance_id": "docker-1",
+        }
     )
-
-    target = run_target_from_execution_binding(binding)
 
     assert isinstance(target.workspace, CloudWorkspaceRef)
     assert target.workspace.workspace_url == "docker://workspace/ws-1"
@@ -94,28 +90,30 @@ def test_cloud_execution_binding_maps_to_managed_pool_run_target() -> None:
 
 
 def test_run_target_round_trips_cloud_metadata() -> None:
-    target = run_target_from_execution_binding(
-        CloudWorkspaceBinding(
-            workspace_url="docker://workspace/ws-1",
-            workspace_id="ws-1",
-            runtime_profile="python",
-            workspace_provider="docker",
-            provider_instance_id="docker-1",
-        )
+    target = run_target_from_legacy_session_payload(
+        {
+            "kind": "cloud",
+            "workspace_url": "docker://workspace/ws-1",
+            "workspace_id": "ws-1",
+            "runtime_profile": "python",
+            "workspace_provider": "docker",
+            "provider_instance_id": "docker-1",
+        }
     )
 
     assert run_target_from_dict(target.to_dict()) == target
 
 
-def test_external_worker_binding_maps_to_external_worker_run_target() -> None:
-    binding = ExternalWorkerBinding(
-        executor_kind="local_cli",
-        worker_pool="pool-a",
-        workspace_ref={"path": "/repo", "label": "checkout"},
-        provider_instance_id="worker-1",
+def test_legacy_external_worker_payload_maps_to_external_worker_run_target() -> None:
+    target = run_target_from_legacy_session_payload(
+        {
+            "kind": "external_worker",
+            "executor_kind": "local_cli",
+            "worker_pool": "pool-a",
+            "workspace_ref": {"path": "/repo", "label": "checkout"},
+            "provider_instance_id": "worker-1",
+        }
     )
-
-    target = run_target_from_execution_binding(binding)
 
     assert isinstance(target.workspace, ExternalWorkerWorkspaceRef)
     assert target.workspace.ref == {"path": "/repo", "label": "checkout"}
@@ -127,26 +125,28 @@ def test_external_worker_binding_maps_to_external_worker_run_target() -> None:
 
 
 def test_run_target_round_trips_external_worker_metadata() -> None:
-    target = run_target_from_execution_binding(
-        ExternalWorkerBinding(
-            executor_kind="local_cli",
-            worker_pool="pool-a",
-            workspace_ref={"path": "/repo", "label": "checkout"},
-            provider_instance_id="worker-1",
-        )
+    target = run_target_from_legacy_session_payload(
+        {
+            "kind": "external_worker",
+            "executor_kind": "local_cli",
+            "worker_pool": "pool-a",
+            "workspace_ref": {"path": "/repo", "label": "checkout"},
+            "provider_instance_id": "worker-1",
+        }
     )
 
     assert run_target_from_dict(target.to_dict()) == target
 
 
-def test_local_attached_binding_maps_to_local_attached_run_target() -> None:
-    binding = LocalAttachedExecutionBinding(
-        executor_kind="local_cli",
-        worker_pool="attached",
-        workspace_ref={"socket": "local-daemon.sock"},
+def test_legacy_local_attached_payload_maps_to_local_attached_run_target() -> None:
+    target = run_target_from_legacy_session_payload(
+        {
+            "kind": "local_attached",
+            "executor_kind": "local_cli",
+            "worker_pool": "attached",
+            "workspace_ref": {"socket": "local-daemon.sock"},
+        }
     )
-
-    target = run_target_from_execution_binding(binding)
 
     assert isinstance(target.workspace, ExternalWorkerWorkspaceRef)
     assert target.workspace.ref == {"socket": "local-daemon.sock"}
@@ -157,12 +157,13 @@ def test_local_attached_binding_maps_to_local_attached_run_target() -> None:
 
 
 def test_run_target_round_trips_local_attached_metadata() -> None:
-    target = run_target_from_execution_binding(
-        LocalAttachedExecutionBinding(
-            executor_kind="local_cli",
-            worker_pool="attached",
-            workspace_ref={"socket": "local-daemon.sock"},
-        )
+    target = run_target_from_legacy_session_payload(
+        {
+            "kind": "local_attached",
+            "executor_kind": "local_cli",
+            "worker_pool": "attached",
+            "workspace_ref": {"socket": "local-daemon.sock"},
+        }
     )
 
     assert run_target_from_dict(target.to_dict()) == target

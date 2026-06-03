@@ -10,7 +10,7 @@ from coding_agent.stores import RuntimeRunRecoveryStore
 
 STALE_RUNTIME_RUN_ERROR = "runtime run was still running during startup recovery"
 STALE_RUNTIME_RUN_RECOVERY_REASON = "startup_stale_running_run"
-ATTACHED_EXECUTOR_BINDING_KINDS = frozenset({"external_worker", "local_attached"})
+ATTACHED_EXECUTOR_REF_KINDS = frozenset({"external_worker", "local_attached"})
 
 type RuntimeRunSessionLister = Callable[[], Awaitable[list[str]]]
 type RuntimeRunRecoveryEligibility = Callable[[str], Awaitable[bool]]
@@ -107,8 +107,8 @@ class RuntimeRunRecoveryService:
         if self.store is None:
             return False
         if (
-            run.metadata.get("execution_binding_kind")
-            not in ATTACHED_EXECUTOR_BINDING_KINDS
+            run.metadata.get("executor_ref_kind")
+            not in ATTACHED_EXECUTOR_REF_KINDS
         ):
             return False
         if run.status not in {"claimed", "running", "cancelling"}:
@@ -139,7 +139,7 @@ class RuntimeRunRecoveryService:
 
 
 __all__ = [
-    "ATTACHED_EXECUTOR_BINDING_KINDS",
+    "ATTACHED_EXECUTOR_REF_KINDS",
     "RuntimeRunRecoveryEligibility",
     "RuntimeRunRecoveryService",
     "RuntimeRunSessionLister",

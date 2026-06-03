@@ -95,10 +95,15 @@ from coding_agent.runs import (
     RuntimeTurnAdmissionService,
     RuntimeWorkspaceExportService,
     RuntimeWireEventRecorder,
+    CloudWorkspaceRef,
+    ExternalWorkerExecutorRef,
+    IsolationPolicy,
+    LocalAttachedExecutorRef,
+    LocalPathWorkspaceRef,
     RunTarget,
     SessionRuntimeHandle,
+    run_target_from_legacy_session_payload,
     run_target_from_dict,
-    run_target_from_execution_binding,
 )
 from coding_agent.runs.environment import RuntimeEnvironmentResolverService
 from coding_agent.runs.runtime_preparation import LocalDaemonRuntimePreparationService
@@ -123,16 +128,7 @@ from coding_agent.server.stores.session_owner_store import SessionOwnershipConfl
 from coding_agent.server.stores.session_owner_store import (
     SessionOwnershipConflictReason,
 )
-from coding_agent.environment.binding_resolver import (
-    BindingResolver,
-    DefaultBindingResolver,
-)
-from coding_agent.environment.execution_binding import (
-    CloudWorkspaceBinding,
-    ExecutionBinding,
-    ExternalWorkerBinding,
-    LocalExecutionBinding,
-)
+from coding_agent.environment.cloud import CloudWorkspaceClient
 from coding_agent.server.stores.workspace_store import (
     JSONValue,
     WorkspaceRecord,
@@ -145,8 +141,39 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_EXECUTION_BINDING = object()
 T = TypeVar("T")
+
+
+def _local_default_run_target(repo_path: Path | None) -> RunTarget:
+    workspace_root = (
+        str(repo_path.resolve()) if repo_path is not None else str(Path.cwd().resolve())
+    )
+    return RunTarget(
+        workspace=LocalPathWorkspaceRef(path=workspace_root),
+        executor=LocalDaemonExecutorRef(),
+        isolation=IsolationPolicy(kind="default_local_sandbox"),
+    )
+
+
+def _session_run_target(session: "Session") -> RunTarget:
+    target = session.default_run_target
+    if target is None:
+        raise RuntimeError("session is missing default_run_target")
+    return target
+
+
+def _session_is_attached(session: "Session") -> bool:
+    return isinstance(
+        _session_run_target(session).executor,
+        (ExternalWorkerExecutorRef, LocalAttachedExecutorRef),
+    )
+
+
+def _session_cloud_workspace(session: "Session") -> CloudWorkspaceRef | None:
+    workspace = _session_run_target(session).workspace
+    if isinstance(workspace, CloudWorkspaceRef):
+        return workspace
+    return None
 
 
 def _subagent_message_id(session_id: str) -> str:
@@ -270,7 +297,6 @@ class SessionRecord:
     last_activity: datetime
     repo_path: Path | None
     origin: dict[str, str] | None
-    execution_binding: ExecutionBinding
     default_run_target: RunTarget
     approval_policy: ApprovalPolicy
     provider_name: str | None
@@ -279,7 +305,6 @@ class SessionRecord:
     max_steps: int
     tape_id: str | None
     last_failure_details: str | None
-    default_run_target_explicit: bool = True
 
     def to_store_data(self) -> dict[str, Any]:
         return {
@@ -287,10 +312,9 @@ class SessionRecord:
             "created_at": self.created_at.isoformat(),
             "last_activity": self.last_activity.isoformat(),
             # repo_path remains backward-compatible metadata and seeds the
-            # default local binding when execution_binding is omitted.
+            # default local RunTarget when placement metadata is omitted.
             "repo_path": None if self.repo_path is None else str(self.repo_path),
             "origin": None if self.origin is None else dict(self.origin),
-            "execution_binding": self.execution_binding.to_dict(),
             "default_run_target": self.default_run_target.to_dict(),
             "approval_policy": self.approval_policy.value,
             "provider_name": self.provider_name,
@@ -336,26 +360,23 @@ class SessionRecord:
             last_failure_details_raw, str
         ):
             raise TypeError("session metadata has invalid last_failure_details")
-        binding_raw = data.get("execution_binding")
-        if binding_raw is not None:
-            if not isinstance(binding_raw, dict):
-                raise TypeError("session metadata has invalid execution_binding")
-            execution_binding = ExecutionBinding.from_dict(binding_raw)
-        else:
-            workspace_root = (
-                str(Path(repo_path_raw).resolve())
-                if repo_path_raw is not None
-                else str(Path.cwd().resolve())
-            )
-            execution_binding = LocalExecutionBinding(workspace_root=workspace_root)
         default_run_target_raw = data.get("default_run_target")
         if default_run_target_raw is None:
-            default_run_target = run_target_from_execution_binding(execution_binding)
+            legacy_target_raw = data.get("execution_binding")
+            if legacy_target_raw is not None:
+                if not isinstance(legacy_target_raw, dict):
+                    raise TypeError("session metadata has invalid legacy run target")
+                default_run_target = run_target_from_legacy_session_payload(
+                    cast(dict[str, object], legacy_target_raw)
+                )
+            else:
+                default_run_target = _local_default_run_target(
+                    None if repo_path_raw is None else Path(repo_path_raw)
+                )
         else:
             if not isinstance(default_run_target_raw, dict):
                 raise TypeError("session metadata has invalid default_run_target")
             default_run_target = run_target_from_dict(default_run_target_raw)
-        default_run_target_explicit = default_run_target_raw is not None
         return cls(
             id=_required_session_str(data, "id"),
             created_at=datetime.fromisoformat(
@@ -366,9 +387,7 @@ class SessionRecord:
             ),
             repo_path=None if repo_path_raw is None else Path(repo_path_raw),
             origin=origin,
-            execution_binding=execution_binding,
             default_run_target=default_run_target,
-            default_run_target_explicit=default_run_target_explicit,
             approval_policy=ApprovalPolicy(approval_policy_raw),
             provider_name=provider_name_raw,
             model_name=model_name_raw,
@@ -386,10 +405,7 @@ class SessionRecord:
             approval_store=ApprovalStore(),
             repo_path=self.repo_path,
             origin=self.origin,
-            execution_binding=self.execution_binding,
-            default_run_target=(
-                self.default_run_target if self.default_run_target_explicit else None
-            ),
+            default_run_target=self.default_run_target,
             approval_policy=self.approval_policy,
             provider_name=self.provider_name,
             model_name=self.model_name,
@@ -400,23 +416,11 @@ class SessionRecord:
         )
 
 
-def _default_run_target_is_derived_from_binding(
-    *,
-    current_target: object,
-    target_explicit: object,
-) -> bool:
-    if current_target is None:
-        return True
-    return not bool(target_explicit)
-
-
 @dataclass
 class Session:
     """A managed agent session.
 
-    Note: ``default_run_target`` is the canonical run placement contract.
-    ``execution_binding`` remains backward-compatible metadata and seeds the
-    default run target when no explicit target has been assigned.
+    ``default_run_target`` is the canonical run placement contract.
     """
 
     id: str
@@ -424,11 +428,8 @@ class Session:
     last_activity: datetime
     wire: LocalWire = field(init=False)
     approval_store: ApprovalStore = field(default_factory=ApprovalStore)
-    repo_path: Path | None = None  # legacy metadata; seeds default local binding
+    repo_path: Path | None = None  # legacy metadata; seeds default local target
     origin: dict[str, str] | None = None
-    execution_binding: ExecutionBinding = field(  # type: ignore[assignment]
-        default=cast(ExecutionBinding, _DEFAULT_EXECUTION_BINDING),
-    )
     default_run_target: RunTarget | None = None
     approval_policy: ApprovalPolicy = ApprovalPolicy.AUTO
     provider: Any | None = None
@@ -483,6 +484,10 @@ class Session:
         return object.__getattribute__(self, name)
 
     def __setattr__(self, name: str, value: object) -> None:
+        if name == "execution_binding":
+            raise AttributeError(
+                "Session.execution_binding was removed; use default_run_target"
+            )
         if name == "approval_store":
             object.__setattr__(self, name, value)
             instance_dict = object.__getattribute__(self, "__dict__")
@@ -491,30 +496,6 @@ class Session:
                 handle.approval_coordinator = ApprovalCoordinator(
                     cast(ApprovalStore, value)
                 )
-            return
-        if name == "execution_binding":
-            instance_dict = object.__getattribute__(self, "__dict__")
-            current_target = instance_dict.get("default_run_target")
-            target_explicit = instance_dict.get("_default_run_target_explicit", False)
-            object.__setattr__(self, name, value)
-            should_sync_target = _default_run_target_is_derived_from_binding(
-                current_target=current_target,
-                target_explicit=target_explicit,
-            )
-            if (
-                value is not cast(ExecutionBinding, _DEFAULT_EXECUTION_BINDING)
-                and should_sync_target
-            ):
-                object.__setattr__(
-                    self,
-                    "default_run_target",
-                    run_target_from_execution_binding(cast(ExecutionBinding, value)),
-                )
-                object.__setattr__(self, "_default_run_target_explicit", False)
-            return
-        if name == "default_run_target":
-            object.__setattr__(self, name, value)
-            object.__setattr__(self, "_default_run_target_explicit", value is not None)
             return
         if name in self._RUNTIME_HANDLE_FIELD_NAMES:
             instance_dict = object.__getattribute__(self, "__dict__")
@@ -525,22 +506,12 @@ class Session:
         object.__setattr__(self, name, value)
 
     def __post_init__(self) -> None:
-        if self.execution_binding is cast(ExecutionBinding, _DEFAULT_EXECUTION_BINDING):
-            workspace_root = (
-                str(self.repo_path.resolve())
-                if self.repo_path is not None
-                else str(Path.cwd().resolve())
-            )
-            self.execution_binding = LocalExecutionBinding(
-                workspace_root=workspace_root
-            )
         if self.default_run_target is None:
             object.__setattr__(
                 self,
                 "default_run_target",
-                run_target_from_execution_binding(self.execution_binding),
+                _local_default_run_target(self.repo_path),
             )
-            object.__setattr__(self, "_default_run_target_explicit", False)
         self.wire = LocalWire(self.id)
         handle = SessionRuntimeHandle(
             approval_coordinator=ApprovalCoordinator(self.approval_store),
@@ -609,9 +580,13 @@ class Session:
         self.runtime_handle.restore_runtime_binding(snapshot)
 
     def as_dict(self) -> dict[str, Any]:
+        target = self.default_run_target
+        if target is None:
+            raise RuntimeError("session is missing default_run_target")
+        workspace = target.workspace
         workspace_id = (
-            self.execution_binding.workspace_id
-            if isinstance(self.execution_binding, CloudWorkspaceBinding)
+            workspace.workspace_id
+            if isinstance(workspace, CloudWorkspaceRef)
             else None
         )
         pending_approval = self.pending_approval is not None
@@ -648,8 +623,7 @@ class Session:
             "base_url": self.base_url,
             "max_steps": self.max_steps,
             "origin": None if self.origin is None else dict(self.origin),
-            "execution_binding": self.execution_binding.to_dict(),
-            "default_run_target": self.default_run_target.to_dict(),
+            "default_run_target": target.to_dict(),
             "workspace_id": workspace_id,
         }
 
@@ -663,7 +637,6 @@ class Session:
             last_activity=self.last_activity,
             repo_path=self.repo_path,
             origin=None if self.origin is None else dict(self.origin),
-            execution_binding=self.execution_binding,
             default_run_target=self.default_run_target,
             approval_policy=self.approval_policy,
             provider_name=self.provider_name,
@@ -672,9 +645,6 @@ class Session:
             max_steps=self.max_steps,
             tape_id=self.tape_id,
             last_failure_details=self.last_failure_details,
-            default_run_target_explicit=bool(
-                getattr(self, "_default_run_target_explicit", True)
-            ),
         )
 
     @classmethod
@@ -739,9 +709,10 @@ class SessionManager:
         checkpoint_store: CheckpointStore | None = None,
         checkpoint_service: CheckpointService | None = None,
         create_agent_fn: Callable[..., tuple[Any, Any]] | None = None,
-        binding_resolver: BindingResolver | None = None,
+        cloud_workspace_client_factory: Callable[[CloudWorkspaceRef], CloudWorkspaceClient]
+        | None = None,
         provisioned_cloud_binding_cleanup: (
-            Callable[[CloudWorkspaceBinding], None] | None
+            Callable[[CloudWorkspaceRef], None] | None
         ) = None,
         workspace_metadata_store: WorkspaceMetadataStoreProtocol | None = None,
         runtime_store: RuntimeStore | None = None,
@@ -779,7 +750,6 @@ class SessionManager:
             resolved_checkpoint_store
         )
         self._create_agent = create_agent_fn
-        self._binding_resolver = binding_resolver or DefaultBindingResolver()
         self._local_daemon_executor = (
             LocalDaemonExecutor()
             if local_daemon_executor is None
@@ -814,9 +784,8 @@ class SessionManager:
         self._runtime_cancel_orchestration = RuntimeCancelOrchestrationService(
             cancel_service=self._runtime_control_services.cancel,
             persist_session=self._persist_session_async,
-            session_is_attached=lambda session: isinstance(
-                session.execution_binding,
-                ExternalWorkerBinding,
+            session_is_attached=lambda session: _session_is_attached(
+                cast(Session, session)
             ),
             schedule_cancel_observation=self._schedule_cancel_observation,
             turn_id_factory=lambda: uuid.uuid4().hex,
@@ -867,7 +836,7 @@ class SessionManager:
             ),
         )
         self._runtime_environment_resolver_service = RuntimeEnvironmentResolverService(
-            self._binding_resolver
+            cloud_client_factory=cloud_workspace_client_factory
         )
         self._runtime_context_binding_service = RuntimeContextBindingService(
             publish_subagent_message=self.publish_subagent_message,
@@ -962,9 +931,8 @@ class SessionManager:
             ),
             run_local=self._run_resumed_local_session,
             request_attached=self._request_resumed_attached_executor_run,
-            session_is_attached=lambda session: isinstance(
-                session.execution_binding,
-                ExternalWorkerBinding,
+            session_is_attached=lambda session: _session_is_attached(
+                cast(Session, session)
             ),
             append_live_boundary_anchor=self._append_live_resume_boundary_anchor,
             active_resume_blocking_statuses=frozenset(
@@ -986,9 +954,8 @@ class SessionManager:
                 load_session=self.get_session_async,
                 attached_executor=self._runtime_control_services.attached_executor,
                 persist_session=self._persist_session_async,
-                session_is_attached=lambda session: isinstance(
-                    session.execution_binding,
-                    ExternalWorkerBinding,
+                session_is_attached=lambda session: _session_is_attached(
+                    cast(Session, session)
                 ),
             )
         )
@@ -1629,9 +1596,9 @@ class SessionManager:
     def _session_uses_provisioned_cloud_workspace(self, session: Session) -> bool:
         origin = session.origin
         return (
-            isinstance(session.execution_binding, CloudWorkspaceBinding)
+            _session_cloud_workspace(session) is not None
             and origin is not None
-            and origin.get("binding_kind") == "cloud"
+            and origin.get("placement_kind") == "cloud_workspace"
             and origin.get("workspace_source_kind") is not None
         )
 
@@ -1640,10 +1607,10 @@ class SessionManager:
             return
         if not self._session_uses_provisioned_cloud_workspace(session):
             return
-        binding = session.execution_binding
-        if not isinstance(binding, CloudWorkspaceBinding):
+        workspace = _session_cloud_workspace(session)
+        if workspace is None:
             return
-        self._provisioned_cloud_binding_cleanup(binding)
+        self._provisioned_cloud_binding_cleanup(workspace)
 
     async def _cleanup_provisioned_cloud_binding_async(
         self, session: Session
@@ -1663,12 +1630,12 @@ class SessionManager:
     ) -> WorkspaceRecord | None:
         if self._workspace_metadata_store is None:
             return None
-        binding = session.execution_binding
-        if not isinstance(binding, CloudWorkspaceBinding):
+        workspace = _session_cloud_workspace(session)
+        if workspace is None:
             return None
         return await self._workspace_metadata_store.load_for_session_workspace(
             session_id=session.id,
-            workspace_id=binding.workspace_id,
+            workspace_id=workspace.workspace_id,
         )
 
     async def _finalize_provisioned_cloud_workspace_on_close(
@@ -1832,12 +1799,12 @@ class SessionManager:
         store = self._workspace_metadata_store
         if store is None:
             return
-        binding = session.execution_binding
-        if not isinstance(binding, CloudWorkspaceBinding):
+        workspace = _session_cloud_workspace(session)
+        if workspace is None:
             return
         origin = session.origin or {}
         if (
-            origin.get("binding_kind") != "cloud"
+            origin.get("placement_kind") != "cloud_workspace"
             or origin.get("workspace_source_kind") is None
         ):
             return
@@ -1861,12 +1828,12 @@ class SessionManager:
             )
 
         source_ref: dict[str, JSONValue] = {}
-        if binding.runtime_profile is not None:
-            source_ref["runtime_profile"] = binding.runtime_profile
+        if workspace.runtime_profile is not None:
+            source_ref["runtime_profile"] = workspace.runtime_profile
         await store.save(
             WorkspaceRecord(
-                workspace_record_id=f"{session.id}:{binding.workspace_id}",
-                workspace_id=binding.workspace_id,
+                workspace_record_id=f"{session.id}:{workspace.workspace_id}",
+                workspace_id=workspace.workspace_id,
                 session_id=session.id,
                 provider=provider,
                 provider_instance_id=provider_instance_id,
@@ -2193,7 +2160,9 @@ class SessionManager:
         self._store.save(session.id, cast(dict[str, Any], session.to_store_data()))
 
     def _resolve_environment(self, session: Session) -> Environment:
-        return self._binding_resolver.resolve_environment(session.execution_binding)
+        return self._runtime_environment_resolver_service.resolve_environment_for_run_target(
+            session.default_run_target
+        )
 
     def _hydrate_session(self, session: Session) -> Session:
         approval_store = self._approval_stores.get(session.id)
@@ -2217,7 +2186,7 @@ class SessionManager:
         max_steps: int = 30,
         enable_parallel: bool = True,
         max_parallel: int = 5,
-        execution_binding: ExecutionBinding | None = None,
+        default_run_target: RunTarget | None = None,
     ) -> str:
         """Create a new agent session.
 
@@ -2231,8 +2200,8 @@ class SessionManager:
             max_steps: Maximum steps per turn
             enable_parallel: Enable parallel tool execution
             max_parallel: Maximum number of parallel tool executions
-            execution_binding: Explicit workspace execution binding. If omitted,
-                a local binding is derived from repo_path or the current directory.
+            default_run_target: Explicit placement target. If omitted, a local
+                daemon target is derived from repo_path or the current directory.
 
         Returns:
             The session ID
@@ -2253,16 +2222,7 @@ class SessionManager:
                 base_url = cfg.base_url
 
         resolved_repo_path = repo_path.resolve() if repo_path is not None else None
-        if execution_binding is None:
-            binding = LocalExecutionBinding(
-                workspace_root=(
-                    str(resolved_repo_path)
-                    if resolved_repo_path is not None
-                    else str(Path.cwd().resolve())
-                )
-            )
-        else:
-            binding = execution_binding
+        target = default_run_target or _local_default_run_target(resolved_repo_path)
 
         session = Session(
             id=session_id,
@@ -2271,7 +2231,7 @@ class SessionManager:
             last_activity=now,
             repo_path=resolved_repo_path,
             origin=None if origin is None else dict(origin),
-            execution_binding=binding,
+            default_run_target=target,
             approval_policy=approval_policy,
             provider=provider,
             provider_name=provider_name,
@@ -2819,7 +2779,7 @@ class SessionManager:
     async def export_workspace_archive(
         self,
         session_id: str,
-        export_archive: Callable[[CloudWorkspaceBinding], T],
+        export_archive: Callable[[CloudWorkspaceRef], T],
     ) -> T:
         return await self._runtime_workspace_export_service.export_archive(
             session_id,

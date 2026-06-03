@@ -1,20 +1,36 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 import pytest
 
 from coding_agent.approval import ApprovalPolicy
-from coding_agent.environment.execution_binding import ExternalWorkerBinding
 from coding_agent.runtime_store import AgentRunRecord, JSONObject, RuntimeEventRecord
 from coding_agent.runs import (
+    ExternalWorkerExecutorRef,
+    ExternalWorkerWorkspaceRef,
+    IsolationPolicy,
+    RunTarget,
     RuntimeAttachedExecutorClaim,
     RuntimeAttachedExecutorClaimService,
     RuntimeAttachedExecutorFinalizeService,
     RuntimeAttachedExecutorRequestService,
     RuntimeAttachedExecutorService,
+    run_target_execution_plane,
+    run_target_execution_placement,
+    run_target_executor_kind,
+    run_target_executor_ref_kind,
+    run_target_workspace_surface,
 )
+
+
+def _attached_target() -> RunTarget:
+    return RunTarget(
+        workspace=ExternalWorkerWorkspaceRef(),
+        executor=ExternalWorkerExecutorRef(executor_kind="local_cli"),
+        isolation=IsolationPolicy(kind="external_worker_policy"),
+    )
 
 
 @dataclass
@@ -25,9 +41,7 @@ class FakeSession:
     model_name: str | None = "gpt-test"
     approval_policy: ApprovalPolicy = ApprovalPolicy.YOLO
     max_steps: int = 12
-    execution_binding: ExternalWorkerBinding = ExternalWorkerBinding(
-        executor_kind="local_cli"
-    )
+    default_run_target: RunTarget = field(default_factory=_attached_target)
     turn_in_progress: bool = False
     turn_status: str = "idle"
     current_turn_id: str | None = None
@@ -188,8 +202,8 @@ async def test_attached_executor_request_service_marks_session_turn_running() ->
         attached_executor=lambda: attached_service,
         persist_session=persist_session,
         session_is_attached=lambda session: isinstance(
-            session.execution_binding,
-            ExternalWorkerBinding,
+            session.default_run_target.executor,
+            ExternalWorkerExecutorRef,
         ),
         run_id_factory=lambda: "run-requested",
     ).request_run(
@@ -518,12 +532,16 @@ def _metadata_for_session(
         "model_name": session.model_name,
         "approval_policy": session.approval_policy.value,
         "max_steps": session.max_steps,
-        "execution_binding_kind": session.execution_binding.kind,
-        "workspace_surface": session.execution_binding.workspace_surface,
-        "execution_plane": session.execution_binding.execution_plane,
-        "execution_placement": "local_attached",
-        "executor_kind": session.execution_binding.executor_kind,
+        "workspace_surface": run_target_workspace_surface(session.default_run_target),
+        "execution_plane": run_target_execution_plane(session.default_run_target),
+        "execution_placement": run_target_execution_placement(
+            session.default_run_target
+        ),
+        "executor_kind": run_target_executor_kind(session.default_run_target),
     }
+    executor_ref_kind = run_target_executor_ref_kind(session.default_run_target)
+    if executor_ref_kind is not None:
+        metadata["executor_ref_kind"] = executor_ref_kind
     if resume_context is not None:
         metadata.update(resume_context.metadata())
     return metadata

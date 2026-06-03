@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, cast, override
 from urllib.parse import urlsplit, urlunsplit
 
 from .cloud import CloudCommandResult
+from coding_agent.runs.target import CloudWorkspaceRef
 from .workspace_provider import (
     CloudWorkspaceClientFactory,
     CloudWorkspaceSource,
@@ -45,7 +46,6 @@ from ..workspace_archive import (
 
 if TYPE_CHECKING:
     from .cloud import CloudWorkspaceClient
-    from .execution_binding import CloudWorkspaceBinding
 
 
 logger = logging.getLogger(__name__)
@@ -93,7 +93,7 @@ class DockerCloudWorkspaceClient:
     def __init__(
         self,
         *,
-        binding: CloudWorkspaceBinding,
+        binding: CloudWorkspaceRef,
         config: _DockerWorkspaceProviderConfig,
     ) -> None:
         _validate_workspace_id(binding.workspace_id)
@@ -361,7 +361,7 @@ class DockerWorkspaceProvider(WorkspaceProvider):
     ) -> CloudWorkspaceClientFactory:
         _validate_docker_workspace_base_config(config)
 
-        def build_client(binding: CloudWorkspaceBinding) -> CloudWorkspaceClient:
+        def build_client(binding: CloudWorkspaceRef) -> CloudWorkspaceClient:
             provider_config = _docker_workspace_provider_config(
                 config,
                 runtime_profile=binding.runtime_profile,
@@ -396,9 +396,7 @@ class DockerWorkspaceProvider(WorkspaceProvider):
         self,
         config: dict[str, object],
         source: CloudWorkspaceSource,
-    ) -> CloudWorkspaceBinding:
-        from .execution_binding import CloudWorkspaceBinding
-
+    ) -> CloudWorkspaceRef:
         kind = source.get("kind")
         if kind not in {"docker", "git"}:
             raise ValueError(
@@ -419,7 +417,7 @@ class DockerWorkspaceProvider(WorkspaceProvider):
                 provider_config.workspace_root, workspace_id
             )
             workspace_root.mkdir(parents=True, exist_ok=False)
-        binding = CloudWorkspaceBinding(
+        binding = CloudWorkspaceRef(
             workspace_url=(
                 f"docker://{_container_name(provider_config, workspace_id)}{provider_config.container_workspace_root}"
             ),
@@ -489,7 +487,7 @@ class DockerWorkspaceProvider(WorkspaceProvider):
     def cleanup_cloud_workspace_binding(
         self,
         config: dict[str, object],
-        binding: CloudWorkspaceBinding,
+        binding: CloudWorkspaceRef,
     ) -> None:
         provider_config = _docker_workspace_provider_config(
             config,
@@ -512,7 +510,7 @@ class DockerWorkspaceProvider(WorkspaceProvider):
     def import_workspace_archive(
         self,
         config: dict[str, object],
-        binding: CloudWorkspaceBinding,
+        binding: CloudWorkspaceRef,
         archive_base64: str,
     ) -> None:
         provider_config = _docker_workspace_provider_config(
@@ -535,7 +533,7 @@ class DockerWorkspaceProvider(WorkspaceProvider):
     def export_workspace_archive(
         self,
         config: dict[str, object],
-        binding: CloudWorkspaceBinding,
+        binding: CloudWorkspaceRef,
     ) -> str:
         provider_config = _docker_workspace_provider_config(
             config,
@@ -1731,7 +1729,7 @@ def _add_git_failure_output_notes(
 def _run_docker_setup_phase_if_configured(
     provider_config: _DockerWorkspaceProviderConfig,
     config: dict[str, object],
-    binding: "CloudWorkspaceBinding",
+    binding: CloudWorkspaceRef,
     *,
     on_docker_invoked: Callable[[], None] | None = None,
 ) -> None:
@@ -1874,7 +1872,7 @@ def _setup_phase_commands(value: object) -> list[str]:
 
 def _start_docker_workspace_container(
     provider_config: _DockerWorkspaceProviderConfig,
-    binding: CloudWorkspaceBinding,
+    binding: CloudWorkspaceRef,
 ) -> None:
     workspace_root = _workspace_root_for_id(
         provider_config.workspace_root, binding.workspace_id

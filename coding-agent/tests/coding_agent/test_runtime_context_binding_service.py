@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
@@ -8,16 +8,27 @@ import pytest
 from agentkit.runtime.context import AgentRunContext
 from agentkit.tape.tape import Tape
 from coding_agent.environment.local import LocalEnvironment
-from coding_agent.environment.execution_binding import LocalExecutionBinding
-from coding_agent.runs import RuntimeContextBindingService
+from coding_agent.runs import (
+    IsolationPolicy,
+    LocalDaemonExecutorRef,
+    LocalPathWorkspaceRef,
+    RunTarget,
+    RuntimeContextBindingService,
+)
+
+
+def _local_target() -> RunTarget:
+    return RunTarget(
+        workspace=LocalPathWorkspaceRef(path="/workspace"),
+        executor=LocalDaemonExecutorRef(),
+        isolation=IsolationPolicy(kind="default_local_sandbox"),
+    )
 
 
 @dataclass
 class FakeSession:
     id: str = "session-1"
-    execution_binding: LocalExecutionBinding = LocalExecutionBinding(
-        workspace_root="/workspace"
-    )
+    default_run_target: RunTarget = field(default_factory=_local_target)
 
 
 @dataclass
@@ -58,7 +69,7 @@ def test_bind_root_run_identity_updates_context_and_trace_metadata() -> None:
         "turn_id": "run-1",
         "tape_id": "tape-1",
         "execution_placement": "server_embedded",
-        "execution_binding_kind": "local",
+        "executor_kind": "local_daemon",
         "workspace_surface": "local_workspace",
         "execution_plane": "control_plane",
     }

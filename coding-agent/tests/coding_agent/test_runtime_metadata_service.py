@@ -3,18 +3,22 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from coding_agent.approval import ApprovalPolicy
-from coding_agent.environment.execution_binding import (
-    CloudWorkspaceBinding,
-    ExecutionBinding,
-    ExternalWorkerBinding,
-    LocalExecutionBinding,
+from coding_agent.runs import (
+    CloudWorkspaceRef,
+    ExternalWorkerExecutorRef,
+    ExternalWorkerWorkspaceRef,
+    IsolationPolicy,
+    LocalDaemonExecutorRef,
+    LocalPathWorkspaceRef,
+    RunTarget,
+    RuntimeRunMetadataService,
+    run_target_execution_placement,
 )
-from coding_agent.runs import RuntimeRunMetadataService, runtime_execution_placement
 
 
 @dataclass
 class FakeSession:
-    execution_binding: ExecutionBinding
+    default_run_target: RunTarget
     id: str = "session-1"
     provider_name: str | None = "openai"
     model_name: str | None = "gpt-test"
@@ -30,14 +34,47 @@ class FakeResumeContext:
         return {
             "previous_run_id": self.previous_run_id,
             "resume_reason": "manual",
-        }
+    }
 
 
-def test_runtime_metadata_service_reports_local_execution_binding() -> None:
-    service = RuntimeRunMetadataService()
-    session = FakeSession(
-        execution_binding=LocalExecutionBinding(workspace_root="/workspace")
+def _local_target() -> RunTarget:
+    return RunTarget(
+        workspace=LocalPathWorkspaceRef(path="/workspace"),
+        executor=LocalDaemonExecutorRef(),
+        isolation=IsolationPolicy(kind="default_local_sandbox"),
     )
+
+
+def _cloud_target() -> RunTarget:
+    return RunTarget(
+        workspace=CloudWorkspaceRef(
+            workspace_url="https://workspace.example",
+            workspace_id="workspace-1",
+        ),
+        executor=LocalDaemonExecutorRef(),
+        isolation=IsolationPolicy(
+            kind="provider_sandbox",
+            network="provider_managed",
+            filesystem="provider_managed",
+            secrets="provider_managed",
+        ),
+    )
+
+
+def _external_worker_target(workspace_ref: dict[str, object]) -> RunTarget:
+    return RunTarget(
+        workspace=ExternalWorkerWorkspaceRef(ref=workspace_ref),
+        executor=ExternalWorkerExecutorRef(
+            executor_kind="local_cli",
+            worker_pool="pool-a",
+        ),
+        isolation=IsolationPolicy(kind="external_worker_policy"),
+    )
+
+
+def test_runtime_metadata_service_reports_local_run_target() -> None:
+    service = RuntimeRunMetadataService()
+    session = FakeSession(default_run_target=_local_target())
 
     metadata = service.metadata_for_session(
         session,
@@ -49,7 +86,7 @@ def test_runtime_metadata_service_reports_local_execution_binding() -> None:
         "model_name": "gpt-test",
         "approval_policy": "auto",
         "max_steps": 12,
-        "execution_binding_kind": "local",
+        "executor_kind": "local_daemon",
         "workspace_surface": "local_workspace",
         "execution_plane": "control_plane",
         "execution_placement": "server_embedded",
@@ -58,34 +95,27 @@ def test_runtime_metadata_service_reports_local_execution_binding() -> None:
     }
 
 
-def test_runtime_metadata_service_reports_cloud_execution_binding() -> None:
+def test_runtime_metadata_service_reports_cloud_run_target() -> None:
     service = RuntimeRunMetadataService()
-    binding = CloudWorkspaceBinding(
-        workspace_url="https://workspace.example",
-        workspace_id="workspace-1",
-    )
+    target = _cloud_target()
 
-    metadata = service.metadata_for_session(FakeSession(execution_binding=binding))
+    metadata = service.metadata_for_session(FakeSession(default_run_target=target))
 
-    assert metadata["execution_binding_kind"] == "cloud"
+    assert metadata["executor_kind"] == "local_daemon"
     assert metadata["workspace_surface"] == "cloud_workspace"
     assert metadata["execution_plane"] == "control_plane"
-    assert metadata["execution_placement"] == "cloud_workspace"
-    assert runtime_execution_placement(binding) == "cloud_workspace"
+    assert metadata["execution_placement"] == "server_embedded"
+    assert run_target_execution_placement(target) == "server_embedded"
 
 
 def test_runtime_metadata_service_reports_external_worker_metadata() -> None:
     service = RuntimeRunMetadataService()
     workspace_ref = {"kind": "snapshot", "snapshot_id": "snap-1"}
-    binding = ExternalWorkerBinding(
-        executor_kind="local_cli",
-        worker_pool="pool-a",
-        workspace_ref=workspace_ref,
-    )
+    target = _external_worker_target(workspace_ref)
 
-    metadata = service.metadata_for_session(FakeSession(execution_binding=binding))
+    metadata = service.metadata_for_session(FakeSession(default_run_target=target))
 
-    assert metadata["execution_binding_kind"] == "external_worker"
+    assert metadata["executor_ref_kind"] == "external_worker"
     assert metadata["workspace_surface"] == "external_worker_workspace_ref"
     assert metadata["execution_plane"] == "executor_plane"
     assert metadata["execution_placement"] == "local_attached"
@@ -93,4 +123,4 @@ def test_runtime_metadata_service_reports_external_worker_metadata() -> None:
     assert metadata["worker_pool"] == "pool-a"
     assert metadata["workspace_ref"] == workspace_ref
     assert metadata["workspace_ref"] is not workspace_ref
-    assert runtime_execution_placement(binding) == "local_attached"
+    assert run_target_execution_placement(target) == "local_attached"

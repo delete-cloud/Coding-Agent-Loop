@@ -31,7 +31,7 @@ async def test_sqlite_runtime_store_persists_runtime_records_across_instances(
             status="requested",
             started_at=started_at,
             metadata={
-                "execution_binding_kind": "local_attached",
+                "executor_ref_kind": "local_attached",
                 "executor_kind": "local_cli",
             },
             result={},
@@ -52,7 +52,7 @@ async def test_sqlite_runtime_store_persists_runtime_records_across_instances(
         status="completed",
         ended_at=datetime(2026, 6, 1, 12, 1, tzinfo=UTC),
         metadata={
-            "execution_binding_kind": "local_attached",
+            "executor_ref_kind": "local_attached",
             "executor_kind": "local_cli",
             "executor_id": "executor-1",
             "resume_from_run_id": "run-0",

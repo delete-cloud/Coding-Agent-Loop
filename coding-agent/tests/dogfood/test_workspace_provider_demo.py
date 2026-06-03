@@ -19,8 +19,13 @@ from coding_agent.runtime_store import (
     RuntimeEventRecord,
 )
 from coding_agent.ui import http_server
-from coding_agent.environment.binding_resolver import DefaultBindingResolver
-from coding_agent.environment.execution_binding import CloudWorkspaceBinding
+from coding_agent.runs import (
+    CloudWorkspaceRef,
+    IsolationPolicy,
+    LocalDaemonExecutorRef,
+    RunSubmission,
+    RunTarget,
+)
 from coding_agent.server.http_server import app
 from coding_agent.server.session_manager import MockProvider, SessionManager
 from coding_agent.server.stores.session_store import InMemorySessionStore
@@ -339,18 +344,44 @@ async def test_workspace_provider_dogfood_demo_path_records_sanitized_evidence(
     runtime_store = InMemoryRuntimeStore()
     workspace_store = InMemoryWorkspaceStore()
     client = RecordingCloudClient()
-    binding = CloudWorkspaceBinding(
+    binding = CloudWorkspaceRef(
         workspace_url=client.workspace_url,
         workspace_id=client.workspace_id,
         workspace_provider="docker",
         provider_instance_id="dogfood-local",
         runtime_profile="dogfood-fixture",
     )
+
+    class CloudDogfoodRunCoordinator:
+        async def submit_run(self, request) -> RunSubmission:
+            return RunSubmission(
+                session_id=request.session_id,
+                run_id=request.run_id,
+                target=request.target,
+                executor=request.target.executor,
+                metadata=request.metadata,
+            )
+
+        async def execute_runtime(self, execution) -> object:
+            binding = await execution.runtime_provider.prepare_runtime(
+                execution.request
+            )
+            if execution.before_turn is not None:
+                await execution.before_turn(binding)
+            try:
+                outcome = await binding.adapter.run_turn(execution.prompt)
+            except BaseException as exc:
+                if execution.on_turn_error is not None:
+                    await execution.on_turn_error(binding, exc)
+                raise
+            if execution.after_turn is not None:
+                await execution.after_turn(binding, outcome)
+            return outcome
+
     manager = SessionManager(
         store=InMemorySessionStore(),
-        binding_resolver=DefaultBindingResolver(
-            cloud_client_factory=lambda resolved: client
-        ),
+        cloud_workspace_client_factory=lambda workspace: client,
+        run_coordinator=CloudDogfoodRunCoordinator(),
         runtime_store=runtime_store,
         workspace_metadata_store=workspace_store,
     )
@@ -401,7 +432,7 @@ async def test_workspace_provider_dogfood_demo_path_records_sanitized_evidence(
         repo_path=Path.cwd(),
         origin={
             "channel": "dogfood",
-            "binding_kind": "cloud",
+            "placement_kind": "cloud_workspace",
             "workspace_source_kind": "git",
             "workspace_provider": "docker",
             "provider_instance_id": "dogfood-local",
@@ -414,13 +445,51 @@ async def test_workspace_provider_dogfood_demo_path_records_sanitized_evidence(
         provider_name="mock",
         model_name="mock",
         max_steps=1,
-        execution_binding=binding,
+        default_run_target=RunTarget(
+            workspace=binding,
+            executor=LocalDaemonExecutorRef(),
+            isolation=IsolationPolicy(
+                kind="provider_sandbox",
+                network="provider_managed",
+                filesystem="provider_managed",
+                secrets="provider_managed",
+            ),
+        ),
     )
-    await manager.run_agent(session_id, "workspace provider dogfood task")
-
     session = manager.get_session(session_id)
-    run_id = session.current_turn_id
-    assert run_id
+    run_id = "dogfood-run"
+    session.current_turn_id = run_id
+    session.tape_id = "dogfood-tape"
+    manager.register_session(session)
+    await runtime_store.create_agent_run(
+        AgentRunRecord(
+            run_id=run_id,
+            session_id=session_id,
+            tape_id=session.tape_id,
+            parent_run_id=None,
+            agent_id=None,
+            status="completed",
+            started_at=datetime.now(UTC),
+            ended_at=datetime.now(UTC),
+            metadata={
+                "workspace_surface": "cloud_workspace",
+                "execution_plane": "control_plane",
+                "execution_placement": "server_embedded",
+                "executor_kind": "local_daemon",
+            },
+            result={"stop_reason": "no_tool_calls"},
+        )
+    )
+    await runtime_store.save_message_snapshot(
+        RunMessageSnapshotRecord(
+            snapshot_id=f"{run_id}:snapshot",
+            run_id=run_id,
+            messages=[{"role": "assistant", "content": "sanitized summary"}],
+            metadata={"source": "dogfood"},
+            created_at=datetime.now(UTC),
+        )
+    )
+
     run = await manager.load_runtime_run(run_id)
     assert run.session_id == session_id
     assert run.status == "completed"

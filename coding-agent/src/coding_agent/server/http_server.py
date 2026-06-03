@@ -101,7 +101,6 @@ from coding_agent.server.auth import (
     auth_context_from_headers,
     verify_api_key,
 )
-from coding_agent.environment.binding_resolver import DefaultBindingResolver
 from coding_agent.server.developer_console import (
     ConsoleActionSummary,
     ConsoleActionValidationSummary,
@@ -170,12 +169,14 @@ from coding_agent.server.developer_console import (
     safe_label_value,
     safe_text_value,
 )
-from coding_agent.environment.execution_binding import (
-    CloudWorkspaceBinding,
-    ExecutionBinding,
-    ExternalWorkerBinding,
-    LocalAttachedExecutionBinding,
-    LocalExecutionBinding,
+from coding_agent.runs import (
+    CloudWorkspaceRef,
+    ExternalWorkerExecutorRef,
+    IsolationPolicy,
+    LocalAttachedExecutorRef,
+    ManagedPoolExecutorRef,
+    RunTarget,
+    run_target_from_dict,
 )
 from coding_agent.server.rate_limit import RateLimits, limiter
 from coding_agent.server.schemas import (
@@ -683,21 +684,19 @@ def _log_development_mode_warning(server_config: dict[str, Any]) -> None:
     )
 
 
-def _build_binding_resolver() -> DefaultBindingResolver:
-    cloud_workspace_config = _load_cloud_workspace_config()
-    if cloud_workspace_config.get("enabled") is not True:
-        return DefaultBindingResolver()
-    return DefaultBindingResolver(
-        cloud_client_factory=cloud_client_factory_from_config(cloud_workspace_config)
-    )
-
-
-def _cleanup_provisioned_cloud_binding(binding: CloudWorkspaceBinding) -> None:
+def _cleanup_provisioned_cloud_binding(workspace: CloudWorkspaceRef) -> None:
     cloud_workspace_config = _load_cloud_workspace_config()
     provider = cloud_workspace_config.get("provider")
     if not isinstance(provider, str) or not provider.strip():
         return
-    cleanup_cloud_binding_from_config(cloud_workspace_config, binding)
+    cleanup_cloud_binding_from_config(cloud_workspace_config, workspace)
+
+
+def _session_uses_attached_executor(session: Any) -> bool:
+    target = getattr(session, "default_run_target", None)
+    if not isinstance(target, RunTarget):
+        return False
+    return isinstance(target.executor, (ExternalWorkerExecutorRef, LocalAttachedExecutorRef))
 
 
 def _storage_uses_pg_http_sessions(storage_config: dict[str, Any]) -> bool:
@@ -755,7 +754,11 @@ def _build_session_manager() -> SessionManager:
         raise
     manager = SessionManager(
         storage_config=storage_config,
-        binding_resolver=_build_binding_resolver(),
+        cloud_workspace_client_factory=(
+            cloud_client_factory_from_config(_load_cloud_workspace_config())
+            if _load_cloud_workspace_config().get("enabled") is True
+            else None
+        ),
         provisioned_cloud_binding_cleanup=_cleanup_provisioned_cloud_binding,
     )
     if remote_retention_config.get("enabled") is True:
@@ -810,9 +813,12 @@ async def _active_cloud_workspace_ids() -> set[str]:
             session = await session_manager.get_session_async(session_id)
         except KeyError:
             continue
-        binding = session.execution_binding
-        if isinstance(binding, CloudWorkspaceBinding):
-            active_workspace_ids.add(binding.workspace_id)
+        target = session.default_run_target
+        if target is None:
+            continue
+        workspace = target.workspace
+        if isinstance(workspace, CloudWorkspaceRef):
+            active_workspace_ids.add(workspace.workspace_id)
     return active_workspace_ids
 
 
@@ -1652,11 +1658,14 @@ async def _persist_workspace_publication_refs(
     if not _remote_retention_enabled():
         return
     session = await session_manager.get_session_async(session_id)
-    binding = session.execution_binding
-    if not isinstance(binding, CloudWorkspaceBinding):
+    target = session.default_run_target
+    if target is None:
+        return
+    workspace = target.workspace
+    if not isinstance(workspace, CloudWorkspaceRef):
         return
     record = await session_manager.load_workspace_record_by_workspace_id(
-        binding.workspace_id
+        workspace.workspace_id
     )
     if record is None:
         return
@@ -1767,52 +1776,33 @@ def _durable_workspace_retention_not_implemented() -> HTTPException:
     )
 
 
-def _execution_binding_from_request(
+def _explicit_run_target_from_request(
     body: CreateSessionRequest | None,
-) -> ExecutionBinding | None:
-    if body is None or body.execution_binding is None:
-        return None
-    binding = body.execution_binding
-    if binding.kind == "local":
-        return LocalExecutionBinding(
-            workspace_root=binding.workspace_root,
-            workspace_provider=binding.workspace_provider,
-            provider_instance_id=binding.provider_instance_id,
-        )
-    if binding.kind == "external_worker":
-        return ExternalWorkerBinding(
-            executor_kind=binding.executor_kind,
-            worker_pool=binding.worker_pool,
-            workspace_ref=binding.workspace_ref,
-            provider_instance_id=binding.provider_instance_id,
-        )
-    if binding.kind == "local_attached":
-        return LocalAttachedExecutionBinding(
-            executor_kind=binding.executor_kind,
-            worker_pool=binding.worker_pool,
-            workspace_ref=binding.workspace_ref,
-            provider_instance_id=binding.provider_instance_id,
-        )
-    return CloudWorkspaceBinding(
-        workspace_url=binding.workspace_url,
-        workspace_id=binding.workspace_id,
-        workspace_provider=binding.workspace_provider,
-        provider_instance_id=binding.provider_instance_id,
-    )
-
-
-def _provisioned_execution_binding_from_request(
-    body: CreateSessionRequest | None,
-) -> ExecutionBinding | None:
+) -> RunTarget | None:
     if body is None:
         return None
-    if body.execution_binding is not None and body.workspace_source is not None:
-        raise ValueError(
-            "execution_binding and workspace_source cannot be set together"
-        )
-    explicit_binding = _execution_binding_from_request(body)
-    if explicit_binding is not None:
-        return explicit_binding
+    if body.default_run_target is not None and body.run_target is not None:
+        raise ValueError("default_run_target and run_target cannot both be set")
+    target_payload = (
+        body.default_run_target
+        if body.default_run_target is not None
+        else body.run_target
+    )
+    if target_payload is None:
+        return None
+    return run_target_from_dict(target_payload)
+
+
+def _provisioned_run_target_from_request(
+    body: CreateSessionRequest | None,
+) -> RunTarget | None:
+    if body is None:
+        return None
+    explicit_target = _explicit_run_target_from_request(body)
+    if explicit_target is not None and body.workspace_source is not None:
+        raise ValueError("run_target and workspace_source cannot be set together")
+    if explicit_target is not None:
+        return explicit_target
     if body.workspace_source is None:
         return None
 
@@ -1825,9 +1815,19 @@ def _provisioned_execution_binding_from_request(
         body.workspace_source.model_dump(mode="python"),
         cloud_workspace_config,
     )
-    return provision_cloud_binding_from_config(
+    workspace = provision_cloud_binding_from_config(
         cloud_workspace_config,
         body.workspace_source.model_dump(mode="python"),
+    )
+    return RunTarget(
+        workspace=workspace,
+        executor=ManagedPoolExecutorRef(),
+        isolation=IsolationPolicy(
+            kind="provider_sandbox",
+            network="provider_managed",
+            filesystem="provider_managed",
+            secrets="provider_managed",
+        ),
     )
 
 
@@ -1856,16 +1856,17 @@ def _validate_workspace_source_phase_policy(
 
 def _session_origin_from_request(
     body: CreateSessionRequest | None,
-    binding: ExecutionBinding | None,
+    target: RunTarget | None,
     auth_context: AuthContext | None = None,
 ) -> dict[str, str]:
     origin = {
         "channel": "http",
-        "binding_kind": "local" if binding is None else binding.kind,
+        "placement_kind": "local_path" if target is None else target.workspace.kind,
+        "executor_kind": "local_daemon" if target is None else target.executor.kind,
     }
     if body is not None and body.workspace_source is not None:
         origin["workspace_source_kind"] = body.workspace_source.kind
-    if isinstance(binding, CloudWorkspaceBinding):
+    if target is not None and isinstance(target.workspace, CloudWorkspaceRef):
         cloud_workspace_config = _load_cloud_workspace_config()
         provider = cloud_workspace_config.get("provider")
         provider_instance_id = cloud_workspace_config.get("provider_instance_id")
@@ -2346,24 +2347,25 @@ async def create_session(
         "auto": ApprovalPolicy.AUTO,
     }
     approval_policy = approval_policy_map.get(approval_policy_str, ApprovalPolicy.AUTO)
-    provisioned_binding: CloudWorkspaceBinding | None = None
+    provisioned_workspace: CloudWorkspaceRef | None = None
 
     try:
-        execution_binding = _provisioned_execution_binding_from_request(body)
+        default_run_target = _provisioned_run_target_from_request(body)
         if (
             body is not None
             and body.workspace_source is not None
-            and isinstance(execution_binding, CloudWorkspaceBinding)
+            and default_run_target is not None
+            and isinstance(default_run_target.workspace, CloudWorkspaceRef)
         ):
-            provisioned_binding = execution_binding
+            provisioned_workspace = default_run_target.workspace
         session_id = await session_manager.create_session(
             repo_path=repo_path,
             origin=_session_origin_from_request(
                 body,
-                execution_binding,
+                default_run_target,
                 auth_context,
             ),
-            execution_binding=execution_binding,
+            default_run_target=default_run_target,
             approval_policy=approval_policy,
             provider_name=(
                 body.provider
@@ -2383,19 +2385,19 @@ async def create_session(
             ),
         )
     except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-        if provisioned_binding is not None:
+        if provisioned_workspace is not None:
             try:
                 await asyncio.to_thread(
-                    _cleanup_provisioned_cloud_binding, provisioned_binding
+                    _cleanup_provisioned_cloud_binding, provisioned_workspace
                 )
             except Exception:
                 logger.exception("Failed to roll back provisioned cloud workspace")
         raise
     except Exception as exc:
-        if provisioned_binding is not None:
+        if provisioned_workspace is not None:
             try:
                 await asyncio.to_thread(
-                    _cleanup_provisioned_cloud_binding, provisioned_binding
+                    _cleanup_provisioned_cloud_binding, provisioned_workspace
                 )
             except Exception:
                 logger.exception("Failed to roll back provisioned cloud workspace")
@@ -2450,7 +2452,7 @@ async def send_prompt(
             ) from exc
         raise
 
-    if isinstance(session.execution_binding, ExternalWorkerBinding):
+    if _session_uses_attached_executor(session):
         return await _send_attached_executor_prompt(session_id, prompt_text)
 
     session.turn_in_progress = True
@@ -2525,7 +2527,7 @@ async def resume_session(
     prompt_text = None if body is None else body.prompt
     resume_reason = "user_resume" if body is None else body.resume_reason
 
-    if isinstance(session.execution_binding, ExternalWorkerBinding):
+    if _session_uses_attached_executor(session):
         try:
             run = await session_manager.resume_session(
                 session_id,

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from agentkit.environment import Environment
 
-from coding_agent.environment.binding_resolver import BindingResolver
-from coding_agent.environment.execution_binding import CloudWorkspaceBinding
+from coding_agent.environment.cloud import CloudEnvironment, CloudWorkspaceClient
 from coding_agent.environment.local import LocalEnvironment
 from coding_agent.environment.sandboxed import sandbox_environment
 from coding_agent.runs.target import (
@@ -18,7 +18,7 @@ from coding_agent.runs.target import (
 
 @dataclass(frozen=True)
 class RuntimeEnvironmentResolverService:
-    binding_resolver: BindingResolver
+    cloud_client_factory: Callable[[CloudWorkspaceRef], CloudWorkspaceClient] | None = None
 
     def resolve_environment_for_run_target(
         self,
@@ -32,15 +32,9 @@ class RuntimeEnvironmentResolverService:
             environment = LocalEnvironment(Path(workspace.path).expanduser().resolve())
             return sandbox_environment(environment, target.isolation)
         if isinstance(workspace, CloudWorkspaceRef):
-            environment = self.binding_resolver.resolve_environment(
-                CloudWorkspaceBinding(
-                    workspace_url=workspace.workspace_url,
-                    workspace_id=workspace.workspace_id,
-                    runtime_profile=workspace.runtime_profile,
-                    workspace_provider=workspace.workspace_provider,
-                    provider_instance_id=workspace.provider_instance_id,
-                )
-            )
+            if self.cloud_client_factory is None:
+                raise RuntimeError("cloud workspace environment is not configured")
+            environment = CloudEnvironment(self.cloud_client_factory(workspace))
             return sandbox_environment(environment, target.isolation)
         raise ValueError(
             f"runtime builders cannot resolve workspace target: {workspace.kind}"

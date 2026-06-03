@@ -21,9 +21,12 @@ from agentkit.tape.tape import Tape
 from coding_agent.approval.store import ApprovalStore
 from coding_agent.approval import ApprovalPolicy
 from agentkit.config.loader import ConfigError
-from coding_agent.environment.execution_binding import (
-    CloudWorkspaceBinding,
-    LocalExecutionBinding,
+from coding_agent.runs import (
+    CloudWorkspaceRef,
+    IsolationPolicy,
+    LocalDaemonExecutorRef,
+    LocalPathWorkspaceRef,
+    RunTarget,
 )
 from coding_agent.wire.protocol import (
     ApprovalRequest,
@@ -39,6 +42,27 @@ from coding_agent.server.stores.session_store import (
     RedisSessionStore,
     create_session_store,
 )
+
+
+def _local_run_target(path: Path | str) -> RunTarget:
+    return RunTarget(
+        workspace=LocalPathWorkspaceRef(path=str(path)),
+        executor=LocalDaemonExecutorRef(),
+        isolation=IsolationPolicy(kind="default_local_sandbox"),
+    )
+
+
+def _cloud_run_target(workspace: CloudWorkspaceRef) -> RunTarget:
+    return RunTarget(
+        workspace=workspace,
+        executor=LocalDaemonExecutorRef(),
+        isolation=IsolationPolicy(
+            kind="provider_sandbox",
+            network="provider_managed",
+            filesystem="provider_managed",
+            secrets="provider_managed",
+        ),
+    )
 
 
 class _PromptCaptureProvider:
@@ -154,12 +178,12 @@ def test_clear_sessions_uses_public_api() -> None:
 
 def test_clear_sessions_cleans_up_persisted_provisioned_cloud_sessions() -> None:
     store = InMemorySessionStore()
-    cleaned: list[CloudWorkspaceBinding] = []
+    cleaned: list[CloudWorkspaceRef] = []
     manager = SessionManager(
         store=store,
         provisioned_cloud_binding_cleanup=cleaned.append,
     )
-    binding = CloudWorkspaceBinding(
+    workspace = CloudWorkspaceRef(
         workspace_url="docker://agent-ws-persisted/workspace",
         workspace_id="ws-persisted",
     )
@@ -168,10 +192,10 @@ def test_clear_sessions_cleans_up_persisted_provisioned_cloud_sessions() -> None
         created_at=datetime.now(),
         last_activity=datetime.now(),
         approval_store=ApprovalStore(),
-        execution_binding=binding,
+        default_run_target=_cloud_run_target(workspace),
         origin={
             "channel": "http",
-            "binding_kind": "cloud",
+            "placement_kind": "cloud_workspace",
             "workspace_source_kind": "docker",
         },
     )
@@ -180,7 +204,7 @@ def test_clear_sessions_cleans_up_persisted_provisioned_cloud_sessions() -> None
 
     manager.clear_sessions()
 
-    assert cleaned == [binding]
+    assert cleaned == [workspace]
     assert store.list_sessions() == []
 
 
@@ -240,7 +264,7 @@ async def test_create_session_persists_configured_restart_metadata_by_default() 
     assert payload["base_url"] == "http://llm.default"
 
 
-def test_session_metadata_round_trips_local_execution_binding(tmp_path: Path) -> None:
+def test_session_metadata_round_trips_default_run_target(tmp_path: Path) -> None:
     store = InMemorySessionStore()
     manager = SessionManager(store=store)
     bound_repo = tmp_path / "bound-repo"
@@ -249,15 +273,15 @@ def test_session_metadata_round_trips_local_execution_binding(tmp_path: Path) ->
         created_at=datetime.now(),
         last_activity=datetime.now(),
         approval_store=ApprovalStore(),
-        execution_binding=LocalExecutionBinding(workspace_root=str(bound_repo)),
+        default_run_target=_local_run_target(bound_repo),
     )
 
     manager.register_session(session)
 
     reloaded = SessionManager(store=store).get_session("binding-session")
 
-    assert isinstance(reloaded.execution_binding, LocalExecutionBinding)
-    assert reloaded.execution_binding.workspace_root == str(bound_repo)
+    assert isinstance(reloaded.default_run_target.workspace, LocalPathWorkspaceRef)
+    assert reloaded.default_run_target.workspace.path == str(bound_repo)
 
 
 def test_session_metadata_round_trips_origin() -> None:
@@ -278,7 +302,7 @@ def test_session_metadata_round_trips_origin() -> None:
     assert reloaded.origin == {"channel": "http", "binding_kind": "cloud"}
 
 
-def test_session_defaults_local_execution_binding_from_repo_path(
+def test_session_defaults_local_run_target_from_repo_path(
     tmp_path: Path,
 ) -> None:
     bound_repo = tmp_path / "bound-repo"
@@ -290,11 +314,11 @@ def test_session_defaults_local_execution_binding_from_repo_path(
         repo_path=bound_repo,
     )
 
-    assert isinstance(session.execution_binding, LocalExecutionBinding)
-    assert session.execution_binding.workspace_root == str(bound_repo.resolve())
+    assert isinstance(session.default_run_target.workspace, LocalPathWorkspaceRef)
+    assert session.default_run_target.workspace.path == str(bound_repo.resolve())
 
 
-def test_session_preserves_explicit_execution_binding_with_repo_path(
+def test_session_preserves_explicit_default_run_target_with_repo_path(
     tmp_path: Path,
 ) -> None:
     bound_repo = tmp_path / "bound-repo"
@@ -305,11 +329,11 @@ def test_session_preserves_explicit_execution_binding_with_repo_path(
         last_activity=datetime.now(),
         approval_store=ApprovalStore(),
         repo_path=bound_repo,
-        execution_binding=LocalExecutionBinding(workspace_root=str(explicit_root)),
+        default_run_target=_local_run_target(explicit_root),
     )
 
-    assert isinstance(session.execution_binding, LocalExecutionBinding)
-    assert session.execution_binding.workspace_root == str(explicit_root)
+    assert isinstance(session.default_run_target.workspace, LocalPathWorkspaceRef)
+    assert session.default_run_target.workspace.path == str(explicit_root)
 
 
 def test_session_as_dict_includes_restart_metadata() -> None:
@@ -359,8 +383,8 @@ def test_session_metadata_defaults_missing_binding_to_local_from_repo_path(
 
     reloaded = SessionManager(store=store).get_session("legacy-session")
 
-    assert isinstance(reloaded.execution_binding, LocalExecutionBinding)
-    assert reloaded.execution_binding.workspace_root == str(legacy_repo)
+    assert isinstance(reloaded.default_run_target.workspace, LocalPathWorkspaceRef)
+    assert reloaded.default_run_target.workspace.path == str(legacy_repo)
 
 
 def test_session_metadata_defaults_missing_binding_resolves_relative_repo_path(
@@ -390,8 +414,8 @@ def test_session_metadata_defaults_missing_binding_resolves_relative_repo_path(
 
     reloaded = SessionManager(store=store).get_session("legacy-relative-session")
 
-    assert isinstance(reloaded.execution_binding, LocalExecutionBinding)
-    assert reloaded.execution_binding.workspace_root == str(legacy_repo.resolve())
+    assert isinstance(reloaded.default_run_target.workspace, LocalPathWorkspaceRef)
+    assert reloaded.default_run_target.workspace.path == str(legacy_repo.resolve())
 
 
 def test_event_queue_mutations_do_not_persist_sync_runtime_only_state() -> None:
@@ -485,6 +509,17 @@ def test_session_manager_uses_pg_backends_when_storage_config_requests_pg() -> N
         def __init__(self, *, pool: FakePGPool) -> None:
             self.pool = pool
 
+        async def load(self, tape_id: str) -> list[dict[str, object]]:
+            del tape_id
+            return []
+
+        async def save(
+            self,
+            tape_id: str,
+            entries: list[dict[str, object]],
+        ) -> None:
+            del tape_id, entries
+
     class FakePGCheckpointStore:
         def __init__(self, *, pool: FakePGPool) -> None:
             self.pool = pool
@@ -556,6 +591,17 @@ def test_session_manager_creates_pg_runtime_store_when_storage_config_requests_p
     class FakePGTapeStore:
         def __init__(self, *, pool: FakePGPool) -> None:
             self.pool = pool
+
+        async def load(self, tape_id: str) -> list[dict[str, object]]:
+            del tape_id
+            return []
+
+        async def save(
+            self,
+            tape_id: str,
+            entries: list[dict[str, object]],
+        ) -> None:
+            del tape_id, entries
 
     class FakePGCheckpointStore:
         def __init__(self, *, pool: FakePGPool) -> None:
@@ -712,6 +758,17 @@ def test_session_manager_creates_dedicated_pg_pool_for_http_session_store() -> N
     class FakePGTapeStore:
         def __init__(self, *, pool: FakePGPool) -> None:
             self.pool = pool
+
+        async def load(self, tape_id: str) -> list[dict[str, object]]:
+            del tape_id
+            return []
+
+        async def save(
+            self,
+            tape_id: str,
+            entries: list[dict[str, object]],
+        ) -> None:
+            del tape_id, entries
 
     class FakePGCheckpointStore:
         def __init__(self, *, pool: FakePGPool) -> None:
@@ -1755,9 +1812,11 @@ async def test_restore_checkpoint_rejects_when_turn_lock_is_held() -> None:
 async def test_export_workspace_archive_rejects_active_turn() -> None:
     manager = SessionManager(store=InMemorySessionStore())
     session_id = await manager.create_session(
-        execution_binding=CloudWorkspaceBinding(
-            workspace_url="docker://agent-ws-export/workspace",
-            workspace_id="ws-export",
+        default_run_target=_cloud_run_target(
+            CloudWorkspaceRef(
+                workspace_url="docker://agent-ws-export/workspace",
+                workspace_id="ws-export",
+            )
         )
     )
     session = manager.get_session(session_id)
@@ -1774,16 +1833,18 @@ async def test_export_workspace_archive_rejects_active_turn() -> None:
 async def test_export_workspace_archive_allows_concurrent_idle_exports() -> None:
     manager = SessionManager(store=InMemorySessionStore())
     session_id = await manager.create_session(
-        execution_binding=CloudWorkspaceBinding(
-            workspace_url="docker://agent-ws-export/workspace",
-            workspace_id="ws-export",
+        default_run_target=_cloud_run_target(
+            CloudWorkspaceRef(
+                workspace_url="docker://agent-ws-export/workspace",
+                workspace_id="ws-export",
+            )
         )
     )
 
     first_export_started = asyncio.Event()
     release_first_export = threading.Event()
 
-    def first_export(binding: CloudWorkspaceBinding) -> str:
+    def first_export(binding: CloudWorkspaceRef) -> str:
         first_export_started.set()
         assert release_first_export.wait(timeout=10)
         return binding.workspace_id
