@@ -11,8 +11,10 @@ Today the repo contains both:
 
 ## Current Capabilities
 
-- Interactive REPL with Rich streaming output and shell mode
 - Foreground local daemon control plane via `python -m coding_agent daemon`
+- Daemon-backed local clients via `python -m coding_agent daemon run`,
+  `python -m coding_agent daemon repl`, and `python -m coding_agent daemon tui`
+- Legacy in-process REPL with Rich streaming output and shell mode
 - HTTP server mode via `python -m coding_agent serve`
 - Dev/testkit one-shot compatibility runs via `python -m coding_agent run --goal ...`
 - Hook-driven runtime built from `agentkit` pipeline stages and plugins
@@ -33,23 +35,48 @@ uv sync --all-extras
 
 ## Usage
 
-### REPL Mode
+### Local Daemon Mode
+
+Local daemon mode is the target local product path. Start a foreground local
+control plane first, then use daemon-backed clients from another terminal:
 
 ```bash
-# Default entrypoint: starts the interactive REPL
+# Terminal 1: local control plane
+uv run python -m coding_agent daemon --host 127.0.0.1 --port 8080
+
+# Terminal 2: one prompt through the daemon-backed local session path
+uv run python -m coding_agent daemon run \
+  --url http://127.0.0.1:8080 \
+  --repo /path/to/project \
+  --goal "fix the bug in utils.py"
+
+# Interactive prompts through one daemon-backed local session
+uv run python -m coding_agent daemon repl \
+  --url http://127.0.0.1:8080 \
+  --repo /path/to/project
+
+# Rich TUI rendering through the daemon-backed local session path
+uv run python -m coding_agent daemon tui \
+  --url http://127.0.0.1:8080 \
+  --repo /path/to/project \
+  --goal "refactor main.py"
+```
+
+The daemon owns session and runtime execution. The clients create local-path
+sessions, stream display events, and submit prompts without running the agent
+runtime in the client process.
+
+### Legacy In-Process REPL
+
+```bash
+# Default entrypoint: starts the legacy in-process interactive REPL
 uv run python -m coding_agent
 
 # Explicit REPL command
 uv run python -m coding_agent repl
-
-# With overrides
-uv run python -m coding_agent repl \
-  --repo /path/to/project \
-  --provider openai \
-  --model gpt-4o
 ```
 
-Inside the REPL:
+Inside the in-process REPL:
 
 - Type normal text to talk to the agent
 - Type `!` on an empty prompt to enter shell mode
@@ -90,8 +117,8 @@ uv run python -m coding_agent run \
 ```
 
 `run` is retained for scripts, tests, and dogfood task packets. It is not the
-target local product path; the local product direction is REPL/client surfaces
-backed by durable local session/runtime management.
+target local product path; use `daemon run`, `daemon repl`, or `daemon tui` for
+local product dogfood.
 
 Legacy patch-enforcing flags such as `run --patch` and `run --verify-cmd` remain
 accepted for existing dev/testkit scripts, but they are hidden compatibility
@@ -113,8 +140,8 @@ uv run python -m coding_agent serve --host 127.0.0.1 --port 8080
 ```
 
 `daemon` is the local product entrypoint for a foreground local control plane.
-It currently reuses the same HTTP app as `serve`; background lifecycle, IPC
-socket transport, and daemon client pairing are future slices.
+It currently reuses the same HTTP app as `serve`; background lifecycle and IPC
+socket transport are future slices.
 
 The HTTP app uses the same pipeline stack as REPL and compatibility one-shot
 mode through the `coding_agent.app.create_agent()` factory and
