@@ -71,23 +71,17 @@ from coding_agent.runs import (
     EventBroadcastResult,
     LocalDaemonExecutorRef,
     RunCoordinator,
-    RuntimeAttachedExecutorService,
     RuntimeAgentFactoryService,
     RuntimeBindingSnapshot,
-    RuntimeCancelService,
+    RuntimeControlServices,
     RuntimeCloser,
     RuntimeContextBindingService,
     RuntimeEnsureService,
     RuntimeRunMetadataService,
     RuntimeObservationService,
     RuntimePreparationRequestService,
-    RuntimeQueryService,
     RuntimeReplacementService,
     RuntimeResumeContext as SessionResumeContext,
-    RuntimeResumeService,
-    RuntimeRunPersistenceService,
-    RuntimeRunRecoveryService,
-    RuntimeTaskStopper,
     RuntimeWireEventRecorder,
     RunTarget,
     SessionRuntimeHandle,
@@ -785,6 +779,22 @@ class SessionManager:
         self._runtime_store = (
             runtime_store if runtime_store is not None else self._create_runtime_store()
         )
+
+        async def runtime_session_is_recoverable(session_id: str) -> bool:
+            if self._owner_store is None:
+                return True
+            return await self._holds_active_owner_lease(session_id)
+
+        self._runtime_control_services = RuntimeControlServices(
+            store=lambda: self._runtime_store,
+            metadata_for_session=self._runtime_metadata_service.metadata_for_session,
+            list_session_ids=self.list_sessions_async,
+            session_is_recoverable=runtime_session_is_recoverable,
+            owner_id=lambda: self._owner_id,
+            active_resume_blocking_statuses=frozenset(
+                _ACTIVE_RESUME_BLOCKING_RUN_STATUSES
+            ),
+        )
         self._runtime_closer = RuntimeCloser()
         self._runtime_agent_factory_service = RuntimeAgentFactoryService(
             create_agent=self._create_agent,
@@ -914,7 +924,7 @@ class SessionManager:
     def _build_runtime_turn_service(self) -> RuntimeTurnService:
         return RuntimeTurnService(
             run_coordinator=self._run_coordinator,
-            runtime_run_persistence=self._runtime_run_persistence(),
+            runtime_run_persistence=self._runtime_control_services.run_persistence(),
             persist_session=self._persist_session_async,
             make_consumer=self._make_session_consumer,
             prepare_runtime=self._local_daemon_runtime_preparation.prepare_runtime,
@@ -939,14 +949,16 @@ class SessionManager:
         return self._runtime_store
 
     async def load_runtime_run(self, run_id: str) -> AgentRunRecord:
-        return await self._runtime_queries().load_runtime_run(run_id)
+        return await self._runtime_control_services.queries().load_runtime_run(run_id)
 
     async def list_runtime_runs(self, session_id: str) -> list[AgentRunRecord]:
-        return await self._runtime_queries().list_runtime_runs(session_id)
+        return await self._runtime_control_services.queries().list_runtime_runs(
+            session_id
+        )
 
     async def session_resume_metadata(self, session_id: str) -> dict[str, Any]:
         session = await self.get_session_async(session_id)
-        return await self._runtime_queries().session_resume_metadata(
+        return await self._runtime_control_services.queries().session_resume_metadata(
             session,
             list_checkpoints=self.list_checkpoints,
         )
@@ -955,13 +967,17 @@ class SessionManager:
         self,
         run_id: str,
     ) -> list[AgentInteractionRecord]:
-        return await self._runtime_queries().list_runtime_interactions(run_id)
+        return await self._runtime_control_services.queries().list_runtime_interactions(
+            run_id
+        )
 
     async def load_runtime_interaction(
         self,
         interaction_id: str,
     ) -> AgentInteractionRecord:
-        return await self._runtime_queries().load_runtime_interaction(interaction_id)
+        return await self._runtime_control_services.queries().load_runtime_interaction(
+            interaction_id
+        )
 
     async def load_tape_debug_info(self, tape_id: str) -> TapeInfo | None:
         if not isinstance(self._tape_store, TapeDebugStore):
@@ -993,7 +1009,9 @@ class SessionManager:
         self,
         run_id: str,
     ) -> RunMessageSnapshotRecord:
-        return await self._runtime_queries().load_runtime_message_snapshot(run_id)
+        return await self._runtime_control_services.queries().load_runtime_message_snapshot(
+            run_id
+        )
 
     async def replay_runtime_events(
         self,
@@ -1002,7 +1020,7 @@ class SessionManager:
         last_event_id: str | None = None,
         limit: int = 1000,
     ) -> list[RuntimeEventRecord]:
-        return await self._runtime_queries().replay_runtime_events(
+        return await self._runtime_control_services.queries().replay_runtime_events(
             run_id,
             last_event_id=last_event_id,
             limit=limit,
@@ -1015,7 +1033,7 @@ class SessionManager:
         last_event_id: str | None = None,
         limit: int = 1000,
     ) -> list[DisplayEvent]:
-        return await self._runtime_queries().replay_display_events(
+        return await self._runtime_control_services.queries().replay_display_events(
             run_id,
             last_event_id=last_event_id,
             limit=limit,
@@ -1040,11 +1058,13 @@ class SessionManager:
             }:
                 raise RuntimeError("turn already in progress")
             resolved_run_id = run_id or uuid.uuid4().hex
-            record = await self._runtime_attached_executor_service().request_run(
-                session,
-                prompt=prompt,
-                run_id=resolved_run_id,
-                resume_context=resume_context,
+            record = (
+                await self._runtime_control_services.attached_executor().request_run(
+                    session,
+                    prompt=prompt,
+                    run_id=resolved_run_id,
+                    resume_context=resume_context,
+                )
             )
             now = record.started_at
             session.current_turn_id = resolved_run_id
@@ -1088,7 +1108,11 @@ class SessionManager:
             "cancelling",
         }:
             raise RuntimeError("turn already in progress")
-        previous_run = await self._runtime_queries().latest_runtime_run(session_id)
+        previous_run = (
+            await self._runtime_control_services.queries().latest_runtime_run(
+                session_id
+            )
+        )
         if previous_run is None:
             raise RuntimeError("session has no previous run to resume")
         if previous_run.status in _ACTIVE_RESUME_BLOCKING_RUN_STATUSES:
@@ -1096,10 +1120,10 @@ class SessionManager:
         if session.tape_id is None and previous_run.tape_id is not None:
             session.tape_id = previous_run.tape_id
             await self._persist_session_async(session)
-        resume_context = await self._runtime_resume_service().build_context(
+        resume_context = await self._runtime_control_services.resume().build_context(
             session=session,
             previous_run=previous_run,
-            resume_from_event_id=await self._runtime_queries().latest_runtime_event_id(
+            resume_from_event_id=await self._runtime_control_services.queries().latest_runtime_event_id(
                 previous_run
             ),
             resume_reason=resume_reason,
@@ -1111,7 +1135,7 @@ class SessionManager:
             session,
             resume_context,
         )
-        resume_prompt = self._runtime_resume_service().resume_prompt(
+        resume_prompt = self._runtime_control_services.resume().resume_prompt(
             resume_context,
             prompt=prompt,
         )
@@ -1141,13 +1165,15 @@ class SessionManager:
     ) -> SessionResumeContext:
         if not session.tape_id:
             raise RuntimeError("session tape_id is required to append resume boundary")
-        anchor = self._runtime_resume_service().resume_boundary_anchor(resume_context)
+        anchor = self._runtime_control_services.resume().resume_boundary_anchor(
+            resume_context
+        )
         await self._tape_store.save(session.tape_id, [anchor.to_dict()])
         runtime_ctx = session.runtime_ctx
         tape = getattr(runtime_ctx, "tape", None)
         if isinstance(tape, Tape) and tape.tape_id == session.tape_id:
             tape.append(anchor)
-        return self._runtime_resume_service().bind_boundary_anchor(
+        return self._runtime_control_services.resume().bind_boundary_anchor(
             resume_context,
             anchor_id=anchor.id,
         )
@@ -1164,7 +1190,7 @@ class SessionManager:
         capabilities: JSONObject | None = None,
         workspace_sync: JSONObject | None = None,
     ) -> ExternalWorkerClaim | None:
-        claim = await self._runtime_attached_executor_service().claim_run(
+        claim = await self._runtime_control_services.attached_executor().claim_run(
             executor_id=executor_id,
             session_id=session_id,
             executor_kind=executor_kind,
@@ -1220,7 +1246,7 @@ class SessionManager:
         capabilities: JSONObject | None = None,
         workspace_sync: JSONObject | None = None,
     ) -> AgentRunRecord:
-        return await self._runtime_attached_executor_service().heartbeat_run(
+        return await self._runtime_control_services.attached_executor().heartbeat_run(
             run_id=run_id,
             executor_id=executor_id,
             claim_token=claim_token,
@@ -1266,7 +1292,7 @@ class SessionManager:
         payload: JSONObject,
         created_at: datetime,
     ) -> RuntimeEventRecord:
-        return await self._runtime_attached_executor_service().append_event(
+        return await self._runtime_control_services.attached_executor().append_event(
             run_id=run_id,
             executor_id=executor_id,
             claim_token=claim_token,
@@ -1310,7 +1336,7 @@ class SessionManager:
         tape_id: str | None,
         tape_entries: list[JSONObject] | None = None,
     ) -> AgentRunRecord:
-        attached_executor_service = self._runtime_attached_executor_service()
+        attached_executor_service = self._runtime_control_services.attached_executor()
         run = await attached_executor_service.load_and_authorize_run(
             run_id=run_id,
             executor_id=executor_id,
@@ -1608,55 +1634,12 @@ class SessionManager:
             cleanup_error=cleanup_error,
         )
 
-    def _runtime_run_persistence(self) -> RuntimeRunPersistenceService:
-        return RuntimeRunPersistenceService(
-            run_store=self._runtime_store,
-            checkpoint_store=self._runtime_store,
-            metadata_for_session=self._runtime_metadata_service.metadata_for_session,
-        )
-
-    def _runtime_run_recovery(self) -> RuntimeRunRecoveryService:
-        async def session_is_recoverable(session_id: str) -> bool:
-            if self._owner_store is None:
-                return True
-            return await self._holds_active_owner_lease(session_id)
-
-        return RuntimeRunRecoveryService(
-            store=self._runtime_store,
-            list_session_ids=self.list_sessions_async,
-            session_is_recoverable=session_is_recoverable,
-            owner_id=self._owner_id,
-        )
-
-    def _runtime_queries(self) -> RuntimeQueryService:
-        return RuntimeQueryService(
-            self._runtime_store,
-            active_resume_blocking_statuses=frozenset(
-                _ACTIVE_RESUME_BLOCKING_RUN_STATUSES
-            ),
-        )
-
-    def _runtime_resume_service(self) -> RuntimeResumeService:
-        return RuntimeResumeService()
-
-    def _runtime_attached_executor_service(self) -> RuntimeAttachedExecutorService:
-        return RuntimeAttachedExecutorService(
-            store=self._runtime_store,
-            metadata_for_session=self._runtime_metadata_service.metadata_for_session,
-        )
-
-    def _runtime_cancel_service(self) -> RuntimeCancelService:
-        return RuntimeCancelService(store=self._runtime_store)
-
-    def _runtime_task_stopper(self) -> RuntimeTaskStopper:
-        return RuntimeTaskStopper()
-
     async def recover_stale_runtime_runs(
         self,
         *,
         recovered_at: datetime | None = None,
     ) -> int:
-        return await self._runtime_run_recovery().recover_stale_runtime_runs(
+        return await self._runtime_control_services.run_recovery().recover_stale_runtime_runs(
             recovered_at=recovered_at,
         )
 
@@ -2396,7 +2379,7 @@ class SessionManager:
             await self._assert_owner(session_id)
             session = await self.get_session_async(session_id)
 
-            await self._runtime_task_stopper().stop(
+            await self._runtime_control_services.task_stopper().stop(
                 session_id=session_id,
                 task=session.task,
             )
@@ -2411,7 +2394,7 @@ class SessionManager:
             await self._assert_owner(session_id)
             session = await self.get_session_async(session_id)
 
-            await self._runtime_task_stopper().stop(
+            await self._runtime_control_services.task_stopper().stop(
                 session_id=session_id,
                 task=session.task,
             )
@@ -2428,10 +2411,8 @@ class SessionManager:
             session = await self.get_session_async(session_id)
             task = session.task
             if isinstance(session.execution_binding, ExternalWorkerBinding):
-                result = (
-                    await self._runtime_cancel_service().cancel_attached_executor_turn(
-                        session
-                    )
+                result = await self._runtime_control_services.cancel().cancel_attached_executor_turn(
+                    session
                 )
                 await self._persist_session_async(session)
                 return CancelTurnResult(
@@ -2440,10 +2421,8 @@ class SessionManager:
                     status=cast(CancelTurnStatus, result.status),
                 )
             if task is None or task.done():
-                result = (
-                    self._runtime_cancel_service().cancel_idle_or_finished_local_turn(
-                        session
-                    )
+                result = self._runtime_control_services.cancel().cancel_idle_or_finished_local_turn(
+                    session
                 )
                 await self._persist_session_async(session)
                 return CancelTurnResult(
@@ -2454,7 +2433,7 @@ class SessionManager:
 
             if session.current_turn_id is None:
                 session.current_turn_id = uuid.uuid4().hex
-            self._runtime_cancel_service().mark_cancelling(session)
+            self._runtime_control_services.cancel().mark_cancelling(session)
             await self._persist_session_async(session)
             task.cancel()
             _ = asyncio.create_task(
@@ -2473,7 +2452,9 @@ class SessionManager:
         task: asyncio.Task[Any],
     ) -> None:
         final_status = (
-            await self._runtime_cancel_service().observe_cancelled_local_task(task)
+            await self._runtime_control_services.cancel().observe_cancelled_local_task(
+                task
+            )
         )
 
         async with self._lock:
@@ -2484,7 +2465,7 @@ class SessionManager:
             if session.task is not task:
                 return
             session.task = None
-            self._runtime_cancel_service().finish_observed_local_turn(
+            self._runtime_control_services.cancel().finish_observed_local_turn(
                 session,
                 status=final_status,
             )

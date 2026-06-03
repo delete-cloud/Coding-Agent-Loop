@@ -324,6 +324,10 @@ This ADR does not implement that path.
     methods.
   - Completed: runtime task cancellation/waiting for close and shutdown paths is
     delegated to `RuntimeTaskStopper` instead of inline `SessionManager` logic.
+  - Completed: runtime control service construction for persistence, recovery,
+    query, resume, attached-executor, cancel, and task-stopper services is
+    delegated to `RuntimeControlServices` instead of `SessionManager` private
+    factory helpers.
   - Completed: runtime close hooks are wired directly from `RuntimeCloser` into
     preparation, turn execution, restore, and session cleanup paths instead of
     `SessionManager` proxy helpers.
