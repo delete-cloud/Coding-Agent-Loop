@@ -60,10 +60,10 @@ class ConsoleSnapshotSummary:
 
 
 @dataclass(frozen=True)
-class ConsoleEventSummary:
+class ConsoleDisplayEventSummary:
     sequence: int | None
-    event_id: str
-    event_kind: str
+    source_event_id: str
+    display_kind: str
     created_at: datetime
     payload_keys: tuple[str, ...]
 
@@ -82,7 +82,7 @@ class ConsoleRunDetail:
     metadata_keys: tuple[str, ...]
     result_keys: tuple[str, ...]
     snapshot: ConsoleSnapshotSummary | None
-    events: tuple[ConsoleEventSummary, ...]
+    events: tuple[ConsoleDisplayEventSummary, ...]
 
 
 @dataclass(frozen=True)
@@ -2115,30 +2115,34 @@ def _run_snapshot_section(snapshot: ConsoleSnapshotSummary | None) -> str:
     )
 
 
-def _run_events_section(run_id: str, events: tuple[ConsoleEventSummary, ...]) -> str:
+def _run_events_section(
+    run_id: str,
+    events: tuple[ConsoleDisplayEventSummary, ...],
+) -> str:
     replay_note = (
-        "Runtime event replay uses the existing "
-        f"/runs/{escape(run_id)}/events API. Pass last_event_id to resume after a known event."
+        "Display event replay uses the "
+        f"/runs/{escape(run_id)}/display-events API. Pass last_event_id to resume "
+        "after a known source event."
     )
     if not events:
-        return _empty_state("Runtime Events", replay_note)
+        return _empty_state("Display Events", replay_note)
     rows = []
     for event in events:
         rows.append(
             "<tr>"
             f"<td>{escape(str(event.sequence or '-'))}</td>"
-            f"<td>{escape(event.event_kind)}</td>"
-            f"<td>{escape(event.event_id)}</td>"
+            f"<td>{escape(event.display_kind)}</td>"
+            f"<td>{escape(event.source_event_id)}</td>"
             f"<td>{escape(_format_datetime(event.created_at))}</td>"
             f"<td>{escape(_join_or_dash(event.payload_keys))}</td>"
             "</tr>"
         )
     return (
-        '<section aria-label="Runtime events">'
-        "<h2>Runtime Events</h2>"
+        '<section aria-label="Display events">'
+        "<h2>Display Events</h2>"
         f'<p class="lede">{replay_note}</p>'
-        '<table aria-label="Run runtime events">'
-        "<thead><tr><th>Sequence</th><th>Kind</th><th>Event ID</th>"
+        '<table aria-label="Run display events">'
+        "<thead><tr><th>Sequence</th><th>Kind</th><th>Source Event ID</th>"
         "<th>Created</th><th>Payload Keys</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"

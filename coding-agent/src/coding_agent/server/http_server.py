@@ -120,7 +120,7 @@ from coding_agent.server.developer_console import (
     ConsoleContextSectionSummary,
     ConsoleContextSummary,
     ConsoleCorrelationSummary,
-    ConsoleEventSummary,
+    ConsoleDisplayEventSummary,
     ConsoleExecutorRunSummary,
     ConsoleInteractionSummary,
     ConsoleMemoryEvidence,
@@ -1179,14 +1179,14 @@ async def console_run_detail(
             metadata_keys=safe_key_tuple(snapshot_record.metadata),
         )
     try:
-        events = await session_manager.replay_runtime_events(run_id, limit=1000)
+        events = await session_manager.replay_display_events(run_id, limit=1000)
     except (KeyError, RuntimeError):
         events = []
     event_summaries = tuple(
-        ConsoleEventSummary(
+        ConsoleDisplayEventSummary(
             sequence=event.sequence,
-            event_id=event.event_id,
-            event_kind=event.event_kind,
+            source_event_id=event.source_event_id,
+            display_kind=event.display_kind,
             created_at=event.created_at,
             payload_keys=safe_key_tuple(event.payload),
         )
