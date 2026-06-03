@@ -221,6 +221,24 @@ def list_remote_run_events(
     return [dict(_expect_mapping(item, "Remote run event entry")) for item in events]
 
 
+def list_remote_run_display_events(
+    endpoint: RemoteEndpoint,
+    run_id: str,
+) -> list[dict[str, object]]:
+    data = _get_remote_json(
+        endpoint,
+        f"/runs/{run_id}/display-events",
+        "list remote run display events",
+    )
+    events = data.get("events")
+    if not isinstance(events, list):
+        raise click.ClickException("Remote run display events response missing events")
+    return [
+        dict(_expect_mapping(item, "Remote run display event entry"))
+        for item in events
+    ]
+
+
 def list_remote_run_interactions(
     endpoint: RemoteEndpoint,
     run_id: str,
@@ -758,13 +776,13 @@ def attach_remote_session(
             with connect_sse(
                 client,
                 "GET",
-                f"/sessions/{session_id}/events",
+                f"/sessions/{session_id}/display-events",
             ) as event_source:
                 _raise_remote_http_error(event_source.response, "attach remote session")
                 for sse in event_source.iter_sse():
                     if sse.event == "ping":
                         continue
-                    status, line_open = handle_sse_event(
+                    status, line_open = handle_display_sse_event(
                         base_url=base_url,
                         session_id=session_id,
                         headers=headers,
@@ -783,6 +801,51 @@ def attach_remote_session(
     if line_open:
         click.echo()
     return 0
+
+
+def handle_display_sse_event(
+    *,
+    base_url: str,
+    session_id: str,
+    headers: dict[str, str],
+    event: str,
+    data: str,
+    line_open: bool = False,
+) -> tuple[int | None, bool]:
+    envelope = _parse_sse_payload(data)
+    payload = envelope.get("payload")
+    if not isinstance(payload, Mapping):
+        raise click.ClickException("Remote display event payload missing payload")
+    return handle_sse_event(
+        base_url=base_url,
+        session_id=session_id,
+        headers=headers,
+        event=_legacy_event_name_for_display_kind(event),
+        data=json.dumps(dict(cast(Mapping[str, object], payload))),
+        line_open=line_open,
+    )
+
+
+def _legacy_event_name_for_display_kind(display_kind: str) -> str:
+    match display_kind:
+        case "assistant_text_delta":
+            return "StreamDelta"
+        case "thinking_delta":
+            return "ThinkingDelta"
+        case "tool_call":
+            return "ToolCallDelta"
+        case "tool_result":
+            return "ToolResultDelta"
+        case "approval_prompt":
+            return "ApprovalRequest"
+        case "approval_result":
+            return "ApprovalResponse"
+        case "progress_update":
+            return "TurnStatusDelta"
+        case "final_result":
+            return "TurnEnd"
+        case _:
+            return display_kind
 
 
 def handle_sse_event(

@@ -243,8 +243,13 @@ This ADR does not implement that path.
     additive live SSE stream that projects queued wire events into
     user-facing `DisplayEvent` payloads while preserving the legacy
     `/sessions/{session_id}/events` stream.
-  - Remaining: product UI/client renderers should switch to the live
-    `DisplayEvent` stream separately before this boundary is complete.
+  - Completed: remote CLI replay listing uses
+    `GET /runs/{run_id}/display-events`, and remote CLI attach uses
+    `GET /sessions/{session_id}/display-events` with `DisplayEvent` envelope
+    rendering.
+  - Remaining: web UI renderers and prompt/resume POST stream clients should
+    switch to `DisplayEvent` streams separately before this boundary is
+    complete.
 - [~] Establish explicit Store contracts for durable runtime state.
   - Completed: `coding_agent.stores` defines runtime store contracts split into
     run lifecycle, run, runtime event, runtime interaction, and runtime
