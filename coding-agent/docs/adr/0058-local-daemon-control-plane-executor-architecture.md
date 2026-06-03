@@ -188,8 +188,12 @@ This ADR does not implement that path.
     `SessionManager` helper methods.
   - Completed: durable approval interaction creation/resolution is delegated
     to `ApprovalInteractionService` instead of `SessionManager` helper methods.
+  - Completed: approval decision publish/read/apply, first-write-wins reuse,
+    approval decision cursor advancement, and applied-decision session
+    projection mutation are delegated to `ApprovalDecisionService` instead of
+    `SessionManager` helper methods.
   - Remaining: `SessionManager` still owns checkpoint restore preparation
-    details, approval-driven consumer setup/session mutation, and some runtime
+    details, approval request waiting/session setup, and some runtime
     close/error policy. These should move behind narrower
     RunService/EventStore/Executor lifecycle boundaries before this item is
     considered complete.
@@ -234,15 +238,15 @@ This ADR does not implement that path.
     `RuntimeRunRecoveryStore` contract through `RuntimeRunRecoveryService`.
   - Completed: durable approval interaction persistence consumes the narrower
     `RuntimeInteractionStore` contract through `ApprovalInteractionService`.
-  - Remaining: approval runtime-message/session mutation and checkpoint restore
-    service ownership is still combined around a single runtime store
-    dependency; those services should consume narrower contracts independently.
+  - Completed: approval decision runtime-message publishing/consumption and
+    applied-decision session mutation are delegated to `ApprovalDecisionService`.
+  - Remaining: approval request waiting/session setup and checkpoint restore
+    service ownership still need narrower boundaries.
 
 ## Remaining Implementation Gaps
 
-- Extract remaining approval runtime-message/session mutation and checkpoint
-  restore ownership from `SessionManager` into narrower durable service
-  boundaries.
+- Extract remaining approval request waiting/session setup and checkpoint restore
+  ownership from `SessionManager` into narrower durable service boundaries.
 - Make sandbox policy the default executor environment wrapper rather than a
   mixed local/cloud environment concern.
 - Add daemon-backed client surfaces for the local product path. REPL/TUI/CLI

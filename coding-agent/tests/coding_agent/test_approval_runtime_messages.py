@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+
 import pytest
 
 from agentkit.runtime import (
@@ -8,11 +12,45 @@ from agentkit.runtime import (
     RuntimeMessageCursor,
     RuntimeMessageKind,
 )
-from coding_agent.approval import ApprovalCoordinator
+from coding_agent.approval import (
+    ApprovalCoordinator,
+    ApprovalDecisionService,
+    ApprovalInteractionService,
+    approval_decision_message_id,
+)
 from coding_agent.approval.runtime_messages import ApprovalDecisionConsumer
 from coding_agent.server.session_manager import MockProvider, SessionManager
 from coding_agent.server.stores.session_store import InMemorySessionStore
 from coding_agent.wire.protocol import ApprovalRequest, ToolCallDelta
+
+
+@dataclass
+class FakeDecisionSession:
+    id: str = "session-approval"
+    approval_coordinator: ApprovalCoordinator = field(
+        default_factory=ApprovalCoordinator
+    )
+    runtime_message_bus: InMemoryRuntimeMessageBus = field(
+        default_factory=InMemoryRuntimeMessageBus
+    )
+    approval_decision_cursor: RuntimeMessageCursor = field(
+        default_factory=RuntimeMessageCursor
+    )
+    pending_approval: dict[str, object] | None = None
+    approval_event: asyncio.Event = field(default_factory=asyncio.Event)
+    approval_response: dict[str, object] | None = None
+    last_activity: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+
+async def _persist_session(session: FakeDecisionSession) -> None:
+    del session
+
+
+def _decision_service() -> ApprovalDecisionService:
+    return ApprovalDecisionService(
+        interactions=ApprovalInteractionService(store=None),
+        persist_session=_persist_session,
+    )
 
 
 def _approval_request(
@@ -150,6 +188,156 @@ async def test_approval_decision_consumer_rejects_cross_session_payload() -> Non
     assert result.skipped_message_ids == ("approval-decision-cross-session",)
     assert result.cursor.sequence == 1
     assert coordinator.get_request(request.request_id) is request
+
+
+@pytest.mark.asyncio
+async def test_approval_decision_service_submit_publishes_and_applies_decision() -> (
+    None
+):
+    session = FakeDecisionSession()
+    request = _approval_request(session_id=session.id, request_id="approval-service-1")
+    session.approval_coordinator.add_request(request)
+    session.pending_approval = session.approval_coordinator.projection()
+
+    response = await _decision_service().submit(
+        session,
+        request.request_id,
+        approved=False,
+        feedback="deny from service",
+        scope="once",
+    )
+
+    assert response is not None
+    assert response.session_id == session.id
+    assert response.request_id == request.request_id
+    assert response.approved is False
+    assert response.feedback == "deny from service"
+    assert response.scope == "once"
+    assert session.approval_decision_cursor.sequence == 1
+    assert session.pending_approval is None
+    assert session.approval_response == {
+        "request_id": request.request_id,
+        "decision": "deny",
+        "feedback": "deny from service",
+    }
+    assert session.approval_event.is_set() is True
+
+
+@pytest.mark.asyncio
+async def test_approval_decision_service_duplicate_submit_uses_first_decision() -> (
+    None
+):
+    session = FakeDecisionSession()
+    request = _approval_request(session_id=session.id, request_id="approval-retry")
+    session.approval_coordinator.add_request(request)
+    session.pending_approval = session.approval_coordinator.projection()
+
+    first = await _decision_service().submit(
+        session,
+        request.request_id,
+        approved=True,
+        feedback="first decision",
+        scope="once",
+    )
+    second = await _decision_service().submit(
+        session,
+        request.request_id,
+        approved=False,
+        feedback="changed decision",
+        scope="once",
+    )
+
+    assert first is not None
+    assert second is not None
+    assert second.request_id == first.request_id
+    assert second.approved == first.approved
+    assert second.feedback == first.feedback
+    assert second.scope == first.scope
+    batch = await session.runtime_message_bus.consume_after(
+        RuntimeMessageCursor(),
+        kinds={RuntimeMessageKind.APPROVAL_DECISION},
+    )
+    assert [item.message.payload for item in batch.messages] == [
+        {
+            "session_id": session.id,
+            "request_id": request.request_id,
+            "approved": True,
+            "feedback": "first decision",
+            "scope": "once",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_approval_decision_service_rejects_stale_projection_without_request() -> (
+    None
+):
+    session = FakeDecisionSession()
+    session.pending_approval = {"request_id": "stale-req", "tool_name": "bash"}
+    session.approval_event.clear()
+
+    response = await _decision_service().submit(
+        session,
+        "stale-req",
+        approved=True,
+        feedback="approve stale projection",
+        scope="once",
+    )
+
+    assert response is None
+    assert session.pending_approval == {"request_id": "stale-req", "tool_name": "bash"}
+    assert session.approval_response is None
+    assert session.approval_event.is_set() is False
+
+
+@pytest.mark.asyncio
+async def test_approval_decision_service_defers_prepublished_decision_until_request_attaches() -> (
+    None
+):
+    session = FakeDecisionSession()
+    request = _approval_request(session_id=session.id, request_id="approval-early")
+    await session.runtime_message_bus.publish(
+        RuntimeMessage(
+            message_id=approval_decision_message_id(session.id, request.request_id),
+            kind=RuntimeMessageKind.APPROVAL_DECISION,
+            payload={
+                "session_id": session.id,
+                "request_id": request.request_id,
+                "approved": True,
+                "feedback": "arrived early",
+                "scope": "once",
+            },
+        )
+    )
+
+    early_response = await _decision_service().submit(
+        session,
+        request.request_id,
+        approved=False,
+        feedback="retry body",
+        scope="once",
+    )
+
+    assert early_response is None
+    assert session.approval_decision_cursor.sequence == 0
+
+    session.approval_coordinator.add_request(request)
+    session.pending_approval = session.approval_coordinator.projection()
+    decision = await _decision_service().published_decision(
+        session,
+        request.request_id,
+    )
+    assert decision is not None
+    applied_response = await _decision_service().apply_published_decision(
+        session,
+        request.request_id,
+        decision,
+    )
+
+    assert applied_response is not None
+    assert applied_response.approved is True
+    assert applied_response.feedback == "arrived early"
+    assert session.approval_decision_cursor.sequence == 1
 
 
 @pytest.mark.asyncio
