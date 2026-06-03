@@ -290,8 +290,11 @@ This ADR does not implement that path.
   - Completed: `coding_agent daemon run` creates a local-path session through
     the daemon HTTP control plane and streams display events without owning an
     in-process runtime manager.
-  - Remaining: REPL/TUI should pair with or connect to the local daemon instead
-    of owning an in-process runtime manager.
+  - Completed: `coding_agent daemon repl` creates one local-path session
+    through the daemon HTTP control plane and streams interactive prompts over
+    the daemon without owning an in-process runtime manager.
+  - Remaining: TUI should pair with or connect to the local daemon instead of
+    owning an in-process runtime manager.
   - Remaining: once the daemon-backed path is dogfooded, make it the documented
     local product default while keeping inline `run` as testkit/devkit.
 

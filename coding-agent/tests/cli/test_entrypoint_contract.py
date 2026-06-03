@@ -92,6 +92,18 @@ def test_daemon_run_help_is_daemon_backed_client_surface() -> None:
     assert "--url" in result.output
 
 
+def test_daemon_repl_help_is_daemon_backed_client_surface() -> None:
+    runner = CliRunner(env=_click_credential_free_env())
+
+    result = runner.invoke(main, ["daemon", "repl", "--help"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert "Start an interactive REPL through an already-running local daemon" in (
+        result.output
+    )
+    assert "--url" in result.output
+
+
 def test_default_non_interactive_entrypoint_points_to_one_shot_compatibility() -> None:
     runner = CliRunner(env=_click_credential_free_env())
 

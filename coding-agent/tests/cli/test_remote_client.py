@@ -451,6 +451,187 @@ def test_daemon_run_cleanup_session_deletes_after_stream_failure(
     ]
 
 
+def test_daemon_repl_reuses_one_daemon_session_for_multiple_prompts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, object]] = []
+
+    def fake_create_local_daemon_session(endpoint, *, repo_path, approval_policy):
+        calls.append(
+            (
+                "create",
+                {
+                    "endpoint": endpoint,
+                    "repo_path": repo_path,
+                    "approval_policy": approval_policy,
+                },
+            )
+        )
+        return "sess-repl"
+
+    def fake_stream_prompt_or_run_request(
+        *,
+        base_url: str,
+        session_id: str,
+        prompt: str,
+        headers: dict[str, str],
+    ) -> int:
+        calls.append(
+            (
+                "stream",
+                {
+                    "base_url": base_url,
+                    "session_id": session_id,
+                    "prompt": prompt,
+                    "headers": headers,
+                },
+            )
+        )
+        return 0
+
+    monkeypatch.setattr(
+        "coding_agent.remote.client.create_local_daemon_session",
+        fake_create_local_daemon_session,
+    )
+    monkeypatch.setattr(
+        "coding_agent.remote.client.stream_prompt_or_run_request",
+        fake_stream_prompt_or_run_request,
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        main,
+        [
+            "daemon",
+            "repl",
+            "--url",
+            "http://127.0.0.1:8765",
+            "--repo",
+            str(tmp_path),
+            "--approval",
+            "auto",
+            "--keep-session",
+        ],
+        input="first prompt\nsecond prompt\n/exit\n",
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "Created daemon-backed local REPL session sess-repl" in result.output
+    assert calls[0][0] == "create"
+    create_payload = calls[0][1]
+    assert isinstance(create_payload, dict)
+    endpoint = create_payload["endpoint"]
+    assert endpoint.name == "local-daemon"
+    assert endpoint.url == "http://127.0.0.1:8765"
+    assert create_payload["repo_path"] == tmp_path.resolve()
+    assert create_payload["approval_policy"] == "auto"
+    assert calls[1:] == [
+        (
+            "stream",
+            {
+                "base_url": "http://127.0.0.1:8765",
+                "session_id": "sess-repl",
+                "prompt": "first prompt",
+                "headers": {},
+            },
+        ),
+        (
+            "stream",
+            {
+                "base_url": "http://127.0.0.1:8765",
+                "session_id": "sess-repl",
+                "prompt": "second prompt",
+                "headers": {},
+            },
+        ),
+    ]
+
+
+def test_daemon_repl_cleanup_session_after_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, object]] = []
+
+    def fake_create_local_daemon_session(endpoint, *, repo_path, approval_policy):
+        del endpoint, repo_path, approval_policy
+        calls.append(("create", None))
+        return "sess-repl"
+
+    def fake_stream_prompt_or_run_request(
+        *,
+        base_url: str,
+        session_id: str,
+        prompt: str,
+        headers: dict[str, str],
+    ) -> int:
+        del base_url, session_id, prompt, headers
+        calls.append(("stream", None))
+        return 0
+
+    def fake_delete_remote_session(
+        *,
+        base_url: str,
+        session_id: str,
+        headers: dict[str, str],
+    ) -> None:
+        calls.append(
+            (
+                "delete",
+                {
+                    "base_url": base_url,
+                    "session_id": session_id,
+                    "headers": headers,
+                },
+            )
+        )
+
+    monkeypatch.setattr(
+        "coding_agent.remote.client.create_local_daemon_session",
+        fake_create_local_daemon_session,
+    )
+    monkeypatch.setattr(
+        "coding_agent.remote.client.stream_prompt_or_run_request",
+        fake_stream_prompt_or_run_request,
+    )
+    monkeypatch.setattr(
+        "coding_agent.remote.client.delete_remote_session",
+        fake_delete_remote_session,
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        main,
+        [
+            "daemon",
+            "repl",
+            "--url",
+            "http://127.0.0.1:8765",
+            "--repo",
+            str(tmp_path),
+            "--cleanup-session",
+        ],
+        input="hello\n/quit\n",
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        ("create", None),
+        ("stream", None),
+        (
+            "delete",
+            {
+                "base_url": "http://127.0.0.1:8765",
+                "session_id": "sess-repl",
+                "headers": {},
+            },
+        ),
+    ]
+
+
 def test_serve_config_uses_server_host_and_port_when_cli_omits_them(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
