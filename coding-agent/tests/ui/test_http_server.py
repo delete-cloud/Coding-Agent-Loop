@@ -2295,6 +2295,33 @@ class TestPromptStreaming:
             CompletionStatus.ERROR.value,
         }
 
+    async def test_prompt_display_events_projects_prompt_stream(self, client):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+
+        events = []
+        async with aconnect_sse(
+            client,
+            "POST",
+            f"/sessions/{session_id}/prompt?event_format=display",
+            json={"prompt": "Hello"},
+        ) as event_source:
+            async for sse in event_source.aiter_sse():
+                payload = json.loads(sse.data)
+                events.append({"event": sse.event, "data": payload})
+                if sse.event == "final_result":
+                    break
+
+        assert events
+        assert events[-1]["event"] == "final_result"
+        assert events[-1]["data"]["display_kind"] == "final_result"
+        assert events[-1]["data"]["payload"]["completion_status"] in {
+            CompletionStatus.COMPLETED.value,
+            CompletionStatus.BLOCKED.value,
+            CompletionStatus.ERROR.value,
+        }
+        assert all("event_kind" not in event["data"] for event in events)
+
     async def test_prompt_streams_owner_conflict_as_error_event_without_fake_turn(
         self, client, monkeypatch
     ):
@@ -3146,6 +3173,99 @@ class TestPromptStreaming:
         assert requested.parent_run_id == previous_run.run_id
         assert requested.metadata["resume_from_run_id"] == previous_run.run_id
         assert requested.metadata["prompt"].startswith("Previous run was interrupted.")
+
+    async def test_http_resume_session_display_events_project_resumed_run(
+        self, client, monkeypatch
+    ):
+        store = FakeExternalWorkerRuntimeStore()
+        session_manager.configure_runtime_store(store)
+        create_resp = await client.post("/sessions", json={"approval_policy": "yolo"})
+        session_id = create_resp.json()["session_id"]
+        previous_run = AgentRunRecord(
+            run_id="run-interrupted-display",
+            session_id=session_id,
+            tape_id="stable-tape",
+            parent_run_id=None,
+            agent_id=None,
+            status="interrupted",
+            started_at=datetime(2026, 5, 19, 12, 0, tzinfo=UTC),
+            ended_at=datetime(2026, 5, 19, 12, 1, tzinfo=UTC),
+            metadata={},
+            result={},
+            error="interrupted",
+        )
+        store.runs[previous_run.run_id] = previous_run
+        await store.append_runtime_event(
+            RuntimeEventRecord(
+                event_id="event-resume-display-from",
+                run_id=previous_run.run_id,
+                event_kind="wire.StreamDelta",
+                payload={"content": "partial"},
+                created_at=datetime(2026, 5, 19, 12, 1, tzinfo=UTC),
+            )
+        )
+
+        class FakeAdapter:
+            def __init__(self, pipeline, ctx, consumer) -> None:
+                del pipeline, ctx
+                self._consumer = consumer
+
+            async def run_turn(self, prompt: str) -> TurnOutcome:
+                assert "display resume" in prompt
+                await self._consumer.emit(
+                    StreamDelta(
+                        session_id=session_id,
+                        agent_id="",
+                        content="resumed",
+                    )
+                )
+                await self._consumer.emit(
+                    TurnEnd(
+                        session_id=session_id,
+                        agent_id="",
+                        turn_id="turn-resumed-display",
+                        completion_status=CompletionStatus.COMPLETED,
+                    )
+                )
+                return TurnOutcome(stop_reason=StopReason.NO_TOOL_CALLS)
+
+        fake_pipeline = types.SimpleNamespace(
+            _registry=types.SimpleNamespace(
+                get=lambda _: types.SimpleNamespace(_instance=None)
+            )
+        )
+
+        def fake_create_agent(**kwargs):
+            return fake_pipeline, types.SimpleNamespace(
+                session_id=kwargs["session_id_override"],
+                config={},
+                tape=kwargs.get("tape") or Tape(tape_id="stable-tape"),
+            )
+
+        monkeypatch.setattr(session_manager, "_create_agent", fake_create_agent)
+        monkeypatch.setattr(
+            "coding_agent.server.session_manager.PipelineAdapter", FakeAdapter
+        )
+
+        events = []
+        async with aconnect_sse(
+            client,
+            "POST",
+            f"/sessions/{session_id}/resume?event_format=display",
+            json={"prompt": "display resume", "resume_reason": "user_resume"},
+        ) as event_source:
+            async for sse in event_source.aiter_sse():
+                events.append({"event": sse.event, "data": json.loads(sse.data)})
+                if sse.event == "final_result":
+                    break
+
+        assert [event["event"] for event in events] == [
+            "assistant_text_delta",
+            "final_result",
+        ]
+        assert events[0]["data"]["payload"]["content"] == "resumed"
+        assert events[0]["data"]["payload"]["role"] == "assistant"
+        assert events[1]["data"]["payload"]["completion_status"] == "completed"
 
     async def test_session_summary_reports_resume_and_checkpoint_context(
         self, client, monkeypatch

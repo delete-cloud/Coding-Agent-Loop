@@ -4355,6 +4355,175 @@ def test_stream_prompt_reports_non_200_sse_response(monkeypatch) -> None:
         )
 
 
+def test_stream_prompt_requests_display_event_stream(monkeypatch, capsys) -> None:
+    calls: list[tuple[str, str, str]] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+    class FakeEventSource:
+        response = FakeResponse()
+
+        def __enter__(self) -> FakeEventSource:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def iter_sse(self):
+            yield type(
+                "SSE",
+                (),
+                {
+                    "event": "assistant_text_delta",
+                    "data": json.dumps(
+                        {
+                            "source_event_id": "live:sess-1:event-1",
+                            "run_id": "run-1",
+                            "sequence": None,
+                            "display_kind": "assistant_text_delta",
+                            "payload": {"content": "hello"},
+                            "created_at": "2026-06-03T00:00:00+00:00",
+                        }
+                    ),
+                },
+            )()
+            yield type(
+                "SSE",
+                (),
+                {
+                    "event": "final_result",
+                    "data": json.dumps(
+                        {
+                            "source_event_id": "live:sess-1:event-2",
+                            "run_id": "run-1",
+                            "sequence": None,
+                            "display_kind": "final_result",
+                            "payload": {"completion_status": "completed"},
+                            "created_at": "2026-06-03T00:00:01+00:00",
+                        }
+                    ),
+                },
+            )()
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            self.base_url = str(kwargs["base_url"])
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+    def fake_connect_sse(client, method: str, path: str, **kwargs: object):
+        del kwargs
+        calls.append((client.base_url, method, path))
+        return FakeEventSource()
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+    monkeypatch.setattr("coding_agent.remote.client.connect_sse", fake_connect_sse)
+
+    from coding_agent.remote.client import stream_prompt
+
+    status = stream_prompt(
+        base_url="http://agent.example",
+        session_id="sess-1",
+        prompt="hello",
+        headers={},
+    )
+
+    assert status == 0
+    assert calls == [
+        (
+            "http://agent.example",
+            "POST",
+            "/sessions/sess-1/prompt?event_format=display",
+        )
+    ]
+    assert capsys.readouterr().out == "hello\n"
+
+
+def test_stream_resume_requests_display_event_stream(monkeypatch, capsys) -> None:
+    calls: list[tuple[str, str, str, dict[str, str]]] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+    class FakeEventSource:
+        response = FakeResponse()
+
+        def __enter__(self) -> FakeEventSource:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def iter_sse(self):
+            yield type(
+                "SSE",
+                (),
+                {
+                    "event": "final_result",
+                    "data": json.dumps(
+                        {
+                            "source_event_id": "live:sess-1:event-1",
+                            "run_id": "run-1",
+                            "sequence": None,
+                            "display_kind": "final_result",
+                            "payload": {"completion_status": "completed"},
+                            "created_at": "2026-06-03T00:00:01+00:00",
+                        }
+                    ),
+                },
+            )()
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            self.base_url = str(kwargs["base_url"])
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+    def fake_connect_sse(
+        client,
+        method: str,
+        path: str,
+        *,
+        json: dict[str, str],
+    ):
+        calls.append((client.base_url, method, path, json))
+        return FakeEventSource()
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+    monkeypatch.setattr("coding_agent.remote.client.connect_sse", fake_connect_sse)
+
+    from coding_agent.remote.client import stream_resume_or_run_request
+
+    status = stream_resume_or_run_request(
+        base_url="http://agent.example",
+        session_id="sess-1",
+        prompt="continue",
+        headers={},
+    )
+
+    assert status == 0
+    assert calls == [
+        (
+            "http://agent.example",
+            "POST",
+            "/sessions/sess-1/resume?event_format=display",
+            {"resume_reason": "remote_cli_resume", "prompt": "continue"},
+        )
+    ]
+    assert capsys.readouterr().out == ""
+
+
 def test_stream_prompt_rejects_truncated_stream_without_turn_end(monkeypatch) -> None:
     class FakeResponse:
         def raise_for_status(self) -> None:

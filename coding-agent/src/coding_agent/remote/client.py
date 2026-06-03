@@ -647,12 +647,12 @@ def stream_prompt(
             with connect_sse(
                 client,
                 "POST",
-                f"/sessions/{session_id}/prompt",
+                f"/sessions/{session_id}/prompt?event_format=display",
                 json={"prompt": prompt},
             ) as event_source:
                 _raise_remote_http_error(event_source.response, "stream remote prompt")
                 for sse in event_source.iter_sse():
-                    status, line_open = handle_sse_event(
+                    status, line_open = _handle_prompt_like_sse_event(
                         base_url=base_url,
                         session_id=session_id,
                         headers=headers,
@@ -679,7 +679,7 @@ def stream_prompt_or_run_request(
     return _stream_prompt_like_request(
         base_url=base_url,
         session_id=session_id,
-        path=f"/sessions/{session_id}/prompt",
+        path=f"/sessions/{session_id}/prompt?event_format=display",
         payload={"prompt": prompt},
         headers=headers,
         action="stream remote prompt",
@@ -700,7 +700,7 @@ def stream_resume_or_run_request(
     return _stream_prompt_like_request(
         base_url=base_url,
         session_id=session_id,
-        path=f"/sessions/{session_id}/resume",
+        path=f"/sessions/{session_id}/resume?event_format=display",
         payload=payload,
         headers=headers,
         action="stream remote resume",
@@ -743,7 +743,7 @@ def _stream_prompt_like_request(
                             )
                         click.echo(f"Requested local attached executor run {run_id}")
                         return 0
-                    status, line_open = handle_sse_event(
+                    status, line_open = _handle_prompt_like_sse_event(
                         base_url=base_url,
                         session_id=session_id,
                         headers=headers,
@@ -762,6 +762,44 @@ def _stream_prompt_like_request(
     if line_open:
         click.echo()
     raise click.ClickException(truncated_message)
+
+
+def _handle_prompt_like_sse_event(
+    *,
+    base_url: str,
+    session_id: str,
+    headers: dict[str, str],
+    event: str,
+    data: str,
+    line_open: bool = False,
+) -> tuple[int | None, bool]:
+    if event in {
+        "StreamDelta",
+        "ThinkingDelta",
+        "ToolCallDelta",
+        "ToolResultDelta",
+        "ApprovalRequest",
+        "ApprovalResponse",
+        "TurnStatusDelta",
+        "TurnEnd",
+        "Error",
+    }:
+        return handle_sse_event(
+            base_url=base_url,
+            session_id=session_id,
+            headers=headers,
+            event=event,
+            data=data,
+            line_open=line_open,
+        )
+    return handle_display_sse_event(
+        base_url=base_url,
+        session_id=session_id,
+        headers=headers,
+        event=event,
+        data=data,
+        line_open=line_open,
+    )
 
 
 def attach_remote_session(
