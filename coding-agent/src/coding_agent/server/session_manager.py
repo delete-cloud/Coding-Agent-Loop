@@ -75,6 +75,7 @@ from coding_agent.runs import (
     RuntimeCancelObservationFinalizer,
     RuntimeCancelOrchestrationService,
     RuntimeCheckpointCaptureService,
+    RuntimeCheckpointQueryService,
     RuntimeControlServices,
     RuntimeCloser,
     RuntimeContextBindingService,
@@ -914,6 +915,9 @@ class SessionManager:
             ),
             close_runtime=self._runtime_closer.close,
             persist_session=self._persist_session_async,
+        )
+        self._runtime_checkpoint_query_service = RuntimeCheckpointQueryService(
+            checkpoint_service=lambda: self._checkpoint_service,
         )
         self._runtime_checkpoint_capture_service = RuntimeCheckpointCaptureService(
             checkpoint_service=lambda: self._checkpoint_service,
@@ -2809,9 +2813,7 @@ class SessionManager:
 
     async def list_checkpoints(self, session_id: str) -> list[CheckpointMeta]:
         session = await self.get_session_async(session_id)
-        if session.tape_id is None:
-            return []
-        return await self._checkpoint_service.list(session.tape_id)
+        return await self._runtime_checkpoint_query_service.list_checkpoints(session)
 
     async def restore_checkpoint(self, session_id: str, checkpoint_id: str) -> None:
         async def restore_admitted_checkpoint(session: object) -> None:

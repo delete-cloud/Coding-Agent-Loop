@@ -142,6 +142,9 @@ from .preparation_request import (
 )
 from .query import (
     CheckpointLister,
+    RuntimeCheckpointQueryBackend,
+    RuntimeCheckpointQueryBackendProvider,
+    RuntimeCheckpointQueryService,
     RuntimeQueryService,
     RuntimeQuerySession,
     RuntimeQueryStore,
@@ -265,6 +268,9 @@ __all__ = [
     "RuntimeCheckpointCaptureService",
     "RuntimeCheckpointCaptureSession",
     "RuntimeCheckpointRuntimeEnsurer",
+    "RuntimeCheckpointQueryBackend",
+    "RuntimeCheckpointQueryBackendProvider",
+    "RuntimeCheckpointQueryService",
     "RuntimeContextBindingService",
     "RuntimeContextBindingSession",
     "RuntimeControlServices",

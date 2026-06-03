@@ -57,6 +57,26 @@ class RuntimeQuerySession(Protocol):
 CheckpointLister = Callable[[str], Awaitable[list[CheckpointMeta]]]
 
 
+class RuntimeCheckpointQueryBackend(Protocol):
+    async def list(self, tape_id: str) -> list[CheckpointMeta]: ...
+
+
+RuntimeCheckpointQueryBackendProvider = Callable[[], RuntimeCheckpointQueryBackend]
+
+
+@dataclass(frozen=True)
+class RuntimeCheckpointQueryService:
+    checkpoint_service: RuntimeCheckpointQueryBackendProvider
+
+    async def list_checkpoints(
+        self,
+        session: RuntimeQuerySession,
+    ) -> list[CheckpointMeta]:
+        if session.tape_id is None:
+            return []
+        return await self.checkpoint_service().list(session.tape_id)
+
+
 @dataclass(frozen=True)
 class RuntimeQueryService:
     store: RuntimeQueryStore | None
@@ -205,6 +225,9 @@ class RuntimeQueryService:
 
 __all__ = [
     "CheckpointLister",
+    "RuntimeCheckpointQueryBackend",
+    "RuntimeCheckpointQueryBackendProvider",
+    "RuntimeCheckpointQueryService",
     "RuntimeQueryService",
     "RuntimeQuerySession",
     "RuntimeQueryStore",
