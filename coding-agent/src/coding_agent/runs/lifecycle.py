@@ -152,6 +152,11 @@ RuntimeTurnAdmissionBody = Callable[
     [RuntimeTurnAdmissionSession],
     Awaitable[Any],
 ]
+RuntimeMaintenanceAdmissionSession = RuntimeTurnAdmissionSession
+RuntimeMaintenanceAdmissionBody = Callable[
+    [RuntimeMaintenanceAdmissionSession],
+    Awaitable[Any],
+]
 
 
 class RuntimeHandleSession(Protocol):
@@ -328,6 +333,31 @@ class RuntimeTurnAdmissionService:
                 raise RuntimeError("turn already in progress")
             await self.assert_owner(session_id)
             session = await self.load_session(session_id)
+            return await body(session)
+
+
+@dataclass(frozen=True)
+class RuntimeMaintenanceAdmissionService:
+    turn_lock_for: RuntimeTurnLockProvider
+    assert_owner: RuntimeOwnerAsserter
+    load_session: RuntimeTurnAdmissionSessionLoader
+
+    async def run_exclusive(
+        self,
+        session_id: str,
+        body: RuntimeMaintenanceAdmissionBody,
+    ) -> Any:
+        lock = self.turn_lock_for(session_id)
+        if lock.locked():
+            raise RuntimeError("turn already in progress")
+
+        async with lock:
+            await self.assert_owner(session_id)
+            session = await self.load_session(session_id)
+            if session.turn_in_progress or (
+                session.task is not None and not session.task.done()
+            ):
+                raise RuntimeError("turn already in progress")
             return await body(session)
 
 
@@ -828,6 +858,9 @@ class RuntimeTurnFinalizer:
 
 
 __all__ = [
+    "RuntimeMaintenanceAdmissionBody",
+    "RuntimeMaintenanceAdmissionService",
+    "RuntimeMaintenanceAdmissionSession",
     "RuntimeMessageSnapshotSaver",
     "RuntimeObservationCompleter",
     "RuntimeRunLifecycle",

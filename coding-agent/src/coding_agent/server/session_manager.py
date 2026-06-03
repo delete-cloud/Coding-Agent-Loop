@@ -79,6 +79,7 @@ from coding_agent.runs import (
     RuntimeCloser,
     RuntimeContextBindingService,
     RuntimeEnsureService,
+    RuntimeMaintenanceAdmissionService,
     RuntimeRunMetadataService,
     RuntimeObservationService,
     RuntimePreparationRequestService,
@@ -822,6 +823,11 @@ class SessionManager:
         self._runtime_turn_admission = RuntimeTurnAdmissionService(
             turn_lock_for=self._turn_lock_for,
             workspace_export_in_progress=self._workspace_export_in_progress,
+            assert_owner=self._assert_owner,
+            load_session=self.get_session_async,
+        )
+        self._runtime_maintenance_admission = RuntimeMaintenanceAdmissionService(
+            turn_lock_for=self._turn_lock_for,
             assert_owner=self._assert_owner,
             load_session=self.get_session_async,
         )
@@ -2733,24 +2739,22 @@ class SessionManager:
         *,
         model_name: str,
     ) -> Session:
-        turn_lock = self._turn_lock_for(session_id)
-        if turn_lock.locked():
-            raise RuntimeError("turn already in progress")
-
-        async with turn_lock:
-            await self._assert_owner(session_id)
-            session = await self.get_session_async(session_id)
-            if session.task and not session.task.done():
-                raise RuntimeError("turn already in progress")
-            if session.turn_in_progress:
-                raise RuntimeError("turn already in progress")
-
+        async def replace_admitted_runtime(session: object) -> Session:
+            admitted_session = cast(Session, session)
             return await self._runtime_replacement_service.replace_runtime_config(
-                session,
+                admitted_session,
                 model_name=model_name,
                 build_runtime=self._build_session_runtime,
                 persist_session=self._persist_session_async,
             )
+
+        return cast(
+            Session,
+            await self._runtime_maintenance_admission.run_exclusive(
+                session_id,
+                replace_admitted_runtime,
+            ),
+        )
 
     async def capture_checkpoint(
         self,
@@ -2759,16 +2763,8 @@ class SessionManager:
         label: str | None = None,
         extra: dict[str, Any] | None = None,
     ) -> CheckpointMeta:
-        turn_lock = self._turn_lock_for(session_id)
-        if turn_lock.locked():
-            raise RuntimeError("turn already in progress")
-
-        async with turn_lock:
-            await self._assert_owner(session_id)
-            session = await self.get_session_async(session_id)
-            if session.turn_in_progress or (session.task and not session.task.done()):
-                raise RuntimeError("turn already in progress")
-
+        async def capture_admitted_checkpoint(session: object) -> CheckpointMeta:
+            admitted_session = cast(Session, session)
             ctx = await self.ensure_session_runtime(session_id)
             payload = dict(extra or {})
             if _CHECKPOINT_SESSION_CONFIG_KEY in payload:
@@ -2776,14 +2772,22 @@ class SessionManager:
                     f"'{_CHECKPOINT_SESSION_CONFIG_KEY}' is a reserved checkpoint metadata key and cannot be provided via extra"
                 )
             payload[_CHECKPOINT_SESSION_CONFIG_KEY] = (
-                serialize_checkpoint_session_config(session)
+                serialize_checkpoint_session_config(admitted_session)
             )
             checkpoint = await self._checkpoint_service.capture(
                 ctx, label=label, extra=payload
             )
-            session.tape_id = ctx.tape.tape_id
-            await self._persist_session_async(session)
+            admitted_session.tape_id = ctx.tape.tape_id
+            await self._persist_session_async(admitted_session)
             return checkpoint
+
+        return cast(
+            CheckpointMeta,
+            await self._runtime_maintenance_admission.run_exclusive(
+                session_id,
+                capture_admitted_checkpoint,
+            ),
+        )
 
     async def export_workspace_archive(
         self,
@@ -2815,13 +2819,10 @@ class SessionManager:
         return await self._checkpoint_service.list(session.tape_id)
 
     async def restore_checkpoint(self, session_id: str, checkpoint_id: str) -> None:
-        turn_lock = self._turn_lock_for(session_id)
-        if turn_lock.locked():
-            raise RuntimeError("turn already in progress")
+        async def restore_admitted_checkpoint(session: object) -> None:
+            await self._restore_checkpoint(cast(Session, session), checkpoint_id)
 
-        async with turn_lock:
-            await self._assert_owner(session_id)
-            session = await self.get_session_async(session_id)
-            if session.turn_in_progress or (session.task and not session.task.done()):
-                raise RuntimeError("turn already in progress")
-            await self._restore_checkpoint(session, checkpoint_id)
+        await self._runtime_maintenance_admission.run_exclusive(
+            session_id,
+            restore_admitted_checkpoint,
+        )
