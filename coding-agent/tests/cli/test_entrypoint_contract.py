@@ -80,6 +80,7 @@ def test_daemon_help_lists_daemon_backed_run_client() -> None:
     assert result.exit_code == 0
     assert "Start local daemon control plane" in result.output
     assert "run" in result.output
+    assert "tui" in result.output
 
 
 def test_daemon_run_help_is_daemon_backed_client_surface() -> None:
@@ -102,6 +103,19 @@ def test_daemon_repl_help_is_daemon_backed_client_surface() -> None:
         result.output
     )
     assert "--url" in result.output
+
+
+def test_daemon_tui_help_is_daemon_backed_client_surface() -> None:
+    runner = CliRunner(env=_click_credential_free_env())
+
+    result = runner.invoke(main, ["daemon", "tui", "--help"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert "Run one prompt through an already-running local daemon with Rich TUI" in (
+        result.output
+    )
+    assert "--url" in result.output
+    assert "--goal" in result.output
 
 
 def test_default_non_interactive_entrypoint_points_to_one_shot_compatibility() -> None:

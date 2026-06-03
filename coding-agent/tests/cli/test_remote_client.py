@@ -632,6 +632,134 @@ def test_daemon_repl_cleanup_session_after_exit(
     ]
 
 
+def test_daemon_tui_uses_local_http_control_plane_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, object]] = []
+    fake_consumer = object()
+
+    class FakeTUI:
+        def __init__(self, *, model_name: str, max_steps: int) -> None:
+            calls.append(
+                (
+                    "tui-init",
+                    {
+                        "model_name": model_name,
+                        "max_steps": max_steps,
+                    },
+                )
+            )
+            self.consumer = fake_consumer
+
+        def __enter__(self) -> FakeTUI:
+            calls.append(("tui-enter", None))
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            calls.append(("tui-exit", None))
+
+        def add_user_message(self, content: str) -> None:
+            calls.append(("tui-user", content))
+
+    def fake_create_local_daemon_session(endpoint, *, repo_path, approval_policy):
+        calls.append(
+            (
+                "create",
+                {
+                    "endpoint": endpoint,
+                    "repo_path": repo_path,
+                    "approval_policy": approval_policy,
+                },
+            )
+        )
+        return "sess-tui"
+
+    def fake_stream_prompt_or_run_request(
+        *,
+        base_url: str,
+        session_id: str,
+        prompt: str,
+        headers: dict[str, str],
+        display_consumer: object | None = None,
+    ) -> int:
+        calls.append(
+            (
+                "stream",
+                {
+                    "base_url": base_url,
+                    "session_id": session_id,
+                    "prompt": prompt,
+                    "headers": headers,
+                    "display_consumer": display_consumer,
+                },
+            )
+        )
+        return 0
+
+    monkeypatch.setattr(
+        "coding_agent.remote.client.create_local_daemon_session",
+        fake_create_local_daemon_session,
+    )
+    monkeypatch.setattr(
+        "coding_agent.remote.client.stream_prompt_or_run_request",
+        fake_stream_prompt_or_run_request,
+    )
+    monkeypatch.setattr("coding_agent.ui.rich_tui.CodingAgentTUI", FakeTUI)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        main,
+        [
+            "daemon",
+            "tui",
+            "--url",
+            "http://127.0.0.1:8765",
+            "--repo",
+            str(tmp_path),
+            "--goal",
+            "hello tui",
+            "--approval",
+            "auto",
+            "--max-steps",
+            "12",
+            "--model",
+            "test-model",
+            "--keep-session",
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "Created daemon-backed local TUI session sess-tui" in result.output
+    assert calls[0] == (
+        "tui-init",
+        {
+            "model_name": "test-model",
+            "max_steps": 12,
+        },
+    )
+    assert calls[1] == ("tui-enter", None)
+    assert calls[2] == ("tui-user", "hello tui")
+    assert calls[3][0] == "create"
+    create_payload = calls[3][1]
+    assert isinstance(create_payload, dict)
+    endpoint = create_payload["endpoint"]
+    assert endpoint.name == "local-daemon"
+    assert endpoint.url == "http://127.0.0.1:8765"
+    assert create_payload["repo_path"] == tmp_path.resolve()
+    assert create_payload["approval_policy"] == "auto"
+    assert calls[4][0] == "stream"
+    stream_payload = calls[4][1]
+    assert isinstance(stream_payload, dict)
+    assert stream_payload["base_url"] == "http://127.0.0.1:8765"
+    assert stream_payload["session_id"] == "sess-tui"
+    assert stream_payload["prompt"] == "hello tui"
+    assert stream_payload["headers"] == {}
+    assert stream_payload["display_consumer"] is fake_consumer
+    assert calls[5] == ("tui-exit", None)
+
+
 def test_serve_config_uses_server_host_and_port_when_cli_omits_them(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4864,6 +4992,108 @@ def test_stream_prompt_requests_display_event_stream(monkeypatch, capsys) -> Non
         )
     ]
     assert capsys.readouterr().out == "hello\n"
+
+
+def test_stream_prompt_can_emit_display_events_to_consumer(monkeypatch, capsys) -> None:
+    from coding_agent.wire.protocol import CompletionStatus, StreamDelta, TurnEnd
+
+    emitted: list[object] = []
+
+    class FakeConsumer:
+        async def emit(self, msg: object) -> None:
+            emitted.append(msg)
+
+        async def request_approval(self, req: object) -> object:
+            raise AssertionError(f"unexpected approval request: {req!r}")
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+    class FakeEventSource:
+        response = FakeResponse()
+
+        def __enter__(self) -> FakeEventSource:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def iter_sse(self):
+            yield type(
+                "SSE",
+                (),
+                {
+                    "event": "assistant_text_delta",
+                    "data": json.dumps(
+                        {
+                            "source_event_id": "live:sess-1:event-1",
+                            "run_id": "run-1",
+                            "sequence": None,
+                            "display_kind": "assistant_text_delta",
+                            "payload": {"content": "hello"},
+                            "created_at": "2026-06-03T00:00:00+00:00",
+                        }
+                    ),
+                },
+            )()
+            yield type(
+                "SSE",
+                (),
+                {
+                    "event": "final_result",
+                    "data": json.dumps(
+                        {
+                            "source_event_id": "live:sess-1:event-2",
+                            "run_id": "run-1",
+                            "sequence": None,
+                            "display_kind": "final_result",
+                            "payload": {
+                                "turn_id": "turn-1",
+                                "completion_status": "completed",
+                            },
+                            "created_at": "2026-06-03T00:00:01+00:00",
+                        }
+                    ),
+                },
+            )()
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            self.base_url = str(kwargs["base_url"])
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+    monkeypatch.setattr(
+        "coding_agent.remote.client.connect_sse",
+        lambda *args, **kwargs: FakeEventSource(),
+    )
+
+    from coding_agent.remote.client import stream_prompt_or_run_request
+
+    status = stream_prompt_or_run_request(
+        base_url="http://agent.example",
+        session_id="sess-1",
+        prompt="hello",
+        headers={},
+        display_consumer=FakeConsumer(),
+    )
+
+    assert status == 0
+    assert capsys.readouterr().out == ""
+    assert len(emitted) == 2
+    assert isinstance(emitted[0], StreamDelta)
+    assert emitted[0].session_id == "sess-1"
+    assert emitted[0].content == "hello"
+    assert isinstance(emitted[1], TurnEnd)
+    assert emitted[1].session_id == "sess-1"
+    assert emitted[1].turn_id == "turn-1"
+    assert emitted[1].completion_status is CompletionStatus.COMPLETED
 
 
 def test_stream_resume_requests_display_event_stream(monkeypatch, capsys) -> None:
