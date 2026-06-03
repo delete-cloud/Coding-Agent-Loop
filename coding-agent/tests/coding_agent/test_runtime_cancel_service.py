@@ -7,13 +7,18 @@ from datetime import UTC, datetime
 import pytest
 
 from coding_agent.runtime_store import AgentRunRecord, JSONObject
-from coding_agent.runs import RuntimeCancelOrchestrationService, RuntimeCancelService
+from coding_agent.runs import (
+    RuntimeCancelObservationFinalizer,
+    RuntimeCancelOrchestrationService,
+    RuntimeCancelService,
+)
 
 
 @dataclass
 class FakeSession:
     id: str = "session-1"
     current_turn_id: str | None = "run-1"
+    task: object | None = None
     turn_in_progress: bool = True
     turn_status: str = "running"
     last_activity: datetime = datetime(2026, 6, 3, 11, 59, tzinfo=UTC)
@@ -195,6 +200,68 @@ def test_finish_observed_local_turn_rejects_non_final_status() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancel_observation_finalizer_finishes_matching_session_task() -> None:
+    now = datetime(2026, 6, 3, 12, 0, tzinfo=UTC)
+    task = asyncio.create_task(asyncio.sleep(60))
+    task.cancel()
+    session = FakeSession(task=task, turn_status="cancelling")
+    persisted: list[FakeSession] = []
+    finalizer = RuntimeCancelObservationFinalizer(
+        cancel_service=lambda: RuntimeCancelService(store=None, now=lambda: now),
+        load_session=lambda session_id: _load_session(session_id, session),
+        persist_session=lambda session: _record_persisted(persisted, session),
+        session_has_task=lambda session, task: session.task is task,
+        lock=lambda: _NoopAsyncLock(),
+    )
+
+    await finalizer.finalize(session_id="session-1", task=task)
+
+    assert session.task is None
+    assert session.turn_status == "cancelled"
+    assert session.turn_in_progress is False
+    assert session.last_activity == now
+    assert persisted == [session]
+
+
+@pytest.mark.asyncio
+async def test_cancel_observation_finalizer_ignores_replaced_session_task() -> None:
+    task = asyncio.create_task(asyncio.sleep(0))
+    replacement_task = object()
+    session = FakeSession(task=replacement_task, turn_status="cancelling")
+    persisted: list[FakeSession] = []
+    finalizer = RuntimeCancelObservationFinalizer(
+        cancel_service=lambda: RuntimeCancelService(store=None),
+        load_session=lambda session_id: _load_session(session_id, session),
+        persist_session=lambda session: _record_persisted(persisted, session),
+        session_has_task=lambda session, task: session.task is task,
+        lock=lambda: _NoopAsyncLock(),
+    )
+
+    await finalizer.finalize(session_id="session-1", task=task)
+
+    assert session.task is replacement_task
+    assert session.turn_status == "cancelling"
+    assert persisted == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_observation_finalizer_ignores_missing_session() -> None:
+    task = asyncio.create_task(asyncio.sleep(0))
+    persisted: list[FakeSession] = []
+    finalizer = RuntimeCancelObservationFinalizer(
+        cancel_service=lambda: RuntimeCancelService(store=None),
+        load_session=_raise_missing_session,
+        persist_session=lambda session: _record_persisted(persisted, session),
+        session_has_task=lambda session, task: True,
+        lock=lambda: _NoopAsyncLock(),
+    )
+
+    await finalizer.finalize(session_id="missing-session", task=task)
+
+    assert persisted == []
+
+
+@pytest.mark.asyncio
 async def test_cancel_orchestration_marks_active_local_task_cancelling() -> None:
     now = datetime(2026, 6, 3, 12, 0, tzinfo=UTC)
     session = FakeSession(current_turn_id=None)
@@ -257,6 +324,24 @@ async def _record_persisted(
     session: FakeSession,
 ) -> None:
     persisted.append(session)
+
+
+async def _load_session(session_id: str, session: FakeSession) -> FakeSession:
+    assert session_id == session.id
+    return session
+
+
+async def _raise_missing_session(session_id: str) -> FakeSession:
+    del session_id
+    raise KeyError("missing session")
+
+
+class _NoopAsyncLock:
+    async def __aenter__(self) -> object:
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        del exc_type, exc, tb
 
 
 class FakeTask:

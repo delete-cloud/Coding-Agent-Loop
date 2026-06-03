@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, Protocol, cast
@@ -24,6 +25,7 @@ class RuntimeCancelStore(RuntimeRunLifecycleStore, Protocol):
 class RuntimeCancelSession(Protocol):
     id: str
     current_turn_id: str | None
+    task: object | None
     turn_in_progress: bool
     turn_status: str
     last_activity: datetime
@@ -42,6 +44,12 @@ RuntimeCancelObservationScheduler = Callable[
     None,
 ]
 RuntimeCancelTurnIdFactory = Callable[[], str]
+RuntimeCancelSessionLoader = Callable[[str], Awaitable[RuntimeCancelSession]]
+RuntimeCancelSessionTaskMatcher = Callable[
+    [RuntimeCancelSession, RuntimeCancelableTask],
+    bool,
+]
+RuntimeCancelObservationLock = Callable[[], AbstractAsyncContextManager[object]]
 
 
 @dataclass(frozen=True)
@@ -88,6 +96,37 @@ class RuntimeCancelOrchestrationService:
             turn_id=session.current_turn_id,
             status="cancelling",
         )
+
+
+@dataclass(frozen=True)
+class RuntimeCancelObservationFinalizer:
+    cancel_service: RuntimeCancelServiceProvider
+    load_session: RuntimeCancelSessionLoader
+    persist_session: RuntimeCancelSessionPersister
+    session_has_task: RuntimeCancelSessionTaskMatcher
+    lock: RuntimeCancelObservationLock
+
+    async def finalize(
+        self,
+        *,
+        session_id: str,
+        task: RuntimeCancelableTask,
+    ) -> None:
+        final_status = await self.cancel_service().observe_cancelled_local_task(task)
+
+        async with self.lock():
+            try:
+                session = await self.load_session(session_id)
+            except KeyError:
+                return
+            if not self.session_has_task(session, task):
+                return
+            session.task = None
+            self.cancel_service().finish_observed_local_turn(
+                session,
+                status=final_status,
+            )
+            await self.persist_session(session)
 
 
 @dataclass(frozen=True)
@@ -202,6 +241,8 @@ class RuntimeCancelService:
 
 __all__ = [
     "RuntimeCancelableTask",
+    "RuntimeCancelObservationFinalizer",
+    "RuntimeCancelObservationLock",
     "RuntimeCancelObservationScheduler",
     "RuntimeCancelOrchestrationService",
     "RuntimeCancelResult",
@@ -209,7 +250,9 @@ __all__ = [
     "RuntimeCancelServiceProvider",
     "RuntimeCancelSession",
     "RuntimeCancelSessionAttachedPredicate",
+    "RuntimeCancelSessionLoader",
     "RuntimeCancelSessionPersister",
+    "RuntimeCancelSessionTaskMatcher",
     "RuntimeCancelStore",
     "RuntimeCancelStatus",
     "RuntimeCancelTurnIdFactory",

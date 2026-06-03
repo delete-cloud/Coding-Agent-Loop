@@ -334,6 +334,11 @@ This ADR does not implement that path.
     persistence, local task cancellation, and cancelled-task observation
     scheduling are delegated to `RuntimeCancelOrchestrationService` instead of
     living inline in `SessionManager.cancel_session_turn()`.
+  - Completed: cancelled local task observation finalization, including task
+    await, session reload, task identity check, task clearing, final status
+    mutation, and session persistence, is delegated to
+    `RuntimeCancelObservationFinalizer` instead of living inline in
+    `SessionManager._observe_cancelled_turn()`.
   - Completed: runtime task cancellation/waiting for close and shutdown paths is
     delegated to `RuntimeTaskStopper` instead of inline `SessionManager` logic.
   - Completed: runtime control service construction for persistence, recovery,
