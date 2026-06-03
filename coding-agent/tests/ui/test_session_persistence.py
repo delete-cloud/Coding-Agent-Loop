@@ -1314,6 +1314,25 @@ def test_session_runtime_handle_broadcasts_and_prunes_event_queues() -> None:
     assert healthy_queue.get_nowait() == event
 
 
+def test_session_runtime_handle_owns_event_queue_lifecycle() -> None:
+    session = Session(
+        id="runtime-queue-lifecycle-session",
+        created_at=datetime.now(),
+        last_activity=datetime.now(),
+        approval_store=ApprovalStore(),
+    )
+    queue: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=1)
+
+    session.runtime_handle.add_event_queue(queue)
+    assert session.runtime_handle.has_event_queue(queue)
+    assert session.event_queues == [queue]
+
+    assert session.runtime_handle.remove_event_queue(queue)
+    assert not session.runtime_handle.has_event_queue(queue)
+    assert session.event_queues == []
+    assert not session.runtime_handle.remove_event_queue(queue)
+
+
 def test_session_store_data_excludes_runtime_handle_state() -> None:
     session = Session(
         id="runtime-handle-session",

@@ -44,6 +44,18 @@ class SessionRuntimeHandle:
         default_factory=RuntimeMessageCursor
     )
 
+    def has_event_queue(self, queue: asyncio.Queue[dict[str, Any]]) -> bool:
+        return queue in self.event_queues
+
+    def add_event_queue(self, queue: asyncio.Queue[dict[str, Any]]) -> None:
+        self.event_queues.append(queue)
+
+    def remove_event_queue(self, queue: asyncio.Queue[dict[str, Any]]) -> bool:
+        if queue not in self.event_queues:
+            return False
+        self.event_queues.remove(queue)
+        return True
+
     def broadcast_event_nowait(
         self,
         event: dict[str, Any],

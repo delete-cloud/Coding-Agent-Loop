@@ -2658,7 +2658,7 @@ class SessionManager:
         queue: asyncio.Queue[dict[str, Any]],
     ) -> bool:
         session = await self.get_session_async(session_id)
-        return queue in session.event_queues
+        return session.runtime_handle.has_event_queue(queue)
 
     async def list_sessions_async(self) -> list[str]:
         return await self._run_store_io(self._store.list_sessions)
@@ -2676,7 +2676,7 @@ class SessionManager:
         queue: asyncio.Queue[dict[str, Any]],
     ) -> None:
         session = await self.get_session_async(session_id)
-        session.event_queues.append(queue)
+        session.runtime_handle.add_event_queue(queue)
 
     async def register_owned_event_queue_async(
         self,
@@ -2686,12 +2686,11 @@ class SessionManager:
         async with self._lock:
             await self._assert_owner(session_id)
             session = await self.get_session_async(session_id)
-            session.event_queues.append(queue)
+            session.runtime_handle.add_event_queue(queue)
             try:
                 await self._assert_owner(session_id)
             except (Exception, asyncio.CancelledError):
-                if queue in session.event_queues:
-                    session.event_queues.remove(queue)
+                session.runtime_handle.remove_event_queue(queue)
                 raise
 
     async def remove_event_queue_async(
@@ -2700,8 +2699,7 @@ class SessionManager:
         queue: asyncio.Queue[dict[str, Any]],
     ) -> None:
         session = await self.get_session_async(session_id)
-        if queue in session.event_queues:
-            session.event_queues.remove(queue)
+        session.runtime_handle.remove_event_queue(queue)
 
     async def check_health_async(self) -> bool:
         return bool(await self._run_store_io(self._store.check_health))
@@ -3079,7 +3077,7 @@ class SessionManager:
         queue: asyncio.Queue[dict[str, Any]],
     ) -> None:
         session = self.get_session(session_id)
-        session.event_queues.append(queue)
+        session.runtime_handle.add_event_queue(queue)
 
     def remove_event_queue(
         self,
@@ -3087,8 +3085,7 @@ class SessionManager:
         queue: asyncio.Queue[dict[str, Any]],
     ) -> None:
         session = self.get_session(session_id)
-        if queue in session.event_queues:
-            session.event_queues.remove(queue)
+        session.runtime_handle.remove_event_queue(queue)
 
     async def broadcast_event(
         self,

@@ -148,6 +148,9 @@ This ADR does not implement that path.
   - Runtime event queue broadcast and queue pruning live on
     `SessionRuntimeHandle`; `Session.broadcast_event_nowait()` is a
     compatibility delegate.
+  - Runtime event queue registration, membership checks, and removal are owned
+    by `SessionRuntimeHandle`; `SessionManager` delegates after session lookup
+    and ownership checks.
   - Store payload tests assert runtime handles are not persisted.
 - [x] Introduce a `RunCoordinator` boundary that selects an executor from
   `RunTarget`.
