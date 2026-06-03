@@ -22,7 +22,9 @@ from coding_agent.server.http_server import (
 )
 from coding_agent.server.stores.session_owner_store import SessionOwnerRecord
 from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictError
-from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictReason
+from coding_agent.server.stores.session_owner_store import (
+    SessionOwnershipConflictReason,
+)
 from coding_agent.server.stores.session_store import InMemorySessionStore
 
 
@@ -267,7 +269,9 @@ async def test_get_events_stops_stream_after_owner_change(
                 raise asyncio.TimeoutError
         return await real_wait_for(awaitable, timeout)
 
-    monkeypatch.setattr("coding_agent.server.http_server.asyncio.wait_for", fake_wait_for)
+    monkeypatch.setattr(
+        "coding_agent.server.http_server.asyncio.wait_for", fake_wait_for
+    )
 
     response = await get_events(_events_request(session_id), session_id, None)
     event_generator = cast(AsyncIterator[dict[str, str]], response.body_iterator)
@@ -539,20 +543,23 @@ async def test_get_events_rejects_close_during_append_to_recheck_window(
         fencing_token=1,
     )
 
-    original_close_runtime = session_manager._close_runtime
+    original_runtime_closer = session_manager._runtime_closer
     close_started = asyncio.Event()
     allow_close_to_finish = asyncio.Event()
 
-    async def fake_close_runtime(session) -> None:
-        close_started.set()
-        await allow_close_to_finish.wait()
-        await original_close_runtime(session)
+    class BlockingRuntimeCloser:
+        async def close(self, session) -> None:
+            close_started.set()
+            await allow_close_to_finish.wait()
+            await original_runtime_closer.close(session)
 
-    monkeypatch.setattr(
-        session_manager,
-        "_close_runtime",
-        fake_close_runtime,
-    )
+        async def close_adapter(self, adapter: object | None) -> None:
+            await original_runtime_closer.close_adapter(adapter)
+
+        def close_sync_safe(self, session) -> None:
+            original_runtime_closer.close_sync_safe(session)
+
+    monkeypatch.setattr(session_manager, "_runtime_closer", BlockingRuntimeCloser())
 
     remove_task = asyncio.create_task(session_manager.remove_session_async(session_id))
     await close_started.wait()
@@ -608,7 +615,9 @@ async def test_get_events_keeps_stream_alive_for_current_owner(
             raise asyncio.TimeoutError
         return await real_wait_for(awaitable, timeout)
 
-    monkeypatch.setattr("coding_agent.server.http_server.asyncio.wait_for", fake_wait_for)
+    monkeypatch.setattr(
+        "coding_agent.server.http_server.asyncio.wait_for", fake_wait_for
+    )
 
     response = await get_events(_events_request(session_id), session_id, None)
     event_generator = cast(AsyncIterator[dict[str, str]], response.body_iterator)

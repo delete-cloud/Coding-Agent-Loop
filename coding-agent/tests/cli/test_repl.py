@@ -1295,6 +1295,7 @@ class TestReplInitialization:
                 self.closed = True
 
         replacement_adapter = ReplacementAdapter()
+
         class FakeManagedSession(SimpleNamespace):
             def runtime_binding_snapshot(self):
                 return SimpleNamespace(
@@ -1333,6 +1334,9 @@ class TestReplInitialization:
                 self.build_calls: list[str] = []
                 self.persisted_models: list[str] = []
                 self.closed_adapters: list[object] = []
+                self._runtime_closer = SimpleNamespace(
+                    close_adapter=self.close_runtime_adapter
+                )
 
             def _turn_lock_for(self, session_id: str):
                 del session_id
@@ -1355,7 +1359,7 @@ class TestReplInitialization:
                 if session.model_name == "claude-next":
                     raise RuntimeError("persist failed")
 
-            async def _close_runtime_adapter(self, adapter) -> None:
+            async def close_runtime_adapter(self, adapter) -> None:
                 self.closed_adapters.append(adapter)
                 close = getattr(adapter, "close", None)
                 if callable(close):
