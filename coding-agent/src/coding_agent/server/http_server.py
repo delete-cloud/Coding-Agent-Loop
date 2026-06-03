@@ -82,7 +82,7 @@ from coding_agent.runtime_store import (
     RunMessageSnapshotRecord,
     RuntimeEventRecord,
 )
-from coding_agent.events import DisplayEvent, project_wire_sse_event_to_display
+from coding_agent.events import DisplayEvent, DisplayEventStreamProjector
 from coding_agent.scheduled_runs import (
     PGScheduledRunStore,
     ProactiveSignalRecord,
@@ -2147,22 +2147,6 @@ async def _cleanup_event_queue_on_disconnect(
         )
 
 
-def _display_event_sse_response(record: DisplayEvent) -> dict[str, str]:
-    return {
-        "event": record.display_kind,
-        "data": json.dumps(
-            {
-                "source_event_id": record.source_event_id,
-                "run_id": record.run_id,
-                "sequence": record.sequence,
-                "display_kind": record.display_kind,
-                "payload": record.payload,
-                "created_at": record.created_at.isoformat(),
-            }
-        ),
-    }
-
-
 def _legacy_event_stream_transform(event: dict[str, str]) -> dict[str, str] | None:
     return event
 
@@ -2171,14 +2155,11 @@ def _display_event_stream_transform(
     session: Session,
     event: dict[str, str],
 ) -> dict[str, str] | None:
-    display_event = project_wire_sse_event_to_display(
-        event,
-        source_event_id=f"live:{session.id}:{uuid.uuid4().hex}",
-        current_run_id=session.current_turn_id,
+    projector = DisplayEventStreamProjector(
+        session_id=session.id,
+        current_run_id=lambda: session.current_turn_id,
     )
-    if display_event is None:
-        return None
-    return _display_event_sse_response(display_event)
+    return projector.project(event)
 
 
 async def _owned_session_event_generator(

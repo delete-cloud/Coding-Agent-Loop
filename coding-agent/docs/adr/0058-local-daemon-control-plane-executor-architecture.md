@@ -302,6 +302,9 @@ This ADR does not implement that path.
   - Completed: the tracked server-rendered developer console run detail page
     uses `DisplayEvent` replay summaries and links to
     `GET /runs/{run_id}/display-events`.
+  - Completed: tracked live wire-event SSE projection and `DisplayEvent` SSE
+    envelope assembly are delegated to `DisplayEventStreamProjector` under
+    `coding_agent.events` instead of being assembled in HTTP routing.
   - Remaining: the untracked standalone `webui/` workspace needs separate
     integration once it is intentionally brought into this branch.
 - [x] Establish explicit Store contracts for durable runtime state.

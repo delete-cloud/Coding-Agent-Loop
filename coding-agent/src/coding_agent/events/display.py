@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
+import uuid
 from typing import Literal, cast
 
 from coding_agent.runtime_store import JSONObject, JSONValue, RuntimeEventRecord
@@ -35,6 +36,42 @@ class DisplayEvent:
         _require_non_empty("display_kind", self.display_kind)
         if self.sequence is not None and self.sequence <= 0:
             raise ValueError("sequence must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class DisplayEventStreamProjector:
+    session_id: str
+    current_run_id: Callable[[], str | None]
+    live_event_id: Callable[[], str] = lambda: uuid.uuid4().hex
+
+    def __post_init__(self) -> None:
+        _require_non_empty("session_id", self.session_id)
+
+    def project(self, event: Mapping[str, str]) -> dict[str, str] | None:
+        display_event = project_wire_sse_event_to_display(
+            event,
+            source_event_id=f"live:{self.session_id}:{self.live_event_id()}",
+            current_run_id=self.current_run_id(),
+        )
+        if display_event is None:
+            return None
+        return display_event_sse_response(display_event)
+
+
+def display_event_sse_response(record: DisplayEvent) -> dict[str, str]:
+    return {
+        "event": record.display_kind,
+        "data": json.dumps(
+            {
+                "source_event_id": record.source_event_id,
+                "run_id": record.run_id,
+                "sequence": record.sequence,
+                "display_kind": record.display_kind,
+                "payload": record.payload,
+                "created_at": record.created_at.isoformat(),
+            }
+        ),
+    }
 
 
 def project_runtime_events_to_display(

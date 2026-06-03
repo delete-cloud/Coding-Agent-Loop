@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 from coding_agent.events import (
     DisplayEvent,
+    DisplayEventStreamProjector,
     project_runtime_event_to_display,
     project_wire_sse_event_to_display,
 )
@@ -180,6 +181,37 @@ def test_projects_live_wire_sse_event_to_display_event() -> None:
             "role": "assistant",
         },
         created_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+    )
+
+
+def test_display_event_stream_projector_returns_sse_response() -> None:
+    projector = DisplayEventStreamProjector(
+        session_id="session-1",
+        current_run_id=lambda: "run-live",
+        live_event_id=lambda: "event-1",
+    )
+
+    response = projector.project(
+        {
+            "event": "StreamDelta",
+            "data": (
+                '{"session_id":"session-1","agent_id":"agent-1",'
+                '"content":"hello","role":"assistant",'
+                '"timestamp":"2026-01-02T03:04:05+00:00"}'
+            ),
+        }
+    )
+
+    assert response is not None
+    assert response["event"] == "assistant_text_delta"
+    assert response["data"] == (
+        '{"source_event_id": "live:session-1:event-1", '
+        '"run_id": "run-live", '
+        '"sequence": null, '
+        '"display_kind": "assistant_text_delta", '
+        '"payload": {"agent_id": "agent-1", "content": "hello", '
+        '"role": "assistant"}, '
+        '"created_at": "2026-01-02T03:04:05+00:00"}'
     )
 
 
