@@ -187,6 +187,15 @@ def create_child_pipeline(
 
     cfg = load_config(config_path)
 
+    # Env vars override toml; explicit function args override env vars.
+    env_provider = os.environ.get("AGENT_PROVIDER")
+    env_model = os.environ.get("AGENT_MODEL")
+    env_base_url = os.environ.get("AGENT_BASE_URL")
+    if env_provider:
+        cfg.provider = env_provider
+    if env_model:
+        cfg.model = env_model
+
     if model_override:
         cfg.model = model_override
     if provider_override:
@@ -250,7 +259,7 @@ def create_child_pipeline(
             provider=cfg.provider,
             model=cfg.model,
             api_key=resolved_key,
-            base_url=base_url_override,
+            base_url=base_url_override or env_base_url,
             parent_provider=parent_provider,
         ),
         "storage": lambda: StoragePlugin(data_dir=data_dir, config=storage_cfg),
