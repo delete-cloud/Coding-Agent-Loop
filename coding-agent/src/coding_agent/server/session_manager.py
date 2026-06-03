@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from inspect import isawaitable
 from pathlib import Path
-from typing import Any, ClassVar, Literal, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol, TypeVar, cast
 
 from agentkit.environment import Environment
 from agentkit.storage.checkpoint_fs import FSCheckpointStore
@@ -33,7 +33,6 @@ from agentkit.runtime import (
 from agentkit.storage.protocols import CheckpointStore, TapeStore
 from agentkit.storage.protocols import TapeDebugStore, TapeInfo, TapeSearchResult
 from agentkit.tape.tape import Tape
-from agentkit.tools import FatalToolExecutionError
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.agent_observability import (
     AgentObservationStore,
@@ -92,7 +91,7 @@ from coding_agent.runs import (
 from coding_agent.runs.environment import RuntimeEnvironmentResolverService
 from coding_agent.runs.runtime_preparation import LocalDaemonRuntimePreparationService
 from coding_agent.runs.runtime_checkpoint_restore import RuntimeCheckpointRestoreService
-from coding_agent.runs.turn_execution import RuntimeTurnService
+from coding_agent.runs.turn_service_factory import RuntimeTurnServiceFactory
 from coding_agent.wire.consumer import LocalWireConsumer
 from coding_agent.wire.local import LocalWire
 from coding_agent.wire.protocol import (
@@ -125,6 +124,9 @@ from coding_agent.server.stores.workspace_store import (
     WorkspaceRetentionPolicy,
     WorkspaceStatus,
 )
+
+if TYPE_CHECKING:
+    from coding_agent.runs.turn_execution import RuntimeTurnService
 
 logger = logging.getLogger(__name__)
 
@@ -861,6 +863,23 @@ class SessionManager:
             close_runtime=self._runtime_closer.close,
             persist_session=self._persist_session_async,
         )
+        self._runtime_turn_service_factory = RuntimeTurnServiceFactory(
+            runtime_control_services=self._runtime_control_services,
+            persist_session=self._persist_session_async,
+            make_consumer=self._make_session_consumer,
+            prepare_runtime=self._local_daemon_runtime_preparation.prepare_runtime,
+            close_runtime=self._runtime_closer.close,
+            emit_message=self._send_session_wire_message,
+            bind_root_run_identity=(
+                self._runtime_context_binding_service.bind_root_run_identity
+            ),
+            bind_subagent_message_publisher=(
+                self._runtime_context_binding_service.bind_subagent_message_publisher
+            ),
+            start_observation=self._runtime_observation_service.start,
+            complete_observation=self._runtime_observation_service.complete,
+            log_turn_exception=lambda message: logger.exception(message),
+        )
         self._runtime_turn_service = self._build_runtime_turn_service()
         self.configure_owner_leases(
             owner_store=owner_store,
@@ -922,26 +941,7 @@ class SessionManager:
         self._runtime_turn_service = self._build_runtime_turn_service()
 
     def _build_runtime_turn_service(self) -> RuntimeTurnService:
-        return RuntimeTurnService(
-            run_coordinator=self._run_coordinator,
-            runtime_run_persistence=self._runtime_control_services.run_persistence(),
-            persist_session=self._persist_session_async,
-            make_consumer=self._make_session_consumer,
-            prepare_runtime=self._local_daemon_runtime_preparation.prepare_runtime,
-            close_runtime=self._runtime_closer.close,
-            emit_message=self._send_session_wire_message,
-            bind_root_run_identity=(
-                self._runtime_context_binding_service.bind_root_run_identity
-            ),
-            bind_subagent_message_publisher=(
-                self._runtime_context_binding_service.bind_subagent_message_publisher
-            ),
-            start_observation=self._runtime_observation_service.start,
-            complete_observation=self._runtime_observation_service.complete,
-            log_turn_exception=lambda message: logger.exception(message),
-            fatal_error_types=(FatalToolExecutionError,),
-            cancelled_error_types=(asyncio.CancelledError,),
-        )
+        return self._runtime_turn_service_factory.build(self._run_coordinator)
 
     def _require_runtime_store(self) -> RuntimeStore:
         if self._runtime_store is None:

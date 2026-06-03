@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import pytest
+
+from agentkit.tools import FatalToolExecutionError
 
 from coding_agent.adapter_types import StopReason, TurnOutcome
 from coding_agent.executors.local_daemon import (
@@ -15,12 +18,14 @@ from coding_agent.runs import (
     IsolationPolicy,
     LocalDaemonExecutorRef,
     LocalPathWorkspaceRef,
+    RuntimeControlServices,
     RunCoordinatorError,
     RunRequest,
     RunTarget,
 )
 from coding_agent.runs.persistence import RuntimeRunPersistenceService
 from coding_agent.runs.turn_execution import RuntimeTurnService
+from coding_agent.runs.turn_service_factory import RuntimeTurnServiceFactory
 from coding_agent.wire.protocol import WireMessage
 
 
@@ -177,6 +182,14 @@ def _persistence(store: RecordingRuntimeStore) -> RuntimeRunPersistenceService:
     )
 
 
+async def _list_session_ids() -> list[str]:
+    return ["session-1"]
+
+
+async def _recoverable(session_id: str) -> bool:
+    return session_id == "session-1"
+
+
 def _service(
     *,
     store: RecordingRuntimeStore,
@@ -237,6 +250,85 @@ def _service(
         fatal_error_types=(ValueError,),
         cancelled_error_types=(),
     )
+
+
+def test_runtime_turn_service_factory_builds_service_with_latest_runtime_store() -> (
+    None
+):
+    store_a = RecordingRuntimeStore()
+    store_b = RecordingRuntimeStore()
+    current_store: RecordingRuntimeStore = store_a
+    coordinator_a = RecordingCoordinator()
+    coordinator_b = RecordingCoordinator()
+
+    async def persist_session(session: FakeSession) -> None:
+        del session
+
+    async def prepare_runtime(
+        session: FakeSession,
+        *,
+        consumer: object,
+        request: RunRequest,
+    ) -> LocalDaemonRuntimeBinding:
+        del session, consumer, request
+        return LocalDaemonRuntimeBinding(
+            pipeline=object(),
+            ctx=FakeRuntimeContext(),
+            adapter=FakeAdapter(),
+        )
+
+    async def close_runtime(session: FakeSession) -> None:
+        del session
+
+    async def emit_message(session: FakeSession, message: WireMessage) -> None:
+        del session, message
+
+    factory = RuntimeTurnServiceFactory(
+        runtime_control_services=RuntimeControlServices(
+            store=lambda: current_store,
+            metadata_for_session=lambda session, *, run_id=None, resume_context=None: {
+                "session_id": session.id,
+                "run_id": run_id,
+                "resume_context": resume_context,
+            },
+            list_session_ids=_list_session_ids,
+            session_is_recoverable=_recoverable,
+            owner_id=lambda: "owner-1",
+            active_resume_blocking_statuses=frozenset({"running"}),
+        ),
+        persist_session=persist_session,
+        make_consumer=lambda session: f"consumer:{session.id}",
+        prepare_runtime=prepare_runtime,
+        close_runtime=close_runtime,
+        emit_message=emit_message,
+        bind_root_run_identity=lambda session, ctx, run_id, *, resume_context=None: (
+            setattr(ctx, "root_run_id", run_id)
+        ),
+        bind_subagent_message_publisher=lambda ctx: setattr(
+            ctx,
+            "subagent_publisher_bound",
+            True,
+        ),
+        start_observation=lambda **kwargs: FakeObservationRecorder(),
+        complete_observation=lambda recorder, *, ctx, turn_status: setattr(
+            ctx,
+            "observation_completed",
+            (recorder, turn_status),
+        ),
+    )
+
+    service_a = factory.build(coordinator_a)
+    current_store = store_b
+    service_b = factory.build(coordinator_b)
+
+    assert service_a.run_coordinator is coordinator_a
+    assert service_a.runtime_run_persistence.run_store is store_a
+    assert service_a.runtime_run_persistence.checkpoint_store is store_a
+    assert service_b.run_coordinator is coordinator_b
+    assert service_b.runtime_run_persistence.run_store is store_b
+    assert service_b.runtime_run_persistence.checkpoint_store is store_b
+    assert service_b.fatal_error_types == (FatalToolExecutionError,)
+    assert service_b.cancelled_error_types == (asyncio.CancelledError,)
 
 
 @pytest.mark.asyncio

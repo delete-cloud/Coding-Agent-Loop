@@ -257,6 +257,9 @@ This ADR does not implement that path.
   - Completed: checkpoint restore service and runtime-builder composition are
     delegated to `RuntimeCheckpointRestoreService` instead of being assembled
     inline by `SessionManager`.
+  - Completed: runtime turn service construction and its dependency/policy
+    bundle are delegated to `RuntimeTurnServiceFactory` instead of being
+    assembled inline by `SessionManager`.
 - [x] Demote `coding_agent run` to an inline testkit/devkit compatibility path.
   - `run` records `origin.mode = inline_testkit`.
   - CLI and README describe `run` as dev/testkit one-shot compatibility.
