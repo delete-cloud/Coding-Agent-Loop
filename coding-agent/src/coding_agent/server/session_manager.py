@@ -90,6 +90,7 @@ from coding_agent.runs import (
     RunCoordinatorError,
     RunRequest,
     RuntimeRunPersistenceService,
+    RuntimeRunRecoveryService,
     RuntimeTurnErrorHandler,
     RuntimeTurnObservationState,
     RuntimeTurnRunTracker,
@@ -280,8 +281,6 @@ def _approval_interaction_status(response: ApprovalResponse) -> str:
     return "approved" if response.approved else "rejected"
 
 
-_STALE_RUNTIME_RUN_ERROR = "runtime run was still running during startup recovery"
-_STALE_RUNTIME_RUN_RECOVERY_REASON = "startup_stale_running_run"
 _RESUME_TAPE_TAIL_LIMIT = 5
 _RESUME_CONTEXT_JSON_LIMIT = 4000
 _RESUME_PLAN_NOTE_LIMIT = 1200
@@ -2439,95 +2438,25 @@ class SessionManager:
             metadata_for_session=self._run_metadata_for_session,
         )
 
+    def _runtime_run_recovery(self) -> RuntimeRunRecoveryService:
+        async def session_is_recoverable(session_id: str) -> bool:
+            if self._owner_store is None:
+                return True
+            return await self._holds_active_owner_lease(session_id)
+
+        return RuntimeRunRecoveryService(
+            store=self._runtime_store,
+            list_session_ids=self.list_sessions_async,
+            session_is_recoverable=session_is_recoverable,
+            owner_id=self._owner_id,
+        )
+
     async def recover_stale_runtime_runs(
         self,
         *,
         recovered_at: datetime | None = None,
     ) -> int:
-        if self._runtime_store is None:
-            return 0
-        recovery_time = recovered_at or datetime.now(UTC)
-        recovered_count = 0
-        for session_id in await self.list_sessions_async():
-            if self._owner_store is not None and not (
-                await self._holds_active_owner_lease(session_id)
-            ):
-                continue
-            runs = await self._runtime_store.list_agent_runs(session_id)
-            for run in runs:
-                if await self._recover_expired_attached_executor_run(
-                    run,
-                    recovered_at=recovery_time,
-                ):
-                    recovered_count += 1
-                    continue
-                if run.status != "running" or run.ended_at is not None:
-                    continue
-                metadata = dict(run.metadata)
-                metadata["reclaimable"] = True
-                metadata["recovered_at"] = recovery_time.isoformat()
-                metadata["recovery_reason"] = _STALE_RUNTIME_RUN_RECOVERY_REASON
-                if self._owner_id is not None:
-                    metadata["recovered_by_owner_id"] = self._owner_id
-                await self._runtime_store.update_agent_run(
-                    run.run_id,
-                    status="interrupted",
-                    ended_at=recovery_time,
-                    metadata=metadata,
-                    result=run.result,
-                    error=_STALE_RUNTIME_RUN_ERROR,
-                )
-                recovered_count += 1
-        return recovered_count
-
-    async def _recover_expired_attached_executor_run(
-        self,
-        run: AgentRunRecord,
-        *,
-        recovered_at: datetime,
-    ) -> bool:
-        if self._runtime_store is None:
-            return False
-        if (
-            run.metadata.get("execution_binding_kind")
-            not in _ATTACHED_EXECUTOR_BINDING_KINDS
-        ):
-            return False
-        if run.status not in {"claimed", "running", "cancelling"}:
-            return False
-        lease_expires_at = _optional_metadata_datetime(
-            run.metadata,
-            "lease_expires_at",
-        )
-        if lease_expires_at is None or lease_expires_at > recovered_at:
-            return False
-        metadata = dict(run.metadata)
-        metadata["reclaimable"] = True
-        metadata["recovered_at"] = recovered_at.isoformat()
-        metadata["recovery_reason"] = "attached_executor_lease_expired"
-        metadata["legacy_recovery_reason"] = "external_worker_lease_expired"
-        metadata["previous_status"] = run.status
-        if self._owner_id is not None:
-            metadata["recovered_by_owner_id"] = self._owner_id
-        await self._runtime_store.update_agent_run(
-            run.run_id,
-            status="expired",
-            ended_at=None,
-            metadata=cast(JSONObject, metadata),
-            result=run.result,
-            error="external worker lease expired",
-        )
-        return True
-
-    async def _recover_expired_external_worker_run(
-        self,
-        run: AgentRunRecord,
-        *,
-        recovered_at: datetime,
-    ) -> bool:
-        """Compatibility wrapper for the legacy external-worker API."""
-        return await self._recover_expired_attached_executor_run(
-            run,
+        return await self._runtime_run_recovery().recover_stale_runtime_runs(
             recovered_at=recovered_at,
         )
 

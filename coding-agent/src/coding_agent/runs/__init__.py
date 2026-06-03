@@ -47,6 +47,11 @@ from .persistence import (
     RuntimeMessageSnapshotSession,
     RuntimeRunPersistenceService,
 )
+from .recovery import (
+    RuntimeRunRecoveryEligibility,
+    RuntimeRunRecoveryService,
+    RuntimeRunSessionLister,
+)
 from .target import (
     CloudWorkspaceRef,
     ExecutionBindingRunTargetError,
@@ -105,9 +110,12 @@ __all__ = [
     "RuntimeRunFinisher",
     "RuntimeRunMetadataProvider",
     "RuntimeRunPersistenceService",
+    "RuntimeRunRecoveryEligibility",
+    "RuntimeRunRecoveryService",
     "RuntimeRunResumeContext",
     "RuntimeRunSession",
     "RuntimeRunStore",
+    "RuntimeRunSessionLister",
     "RuntimeSessionPersister",
     "RuntimeSubagentMessagePublisherBinder",
     "RuntimeTurnBinding",
