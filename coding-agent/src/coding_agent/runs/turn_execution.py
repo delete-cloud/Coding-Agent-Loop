@@ -9,6 +9,7 @@ from coding_agent.executors.local_daemon import (
     LocalDaemonRuntimeExecution,
 )
 from coding_agent.runs.coordinator import RunCoordinator, RunCoordinatorError, RunRequest
+from coding_agent.runs.target import RunTarget
 from coding_agent.runs.lifecycle import (
     RuntimeObservationCompleter,
     RuntimeObservationStarter,
@@ -33,17 +34,6 @@ class RuntimeTurnConsumerFactory(Protocol):
     def __call__(self, session: RuntimeTurnServiceSession) -> object: ...
 
 
-class RuntimeRunRequestBuilder(Protocol):
-    async def __call__(
-        self,
-        session: RuntimeTurnServiceSession,
-        *,
-        run_id: str,
-        prompt: str,
-        resume_context: RuntimeRunResumeContext | None = None,
-    ) -> RunRequest: ...
-
-
 class RuntimeProviderPreparer(Protocol):
     async def __call__(
         self,
@@ -60,6 +50,7 @@ class RuntimeCurrentTaskProvider(Protocol):
 
 class RuntimeTurnServiceSession(RuntimeTurnStateSession, Protocol):
     id: str
+    default_run_target: RunTarget
 
 
 @dataclass(frozen=True)
@@ -76,7 +67,6 @@ class RuntimeTurnService:
     runtime_run_persistence: RuntimeRunPersistenceService
     persist_session: RuntimeTurnStatePersister
     make_consumer: RuntimeTurnConsumerFactory
-    build_run_request: RuntimeRunRequestBuilder
     prepare_runtime: RuntimeProviderPreparer
     close_runtime: RuntimeSessionCloser
     emit_message: RuntimeTurnWireEmitter
@@ -138,11 +128,14 @@ class RuntimeTurnService:
 
         async def execute_runtime() -> None:
             consumer = self.make_consumer(session)
-            run_request = await self.build_run_request(
-                session,
+            run_request = RunRequest(
+                session_id=session.id,
                 run_id=run_id,
-                prompt=prompt,
-                resume_context=resume_context,
+                target=session.default_run_target,
+                input_summary=prompt if prompt.strip() else None,
+                resume_from_run_id=(
+                    None if resume_context is None else resume_context.previous_run_id
+                ),
             )
             await self.run_coordinator.submit_run(run_request)
             turn_controller.starter = RuntimeTurnStarter(
@@ -198,7 +191,6 @@ class RuntimeTurnService:
 
 __all__ = [
     "RuntimeProviderPreparer",
-    "RuntimeRunRequestBuilder",
     "RuntimeTurnConsumerFactory",
     "RuntimeTurnService",
     "RuntimeTurnServiceSession",

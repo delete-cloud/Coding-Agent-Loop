@@ -239,9 +239,9 @@ This ADR does not implement that path.
   - Completed: `SessionManager.run_agent()` invokes a configured
     `RuntimeTurnService` instead of constructing the runtime turn service
     inline for every turn.
-  - Completed: runtime turn request submission is owned by
-    `RuntimeTurnService`; `SessionManager` only builds the `RunRequest` from
-    session placement.
+  - Completed: runtime turn `RunRequest` construction and submission are owned
+    by `RuntimeTurnService`, using the session's authoritative
+    `default_run_target`.
   - Completed: normal local-daemon runtime preparation, environment resolution,
     workspace-root compatibility checks, and `LocalDaemonSessionRuntimeProvider`
     assembly are delegated to `LocalDaemonRuntimePreparationService`.
