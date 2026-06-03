@@ -2783,6 +2783,66 @@ async def test_cancel_session_turn_is_idempotent_for_idle_session() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancel_attached_executor_requested_run_marks_cancelled() -> None:
+    runtime_store = FakeRuntimeStore()
+    manager = SessionManager(runtime_store=runtime_store)
+    session_id = await manager.create_session(
+        execution_binding=ExternalWorkerBinding(executor_kind="local_cli")
+    )
+    requested = await manager.request_attached_executor_run(
+        session_id,
+        "run on attached executor",
+    )
+
+    result = await manager.cancel_session_turn(session_id)
+
+    assert result.session_id == session_id
+    assert result.turn_id == requested.run_id
+    assert result.status == "cancelled"
+    loaded = await runtime_store.load_agent_run(requested.run_id)
+    assert loaded is not None
+    assert loaded.status == "cancelled"
+    assert loaded.error == "cancelled before claim"
+    assert "cancel_requested_at" in loaded.metadata
+    session = manager.get_session(session_id)
+    assert session.turn_in_progress is False
+    assert session.turn_status == "idle"
+
+
+@pytest.mark.asyncio
+async def test_cancel_attached_executor_claimed_run_marks_cancelling() -> None:
+    runtime_store = FakeRuntimeStore()
+    manager = SessionManager(runtime_store=runtime_store)
+    session_id = await manager.create_session(
+        execution_binding=ExternalWorkerBinding(executor_kind="local_cli")
+    )
+    requested = await manager.request_attached_executor_run(
+        session_id,
+        "run on attached executor",
+    )
+    claim = await manager.claim_attached_executor_run(
+        executor_id="executor-1",
+        executor_kind="local_cli",
+        session_id=session_id,
+    )
+    assert claim is not None
+
+    result = await manager.cancel_session_turn(session_id)
+
+    assert result.session_id == session_id
+    assert result.turn_id == requested.run_id
+    assert result.status == "cancelling"
+    loaded = await runtime_store.load_agent_run(requested.run_id)
+    assert loaded is not None
+    assert loaded.status == "cancelling"
+    assert loaded.error is None
+    assert "cancel_requested_at" in loaded.metadata
+    session = manager.get_session(session_id)
+    assert session.turn_in_progress is True
+    assert session.turn_status == "cancelling"
+
+
+@pytest.mark.asyncio
 async def test_register_session_closes_cached_runtime() -> None:
     manager = SessionManager(store=InMemorySessionStore())
     session_id = await manager.create_session()

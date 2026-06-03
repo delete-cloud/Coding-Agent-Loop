@@ -24,6 +24,13 @@ from .attached_executor import (
     RuntimeAttachedExecutorService,
     RuntimeAttachedExecutorStore,
 )
+from .cancel import (
+    RuntimeCancelResult,
+    RuntimeCancelService,
+    RuntimeCancelSession,
+    RuntimeCancelStatus,
+    RuntimeCancelStore,
+)
 from .lifecycle import (
     RuntimeMessageSnapshotSaver,
     RuntimeObservationCompleter,
@@ -163,6 +170,11 @@ __all__ = [
     "RuntimeAttachedExecutorSession",
     "RuntimeAttachedExecutorService",
     "RuntimeAttachedExecutorStore",
+    "RuntimeCancelResult",
+    "RuntimeCancelService",
+    "RuntimeCancelSession",
+    "RuntimeCancelStatus",
+    "RuntimeCancelStore",
     "SessionRuntimeHandle",
     "RuntimeExecution",
     "RuntimeMessageSnapshotSession",
