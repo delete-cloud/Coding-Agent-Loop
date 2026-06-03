@@ -51,6 +51,24 @@ class FakeRuntimeSession:
         self.runtime_ctx: object | None = None
         self.runtime_adapter: FakeRuntimeAdapter | None = None
 
+    def attach_runtime_binding(
+        self,
+        *,
+        pipeline: object,
+        ctx: object,
+        adapter: FakeRuntimeAdapter,
+    ) -> None:
+        self.runtime_pipeline = pipeline
+        self.runtime_ctx = ctx
+        self.runtime_adapter = adapter
+
+    def detach_runtime_adapter(self) -> object | None:
+        adapter = self.runtime_adapter
+        self.runtime_pipeline = None
+        self.runtime_ctx = None
+        self.runtime_adapter = None
+        return adapter
+
 
 class FakeLocalDaemonExecutor:
     def __init__(self) -> None:

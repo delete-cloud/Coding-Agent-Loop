@@ -317,6 +317,9 @@ This ADR does not implement that path.
     methods.
   - Completed: runtime task cancellation/waiting for close and shutdown paths is
     delegated to `RuntimeTaskStopper` instead of inline `SessionManager` logic.
+  - Completed: runtime close hooks are wired directly from `RuntimeCloser` into
+    preparation, turn execution, restore, and session cleanup paths instead of
+    `SessionManager` proxy helpers.
   - Completed: runtime run lifecycle and latest message snapshot persistence
     consume narrower `RuntimeRunLifecycleStore` and `RuntimeCheckpointStore`
     contracts through `RuntimeRunPersistenceService`.

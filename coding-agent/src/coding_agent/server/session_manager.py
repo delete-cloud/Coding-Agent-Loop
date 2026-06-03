@@ -793,8 +793,8 @@ class SessionManager:
         self._local_daemon_runtime_preparation = LocalDaemonRuntimePreparationService(
             binding_resolver=self._binding_resolver,
             local_daemon_executor=self._local_daemon_executor,
-            close_runtime=self._close_runtime,
-            close_runtime_adapter=self._close_runtime_adapter,
+            close_runtime=self._runtime_closer.close,
+            close_runtime_adapter=self._runtime_closer.close_adapter,
             create_agent_for_session=self._create_agent_for_session,
             restore_tape=self._restore_tape,
             persist_session=self._persist_session_async,
@@ -874,7 +874,7 @@ class SessionManager:
             persist_session=self._persist_session_async,
             make_consumer=self._make_session_consumer,
             prepare_runtime=self._local_daemon_runtime_preparation.prepare_runtime,
-            close_runtime=self._close_runtime,
+            close_runtime=self._runtime_closer.close,
             emit_message=self._send_session_wire_message,
             bind_root_run_identity=self._bind_root_run_identity,
             bind_subagent_message_publisher=self._bind_subagent_message_publisher,
@@ -1486,15 +1486,6 @@ class SessionManager:
             return SQLiteRuntimeStore(path)
         raise ValueError(f"unsupported storage.runtime_backend: {backend}")
 
-    async def _close_runtime(self, session: Session) -> None:
-        await self._runtime_closer.close(session)
-
-    async def _close_runtime_adapter(self, adapter: object | None) -> None:
-        await self._runtime_closer.close_adapter(adapter)
-
-    def _close_runtime_sync_safe(self, session: Session) -> None:
-        self._runtime_closer.close_sync_safe(session)
-
     def _session_uses_provisioned_cloud_workspace(self, session: Session) -> bool:
         origin = session.origin
         return (
@@ -2080,7 +2071,7 @@ class SessionManager:
 
     async def _remove_session_async_no_lock(self, session_id: str) -> None:
         session = await self.get_session_async(session_id)
-        await self._close_runtime(session)
+        await self._runtime_closer.close(session)
         await self._finalize_provisioned_cloud_workspace_on_close(session)
         self._session_cache.pop(session_id, None)
         await self._run_store_io(self._store.delete, session_id)
@@ -2186,7 +2177,7 @@ class SessionManager:
             checkpoint_service=self._checkpoint_service,
             tape_store=self._tape_store,
             prepare_runtime=prepare_runtime,
-            close_runtime=self._close_runtime,
+            close_runtime=self._runtime_closer.close,
             persist_session=self._persist_session_async,
         )
 
@@ -2385,7 +2376,7 @@ class SessionManager:
         return self._store.load(session_id) is not None
 
     def register_session(self, session: Session) -> None:
-        self._close_runtime_sync_safe(session)
+        self._runtime_closer.close_sync_safe(session)
         self._approval_stores[session.id] = session.approval_store
         self._persist_session(session)
 
@@ -2393,7 +2384,7 @@ class SessionManager:
         if not self.has_session(session_id):
             raise KeyError(f"Session not found: {session_id}")
         session = self.get_session(session_id)
-        self._close_runtime_sync_safe(session)
+        self._runtime_closer.close_sync_safe(session)
         self._cleanup_provisioned_cloud_binding(session)
         self._session_cache.pop(session_id, None)
         self._store.delete(session_id)
@@ -2403,12 +2394,12 @@ class SessionManager:
     def clear_sessions(self) -> None:
         cleared_session_ids = set(self._session_cache)
         for session in list(self._session_cache.values()):
-            self._close_runtime_sync_safe(session)
+            self._runtime_closer.close_sync_safe(session)
             self._cleanup_provisioned_cloud_binding(session)
         for session_id in list(self._store.list_sessions()):
             if session_id not in cleared_session_ids:
                 session = self.get_session(session_id)
-                self._close_runtime_sync_safe(session)
+                self._runtime_closer.close_sync_safe(session)
                 self._cleanup_provisioned_cloud_binding(session)
                 self._session_cache.pop(session_id, None)
             self._store.delete(session_id)
@@ -2495,7 +2486,7 @@ class SessionManager:
                 task=session.task,
             )
 
-            await self._close_runtime(session)
+            await self._runtime_closer.close(session)
             session.task = None
             session.turn_in_progress = False
             await self._persist_session_async(session)
@@ -2914,11 +2905,11 @@ class SessionManager:
                 session.model_name = old_model_name
                 session.restore_runtime_binding(old_runtime_binding)
                 session.tape_id = old_tape_id
-                await self._close_runtime_adapter(adapter)
+                await self._runtime_closer.close_adapter(adapter)
                 raise
 
             try:
-                await self._close_runtime_adapter(old_runtime_binding.adapter)
+                await self._runtime_closer.close_adapter(old_runtime_binding.adapter)
             except Exception:
                 logger.warning(
                     "Failed to close previous runtime adapter for session %s",
