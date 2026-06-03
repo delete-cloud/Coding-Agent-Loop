@@ -69,6 +69,13 @@ from .recovery import (
     RuntimeRunRecoveryService,
     RuntimeRunSessionLister,
 )
+from .runtime_events import (
+    RuntimeWireEventRecorder,
+    RuntimeWireEventSession,
+    RuntimeWireEventStore,
+    runtime_event_correlation_from_run,
+    with_runtime_event_correlation,
+)
 from .session_runtime import (
     EventBroadcastResult,
     RuntimeBindingSnapshot,
@@ -171,6 +178,9 @@ __all__ = [
     "RuntimeTurnStartSession",
     "RuntimeTurnStarter",
     "RuntimeTurnSession",
+    "RuntimeWireEventRecorder",
+    "RuntimeWireEventSession",
+    "RuntimeWireEventStore",
     "SnapshotWorkspaceRef",
     "WorkspaceRef",
     "executor_ref_from_dict",
@@ -179,8 +189,10 @@ __all__ = [
     "runtime_result_from_turn_outcome",
     "runtime_status_from_turn_outcome",
     "runtime_execution_placement",
+    "runtime_event_correlation_from_run",
     "run_target_from_dict",
     "run_target_from_execution_binding",
+    "with_runtime_event_correlation",
     "workspace_ref_from_dict",
     "workspace_ref_to_dict",
     "checkpoint_session_config_from_extra",

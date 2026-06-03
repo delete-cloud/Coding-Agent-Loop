@@ -12,11 +12,9 @@ import secrets
 import threading
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
-from dataclasses import asdict, dataclass, field, is_dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
-from enum import Enum
 from inspect import isawaitable
-from math import isfinite
 from pathlib import Path
 from typing import Any, ClassVar, Literal, Protocol, TypeVar, cast
 
@@ -67,7 +65,6 @@ from coding_agent.runtime_store import (
     RunMessageSnapshotRecord,
     RuntimeEventRecord,
     SQLiteRuntimeStore,
-    JSONValue as RuntimeJSONValue,
 )
 from coding_agent.stores import RuntimeStore
 from coding_agent.executors import (
@@ -92,12 +89,15 @@ from coding_agent.runs import (
     RuntimeObservationService,
     RuntimeRunPersistenceService,
     RuntimeRunRecoveryService,
+    RuntimeWireEventRecorder,
     RunTarget,
     SessionRuntimeHandle,
+    runtime_event_correlation_from_run,
     runtime_execution_placement,
     run_target_from_dict,
     run_target_from_execution_binding,
     serialize_checkpoint_session_config,
+    with_runtime_event_correlation,
 )
 from coding_agent.runs.checkpoint_runtime import CheckpointRuntimeBuilder
 from coding_agent.runs.runtime_preparation import LocalDaemonRuntimePreparationService
@@ -168,72 +168,6 @@ def _optional_metadata_datetime(
 
 def _subagent_message_id(session_id: str) -> str:
     return f"subagent_message:{session_id}:{uuid.uuid4().hex}"
-
-
-def _json_compatible_value(value: object) -> RuntimeJSONValue:
-    if value is None or isinstance(value, str | int | bool):
-        return value
-    if isinstance(value, float):
-        return value if isfinite(value) else str(value)
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if isinstance(value, Enum):
-        return cast(RuntimeJSONValue, value.value)
-    if is_dataclass(value) and not isinstance(value, type):
-        return _json_compatible_value(asdict(value))
-    if isinstance(value, Mapping):
-        return {str(key): _json_compatible_value(item) for key, item in value.items()}
-    if isinstance(value, list | tuple):
-        return [_json_compatible_value(item) for item in value]
-    return str(value)
-
-
-def _wire_message_event_payload(message: WireMessage) -> JSONObject:
-    message_payload = _json_compatible_value(asdict(message))
-    if not isinstance(message_payload, dict):
-        raise TypeError("wire message payload must serialize to a JSON object")
-    return {
-        "message_type": type(message).__name__,
-        "message": cast(RuntimeJSONValue, message_payload),
-    }
-
-
-def _runtime_event_correlation_from_run(run: AgentRunRecord) -> JSONObject:
-    metadata = run.metadata
-    payload: JSONObject = {
-        "session_id": run.session_id,
-        "run_id": run.run_id,
-    }
-    if run.tape_id is not None:
-        payload["tape_id"] = run.tape_id
-    for key in (
-        "execution_placement",
-        "execution_binding_kind",
-        "workspace_surface",
-        "execution_plane",
-        "previous_run_id",
-        "resume_from_run_id",
-        "resume_from_event_id",
-        "resume_reason",
-        "resume_context_strategy",
-        "resume_boundary_anchor_id",
-        "resume_boundary_anchor_type",
-        "executor_id",
-        "worker_id",
-    ):
-        value = metadata.get(key)
-        if isinstance(value, str) and value:
-            payload[key] = value
-    if metadata.get("resume_context_injected") is True:
-        payload["resume_context_injected"] = True
-    return payload
-
-
-def _with_runtime_event_correlation(
-    payload: JSONObject,
-    correlation: JSONObject,
-) -> JSONObject:
-    return {**correlation, **payload}
 
 
 _RESUME_TAPE_TAIL_LIMIT = 5
@@ -1751,9 +1685,9 @@ class SessionManager:
                 event_id=event_id,
                 run_id=run_id,
                 event_kind=event_kind,
-                payload=_with_runtime_event_correlation(
+                payload=with_runtime_event_correlation(
                     payload,
-                    _runtime_event_correlation_from_run(run),
+                    runtime_event_correlation_from_run(run),
                 ),
                 created_at=created_at,
             )
@@ -2231,38 +2165,9 @@ class SessionManager:
         session: Session,
         message: WireMessage,
     ) -> None:
-        if self._runtime_store is None:
-            return
-        run_id = session.current_turn_id
-        if run_id is None:
-            return
-        run = await self._runtime_store.load_agent_run(run_id)
-        if run is None:
-            correlation: JSONObject = {
-                "session_id": session.id,
-                "run_id": run_id,
-                "execution_placement": runtime_execution_placement(
-                    session.execution_binding
-                ),
-                "execution_binding_kind": session.execution_binding.kind,
-                "workspace_surface": session.execution_binding.workspace_surface,
-                "execution_plane": session.execution_binding.execution_plane,
-            }
-            if session.tape_id is not None:
-                correlation["tape_id"] = session.tape_id
-        else:
-            correlation = _runtime_event_correlation_from_run(run)
-        await self._runtime_store.append_runtime_event(
-            RuntimeEventRecord(
-                event_id=f"{run_id}:wire:{uuid.uuid4().hex}",
-                run_id=run_id,
-                event_kind=f"wire.{type(message).__name__}",
-                payload=_with_runtime_event_correlation(
-                    _wire_message_event_payload(message),
-                    correlation,
-                ),
-                created_at=message.timestamp,
-            )
+        await RuntimeWireEventRecorder(self._runtime_store).append_wire_event(
+            session,
+            message,
         )
 
     def _approval_interactions(self) -> ApprovalInteractionService:

@@ -299,6 +299,9 @@ This ADR does not implement that path.
     instead of an inline server-local protocol.
   - Completed: runtime event replay consumes the narrower `RuntimeEventStore`
     contract through `RuntimeEventReplayService`.
+  - Completed: runtime wire event serialization, correlation enrichment, and
+    append behavior are delegated to `RuntimeWireEventRecorder` instead of
+    `SessionManager` helper methods.
   - Completed: runtime run lifecycle and latest message snapshot persistence
     consume narrower `RuntimeRunLifecycleStore` and `RuntimeCheckpointStore`
     contracts through `RuntimeRunPersistenceService`.
