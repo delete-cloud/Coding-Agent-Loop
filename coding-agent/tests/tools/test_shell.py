@@ -573,6 +573,7 @@ class TestLinuxNativeSandbox:
 
         def fake_run(command, **kwargs):
             captured["command"] = command
+            captured["env"] = kwargs.get("env")
             return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
 
         monkeypatch.setattr(sandbox_module.subprocess, "run", fake_run)
@@ -585,6 +586,9 @@ class TestLinuxNativeSandbox:
         assert result.returncode == 0
         command = cast(list[str], captured["command"])
         assert command[0] == "bwrap"
+        # root filesystem is bind-mounted read-only (security contract)
+        ro_bind_idx = command.index("--ro-bind")
+        assert command[ro_bind_idx + 1 : ro_bind_idx + 3] == ["/", "/"]
         assert "--unshare-net" in command
         root = str(workspace.resolve())
         bind_idx = command.index("--bind")
@@ -593,6 +597,12 @@ class TestLinuxNativeSandbox:
         chdir_idx = command.index("--chdir")
         assert command[chdir_idx + 1] == root
         assert command[-2:] == ["echo", "hi"]
+        # env is a minimal allowlist, never the inherited host environment
+        env = cast("dict[str, str] | None", captured["env"])
+        assert env is not None
+        assert set(env).issubset(
+            {"HOME", "LANG", "LC_ALL", "LC_CTYPE", "PATH", "TERM", "TZ"}
+        )
 
     def test_linux_native_fails_closed_when_bwrap_missing(
         self, monkeypatch, tmp_path: Path
@@ -613,6 +623,38 @@ class TestLinuxNativeSandbox:
                     args=["echo", "hi"], cwd=workspace, env=None, timeout_seconds=1
                 )
             )
+
+
+class TestNativeSandboxEnv:
+    """ADR-0060: native sandboxes must not inherit the host environment."""
+
+    def test_native_env_excludes_host_secrets_when_no_env_supplied(
+        self, monkeypatch
+    ):
+        sandbox_module = importlib.import_module("coding_agent.tools.sandbox")
+        monkeypatch.setenv("HOST_SECRET", "leak-me")
+        monkeypatch.setenv("PATH", "/usr/bin")
+
+        env = sandbox_module._native_sandbox_env(None)
+
+        assert "HOST_SECRET" not in env
+        assert env.get("PATH") == "/usr/bin"
+
+    def test_native_env_uses_explicit_env_verbatim(self, monkeypatch):
+        sandbox_module = importlib.import_module("coding_agent.tools.sandbox")
+        monkeypatch.setenv("HOST_SECRET", "leak-me")
+
+        env = sandbox_module._native_sandbox_env({"EXPLICIT": "1"})
+
+        assert env == {"EXPLICIT": "1"}
+        assert "HOST_SECRET" not in env
+
+    def test_native_env_rejects_unsafe_names(self):
+        sandbox_module = importlib.import_module("coding_agent.tools.sandbox")
+        with pytest.raises(
+            sandbox_module.SandboxError, match="(?i)unsafe environment variable name"
+        ):
+            sandbox_module._native_sandbox_env({"BAD NAME": "x"})
 
 
 class TestPodmanSandbox:

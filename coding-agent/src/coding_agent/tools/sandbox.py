@@ -120,6 +120,7 @@ class MacosSeatbeltSandboxRunner:
             raise SandboxUnavailableError("sandbox-exec binary not found on PATH")
 
         cwd = _validate_cwd(request.cwd, self._config.workspace_root)
+        _validate_none_mode_limits(self._config.limits)
         profile = self._profile()
         command = ["sandbox-exec", "-p", profile, *request.args]
         return subprocess.run(
@@ -129,7 +130,8 @@ class MacosSeatbeltSandboxRunner:
             text=True,
             timeout=request.timeout_seconds,
             cwd=str(cwd),
-            env=request.env,
+            env=_native_sandbox_env(request.env),
+            preexec_fn=_resource_limit_preexec(self._config.limits),
         )
 
     def _profile(self) -> str:
@@ -179,7 +181,8 @@ class LinuxNativeSandboxRunner:
             capture_output=True,
             text=True,
             timeout=request.timeout_seconds,
-            env=request.env,
+            env=_native_sandbox_env(request.env),
+            preexec_fn=_resource_limit_preexec(self._config.limits),
         )
 
     def _bwrap_command(self, request: SandboxRequest, cwd: Path) -> list[str]:
@@ -358,6 +361,25 @@ class PodmanSandboxRunner:
 def _macos_tmpdir() -> str:
     """Per-user temp dir used as a writable scratch root in the Seatbelt profile."""
     return str(Path(os.environ.get("TMPDIR", "/tmp")).resolve())
+
+
+_NATIVE_ENV_KEYS = {"HOME", "LANG", "LC_ALL", "LC_CTYPE", "PATH", "TERM", "TZ"}
+
+
+def _native_sandbox_env(env: dict[str, str] | None) -> dict[str, str]:
+    """Build the environment for a native-sandboxed command (ADR-0060).
+
+    Native backends run the command in the host process tree, so forwarding
+    ``None`` would inherit every host variable — including secrets — into the
+    sandbox. Honor the ADR's explicit/controlled-env contract: when no env is
+    supplied, expose only a minimal allowlist pulled from the host; when env is
+    supplied, validate names and use it verbatim with nothing else inherited.
+    """
+    if env is not None:
+        for key in env:
+            _validate_docker_env_name(key)
+        return dict(env)
+    return {key: os.environ[key] for key in _NATIVE_ENV_KEYS if key in os.environ}
 
 
 def _validate_cwd(cwd: Path, workspace_root: Path) -> Path:
