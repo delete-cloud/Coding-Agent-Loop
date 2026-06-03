@@ -1337,6 +1337,11 @@ class TestReplInitialization:
                 self._runtime_closer = SimpleNamespace(
                     close_adapter=self.close_runtime_adapter
                 )
+                self._runtime_replacement_service = (
+                    session_manager_module.RuntimeReplacementService(
+                        close_runtime_adapter=self.close_runtime_adapter,
+                    )
+                )
 
             def _turn_lock_for(self, session_id: str):
                 del session_id

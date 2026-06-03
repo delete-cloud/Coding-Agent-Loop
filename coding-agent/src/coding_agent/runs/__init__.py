@@ -100,6 +100,12 @@ from .recovery import (
     RuntimeRunRecoveryService,
     RuntimeRunSessionLister,
 )
+from .replacement import (
+    RuntimeReplacementBuilder,
+    RuntimeReplacementPersister,
+    RuntimeReplacementService,
+    RuntimeReplacementSession,
+)
 from .runtime_events import (
     RuntimeWireEventRecorder,
     RuntimeWireEventSession,
@@ -204,6 +210,10 @@ __all__ = [
     "RuntimeQueryService",
     "RuntimeQuerySession",
     "RuntimeQueryStore",
+    "RuntimeReplacementBuilder",
+    "RuntimeReplacementPersister",
+    "RuntimeReplacementService",
+    "RuntimeReplacementSession",
     "RuntimeResumeContext",
     "RuntimeResumeService",
     "RuntimeResumeSession",

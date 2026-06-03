@@ -87,6 +87,7 @@ from coding_agent.runs import (
     RuntimeObservationService,
     RuntimePreparationRequestService,
     RuntimeQueryService,
+    RuntimeReplacementService,
     RuntimeResumeContext as SessionResumeContext,
     RuntimeResumeService,
     RuntimeRunPersistenceService,
@@ -794,6 +795,9 @@ class SessionManager:
             create_agent=self._create_agent,
         )
         self._runtime_preparation_request_service = RuntimePreparationRequestService()
+        self._runtime_replacement_service = RuntimeReplacementService(
+            close_runtime_adapter=self._runtime_closer.close_adapter,
+        )
         self._runtime_context_binding_service = RuntimeContextBindingService(
             publish_subagent_message=self.publish_subagent_message,
         )
@@ -2840,43 +2844,12 @@ class SessionManager:
             if session.turn_in_progress:
                 raise RuntimeError("turn already in progress")
 
-            old_provider = session.provider
-            old_model_name = session.model_name
-            old_tape_id = session.tape_id
-            old_runtime_binding = session.runtime_binding_snapshot()
-
-            pipeline, ctx, adapter = await self._build_session_runtime(
+            return await self._runtime_replacement_service.replace_runtime_config(
                 session,
                 model_name=model_name,
+                build_runtime=self._build_session_runtime,
+                persist_session=self._persist_session_async,
             )
-
-            session.provider = None
-            session.model_name = model_name
-            session.attach_runtime_binding(
-                pipeline=pipeline,
-                ctx=ctx,
-                adapter=adapter,
-            )
-            session.tape_id = ctx.tape.tape_id
-            try:
-                await self._persist_session_async(session)
-            except Exception:
-                session.provider = old_provider
-                session.model_name = old_model_name
-                session.restore_runtime_binding(old_runtime_binding)
-                session.tape_id = old_tape_id
-                await self._runtime_closer.close_adapter(adapter)
-                raise
-
-            try:
-                await self._runtime_closer.close_adapter(old_runtime_binding.adapter)
-            except Exception:
-                logger.warning(
-                    "Failed to close previous runtime adapter for session %s",
-                    session_id,
-                    exc_info=True,
-                )
-            return session
 
     async def capture_checkpoint(
         self,
