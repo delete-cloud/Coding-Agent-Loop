@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol, cast
 
 from agentkit.checkpoint import CheckpointService
 from agentkit.storage.protocols import TapeStore
@@ -27,6 +27,35 @@ from coding_agent.runs.checkpoint_runtime import (
     RuntimeWorkspaceRootResolver,
     SubagentMessagePublisherBinder,
 )
+
+
+RuntimeCheckpointRestoreAdmissionBody = Callable[[object], Awaitable[None]]
+
+
+class RuntimeCheckpointRestoreAdmission(Protocol):
+    async def run_exclusive(
+        self,
+        session_id: str,
+        body: RuntimeCheckpointRestoreAdmissionBody,
+    ) -> None: ...
+
+
+RuntimeCheckpointRestoreOperation = Callable[
+    [CheckpointRestoreSession, str],
+    Awaitable[None],
+]
+
+
+@dataclass(frozen=True)
+class RuntimeCheckpointRestoreOrchestrationService:
+    admission: RuntimeCheckpointRestoreAdmission
+    restore: RuntimeCheckpointRestoreOperation
+
+    async def restore_checkpoint(self, session_id: str, checkpoint_id: str) -> None:
+        async def restore_admitted_checkpoint(session: object) -> None:
+            await self.restore(cast(CheckpointRestoreSession, session), checkpoint_id)
+
+        await self.admission.run_exclusive(session_id, restore_admitted_checkpoint)
 
 
 @dataclass(frozen=True)
@@ -82,4 +111,10 @@ class RuntimeCheckpointRestoreService:
         )
 
 
-__all__ = ["RuntimeCheckpointRestoreService"]
+__all__ = [
+    "RuntimeCheckpointRestoreAdmission",
+    "RuntimeCheckpointRestoreAdmissionBody",
+    "RuntimeCheckpointRestoreOperation",
+    "RuntimeCheckpointRestoreOrchestrationService",
+    "RuntimeCheckpointRestoreService",
+]

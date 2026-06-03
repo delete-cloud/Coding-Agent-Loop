@@ -257,6 +257,9 @@ This ADR does not implement that path.
   - Completed: checkpoint restore service and runtime-builder composition are
     delegated to `RuntimeCheckpointRestoreService` instead of being assembled
     inline by `SessionManager`.
+  - Completed: public checkpoint restore admission orchestration is delegated
+    to `RuntimeCheckpointRestoreOrchestrationService` instead of living inline
+    in `SessionManager.restore_checkpoint()`.
   - Completed: runtime turn service construction and its dependency/policy
     bundle are delegated to `RuntimeTurnServiceFactory` instead of being
     assembled inline by `SessionManager`.
