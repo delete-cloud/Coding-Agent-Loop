@@ -251,8 +251,11 @@ This ADR does not implement that path.
     `event_format=display`, and remote prompt/resume clients request and render
     `DisplayEvent` envelopes while legacy wire stream responses remain
     available.
-  - Remaining: web UI renderers should switch to `DisplayEvent` streams
-    separately before this boundary is complete.
+  - Completed: the tracked server-rendered developer console run detail page
+    uses `DisplayEvent` replay summaries and links to
+    `GET /runs/{run_id}/display-events`.
+  - Remaining: the untracked standalone `webui/` workspace needs separate
+    integration once it is intentionally brought into this branch.
 - [~] Establish explicit Store contracts for durable runtime state.
   - Completed: `coding_agent.stores` defines runtime store contracts split into
     run lifecycle, run, runtime event, runtime interaction, and runtime

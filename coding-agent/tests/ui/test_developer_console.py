@@ -2651,12 +2651,17 @@ async def test_console_run_detail_renders_completed_run_without_raw_snapshot() -
     assert "2 messages" in response.text
     assert "role:user" in response.text
     assert "role:assistant" in response.text
-    assert "Runtime Events" in response.text
-    assert "wire.StreamDelta" in response.text
-    assert "wire.TurnEnd" in response.text
-    assert response.text.index("wire.StreamDelta") < response.text.index("wire.TurnEnd")
+    assert "Display Events" in response.text
+    assert "assistant_text_delta" in response.text
+    assert "final_result" in response.text
+    assert response.text.index("assistant_text_delta") < response.text.index(
+        "final_result"
+    )
     assert "last_event_id" in response.text
-    assert "/runs/run-detail/events" in response.text
+    assert "/runs/run-detail/display-events" in response.text
+    assert "/runs/run-detail/events" not in response.text
+    assert "wire.StreamDelta" not in response.text
+    assert "wire.TurnEnd" not in response.text
     for forbidden in FORBIDDEN_RENDERED_TEXT:
         assert forbidden not in response.text
     assert "tool-secret" not in response.text
