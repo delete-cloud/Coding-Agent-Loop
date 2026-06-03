@@ -155,6 +155,9 @@ This ADR does not implement that path.
     `approval_response`, and approval signaling) are owned by
     `SessionRuntimeHandle`; approval services call session compatibility
     delegates instead of mutating those runtime fields directly.
+  - Runtime binding detach/invalidations are owned by `SessionRuntimeHandle`;
+    `RuntimeCloser` asks the session to detach the adapter before closing it
+    instead of clearing runtime binding fields directly.
   - Store payload tests assert runtime handles are not persisted.
 - [x] Introduce a `RunCoordinator` boundary that selects an executor from
   `RunTarget`.

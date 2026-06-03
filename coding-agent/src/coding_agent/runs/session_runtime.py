@@ -88,6 +88,13 @@ class SessionRuntimeHandle:
         if signal_event:
             self.approval_event.set()
 
+    def detach_runtime_adapter(self) -> object | None:
+        adapter = self.runtime_adapter
+        self.runtime_pipeline = None
+        self.runtime_ctx = None
+        self.runtime_adapter = None
+        return adapter
+
     def broadcast_event_nowait(
         self,
         event: dict[str, Any],

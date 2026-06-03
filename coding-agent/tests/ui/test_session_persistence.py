@@ -1389,6 +1389,28 @@ def test_session_runtime_handle_owns_approval_projection_lifecycle() -> None:
     assert session.approval_event.is_set()
 
 
+def test_session_runtime_handle_detaches_runtime_binding() -> None:
+    session = Session(
+        id="runtime-binding-detach-session",
+        created_at=datetime.now(),
+        last_activity=datetime.now(),
+        approval_store=ApprovalStore(),
+    )
+    pipeline = object()
+    ctx = object()
+    adapter = object()
+    session.runtime_pipeline = pipeline
+    session.runtime_ctx = ctx
+    session.runtime_adapter = adapter
+
+    detached = session.runtime_handle.detach_runtime_adapter()
+
+    assert detached is adapter
+    assert session.runtime_pipeline is None
+    assert session.runtime_ctx is None
+    assert session.runtime_adapter is None
+
+
 def test_session_store_data_excludes_runtime_handle_state() -> None:
     session = Session(
         id="runtime-handle-session",
