@@ -40,6 +40,35 @@ class FakeApprovalRequestSession:
     approval_response: dict[str, object] | None = None
     last_activity: datetime = field(default_factory=lambda: datetime.now(UTC))
 
+    def begin_approval_request(self, request: ApprovalRequest) -> None:
+        self.approval_coordinator.add_request(request)
+        self.pending_approval = self.approval_coordinator.projection()
+        self.approval_event.clear()
+        self.approval_response = None
+
+    def update_pending_approval_projection(
+        self,
+        *,
+        signal_event: bool = False,
+    ) -> None:
+        self.pending_approval = self.approval_coordinator.projection()
+        if signal_event:
+            self.approval_event.set()
+
+    def expose_approval_response(
+        self,
+        response_projection: dict[str, object],
+    ) -> None:
+        self.approval_response = response_projection
+        self.pending_approval = self.approval_coordinator.projection()
+        self.approval_event.set()
+
+    def cleanup_approval_wait_projection(self, *, signal_event: bool) -> None:
+        self.pending_approval = self.approval_coordinator.projection()
+        self.approval_response = None
+        if signal_event:
+            self.approval_event.set()
+
 
 def _request(
     *,

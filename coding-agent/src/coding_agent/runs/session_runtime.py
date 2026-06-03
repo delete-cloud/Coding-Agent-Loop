@@ -12,6 +12,7 @@ from agentkit.runtime import (
 )
 
 from coding_agent.approval import ApprovalCoordinator
+from coding_agent.wire.protocol import ApprovalRequest
 
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,37 @@ class SessionRuntimeHandle:
             return False
         self.event_queues.remove(queue)
         return True
+
+    def clear_approval_runtime_state(self) -> None:
+        self.pending_approval = None
+        self.approval_response = None
+        self.approval_event.clear()
+
+    def begin_approval_request(self, request: ApprovalRequest) -> None:
+        self.approval_coordinator.add_request(request)
+        self.pending_approval = self.approval_coordinator.projection()
+        self.approval_event.clear()
+        self.approval_response = None
+
+    def update_pending_approval_projection(
+        self,
+        *,
+        signal_event: bool = False,
+    ) -> None:
+        self.pending_approval = self.approval_coordinator.projection()
+        if signal_event:
+            self.approval_event.set()
+
+    def expose_approval_response(self, response_projection: dict[str, Any]) -> None:
+        self.approval_response = response_projection
+        self.pending_approval = self.approval_coordinator.projection()
+        self.approval_event.set()
+
+    def cleanup_approval_wait_projection(self, *, signal_event: bool) -> None:
+        self.pending_approval = self.approval_coordinator.projection()
+        self.approval_response = None
+        if signal_event:
+            self.approval_event.set()
 
     def broadcast_event_nowait(
         self,

@@ -36,7 +36,7 @@ from coding_agent.server.stores.workspace_store import (
     PGWorkspaceMetadataStore,
     WorkspaceRecord,
 )
-from coding_agent.wire.protocol import ApprovalRequest
+from coding_agent.wire.protocol import ApprovalRequest, ApprovalResponse, ToolCallDelta
 
 
 def test_register_session_uses_public_api() -> None:
@@ -1331,6 +1331,62 @@ def test_session_runtime_handle_owns_event_queue_lifecycle() -> None:
     assert not session.runtime_handle.has_event_queue(queue)
     assert session.event_queues == []
     assert not session.runtime_handle.remove_event_queue(queue)
+
+
+def test_session_runtime_handle_owns_approval_projection_lifecycle() -> None:
+    session = Session(
+        id="runtime-approval-lifecycle-session",
+        created_at=datetime.now(),
+        last_activity=datetime.now(),
+        approval_store=ApprovalStore(),
+    )
+    request = ApprovalRequest(
+        session_id=session.id,
+        request_id="req-123",
+        tool_call=ToolCallDelta(
+            session_id=session.id,
+            agent_id="agent-1",
+            tool_name="bash",
+            arguments={"command": "pwd"},
+            call_id="call-123",
+        ),
+    )
+
+    session.runtime_handle.begin_approval_request(request)
+
+    assert session.pending_approval == {
+        "request_id": "req-123",
+        "tool_name": "bash",
+        "arguments": {"command": "pwd"},
+    }
+    assert session.approval_response is None
+    assert not session.approval_event.is_set()
+
+    response = ApprovalResponse(
+        session_id=session.id,
+        request_id="req-123",
+        approved=True,
+        feedback="ok",
+    )
+    assert session.approval_coordinator.respond(response)
+
+    session.runtime_handle.expose_approval_response(
+        {"request_id": "req-123", "decision": "approve", "feedback": "ok"}
+    )
+
+    assert session.pending_approval is None
+    assert session.approval_response == {
+        "request_id": "req-123",
+        "decision": "approve",
+        "feedback": "ok",
+    }
+    assert session.approval_event.is_set()
+
+    session.runtime_handle.cleanup_approval_wait_projection(signal_event=False)
+
+    assert session.pending_approval is None
+    assert session.approval_response is None
+    assert session.approval_event.is_set()
 
 
 def test_session_store_data_excludes_runtime_handle_state() -> None:

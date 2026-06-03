@@ -151,6 +151,10 @@ This ADR does not implement that path.
   - Runtime event queue registration, membership checks, and removal are owned
     by `SessionRuntimeHandle`; `SessionManager` delegates after session lookup
     and ownership checks.
+  - Approval runtime projection updates (`pending_approval`,
+    `approval_response`, and approval signaling) are owned by
+    `SessionRuntimeHandle`; approval services call session compatibility
+    delegates instead of mutating those runtime fields directly.
   - Store payload tests assert runtime handles are not persisted.
 - [x] Introduce a `RunCoordinator` boundary that selects an executor from
   `RunTarget`.

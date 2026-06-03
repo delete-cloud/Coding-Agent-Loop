@@ -41,6 +41,23 @@ class FakeDecisionSession:
     approval_response: dict[str, object] | None = None
     last_activity: datetime = field(default_factory=lambda: datetime.now(UTC))
 
+    def update_pending_approval_projection(
+        self,
+        *,
+        signal_event: bool = False,
+    ) -> None:
+        self.pending_approval = self.approval_coordinator.projection()
+        if signal_event:
+            self.approval_event.set()
+
+    def expose_approval_response(
+        self,
+        response_projection: dict[str, object],
+    ) -> None:
+        self.approval_response = response_projection
+        self.pending_approval = self.approval_coordinator.projection()
+        self.approval_event.set()
+
 
 async def _persist_session(session: FakeDecisionSession) -> None:
     del session
