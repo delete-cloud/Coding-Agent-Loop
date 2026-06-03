@@ -209,10 +209,12 @@ This ADR does not implement that path.
   - Completed: outer run-turn exception routing is delegated to
     `RuntimeTurnController.run_execution()` instead of being implemented as a
     `SessionManager.run_agent()` exception ladder.
-  - Remaining: `SessionManager` still owns the run-turn composition root and
-    runtime execution callback assembly. These should move behind narrower
-    RunService/EventStore/Executor lifecycle boundaries before this item is
-    considered complete.
+  - Completed: run-turn composition root and runtime execution callback
+    assembly are delegated to `RuntimeTurnService` instead of living inside
+    `SessionManager.run_agent()`.
+  - Remaining: normal runtime construction still has compatibility callbacks in
+    `SessionManager`; those should move behind narrower executor lifecycle
+    boundaries before this item is considered complete.
 - [x] Demote `coding_agent run` to an inline testkit/devkit compatibility path.
   - `run` records `origin.mode = inline_testkit`.
   - CLI and README describe `run` as dev/testkit one-shot compatibility.
@@ -263,8 +265,8 @@ This ADR does not implement that path.
 
 ## Remaining Implementation Gaps
 
-- Move the run-turn composition root and runtime execution callback assembly
-  out of `SessionManager` into narrower runtime/executor lifecycle boundaries.
+- Move normal runtime construction compatibility callbacks out of
+  `SessionManager` into narrower executor lifecycle boundaries.
 - Make sandbox policy the default executor environment wrapper rather than a
   mixed local/cloud environment concern.
 - Add daemon-backed client surfaces for the local product path. REPL/TUI/CLI
