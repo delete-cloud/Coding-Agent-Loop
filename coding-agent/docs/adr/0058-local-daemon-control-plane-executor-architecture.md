@@ -346,6 +346,10 @@ This ADR does not implement that path.
     active-turn checks, is delegated to `RuntimeTurnAdmissionService` instead
     of living inline in `SessionManager.prepare_session_turn()` and
     `SessionManager.run_agent()`.
+  - Completed: local runtime maintenance admission for runtime config
+    replacement, checkpoint capture, and checkpoint restore is delegated to
+    `RuntimeMaintenanceAdmissionService` instead of living inline in
+    `SessionManager`.
   - Completed: runtime control service construction for persistence, recovery,
     query, resume, attached-executor, cancel, and task-stopper services is
     delegated to `RuntimeControlServices` instead of `SessionManager` private

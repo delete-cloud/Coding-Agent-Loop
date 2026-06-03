@@ -55,6 +55,9 @@ from .ensure import (
     RuntimeEnsureSession,
 )
 from .lifecycle import (
+    RuntimeMaintenanceAdmissionBody,
+    RuntimeMaintenanceAdmissionService,
+    RuntimeMaintenanceAdmissionSession,
     RuntimeMessageSnapshotSaver,
     RuntimeObservationCompleter,
     RuntimeObservationStarter,
@@ -241,6 +244,9 @@ __all__ = [
     "SessionRuntimeHandle",
     "RuntimeExecution",
     "RuntimeMessageSnapshotSession",
+    "RuntimeMaintenanceAdmissionBody",
+    "RuntimeMaintenanceAdmissionService",
+    "RuntimeMaintenanceAdmissionSession",
     "RuntimeMessageSnapshotSaver",
     "RuntimeMetadataSession",
     "RuntimeObservationService",
