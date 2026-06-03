@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from inspect import isawaitable
@@ -102,6 +102,10 @@ class RuntimeTurnObservationCompleter(Protocol):
 
 class RuntimeTurnErrorAction(Protocol):
     async def __call__(self) -> None: ...
+
+
+class RuntimeTurnExecution(Protocol):
+    def __call__(self) -> Awaitable[None]: ...
 
 
 class RuntimeSessionCloser(Protocol):
@@ -597,6 +601,27 @@ class RuntimeTurnController:
             )
             return False
         return True
+
+    async def run_execution(
+        self,
+        session: RuntimeTurnErrorSession,
+        execute: RuntimeTurnExecution,
+        *,
+        ensure_started_error_types: tuple[type[BaseException], ...] = (),
+    ) -> None:
+        try:
+            await execute()
+        except BaseException as exc:
+            ensure_started = bool(ensure_started_error_types) and isinstance(
+                exc,
+                ensure_started_error_types,
+            )
+            if await self.handle_outer_exception(
+                session,
+                exc,
+                ensure_started=ensure_started,
+            ):
+                raise
 
     def _is_fatal(self, exc: BaseException) -> bool:
         return bool(self.fatal_error_types) and isinstance(exc, self.fatal_error_types)

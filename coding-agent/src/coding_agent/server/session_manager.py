@@ -3439,7 +3439,7 @@ class SessionManager:
                 del binding
                 await turn_controller.on_turn_error(session, exc)
 
-            try:
+            async def _execute_runtime() -> None:
                 consumer = self._make_session_consumer(session)
                 run_request = await self._submit_runtime_run_request(
                     session,
@@ -3489,22 +3489,13 @@ class SessionManager:
                         on_turn_error=_on_local_daemon_turn_error,
                     )
                 )
-            except FatalToolExecutionError as exc:
-                if await turn_controller.handle_outer_exception(session, exc):
-                    raise
-            except asyncio.CancelledError as exc:
-                if await turn_controller.handle_outer_exception(session, exc):
-                    raise
-            except RunCoordinatorError as exc:
-                if await turn_controller.handle_outer_exception(
+
+            try:
+                await turn_controller.run_execution(
                     session,
-                    exc,
-                    ensure_started=True,
-                ):
-                    raise
-            except Exception as exc:
-                if await turn_controller.handle_outer_exception(session, exc):
-                    raise
+                    _execute_runtime,
+                    ensure_started_error_types=(RunCoordinatorError,),
+                )
             finally:
                 await turn_session_state.finalize(
                     session,

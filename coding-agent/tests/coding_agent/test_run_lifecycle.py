@@ -685,6 +685,156 @@ async def test_runtime_turn_controller_does_not_double_handle_inner_error() -> N
 
 
 @pytest.mark.asyncio
+async def test_runtime_turn_controller_run_execution_routes_generic_error() -> None:
+    store = RecordingRuntimeStore()
+    lifecycle = RuntimeRunLifecycle(
+        store=store,
+        metadata_for_session=lambda session, *, resume_context=None: {
+            "session_id": session.id,
+        },
+    )
+    turn_run = RuntimeTurnRunTracker(
+        lifecycle=lifecycle,
+        run_id="run-1",
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    session = FakeTurnSession(id="session-1", tape_id="tape-1")
+    closed: list[str] = []
+    notifications: list[str] = []
+
+    async def close_runtime(session: FakeTurnSession) -> None:
+        closed.append(session.id)
+
+    async def notify_generic_error(
+        session: FakeTurnSession,
+        exc: Exception,
+    ) -> None:
+        del session
+        notifications.append(str(exc))
+
+    await turn_run.ensure_started(session)
+    controller = RuntimeTurnController(
+        error_handler=RuntimeTurnErrorHandler(
+            turn_run=turn_run,
+            close_runtime=close_runtime,
+            notify_generic_error=notify_generic_error,
+        ),
+    )
+
+    async def execute() -> None:
+        raise RuntimeError("boom")
+
+    await controller.run_execution(session, execute)
+
+    assert session.turn_status == "failed"
+    assert closed == ["session-1"]
+    assert notifications == ["boom"]
+    assert store.updated[-1]["status"] == "failed"
+    assert store.updated[-1]["error"] == "boom"
+
+
+@pytest.mark.asyncio
+async def test_runtime_turn_controller_run_execution_reraises_fatal_error() -> None:
+    store = RecordingRuntimeStore()
+    lifecycle = RuntimeRunLifecycle(
+        store=store,
+        metadata_for_session=lambda session, *, resume_context=None: {
+            "session_id": session.id,
+        },
+    )
+    turn_run = RuntimeTurnRunTracker(
+        lifecycle=lifecycle,
+        run_id="run-1",
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    session = FakeTurnSession(id="session-1", tape_id="tape-1")
+    closed: list[str] = []
+
+    async def close_runtime(session: FakeTurnSession) -> None:
+        closed.append(session.id)
+
+    async def notify_generic_error(
+        session: FakeTurnSession,
+        exc: Exception,
+    ) -> None:
+        raise AssertionError(f"fatal errors should not notify generic error: {exc!r}")
+
+    await turn_run.ensure_started(session)
+    controller = RuntimeTurnController(
+        error_handler=RuntimeTurnErrorHandler(
+            turn_run=turn_run,
+            close_runtime=close_runtime,
+            notify_generic_error=notify_generic_error,
+        ),
+        fatal_error_types=(ValueError,),
+    )
+
+    async def execute() -> None:
+        raise ValueError("fatal")
+
+    with pytest.raises(ValueError, match="fatal"):
+        await controller.run_execution(session, execute)
+
+    assert session.turn_status == "failed"
+    assert closed == ["session-1"]
+    assert store.updated[-1]["status"] == "failed"
+    assert store.updated[-1]["error"] == "fatal"
+
+
+@pytest.mark.asyncio
+async def test_runtime_turn_controller_run_execution_can_start_run_before_failure() -> (
+    None
+):
+    store = RecordingRuntimeStore()
+    lifecycle = RuntimeRunLifecycle(
+        store=store,
+        metadata_for_session=lambda session, *, resume_context=None: {
+            "session_id": session.id,
+        },
+    )
+    turn_run = RuntimeTurnRunTracker(
+        lifecycle=lifecycle,
+        run_id="run-1",
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    session = FakeTurnSession(id="session-1", tape_id="tape-1")
+
+    class SubmitFailed(RuntimeError):
+        pass
+
+    async def close_runtime(session: FakeTurnSession) -> None:
+        del session
+
+    async def notify_generic_error(
+        session: FakeTurnSession,
+        exc: Exception,
+    ) -> None:
+        del session, exc
+
+    controller = RuntimeTurnController(
+        error_handler=RuntimeTurnErrorHandler(
+            turn_run=turn_run,
+            close_runtime=close_runtime,
+            notify_generic_error=notify_generic_error,
+        ),
+    )
+
+    async def execute() -> None:
+        raise SubmitFailed("submit failed")
+
+    await controller.run_execution(
+        session,
+        execute,
+        ensure_started_error_types=(SubmitFailed,),
+    )
+
+    assert turn_run.created is True
+    assert store.created[0].status == "queued"
+    assert [update["status"] for update in store.updated] == ["running", "failed"]
+    assert store.updated[-1]["error"] == "submit failed"
+
+
+@pytest.mark.asyncio
 async def test_runtime_turn_starter_wires_runtime_context_and_observation() -> None:
     store = RecordingRuntimeStore()
     lifecycle = RuntimeRunLifecycle(
