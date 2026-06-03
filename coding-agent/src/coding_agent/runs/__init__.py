@@ -64,6 +64,12 @@ from .persistence import (
     RuntimeMessageSnapshotSession,
     RuntimeRunPersistenceService,
 )
+from .query import (
+    CheckpointLister,
+    RuntimeQueryService,
+    RuntimeQuerySession,
+    RuntimeQueryStore,
+)
 from .recovery import (
     RuntimeRunRecoveryEligibility,
     RuntimeRunRecoveryService,
@@ -113,6 +119,7 @@ __all__ = [
     "CheckpointRestoreSession",
     "CheckpointRestoredRuntime",
     "CheckpointSessionConfig",
+    "CheckpointLister",
     "DefaultRunCoordinator",
     "ExecutionBindingRunTargetError",
     "EventBroadcastResult",
@@ -143,6 +150,9 @@ __all__ = [
     "RuntimeObservationSession",
     "RuntimeObservationCompleter",
     "RuntimeObservationStarter",
+    "RuntimeQueryService",
+    "RuntimeQuerySession",
+    "RuntimeQueryStore",
     "RuntimeCloser",
     "RuntimeHandleSession",
     "RuntimeRootRunIdentityBinder",

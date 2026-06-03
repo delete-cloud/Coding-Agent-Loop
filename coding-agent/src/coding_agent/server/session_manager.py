@@ -70,7 +70,7 @@ from coding_agent.stores import RuntimeStore
 from coding_agent.executors import (
     LocalDaemonExecutor,
 )
-from coding_agent.events import DisplayEvent, RuntimeEventReplayService
+from coding_agent.events import DisplayEvent
 from coding_agent.runs import (
     CHECKPOINT_SESSION_CONFIG_KEY,
     CloudWorkspaceRef,
@@ -87,6 +87,7 @@ from coding_agent.runs import (
     RuntimeCloser,
     RuntimeRunMetadataService,
     RuntimeObservationService,
+    RuntimeQueryService,
     RuntimeRunPersistenceService,
     RuntimeRunRecoveryService,
     RuntimeWireEventRecorder,
@@ -1140,97 +1141,29 @@ class SessionManager:
         return self._runtime_store
 
     async def load_runtime_run(self, run_id: str) -> AgentRunRecord:
-        store = self._require_runtime_store()
-        record = await store.load_agent_run(run_id)
-        if record is None:
-            raise KeyError(f"runtime run not found: {run_id}")
-        return record
+        return await self._runtime_queries().load_runtime_run(run_id)
 
     async def list_runtime_runs(self, session_id: str) -> list[AgentRunRecord]:
-        store = self._require_runtime_store()
-        return await store.list_agent_runs(session_id)
+        return await self._runtime_queries().list_runtime_runs(session_id)
 
     async def session_resume_metadata(self, session_id: str) -> dict[str, Any]:
         session = await self.get_session_async(session_id)
-        metadata: dict[str, Any] = {
-            "resumable": False,
-            "last_run_id": None,
-            "last_run_status": None,
-            "last_interrupted_run_id": None,
-            "resume_from_event_id": None,
-            "checkpoint_count": 0,
-            "latest_checkpoint_id": None,
-            "latest_checkpoint_label": None,
-        }
-        try:
-            latest_run = await self._latest_runtime_run(session_id)
-        except RuntimeError:
-            latest_run = None
-        if latest_run is not None:
-            metadata["last_run_id"] = latest_run.run_id
-            metadata["last_run_status"] = latest_run.status
-            metadata["resumable"] = (
-                latest_run.status not in _ACTIVE_RESUME_BLOCKING_RUN_STATUSES
-            )
-            metadata["resume_from_event_id"] = await self._latest_runtime_event_id(
-                latest_run
-            )
-            interrupted_runs = [
-                run
-                for run in await self.list_runtime_runs(session_id)
-                if run.status == "interrupted"
-            ]
-            if interrupted_runs:
-                metadata["last_interrupted_run_id"] = max(
-                    interrupted_runs,
-                    key=lambda run: (run.started_at, run.run_id),
-                ).run_id
-        if session.tape_id is not None:
-            checkpoints = await self.list_checkpoints(session_id)
-            metadata["checkpoint_count"] = len(checkpoints)
-            if checkpoints:
-                latest_checkpoint = max(
-                    checkpoints,
-                    key=lambda checkpoint: (
-                        checkpoint.created_at,
-                        checkpoint.checkpoint_id,
-                    ),
-                )
-                metadata["latest_checkpoint_id"] = latest_checkpoint.checkpoint_id
-                metadata["latest_checkpoint_label"] = latest_checkpoint.label
-        return metadata
-
-    async def _latest_runtime_run(self, session_id: str) -> AgentRunRecord | None:
-        runs = await self.list_runtime_runs(session_id)
-        if not runs:
-            return None
-        return max(runs, key=lambda run: (run.started_at, run.run_id))
-
-    async def _latest_runtime_event_id(self, run: AgentRunRecord) -> str | None:
-        events = await self.replay_runtime_events(run.run_id, limit=1000)
-        if not events:
-            return None
-        sequenced_events = [event for event in events if event.sequence is not None]
-        if sequenced_events:
-            return max(sequenced_events, key=lambda event: event.sequence or 0).event_id
-        return max(events, key=lambda event: event.created_at).event_id
+        return await self._runtime_queries().session_resume_metadata(
+            session,
+            list_checkpoints=self.list_checkpoints,
+        )
 
     async def list_runtime_interactions(
         self,
         run_id: str,
     ) -> list[AgentInteractionRecord]:
-        store = self._require_runtime_store()
-        return await store.list_agent_interactions(run_id)
+        return await self._runtime_queries().list_runtime_interactions(run_id)
 
     async def load_runtime_interaction(
         self,
         interaction_id: str,
     ) -> AgentInteractionRecord:
-        store = self._require_runtime_store()
-        record = await store.load_agent_interaction(interaction_id)
-        if record is None:
-            raise KeyError(f"runtime interaction not found: {interaction_id}")
-        return record
+        return await self._runtime_queries().load_runtime_interaction(interaction_id)
 
     async def load_tape_debug_info(self, tape_id: str) -> TapeInfo | None:
         if not isinstance(self._tape_store, TapeDebugStore):
@@ -1262,12 +1195,7 @@ class SessionManager:
         self,
         run_id: str,
     ) -> RunMessageSnapshotRecord:
-        store = self._require_runtime_store()
-        snapshot_id = f"{run_id}:latest"
-        record = await store.load_message_snapshot(snapshot_id)
-        if record is None:
-            raise KeyError(f"runtime message snapshot not found: {snapshot_id}")
-        return record
+        return await self._runtime_queries().load_runtime_message_snapshot(run_id)
 
     async def replay_runtime_events(
         self,
@@ -1276,9 +1204,7 @@ class SessionManager:
         last_event_id: str | None = None,
         limit: int = 1000,
     ) -> list[RuntimeEventRecord]:
-        return await RuntimeEventReplayService(
-            self._require_runtime_store()
-        ).replay_runtime_events(
+        return await self._runtime_queries().replay_runtime_events(
             run_id,
             last_event_id=last_event_id,
             limit=limit,
@@ -1291,9 +1217,7 @@ class SessionManager:
         last_event_id: str | None = None,
         limit: int = 1000,
     ) -> list[DisplayEvent]:
-        return await RuntimeEventReplayService(
-            self._require_runtime_store()
-        ).replay_display_events(
+        return await self._runtime_queries().replay_display_events(
             run_id,
             last_event_id=last_event_id,
             limit=limit,
@@ -1386,7 +1310,7 @@ class SessionManager:
             "cancelling",
         }:
             raise RuntimeError("turn already in progress")
-        previous_run = await self._latest_runtime_run(session_id)
+        previous_run = await self._runtime_queries().latest_runtime_run(session_id)
         if previous_run is None:
             raise RuntimeError("session has no previous run to resume")
         if previous_run.status in _ACTIVE_RESUME_BLOCKING_RUN_STATUSES:
@@ -1402,7 +1326,9 @@ class SessionManager:
         resume_context = SessionResumeContext(
             previous_run_id=previous_run.run_id,
             resume_from_run_id=previous_run.run_id,
-            resume_from_event_id=await self._latest_runtime_event_id(previous_run),
+            resume_from_event_id=await self._runtime_queries().latest_runtime_event_id(
+                previous_run
+            ),
             resume_reason=resume_reason,
             checkpoint_count=checkpoint_context["checkpoint_count"],
             latest_checkpoint_id=checkpoint_context["latest_checkpoint_id"],
@@ -2149,6 +2075,14 @@ class SessionManager:
             list_session_ids=self.list_sessions_async,
             session_is_recoverable=session_is_recoverable,
             owner_id=self._owner_id,
+        )
+
+    def _runtime_queries(self) -> RuntimeQueryService:
+        return RuntimeQueryService(
+            self._runtime_store,
+            active_resume_blocking_statuses=frozenset(
+                _ACTIVE_RESUME_BLOCKING_RUN_STATUSES
+            ),
         )
 
     async def recover_stale_runtime_runs(
