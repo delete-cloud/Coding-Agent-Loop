@@ -1457,6 +1457,58 @@ async def test_resume_external_executor_session_requests_linked_run() -> None:
 
 
 @pytest.mark.asyncio
+async def test_finalize_attached_executor_run_saves_tape_before_final_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_store = FakeRuntimeStore()
+    manager = SessionManager(runtime_store=runtime_store)
+    session_id = await manager.create_session(
+        execution_binding=ExternalWorkerBinding(executor_kind="local_cli")
+    )
+    requested = await manager.request_attached_executor_run(
+        session_id,
+        "run on attached executor",
+    )
+    claim = await manager.claim_attached_executor_run(
+        executor_id="executor-1",
+        executor_kind="local_cli",
+        session_id=session_id,
+    )
+    assert claim is not None
+
+    class FailingTapeStore:
+        async def save(
+            self,
+            tape_id: str,
+            entries: list[dict[str, object]],
+        ) -> None:
+            del tape_id, entries
+            raise RuntimeError("tape save failed")
+
+    monkeypatch.setattr(manager, "_tape_store", FailingTapeStore(), raising=False)
+
+    with pytest.raises(RuntimeError, match="tape save failed"):
+        await manager.finalize_attached_executor_run(
+            run_id=requested.run_id,
+            executor_id="executor-1",
+            claim_token=claim.claim_token,
+            status="completed",
+            result={"ok": True},
+            error=None,
+            tape_id="final-tape",
+            tape_entries=[{"kind": "message", "payload": {"content": "done"}}],
+        )
+
+    assert runtime_store.updated == []
+    loaded = await runtime_store.load_agent_run(requested.run_id)
+    assert loaded is not None
+    assert loaded.status == "claimed"
+    session = await manager.get_session_async(session_id)
+    assert session.turn_in_progress is True
+    assert session.turn_status == "running"
+
+
+@pytest.mark.asyncio
 async def test_session_resume_metadata_reports_run_and_checkpoint_context() -> None:
     runtime_store = FakeRuntimeStore()
     manager = SessionManager(runtime_store=runtime_store)
@@ -3284,7 +3336,9 @@ async def test_ensure_session_runtime_builds_from_preparation_target(
 
 
 @pytest.mark.asyncio
-async def test_ensure_session_runtime_rejects_local_daemon_non_local_workspace() -> None:
+async def test_ensure_session_runtime_rejects_local_daemon_non_local_workspace() -> (
+    None
+):
     def fake_create_agent(**kwargs):
         del kwargs
         raise AssertionError("agent builder should not run for invalid target")
@@ -4284,7 +4338,9 @@ async def test_run_agent_routes_unsupported_runtime_through_run_coordinator() ->
     assert len(coordinator.executions) == 1
     assert isinstance(coordinator.executions[0], LocalDaemonRuntimeExecution)
     assert coordinator.executions[0].request == coordinator.requests[0]
-    assert isinstance(coordinator.executions[0].request.target.executor, ManagedPoolExecutorRef)
+    assert isinstance(
+        coordinator.executions[0].request.target.executor, ManagedPoolExecutorRef
+    )
     assert runtime_store.created[0].metadata["workspace_surface"] == "cloud_workspace"
     assert runtime_store.updated[0]["status"] == "running"
     assert runtime_store.updated[-1]["status"] == "failed"
@@ -4319,7 +4375,9 @@ async def test_configure_run_coordinator_updates_runtime_turn_service() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_agent_does_not_route_cloud_runtime_through_local_daemon_executor() -> None:
+async def test_run_agent_does_not_route_cloud_runtime_through_local_daemon_executor() -> (
+    None
+):
     local_executor = RecordingLocalDaemonExecutor()
     runtime_store = FakeRuntimeStore()
     fake_pipeline = types.SimpleNamespace(

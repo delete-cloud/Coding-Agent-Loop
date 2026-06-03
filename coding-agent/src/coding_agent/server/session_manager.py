@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import importlib
 import logging
 import os
-import secrets
 import threading
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from inspect import isawaitable
 from pathlib import Path
 from typing import Any, ClassVar, Literal, Protocol, TypeVar, cast
@@ -81,6 +79,7 @@ from coding_agent.runs import (
     LocalPathWorkspaceRef,
     RunCoordinator,
     RunRequest,
+    RuntimeAttachedExecutorService,
     RuntimeBindingSnapshot,
     RuntimeCloser,
     RuntimeRunMetadataService,
@@ -93,12 +92,10 @@ from coding_agent.runs import (
     RuntimeWireEventRecorder,
     RunTarget,
     SessionRuntimeHandle,
-    runtime_event_correlation_from_run,
     runtime_execution_placement,
     run_target_from_dict,
     run_target_from_execution_binding,
     serialize_checkpoint_session_config,
-    with_runtime_event_correlation,
 )
 from coding_agent.runs.checkpoint_runtime import CheckpointRuntimeBuilder
 from coding_agent.runs.runtime_preparation import LocalDaemonRuntimePreparationService
@@ -144,29 +141,6 @@ _DEFAULT_EXECUTION_BINDING = object()
 T = TypeVar("T")
 
 
-def _hash_claim_token(claim_token: str) -> str:
-    return hashlib.sha256(claim_token.encode("utf-8")).hexdigest()
-
-
-def _metadata_required_str(metadata: Mapping[str, object], key: str) -> str:
-    value = metadata.get(key)
-    if not isinstance(value, str) or not value:
-        raise RuntimeError(f"runtime run metadata is missing {key}")
-    return value
-
-
-def _optional_metadata_datetime(
-    metadata: Mapping[str, object],
-    key: str,
-) -> datetime | None:
-    value = metadata.get(key)
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value:
-        raise RuntimeError(f"runtime run metadata {key} must be a non-empty string")
-    return datetime.fromisoformat(value)
-
-
 def _subagent_message_id(session_id: str) -> str:
     return f"subagent_message:{session_id}:{uuid.uuid4().hex}"
 
@@ -180,7 +154,6 @@ _ACTIVE_RESUME_BLOCKING_RUN_STATUSES = {
     "running",
     "cancelling",
 }
-_ATTACHED_EXECUTOR_BINDING_KINDS = {"external_worker", "local_attached"}
 
 
 @dataclass(frozen=True)
@@ -1006,7 +979,6 @@ class SessionManager:
         run_id: str | None = None,
         resume_context: SessionResumeContext | None = None,
     ) -> AgentRunRecord:
-        store = self._require_runtime_store()
         async with self._lock:
             await self._assert_owner(session_id)
             session = await self.get_session_async(session_id)
@@ -1018,32 +990,13 @@ class SessionManager:
             }:
                 raise RuntimeError("turn already in progress")
             resolved_run_id = run_id or uuid.uuid4().hex
-            now = datetime.now(UTC)
-            metadata = self._runtime_metadata_service.metadata_for_session(
+            record = await self._runtime_attached_executor_service().request_run(
                 session,
+                prompt=prompt,
+                run_id=resolved_run_id,
                 resume_context=resume_context,
             )
-            metadata["prompt"] = prompt
-            metadata["requested_at"] = now.isoformat()
-            metadata["run_request_status"] = "requested"
-            record = await store.create_agent_run(
-                AgentRunRecord(
-                    run_id=resolved_run_id,
-                    session_id=session.id,
-                    tape_id=session.tape_id,
-                    parent_run_id=(
-                        None
-                        if resume_context is None
-                        else resume_context.previous_run_id
-                    ),
-                    agent_id=None,
-                    status="requested",
-                    started_at=now,
-                    metadata=metadata,
-                    result={},
-                    error=None,
-                )
-            )
+            now = record.started_at
             session.current_turn_id = resolved_run_id
             session.turn_in_progress = True
             session.turn_status = "running"
@@ -1161,38 +1114,23 @@ class SessionManager:
         capabilities: JSONObject | None = None,
         workspace_sync: JSONObject | None = None,
     ) -> ExternalWorkerClaim | None:
-        store = self._require_runtime_store()
-        claim_token = secrets.token_urlsafe(32)
-        now = datetime.now(UTC)
-        lease_expires_at = now + timedelta(seconds=lease_seconds)
-        claim_metadata: JSONObject = {
-            "worker_id": executor_id,
-            "executor_id": executor_id,
-            "claim_token_hash": _hash_claim_token(claim_token),
-            "claimed_at": now.isoformat(),
-            "lease_expires_at": lease_expires_at.isoformat(),
-        }
-        if worker_instance_id is not None:
-            claim_metadata["worker_instance_id"] = worker_instance_id
-        if process_id is not None:
-            claim_metadata["process_id"] = process_id
-        if capabilities is not None:
-            claim_metadata["capabilities"] = capabilities
-        if workspace_sync is not None:
-            claim_metadata["workspace_sync"] = workspace_sync
-        run = await store.claim_attached_executor_run(
+        claim = await self._runtime_attached_executor_service().claim_run(
+            executor_id=executor_id,
             session_id=session_id,
             executor_kind=executor_kind,
-            claim_metadata=claim_metadata,
+            lease_seconds=lease_seconds,
+            worker_instance_id=worker_instance_id,
+            process_id=process_id,
+            capabilities=capabilities,
+            workspace_sync=workspace_sync,
         )
-        if run is None:
+        if claim is None:
             return None
-        session = await self.get_session_async(run.session_id)
-        prompt = _metadata_required_str(run.metadata, "prompt")
+        session = await self.get_session_async(claim.run.session_id)
         return ExternalWorkerClaim(
-            run=run,
-            claim_token=claim_token,
-            prompt=prompt,
+            run=claim.run,
+            claim_token=claim.claim_token,
+            prompt=claim.prompt,
             session=session,
         )
 
@@ -1232,32 +1170,15 @@ class SessionManager:
         capabilities: JSONObject | None = None,
         workspace_sync: JSONObject | None = None,
     ) -> AgentRunRecord:
-        run = await self._load_and_authorize_attached_executor_run(
+        return await self._runtime_attached_executor_service().heartbeat_run(
             run_id=run_id,
             executor_id=executor_id,
             claim_token=claim_token,
-        )
-        metadata = dict(run.metadata)
-        metadata["lease_expires_at"] = (
-            datetime.now(UTC) + timedelta(seconds=lease_seconds)
-        ).isoformat()
-        metadata["last_heartbeat_at"] = datetime.now(UTC).isoformat()
-        if worker_instance_id is not None:
-            metadata["worker_instance_id"] = worker_instance_id
-        if process_id is not None:
-            metadata["process_id"] = process_id
-        if capabilities is not None:
-            metadata["capabilities"] = capabilities
-        if workspace_sync is not None:
-            metadata["workspace_sync"] = workspace_sync
-        status = "running" if run.status == "claimed" else run.status
-        return await self._require_runtime_store().update_agent_run(
-            run_id,
-            status=status,
-            ended_at=run.ended_at,
-            metadata=cast(JSONObject, metadata),
-            result=run.result,
-            error=run.error,
+            lease_seconds=lease_seconds,
+            worker_instance_id=worker_instance_id,
+            process_id=process_id,
+            capabilities=capabilities,
+            workspace_sync=workspace_sync,
         )
 
     async def heartbeat_external_worker_run(
@@ -1295,22 +1216,14 @@ class SessionManager:
         payload: JSONObject,
         created_at: datetime,
     ) -> RuntimeEventRecord:
-        run = await self._load_and_authorize_attached_executor_run(
+        return await self._runtime_attached_executor_service().append_event(
             run_id=run_id,
             executor_id=executor_id,
             claim_token=claim_token,
-        )
-        return await self._require_runtime_store().append_runtime_event(
-            RuntimeEventRecord(
-                event_id=event_id,
-                run_id=run_id,
-                event_kind=event_kind,
-                payload=with_runtime_event_correlation(
-                    payload,
-                    runtime_event_correlation_from_run(run),
-                ),
-                created_at=created_at,
-            )
+            event_id=event_id,
+            event_kind=event_kind,
+            payload=payload,
+            created_at=created_at,
         )
 
     async def append_external_worker_event(
@@ -1347,29 +1260,24 @@ class SessionManager:
         tape_id: str | None,
         tape_entries: list[JSONObject] | None = None,
     ) -> AgentRunRecord:
-        run = await self._load_and_authorize_attached_executor_run(
+        attached_executor_service = self._runtime_attached_executor_service()
+        run = await attached_executor_service.load_and_authorize_run(
             run_id=run_id,
             executor_id=executor_id,
             claim_token=claim_token,
         )
-        if status not in {"completed", "cancelled", "failed"}:
-            raise ValueError("attached executor final status is invalid")
-        metadata = dict(run.metadata)
-        metadata["finalized_at"] = datetime.now(UTC).isoformat()
-        if tape_id is not None:
-            metadata["final_tape_id"] = tape_id
+        attached_executor_service.validate_final_status(status)
         if tape_id is not None and tape_entries is not None:
             await self._tape_store.save(tape_id, tape_entries)
-        updated = await self._require_runtime_store().update_agent_run(
-            run_id,
+        updated = await attached_executor_service.finalize_authorized_run(
+            run,
             status=status,
-            ended_at=datetime.now(UTC),
-            metadata=cast(JSONObject, metadata),
             result=result,
             error=error,
+            tape_id=tape_id,
         )
         async with self._lock:
-            session = await self.get_session_async(run.session_id)
+            session = await self.get_session_async(updated.session_id)
             if tape_id is not None:
                 session.tape_id = tape_id
             session.turn_in_progress = False
@@ -1406,50 +1314,6 @@ class SessionManager:
             error=error,
             tape_id=tape_id,
             tape_entries=tape_entries,
-        )
-
-    async def _load_and_authorize_attached_executor_run(
-        self,
-        *,
-        run_id: str,
-        executor_id: str,
-        claim_token: str,
-    ) -> AgentRunRecord:
-        run = await self.load_runtime_run(run_id)
-        metadata = run.metadata
-        if (
-            metadata.get("execution_binding_kind")
-            not in _ATTACHED_EXECUTOR_BINDING_KINDS
-        ):
-            raise ValueError("runtime run is not attached executor owned")
-        owner_id = metadata.get("executor_id") or metadata.get("worker_id")
-        if owner_id != executor_id:
-            raise PermissionError("attached executor does not own this run")
-        token_hash = metadata.get("claim_token_hash")
-        if not isinstance(token_hash, str) or not secrets.compare_digest(
-            token_hash,
-            _hash_claim_token(claim_token),
-        ):
-            raise PermissionError("attached executor claim token is invalid")
-        if run.status not in {"claimed", "running", "cancelling"}:
-            raise PermissionError("attached executor claim is expired or inactive")
-        lease_expires_at = _optional_metadata_datetime(metadata, "lease_expires_at")
-        if lease_expires_at is None or lease_expires_at <= datetime.now(UTC):
-            raise PermissionError("attached executor claim is expired or inactive")
-        return run
-
-    async def _load_and_authorize_external_worker_run(
-        self,
-        *,
-        run_id: str,
-        worker_id: str,
-        claim_token: str,
-    ) -> AgentRunRecord:
-        """Compatibility wrapper for the legacy external-worker API."""
-        return await self._load_and_authorize_attached_executor_run(
-            run_id=run_id,
-            executor_id=worker_id,
-            claim_token=claim_token,
         )
 
     async def list_workspace_records(self) -> list[WorkspaceRecord]:
@@ -1781,6 +1645,12 @@ class SessionManager:
 
     def _runtime_resume_service(self) -> RuntimeResumeService:
         return RuntimeResumeService()
+
+    def _runtime_attached_executor_service(self) -> RuntimeAttachedExecutorService:
+        return RuntimeAttachedExecutorService(
+            store=self._runtime_store,
+            metadata_for_session=self._runtime_metadata_service.metadata_for_session,
+        )
 
     async def recover_stale_runtime_runs(
         self,
