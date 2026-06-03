@@ -328,6 +328,9 @@ This ADR does not implement that path.
   - Completed: runtime preparation `RunRequest` construction is delegated to
     `RuntimePreparationRequestService` instead of a `SessionManager` helper
     method.
+  - Completed: runtime config replacement, persistence rollback, and previous
+    adapter close handling are delegated to `RuntimeReplacementService` instead
+    of inline `SessionManager` logic.
   - Completed: runtime run lifecycle and latest message snapshot persistence
     consume narrower `RuntimeRunLifecycleStore` and `RuntimeCheckpointStore`
     contracts through `RuntimeRunPersistenceService`.
