@@ -33,6 +33,18 @@ class LocalCliRuntime:
     pipeline_adapter: Any
 
 
+class LocalCliManagedSession(Protocol):
+    tape_id: str | None
+
+    def attach_runtime_binding(
+        self,
+        *,
+        pipeline: object,
+        ctx: object,
+        adapter: object,
+    ) -> None: ...
+
+
 @runtime_checkable
 class LocalCliSessionManager(Protocol):
     """Subset of session behavior used by the interactive local REPL."""
@@ -66,7 +78,7 @@ class LocalCliSessionManager(Protocol):
 
     def attach_runtime(
         self,
-        managed_session: Any,
+        managed_session: LocalCliManagedSession,
         *,
         pipeline: Any,
         pipeline_ctx: Any,
@@ -133,15 +145,17 @@ class ServerBackedLocalCliSessionManager:
 
     def attach_runtime(
         self,
-        managed_session: Any,
+        managed_session: LocalCliManagedSession,
         *,
         pipeline: Any,
         pipeline_ctx: Any,
         pipeline_adapter: Any,
     ) -> None:
-        managed_session.runtime_pipeline = pipeline
-        managed_session.runtime_ctx = pipeline_ctx
-        managed_session.runtime_adapter = pipeline_adapter
+        managed_session.attach_runtime_binding(
+            pipeline=pipeline,
+            ctx=pipeline_ctx,
+            adapter=pipeline_adapter,
+        )
         managed_session.tape_id = pipeline_ctx.tape.tape_id
         self._delegate._persist_session(managed_session)
 
@@ -166,6 +180,7 @@ def create_local_cli_session_manager(
 
 
 __all__ = [
+    "LocalCliManagedSession",
     "LocalCliSessionManager",
     "LocalCliRuntime",
     "ServerBackedLocalCliSessionManager",
