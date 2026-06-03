@@ -106,6 +106,7 @@ from coding_agent.runs import (
     run_target_from_execution_binding,
     serialize_checkpoint_session_config,
 )
+from coding_agent.runs.checkpoint_runtime import CheckpointRuntimeBuilder
 from coding_agent.wire.consumer import LocalWireConsumer
 from coding_agent.wire.local import LocalWire
 from coding_agent.wire.protocol import (
@@ -2851,111 +2852,22 @@ class SessionManager:
             ),
         )
 
-    async def _build_restored_session_runtime_direct(
-        self,
-        session: Session,
-        *,
-        target: RunTarget | None = None,
-        restored_tape: Tape,
-        restored_config: CheckpointSessionConfig,
-        plugin_states: Mapping[str, Any],
-    ) -> tuple[Any, Any, PipelineAdapter]:
-        runtime_target = session.default_run_target if target is None else target
-        environment = self._resolve_environment_for_run_target(runtime_target)
-        workspace_root = self._environment_workspace_root(environment)
-
-        approval_mode_map = {
-            ApprovalPolicy.YOLO: "yolo",
-            ApprovalPolicy.INTERACTIVE: "interactive",
-            ApprovalPolicy.AUTO: "auto",
-        }
-        pipeline, ctx = self._create_agent_for_session(
-            workspace_root=workspace_root,
-            environment=environment,
-            model_override=restored_config.model_name,
-            provider_override=restored_config.provider_name,
-            base_url_override=restored_config.base_url,
-            max_steps_override=restored_config.max_steps,
-            approval_mode_override=approval_mode_map[restored_config.approval_policy],
-            session_id_override=session.id,
-            api_key=None,
-            tape=restored_tape,
-        )
-        ctx.config["wire_consumer"] = None
-        ctx.config["agent_id"] = ""
-        self._bind_subagent_message_publisher(ctx)
-
-        provider_model_name = getattr(session.provider, "model_name", None)
-        can_reuse_provider = (
-            session.provider is not None
-            and session.provider_name == restored_config.provider_name
-            and provider_model_name == restored_config.model_name
-            and session.base_url == restored_config.base_url
-        )
-        if can_reuse_provider:
-            llm_plugin = pipeline._registry.get("llm_provider")
-            llm_plugin._instance = session.provider
-
-        consumer = self._make_restore_consumer(session.wire)
-        ctx.config["wire_consumer"] = consumer
-        for key, value in plugin_states.items():
-            ctx.plugin_states.setdefault(key, value)
-        adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
-        initialize = getattr(adapter, "initialize", None)
-        if callable(initialize):
-            initialize_result = initialize()
-            if isawaitable(initialize_result):
-                await initialize_result
-        return pipeline, ctx, adapter
-
-    async def _build_restored_session_runtime(
-        self,
-        session: Session,
-        *,
-        restored_tape: Tape,
-        restored_config: CheckpointSessionConfig,
-        plugin_states: Mapping[str, Any],
-    ) -> tuple[Any, Any, PipelineAdapter]:
-        if not self._is_local_daemon_run_target(session.default_run_target):
-            return await self._build_restored_session_runtime_direct(
-                session,
-                restored_tape=restored_tape,
-                restored_config=restored_config,
-                plugin_states=plugin_states,
-            )
-
-        async def prepare_runtime(request: RunRequest) -> LocalDaemonRuntimeBinding:
-            pipeline, ctx, adapter = await self._build_restored_session_runtime_direct(
-                session,
-                target=request.target,
-                restored_tape=restored_tape,
-                restored_config=restored_config,
-                plugin_states=plugin_states,
-            )
-            return LocalDaemonRuntimeBinding(
+    def _checkpoint_restore_service(self) -> CheckpointRestoreService:
+        runtime_builder = CheckpointRuntimeBuilder(
+            local_daemon_executor=self._local_daemon_executor,
+            resolve_environment_for_run_target=self._resolve_environment_for_run_target,
+            workspace_root_for_environment=self._environment_workspace_root,
+            create_agent_for_session=self._create_agent_for_session,
+            bind_subagent_message_publisher=self._bind_subagent_message_publisher,
+            restore_consumer_factory=self._make_restore_consumer,
+            adapter_factory=lambda pipeline, ctx, consumer: PipelineAdapter(
                 pipeline=pipeline,
                 ctx=ctx,
-                adapter=adapter,
-            )
-
-        binding = await self._local_daemon_executor.prepare_runtime(
-            LocalDaemonRuntimePreparation(
-                request=self._runtime_preparation_request(
-                    session,
-                    purpose="checkpoint_restore",
-                ),
-                runtime_provider=_SessionLocalDaemonRuntimeProvider(
-                    prepare=prepare_runtime,
-                ),
-            )
-        )
-        return (
-            binding.pipeline,
-            binding.ctx,
-            cast(PipelineAdapter, binding.adapter),
+                consumer=consumer,
+            ),
+            runtime_preparation_request=self._runtime_preparation_request,
         )
 
-    def _checkpoint_restore_service(self) -> CheckpointRestoreService:
         async def prepare_runtime(
             *,
             session: Session,
@@ -2963,16 +2875,11 @@ class SessionManager:
             restored_config: CheckpointSessionConfig,
             plugin_states: Mapping[str, Any],
         ) -> CheckpointRestoredRuntime:
-            pipeline, ctx, adapter = await self._build_restored_session_runtime(
-                session,
+            return await runtime_builder.prepare_runtime(
+                session=session,
                 restored_tape=restored_tape,
                 restored_config=restored_config,
                 plugin_states=plugin_states,
-            )
-            return CheckpointRestoredRuntime(
-                pipeline=pipeline,
-                ctx=ctx,
-                adapter=adapter,
             )
 
         return CheckpointRestoreService(
