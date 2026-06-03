@@ -25,6 +25,13 @@ class EventBroadcastResult:
     failed_pruned_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimeBindingSnapshot:
+    pipeline: object | None
+    ctx: object | None
+    adapter: object | None
+
+
 @dataclass
 class SessionRuntimeHandle:
     """Process-local runtime state associated with a session record."""
@@ -106,6 +113,18 @@ class SessionRuntimeHandle:
         self.runtime_ctx = ctx
         self.runtime_adapter = adapter
 
+    def runtime_binding_snapshot(self) -> RuntimeBindingSnapshot:
+        return RuntimeBindingSnapshot(
+            pipeline=self.runtime_pipeline,
+            ctx=self.runtime_ctx,
+            adapter=self.runtime_adapter,
+        )
+
+    def restore_runtime_binding(self, snapshot: RuntimeBindingSnapshot) -> None:
+        self.runtime_pipeline = snapshot.pipeline
+        self.runtime_ctx = snapshot.ctx
+        self.runtime_adapter = snapshot.adapter
+
     def broadcast_event_nowait(
         self,
         event: dict[str, Any],
@@ -137,4 +156,8 @@ class SessionRuntimeHandle:
             failed_pruned_count=failed_pruned_count,
         )
 
-__all__ = ["EventBroadcastResult", "SessionRuntimeHandle"]
+__all__ = [
+    "EventBroadcastResult",
+    "RuntimeBindingSnapshot",
+    "SessionRuntimeHandle",
+]

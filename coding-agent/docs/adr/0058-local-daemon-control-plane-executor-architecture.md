@@ -161,6 +161,9 @@ This ADR does not implement that path.
   - Runtime binding attachment for daemon/runtime preparation and checkpoint
     restore is owned by `SessionRuntimeHandle`; callers attach through session
     compatibility delegates instead of writing binding fields directly.
+  - Runtime binding snapshot/restore for replacement rollback is owned by
+    `SessionRuntimeHandle`; `SessionManager.replace_session_runtime_config()`
+    no longer snapshots or restores runtime binding fields directly.
   - Store payload tests assert runtime handles are not persisted.
 - [x] Introduce a `RunCoordinator` boundary that selects an executor from
   `RunTarget`.

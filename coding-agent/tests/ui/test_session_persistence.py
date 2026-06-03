@@ -1433,6 +1433,38 @@ def test_session_runtime_handle_attaches_runtime_binding() -> None:
     assert session.runtime_adapter is adapter
 
 
+def test_session_runtime_handle_snapshots_and_restores_runtime_binding() -> None:
+    session = Session(
+        id="runtime-binding-snapshot-session",
+        created_at=datetime.now(),
+        last_activity=datetime.now(),
+        approval_store=ApprovalStore(),
+    )
+    original_pipeline = object()
+    original_ctx = object()
+    original_adapter = object()
+    replacement_pipeline = object()
+    replacement_ctx = object()
+    replacement_adapter = object()
+    session.runtime_handle.attach_runtime_binding(
+        pipeline=original_pipeline,
+        ctx=original_ctx,
+        adapter=original_adapter,
+    )
+
+    snapshot = session.runtime_handle.runtime_binding_snapshot()
+    session.runtime_handle.attach_runtime_binding(
+        pipeline=replacement_pipeline,
+        ctx=replacement_ctx,
+        adapter=replacement_adapter,
+    )
+    session.runtime_handle.restore_runtime_binding(snapshot)
+
+    assert session.runtime_pipeline is original_pipeline
+    assert session.runtime_ctx is original_ctx
+    assert session.runtime_adapter is original_adapter
+
+
 def test_session_store_data_excludes_runtime_handle_state() -> None:
     session = Session(
         id="runtime-handle-session",
