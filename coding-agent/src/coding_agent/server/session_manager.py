@@ -71,6 +71,7 @@ from coding_agent.runs import (
     LocalDaemonExecutorRef,
     RunCoordinator,
     RuntimeAgentFactoryService,
+    RuntimeAttachedExecutorClaimService,
     RuntimeAttachedExecutorRequestService,
     RuntimeBindingSnapshot,
     RuntimeCancelObservationFinalizer,
@@ -990,6 +991,18 @@ class SessionManager:
                 ),
             )
         )
+        self._runtime_attached_executor_claim_service = (
+            RuntimeAttachedExecutorClaimService(
+                attached_executor=self._runtime_control_services.attached_executor,
+                load_session=self.get_session_async,
+                claim_factory=lambda claim, session: ExternalWorkerClaim(
+                    run=claim.run,
+                    claim_token=claim.claim_token,
+                    prompt=claim.prompt,
+                    session=cast(Session, session),
+                ),
+            )
+        )
         self._runtime_turn_service_factory = RuntimeTurnServiceFactory(
             runtime_control_services=self._runtime_control_services,
             persist_session=self._persist_session_async,
@@ -1259,25 +1272,17 @@ class SessionManager:
         capabilities: JSONObject | None = None,
         workspace_sync: JSONObject | None = None,
     ) -> ExternalWorkerClaim | None:
-        claim = await self._runtime_control_services.attached_executor().claim_run(
+        claim = await self._runtime_attached_executor_claim_service.claim_run(
             executor_id=executor_id,
-            session_id=session_id,
             executor_kind=executor_kind,
+            session_id=session_id,
             lease_seconds=lease_seconds,
             worker_instance_id=worker_instance_id,
             process_id=process_id,
             capabilities=capabilities,
             workspace_sync=workspace_sync,
         )
-        if claim is None:
-            return None
-        session = await self.get_session_async(claim.run.session_id)
-        return ExternalWorkerClaim(
-            run=claim.run,
-            claim_token=claim.claim_token,
-            prompt=claim.prompt,
-            session=session,
-        )
+        return cast(ExternalWorkerClaim | None, claim)
 
     async def claim_external_worker_run(
         self,

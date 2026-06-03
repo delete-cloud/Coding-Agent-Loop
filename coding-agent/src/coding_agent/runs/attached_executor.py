@@ -58,6 +58,13 @@ class RuntimeAttachedExecutorClaim:
     prompt: str
 
 
+class RuntimeAttachedExecutorClaimEnvelope(Protocol):
+    run: AgentRunRecord
+    claim_token: str
+    prompt: str
+    session: object
+
+
 RuntimeAttachedExecutorRequestLock = AsyncContextManager[None]
 RuntimeAttachedExecutorOwnerAsserter = Callable[[str], Awaitable[None]]
 RuntimeAttachedExecutorSessionLoader = Callable[
@@ -74,6 +81,11 @@ RuntimeAttachedExecutorSessionPredicate = Callable[
     bool,
 ]
 RuntimeAttachedExecutorRunIdFactory = Callable[[], str]
+RuntimeAttachedExecutorClaimFactory = Callable[
+    [RuntimeAttachedExecutorClaim, object],
+    RuntimeAttachedExecutorClaimEnvelope,
+]
+RuntimeAttachedExecutorClaimSessionLoader = Callable[[str], Awaitable[object]]
 
 
 @dataclass(frozen=True)
@@ -118,6 +130,40 @@ class RuntimeAttachedExecutorRequestService:
             session.last_failure_details = None
             await self.persist_session(session)
             return record
+
+
+@dataclass(frozen=True)
+class RuntimeAttachedExecutorClaimService:
+    attached_executor: RuntimeAttachedExecutorProvider
+    load_session: RuntimeAttachedExecutorClaimSessionLoader
+    claim_factory: RuntimeAttachedExecutorClaimFactory
+
+    async def claim_run(
+        self,
+        *,
+        executor_id: str,
+        executor_kind: str,
+        session_id: str | None = None,
+        lease_seconds: int = 30,
+        worker_instance_id: str | None = None,
+        process_id: int | None = None,
+        capabilities: JSONObject | None = None,
+        workspace_sync: JSONObject | None = None,
+    ) -> RuntimeAttachedExecutorClaimEnvelope | None:
+        claim = await self.attached_executor().claim_run(
+            executor_id=executor_id,
+            session_id=session_id,
+            executor_kind=executor_kind,
+            lease_seconds=lease_seconds,
+            worker_instance_id=worker_instance_id,
+            process_id=process_id,
+            capabilities=capabilities,
+            workspace_sync=workspace_sync,
+        )
+        if claim is None:
+            return None
+        session = await self.load_session(claim.run.session_id)
+        return self.claim_factory(claim, session)
 
 
 @dataclass(frozen=True)
@@ -384,6 +430,10 @@ def _optional_metadata_datetime(
 __all__ = [
     "ATTACHED_EXECUTOR_BINDING_KINDS",
     "RuntimeAttachedExecutorClaim",
+    "RuntimeAttachedExecutorClaimEnvelope",
+    "RuntimeAttachedExecutorClaimFactory",
+    "RuntimeAttachedExecutorClaimService",
+    "RuntimeAttachedExecutorClaimSessionLoader",
     "RuntimeAttachedExecutorOwnerAsserter",
     "RuntimeAttachedExecutorProvider",
     "RuntimeAttachedExecutorRequestLock",

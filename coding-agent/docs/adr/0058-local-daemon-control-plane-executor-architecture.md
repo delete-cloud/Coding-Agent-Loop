@@ -338,6 +338,10 @@ This ADR does not implement that path.
     and session persistence are delegated to
     `RuntimeAttachedExecutorRequestService` instead of living inline in
     `SessionManager.request_attached_executor_run()`.
+  - Completed: attached/external executor claim invocation, claimed-session
+    loading, and server-facing claim DTO construction are delegated to
+    `RuntimeAttachedExecutorClaimService` instead of living inline in
+    `SessionManager.claim_attached_executor_run()`.
   - Completed: attached executor cancellation run updates, local turn
     cancellation session-state transitions, and cancelled local task observation
     are delegated to `RuntimeCancelService` instead of `SessionManager` helper

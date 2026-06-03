@@ -9,6 +9,8 @@ from coding_agent.approval import ApprovalPolicy
 from coding_agent.environment.execution_binding import ExternalWorkerBinding
 from coding_agent.runtime_store import AgentRunRecord, JSONObject, RuntimeEventRecord
 from coding_agent.runs import (
+    RuntimeAttachedExecutorClaim,
+    RuntimeAttachedExecutorClaimService,
     RuntimeAttachedExecutorRequestService,
     RuntimeAttachedExecutorService,
 )
@@ -272,6 +274,93 @@ async def test_attached_executor_request_service_rejects_active_turn() -> None:
             persist_session=persist_session,
             session_is_attached=lambda session: True,
         ).request_run("session-1", "run attached")
+
+
+@pytest.mark.asyncio
+async def test_attached_executor_claim_service_loads_session_and_wraps_claim() -> None:
+    now = datetime(2026, 6, 3, 12, 0, tzinfo=UTC)
+    session = FakeSession()
+    store = FakeAttachedExecutorStore()
+    attached_service = RuntimeAttachedExecutorService(
+        store=store,
+        metadata_for_session=_metadata_for_session,
+        now=lambda: now,
+        token_urlsafe=lambda _: "claim-token",
+    )
+    await attached_service.request_run(
+        session,
+        prompt="run attached",
+        run_id="run-1",
+    )
+    loaded_sessions: list[str] = []
+
+    async def load_session(session_id: str) -> FakeSession:
+        loaded_sessions.append(session_id)
+        return session
+
+    @dataclass(frozen=True)
+    class ClaimEnvelope:
+        run: AgentRunRecord
+        claim_token: str
+        prompt: str
+        session: FakeSession
+
+    def claim_factory(
+        claim: RuntimeAttachedExecutorClaim,
+        loaded_session: object,
+    ) -> ClaimEnvelope:
+        return ClaimEnvelope(
+            run=claim.run,
+            claim_token=claim.claim_token,
+            prompt=claim.prompt,
+            session=loaded_session,
+        )
+
+    envelope = await RuntimeAttachedExecutorClaimService(
+        attached_executor=lambda: attached_service,
+        load_session=load_session,
+        claim_factory=claim_factory,
+    ).claim_run(
+        executor_id="executor-1",
+        executor_kind="local_cli",
+        session_id="session-1",
+        capabilities={"streaming": True},
+    )
+
+    assert envelope is not None
+    assert envelope.run.run_id == "run-1"
+    assert envelope.run.status == "claimed"
+    assert envelope.run.metadata["executor_id"] == "executor-1"
+    assert envelope.run.metadata["capabilities"] == {"streaming": True}
+    assert envelope.claim_token == "claim-token"
+    assert envelope.prompt == "run attached"
+    assert envelope.session is session
+    assert loaded_sessions == ["session-1"]
+
+
+@pytest.mark.asyncio
+async def test_attached_executor_claim_service_returns_none_without_claim() -> None:
+    loaded_sessions: list[str] = []
+
+    async def load_session(session_id: str) -> FakeSession:
+        loaded_sessions.append(session_id)
+        return FakeSession()
+
+    envelope = await RuntimeAttachedExecutorClaimService(
+        attached_executor=lambda: RuntimeAttachedExecutorService(
+            store=FakeAttachedExecutorStore(),
+            metadata_for_session=_metadata_for_session,
+        ),
+        load_session=load_session,
+        claim_factory=lambda claim, session: claim,
+    ).claim_run(
+        executor_id="executor-1",
+        executor_kind="local_cli",
+        session_id="session-1",
+    )
+
+    assert envelope is None
+    assert loaded_sessions == []
 
 
 def _metadata_for_session(
