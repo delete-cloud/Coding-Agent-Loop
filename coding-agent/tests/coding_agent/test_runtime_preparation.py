@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from coding_agent.approval import ApprovalPolicy
+from coding_agent.environment import SandboxedEnvironment
 from coding_agent.executors.local_daemon import LocalDaemonRuntimePreparation
 from coding_agent.runs import (
     IsolationPolicy,
@@ -164,6 +165,12 @@ async def test_runtime_preparation_service_builds_local_daemon_runtime(
     )
 
     assert created["workspace_root"] == workspace.resolve()
+    assert isinstance(created["environment"], SandboxedEnvironment)
+    assert created["environment"].workspace_root == workspace.resolve()
+    assert created["environment"].tool_config()["shell"] == {"sandbox_mode": "none"}
+    assert created["environment"].tool_config()["isolation_policy"] == (
+        _request(workspace).target.isolation.to_dict()
+    )
     assert created["model_override"] == "model-1"
     assert created["provider_override"] == "provider-1"
     assert created["base_url_override"] == "https://example.test"
@@ -208,6 +215,7 @@ async def test_runtime_preparation_service_builds_runtime_through_executor(
         "purpose": "runtime_preparation"
     }
     assert created["workspace_root"] == workspace.resolve()
+    assert isinstance(created["environment"], SandboxedEnvironment)
     assert created["approval_mode_override"] == "interactive"
     assert restored == ["tape-old"]
     assert runtime.adapter is adapter

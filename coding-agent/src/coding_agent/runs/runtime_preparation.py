@@ -13,6 +13,7 @@ from coding_agent.approval import ApprovalPolicy
 from coding_agent.environment.binding_resolver import BindingResolver
 from coding_agent.environment.execution_binding import CloudWorkspaceBinding
 from coding_agent.environment.local import LocalEnvironment
+from coding_agent.environment.sandboxed import sandbox_environment
 from coding_agent.executors.local_daemon import (
     LocalDaemonExecutor,
     LocalDaemonRuntimeBinding,
@@ -232,10 +233,12 @@ class LocalDaemonRuntimePreparationService:
 
     def _resolve_environment_for_run_target(self, target: RunTarget) -> Environment:
         workspace = target.workspace
+        environment: Environment
         if isinstance(workspace, LocalPathWorkspaceRef):
-            return LocalEnvironment(Path(workspace.path).expanduser().resolve())
+            environment = LocalEnvironment(Path(workspace.path).expanduser().resolve())
+            return sandbox_environment(environment, target.isolation)
         if isinstance(workspace, CloudWorkspaceRef):
-            return self.binding_resolver.resolve_environment(
+            environment = self.binding_resolver.resolve_environment(
                 CloudWorkspaceBinding(
                     workspace_url=workspace.workspace_url,
                     workspace_id=workspace.workspace_id,
@@ -244,6 +247,7 @@ class LocalDaemonRuntimePreparationService:
                     provider_instance_id=workspace.provider_instance_id,
                 )
             )
+            return sandbox_environment(environment, target.isolation)
         raise ValueError(
             f"runtime builders cannot resolve workspace target: {workspace.kind}"
         )

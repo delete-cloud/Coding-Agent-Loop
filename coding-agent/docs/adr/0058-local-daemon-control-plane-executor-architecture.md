@@ -277,11 +277,15 @@ This ADR does not implement that path.
     `ApprovalRequestService`.
   - Completed: checkpoint restore orchestration is delegated to
     `CheckpointRestoreService`.
+- [x] Make sandbox policy the default executor environment wrapper rather than
+  a mixed local/cloud environment concern.
+  - `SandboxedEnvironment` wraps local daemon runtime environments from
+    `RunTarget.isolation`.
+  - Pipeline shell defaults merge environment-provided sandbox config before
+    file config overrides.
 
 ## Remaining Implementation Gaps
 
-- Make sandbox policy the default executor environment wrapper rather than a
-  mixed local/cloud environment concern.
 - Add daemon-backed client surfaces for the local product path. REPL/TUI/CLI
   clients should pair with or connect to the local daemon instead of owning an
   in-process runtime manager, and a daemon-backed non-interactive client should

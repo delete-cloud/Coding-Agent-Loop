@@ -23,6 +23,7 @@ from coding_agent.environment import (
     CloudCommandResult,
     CloudEnvironment,
     LocalEnvironment,
+    SandboxedEnvironment,
 )
 from coding_agent.events import DisplayEvent
 from coding_agent.executors import (
@@ -3115,8 +3116,11 @@ async def test_ensure_session_runtime_uses_default_run_target_workspace(
         await manager.ensure_session_runtime(session_id)
 
     assert captured_kwargs["workspace_root"] == target_bound.resolve()
-    assert isinstance(captured_kwargs["environment"], LocalEnvironment)
+    assert isinstance(captured_kwargs["environment"], SandboxedEnvironment)
     assert captured_kwargs["environment"].workspace_root == target_bound.resolve()
+    assert captured_kwargs["environment"].tool_config()["shell"] == {
+        "sandbox_mode": "none"
+    }
     assert len(local_executor.preparations) == 1
     assert local_executor.preparations[0].request.target == session.default_run_target
     assert isinstance(session.execution_binding, LocalExecutionBinding)
@@ -3181,8 +3185,11 @@ async def test_replace_session_runtime_config_uses_default_run_target_workspace(
         )
 
     assert captured_kwargs["workspace_root"] == target_bound.resolve()
-    assert isinstance(captured_kwargs["environment"], LocalEnvironment)
+    assert isinstance(captured_kwargs["environment"], SandboxedEnvironment)
     assert captured_kwargs["environment"].workspace_root == target_bound.resolve()
+    assert captured_kwargs["environment"].tool_config()["shell"] == {
+        "sandbox_mode": "none"
+    }
     assert len(local_executor.preparations) == 1
     assert local_executor.preparations[0].request.target == session.default_run_target
     assert isinstance(session.execution_binding, LocalExecutionBinding)
@@ -3986,8 +3993,11 @@ async def test_restore_checkpoint_uses_default_run_target_workspace(
         await manager._restore_checkpoint(session, "cp-target-binding")
 
     assert captured_kwargs["workspace_root"] == target_bound.resolve()
-    assert isinstance(captured_kwargs["environment"], LocalEnvironment)
+    assert isinstance(captured_kwargs["environment"], SandboxedEnvironment)
     assert captured_kwargs["environment"].workspace_root == target_bound.resolve()
+    assert captured_kwargs["environment"].tool_config()["shell"] == {
+        "sandbox_mode": "none"
+    }
     assert len(local_executor.preparations) == 1
     assert local_executor.preparations[0].request.target == session.default_run_target
     assert isinstance(session.execution_binding, LocalExecutionBinding)

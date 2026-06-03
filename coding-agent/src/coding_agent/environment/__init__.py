@@ -5,6 +5,7 @@ from .cloud import (
 )
 from .docker_workspace_provider import DockerCloudWorkspaceClient
 from .local import LocalEnvironment
+from .sandboxed import SandboxedEnvironment, sandbox_environment
 from .binding_resolver import (
     BindingResolver,
     CloudBindingNotImplementedError,
@@ -71,6 +72,7 @@ __all__ = [
     "LocalEnvironment",
     "LocalAttachedExecutionBinding",
     "LocalExecutionBinding",
+    "SandboxedEnvironment",
     "WorkspaceArchiveManifest",
     "WorkspaceBranchPublication",
     "WorkspaceDiff",
@@ -90,6 +92,7 @@ __all__ = [
     "publish_workspace_branch_from_config",
     "provision_cloud_binding_from_config",
     "register_workspace_provider",
+    "sandbox_environment",
     "workspace_provider_capabilities_from_config",
     "workspace_archive_manifest_from_config",
     "workspace_diff_from_config",
