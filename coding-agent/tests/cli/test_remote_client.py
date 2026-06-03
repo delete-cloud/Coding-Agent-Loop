@@ -86,6 +86,72 @@ def test_create_remote_session_sends_git_workspace_source(
     ]
 
 
+def test_create_local_daemon_session_sends_local_execution_binding(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from coding_agent.remote.client import (
+        RemoteEndpoint,
+        create_local_daemon_session,
+    )
+
+    calls: list[tuple[str, dict[str, object] | None, dict[str, str]]] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"session_id": "sess-local"}
+
+    class FakeClient:
+        def __init__(
+            self,
+            *,
+            base_url: str,
+            headers: dict[str, str] | None = None,
+            timeout: float,
+        ) -> None:
+            assert base_url == "http://127.0.0.1:8080"
+            assert timeout == 60.0
+            self.headers = headers or {}
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def post(
+            self, path: str, json: dict[str, object] | None = None
+        ) -> FakeResponse:
+            calls.append((path, json, self.headers))
+            return FakeResponse()
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+
+    session_id = create_local_daemon_session(
+        RemoteEndpoint("local-daemon", "http://127.0.0.1:8080", None),
+        repo_path=tmp_path,
+        approval_policy="auto",
+    )
+
+    assert session_id == "sess-local"
+    assert calls == [
+        (
+            "/sessions",
+            {
+                "execution_binding": {
+                    "kind": "local",
+                    "workspace_root": str(tmp_path.resolve()),
+                },
+                "approval_policy": "auto",
+            },
+            {},
+        )
+    ]
+
+
 def _run_git(repo_path: Path, args: list[str]) -> str:
     result = subprocess.run(
         ["git", "-C", str(repo_path), *args],
@@ -209,6 +275,180 @@ def test_daemon_command_starts_foreground_local_control_plane(
     assert result.exit_code == 0
     assert captured == {"host": "127.0.0.1", "port": 8765}
     assert "Starting Coding Agent local daemon control plane" in result.output
+
+
+def test_daemon_run_uses_local_http_control_plane_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, object]] = []
+
+    def fake_create_local_daemon_session(endpoint, *, repo_path, approval_policy):
+        calls.append(
+            (
+                "create",
+                {
+                    "endpoint": endpoint,
+                    "repo_path": repo_path,
+                    "approval_policy": approval_policy,
+                },
+            )
+        )
+        return "sess-local"
+
+    def fake_stream_prompt_or_run_request(
+        *,
+        base_url: str,
+        session_id: str,
+        prompt: str,
+        headers: dict[str, str],
+    ) -> int:
+        calls.append(
+            (
+                "stream",
+                {
+                    "base_url": base_url,
+                    "session_id": session_id,
+                    "prompt": prompt,
+                    "headers": headers,
+                },
+            )
+        )
+        return 0
+
+    monkeypatch.setattr(
+        "coding_agent.remote.client.create_local_daemon_session",
+        fake_create_local_daemon_session,
+    )
+    monkeypatch.setattr(
+        "coding_agent.remote.client.stream_prompt_or_run_request",
+        fake_stream_prompt_or_run_request,
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        main,
+        [
+            "daemon",
+            "run",
+            "--url",
+            "http://127.0.0.1:8765",
+            "--repo",
+            str(tmp_path),
+            "--goal",
+            "hello daemon",
+            "--approval",
+            "auto",
+            "--keep-session",
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "Created daemon-backed local session sess-local" in result.output
+    assert calls[0][0] == "create"
+    create_payload = calls[0][1]
+    assert isinstance(create_payload, dict)
+    endpoint = create_payload["endpoint"]
+    assert endpoint.name == "local-daemon"
+    assert endpoint.url == "http://127.0.0.1:8765"
+    assert endpoint.token is None
+    assert create_payload["repo_path"] == tmp_path.resolve()
+    assert create_payload["approval_policy"] == "auto"
+    assert calls[1] == (
+        "stream",
+        {
+            "base_url": "http://127.0.0.1:8765",
+            "session_id": "sess-local",
+            "prompt": "hello daemon",
+            "headers": {},
+        },
+    )
+
+
+def test_daemon_run_cleanup_session_deletes_after_stream_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, object]] = []
+
+    def fake_create_local_daemon_session(endpoint, *, repo_path, approval_policy):
+        del repo_path, approval_policy
+        calls.append(("create", endpoint.url))
+        return "sess-local"
+
+    def fake_stream_prompt_or_run_request(
+        *,
+        base_url: str,
+        session_id: str,
+        prompt: str,
+        headers: dict[str, str],
+    ) -> int:
+        del base_url, session_id, prompt, headers
+        calls.append(("stream", None))
+        raise click.ClickException("stream failed")
+
+    def fake_delete_remote_session(
+        *,
+        base_url: str,
+        session_id: str,
+        headers: dict[str, str],
+    ) -> None:
+        calls.append(
+            (
+                "delete",
+                {
+                    "base_url": base_url,
+                    "session_id": session_id,
+                    "headers": headers,
+                },
+            )
+        )
+
+    monkeypatch.setattr(
+        "coding_agent.remote.client.create_local_daemon_session",
+        fake_create_local_daemon_session,
+    )
+    monkeypatch.setattr(
+        "coding_agent.remote.client.stream_prompt_or_run_request",
+        fake_stream_prompt_or_run_request,
+    )
+    monkeypatch.setattr(
+        "coding_agent.remote.client.delete_remote_session",
+        fake_delete_remote_session,
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        main,
+        [
+            "daemon",
+            "run",
+            "--url",
+            "http://127.0.0.1:8765",
+            "--repo",
+            str(tmp_path),
+            "--goal",
+            "hello daemon",
+            "--cleanup-session",
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code != 0
+    assert "stream failed" in result.output
+    assert calls == [
+        ("create", "http://127.0.0.1:8765"),
+        ("stream", None),
+        (
+            "delete",
+            {
+                "base_url": "http://127.0.0.1:8765",
+                "session_id": "sess-local",
+                "headers": {},
+            },
+        ),
+    ]
 
 
 def test_serve_config_uses_server_host_and_port_when_cli_omits_them(
