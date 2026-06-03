@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Coding Agent — Web Client (MVP)</title>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --border:#262b36; --fg:#e6e8eb; --muted:#8b93a1;
+          --accent:#4c8bf5; --ok:#3fb950; --err:#f85149; --tool:#d29922; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;
+         background:var(--bg); color:var(--fg); height:100vh; display:flex; flex-direction:column; }
+  header { padding:8px 12px; border-bottom:1px solid var(--border); background:var(--panel);
+           display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  header input, header select { background:var(--bg); color:var(--fg); border:1px solid var(--border);
+           border-radius:6px; padding:5px 8px; font:inherit; }
+  header input.url { width:200px; } header input.key { width:140px; } header input.repo { width:220px; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:6px; padding:6px 12px;
+           font:inherit; cursor:pointer; } button:disabled { opacity:.5; cursor:default; }
+  button.ghost { background:transparent; border:1px solid var(--border); color:var(--fg); }
+  #status { margin-left:auto; color:var(--muted); font-size:12px; white-space:nowrap; }
+  #log { flex:1; overflow:auto; padding:14px; }
+  .msg { margin:0 0 12px; padding:10px 12px; border-radius:8px; background:var(--panel);
+         border:1px solid var(--border); white-space:pre-wrap; word-break:break-word; }
+  .msg.user { border-color:#2d4a7c; } .msg.thinking { color:var(--muted); font-style:italic; }
+  .tool { border-color:var(--tool); } .tool .name { color:var(--tool); font-weight:600; }
+  .tool pre { margin:6px 0 0; max-height:240px; overflow:auto; background:var(--bg);
+              padding:8px; border-radius:6px; font-size:12px; }
+  .tool .err { color:var(--err); }
+  .approval { border-color:var(--err); }
+  .approval .row { margin-top:8px; display:flex; gap:8px; align-items:center; }
+  .label { font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted);
+           margin-bottom:4px; }
+  .agent-tag { font-size:11px; color:var(--accent); }
+  footer { padding:10px 12px; border-top:1px solid var(--border); background:var(--panel);
+           display:flex; gap:8px; }
+  #prompt { flex:1; background:var(--bg); color:var(--fg); border:1px solid var(--border);
+            border-radius:6px; padding:8px 10px; font:inherit; resize:none; height:48px; }
+</style>
+</head>
+<body>
+<header>
+  <input class="url" id="baseUrl" value="http://127.0.0.1:8080" title="Server base URL" />
+  <input class="key" id="apiKey" type="password" placeholder="X-API-Key" />
+  <input class="repo" id="repoPath" placeholder="repo path (optional)" />
+  <select id="approval" title="approval policy">
+    <option value="auto">auto</option>
+    <option value="interactive">interactive</option>
+    <option value="yolo">yolo</option>
+  </select>
+  <button id="newSession">New session</button>
+  <button class="ghost" id="showDiff" disabled>Diff</button>
+  <span id="status">no session</span>
+</header>
+<div id="log"></div>
+<footer>
+  <textarea id="prompt" placeholder="Ask the agent…  (Enter to send, Shift+Enter for newline)"></textarea>
+  <button id="send" disabled>Send</button>
+  <button class="ghost" id="cancel" disabled>Cancel</button>
+</footer>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const log = $('log');
+let sessionId = null;
+let streaming = false;
+let curAssistant = null;       // current root assistant .msg element being appended to
+const toolCards = new Map();   // call_id -> element
+
+function api() { return $('baseUrl').value.replace(/\/+$/, ''); }
+function headers(json) {
+  const h = {}; const k = $('apiKey').value.trim();
+  if (k) h['X-API-Key'] = k;
+  if (json) h['Content-Type'] = 'application/json';
+  return h;
+}
+function setStatus(t) { $('status').textContent = t; }
+function add(cls, html) {
+  const el = document.createElement('div');
+  el.className = 'msg ' + (cls || '');
+  el.innerHTML = html;
+  log.appendChild(el); log.scrollTop = log.scrollHeight;
+  return el;
+}
+const esc = (s) => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const tag = (aid) => aid ? `<span class="agent-tag">[${esc(aid)}]</span> ` : '';
+
+async function newSession() {
+  const body = { approval_policy: $('approval').value };
+  const repo = $('repoPath').value.trim();
+  if (repo) body.repo_path = repo;
+  try {
+    const r = await fetch(api() + '/sessions', { method:'POST', headers:headers(true), body:JSON.stringify(body) });
+    if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+    sessionId = (await r.json()).session_id;
+    log.innerHTML = '';
+    add('', `<div class="label">session</div>${esc(sessionId)}`);
+    setStatus('idle'); $('send').disabled = false; $('showDiff').disabled = false;
+  } catch (e) { add('', `<span style="color:var(--err)">create failed: ${esc(e.message)}</span>`); }
+}
+
+async function send() {
+  const text = $('prompt').value.trim();
+  if (!text || !sessionId || streaming) return;
+  $('prompt').value = '';
+  add('user', `<div class="label">you</div>${esc(text)}`);
+  curAssistant = null;
+  streaming = true; $('send').disabled = true; $('cancel').disabled = false; setStatus('running…');
+  try {
+    const r = await fetch(`${api()}/sessions/${sessionId}/prompt?event_format=display`, {
+      method:'POST', headers:headers(true), body:JSON.stringify({ prompt:text }),
+    });
+    if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+    await readSSE(r.body, onEvent);
+  } catch (e) {
+    add('', `<span style="color:var(--err)">stream error: ${esc(e.message)}</span>`);
+  } finally {
+    streaming = false; $('send').disabled = false; $('cancel').disabled = true; setStatus('idle');
+  }
+}
+
+// Parse an SSE byte stream (event:/data: frames separated by blank lines).
+async function readSSE(stream, handler) {
+  const reader = stream.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream:true }).replace(/\r/g, '');  // SSE uses CRLF
+    let idx;
+    while ((idx = buf.indexOf('\n\n')) >= 0) {
+      const frame = buf.slice(0, idx); buf = buf.slice(idx + 2);
+      let event = 'message', data = '';
+      for (const line of frame.split('\n')) {
+        if (line.startsWith('event:')) event = line.slice(6).trim();
+        else if (line.startsWith('data:')) data += line.slice(5).trim();
+      }
+      if (data) { try { handler(event, JSON.parse(data)); } catch { handler(event, { raw:data }); } }
+    }
+  }
+}
+
+function onEvent(event, d) {
+  const p = d && d.payload ? d.payload : d;
+  switch (event) {
+    case 'assistant_text_delta':
+      if (p.agent_id) { // subagent text: keep it visible but separate
+        add('', `${tag(p.agent_id)}${esc(p.content)}`);
+      } else {
+        if (!curAssistant) curAssistant = add('', '<div class="label">agent</div>');
+        curAssistant.insertAdjacentText('beforeend', p.content || '');
+        log.scrollTop = log.scrollHeight;
+      }
+      break;
+    case 'thinking_delta': add('thinking', `${tag(p.agent_id)}${esc(p.text)}`); break;
+    case 'progress_update':
+      setStatus(`${p.phase || 'running'} · ${p.model_name || ''} · ↑${p.tokens_in ?? 0} ↓${p.tokens_out ?? 0} · ctx ${Math.round((p.context_percent || 0))}% · ${(p.elapsed_seconds || 0).toFixed(1)}s`);
+      break;
+    case 'tool_call': {
+      const callId = p.call_id || d.source_event_id;
+      const el = add('tool', `<span class="name">${tag(p.agent_id)}🔧 ${esc(p.tool_name)}</span>`+
+        `<pre>${esc(JSON.stringify(p.arguments || {}, null, 2))}</pre>`);
+      toolCards.set(callId, el); break;
+    }
+    case 'tool_result': {
+      const el = toolCards.get(p.call_id);
+      const out = `<pre class="${p.is_error?'err':''}">${esc(p.display_result || '')}</pre>`;
+      if (el) el.insertAdjacentHTML('beforeend', out); else add('tool', out);
+      break;
+    }
+    case 'approval_prompt': renderApproval(p); break;
+    case 'approval_result': /* echo handled by removing card in approve() */ break;
+    case 'Error': case 'ErrorMessage':
+      add('', `<span style="color:var(--err)">${esc(d.error || d.content)}</span>`); break;
+    case 'final_result':
+      if (!p.agent_id) { add('', `<div class="label">turn end · ${esc(p.completion_status)}</div>`); curAssistant = null; }
+      break;
+  }
+}
+
+function renderApproval(d) {
+  const tc = d.tool_call || {};
+  const el = add('approval',
+    `<div class="label">approval required</div>`+
+    `<b>${esc(tc.tool_name)}</b><pre>${esc(JSON.stringify(tc.arguments, null, 2))}</pre>`+
+    `<div class="row"><button data-ok="1">Approve</button>`+
+    `<button class="ghost" data-ok="0">Deny</button>`+
+    `<input placeholder="feedback (optional)" style="flex:1;background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:5px 8px"/></div>`);
+  el.querySelectorAll('button').forEach(b => b.onclick = async () => {
+    const approved = b.dataset.ok === '1';
+    const feedback = el.querySelector('input').value.trim() || null;
+    el.querySelectorAll('button').forEach(x => x.disabled = true);
+    try {
+      const r = await fetch(`${api()}/sessions/${sessionId}/approve`, {
+        method:'POST', headers:headers(true),
+        body:JSON.stringify({ request_id:d.request_id, approved, feedback, scope:'once' }),
+      });
+      if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+      el.insertAdjacentHTML('beforeend', `<div class="label">→ ${approved?'approved':'denied'}</div>`);
+    } catch (e) { el.insertAdjacentHTML('beforeend', `<span style="color:var(--err)">${esc(e.message)}</span>`); }
+  });
+}
+
+async function showDiff() {
+  if (!sessionId) return;
+  try {
+    const r = await fetch(`${api()}/sessions/${sessionId}/workspace/diff`, { headers:headers(false) });
+    if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+    const d = await r.json();
+    const rows = (d.files||[]).map(f => `${f.status.padEnd(9)} +${f.additions??0} -${f.deletions??0}  ${f.path}`).join('\n') || '(no changes)';
+    add('tool', `<span class="name">📦 diff · +${d.additions} -${d.deletions}</span><pre>${esc(rows)}</pre>`);
+  } catch (e) { add('', `<span style="color:var(--err)">diff failed: ${esc(e.message)}</span>`); }
+}
+
+async function cancel() {
+  if (!sessionId) return;
+  try { await fetch(`${api()}/sessions/${sessionId}/cancel`, { method:'POST', headers:headers(false) }); }
+  catch {}
+}
+
+$('newSession').onclick = newSession;
+$('send').onclick = send;
+$('cancel').onclick = cancel;
+$('showDiff').onclick = showDiff;
+$('prompt').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+});
+</script>
+</body>
+</html>

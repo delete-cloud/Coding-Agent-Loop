@@ -275,7 +275,7 @@ This ADR does not implement that path.
     `execution_binding`.
   - Compatibility `execution_binding` assignment only updates derived targets;
     explicitly assigned or persisted targets remain authoritative.
-- [~] Split internal `RuntimeEvent` facts from user-facing `DisplayEvent`
+- [x] Split internal `RuntimeEvent` facts from user-facing `DisplayEvent`
   projections.
   - Completed: `DisplayEvent` model and projection helpers exist under
     `coding_agent.events`.
@@ -305,8 +305,9 @@ This ADR does not implement that path.
   - Completed: tracked live wire-event SSE projection and `DisplayEvent` SSE
     envelope assembly are delegated to `DisplayEventStreamProjector` under
     `coding_agent.events` instead of being assembled in HTTP routing.
-  - Remaining: the untracked standalone `webui/` workspace needs separate
-    integration once it is intentionally brought into this branch.
+  - Completed: the standalone `webui/` source is tracked and consumes
+    `event_format=display` prompt streams and `DisplayEvent` payloads instead
+    of legacy wire event payloads.
 - [x] Establish explicit Store contracts for durable runtime state.
   - Completed: `coding_agent.stores` defines runtime store contracts split into
     run lifecycle, run, runtime event, runtime interaction, and runtime

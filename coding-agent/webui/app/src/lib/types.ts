@@ -1,0 +1,145 @@
+// User-facing DisplayEvent stream payloads.
+// Source of truth: src/coding_agent/events/display.py and http_server.py.
+
+export interface BaseEvent {
+  session_id: string;
+  agent_id: string; // "" = root agent, non-empty = subagent
+  timestamp: string;
+}
+
+export interface StreamDelta extends BaseEvent { content: string; role: string }
+export interface ThinkingDelta extends BaseEvent { text: string }
+export interface TurnStatusDelta extends BaseEvent {
+  phase: "thinking" | "streaming" | "tool_call" | "idle" | string;
+  elapsed_seconds: number;
+  tokens_in: number;
+  tokens_out: number;
+  model_name: string;
+  context_percent: number;
+}
+export interface ToolCallDelta extends BaseEvent {
+  tool_name: string;
+  arguments: Record<string, unknown>;
+  call_id: string;
+}
+export interface ToolResultDelta extends BaseEvent {
+  call_id: string;
+  tool_name: string;
+  result?: unknown;
+  display_result?: string;
+  is_error?: boolean;
+}
+export interface ToolCall { tool_name: string; arguments: Record<string, unknown>; call_id: string }
+export interface ApprovalRequest extends BaseEvent {
+  request_id: string;
+  tool_call: ToolCall;
+  timeout_seconds: number;
+}
+export interface TurnEnd extends BaseEvent {
+  turn_id: string;
+  completion_status: "completed" | "blocked" | "error" | string;
+}
+export interface ErrorEvent extends BaseEvent { content?: string; error?: string }
+
+export type DisplayEventKind =
+  | "assistant_text_delta"
+  | "thinking_delta"
+  | "tool_call"
+  | "tool_result"
+  | "approval_prompt"
+  | "approval_result"
+  | "progress_update"
+  | "final_result";
+
+export interface DisplayEventEnvelope<Payload extends object = Record<string, unknown>> {
+  source_event_id: string;
+  run_id: string;
+  sequence: number | null;
+  display_kind: DisplayEventKind;
+  payload: Payload;
+  created_at: string;
+}
+
+export interface AssistantTextPayload {
+  agent_id?: string;
+  content?: string;
+  role?: string;
+}
+export interface ThinkingPayload { agent_id?: string; text?: string }
+export interface ProgressPayload {
+  agent_id?: string;
+  phase?: string;
+  elapsed_seconds?: number;
+  tokens_in?: number;
+  tokens_out?: number;
+  model_name?: string;
+  context_percent?: number;
+}
+export interface ToolCallPayload {
+  agent_id?: string;
+  tool_name?: string;
+  arguments?: Record<string, unknown>;
+  call_id?: string;
+}
+export interface ToolResultPayload {
+  agent_id?: string;
+  call_id?: string;
+  tool_name?: string;
+  display_result?: string;
+  is_error?: boolean;
+}
+export interface ApprovalPromptPayload {
+  agent_id?: string;
+  request_id?: string;
+  tool_call?: ToolCall;
+  timeout_seconds?: number;
+}
+export interface ApprovalResultPayload {
+  agent_id?: string;
+  request_id?: string;
+  approved?: boolean;
+  feedback?: string;
+}
+export interface FinalResultPayload {
+  agent_id?: string;
+  turn_id?: string;
+  completion_status?: "completed" | "blocked" | "error" | string;
+}
+
+export type DisplayStreamEvent =
+  | { event: "assistant_text_delta"; data: DisplayEventEnvelope<AssistantTextPayload> }
+  | { event: "thinking_delta"; data: DisplayEventEnvelope<ThinkingPayload> }
+  | { event: "tool_call"; data: DisplayEventEnvelope<ToolCallPayload> }
+  | { event: "tool_result"; data: DisplayEventEnvelope<ToolResultPayload> }
+  | { event: "approval_prompt"; data: DisplayEventEnvelope<ApprovalPromptPayload> }
+  | { event: "approval_result"; data: DisplayEventEnvelope<ApprovalResultPayload> }
+  | { event: "progress_update"; data: DisplayEventEnvelope<ProgressPayload> }
+  | { event: "final_result"; data: DisplayEventEnvelope<FinalResultPayload> }
+  | { event: "Error" | "ErrorMessage"; data: ErrorEvent }
+  | { event: string; data: Record<string, unknown> };
+
+export type ApprovalPolicy = "auto" | "interactive" | "yolo";
+export type ApprovalScope = "once" | "session";
+
+export interface SessionResult {
+  session_id: string;
+  status: string;
+  final_answer: string | null;
+  verification_summary: string | null;
+  failure_details: string | null;
+}
+
+export interface DiffFile {
+  path: string;
+  status: "added" | "modified" | "deleted" | "renamed" | "binary" | "unknown";
+  old_path?: string | null;
+  additions?: number | null;
+  deletions?: number | null;
+  binary?: boolean;
+}
+export interface WorkspaceDiff {
+  session_id: string;
+  files: DiffFile[];
+  additions: number;
+  deletions: number;
+}
