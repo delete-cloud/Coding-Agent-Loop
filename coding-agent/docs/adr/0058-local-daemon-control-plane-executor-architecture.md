@@ -315,6 +315,8 @@ This ADR does not implement that path.
     cancellation session-state transitions, and cancelled local task observation
     are delegated to `RuntimeCancelService` instead of `SessionManager` helper
     methods.
+  - Completed: runtime task cancellation/waiting for close and shutdown paths is
+    delegated to `RuntimeTaskStopper` instead of inline `SessionManager` logic.
   - Completed: runtime run lifecycle and latest message snapshot persistence
     consume narrower `RuntimeRunLifecycleStore` and `RuntimeCheckpointStore`
     contracts through `RuntimeRunPersistenceService`.

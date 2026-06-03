@@ -12,6 +12,7 @@ from coding_agent.runtime_store import AgentRunRecord, JSONObject
 from coding_agent.runs import (
     RuntimeCloser,
     RuntimeRunLifecycle,
+    RuntimeTaskStopper,
     RuntimeTurnController,
     RuntimeTurnSessionState,
     RuntimeTurnObservationState,
@@ -177,7 +178,9 @@ def test_runtime_turn_outcome_helpers_map_result_and_status() -> None:
 
 
 @pytest.mark.asyncio
-async def test_runtime_closer_invalidates_runtime_before_awaiting_adapter_close() -> None:
+async def test_runtime_closer_invalidates_runtime_before_awaiting_adapter_close() -> (
+    None
+):
     close_started = asyncio.Event()
     close_released = asyncio.Event()
     session = FakeRuntimeHandleSession(
@@ -204,7 +207,9 @@ async def test_runtime_closer_invalidates_runtime_before_awaiting_adapter_close(
 
 
 @pytest.mark.asyncio
-async def test_runtime_closer_propagates_async_close_failure_after_invalidating() -> None:
+async def test_runtime_closer_propagates_async_close_failure_after_invalidating() -> (
+    None
+):
     session = FakeRuntimeHandleSession(
         runtime_pipeline=object(),
         runtime_ctx=object(),
@@ -265,6 +270,51 @@ def test_runtime_closer_sync_safe_closes_without_running_loop() -> None:
     assert session.runtime_ctx is None
     assert session.runtime_adapter is None
     assert closed == ["closed"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_task_stopper_noops_without_active_task() -> None:
+    await RuntimeTaskStopper().stop(session_id="session-1", task=None)
+
+
+@pytest.mark.asyncio
+async def test_runtime_task_stopper_cancels_active_task() -> None:
+    task = asyncio.create_task(asyncio.sleep(60))
+
+    await RuntimeTaskStopper().stop(session_id="session-1", task=task)
+
+    assert task.cancelled() is True
+
+
+@pytest.mark.asyncio
+async def test_runtime_task_stopper_raises_when_task_survives_cancellation() -> None:
+    class FakeTask:
+        def __init__(self) -> None:
+            self.cancel_calls = 0
+
+        def done(self) -> bool:
+            return False
+
+        def cancel(self) -> None:
+            self.cancel_calls += 1
+
+    fake_task = FakeTask()
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+
+        async def timeout_wait_for(task: object, *, timeout: float) -> None:
+            assert task is fake_task
+            assert timeout == 0.01
+            raise asyncio.TimeoutError
+
+        monkeypatch.setattr(asyncio, "wait_for", timeout_wait_for)
+        with pytest.raises(RuntimeError, match="did not stop after cancellation"):
+            await RuntimeTaskStopper(timeout=0.01).stop(
+                session_id="session-1",
+                task=cast(Any, fake_task),
+            )
+
+    assert fake_task.cancel_calls == 1
 
 
 @pytest.mark.asyncio
