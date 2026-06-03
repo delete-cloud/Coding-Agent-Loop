@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Any
+
 from .cloud import (
     CloudCommandResult,
     CloudEnvironment,
@@ -5,7 +9,6 @@ from .cloud import (
 )
 from .docker_workspace_provider import DockerCloudWorkspaceClient
 from .local import LocalEnvironment
-from .sandboxed import SandboxedEnvironment, sandbox_environment
 from .binding_resolver import (
     BindingResolver,
     CloudBindingNotImplementedError,
@@ -50,6 +53,18 @@ from .workspace_provider import (
     workspace_diff_from_config,
     workspace_patch_from_config,
 )
+
+
+def __getattr__(name: str) -> Any:
+    if name in {"SandboxedEnvironment", "sandbox_environment"}:
+        from .sandboxed import SandboxedEnvironment, sandbox_environment
+
+        exports = {
+            "SandboxedEnvironment": SandboxedEnvironment,
+            "sandbox_environment": sandbox_environment,
+        }
+        return exports[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     "CloudCommandResult",
