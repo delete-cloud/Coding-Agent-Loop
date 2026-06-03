@@ -355,6 +355,9 @@ This ADR does not implement that path.
     capture, tape-id synchronization, and session persistence are delegated to
     `RuntimeCheckpointCaptureService` instead of living inline in
     `SessionManager.capture_checkpoint()`.
+  - Completed: checkpoint metadata listing is delegated to
+    `RuntimeCheckpointQueryService` instead of `SessionManager` directly
+    querying the checkpoint backend.
   - Completed: ensure-runtime owner assertion, session loading, runtime
     ensure invocation, runtime builder wiring, and session persistence wiring
     are delegated to `RuntimeEnsureOrchestrationService` instead of living

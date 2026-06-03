@@ -13,7 +13,7 @@ from coding_agent.runtime_store import (
     RunMessageSnapshotRecord,
     RuntimeEventRecord,
 )
-from coding_agent.runs import RuntimeQueryService
+from coding_agent.runs import RuntimeCheckpointQueryService, RuntimeQueryService
 
 
 @dataclass
@@ -61,7 +61,9 @@ class RecordingRuntimeQueryStore:
         self,
         event_id: str,
     ) -> RuntimeEventRecord | None:
-        return next((event for event in self.events if event.event_id == event_id), None)
+        return next(
+            (event for event in self.events if event.event_id == event_id), None
+        )
 
     async def replay_runtime_events(
         self,
@@ -78,6 +80,62 @@ class RecordingRuntimeQueryStore:
             and event.sequence > after_sequence
         ]
         return events[:limit]
+
+
+class RecordingCheckpointBackend:
+    def __init__(self, checkpoints: list[CheckpointMeta]) -> None:
+        self.checkpoints = checkpoints
+        self.tape_ids: list[str] = []
+
+    async def list(self, tape_id: str) -> list[CheckpointMeta]:
+        self.tape_ids.append(tape_id)
+        return self.checkpoints
+
+
+@pytest.mark.asyncio
+async def test_runtime_checkpoint_query_service_returns_empty_without_tape() -> None:
+    backend = RecordingCheckpointBackend([_checkpoint("cp-unused")])
+
+    checkpoints = await RuntimeCheckpointQueryService(
+        checkpoint_service=lambda: backend,
+    ).list_checkpoints(FakeSession(tape_id=None))
+
+    assert checkpoints == []
+    assert backend.tape_ids == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_checkpoint_query_service_lists_session_tape_checkpoints() -> (
+    None
+):
+    expected = [_checkpoint("cp-1")]
+    backend = RecordingCheckpointBackend(expected)
+
+    checkpoints = await RuntimeCheckpointQueryService(
+        checkpoint_service=lambda: backend,
+    ).list_checkpoints(FakeSession(tape_id="stable-tape"))
+
+    assert checkpoints == expected
+    assert backend.tape_ids == ["stable-tape"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_checkpoint_query_service_reads_backend_provider_at_call_time() -> (
+    None
+):
+    backend_a = RecordingCheckpointBackend([_checkpoint("cp-old")])
+    backend_b = RecordingCheckpointBackend([_checkpoint("cp-current")])
+    current_backend = backend_a
+    service = RuntimeCheckpointQueryService(
+        checkpoint_service=lambda: current_backend,
+    )
+    current_backend = backend_b
+
+    checkpoints = await service.list_checkpoints(FakeSession(tape_id="tape-1"))
+
+    assert [checkpoint.checkpoint_id for checkpoint in checkpoints] == ["cp-current"]
+    assert backend_a.tape_ids == []
+    assert backend_b.tape_ids == ["tape-1"]
 
 
 @pytest.mark.asyncio
@@ -195,6 +253,18 @@ async def _list_checkpoints(session_id: str) -> list[CheckpointMeta]:
             label="latest",
         ),
     ]
+
+
+def _checkpoint(checkpoint_id: str) -> CheckpointMeta:
+    return CheckpointMeta(
+        checkpoint_id=checkpoint_id,
+        tape_id="tape-1",
+        session_id="session-1",
+        entry_count=1,
+        window_start=0,
+        created_at=datetime(2026, 5, 19, 11, 0, tzinfo=UTC),
+        label=None,
+    )
 
 
 def _run(
