@@ -36,6 +36,7 @@ from .context_binding import (
     RuntimeContextBindingService,
     RuntimeContextBindingSession,
 )
+from .control_services import RuntimeControlServices
 from .ensure import (
     RuntimeEnsureBuilder,
     RuntimeEnsurePersister,
@@ -202,6 +203,7 @@ __all__ = [
     "RuntimeCancelStore",
     "RuntimeContextBindingService",
     "RuntimeContextBindingSession",
+    "RuntimeControlServices",
     "RuntimeEnsureBuilder",
     "RuntimeEnsurePersister",
     "RuntimeEnsureService",
