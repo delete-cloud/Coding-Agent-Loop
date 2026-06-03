@@ -322,6 +322,9 @@ This ADR does not implement that path.
     `SessionManager` proxy helpers.
   - Completed: root run identity and subagent publisher binding are delegated to
     `RuntimeContextBindingService` instead of `SessionManager` helper methods.
+  - Completed: runtime agent factory selection and default application factory
+    lazy loading are delegated to `RuntimeAgentFactoryService` instead of a
+    `SessionManager` helper method.
   - Completed: runtime run lifecycle and latest message snapshot persistence
     consume narrower `RuntimeRunLifecycleStore` and `RuntimeCheckpointStore`
     contracts through `RuntimeRunPersistenceService`.

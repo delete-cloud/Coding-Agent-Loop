@@ -79,6 +79,7 @@ from coding_agent.runs import (
     RunCoordinator,
     RunRequest,
     RuntimeAttachedExecutorService,
+    RuntimeAgentFactoryService,
     RuntimeBindingSnapshot,
     RuntimeCancelService,
     RuntimeCloser,
@@ -789,6 +790,9 @@ class SessionManager:
             runtime_store if runtime_store is not None else self._create_runtime_store()
         )
         self._runtime_closer = RuntimeCloser()
+        self._runtime_agent_factory_service = RuntimeAgentFactoryService(
+            create_agent=self._create_agent,
+        )
         self._runtime_context_binding_service = RuntimeContextBindingService(
             publish_subagent_message=self.publish_subagent_message,
         )
@@ -797,7 +801,9 @@ class SessionManager:
             local_daemon_executor=self._local_daemon_executor,
             close_runtime=self._runtime_closer.close,
             close_runtime_adapter=self._runtime_closer.close_adapter,
-            create_agent_for_session=self._create_agent_for_session,
+            create_agent_for_session=(
+                self._runtime_agent_factory_service.create_agent_for_session
+            ),
             restore_tape=self._restore_tape,
             persist_session=self._persist_session_async,
             make_consumer=self._make_session_consumer,
@@ -1568,12 +1574,6 @@ class SessionManager:
             cleanup_error=cleanup_error,
         )
 
-    def _create_agent_for_session(self, **kwargs: Any) -> tuple[Any, Any]:
-        factory = self._create_agent
-        if factory is None:
-            factory = importlib.import_module("coding_agent.__main__").create_agent
-        return factory(**kwargs)
-
     def _runtime_run_persistence(self) -> RuntimeRunPersistenceService:
         return RuntimeRunPersistenceService(
             run_store=self._runtime_store,
@@ -2114,7 +2114,9 @@ class SessionManager:
             local_daemon_executor=self._local_daemon_executor,
             resolve_environment_for_run_target=self._resolve_environment_for_run_target,
             workspace_root_for_environment=self._environment_workspace_root,
-            create_agent_for_session=self._create_agent_for_session,
+            create_agent_for_session=(
+                self._runtime_agent_factory_service.create_agent_for_session
+            ),
             bind_subagent_message_publisher=(
                 self._runtime_context_binding_service.bind_subagent_message_publisher
             ),
