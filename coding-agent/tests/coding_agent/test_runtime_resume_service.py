@@ -9,7 +9,11 @@ from agentkit.checkpoint.models import CheckpointMeta
 from agentkit.tape.models import Entry
 
 from coding_agent.runtime_store import AgentRunRecord, RunMessageSnapshotRecord
-from coding_agent.runs import RuntimeResumeOrchestrationService, RuntimeResumeService
+from coding_agent.runs import (
+    RuntimeResumeOrchestrationService,
+    RuntimeResumeService,
+    RuntimeResumeSessionOrchestrationService,
+)
 
 
 @dataclass
@@ -197,6 +201,56 @@ async def test_runtime_resume_orchestration_runs_local_resume_with_boundary_anch
     assert local_runs[0][2] == "run-resumed"
     assert "Previous run was interrupted." in local_runs[0][1]
     assert "continue the implementation" in local_runs[0][1]
+
+
+@pytest.mark.asyncio
+async def test_runtime_resume_session_orchestration_requires_store_then_loads_session() -> (
+    None
+):
+    session = FakeSession()
+    calls: list[tuple[str, str | None]] = []
+
+    class RecordingResumeOrchestration:
+        async def resume(
+            self,
+            *,
+            session: FakeSession,
+            prompt: str | None = None,
+            resume_reason: str = "user_resume",
+        ) -> AgentRunRecord:
+            calls.append((f"resume:{session.id}", prompt))
+            assert resume_reason == "operator_resume"
+            return _run("run-resumed")
+
+    def require_runtime_store() -> object:
+        calls.append(("require_store", None))
+        return object()
+
+    async def assert_owner(session_id: str) -> None:
+        calls.append((f"assert_owner:{session_id}", None))
+
+    async def load_session(session_id: str) -> FakeSession:
+        calls.append((f"load_session:{session_id}", None))
+        return session
+
+    resumed_run = await RuntimeResumeSessionOrchestrationService(
+        require_runtime_store=require_runtime_store,
+        assert_owner=assert_owner,
+        load_session=load_session,
+        resume_orchestration=RecordingResumeOrchestration(),
+    ).resume_session(
+        "session-1",
+        prompt="continue",
+        resume_reason="operator_resume",
+    )
+
+    assert resumed_run.run_id == "run-resumed"
+    assert calls == [
+        ("require_store", None),
+        ("assert_owner:session-1", None),
+        ("load_session:session-1", None),
+        ("resume:session-1", "continue"),
+    ]
 
 
 async def _list_checkpoints(session_id: str) -> list[CheckpointMeta]:

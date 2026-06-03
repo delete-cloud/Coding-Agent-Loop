@@ -88,6 +88,7 @@ from coding_agent.runs import (
     RuntimeReplacementService,
     RuntimeResumeContext as SessionResumeContext,
     RuntimeResumeOrchestrationService,
+    RuntimeResumeSessionOrchestrationService,
     RuntimeTurnAdmissionService,
     RuntimeWorkspaceExportService,
     RuntimeWireEventRecorder,
@@ -938,6 +939,43 @@ class SessionManager:
             ensure_runtime=lambda session_id: self.ensure_session_runtime(session_id),
             persist_session=lambda session: self._persist_session_async(session),
         )
+        self._runtime_resume_orchestration = RuntimeResumeOrchestrationService(
+            resume_service=self._runtime_control_services.resume(),
+            latest_runtime_run=lambda session_id: (
+                self._runtime_control_services.queries().latest_runtime_run(session_id)
+            ),
+            latest_runtime_event_id=lambda run: (
+                self._runtime_control_services.queries().latest_runtime_event_id(run)
+            ),
+            load_runtime_run=lambda run_id: (
+                self._require_runtime_store().load_agent_run(run_id)
+            ),
+            persist_session=lambda session: self._persist_session_async(session),
+            list_checkpoints=self.list_checkpoints,
+            load_tape_entries=self._tape_store.load,
+            save_tape_entries=self._tape_store.save,
+            load_message_snapshot=lambda snapshot_id: (
+                self._require_runtime_store().load_message_snapshot(snapshot_id)
+            ),
+            run_local=self._run_resumed_local_session,
+            request_attached=self._request_resumed_attached_executor_run,
+            session_is_attached=lambda session: isinstance(
+                session.execution_binding,
+                ExternalWorkerBinding,
+            ),
+            append_live_boundary_anchor=self._append_live_resume_boundary_anchor,
+            active_resume_blocking_statuses=frozenset(
+                _ACTIVE_RESUME_BLOCKING_RUN_STATUSES
+            ),
+        )
+        self._runtime_resume_session_orchestration = (
+            RuntimeResumeSessionOrchestrationService(
+                require_runtime_store=self._require_runtime_store,
+                assert_owner=self._assert_owner,
+                load_session=self.get_session_async,
+                resume_orchestration=self._runtime_resume_orchestration,
+            )
+        )
         self._runtime_turn_service_factory = RuntimeTurnServiceFactory(
             runtime_control_services=self._runtime_control_services,
             persist_session=self._persist_session_async,
@@ -1173,35 +1211,8 @@ class SessionManager:
         prompt: str | None = None,
         resume_reason: str = "user_resume",
     ) -> AgentRunRecord:
-        store = self._require_runtime_store()
-        await self._assert_owner(session_id)
-        session = await self.get_session_async(session_id)
-        return await RuntimeResumeOrchestrationService(
-            resume_service=self._runtime_control_services.resume(),
-            latest_runtime_run=(
-                self._runtime_control_services.queries().latest_runtime_run
-            ),
-            latest_runtime_event_id=(
-                self._runtime_control_services.queries().latest_runtime_event_id
-            ),
-            load_runtime_run=store.load_agent_run,
-            persist_session=self._persist_session_async,
-            list_checkpoints=self.list_checkpoints,
-            load_tape_entries=self._tape_store.load,
-            save_tape_entries=self._tape_store.save,
-            load_message_snapshot=store.load_message_snapshot,
-            run_local=self._run_resumed_local_session,
-            request_attached=self._request_resumed_attached_executor_run,
-            session_is_attached=lambda session: isinstance(
-                session.execution_binding,
-                ExternalWorkerBinding,
-            ),
-            append_live_boundary_anchor=self._append_live_resume_boundary_anchor,
-            active_resume_blocking_statuses=frozenset(
-                _ACTIVE_RESUME_BLOCKING_RUN_STATUSES
-            ),
-        ).resume(
-            session=session,
+        return await self._runtime_resume_session_orchestration.resume_session(
+            session_id,
             prompt=prompt,
             resume_reason=resume_reason,
         )

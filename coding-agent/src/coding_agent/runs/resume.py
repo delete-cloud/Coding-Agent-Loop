@@ -45,6 +45,12 @@ RuntimeLiveBoundaryAnchorAppender = Callable[
     [RuntimeResumeOrchestrationSession, Anchor], None
 ]
 RuntimeRunIdFactory = Callable[[], str]
+RuntimeResumeStoreRequirement = Callable[[], object]
+RuntimeResumeOwnerAsserter = Callable[[str], Awaitable[None]]
+RuntimeResumeSessionLoader = Callable[
+    [str],
+    Awaitable[RuntimeResumeOrchestrationSession],
+]
 
 
 @dataclass(frozen=True)
@@ -195,6 +201,30 @@ class RuntimeResumeOrchestrationService:
         return self.resume_service.bind_boundary_anchor(
             resume_context,
             anchor_id=anchor.id,
+        )
+
+
+@dataclass(frozen=True)
+class RuntimeResumeSessionOrchestrationService:
+    require_runtime_store: RuntimeResumeStoreRequirement
+    assert_owner: RuntimeResumeOwnerAsserter
+    load_session: RuntimeResumeSessionLoader
+    resume_orchestration: RuntimeResumeOrchestrationService
+
+    async def resume_session(
+        self,
+        session_id: str,
+        *,
+        prompt: str | None = None,
+        resume_reason: str = "user_resume",
+    ) -> AgentRunRecord:
+        self.require_runtime_store()
+        await self.assert_owner(session_id)
+        session = await self.load_session(session_id)
+        return await self.resume_orchestration.resume(
+            session=session,
+            prompt=prompt,
+            resume_reason=resume_reason,
         )
 
 
