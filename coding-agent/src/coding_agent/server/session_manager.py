@@ -8,7 +8,7 @@ import logging
 import os
 import threading
 import uuid
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from inspect import isawaitable
@@ -67,9 +67,6 @@ from coding_agent.executors import (
 from coding_agent.events import DisplayEvent
 from coding_agent.runs import (
     CHECKPOINT_SESSION_CONFIG_KEY,
-    CheckpointRestoredRuntime,
-    CheckpointRestoreService,
-    CheckpointSessionConfig,
     DefaultRunCoordinator,
     EventBroadcastResult,
     LocalDaemonExecutorRef,
@@ -98,9 +95,9 @@ from coding_agent.runs import (
     run_target_from_execution_binding,
     serialize_checkpoint_session_config,
 )
-from coding_agent.runs.checkpoint_runtime import CheckpointRuntimeBuilder
 from coding_agent.runs.environment import RuntimeEnvironmentResolverService
 from coding_agent.runs.runtime_preparation import LocalDaemonRuntimePreparationService
+from coding_agent.runs.runtime_checkpoint_restore import RuntimeCheckpointRestoreService
 from coding_agent.runs.turn_execution import RuntimeTurnService
 from coding_agent.wire.consumer import LocalWireConsumer
 from coding_agent.wire.local import LocalWire
@@ -825,6 +822,34 @@ class SessionManager:
                 ctx=ctx,
                 consumer=consumer,
             ),
+        )
+        self._runtime_checkpoint_restore_service = RuntimeCheckpointRestoreService(
+            checkpoint_service=lambda: self._checkpoint_service,
+            tape_store=lambda: self._tape_store,
+            local_daemon_executor=self._local_daemon_executor,
+            resolve_environment_for_run_target=(
+                self._runtime_environment_resolver_service.resolve_environment_for_run_target
+            ),
+            workspace_root_for_environment=(
+                self._runtime_environment_resolver_service.workspace_root_for_environment
+            ),
+            create_agent_for_session=(
+                self._runtime_agent_factory_service.create_agent_for_session
+            ),
+            bind_subagent_message_publisher=(
+                self._runtime_context_binding_service.bind_subagent_message_publisher
+            ),
+            restore_consumer_factory=self._make_restore_consumer,
+            adapter_factory=lambda pipeline, ctx, consumer: PipelineAdapter(
+                pipeline=pipeline,
+                ctx=ctx,
+                consumer=consumer,
+            ),
+            runtime_preparation_request=(
+                self._runtime_preparation_request_service.request_for_session
+            ),
+            close_runtime=self._runtime_closer.close,
+            persist_session=self._persist_session_async,
         )
         self._runtime_turn_service = self._build_runtime_turn_service()
         self.configure_owner_leases(
@@ -2118,56 +2143,8 @@ class SessionManager:
             ),
         )
 
-    def _checkpoint_restore_service(self) -> CheckpointRestoreService:
-        runtime_builder = CheckpointRuntimeBuilder(
-            local_daemon_executor=self._local_daemon_executor,
-            resolve_environment_for_run_target=(
-                self._runtime_environment_resolver_service.resolve_environment_for_run_target
-            ),
-            workspace_root_for_environment=(
-                self._runtime_environment_resolver_service.workspace_root_for_environment
-            ),
-            create_agent_for_session=(
-                self._runtime_agent_factory_service.create_agent_for_session
-            ),
-            bind_subagent_message_publisher=(
-                self._runtime_context_binding_service.bind_subagent_message_publisher
-            ),
-            restore_consumer_factory=self._make_restore_consumer,
-            adapter_factory=lambda pipeline, ctx, consumer: PipelineAdapter(
-                pipeline=pipeline,
-                ctx=ctx,
-                consumer=consumer,
-            ),
-            runtime_preparation_request=(
-                self._runtime_preparation_request_service.request_for_session
-            ),
-        )
-
-        async def prepare_runtime(
-            *,
-            session: Session,
-            restored_tape: Tape,
-            restored_config: CheckpointSessionConfig,
-            plugin_states: Mapping[str, Any],
-        ) -> CheckpointRestoredRuntime:
-            return await runtime_builder.prepare_runtime(
-                session=session,
-                restored_tape=restored_tape,
-                restored_config=restored_config,
-                plugin_states=plugin_states,
-            )
-
-        return CheckpointRestoreService(
-            checkpoint_service=self._checkpoint_service,
-            tape_store=self._tape_store,
-            prepare_runtime=prepare_runtime,
-            close_runtime=self._runtime_closer.close,
-            persist_session=self._persist_session_async,
-        )
-
     async def _restore_checkpoint(self, session: Session, checkpoint_id: str) -> None:
-        await self._checkpoint_restore_service().restore(session, checkpoint_id)
+        await self._runtime_checkpoint_restore_service.restore(session, checkpoint_id)
 
     def _persist_session(self, session: Session) -> None:
         self._session_cache[session.id] = session
