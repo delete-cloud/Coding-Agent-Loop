@@ -2443,6 +2443,7 @@ async def send_prompt(
     session_id: str,
     body: PromptRequest | None = None,
     prompt: str | None = None,  # Backward compat: query param
+    event_format: Literal["wire", "display"] = Query("wire"),
     api_key: str | None = Depends(verify_api_key),
 ) -> EventSourceResponse:
     """Send message, returns SSE stream.
@@ -2483,7 +2484,13 @@ async def send_prompt(
 
             async for event in stream_wire_messages(session.wire, session.task):
                 await _broadcast_event(session, event)
-                yield event
+                response_event = _prompt_stream_event_response(
+                    session,
+                    event,
+                    event_format=event_format,
+                )
+                if response_event is not None:
+                    yield response_event
 
         except Exception as e:
             logger.exception("Error during turn")
@@ -2522,6 +2529,7 @@ async def resume_session(
     request: Request,
     session_id: str,
     body: ResumeSessionRequest | None = None,
+    event_format: Literal["wire", "display"] = Query("wire"),
     api_key: str | None = Depends(verify_api_key),
     auth_context: AuthContext | None = Depends(auth_context_from_headers),
 ) -> EventSourceResponse:
@@ -2590,7 +2598,13 @@ async def resume_session(
             )
             async for event in stream_wire_messages(session.wire, session.task):
                 await _broadcast_event(session, event)
-                yield event
+                response_event = _prompt_stream_event_response(
+                    session,
+                    event,
+                    event_format=event_format,
+                )
+                if response_event is not None:
+                    yield response_event
         except Exception as exc:
             logger.exception("Error during session resume")
             error_data = {
@@ -2619,6 +2633,19 @@ async def resume_session(
         event_generator(),
         media_type="text/event-stream",
     )
+
+
+def _prompt_stream_event_response(
+    session: Session,
+    event: dict[str, str],
+    *,
+    event_format: Literal["wire", "display"],
+) -> dict[str, str] | None:
+    if event_format == "wire":
+        return event
+    if event.get("event") == "Error":
+        return event
+    return _display_event_stream_transform(session, event)
 
 
 async def _send_attached_executor_prompt(

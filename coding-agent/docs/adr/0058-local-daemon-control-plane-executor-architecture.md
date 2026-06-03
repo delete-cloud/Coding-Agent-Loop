@@ -247,9 +247,12 @@ This ADR does not implement that path.
     `GET /runs/{run_id}/display-events`, and remote CLI attach uses
     `GET /sessions/{session_id}/display-events` with `DisplayEvent` envelope
     rendering.
-  - Remaining: web UI renderers and prompt/resume POST stream clients should
-    switch to `DisplayEvent` streams separately before this boundary is
-    complete.
+  - Completed: prompt/resume POST streams support opt-in
+    `event_format=display`, and remote prompt/resume clients request and render
+    `DisplayEvent` envelopes while legacy wire stream responses remain
+    available.
+  - Remaining: web UI renderers should switch to `DisplayEvent` streams
+    separately before this boundary is complete.
 - [~] Establish explicit Store contracts for durable runtime state.
   - Completed: `coding_agent.stores` defines runtime store contracts split into
     run lifecycle, run, runtime event, runtime interaction, and runtime
