@@ -73,6 +73,7 @@ from coding_agent.runs import (
     RunCoordinator,
     RuntimeAgentFactoryService,
     RuntimeBindingSnapshot,
+    RuntimeCancelObservationFinalizer,
     RuntimeCancelOrchestrationService,
     RuntimeControlServices,
     RuntimeCloser,
@@ -809,6 +810,13 @@ class SessionManager:
             ),
             schedule_cancel_observation=self._schedule_cancel_observation,
             turn_id_factory=lambda: uuid.uuid4().hex,
+        )
+        self._runtime_cancel_observation_finalizer = RuntimeCancelObservationFinalizer(
+            cancel_service=self._runtime_control_services.cancel,
+            load_session=self.get_session_async,
+            persist_session=self._persist_session_async,
+            session_has_task=lambda session, task: session.task is task,
+            lock=lambda: self._lock,
         )
         self._runtime_closer = RuntimeCloser()
         self._runtime_agent_factory_service = RuntimeAgentFactoryService(
@@ -2437,25 +2445,10 @@ class SessionManager:
         session_id: str,
         task: asyncio.Task[Any],
     ) -> None:
-        final_status = (
-            await self._runtime_control_services.cancel().observe_cancelled_local_task(
-                task
-            )
+        await self._runtime_cancel_observation_finalizer.finalize(
+            session_id=session_id,
+            task=task,
         )
-
-        async with self._lock:
-            try:
-                session = await self.get_session_async(session_id)
-            except KeyError:
-                return
-            if session.task is not task:
-                return
-            session.task = None
-            self._runtime_control_services.cancel().finish_observed_local_turn(
-                session,
-                status=final_status,
-            )
-            await self._persist_session_async(session)
 
     async def close(self) -> None:
         await self._close_resource_async(self._store)
