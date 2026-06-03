@@ -270,6 +270,81 @@ def daemon_repl(
             click.echo(f"Cleaned up daemon-backed local REPL session {session_id}")
 
 
+@daemon.command("tui")
+@click.option("--goal", required=True, help="Prompt to send to the local daemon.")
+@click.option("--repo", default=".", help="Local repository path for the session.")
+@click.option(
+    "--url",
+    default="http://127.0.0.1:8080",
+    show_default=True,
+    help="Local daemon HTTP URL.",
+)
+@click.option(
+    "--approval",
+    "approval_policy",
+    default="auto",
+    show_default=True,
+    type=DAEMON_APPROVAL_CHOICES,
+    help="Tool approval policy for the daemon session.",
+)
+@click.option("--token", default=None, help="Bearer token for the daemon.")
+@click.option("--model", "model_name", default="gpt-4", help="Model label for the TUI.")
+@click.option("--max-steps", default=30, show_default=True, help="Max steps to display.")
+@click.option(
+    "--keep-session/--cleanup-session",
+    default=True,
+    show_default=True,
+    help="Keep the created daemon session after the TUI run finishes.",
+)
+def daemon_tui(
+    goal: str,
+    repo: str,
+    url: str,
+    approval_policy: str,
+    token: str | None,
+    model_name: str,
+    max_steps: int,
+    keep_session: bool,
+) -> None:
+    """Run one prompt through an already-running local daemon with Rich TUI."""
+    from coding_agent.remote.client import (
+        auth_headers,
+        delete_remote_session,
+        stream_prompt_or_run_request,
+    )
+    from coding_agent.ui.rich_tui import CodingAgentTUI
+
+    with CodingAgentTUI(model_name=model_name, max_steps=max_steps) as tui:
+        tui.add_user_message(goal)
+        endpoint, session_id = _create_daemon_local_session(
+            repo=repo,
+            url=url,
+            token=token,
+            approval_policy=approval_policy,
+        )
+        click.echo(
+            f"Created daemon-backed local TUI session {session_id} at {endpoint.url}"
+        )
+        headers = auth_headers(endpoint)
+        try:
+            status = stream_prompt_or_run_request(
+                base_url=endpoint.url,
+                session_id=session_id,
+                prompt=goal,
+                headers=headers,
+                display_consumer=tui.consumer,
+            )
+        finally:
+            if not keep_session:
+                delete_remote_session(
+                    base_url=endpoint.url,
+                    session_id=session_id,
+                    headers=headers,
+                )
+                click.echo(f"Cleaned up daemon-backed local TUI session {session_id}")
+    raise SystemExit(status)
+
+
 def _create_daemon_local_session(
     *,
     repo: str,

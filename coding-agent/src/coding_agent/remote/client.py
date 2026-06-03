@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import asyncio
 import tempfile
 from dataclasses import dataclass
 from collections.abc import Mapping
 from pathlib import Path
-from typing import cast
+from typing import Any, Protocol, cast
 from urllib.parse import quote, urlencode
 
 import click
@@ -16,6 +17,23 @@ import httpx
 from httpx_sse import connect_sse
 
 from coding_agent.remote.approval import APPROVAL_POLICIES
+from coding_agent.wire.protocol import (
+    ApprovalRequest,
+    ApprovalResponse,
+    CompletionStatus,
+    StreamDelta,
+    ThinkingDelta,
+    ToolCallDelta,
+    ToolResultDelta,
+    TurnEnd,
+    TurnStatusDelta,
+    WireMessage,
+)
+
+
+class DisplayWireConsumer(Protocol):
+    async def emit(self, msg: WireMessage) -> None: ...
+    async def request_approval(self, req: ApprovalRequest) -> ApprovalResponse: ...
 
 
 @dataclass(frozen=True)
@@ -711,7 +729,12 @@ def stream_prompt(
 
 
 def stream_prompt_or_run_request(
-    *, base_url: str, session_id: str, prompt: str, headers: dict[str, str]
+    *,
+    base_url: str,
+    session_id: str,
+    prompt: str,
+    headers: dict[str, str],
+    display_consumer: DisplayWireConsumer | None = None,
 ) -> int:
     return _stream_prompt_like_request(
         base_url=base_url,
@@ -721,6 +744,7 @@ def stream_prompt_or_run_request(
         headers=headers,
         action="stream remote prompt",
         truncated_message="Remote prompt stream ended without RunRequested or TurnEnd",
+        display_consumer=display_consumer,
     )
 
 
@@ -754,6 +778,7 @@ def _stream_prompt_like_request(
     headers: dict[str, str],
     action: str,
     truncated_message: str,
+    display_consumer: DisplayWireConsumer | None = None,
 ) -> int:
     timeout = httpx.Timeout(connect=10.0, write=30.0, pool=30.0, read=None)
     line_open = False
@@ -787,6 +812,7 @@ def _stream_prompt_like_request(
                         event=sse.event,
                         data=sse.data,
                         line_open=line_open,
+                        display_consumer=display_consumer,
                     )
                     if status is not None:
                         if line_open:
@@ -809,7 +835,18 @@ def _handle_prompt_like_sse_event(
     event: str,
     data: str,
     line_open: bool = False,
+    display_consumer: DisplayWireConsumer | None = None,
 ) -> tuple[int | None, bool]:
+    if display_consumer is not None:
+        return _handle_prompt_like_sse_event_with_consumer(
+            base_url=base_url,
+            session_id=session_id,
+            headers=headers,
+            event=event,
+            data=data,
+            line_open=line_open,
+            display_consumer=display_consumer,
+        )
     if event in {
         "StreamDelta",
         "ThinkingDelta",
@@ -837,6 +874,203 @@ def _handle_prompt_like_sse_event(
         data=data,
         line_open=line_open,
     )
+
+
+def _handle_prompt_like_sse_event_with_consumer(
+    *,
+    base_url: str,
+    session_id: str,
+    headers: dict[str, str],
+    event: str,
+    data: str,
+    line_open: bool,
+    display_consumer: DisplayWireConsumer,
+) -> tuple[int | None, bool]:
+    del line_open
+    legacy_event, payload = _legacy_prompt_event_payload(event, data)
+    if legacy_event == "ApprovalRequest":
+        request = _wire_message_from_payload(legacy_event, payload, session_id)
+        if not isinstance(request, ApprovalRequest):
+            raise click.ClickException("Remote approval event was not an approval request")
+        response = asyncio.run(display_consumer.request_approval(request))
+        _submit_approval(
+            base_url=base_url,
+            session_id=session_id,
+            request_id=response.request_id,
+            approved=response.approved,
+            feedback=response.feedback,
+            scope=response.scope,
+            headers=headers,
+        )
+        return None, False
+    if legacy_event == "Error":
+        error = payload.get("error")
+        raise click.ClickException(str(error) if error is not None else "Remote error")
+    message = _wire_message_from_payload(legacy_event, payload, session_id)
+    if message is None:
+        return None, False
+    asyncio.run(display_consumer.emit(message))
+    if isinstance(message, TurnEnd):
+        return (0 if message.completion_status is CompletionStatus.COMPLETED else 1), False
+    return None, False
+
+
+def _legacy_prompt_event_payload(
+    event: str,
+    data: str,
+) -> tuple[str, dict[str, object]]:
+    if event in {
+        "StreamDelta",
+        "ThinkingDelta",
+        "ToolCallDelta",
+        "ToolResultDelta",
+        "ApprovalRequest",
+        "ApprovalResponse",
+        "TurnStatusDelta",
+        "TurnEnd",
+        "Error",
+    }:
+        return event, _parse_sse_payload(data)
+    envelope = _parse_sse_payload(data)
+    payload = envelope.get("payload")
+    if not isinstance(payload, Mapping):
+        raise click.ClickException("Remote display event payload missing payload")
+    return (
+        _legacy_event_name_for_display_kind(event),
+        dict(cast(Mapping[str, object], payload)),
+    )
+
+
+def _wire_message_from_payload(
+    event: str,
+    payload: dict[str, object],
+    session_id: str,
+) -> WireMessage | None:
+    message_session_id = _string_payload_value(payload, "session_id") or session_id
+    agent_id = _string_payload_value(payload, "agent_id") or ""
+    if event == "StreamDelta":
+        return StreamDelta(
+            session_id=message_session_id,
+            agent_id=agent_id,
+            content=_string_payload_value(payload, "content") or "",
+            role=_string_payload_value(payload, "role") or "assistant",
+        )
+    if event == "ThinkingDelta":
+        return ThinkingDelta(
+            session_id=message_session_id,
+            agent_id=agent_id,
+            text=_string_payload_value(payload, "text") or "",
+        )
+    if event == "ToolCallDelta":
+        return ToolCallDelta(
+            session_id=message_session_id,
+            agent_id=agent_id,
+            tool_name=_string_payload_value(payload, "tool_name") or "unknown",
+            arguments=_mapping_payload_value(payload, "arguments"),
+            call_id=_string_payload_value(payload, "call_id") or "",
+        )
+    if event == "ToolResultDelta":
+        result = payload.get("result")
+        display_result = _string_payload_value(payload, "display_result") or ""
+        if result is None:
+            result = display_result
+        return ToolResultDelta(
+            session_id=message_session_id,
+            agent_id=agent_id,
+            call_id=_string_payload_value(payload, "call_id") or "",
+            tool_name=_string_payload_value(payload, "tool_name") or "unknown",
+            result=result,
+            display_result=display_result,
+            is_error=bool(payload.get("is_error")),
+        )
+    if event == "ApprovalRequest":
+        tool_call = _tool_call_payload_value(payload, message_session_id, agent_id)
+        return ApprovalRequest(
+            session_id=message_session_id,
+            agent_id=agent_id,
+            request_id=_string_payload_value(payload, "request_id") or "",
+            call_id=_string_payload_value(payload, "call_id") or "",
+            tool_call=tool_call,
+            tool=_string_payload_value(payload, "tool") or "",
+            args=_mapping_payload_value(payload, "args"),
+            risk_level=cast(Any, _string_payload_value(payload, "risk_level") or "low"),
+        )
+    if event == "ApprovalResponse":
+        return ApprovalResponse(
+            session_id=message_session_id,
+            agent_id=agent_id,
+            request_id=_string_payload_value(payload, "request_id") or "",
+            call_id=_string_payload_value(payload, "call_id") or "",
+            approved=bool(payload.get("approved", True)),
+            feedback=cast(str | None, payload.get("feedback")),
+            scope=cast(Any, _string_payload_value(payload, "scope") or "once"),
+        )
+    if event == "TurnStatusDelta":
+        return TurnStatusDelta(
+            session_id=message_session_id,
+            agent_id=agent_id,
+            phase=_string_payload_value(payload, "phase") or "idle",
+            elapsed_seconds=_float_payload_value(payload, "elapsed_seconds"),
+            tokens_in=_int_payload_value(payload, "tokens_in"),
+            tokens_out=_int_payload_value(payload, "tokens_out"),
+            model_name=_string_payload_value(payload, "model_name") or "",
+            context_percent=_float_payload_value(payload, "context_percent"),
+        )
+    if event == "TurnEnd":
+        status = _string_payload_value(payload, "completion_status") or "error"
+        return TurnEnd(
+            session_id=message_session_id,
+            agent_id=agent_id,
+            turn_id=_string_payload_value(payload, "turn_id") or "",
+            completion_status=CompletionStatus(status),
+        )
+    return None
+
+
+def _tool_call_payload_value(
+    payload: dict[str, object],
+    session_id: str,
+    agent_id: str,
+) -> ToolCallDelta | None:
+    tool_call = payload.get("tool_call")
+    if not isinstance(tool_call, Mapping):
+        return None
+    tool_call_payload = dict(cast(Mapping[str, object], tool_call))
+    return ToolCallDelta(
+        session_id=_string_payload_value(tool_call_payload, "session_id") or session_id,
+        agent_id=_string_payload_value(tool_call_payload, "agent_id") or agent_id,
+        tool_name=_string_payload_value(tool_call_payload, "tool_name") or "unknown",
+        arguments=_mapping_payload_value(tool_call_payload, "arguments"),
+        call_id=_string_payload_value(tool_call_payload, "call_id") or "",
+    )
+
+
+def _string_payload_value(payload: Mapping[str, object], key: str) -> str | None:
+    value = payload.get(key)
+    return value if isinstance(value, str) else None
+
+
+def _mapping_payload_value(payload: Mapping[str, object], key: str) -> dict[str, Any]:
+    value = payload.get(key)
+    if not isinstance(value, Mapping):
+        return {}
+    return dict(cast(Mapping[str, Any], value))
+
+
+def _int_payload_value(payload: Mapping[str, object], key: str) -> int:
+    value = payload.get(key)
+    if isinstance(value, bool):
+        return 0
+    return value if isinstance(value, int) else 0
+
+
+def _float_payload_value(payload: Mapping[str, object], key: str) -> float:
+    value = payload.get(key)
+    if isinstance(value, bool):
+        return 0.0
+    if isinstance(value, int | float):
+        return float(value)
+    return 0.0
 
 
 def attach_remote_session(
