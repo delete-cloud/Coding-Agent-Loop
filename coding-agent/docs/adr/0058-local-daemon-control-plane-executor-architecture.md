@@ -326,6 +326,10 @@ This ADR does not implement that path.
     dispatch, and resumed run lookup is delegated to
     `RuntimeResumeOrchestrationService` instead of living inline in
     `SessionManager.resume_session()`.
+  - Completed: public resume-session runtime-store guard, owner assertion,
+    session loading, and resume dispatch are delegated to
+    `RuntimeResumeSessionOrchestrationService` instead of living inline in
+    `SessionManager.resume_session()`.
   - Completed: attached/external executor run request, claim, heartbeat, runtime
     event append, finalization metadata, and claim authorization are delegated to
     `RuntimeAttachedExecutorService` instead of `SessionManager` helper methods.
