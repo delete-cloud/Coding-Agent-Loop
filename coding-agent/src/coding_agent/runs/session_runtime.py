@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+import logging
 from typing import Any
 
 from agentkit.runtime import (
@@ -11,6 +12,16 @@ from agentkit.runtime import (
 )
 
 from coding_agent.approval import ApprovalCoordinator
+
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class EventBroadcastResult:
+    delivered_count: int
+    full_pruned_count: int
+    failed_pruned_count: int
 
 
 @dataclass
@@ -33,5 +44,35 @@ class SessionRuntimeHandle:
         default_factory=RuntimeMessageCursor
     )
 
+    def broadcast_event_nowait(
+        self,
+        event: dict[str, Any],
+    ) -> EventBroadcastResult:
+        active_queues: list[asyncio.Queue[dict[str, Any]]] = []
+        delivered_count = 0
+        full_pruned_count = 0
+        failed_pruned_count = 0
 
-__all__ = ["SessionRuntimeHandle"]
+        for queue in self.event_queues:
+            try:
+                queue.put_nowait(event)
+            except asyncio.QueueFull:
+                full_pruned_count += 1
+            except Exception:
+                logger.debug(
+                    "Pruning event queue after broadcast failure",
+                    exc_info=True,
+                )
+                failed_pruned_count += 1
+            else:
+                delivered_count += 1
+                active_queues.append(queue)
+
+        self.event_queues = active_queues
+        return EventBroadcastResult(
+            delivered_count=delivered_count,
+            full_pruned_count=full_pruned_count,
+            failed_pruned_count=failed_pruned_count,
+        )
+
+__all__ = ["EventBroadcastResult", "SessionRuntimeHandle"]

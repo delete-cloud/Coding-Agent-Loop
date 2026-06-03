@@ -63,7 +63,7 @@ from .recovery import (
     RuntimeRunRecoveryService,
     RuntimeRunSessionLister,
 )
-from .session_runtime import SessionRuntimeHandle
+from .session_runtime import EventBroadcastResult, SessionRuntimeHandle
 from .target import (
     CloudWorkspaceRef,
     ExecutionBindingRunTargetError,
@@ -98,6 +98,7 @@ __all__ = [
     "CheckpointSessionConfig",
     "DefaultRunCoordinator",
     "ExecutionBindingRunTargetError",
+    "EventBroadcastResult",
     "ExecutorRef",
     "ExternalWorkerExecutorRef",
     "ExternalWorkerWorkspaceRef",

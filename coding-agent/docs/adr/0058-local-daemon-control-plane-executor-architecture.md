@@ -145,6 +145,9 @@ This ADR does not implement that path.
     `coding_agent.runs.SessionRuntimeHandle`.
   - `SessionManager` consumes the runtime-layer handle instead of defining the
     runtime handle type in the server module.
+  - Runtime event queue broadcast and queue pruning live on
+    `SessionRuntimeHandle`; `Session.broadcast_event_nowait()` is a
+    compatibility delegate.
   - Store payload tests assert runtime handles are not persisted.
 - [x] Introduce a `RunCoordinator` boundary that selects an executor from
   `RunTarget`.
