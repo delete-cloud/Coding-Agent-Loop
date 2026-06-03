@@ -69,7 +69,7 @@ class FakePool:
                 if row["status"] not in {"requested", "expired"}:
                     continue
                 metadata = cast(dict[str, object], row["metadata"])
-                if metadata.get("execution_binding_kind") not in {
+                if metadata.get("executor_ref_kind") not in {
                     "external_worker",
                     "local_attached",
                 }:
@@ -320,7 +320,7 @@ async def test_claim_external_worker_run_marks_requested_run_claimed(
             started_at=_dt(9),
             ended_at=None,
             metadata={
-                "execution_binding_kind": "external_worker",
+                "executor_ref_kind": "external_worker",
                 "executor_kind": "local_cli",
                 "prompt": "hello",
             },
@@ -360,7 +360,7 @@ async def test_claim_attached_executor_run_accepts_local_attached_binding(
             started_at=_dt(9),
             ended_at=None,
             metadata={
-                "execution_binding_kind": "local_attached",
+                "executor_ref_kind": "local_attached",
                 "execution_placement": "local_attached",
                 "executor_kind": "local_cli",
                 "prompt": "hello",
@@ -382,7 +382,7 @@ async def test_claim_attached_executor_run_accepts_local_attached_binding(
     assert claimed is not None
     assert claimed.run_id == "run-local-attached"
     assert claimed.status == "claimed"
-    assert claimed.metadata["execution_binding_kind"] == "local_attached"
+    assert claimed.metadata["executor_ref_kind"] == "local_attached"
     assert claimed.metadata["worker_id"] == "worker-1"
 
 

@@ -4,15 +4,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import ClassVar, Literal, TypeAlias, cast
 
-from coding_agent.environment.execution_binding import (
-    CloudWorkspaceBinding,
-    ExecutionBinding,
-    ExternalWorkerBinding,
-    LocalAttachedExecutionBinding,
-    LocalExecutionBinding,
-)
-
-
 def _require_non_empty(value: str, *, field_name: str) -> None:
     if not value.strip():
         raise ValueError(f"{field_name} must be non-empty")
@@ -414,8 +405,8 @@ class RunTarget:
         }
 
 
-class ExecutionBindingRunTargetError(ValueError):
-    """Raised when a compatibility execution binding cannot map to RunTarget."""
+class LegacyRunTargetError(ValueError):
+    """Raised when legacy session target metadata cannot map to RunTarget."""
 
 
 class RunTargetSerializationError(ValueError):
@@ -505,26 +496,30 @@ def run_target_from_dict(data: Mapping[str, object]) -> RunTarget:
     )
 
 
-def run_target_from_execution_binding(binding: ExecutionBinding) -> RunTarget:
-    if isinstance(binding, LocalExecutionBinding):
+def run_target_from_legacy_session_payload(
+    data: Mapping[str, object],
+) -> RunTarget:
+    """Convert legacy stored session target metadata into a RunTarget."""
+    kind = data.get("kind")
+    if kind == "local":
         return RunTarget(
             workspace=LocalPathWorkspaceRef(
-                path=binding.workspace_root,
-                workspace_provider=binding.workspace_provider,
-                provider_instance_id=binding.provider_instance_id,
+                path=_require_str(data, "workspace_root"),
+                workspace_provider=_optional_str(data, "workspace_provider"),
+                provider_instance_id=_optional_str(data, "provider_instance_id"),
             ),
             executor=LocalDaemonExecutorRef(),
             isolation=IsolationPolicy(kind="default_local_sandbox"),
         )
 
-    if isinstance(binding, CloudWorkspaceBinding):
+    if kind == "cloud":
         return RunTarget(
             workspace=CloudWorkspaceRef(
-                workspace_url=binding.workspace_url,
-                workspace_id=binding.workspace_id,
-                runtime_profile=binding.runtime_profile,
-                workspace_provider=binding.workspace_provider,
-                provider_instance_id=binding.provider_instance_id,
+                workspace_url=_require_str(data, "workspace_url"),
+                workspace_id=_require_str(data, "workspace_id"),
+                runtime_profile=_optional_str(data, "runtime_profile"),
+                workspace_provider=_optional_str(data, "workspace_provider"),
+                provider_instance_id=_optional_str(data, "provider_instance_id"),
             ),
             executor=ManagedPoolExecutorRef(),
             isolation=IsolationPolicy(
@@ -535,40 +530,116 @@ def run_target_from_execution_binding(binding: ExecutionBinding) -> RunTarget:
             ),
         )
 
-    if isinstance(binding, LocalAttachedExecutionBinding):
+    if kind == "local_attached":
         return RunTarget(
             workspace=ExternalWorkerWorkspaceRef(
-                ref={} if binding.workspace_ref is None else binding.workspace_ref,
-                provider_instance_id=binding.provider_instance_id,
+                ref=_optional_metadata(data, "workspace_ref") or {},
+                provider_instance_id=_optional_str(data, "provider_instance_id"),
             ),
             executor=LocalAttachedExecutorRef(
-                executor_kind=binding.executor_kind,
-                worker_pool=binding.worker_pool,
+                executor_kind=_require_str(data, "executor_kind"),
+                worker_pool=_optional_str_with_default(
+                    data,
+                    "worker_pool",
+                    "default",
+                ),
             ),
             isolation=IsolationPolicy(kind="external_worker_policy"),
         )
 
-    if isinstance(binding, ExternalWorkerBinding):
+    if kind == "external_worker":
         return RunTarget(
             workspace=ExternalWorkerWorkspaceRef(
-                ref={} if binding.workspace_ref is None else binding.workspace_ref,
-                provider_instance_id=binding.provider_instance_id,
+                ref=_optional_metadata(data, "workspace_ref") or {},
+                provider_instance_id=_optional_str(data, "provider_instance_id"),
             ),
             executor=ExternalWorkerExecutorRef(
-                executor_kind=binding.executor_kind,
-                worker_pool=binding.worker_pool,
+                executor_kind=_require_str(data, "executor_kind"),
+                worker_pool=_optional_str_with_default(
+                    data,
+                    "worker_pool",
+                    "default",
+                ),
             ),
             isolation=IsolationPolicy(kind="external_worker_policy"),
         )
 
-    raise ExecutionBindingRunTargetError(
-        f"unsupported execution binding type: {type(binding).__name__}"
+    raise LegacyRunTargetError(
+        f"unsupported legacy session payload kind: {kind}"
     )
+
+
+def run_target_workspace_surface(target: RunTarget) -> str:
+    workspace = target.workspace
+    if isinstance(workspace, LocalPathWorkspaceRef):
+        return "local_workspace"
+    if isinstance(workspace, CloudWorkspaceRef):
+        return "cloud_workspace"
+    if isinstance(workspace, ExternalWorkerWorkspaceRef):
+        if isinstance(target.executor, LocalAttachedExecutorRef):
+            return "local_attached_workspace"
+        return "external_worker_workspace_ref"
+    if isinstance(workspace, SnapshotWorkspaceRef):
+        return "snapshot_workspace"
+    raise RunTargetSerializationError(
+        f"unsupported workspace ref type: {type(workspace).__name__}"
+    )
+
+
+def run_target_execution_plane(target: RunTarget) -> str:
+    if isinstance(target.executor, (ExternalWorkerExecutorRef, LocalAttachedExecutorRef)):
+        return "executor_plane"
+    return "control_plane"
+
+
+def run_target_execution_placement(target: RunTarget) -> str:
+    if isinstance(target.executor, LocalDaemonExecutorRef):
+        return "server_embedded"
+    if isinstance(target.executor, ManagedPoolExecutorRef):
+        return "cloud_workspace"
+    if isinstance(target.executor, (ExternalWorkerExecutorRef, LocalAttachedExecutorRef)):
+        return "local_attached"
+    if isinstance(target.executor, InlineExecutorRef):
+        return "inline_testkit"
+    raise RunTargetSerializationError(
+        f"unsupported executor ref type: {type(target.executor).__name__}"
+    )
+
+
+def run_target_executor_kind(target: RunTarget) -> str:
+    executor = target.executor
+    if isinstance(executor, LocalDaemonExecutorRef):
+        return "local_daemon"
+    if isinstance(executor, ManagedPoolExecutorRef):
+        return "managed_pool"
+    if isinstance(executor, (ExternalWorkerExecutorRef, LocalAttachedExecutorRef)):
+        return executor.executor_kind
+    if isinstance(executor, InlineExecutorRef):
+        return "inline_testkit"
+    raise RunTargetSerializationError(
+        f"unsupported executor ref type: {type(executor).__name__}"
+    )
+
+
+def run_target_executor_ref_kind(target: RunTarget) -> str | None:
+    executor = target.executor
+    if isinstance(executor, (ExternalWorkerExecutorRef, LocalAttachedExecutorRef)):
+        return executor.kind
+    return None
+
+
+def run_target_worker_pool(target: RunTarget) -> str | None:
+    executor = target.executor
+    if isinstance(executor, (ExternalWorkerExecutorRef, LocalAttachedExecutorRef)):
+        return executor.worker_pool
+    if isinstance(executor, ManagedPoolExecutorRef):
+        return executor.pool
+    return None
 
 
 __all__ = [
     "CloudWorkspaceRef",
-    "ExecutionBindingRunTargetError",
+    "LegacyRunTargetError",
     "ExecutorRef",
     "ExternalWorkerExecutorRef",
     "ExternalWorkerWorkspaceRef",
@@ -586,7 +657,13 @@ __all__ = [
     "executor_ref_from_dict",
     "executor_ref_to_dict",
     "run_target_from_dict",
-    "run_target_from_execution_binding",
+    "run_target_execution_placement",
+    "run_target_execution_plane",
+    "run_target_executor_kind",
+    "run_target_executor_ref_kind",
+    "run_target_from_legacy_session_payload",
+    "run_target_worker_pool",
+    "run_target_workspace_surface",
     "workspace_ref_from_dict",
     "workspace_ref_to_dict",
 ]

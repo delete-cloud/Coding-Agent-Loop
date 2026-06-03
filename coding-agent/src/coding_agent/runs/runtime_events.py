@@ -8,7 +8,6 @@ from enum import Enum
 from math import isfinite
 from typing import Protocol, cast
 
-from coding_agent.environment.execution_binding import ExecutionBinding
 from coding_agent.runtime_store import (
     AgentRunRecord,
     JSONObject,
@@ -17,14 +16,21 @@ from coding_agent.runtime_store import (
 )
 from coding_agent.wire.protocol import WireMessage
 
-from .metadata import runtime_execution_placement
+from .target import (
+    RunTarget,
+    run_target_execution_placement,
+    run_target_execution_plane,
+    run_target_executor_kind,
+    run_target_executor_ref_kind,
+    run_target_workspace_surface,
+)
 
 
 class RuntimeWireEventSession(Protocol):
     id: str
     current_turn_id: str | None
     tape_id: str | None
-    execution_binding: ExecutionBinding
+    default_run_target: RunTarget
 
 
 class RuntimeWireEventStore(Protocol):
@@ -46,7 +52,8 @@ def runtime_event_correlation_from_run(run: AgentRunRecord) -> JSONObject:
         payload["tape_id"] = run.tape_id
     for key in (
         "execution_placement",
-        "execution_binding_kind",
+        "executor_kind",
+        "executor_ref_kind",
         "workspace_surface",
         "execution_plane",
         "previous_run_id",
@@ -114,17 +121,20 @@ def _runtime_event_correlation_from_session(
     session: RuntimeWireEventSession,
     run_id: str,
 ) -> JSONObject:
-    binding = session.execution_binding
+    target = session.default_run_target
     correlation: JSONObject = {
         "session_id": session.id,
         "run_id": run_id,
-        "execution_placement": runtime_execution_placement(binding),
-        "execution_binding_kind": binding.kind,
-        "workspace_surface": binding.workspace_surface,
-        "execution_plane": binding.execution_plane,
+        "execution_placement": run_target_execution_placement(target),
+        "executor_kind": run_target_executor_kind(target),
+        "workspace_surface": run_target_workspace_surface(target),
+        "execution_plane": run_target_execution_plane(target),
     }
     if session.tape_id is not None:
         correlation["tape_id"] = session.tape_id
+    executor_ref_kind = run_target_executor_ref_kind(target)
+    if executor_ref_kind is not None:
+        correlation["executor_ref_kind"] = executor_ref_kind
     return correlation
 
 

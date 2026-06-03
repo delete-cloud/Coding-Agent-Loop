@@ -6,15 +6,19 @@ from typing import Any, Protocol
 
 from agentkit.runtime.context import AgentRunContext
 
-from coding_agent.environment.execution_binding import ExecutionBinding
-
 from .lifecycle import RuntimeRunResumeContext
-from .metadata import runtime_execution_placement
+from .target import (
+    RunTarget,
+    run_target_execution_placement,
+    run_target_execution_plane,
+    run_target_executor_kind,
+    run_target_workspace_surface,
+)
 
 
 class RuntimeContextBindingSession(Protocol):
     id: str
-    execution_binding: ExecutionBinding
+    default_run_target: RunTarget
 
 
 @dataclass(frozen=True)
@@ -42,14 +46,11 @@ class RuntimeContextBindingService:
         trace_metadata = dict(run_context.trace_metadata)
         trace_metadata["turn_id"] = run_id
         trace_metadata["tape_id"] = ctx.tape.tape_id
-        trace_metadata["execution_placement"] = runtime_execution_placement(
-            session.execution_binding
-        )
-        trace_metadata["execution_binding_kind"] = session.execution_binding.kind
-        trace_metadata["workspace_surface"] = (
-            session.execution_binding.workspace_surface
-        )
-        trace_metadata["execution_plane"] = session.execution_binding.execution_plane
+        target = session.default_run_target
+        trace_metadata["execution_placement"] = run_target_execution_placement(target)
+        trace_metadata["executor_kind"] = run_target_executor_kind(target)
+        trace_metadata["workspace_surface"] = run_target_workspace_surface(target)
+        trace_metadata["execution_plane"] = run_target_execution_plane(target)
         if resume_context is not None:
             trace_metadata.update(resume_context.metadata())
         ctx.run_context = replace(

@@ -1,17 +1,37 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 import pytest
 
-from coding_agent.environment.execution_binding import (
-    ExternalWorkerBinding,
-    LocalExecutionBinding,
+from coding_agent.runs import (
+    ExternalWorkerExecutorRef,
+    ExternalWorkerWorkspaceRef,
+    IsolationPolicy,
+    LocalDaemonExecutorRef,
+    LocalPathWorkspaceRef,
+    RunTarget,
+    RuntimeWireEventRecorder,
 )
 from coding_agent.runtime_store import AgentRunRecord, RuntimeEventRecord
-from coding_agent.runs import RuntimeWireEventRecorder
 from coding_agent.wire.protocol import StreamDelta
+
+
+def _local_target() -> RunTarget:
+    return RunTarget(
+        workspace=LocalPathWorkspaceRef(path="/workspace"),
+        executor=LocalDaemonExecutorRef(),
+        isolation=IsolationPolicy(kind="default_local_sandbox"),
+    )
+
+
+def _external_worker_target() -> RunTarget:
+    return RunTarget(
+        workspace=ExternalWorkerWorkspaceRef(),
+        executor=ExternalWorkerExecutorRef(executor_kind="local_cli"),
+        isolation=IsolationPolicy(kind="external_worker_policy"),
+    )
 
 
 @dataclass
@@ -19,9 +39,7 @@ class FakeSession:
     id: str = "session-1"
     current_turn_id: str | None = "run-1"
     tape_id: str | None = "tape-1"
-    execution_binding: LocalExecutionBinding = LocalExecutionBinding(
-        workspace_root="/workspace"
-    )
+    default_run_target: RunTarget = field(default_factory=_local_target)
 
 
 class RecordingRuntimeEventStore:
@@ -53,7 +71,7 @@ async def test_runtime_wire_event_recorder_uses_run_correlation_metadata() -> No
         started_at=datetime(2026, 6, 3, 1, 2, tzinfo=UTC),
         metadata={
             "execution_placement": "local_attached",
-            "execution_binding_kind": "external_worker",
+            "executor_ref_kind": "external_worker",
             "workspace_surface": "external_worker_workspace_ref",
             "execution_plane": "executor_plane",
             "previous_run_id": "run-0",
@@ -89,7 +107,7 @@ async def test_runtime_wire_event_recorder_uses_run_correlation_metadata() -> No
     assert record.payload["run_id"] == "run-1"
     assert record.payload["tape_id"] == "stable-tape"
     assert record.payload["execution_placement"] == "local_attached"
-    assert record.payload["execution_binding_kind"] == "external_worker"
+    assert record.payload["executor_ref_kind"] == "external_worker"
     assert record.payload["workspace_surface"] == "external_worker_workspace_ref"
     assert record.payload["execution_plane"] == "executor_plane"
     assert record.payload["previous_run_id"] == "run-0"
@@ -114,9 +132,7 @@ async def test_runtime_wire_event_recorder_falls_back_to_session_correlation() -
         store,
         new_event_id=lambda run_id: f"{run_id}:wire:fixed",
     )
-    session = FakeSession(
-        execution_binding=ExternalWorkerBinding(executor_kind="local_cli"),
-    )
+    session = FakeSession(default_run_target=_external_worker_target())
 
     record = await recorder.append_wire_event(
         session,
@@ -134,7 +150,7 @@ async def test_runtime_wire_event_recorder_falls_back_to_session_correlation() -
     assert record.payload["run_id"] == "run-1"
     assert record.payload["tape_id"] == "tape-1"
     assert record.payload["execution_placement"] == "local_attached"
-    assert record.payload["execution_binding_kind"] == "external_worker"
+    assert record.payload["executor_ref_kind"] == "external_worker"
     assert record.payload["workspace_surface"] == "external_worker_workspace_ref"
     assert record.payload["execution_plane"] == "executor_plane"
 

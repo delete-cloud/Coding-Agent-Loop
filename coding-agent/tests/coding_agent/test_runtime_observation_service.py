@@ -1,9 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from coding_agent.agent_observability import AgentObservationEvent
-from coding_agent.environment.execution_binding import LocalExecutionBinding
+from coding_agent.runs import (
+    IsolationPolicy,
+    LocalDaemonExecutorRef,
+    LocalPathWorkspaceRef,
+    RunTarget,
+)
 from coding_agent.runs.observation import RuntimeObservationService
 
 
@@ -26,8 +31,12 @@ class FakeResumeContext:
 @dataclass
 class FakeSession:
     id: str = "session-1"
-    execution_binding: LocalExecutionBinding = LocalExecutionBinding(
-        workspace_root="/repo"
+    default_run_target: RunTarget = field(
+        default_factory=lambda: RunTarget(
+            workspace=LocalPathWorkspaceRef(path="/repo"),
+            executor=LocalDaemonExecutorRef(),
+            isolation=IsolationPolicy(kind="default_local_sandbox"),
+        )
     )
 
 
@@ -61,7 +70,7 @@ def test_runtime_observation_service_records_turn_start_and_completion() -> None
     assert store.events[0].attributes["previous_run_id"] == "run-0"
     assert store.events[0].attributes["tape_id"] == "tape-1"
     assert store.events[0].attributes["execution_placement"] == "server_embedded"
-    assert store.events[0].attributes["execution_binding_kind"] == "local"
+    assert store.events[0].attributes["executor_kind"] == "local_daemon"
     assert store.events[0].attributes["workspace_surface"] == "local_workspace"
     assert store.events[0].attributes["execution_plane"] == "control_plane"
     assert store.events[1].status == "error"

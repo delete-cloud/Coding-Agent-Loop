@@ -193,7 +193,7 @@ class JSONLRuntimeStore:
                 run
                 for run in runs.values()
                 if run.status in {"requested", "expired"}
-                and run.metadata.get("execution_binding_kind")
+                and run.metadata.get("executor_ref_kind")
                 in {"external_worker", "local_attached"}
                 and run.metadata.get("executor_kind") == executor_kind
                 and (session_id is None or run.session_id == session_id)
@@ -643,7 +643,7 @@ class SQLiteRuntimeStore:
             candidates = [
                 run
                 for run in candidates
-                if run.metadata.get("execution_binding_kind")
+                if run.metadata.get("executor_ref_kind")
                 in {"external_worker", "local_attached"}
                 and run.metadata.get("executor_kind") == executor_kind
             ]
@@ -937,7 +937,7 @@ class PGRuntimeStore:
             run_id
         )
         WHERE status IN ('requested', 'expired')
-          AND metadata->>'execution_binding_kind' IN ('external_worker', 'local_attached')
+          AND metadata->>'executor_ref_kind' IN ('external_worker', 'local_attached')
           AND metadata->>'executor_kind' IS NOT NULL;
 
     CREATE TABLE IF NOT EXISTS runtime_events (
@@ -1030,7 +1030,7 @@ class PGRuntimeStore:
         SELECT run_id
         FROM agent_runs
         WHERE status IN ('requested', 'expired')
-          AND metadata->>'execution_binding_kind' IN ('external_worker', 'local_attached')
+          AND metadata->>'executor_ref_kind' IN ('external_worker', 'local_attached')
           AND metadata->>'executor_kind' = $2
           AND ($1::text IS NULL OR session_id = $1)
         ORDER BY started_at, run_id

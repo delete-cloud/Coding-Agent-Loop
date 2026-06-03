@@ -5,70 +5,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from coding_agent.core.config import ProviderName
-
-
-class LocalExecutionBindingRequest(BaseModel):
-    kind: Literal["local"]
-    workspace_root: str = Field(..., min_length=1, max_length=500)
-    workspace_provider: str | None = Field(
-        None,
-        min_length=1,
-        max_length=100,
-        pattern=r"^.*\S.*$",
-    )
-    provider_instance_id: str | None = Field(
-        None,
-        min_length=1,
-        max_length=200,
-        pattern=r"^.*\S.*$",
-    )
-
-
-class CloudWorkspaceBindingRequest(BaseModel):
-    kind: Literal["cloud"]
-    workspace_url: str = Field(..., min_length=1, max_length=500)
-    workspace_id: str = Field(..., min_length=1, max_length=200)
-    workspace_provider: str | None = Field(
-        None,
-        min_length=1,
-        max_length=100,
-        pattern=r"^.*\S.*$",
-    )
-    provider_instance_id: str | None = Field(
-        None,
-        min_length=1,
-        max_length=200,
-        pattern=r"^.*\S.*$",
-    )
-
-
-class ExternalWorkerBindingRequest(BaseModel):
-    kind: Literal["external_worker"]
-    executor_kind: str = Field(..., min_length=1, max_length=100)
-    worker_pool: str = Field("default", min_length=1, max_length=100)
-    workspace_ref: dict[str, Any] | None = None
-    provider_instance_id: str | None = Field(
-        None,
-        min_length=1,
-        max_length=200,
-        pattern=r"^.*\S.*$",
-    )
-
-
-class LocalAttachedExecutionBindingRequest(BaseModel):
-    kind: Literal["local_attached"]
-    executor_kind: str = Field(..., min_length=1, max_length=100)
-    worker_pool: str = Field("default", min_length=1, max_length=100)
-    workspace_ref: dict[str, Any] | None = None
-    provider_instance_id: str | None = Field(
-        None,
-        min_length=1,
-        max_length=200,
-        pattern=r"^.*\S.*$",
-    )
 
 
 class DockerWorkspaceSourceRequest(BaseModel):
@@ -88,12 +27,6 @@ class GitWorkspaceSourceRequest(BaseModel):
     runtime_profile: str | None = Field(None, min_length=1, max_length=100)
 
 
-ExecutionBindingRequest = (
-    LocalExecutionBindingRequest
-    | CloudWorkspaceBindingRequest
-    | LocalAttachedExecutionBindingRequest
-    | ExternalWorkerBindingRequest
-)
 WorkspaceSourceRequest = DockerWorkspaceSourceRequest | GitWorkspaceSourceRequest
 
 
@@ -113,8 +46,11 @@ class ResumeSessionRequest(BaseModel):
 class CreateSessionRequest(BaseModel):
     """Request schema for creating a session."""
 
+    model_config = ConfigDict(extra="forbid")
+
     repo_path: str | None = Field(None, max_length=500)
-    execution_binding: ExecutionBindingRequest | None = None
+    default_run_target: dict[str, Any] | None = None
+    run_target: dict[str, Any] | None = None
     workspace_source: WorkspaceSourceRequest | None = None
     approval_policy: str = Field("auto", pattern="^(yolo|interactive|auto)$")
     provider: ProviderName | None = None
@@ -162,7 +98,7 @@ class SessionSummaryResponse(BaseModel):
     base_url: str | None = None
     max_steps: int
     origin: dict[str, str] | None = None
-    execution_binding: dict[str, object]
+    default_run_target: dict[str, object]
     workspace_id: str | None = None
     resumable: bool = False
     last_run_id: str | None = None

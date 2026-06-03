@@ -42,6 +42,8 @@ from coding_agent.runtime_store import (
 )
 from coding_agent.runs import (
     CloudWorkspaceRef,
+    ExternalWorkerExecutorRef,
+    ExternalWorkerWorkspaceRef,
     IsolationPolicy,
     LocalDaemonExecutorRef,
     LocalPathWorkspaceRef,
@@ -50,12 +52,6 @@ from coding_agent.runs import (
     RunRequest,
     RunSubmission,
     RunTarget,
-)
-from coding_agent.environment.binding_resolver import DefaultBindingResolver
-from coding_agent.environment.execution_binding import (
-    CloudWorkspaceBinding,
-    ExternalWorkerBinding,
-    LocalExecutionBinding,
 )
 from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictError
 from coding_agent.server.stores.session_owner_store import SessionOwnerRecord
@@ -78,6 +74,35 @@ from coding_agent.server.stores.workspace_store import (
     WorkspaceRetentionPolicy,
     WorkspaceStatus,
 )
+
+
+def _local_run_target(path: Path | str) -> RunTarget:
+    return RunTarget(
+        workspace=LocalPathWorkspaceRef(path=str(path)),
+        executor=LocalDaemonExecutorRef(),
+        isolation=IsolationPolicy(kind="default_local_sandbox"),
+    )
+
+
+def _cloud_run_target(workspace: CloudWorkspaceRef) -> RunTarget:
+    return RunTarget(
+        workspace=workspace,
+        executor=LocalDaemonExecutorRef(),
+        isolation=IsolationPolicy(
+            kind="provider_sandbox",
+            network="provider_managed",
+            filesystem="provider_managed",
+            secrets="provider_managed",
+        ),
+    )
+
+
+def _external_worker_run_target() -> RunTarget:
+    return RunTarget(
+        workspace=ExternalWorkerWorkspaceRef(),
+        executor=ExternalWorkerExecutorRef(executor_kind="local_cli"),
+        isolation=IsolationPolicy(kind="external_worker_policy"),
+    )
 
 
 class FakeRuntimeStore:
@@ -820,7 +845,7 @@ async def test_run_agent_persists_agent_run_lifecycle_when_store_configured() ->
         "model_name": "test-model",
         "approval_policy": "auto",
         "max_steps": 30,
-        "execution_binding_kind": "local",
+        "executor_kind": "local_daemon",
         "workspace_surface": "local_workspace",
         "execution_plane": "control_plane",
         "execution_placement": "server_embedded",
@@ -860,7 +885,7 @@ async def test_run_agent_submits_run_request_to_run_coordinator(
         run_coordinator=run_coordinator,
     )
     session_id = await manager.create_session(
-        execution_binding=LocalExecutionBinding(workspace_root=str(legacy_workspace)),
+        default_run_target=_local_run_target(legacy_workspace),
     )
     session = manager.get_session(session_id)
     session.default_run_target = RunTarget(
@@ -944,7 +969,7 @@ async def test_run_agent_executes_local_runtime_through_local_daemon_executor(
         local_daemon_executor=local_executor,
     )
     session_id = await manager.create_session(
-        execution_binding=LocalExecutionBinding(workspace_root=str(workspace)),
+        default_run_target=_local_run_target(workspace),
     )
 
     class FakeAdapter:
@@ -1379,7 +1404,7 @@ async def test_resume_session_creates_new_run_linked_to_interrupted_run(
     )
     assert observation["attributes"]["tape_id"] == stable_tape_id
     assert observation["attributes"]["execution_placement"] == "server_embedded"
-    assert observation["attributes"]["execution_binding_kind"] == "local"
+    assert observation["attributes"]["executor_kind"] == "local_daemon"
     assert observation["attributes"]["workspace_surface"] == "local_workspace"
     assert observation["attributes"]["execution_plane"] == "control_plane"
 
@@ -1412,7 +1437,7 @@ async def test_resume_external_executor_session_requests_linked_run() -> None:
     runtime_store = FakeRuntimeStore()
     manager = SessionManager(runtime_store=runtime_store)
     session_id = await manager.create_session(
-        execution_binding=ExternalWorkerBinding(executor_kind="local_cli")
+        default_run_target=_external_worker_run_target()
     )
     stable_tape_id = f"{session_id}-tape"
     previous_run = AgentRunRecord(
@@ -1463,7 +1488,7 @@ async def test_finalize_attached_executor_run_saves_tape_before_final_status(
     runtime_store = FakeRuntimeStore()
     manager = SessionManager(runtime_store=runtime_store)
     session_id = await manager.create_session(
-        execution_binding=ExternalWorkerBinding(executor_kind="local_cli")
+        default_run_target=_external_worker_run_target()
     )
     requested = await manager.request_attached_executor_run(
         session_id,
@@ -1821,7 +1846,7 @@ async def test_run_agent_persists_wire_events_when_runtime_store_configured() ->
     assert event.payload["run_id"] == runtime_store.created[0].run_id
     assert event.payload["tape_id"] == runtime_store.created[0].tape_id
     assert event.payload["execution_placement"] == "server_embedded"
-    assert event.payload["execution_binding_kind"] == "local"
+    assert event.payload["executor_kind"] == "local_daemon"
     assert event.payload["workspace_surface"] == "local_workspace"
     assert event.payload["execution_plane"] == "control_plane"
     assert event.payload["message_type"] == "StreamDelta"
@@ -1903,7 +1928,7 @@ async def test_run_agent_persists_approval_request_wire_events() -> None:
     assert event.payload["run_id"] == runtime_store.created[0].run_id
     assert event.payload["tape_id"] == runtime_store.created[0].tape_id
     assert event.payload["execution_placement"] == "server_embedded"
-    assert event.payload["execution_binding_kind"] == "local"
+    assert event.payload["executor_kind"] == "local_daemon"
     assert event.payload["workspace_surface"] == "local_workspace"
     assert event.payload["execution_plane"] == "control_plane"
     assert event.payload["message_type"] == "ApprovalRequest"
@@ -2395,7 +2420,7 @@ async def test_run_agent_rebuilds_live_runtime_when_default_run_target_changes(
     second_workspace = tmp_path / "second"
     second_workspace.mkdir()
     session_id = await manager.create_session(
-        execution_binding=LocalExecutionBinding(workspace_root=str(first_workspace)),
+        default_run_target=_local_run_target(first_workspace),
     )
 
     create_agent_roots: list[Path] = []
@@ -2787,7 +2812,7 @@ async def test_cancel_attached_executor_requested_run_marks_cancelled() -> None:
     runtime_store = FakeRuntimeStore()
     manager = SessionManager(runtime_store=runtime_store)
     session_id = await manager.create_session(
-        execution_binding=ExternalWorkerBinding(executor_kind="local_cli")
+        default_run_target=_external_worker_run_target()
     )
     requested = await manager.request_attached_executor_run(
         session_id,
@@ -2814,7 +2839,7 @@ async def test_cancel_attached_executor_claimed_run_marks_cancelling() -> None:
     runtime_store = FakeRuntimeStore()
     manager = SessionManager(runtime_store=runtime_store)
     session_id = await manager.create_session(
-        execution_binding=ExternalWorkerBinding(executor_kind="local_cli")
+        default_run_target=_external_worker_run_target()
     )
     requested = await manager.request_attached_executor_run(
         session_id,
@@ -2953,15 +2978,17 @@ async def test_prepare_session_turn_rejects_active_workspace_export() -> None:
     store = InMemorySessionStore()
     manager = SessionManager(store=store)
     session_id = await manager.create_session(
-        execution_binding=CloudWorkspaceBinding(
-            workspace_url="docker://agent-ws-export/workspace",
-            workspace_id="ws-export",
+        default_run_target=_cloud_run_target(
+            CloudWorkspaceRef(
+                workspace_url="docker://agent-ws-export/workspace",
+                workspace_id="ws-export",
+            )
         )
     )
     export_started = asyncio.Event()
     release_export = threading.Event()
 
-    def blocking_export(binding: CloudWorkspaceBinding) -> str:
+    def blocking_export(binding: CloudWorkspaceRef) -> str:
         export_started.set()
         assert release_export.wait(timeout=10)
         return binding.workspace_id
@@ -2984,15 +3011,17 @@ async def test_run_agent_rejects_active_workspace_export() -> None:
     store = InMemorySessionStore()
     manager = SessionManager(store=store)
     session_id = await manager.create_session(
-        execution_binding=CloudWorkspaceBinding(
-            workspace_url="docker://agent-ws-export/workspace",
-            workspace_id="ws-export",
+        default_run_target=_cloud_run_target(
+            CloudWorkspaceRef(
+                workspace_url="docker://agent-ws-export/workspace",
+                workspace_id="ws-export",
+            )
         )
     )
     export_started = asyncio.Event()
     release_export = threading.Event()
 
-    def blocking_export(binding: CloudWorkspaceBinding) -> str:
+    def blocking_export(binding: CloudWorkspaceRef) -> str:
         export_started.set()
         assert release_export.wait(timeout=10)
         return binding.workspace_id
@@ -3055,8 +3084,20 @@ async def test_rehydrated_session_rebuilds_runtime_from_persisted_tape() -> None
         mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
         mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
         mp.setattr(rehydrated, "_restore_tape", fake_restore_tape)
-
-        await rehydrated.run_agent(session_id, "resume")
+        original_restore_tape = rehydrated._local_daemon_runtime_preparation.restore_tape
+        object.__setattr__(
+            rehydrated._local_daemon_runtime_preparation,
+            "restore_tape",
+            fake_restore_tape,
+        )
+        try:
+            await rehydrated.run_agent(session_id, "resume")
+        finally:
+            object.__setattr__(
+                rehydrated._local_daemon_runtime_preparation,
+                "restore_tape",
+                original_restore_tape,
+            )
 
     assert created_tapes == [persisted_tape]
 
@@ -3213,7 +3254,7 @@ async def test_ensure_session_runtime_uses_default_run_target_workspace(
         local_daemon_executor=local_executor,
     )
     session_id = await manager.create_session(
-        execution_binding=LocalExecutionBinding(workspace_root=str(legacy_bound)),
+        default_run_target=_local_run_target(legacy_bound),
     )
     session = manager.get_session(session_id)
     session.default_run_target = RunTarget(
@@ -3235,8 +3276,8 @@ async def test_ensure_session_runtime_uses_default_run_target_workspace(
     }
     assert len(local_executor.preparations) == 1
     assert local_executor.preparations[0].request.target == session.default_run_target
-    assert isinstance(session.execution_binding, LocalExecutionBinding)
-    assert session.execution_binding.workspace_root == str(legacy_bound)
+    assert isinstance(session.default_run_target.workspace, LocalPathWorkspaceRef)
+    assert session.default_run_target.workspace.path == str(target_bound)
 
 
 @pytest.mark.asyncio
@@ -3279,7 +3320,7 @@ async def test_replace_session_runtime_config_uses_default_run_target_workspace(
         local_daemon_executor=local_executor,
     )
     session_id = await manager.create_session(
-        execution_binding=LocalExecutionBinding(workspace_root=str(legacy_bound)),
+        default_run_target=_local_run_target(legacy_bound),
     )
     session = manager.get_session(session_id)
     session.default_run_target = RunTarget(
@@ -3304,8 +3345,8 @@ async def test_replace_session_runtime_config_uses_default_run_target_workspace(
     }
     assert len(local_executor.preparations) == 1
     assert local_executor.preparations[0].request.target == session.default_run_target
-    assert isinstance(session.execution_binding, LocalExecutionBinding)
-    assert session.execution_binding.workspace_root == str(legacy_bound)
+    assert isinstance(session.default_run_target.workspace, LocalPathWorkspaceRef)
+    assert session.default_run_target.workspace.path == str(target_bound)
 
 
 @pytest.mark.asyncio
@@ -3372,7 +3413,7 @@ async def test_ensure_session_runtime_builds_from_preparation_target(
         local_daemon_executor=local_executor,
     )
     session_id = await manager.create_session(
-        execution_binding=LocalExecutionBinding(workspace_root=str(original_bound)),
+        default_run_target=_local_run_target(original_bound),
     )
     session = manager.get_session(session_id)
     original_target = RunTarget(
@@ -3509,7 +3550,20 @@ async def test_cold_restore_recovers_conversation_history() -> None:
         mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
         mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
         mp.setattr(manager, "_restore_tape", fake_restore_tape)
-        await manager.run_agent(session_id, "resume")
+        original_restore_tape = manager._local_daemon_runtime_preparation.restore_tape
+        object.__setattr__(
+            manager._local_daemon_runtime_preparation,
+            "restore_tape",
+            fake_restore_tape,
+        )
+        try:
+            await manager.run_agent(session_id, "resume")
+        finally:
+            object.__setattr__(
+                manager._local_daemon_runtime_preparation,
+                "restore_tape",
+                original_restore_tape,
+            )
 
     assert [entry.payload["content"] for entry in restored_entries[:2]] == [
         "persisted history",
@@ -3906,17 +3960,15 @@ async def test_restore_rewinds_restart_safe_agent_configuration_from_checkpoint_
 
 
 @pytest.mark.asyncio
-async def test_run_agent_uses_resolved_workspace_root_from_binding(
+async def test_run_agent_uses_default_run_target_workspace(
     tmp_path: Path,
 ) -> None:
     manager = SessionManager(store=InMemorySessionStore())
     session_id = await manager.create_session()
     session = manager.get_session(session_id)
     session.repo_path = tmp_path / "not-used-directly"
-    bound_workspace = tmp_path / "bound-workspace"
-    session.execution_binding = LocalExecutionBinding(
-        workspace_root=str(bound_workspace)
-    )
+    target_workspace = tmp_path / "target-workspace"
+    session.default_run_target = _local_run_target(target_workspace)
     manager.register_session(session)
 
     class FakeAdapter:
@@ -3944,20 +3996,20 @@ async def test_run_agent_uses_resolved_workspace_root_from_binding(
         mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
         await manager.run_agent(session_id, "hello")
 
-    assert captured_kwargs["workspace_root"] == bound_workspace.resolve()
+    assert captured_kwargs["workspace_root"] == target_workspace.resolve()
     assert isinstance(captured_kwargs["environment"], LocalEnvironment)
-    assert captured_kwargs["environment"].workspace_root == bound_workspace.resolve()
+    assert captured_kwargs["environment"].workspace_root == target_workspace.resolve()
 
 
 @pytest.mark.asyncio
-async def test_restore_checkpoint_preserves_execution_binding(tmp_path: Path) -> None:
+async def test_restore_checkpoint_preserves_default_run_target(tmp_path: Path) -> None:
     store = InMemorySessionStore()
     manager = SessionManager(store=store)
     session_id = await manager.create_session()
     session = manager.get_session(session_id)
     session.tape_id = "binding-restore-tape"
     restore_bound = tmp_path / "restore-bound"
-    session.execution_binding = LocalExecutionBinding(workspace_root=str(restore_bound))
+    session.default_run_target = _local_run_target(restore_bound)
     manager.register_session(session)
 
     snapshot = types.SimpleNamespace(
@@ -4021,8 +4073,8 @@ async def test_restore_checkpoint_preserves_execution_binding(tmp_path: Path) ->
     assert captured_kwargs["workspace_root"] == restore_bound.resolve()
     assert isinstance(captured_kwargs["environment"], LocalEnvironment)
     assert captured_kwargs["environment"].workspace_root == restore_bound.resolve()
-    assert isinstance(session.execution_binding, LocalExecutionBinding)
-    assert session.execution_binding.workspace_root == str(restore_bound)
+    assert isinstance(session.default_run_target.workspace, LocalPathWorkspaceRef)
+    assert session.default_run_target.workspace.path == str(restore_bound)
 
 
 @pytest.mark.asyncio
@@ -4037,7 +4089,7 @@ async def test_restore_checkpoint_uses_default_run_target_workspace(
     legacy_bound.mkdir()
     target_bound.mkdir()
     session_id = await manager.create_session(
-        execution_binding=LocalExecutionBinding(workspace_root=str(legacy_bound)),
+        default_run_target=_local_run_target(legacy_bound),
     )
     session = manager.get_session(session_id)
     session.tape_id = "target-restore-tape"
@@ -4114,8 +4166,8 @@ async def test_restore_checkpoint_uses_default_run_target_workspace(
     }
     assert len(local_executor.preparations) == 1
     assert local_executor.preparations[0].request.target == session.default_run_target
-    assert isinstance(session.execution_binding, LocalExecutionBinding)
-    assert session.execution_binding.workspace_root == str(legacy_bound)
+    assert isinstance(session.default_run_target.workspace, LocalPathWorkspaceRef)
+    assert session.default_run_target.workspace.path == str(target_bound)
 
 
 @pytest.mark.asyncio
@@ -4207,7 +4259,7 @@ async def test_restore_checkpoint_builds_from_preparation_target(
         local_daemon_executor=local_executor,
     )
     session_id = await manager.create_session(
-        execution_binding=LocalExecutionBinding(workspace_root=str(original_bound)),
+        default_run_target=_local_run_target(original_bound),
     )
     session = manager.get_session(session_id)
     session.tape_id = "restore-preparation-tape"
@@ -4333,7 +4385,7 @@ class FakeCloudClient:
 
 
 @pytest.mark.asyncio
-async def test_run_agent_does_not_bootstrap_cloud_runtime_from_execution_binding() -> (
+async def test_run_agent_does_not_bootstrap_managed_pool_runtime() -> (
     None
 ):
     runtime_store = FakeRuntimeStore()
@@ -4345,14 +4397,16 @@ async def test_run_agent_does_not_bootstrap_cloud_runtime_from_execution_binding
         store=InMemorySessionStore(),
         runtime_store=runtime_store,
         create_agent_fn=fake_create_agent,
-        binding_resolver=DefaultBindingResolver(
-            cloud_client_factory=lambda binding: FakeCloudClient()
-        ),
+        cloud_workspace_client_factory=lambda workspace: FakeCloudClient(),
     )
     session_id = await manager.create_session(
-        execution_binding=CloudWorkspaceBinding(
-            workspace_url="https://workspace.example.com",
-            workspace_id="ws-123",
+        default_run_target=RunTarget(
+            workspace=CloudWorkspaceRef(
+                workspace_url="https://workspace.example.com",
+                workspace_id="ws-123",
+            ),
+            executor=ManagedPoolExecutorRef(),
+            isolation=IsolationPolicy(kind="provider_sandbox"),
         )
     )
 
@@ -4381,14 +4435,16 @@ async def test_run_agent_routes_unsupported_runtime_through_run_coordinator() ->
         runtime_store=runtime_store,
         create_agent_fn=fake_create_agent,
         run_coordinator=coordinator,
-        binding_resolver=DefaultBindingResolver(
-            cloud_client_factory=lambda binding: FakeCloudClient()
-        ),
+        cloud_workspace_client_factory=lambda workspace: FakeCloudClient(),
     )
     session_id = await manager.create_session(
-        execution_binding=CloudWorkspaceBinding(
-            workspace_url="https://workspace.example.com",
-            workspace_id="ws-123",
+        default_run_target=RunTarget(
+            workspace=CloudWorkspaceRef(
+                workspace_url="https://workspace.example.com",
+                workspace_id="ws-123",
+            ),
+            executor=ManagedPoolExecutorRef(),
+            isolation=IsolationPolicy(kind="provider_sandbox"),
         )
     )
 
@@ -4422,7 +4478,7 @@ async def test_configure_run_coordinator_updates_runtime_turn_service() -> None:
     )
     manager.configure_run_coordinator(coordinator)
     session_id = await manager.create_session(
-        execution_binding=LocalExecutionBinding(workspace_root="/tmp/repo")
+        default_run_target=_local_run_target("/tmp/repo")
     )
 
     await manager.run_agent(session_id, "hello")
@@ -4467,14 +4523,16 @@ async def test_run_agent_does_not_route_cloud_runtime_through_local_daemon_execu
         runtime_store=cast(Any, runtime_store),
         create_agent_fn=fake_create_agent,
         local_daemon_executor=local_executor,
-        binding_resolver=DefaultBindingResolver(
-            cloud_client_factory=lambda binding: FakeCloudClient()
-        ),
+        cloud_workspace_client_factory=lambda workspace: FakeCloudClient(),
     )
     session_id = await manager.create_session(
-        execution_binding=CloudWorkspaceBinding(
-            workspace_url="https://workspace.example.com",
-            workspace_id="ws-123",
+        default_run_target=RunTarget(
+            workspace=CloudWorkspaceRef(
+                workspace_url="https://workspace.example.com",
+                workspace_id="ws-123",
+            ),
+            executor=ManagedPoolExecutorRef(),
+            isolation=IsolationPolicy(kind="provider_sandbox"),
         )
     )
 
@@ -4507,90 +4565,8 @@ async def test_run_agent_does_not_route_cloud_runtime_through_local_daemon_execu
 
 
 @pytest.mark.asyncio
-async def test_restore_checkpoint_preserves_cloud_execution_binding() -> None:
-    captured_kwargs: dict[str, object] = {}
-    fake_pipeline = types.SimpleNamespace(
-        _registry=types.SimpleNamespace(
-            get=lambda _: types.SimpleNamespace(_instance=None)
-        )
-    )
-
-    def fake_create_agent(**kwargs):
-        captured_kwargs.update(kwargs)
-        return fake_pipeline, types.SimpleNamespace(
-            config={}, tape=kwargs.get("tape"), plugin_states={}
-        )
-
-    manager = SessionManager(
-        store=InMemorySessionStore(),
-        create_agent_fn=fake_create_agent,
-        binding_resolver=DefaultBindingResolver(
-            cloud_client_factory=lambda binding: FakeCloudClient()
-        ),
-    )
-    session_id = await manager.create_session(
-        execution_binding=CloudWorkspaceBinding(
-            workspace_url="https://workspace.example.com",
-            workspace_id="ws-123",
-        )
-    )
-    session = manager.get_session(session_id)
-    session.tape_id = "cloud-restore-tape"
-    manager.register_session(session)
-
-    snapshot = types.SimpleNamespace(
-        meta=types.SimpleNamespace(
-            checkpoint_id="cp-cloud-binding",
-            tape_id="cloud-restore-tape",
-            entry_count=0,
-            window_start=0,
-        ),
-        tape_entries=(),
-        plugin_states={},
-        extra={},
-    )
-
-    class FakeCheckpointService:
-        async def restore(self, checkpoint_id: str):
-            assert checkpoint_id == "cp-cloud-binding"
-            return snapshot
-
-        async def list(self, tape_id: str):
-            assert tape_id == "cloud-restore-tape"
-            return [snapshot.meta]
-
-        async def delete(self, checkpoint_id: str) -> None:
-            del checkpoint_id
-
-    class FakeTapeStore:
-        async def truncate(self, tape_id: str, keep: int) -> None:
-            del tape_id, keep
-
-    class FakeAdapter:
-        def __init__(self, pipeline, ctx, consumer) -> None:
-            del pipeline, consumer
-            self.ctx = ctx
-
-        async def initialize(self) -> None:
-            return None
-
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
-        mp.setattr(
-            manager, "_checkpoint_service", FakeCheckpointService(), raising=False
-        )
-        mp.setattr(manager, "_tape_store", FakeTapeStore(), raising=False)
-        await manager._restore_checkpoint(session, "cp-cloud-binding")
-
-    assert captured_kwargs["workspace_root"] is None
-    assert isinstance(captured_kwargs["environment"], CloudEnvironment)
-    assert isinstance(session.execution_binding, CloudWorkspaceBinding)
-    assert session.execution_binding.workspace_id == "ws-123"
-
-
-@pytest.mark.asyncio
 async def test_restore_checkpoint_preserves_cloud_run_target_metadata() -> None:
-    observed_bindings: list[CloudWorkspaceBinding] = []
+    observed_bindings: list[CloudWorkspaceRef] = []
 
     def fake_create_agent(**kwargs):
         return fake_pipeline, types.SimpleNamespace(
@@ -4606,16 +4582,16 @@ async def test_restore_checkpoint_preserves_cloud_run_target_metadata() -> None:
     manager = SessionManager(
         store=InMemorySessionStore(),
         create_agent_fn=fake_create_agent,
-        binding_resolver=DefaultBindingResolver(
-            cloud_client_factory=lambda binding: (
-                observed_bindings.append(binding) or FakeCloudClient()
-            )
+        cloud_workspace_client_factory=lambda workspace: (
+            observed_bindings.append(workspace) or FakeCloudClient()
         ),
     )
     session_id = await manager.create_session(
-        execution_binding=CloudWorkspaceBinding(
-            workspace_url="https://legacy.example.com",
-            workspace_id="legacy-ws",
+        default_run_target=_cloud_run_target(
+            CloudWorkspaceRef(
+                workspace_url="https://legacy.example.com",
+                workspace_id="legacy-ws",
+            )
         )
     )
     session = manager.get_session(session_id)
@@ -4678,7 +4654,7 @@ async def test_restore_checkpoint_preserves_cloud_run_target_metadata() -> None:
         await manager._restore_checkpoint(session, "cp-cloud-target")
 
     assert observed_bindings == [
-        CloudWorkspaceBinding(
+        CloudWorkspaceRef(
             workspace_url="https://target.example.com",
             workspace_id="target-ws",
             runtime_profile="gpu-large",
@@ -4690,20 +4666,20 @@ async def test_restore_checkpoint_preserves_cloud_run_target_metadata() -> None:
 
 @pytest.mark.asyncio
 async def test_close_session_cleans_up_server_provisioned_cloud_binding() -> None:
-    cleaned: list[CloudWorkspaceBinding] = []
+    cleaned: list[CloudWorkspaceRef] = []
     manager = SessionManager(
         store=InMemorySessionStore(),
         provisioned_cloud_binding_cleanup=cleaned.append,
     )
-    binding = CloudWorkspaceBinding(
+    binding = CloudWorkspaceRef(
         workspace_url="docker://agent-ws-123/workspace",
         workspace_id="ws-123",
     )
     session_id = await manager.create_session(
-        execution_binding=binding,
+        default_run_target=_cloud_run_target(binding),
         origin={
             "channel": "http",
-            "binding_kind": "cloud",
+            "placement_kind": "cloud_workspace",
             "workspace_source_kind": "docker",
         },
     )
@@ -4721,15 +4697,15 @@ async def test_close_session_offloads_provisioned_cloud_cleanup(
         store=InMemorySessionStore(),
         provisioned_cloud_binding_cleanup=lambda binding: None,
     )
-    binding = CloudWorkspaceBinding(
+    binding = CloudWorkspaceRef(
         workspace_url="docker://agent-ws-threaded/workspace",
         workspace_id="ws-threaded",
     )
     session_id = await manager.create_session(
-        execution_binding=binding,
+        default_run_target=_cloud_run_target(binding),
         origin={
             "channel": "http",
-            "binding_kind": "cloud",
+            "placement_kind": "cloud_workspace",
             "workspace_source_kind": "docker",
         },
     )
@@ -4753,7 +4729,7 @@ async def test_close_session_offloads_provisioned_cloud_cleanup(
 async def test_close_session_logs_provisioned_cloud_cleanup_failure(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    def fail_cleanup(binding: CloudWorkspaceBinding) -> None:
+    def fail_cleanup(binding: CloudWorkspaceRef) -> None:
         del binding
         raise RuntimeError("cleanup failed")
 
@@ -4762,13 +4738,13 @@ async def test_close_session_logs_provisioned_cloud_cleanup_failure(
         provisioned_cloud_binding_cleanup=fail_cleanup,
     )
     session_id = await manager.create_session(
-        execution_binding=CloudWorkspaceBinding(
+        default_run_target=_cloud_run_target(CloudWorkspaceRef(
             workspace_url="docker://agent-ws-fails/workspace",
             workspace_id="ws-fails",
-        ),
+        )),
         origin={
             "channel": "http",
-            "binding_kind": "cloud",
+            "placement_kind": "cloud_workspace",
             "workspace_source_kind": "docker",
         },
     )
@@ -4782,17 +4758,17 @@ async def test_close_session_logs_provisioned_cloud_cleanup_failure(
 
 @pytest.mark.asyncio
 async def test_close_session_keeps_explicit_cloud_binding_untouched() -> None:
-    cleaned: list[CloudWorkspaceBinding] = []
+    cleaned: list[CloudWorkspaceRef] = []
     manager = SessionManager(
         store=InMemorySessionStore(),
         provisioned_cloud_binding_cleanup=cleaned.append,
     )
     session_id = await manager.create_session(
-        execution_binding=CloudWorkspaceBinding(
+        default_run_target=_cloud_run_target(CloudWorkspaceRef(
             workspace_url="https://workspace.example.com",
             workspace_id="ws-explicit",
-        ),
-        origin={"channel": "http", "binding_kind": "cloud"},
+        )),
+        origin={"channel": "http", "placement_kind": "cloud_workspace"},
     )
 
     await manager.close_session(session_id)
@@ -4879,7 +4855,7 @@ def _workspace_record(
 
 @pytest.mark.asyncio
 async def test_create_session_persists_cloud_workspace_record() -> None:
-    binding = CloudWorkspaceBinding(
+    binding = CloudWorkspaceRef(
         workspace_url="docker://agent-ws-created/workspace",
         workspace_id="ws-created",
         runtime_profile="universal",
@@ -4891,10 +4867,10 @@ async def test_create_session_persists_cloud_workspace_record() -> None:
     )
 
     session_id = await manager.create_session(
-        execution_binding=binding,
+        default_run_target=_cloud_run_target(binding),
         origin={
             "channel": "http",
-            "binding_kind": "cloud",
+            "placement_kind": "cloud_workspace",
             "workspace_source_kind": "docker",
             "workspace_provider": "docker",
             "provider_instance_id": "docker-host-a",
@@ -4924,7 +4900,7 @@ async def test_create_session_persists_cloud_workspace_record() -> None:
 
 @pytest.mark.asyncio
 async def test_create_session_does_not_persist_explicit_cloud_binding_record() -> None:
-    binding = CloudWorkspaceBinding(
+    binding = CloudWorkspaceRef(
         workspace_url="docker://external-workspace/workspace",
         workspace_id="external-workspace",
     )
@@ -4935,10 +4911,10 @@ async def test_create_session_does_not_persist_explicit_cloud_binding_record() -
     )
 
     await manager.create_session(
-        execution_binding=binding,
+        default_run_target=_cloud_run_target(binding),
         origin={
             "channel": "http",
-            "binding_kind": "cloud",
+            "placement_kind": "cloud_workspace",
         },
     )
 
@@ -4947,8 +4923,8 @@ async def test_create_session_does_not_persist_explicit_cloud_binding_record() -
 
 @pytest.mark.asyncio
 async def test_close_session_retains_workspace_when_policy_is_pinned() -> None:
-    cleaned: list[CloudWorkspaceBinding] = []
-    binding = CloudWorkspaceBinding(
+    cleaned: list[CloudWorkspaceRef] = []
+    binding = CloudWorkspaceRef(
         workspace_url="docker://agent-ws-pinned/workspace",
         workspace_id="ws-pinned",
     )
@@ -4959,10 +4935,10 @@ async def test_close_session_retains_workspace_when_policy_is_pinned() -> None:
         workspace_metadata_store=store,
     )
     session_id = await manager.create_session(
-        execution_binding=binding,
+        default_run_target=_cloud_run_target(binding),
         origin={
             "channel": "http",
-            "binding_kind": "cloud",
+            "placement_kind": "cloud_workspace",
             "workspace_source_kind": "git",
             "workspace_provider": "docker",
             "provider_instance_id": "docker-host-a",
@@ -4985,8 +4961,8 @@ async def test_close_session_retains_workspace_when_policy_is_pinned() -> None:
 
 @pytest.mark.asyncio
 async def test_close_session_deletes_workspace_when_policy_is_delete_on_close() -> None:
-    cleaned: list[CloudWorkspaceBinding] = []
-    binding = CloudWorkspaceBinding(
+    cleaned: list[CloudWorkspaceRef] = []
+    binding = CloudWorkspaceRef(
         workspace_url="docker://agent-ws-delete/workspace",
         workspace_id="ws-delete",
     )
@@ -4997,10 +4973,10 @@ async def test_close_session_deletes_workspace_when_policy_is_delete_on_close() 
         workspace_metadata_store=store,
     )
     session_id = await manager.create_session(
-        execution_binding=binding,
+        default_run_target=_cloud_run_target(binding),
         origin={
             "channel": "http",
-            "binding_kind": "cloud",
+            "placement_kind": "cloud_workspace",
             "workspace_source_kind": "git",
             "workspace_provider": "docker",
             "provider_instance_id": "docker-host-a",
@@ -5023,11 +4999,11 @@ async def test_close_session_deletes_workspace_when_policy_is_delete_on_close() 
 
 @pytest.mark.asyncio
 async def test_close_session_marks_workspace_cleanup_failed() -> None:
-    def fail_cleanup(binding: CloudWorkspaceBinding) -> None:
+    def fail_cleanup(binding: CloudWorkspaceRef) -> None:
         del binding
         raise RuntimeError("cleanup failed")
 
-    binding = CloudWorkspaceBinding(
+    binding = CloudWorkspaceRef(
         workspace_url="docker://agent-ws-cleanup-failed/workspace",
         workspace_id="ws-cleanup-failed",
     )
@@ -5038,10 +5014,10 @@ async def test_close_session_marks_workspace_cleanup_failed() -> None:
         workspace_metadata_store=store,
     )
     session_id = await manager.create_session(
-        execution_binding=binding,
+        default_run_target=_cloud_run_target(binding),
         origin={
             "channel": "http",
-            "binding_kind": "cloud",
+            "placement_kind": "cloud_workspace",
             "workspace_source_kind": "git",
             "workspace_provider": "docker",
             "provider_instance_id": "docker-host-a",
@@ -5069,8 +5045,8 @@ async def test_close_session_marks_workspace_cleanup_failed() -> None:
 
 @pytest.mark.asyncio
 async def test_shutdown_session_runtime_does_not_apply_workspace_retention() -> None:
-    cleaned: list[CloudWorkspaceBinding] = []
-    binding = CloudWorkspaceBinding(
+    cleaned: list[CloudWorkspaceRef] = []
+    binding = CloudWorkspaceRef(
         workspace_url="docker://agent-ws-shutdown/workspace",
         workspace_id="ws-shutdown",
     )
@@ -5081,10 +5057,10 @@ async def test_shutdown_session_runtime_does_not_apply_workspace_retention() -> 
         workspace_metadata_store=store,
     )
     session_id = await manager.create_session(
-        execution_binding=binding,
+        default_run_target=_cloud_run_target(binding),
         origin={
             "channel": "http",
-            "binding_kind": "cloud",
+            "placement_kind": "cloud_workspace",
             "workspace_source_kind": "git",
             "workspace_provider": "docker",
             "provider_instance_id": "docker-host-a",

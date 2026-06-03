@@ -21,7 +21,7 @@ from coding_agent.environment import (
     workspace_provider_capabilities_from_config,
     provision_cloud_binding_from_config,
 )
-from coding_agent.environment.execution_binding import CloudWorkspaceBinding
+from coding_agent.runs import CloudWorkspaceRef
 from coding_agent.workspace_archive import create_workspace_archive_base64
 
 
@@ -70,7 +70,7 @@ def test_docker_workspace_provider_builds_client_from_config(tmp_path: Path) -> 
     )
 
     client = factory(
-        CloudWorkspaceBinding(
+        CloudWorkspaceRef(
             workspace_url="https://workspace.example.com",
             workspace_id="ws-123",
         )
@@ -97,7 +97,7 @@ def test_docker_cloud_client_maps_file_tools_to_remote_workspace(
     client = cloud_client_factory_from_config(
         _docker_config({"workspace_root": str(workspace_root)})
     )(
-        CloudWorkspaceBinding(
+        CloudWorkspaceRef(
             workspace_url="https://workspace.example.com",
             workspace_id="ws-123",
         )
@@ -128,7 +128,7 @@ def test_docker_cloud_client_applies_patch_with_workspace_root(tmp_path: Path) -
     client = cloud_client_factory_from_config(
         _docker_config({"workspace_root": str(workspace_root)})
     )(
-        CloudWorkspaceBinding(
+        CloudWorkspaceRef(
             workspace_url="https://workspace.example.com",
             workspace_id="ws-123",
         )
@@ -162,7 +162,7 @@ def test_docker_cloud_client_runs_shell_in_workspace_cwd(
             }
         )
     )(
-        CloudWorkspaceBinding(
+        CloudWorkspaceRef(
             workspace_url="https://workspace.example.com",
             workspace_id="ws-123",
         )
@@ -237,7 +237,7 @@ def test_docker_cloud_client_raises_timeout_when_container_command_times_out(
     client = cloud_client_factory_from_config(
         _docker_config({"workspace_root": str(workspace_root)})
     )(
-        CloudWorkspaceBinding(
+        CloudWorkspaceRef(
             workspace_url="https://workspace.example.com",
             workspace_id="ws-123",
         )
@@ -271,7 +271,7 @@ def test_docker_cloud_client_preserves_stderr_with_nonmatching_timeout_prefix(
     client = cloud_client_factory_from_config(
         _docker_config({"workspace_root": str(workspace_root)})
     )(
-        CloudWorkspaceBinding(
+        CloudWorkspaceRef(
             workspace_url="https://workspace.example.com",
             workspace_id="ws-123",
         )
@@ -305,7 +305,7 @@ def test_docker_cloud_client_preserves_legitimate_exit_codes(
     client = cloud_client_factory_from_config(
         _docker_config({"workspace_root": str(workspace_root)})
     )(
-        CloudWorkspaceBinding(
+        CloudWorkspaceRef(
             workspace_url="https://workspace.example.com",
             workspace_id="ws-123",
         )
@@ -335,7 +335,7 @@ def test_docker_cloud_client_timeout_contract_blocks_post_timeout_mutation(
     client = cloud_client_factory_from_config(
         _docker_config({"workspace_root": str(workspace_root)})
     )(
-        CloudWorkspaceBinding(
+        CloudWorkspaceRef(
             workspace_url="https://workspace.example.com",
             workspace_id="ws-123",
         )
@@ -387,7 +387,7 @@ def test_docker_cloud_client_rejects_disallowed_env_names(tmp_path: Path) -> Non
             }
         )
     )(
-        CloudWorkspaceBinding(
+        CloudWorkspaceRef(
             workspace_url="https://workspace.example.com",
             workspace_id="ws-123",
         )
@@ -413,7 +413,7 @@ def test_docker_cloud_client_rejects_workspace_escape(tmp_path: Path) -> None:
     client = cloud_client_factory_from_config(
         _docker_config({"workspace_root": str(workspace_root)})
     )(
-        CloudWorkspaceBinding(
+        CloudWorkspaceRef(
             workspace_url="https://workspace.example.com",
             workspace_id="ws-123",
         )
@@ -437,7 +437,7 @@ def test_docker_cloud_client_rejects_symlink_escape_paths(tmp_path: Path) -> Non
     client = cloud_client_factory_from_config(
         _docker_config({"workspace_root": str(workspace_root)})
     )(
-        CloudWorkspaceBinding(
+        CloudWorkspaceRef(
             workspace_url="https://workspace.example.com",
             workspace_id="ws-123",
         )
@@ -2473,7 +2473,7 @@ def test_docker_workspace_provider_reserves_quota_slot_atomically(
             _ = release_first_run.wait(timeout=5)
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
-    def provision() -> CloudWorkspaceBinding:
+    def provision() -> CloudWorkspaceRef:
         start_barrier.wait(timeout=5)
         return provision_cloud_binding_from_config(
             _docker_config(
@@ -2488,7 +2488,7 @@ def test_docker_workspace_provider_reserves_quota_slot_atomically(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    results: list[CloudWorkspaceBinding] = []
+    results: list[CloudWorkspaceRef] = []
     errors: list[BaseException] = []
 
     def worker() -> None:

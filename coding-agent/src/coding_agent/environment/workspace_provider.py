@@ -3,16 +3,14 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias
+from typing import Literal, Protocol, TypeAlias
 
 from .cloud import CloudWorkspaceClient
-
-if TYPE_CHECKING:
-    from .execution_binding import CloudWorkspaceBinding
+from coding_agent.runs.target import CloudWorkspaceRef
 
 
 CloudWorkspaceClientFactory: TypeAlias = Callable[
-    ["CloudWorkspaceBinding"], CloudWorkspaceClient
+    [CloudWorkspaceRef], CloudWorkspaceClient
 ]
 CloudWorkspaceSource: TypeAlias = Mapping[str, object]
 WorkspaceStatus: TypeAlias = Literal[
@@ -104,25 +102,25 @@ class WorkspaceProvider(Protocol):
         self,
         config: dict[str, object],
         source: CloudWorkspaceSource,
-    ) -> "CloudWorkspaceBinding": ...
+    ) -> CloudWorkspaceRef: ...
 
     def cleanup_cloud_workspace_binding(
         self,
         config: dict[str, object],
-        binding: "CloudWorkspaceBinding",
+        binding: CloudWorkspaceRef,
     ) -> None: ...
 
     def import_workspace_archive(
         self,
         config: dict[str, object],
-        binding: "CloudWorkspaceBinding",
+        binding: CloudWorkspaceRef,
         archive_base64: str,
     ) -> None: ...
 
     def export_workspace_archive(
         self,
         config: dict[str, object],
-        binding: "CloudWorkspaceBinding",
+        binding: CloudWorkspaceRef,
     ) -> str: ...
 
     def cleanup_stale_cloud_workspaces(
@@ -247,14 +245,14 @@ def workspace_provider_capabilities_from_config(
 def provision_cloud_binding_from_config(
     config: dict[str, object],
     source: CloudWorkspaceSource,
-) -> "CloudWorkspaceBinding":
+) -> CloudWorkspaceRef:
     provider = _provider_from_config(config)
     return provider.provision_cloud_workspace_binding(config, source)
 
 
 def cleanup_cloud_binding_from_config(
     config: dict[str, object],
-    binding: "CloudWorkspaceBinding",
+    binding: CloudWorkspaceRef,
 ) -> None:
     provider = _provider_from_config(config)
     provider.cleanup_cloud_workspace_binding(config, binding)
@@ -262,7 +260,7 @@ def cleanup_cloud_binding_from_config(
 
 def import_workspace_archive_from_config(
     config: dict[str, object],
-    binding: "CloudWorkspaceBinding",
+    binding: CloudWorkspaceRef,
     archive_base64: str,
 ) -> None:
     provider = _provider_from_config(config)
@@ -271,7 +269,7 @@ def import_workspace_archive_from_config(
 
 def export_workspace_archive_from_config(
     config: dict[str, object],
-    binding: "CloudWorkspaceBinding",
+    binding: CloudWorkspaceRef,
 ) -> str:
     provider = _provider_from_config(config)
     return provider.export_workspace_archive(config, binding)

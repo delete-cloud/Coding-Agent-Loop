@@ -27,7 +27,7 @@ from .checkpoint_capture import (
     RuntimeCheckpointRuntimeEnsurer,
 )
 from .attached_executor import (
-    ATTACHED_EXECUTOR_BINDING_KINDS,
+    ATTACHED_EXECUTOR_REF_KINDS,
     RuntimeAttachedExecutorClaim,
     RuntimeAttachedExecutorClaimEnvelope,
     RuntimeAttachedExecutorClaimFactory,
@@ -145,7 +145,6 @@ from .observation import RuntimeObservationService, RuntimeObservationSession
 from .metadata import (
     RuntimeMetadataSession,
     RuntimeRunMetadataService,
-    runtime_execution_placement,
 )
 from .persistence import (
     RuntimeMessageSnapshotSession,
@@ -203,7 +202,7 @@ from .session_runtime import (
 )
 from .target import (
     CloudWorkspaceRef,
-    ExecutionBindingRunTargetError,
+    LegacyRunTargetError,
     ExecutorRef,
     ExternalWorkerExecutorRef,
     ExternalWorkerWorkspaceRef,
@@ -220,15 +219,21 @@ from .target import (
     WorkspaceRef,
     executor_ref_from_dict,
     executor_ref_to_dict,
+    run_target_execution_placement,
+    run_target_execution_plane,
+    run_target_executor_kind,
+    run_target_executor_ref_kind,
     run_target_from_dict,
-    run_target_from_execution_binding,
+    run_target_from_legacy_session_payload,
+    run_target_worker_pool,
+    run_target_workspace_surface,
     workspace_ref_from_dict,
     workspace_ref_to_dict,
 )
 
 __all__ = [
     "CloudWorkspaceRef",
-    "ATTACHED_EXECUTOR_BINDING_KINDS",
+    "ATTACHED_EXECUTOR_REF_KINDS",
     "CHECKPOINT_SESSION_CONFIG_KEY",
     "CheckpointRestoreService",
     "CheckpointRestoreSession",
@@ -237,7 +242,7 @@ __all__ = [
     "CheckpointLister",
     "DefaultRunCoordinator",
     "DEFAULT_RESUME_PROMPT",
-    "ExecutionBindingRunTargetError",
+    "LegacyRunTargetError",
     "EventBroadcastResult",
     "ExecutorRef",
     "ExternalWorkerExecutorRef",
@@ -409,10 +414,15 @@ __all__ = [
     "require_runtime_turn_outcome",
     "runtime_result_from_turn_outcome",
     "runtime_status_from_turn_outcome",
-    "runtime_execution_placement",
     "runtime_event_correlation_from_run",
+    "run_target_execution_placement",
+    "run_target_execution_plane",
+    "run_target_executor_kind",
+    "run_target_executor_ref_kind",
     "run_target_from_dict",
-    "run_target_from_execution_binding",
+    "run_target_from_legacy_session_payload",
+    "run_target_worker_pool",
+    "run_target_workspace_surface",
     "with_runtime_event_correlation",
     "workspace_ref_from_dict",
     "workspace_ref_to_dict",

@@ -1,13 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
 
-from agentkit.environment import FileTools, WorkspaceSummary
 from coding_agent.environment import SandboxedEnvironment
-from coding_agent.environment.execution_binding import CloudWorkspaceBinding
 from coding_agent.runs import (
     CloudWorkspaceRef,
     InlineExecutorRef,
@@ -20,46 +17,44 @@ from coding_agent.runs import (
 from coding_agent.runs.environment import RuntimeEnvironmentResolverService
 
 
-class FakeCloudEnvironment:
-    kind = "fake_cloud"
+class FakeCloudClient:
+    workspace_url = "https://workspace.example.test/w/1"
+    workspace_id = "workspace-1"
+    default_cwd = "/workspace"
 
-    def __init__(self, local_root: str | None = None) -> None:
-        self._local_root = local_root
-
-    def workspace_summary(self) -> WorkspaceSummary:
-        return WorkspaceSummary(
-            display_name="cloud",
-            default_cwd=None,
-            local_root=self._local_root,
-        )
-
-    def tool_config(self) -> dict[str, Any]:
-        return {"shell": {"sandbox_mode": "provider"}}
-
-    def build_file_tools(self) -> FileTools:
+    def read_file(self, path: str) -> str:
         raise NotImplementedError
 
-    def build_file_patch_tool(self):
+    def write_file(self, path: str, content: str) -> None:
         raise NotImplementedError
 
-    def build_shell_tool(self):
+    def replace_file(self, path: str, old: str, new: str) -> None:
         raise NotImplementedError
 
+    def glob_files(self, pattern: str, directory: str) -> list[str]:
+        raise NotImplementedError
 
-class FakeBindingResolver:
-    def __init__(self, environment: FakeCloudEnvironment | None = None) -> None:
-        self.environment = environment or FakeCloudEnvironment()
-        self.bindings: list[CloudWorkspaceBinding] = []
+    def grep_search(self, pattern: str, directory: str, include: str) -> list[str]:
+        raise NotImplementedError
 
-    def resolve_environment(self, binding: CloudWorkspaceBinding):
-        self.bindings.append(binding)
-        return self.environment
+    def apply_patch(self, path: str, patch: str) -> dict[str, object]:
+        raise NotImplementedError
+
+    def run_command(
+        self,
+        command: str,
+        *,
+        cwd: str | None,
+        env: dict[str, str] | None,
+        timeout: int,
+    ):
+        raise NotImplementedError
 
 
 def test_runtime_environment_resolver_resolves_local_target(tmp_path: Path) -> None:
     workspace = tmp_path / "repo"
     workspace.mkdir()
-    service = RuntimeEnvironmentResolverService(FakeBindingResolver())
+    service = RuntimeEnvironmentResolverService()
     target = RunTarget(
         workspace=LocalPathWorkspaceRef(path=str(workspace)),
         executor=LocalDaemonExecutorRef(),
@@ -76,9 +71,13 @@ def test_runtime_environment_resolver_resolves_local_target(tmp_path: Path) -> N
 
 
 def test_runtime_environment_resolver_delegates_cloud_workspace() -> None:
-    cloud_environment = FakeCloudEnvironment()
-    binding_resolver = FakeBindingResolver(cloud_environment)
-    service = RuntimeEnvironmentResolverService(binding_resolver)
+    resolved_workspaces: list[CloudWorkspaceRef] = []
+
+    def factory(workspace: CloudWorkspaceRef) -> FakeCloudClient:
+        resolved_workspaces.append(workspace)
+        return FakeCloudClient()
+
+    service = RuntimeEnvironmentResolverService(factory)
     target = RunTarget(
         workspace=CloudWorkspaceRef(
             workspace_url="https://workspace.example.test/w/1",
@@ -93,9 +92,13 @@ def test_runtime_environment_resolver_delegates_cloud_workspace() -> None:
 
     environment = service.resolve_environment_for_run_target(target)
 
-    assert environment is cloud_environment
-    assert binding_resolver.bindings == [
-        CloudWorkspaceBinding(
+    assert environment.kind == "cloud"
+    assert environment.tool_config() == {
+        "workspace_id": "workspace-1",
+        "workspace_url": "https://workspace.example.test/w/1",
+    }
+    assert resolved_workspaces == [
+        CloudWorkspaceRef(
             workspace_url="https://workspace.example.test/w/1",
             workspace_id="workspace-1",
             runtime_profile="python",
@@ -107,14 +110,14 @@ def test_runtime_environment_resolver_delegates_cloud_workspace() -> None:
 
 
 def test_runtime_environment_resolver_rejects_missing_target() -> None:
-    service = RuntimeEnvironmentResolverService(FakeBindingResolver())
+    service = RuntimeEnvironmentResolverService()
 
     with pytest.raises(RuntimeError, match="session is missing default_run_target"):
         service.resolve_environment_for_run_target(None)
 
 
 def test_runtime_environment_resolver_rejects_unsupported_workspace() -> None:
-    service = RuntimeEnvironmentResolverService(FakeBindingResolver())
+    service = RuntimeEnvironmentResolverService()
     target = RunTarget(
         workspace=SnapshotWorkspaceRef(snapshot_id="snapshot-1"),
         executor=InlineExecutorRef(),
@@ -131,16 +134,11 @@ def test_runtime_environment_resolver_rejects_unsupported_workspace() -> None:
 def test_runtime_environment_resolver_normalizes_workspace_root(tmp_path: Path) -> None:
     workspace = tmp_path / "repo"
     workspace.mkdir()
-    service = RuntimeEnvironmentResolverService(
-        FakeBindingResolver(FakeCloudEnvironment(str(workspace)))
-    )
+    service = RuntimeEnvironmentResolverService()
     target = RunTarget(
-        workspace=CloudWorkspaceRef(
-            workspace_url="https://workspace.example.test/w/1",
-            workspace_id="workspace-1",
-        ),
-        executor=InlineExecutorRef(),
-        isolation=IsolationPolicy(kind="provider_sandbox"),
+        workspace=LocalPathWorkspaceRef(path=str(workspace / ".")),
+        executor=LocalDaemonExecutorRef(),
+        isolation=IsolationPolicy(kind="default_local_sandbox"),
     )
 
     environment = service.resolve_environment_for_run_target(target)

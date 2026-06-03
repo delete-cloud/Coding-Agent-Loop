@@ -239,15 +239,23 @@ async def _create_attached_executor_session(
     payload: dict[str, Any] = {
         "approval_policy": approval_policy,
         "max_steps": max_steps,
-        "execution_binding": {
-            "kind": "local_attached",
-            "executor_kind": "local_cli",
-            "worker_pool": "default",
-            "workspace_ref": {
-                "kind": "local_path",
-                "display_path": str(repo_path),
+        "run_target": {
+            "workspace": {
+                "kind": "external_worker_ref",
+                "ref": {
+                    "kind": "local_path",
+                    "display_path": str(repo_path),
+                },
+                "provider_instance_id": worker_id,
             },
-            "provider_instance_id": worker_id,
+            "executor": {
+                "kind": "local_attached",
+                "executor_kind": "local_cli",
+                "worker_pool": "default",
+            },
+            "isolation": {"kind": "external_worker_policy"},
+            "constraints": {},
+            "annotations": {},
         },
     }
     if provider_name is not None:

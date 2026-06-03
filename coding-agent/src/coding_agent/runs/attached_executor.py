@@ -16,7 +16,7 @@ from .metadata import RuntimeMetadataSession
 from .runtime_events import runtime_event_correlation_from_run
 from .runtime_events import with_runtime_event_correlation
 
-ATTACHED_EXECUTOR_BINDING_KINDS = frozenset({"external_worker", "local_attached"})
+ATTACHED_EXECUTOR_REF_KINDS = frozenset({"external_worker", "local_attached"})
 ATTACHED_EXECUTOR_FINAL_STATUSES = frozenset({"completed", "cancelled", "failed"})
 
 
@@ -431,8 +431,8 @@ class RuntimeAttachedExecutorService:
             raise KeyError(f"runtime run not found: {run_id}")
         metadata = run.metadata
         if (
-            metadata.get("execution_binding_kind")
-            not in ATTACHED_EXECUTOR_BINDING_KINDS
+            metadata.get("executor_ref_kind")
+            not in ATTACHED_EXECUTOR_REF_KINDS
         ):
             raise ValueError("runtime run is not attached executor owned")
         owner_id = metadata.get("executor_id") or metadata.get("worker_id")
@@ -481,7 +481,7 @@ def _optional_metadata_datetime(
 
 
 __all__ = [
-    "ATTACHED_EXECUTOR_BINDING_KINDS",
+    "ATTACHED_EXECUTOR_REF_KINDS",
     "RuntimeAttachedExecutorClaim",
     "RuntimeAttachedExecutorClaimEnvelope",
     "RuntimeAttachedExecutorClaimFactory",

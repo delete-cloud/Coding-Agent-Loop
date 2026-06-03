@@ -3,10 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from coding_agent.environment import CloudCommandResult
+from coding_agent.environment import CloudCommandResult, CloudEnvironment
 from coding_agent.plugins.core_tools import CoreToolsPlugin
-from coding_agent.environment.binding_resolver import DefaultBindingResolver
-from coding_agent.environment.execution_binding import CloudWorkspaceBinding
 
 
 @dataclass
@@ -71,17 +69,8 @@ class RecordingCloudClient:
 
 def test_action_tools_route_from_selected_binding_to_workspace_client() -> None:
     selected_client = RecordingCloudClient()
-    binding = CloudWorkspaceBinding(
-        workspace_url=selected_client.workspace_url,
-        workspace_id=selected_client.workspace_id,
-        workspace_provider="docker",
-        provider_instance_id="docker-local",
-    )
-    resolver = DefaultBindingResolver(
-        cloud_client_factory=lambda resolved: selected_client
-    )
 
-    environment = resolver.resolve_environment(binding)
+    environment = CloudEnvironment(selected_client)
     plugin = CoreToolsPlugin(environment=environment)
 
     calls: list[tuple[str, dict[str, Any]]] = [

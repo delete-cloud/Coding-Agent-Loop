@@ -11,15 +11,20 @@ from coding_agent.agent_observability import (
     AgentObservationStatus,
     AgentObservationStore,
 )
-from coding_agent.environment.execution_binding import ExecutionBinding
 from coding_agent.runtime_store import JSONObject
 from coding_agent.runs.lifecycle import RuntimeRunResumeContext
-from coding_agent.runs.metadata import runtime_execution_placement
+from coding_agent.runs.target import (
+    RunTarget,
+    run_target_execution_placement,
+    run_target_execution_plane,
+    run_target_executor_kind,
+    run_target_workspace_surface,
+)
 
 
 class RuntimeObservationSession(Protocol):
     id: str
-    execution_binding: ExecutionBinding
+    default_run_target: RunTarget
 
 
 @dataclass(frozen=True)
@@ -76,13 +81,13 @@ def _observation_attributes(
     *,
     resume_context: RuntimeRunResumeContext | None = None,
 ) -> JSONObject:
-    binding = session.execution_binding
+    target = session.default_run_target
     attributes: JSONObject = {
         "tape_id": getattr(getattr(ctx, "tape", None), "tape_id", None),
-        "execution_placement": runtime_execution_placement(binding),
-        "execution_binding_kind": binding.kind,
-        "workspace_surface": binding.workspace_surface,
-        "execution_plane": binding.execution_plane,
+        "execution_placement": run_target_execution_placement(target),
+        "executor_kind": run_target_executor_kind(target),
+        "workspace_surface": run_target_workspace_surface(target),
+        "execution_plane": run_target_execution_plane(target),
     }
     if resume_context is not None:
         attributes.update(resume_context.metadata())

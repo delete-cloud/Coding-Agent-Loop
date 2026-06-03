@@ -5,11 +5,14 @@ from dataclasses import dataclass
 
 import pytest
 
-from coding_agent.environment.execution_binding import (
-    CloudWorkspaceBinding,
-    LocalExecutionBinding,
+from coding_agent.runs import (
+    CloudWorkspaceRef,
+    IsolationPolicy,
+    LocalDaemonExecutorRef,
+    LocalPathWorkspaceRef,
+    RunTarget,
+    RuntimeWorkspaceExportService,
 )
-from coding_agent.runs import RuntimeWorkspaceExportService
 
 
 @dataclass
@@ -22,15 +25,32 @@ class FakeTask:
 
 @dataclass
 class FakeSession:
-    execution_binding: object
+    default_run_target: RunTarget
     turn_in_progress: bool = False
     task: FakeTask | None = None
 
 
-def _cloud_binding() -> CloudWorkspaceBinding:
-    return CloudWorkspaceBinding(
-        workspace_url="docker://agent-ws-export/workspace",
-        workspace_id="ws-export",
+def _cloud_target() -> RunTarget:
+    return RunTarget(
+        workspace=CloudWorkspaceRef(
+            workspace_url="docker://agent-ws-export/workspace",
+            workspace_id="ws-export",
+        ),
+        executor=LocalDaemonExecutorRef(),
+        isolation=IsolationPolicy(
+            kind="provider_sandbox",
+            network="provider_managed",
+            filesystem="provider_managed",
+            secrets="provider_managed",
+        ),
+    )
+
+
+def _local_target() -> RunTarget:
+    return RunTarget(
+        workspace=LocalPathWorkspaceRef(path="/tmp/repo"),
+        executor=LocalDaemonExecutorRef(),
+        isolation=IsolationPolicy(kind="default_local_sandbox"),
     )
 
 
@@ -40,7 +60,7 @@ def _service(
     lock: asyncio.Lock | None = None,
     calls: list[str] | None = None,
 ) -> RuntimeWorkspaceExportService:
-    current_session = session or FakeSession(execution_binding=_cloud_binding())
+    current_session = session or FakeSession(default_run_target=_cloud_target())
     current_lock = lock or asyncio.Lock()
 
     async def assert_owner(session_id: str) -> None:
@@ -110,8 +130,8 @@ async def test_export_archive_rejects_active_lock_without_loading_session() -> N
 @pytest.mark.parametrize(
     "session",
     [
-        FakeSession(execution_binding=_cloud_binding(), turn_in_progress=True),
-        FakeSession(execution_binding=_cloud_binding(), task=FakeTask(is_done=False)),
+        FakeSession(default_run_target=_cloud_target(), turn_in_progress=True),
+        FakeSession(default_run_target=_cloud_target(), task=FakeTask(is_done=False)),
     ],
 )
 async def test_export_archive_rejects_active_session_before_begin(
@@ -131,9 +151,7 @@ async def test_export_archive_rejects_active_session_before_begin(
 @pytest.mark.asyncio
 async def test_export_archive_rejects_non_cloud_session_before_begin() -> None:
     calls: list[str] = []
-    session = FakeSession(
-        execution_binding=LocalExecutionBinding(workspace_root="/tmp/repo"),
-    )
+    session = FakeSession(default_run_target=_local_target())
 
     with pytest.raises(ValueError, match="Workspace export requires cloud session"):
         await _service(session=session, calls=calls).export_archive(
@@ -148,7 +166,7 @@ async def test_export_archive_rejects_non_cloud_session_before_begin() -> None:
 async def test_export_archive_ends_export_when_exporter_fails() -> None:
     calls: list[str] = []
 
-    def fail_export(binding: CloudWorkspaceBinding) -> str:
+    def fail_export(binding: CloudWorkspaceRef) -> str:
         del binding
         raise RuntimeError("export failed")
 

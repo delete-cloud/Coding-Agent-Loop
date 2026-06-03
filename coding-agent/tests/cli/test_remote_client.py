@@ -86,7 +86,7 @@ def test_create_remote_session_sends_git_workspace_source(
     ]
 
 
-def test_create_local_daemon_session_sends_local_execution_binding(
+def test_create_local_daemon_session_sends_local_run_target(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -141,9 +141,15 @@ def test_create_local_daemon_session_sends_local_execution_binding(
         (
             "/sessions",
             {
-                "execution_binding": {
-                    "kind": "local",
-                    "workspace_root": str(tmp_path.resolve()),
+                "run_target": {
+                    "workspace": {
+                        "kind": "local_path",
+                        "path": str(tmp_path.resolve()),
+                    },
+                    "executor": {"kind": "local_daemon"},
+                    "isolation": {"kind": "default_local_sandbox"},
+                    "constraints": {},
+                    "annotations": {},
                 },
                 "approval_policy": "auto",
             },
@@ -999,20 +1005,27 @@ async def test_attached_executor_client_creates_local_attached_session(
             "json": {
                 "approval_policy": "yolo",
                 "max_steps": 7,
-                "execution_binding": {
-                    "kind": "local_attached",
-                    "executor_kind": "local_cli",
-                    "worker_pool": "default",
-                    "workspace_ref": {
-                        "kind": "local_path",
-                        "display_path": str(tmp_path),
+                "run_target": {
+                    "workspace": {
+                        "kind": "external_worker_ref",
+                        "ref": {
+                            "kind": "local_path",
+                            "display_path": str(tmp_path),
+                        },
+                        "provider_instance_id": "executor-1",
                     },
-                    "provider_instance_id": "executor-1",
+                    "executor": {
+                        "kind": "local_attached",
+                        "executor_kind": "local_cli",
+                        "worker_pool": "default",
+                    },
+                    "isolation": {"kind": "external_worker_policy"},
+                    "constraints": {},
+                    "annotations": {},
                 },
             },
         }
     ]
-
 
 @pytest.mark.asyncio
 async def test_attached_executor_client_claims_via_executor_endpoint(

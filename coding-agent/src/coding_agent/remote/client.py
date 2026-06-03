@@ -196,9 +196,15 @@ def create_local_daemon_session(
     if approval_policy not in APPROVAL_POLICIES:
         raise click.ClickException(f"Unsupported approval policy: {approval_policy}")
     payload: dict[str, object] = {
-        "execution_binding": {
-            "kind": "local",
-            "workspace_root": str(repo_path.expanduser().resolve()),
+        "run_target": {
+            "workspace": {
+                "kind": "local_path",
+                "path": str(repo_path.expanduser().resolve()),
+            },
+            "executor": {"kind": "local_daemon"},
+            "isolation": {"kind": "default_local_sandbox"},
+            "constraints": {},
+            "annotations": {},
         },
         "approval_policy": approval_policy,
     }

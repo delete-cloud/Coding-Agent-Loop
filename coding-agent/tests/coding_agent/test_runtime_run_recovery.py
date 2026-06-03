@@ -140,7 +140,7 @@ async def test_runtime_run_recovery_service_expires_attached_executor_leases() -
                 status="claimed",
                 started_at=started_at,
                 metadata={
-                    "execution_binding_kind": "local_attached",
+                    "executor_ref_kind": "local_attached",
                     "lease_expires_at": (
                         recovered_at - timedelta(seconds=1)
                     ).isoformat(),
@@ -157,7 +157,7 @@ async def test_runtime_run_recovery_service_expires_attached_executor_leases() -
                 status="claimed",
                 started_at=started_at,
                 metadata={
-                    "execution_binding_kind": "external_worker",
+                    "executor_ref_kind": "external_worker",
                     "lease_expires_at": (
                         recovered_at + timedelta(seconds=30)
                     ).isoformat(),
@@ -181,7 +181,7 @@ async def test_runtime_run_recovery_service_expires_attached_executor_leases() -
             "status": "expired",
             "ended_at": None,
             "metadata": {
-                "execution_binding_kind": "local_attached",
+                "executor_ref_kind": "local_attached",
                 "lease_expires_at": (recovered_at - timedelta(seconds=1)).isoformat(),
                 "executor_id": "executor-1",
                 "reclaimable": True,

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from types import TracebackType
 from typing import Protocol, TypeVar
 
-from coding_agent.environment.execution_binding import CloudWorkspaceBinding
+from .target import CloudWorkspaceRef
 
 T = TypeVar("T")
 
@@ -29,7 +29,7 @@ class RuntimeWorkspaceExportTask(Protocol):
 
 
 class RuntimeWorkspaceExportSession(Protocol):
-    execution_binding: object
+    default_run_target: object
     turn_in_progress: bool
     task: RuntimeWorkspaceExportTask | None
 
@@ -42,7 +42,7 @@ RuntimeWorkspaceExportSessionLoader = Callable[
 ]
 RuntimeWorkspaceExportBegin = Callable[[str], None]
 RuntimeWorkspaceExportEnd = Callable[[str], None]
-RuntimeWorkspaceArchiveExporter = Callable[[CloudWorkspaceBinding], T]
+RuntimeWorkspaceArchiveExporter = Callable[[CloudWorkspaceRef], T]
 
 
 @dataclass(frozen=True)
@@ -68,14 +68,18 @@ class RuntimeWorkspaceExportService:
             session.task is not None and not session.task.done()
         ):
             raise RuntimeError("turn already in progress")
-        if not isinstance(session.execution_binding, CloudWorkspaceBinding):
+        target = session.default_run_target
+        if not hasattr(target, "workspace") or not isinstance(
+            target.workspace,
+            CloudWorkspaceRef,
+        ):
             raise ValueError("Workspace export requires cloud session")
 
         self.begin_export(session_id)
         try:
             result = await asyncio.to_thread(
                 export_archive,
-                session.execution_binding,
+                target.workspace,
             )
             await self.assert_owner(session_id)
             return result
