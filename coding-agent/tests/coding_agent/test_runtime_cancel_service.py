@@ -7,11 +7,12 @@ from datetime import UTC, datetime
 import pytest
 
 from coding_agent.runtime_store import AgentRunRecord, JSONObject
-from coding_agent.runs import RuntimeCancelService
+from coding_agent.runs import RuntimeCancelOrchestrationService, RuntimeCancelService
 
 
 @dataclass
 class FakeSession:
+    id: str = "session-1"
     current_turn_id: str | None = "run-1"
     turn_in_progress: bool = True
     turn_status: str = "running"
@@ -191,6 +192,84 @@ def test_finish_observed_local_turn_rejects_non_final_status() -> None:
 
     with pytest.raises(ValueError, match="invalid observed cancellation status"):
         service.finish_observed_local_turn(session, status="idle")
+
+
+@pytest.mark.asyncio
+async def test_cancel_orchestration_marks_active_local_task_cancelling() -> None:
+    now = datetime(2026, 6, 3, 12, 0, tzinfo=UTC)
+    session = FakeSession(current_turn_id=None)
+    task = FakeTask(done=False)
+    persisted: list[FakeSession] = []
+    scheduled: list[tuple[str, FakeTask]] = []
+    orchestration = RuntimeCancelOrchestrationService(
+        cancel_service=lambda: RuntimeCancelService(store=None, now=lambda: now),
+        persist_session=lambda session: _record_persisted(persisted, session),
+        session_is_attached=lambda session: False,
+        schedule_cancel_observation=lambda session_id, task: scheduled.append(
+            (session_id, task)
+        ),
+        turn_id_factory=lambda: "generated-turn",
+    )
+
+    result = await orchestration.cancel(session, task=task)
+
+    assert result.turn_id == "generated-turn"
+    assert result.status == "cancelling"
+    assert session.current_turn_id == "generated-turn"
+    assert session.turn_status == "cancelling"
+    assert session.turn_in_progress is True
+    assert session.last_activity == now
+    assert task.cancel_calls == 1
+    assert persisted == [session]
+    assert scheduled == [("session-1", task)]
+
+
+@pytest.mark.asyncio
+async def test_cancel_orchestration_persists_idle_local_session() -> None:
+    now = datetime(2026, 6, 3, 12, 0, tzinfo=UTC)
+    session = FakeSession(turn_status="idle", turn_in_progress=False)
+    task = FakeTask(done=True)
+    persisted: list[FakeSession] = []
+    scheduled: list[tuple[str, FakeTask]] = []
+    orchestration = RuntimeCancelOrchestrationService(
+        cancel_service=lambda: RuntimeCancelService(store=None, now=lambda: now),
+        persist_session=lambda session: _record_persisted(persisted, session),
+        session_is_attached=lambda session: False,
+        schedule_cancel_observation=lambda session_id, task: scheduled.append(
+            (session_id, task)
+        ),
+        turn_id_factory=lambda: "unused-turn",
+    )
+
+    result = await orchestration.cancel(session, task=task)
+
+    assert result.turn_id == "run-1"
+    assert result.status == "idle"
+    assert session.turn_status == "idle"
+    assert session.turn_in_progress is False
+    assert task.cancel_calls == 0
+    assert persisted == [session]
+    assert scheduled == []
+
+
+async def _record_persisted(
+    persisted: list[FakeSession],
+    session: FakeSession,
+) -> None:
+    persisted.append(session)
+
+
+class FakeTask:
+    def __init__(self, *, done: bool) -> None:
+        self._done = done
+        self.cancel_calls = 0
+
+    def done(self) -> bool:
+        return self._done
+
+    def cancel(self) -> bool:
+        self.cancel_calls += 1
+        return True
 
 
 def _run(

@@ -73,6 +73,7 @@ from coding_agent.runs import (
     RunCoordinator,
     RuntimeAgentFactoryService,
     RuntimeBindingSnapshot,
+    RuntimeCancelOrchestrationService,
     RuntimeControlServices,
     RuntimeCloser,
     RuntimeContextBindingService,
@@ -798,6 +799,16 @@ class SessionManager:
             active_resume_blocking_statuses=frozenset(
                 _ACTIVE_RESUME_BLOCKING_RUN_STATUSES
             ),
+        )
+        self._runtime_cancel_orchestration = RuntimeCancelOrchestrationService(
+            cancel_service=self._runtime_control_services.cancel,
+            persist_session=self._persist_session_async,
+            session_is_attached=lambda session: isinstance(
+                session.execution_binding,
+                ExternalWorkerBinding,
+            ),
+            schedule_cancel_observation=self._schedule_cancel_observation,
+            turn_id_factory=lambda: uuid.uuid4().hex,
         )
         self._runtime_closer = RuntimeCloser()
         self._runtime_agent_factory_service = RuntimeAgentFactoryService(
@@ -2401,41 +2412,24 @@ class SessionManager:
         async with self._lock:
             await self._assert_owner(session_id)
             session = await self.get_session_async(session_id)
-            task = session.task
-            if isinstance(session.execution_binding, ExternalWorkerBinding):
-                result = await self._runtime_control_services.cancel().cancel_attached_executor_turn(
-                    session
-                )
-                await self._persist_session_async(session)
-                return CancelTurnResult(
-                    session_id=session_id,
-                    turn_id=result.turn_id,
-                    status=cast(CancelTurnStatus, result.status),
-                )
-            if task is None or task.done():
-                result = self._runtime_control_services.cancel().cancel_idle_or_finished_local_turn(
-                    session
-                )
-                await self._persist_session_async(session)
-                return CancelTurnResult(
-                    session_id=session_id,
-                    turn_id=result.turn_id,
-                    status=cast(CancelTurnStatus, result.status),
-                )
-
-            if session.current_turn_id is None:
-                session.current_turn_id = uuid.uuid4().hex
-            self._runtime_control_services.cancel().mark_cancelling(session)
-            await self._persist_session_async(session)
-            task.cancel()
-            _ = asyncio.create_task(
-                self._observe_cancelled_turn(session_id=session_id, task=task)
+            result = await self._runtime_cancel_orchestration.cancel(
+                session,
+                task=session.task,
             )
             return CancelTurnResult(
                 session_id=session_id,
-                turn_id=session.current_turn_id,
-                status="cancelling",
+                turn_id=result.turn_id,
+                status=cast(CancelTurnStatus, result.status),
             )
+
+    def _schedule_cancel_observation(
+        self,
+        session_id: str,
+        task: asyncio.Task[Any],
+    ) -> None:
+        _ = asyncio.create_task(
+            self._observe_cancelled_turn(session_id=session_id, task=task)
+        )
 
     async def _observe_cancelled_turn(
         self,
