@@ -174,7 +174,7 @@ This ADR does not implement that path.
     `RunCoordinator.execute_runtime`.
   - Unsupported managed runtime execution is rejected by `RunCoordinator`, not
     prefiltered by `SessionManager`.
-- [~] Move runtime ownership behind `LocalDaemonExecutor`.
+- [x] Move runtime ownership behind `LocalDaemonExecutor`.
   - Completed: local daemon runtime execution routes through
     `RunCoordinator.execute_runtime()` and `LocalDaemonExecutor`.
   - Completed: normal local runtime preparation is delegated from
@@ -304,7 +304,7 @@ This ADR does not implement that path.
     `GET /runs/{run_id}/display-events`.
   - Remaining: the untracked standalone `webui/` workspace needs separate
     integration once it is intentionally brought into this branch.
-- [~] Establish explicit Store contracts for durable runtime state.
+- [x] Establish explicit Store contracts for durable runtime state.
   - Completed: `coding_agent.stores` defines runtime store contracts split into
     run lifecycle, run, runtime event, runtime interaction, and runtime
     checkpoint surfaces.
