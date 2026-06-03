@@ -76,7 +76,6 @@ from coding_agent.stores import RuntimeStore
 from coding_agent.executors import (
     LocalDaemonExecutor,
     LocalDaemonRuntimeBinding,
-    LocalDaemonRuntimeExecution,
     LocalDaemonRuntimePreparation,
     LocalDaemonSessionRuntimeProvider,
 )
@@ -91,23 +90,17 @@ from coding_agent.runs import (
     LocalDaemonExecutorRef,
     LocalPathWorkspaceRef,
     RunCoordinator,
-    RunCoordinatorError,
     RunRequest,
     RuntimeCloser,
     RuntimeRunPersistenceService,
     RuntimeRunRecoveryService,
-    RuntimeTurnErrorHandler,
-    RuntimeTurnObservationState,
-    RuntimeTurnRunTracker,
-    RuntimeTurnSessionState,
-    RuntimeTurnController,
-    RuntimeTurnStarter,
     RunTarget,
     run_target_from_dict,
     run_target_from_execution_binding,
     serialize_checkpoint_session_config,
 )
 from coding_agent.runs.checkpoint_runtime import CheckpointRuntimeBuilder
+from coding_agent.runs.turn_execution import RuntimeTurnService
 from coding_agent.wire.consumer import LocalWireConsumer
 from coding_agent.wire.local import LocalWire
 from coding_agent.wire.protocol import (
@@ -115,7 +108,6 @@ from coding_agent.wire.protocol import (
     ApprovalResponse,
     WireMessage,
 )
-from coding_agent.wire.runtime import RuntimeTurnWire
 from coding_agent.server.stores.session_store import (
     SessionStore,
     create_session_store,
@@ -3397,110 +3389,29 @@ class SessionManager:
             await self._assert_owner(session_id)
             session = await self.get_session_async(session_id)
             run_id = run_id_override or uuid.uuid4().hex
-            turn_session_state = RuntimeTurnSessionState(
-                persist_session=self._persist_session_async
-            )
-            started_at = await turn_session_state.begin(session, run_id=run_id)
-            runtime_run_persistence = self._runtime_run_persistence()
-            turn_run = RuntimeTurnRunTracker(
-                lifecycle=runtime_run_persistence.lifecycle(),
-                run_id=run_id,
-                started_at=started_at,
-                resume_context=resume_context,
-            )
-            observation = RuntimeTurnObservationState(
-                complete_observation=self._complete_agent_observation
-            )
-            turn_wire = RuntimeTurnWire(
-                session_id=session_id,
-                run_id=run_id,
-                emit_message=self._send_session_wire_message,
-                log_exception=lambda message: logger.exception(message),
-            )
-
-            turn_error_handler = RuntimeTurnErrorHandler(
-                turn_run=turn_run,
+            await RuntimeTurnService(
+                run_coordinator=self._run_coordinator,
+                runtime_run_persistence=self._runtime_run_persistence(),
+                persist_session=self._persist_session_async,
+                make_consumer=self._make_session_consumer,
+                submit_run_request=self._submit_runtime_run_request,
+                prepare_runtime=self._prepare_local_daemon_runtime,
                 close_runtime=self._close_runtime,
-                notify_generic_error=turn_wire.notify_generic_error,
-                fail_observation=observation.fail,
-                cancel_observation=observation.cancel,
-            )
-            turn_controller = RuntimeTurnController(
-                error_handler=turn_error_handler,
-                observation=observation,
+                emit_message=self._send_session_wire_message,
+                bind_root_run_identity=self._bind_root_run_identity,
+                bind_subagent_message_publisher=self._bind_subagent_message_publisher,
+                start_observation=self._start_agent_observation,
+                complete_observation=self._complete_agent_observation,
+                log_turn_exception=lambda message: logger.exception(message),
                 fatal_error_types=(FatalToolExecutionError,),
                 cancelled_error_types=(asyncio.CancelledError,),
+            ).run(
+                session,
+                prompt=prompt,
+                run_id=run_id,
+                resume_context=resume_context,
+                current_task=asyncio.current_task(),
             )
-
-            async def _on_local_daemon_turn_error(
-                binding: LocalDaemonRuntimeBinding,
-                exc: BaseException,
-            ) -> None:
-                del binding
-                await turn_controller.on_turn_error(session, exc)
-
-            async def _execute_runtime() -> None:
-                consumer = self._make_session_consumer(session)
-                run_request = await self._submit_runtime_run_request(
-                    session,
-                    run_id=run_id,
-                    prompt=prompt,
-                    resume_context=resume_context,
-                )
-                turn_controller.starter = RuntimeTurnStarter(
-                    turn_run=turn_run,
-                    consumer=consumer,
-                    run_id=run_id,
-                    prompt=prompt,
-                    bind_root_run_identity=self._bind_root_run_identity,
-                    bind_subagent_message_publisher=self._bind_subagent_message_publisher,
-                    start_observation=self._start_agent_observation,
-                    resume_context=resume_context,
-                )
-                turn_controller.finalizer = runtime_run_persistence.turn_finalizer(
-                    persist_session=self._persist_session_async,
-                    complete_observation=observation.complete,
-                )
-
-                async def _before_local_daemon_turn(
-                    binding: LocalDaemonRuntimeBinding,
-                ) -> None:
-                    await turn_controller.before_turn(session, binding)
-
-                async def _after_local_daemon_turn(
-                    binding: LocalDaemonRuntimeBinding,
-                    outcome: object,
-                ) -> None:
-                    await turn_controller.after_turn(session, binding, outcome)
-
-                await self._run_coordinator.execute_runtime(
-                    LocalDaemonRuntimeExecution(
-                        request=run_request,
-                        runtime_provider=_SessionLocalDaemonRuntimeProvider(
-                            prepare=lambda request: self._prepare_local_daemon_runtime(
-                                session,
-                                consumer=consumer,
-                                request=request,
-                            )
-                        ),
-                        prompt=prompt,
-                        before_turn=_before_local_daemon_turn,
-                        after_turn=_after_local_daemon_turn,
-                        on_turn_error=_on_local_daemon_turn_error,
-                    )
-                )
-
-            try:
-                await turn_controller.run_execution(
-                    session,
-                    _execute_runtime,
-                    ensure_started_error_types=(RunCoordinatorError,),
-                )
-            finally:
-                await turn_session_state.finalize(
-                    session,
-                    current_task=asyncio.current_task(),
-                )
 
     async def submit_approval_response(
         self,
