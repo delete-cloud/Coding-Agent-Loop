@@ -239,8 +239,12 @@ This ADR does not implement that path.
     replay service.
   - Completed: `GET /runs/{run_id}/display-events` exposes an additive
     user-facing replay endpoint without changing `GET /runs/{run_id}/events`.
-  - Remaining: live SSE/UI rendering still uses existing wire/runtime event
-    paths and should move to `DisplayEvent` projection separately.
+  - Completed: `GET /sessions/{session_id}/display-events` exposes an
+    additive live SSE stream that projects queued wire events into
+    user-facing `DisplayEvent` payloads while preserving the legacy
+    `/sessions/{session_id}/events` stream.
+  - Remaining: product UI/client renderers should switch to the live
+    `DisplayEvent` stream separately before this boundary is complete.
 - [~] Establish explicit Store contracts for durable runtime state.
   - Completed: `coding_agent.stores` defines runtime store contracts split into
     run lifecycle, run, runtime event, runtime interaction, and runtime

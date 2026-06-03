@@ -68,6 +68,7 @@ from coding_agent.server.http_server import (
     _cleanup_event_queue_on_disconnect,
     _broadcast_event,
     get_events,
+    get_session_display_events,
     _session_to_dict,
     stream_wire_messages,
     _wire_message_to_event,
@@ -4022,6 +4023,120 @@ class TestEventsFanOut:
         session = session_manager.get_session(session_id)
         assert hasattr(session, "event_queues")
         assert isinstance(session.event_queues, list)
+
+    async def test_session_display_events_projects_live_wire_events(
+        self, client, monkeypatch
+    ):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+        session = session_manager.get_session(session_id)
+        session.current_turn_id = "run-live"
+
+        class FakeEventSourceResponse:
+            def __init__(self, body_iterator):
+                self.body_iterator = body_iterator
+
+        monkeypatch.setattr(
+            "coding_agent.server.http_server.EventSourceResponse",
+            FakeEventSourceResponse,
+        )
+
+        request = Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": f"/sessions/{session_id}/display-events",
+                "headers": [],
+            }
+        )
+        response = await get_session_display_events(request, session_id, None)
+        event_generator = cast(AsyncIterator[dict[str, str]], response.body_iterator)
+        assert len(session.event_queues) == 1
+
+        await session.event_queues[0].put(
+            _wire_message_to_event(
+                StreamDelta(
+                    session_id=session_id,
+                    agent_id="agent-1",
+                    content="hello",
+                    role="assistant",
+                    timestamp=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+                )
+            )
+        )
+
+        event = await anext(event_generator)
+        assert event["event"] == "assistant_text_delta"
+        data = json.loads(event["data"])
+        assert data["source_event_id"].startswith(f"live:{session_id}:")
+        assert data["run_id"] == "run-live"
+        assert data["sequence"] is None
+        assert data["display_kind"] == "assistant_text_delta"
+        assert data["payload"] == {
+            "agent_id": "agent-1",
+            "content": "hello",
+            "role": "assistant",
+        }
+        assert data["created_at"] == "2026-01-02T03:04:05+00:00"
+
+        await event_generator.aclose()
+        assert session.event_queues == []
+
+    async def test_session_display_events_redacts_live_tool_result_payload(
+        self, client, monkeypatch
+    ):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+        session = session_manager.get_session(session_id)
+        session.current_turn_id = "run-live"
+
+        class FakeEventSourceResponse:
+            def __init__(self, body_iterator):
+                self.body_iterator = body_iterator
+
+        monkeypatch.setattr(
+            "coding_agent.server.http_server.EventSourceResponse",
+            FakeEventSourceResponse,
+        )
+
+        request = Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": f"/sessions/{session_id}/display-events",
+                "headers": [],
+            }
+        )
+        response = await get_session_display_events(request, session_id, None)
+        event_generator = cast(AsyncIterator[dict[str, str]], response.body_iterator)
+        await session.event_queues[0].put(
+            _wire_message_to_event(
+                ToolResultDelta(
+                    session_id=session_id,
+                    agent_id="agent-1",
+                    call_id="call-1",
+                    tool_name="bash_run",
+                    result={"stdout": "SECRET=abc123"},
+                    display_result="command succeeded",
+                    timestamp=datetime(2026, 1, 2, 3, 4, 6, tzinfo=UTC),
+                )
+            )
+        )
+
+        event = await anext(event_generator)
+        assert event["event"] == "tool_result"
+        data = json.loads(event["data"])
+        assert data["payload"] == {
+            "agent_id": "agent-1",
+            "call_id": "call-1",
+            "tool_name": "bash_run",
+            "display_result": "command succeeded",
+            "is_error": False,
+        }
+        assert "SECRET" not in json.dumps(data)
+
+        await event_generator.aclose()
+        assert session.event_queues == []
 
     async def test_event_queue_cleanup_is_shielded_on_disconnect(self, monkeypatch):
         session_id = "disconnect-session"

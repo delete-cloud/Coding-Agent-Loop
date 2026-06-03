@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from coding_agent.events import DisplayEvent, project_runtime_event_to_display
+from coding_agent.events import (
+    DisplayEvent,
+    project_runtime_event_to_display,
+    project_wire_sse_event_to_display,
+)
 from coding_agent.runtime_store import RuntimeEventRecord
 
 
@@ -149,3 +153,79 @@ def test_skips_internal_or_unknown_runtime_events() -> None:
     )
 
     assert project_runtime_event_to_display(runtime_event) is None
+
+
+def test_projects_live_wire_sse_event_to_display_event() -> None:
+    display = project_wire_sse_event_to_display(
+        {
+            "event": "StreamDelta",
+            "data": (
+                '{"session_id":"session-1","agent_id":"agent-1",'
+                '"content":"hello","role":"assistant",'
+                '"timestamp":"2026-01-02T03:04:05+00:00"}'
+            ),
+        },
+        source_event_id="live:event-1",
+        current_run_id="run-live",
+    )
+
+    assert display == DisplayEvent(
+        source_event_id="live:event-1",
+        run_id="run-live",
+        sequence=None,
+        display_kind="assistant_text_delta",
+        payload={
+            "agent_id": "agent-1",
+            "content": "hello",
+            "role": "assistant",
+        },
+        created_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+    )
+
+
+def test_projects_live_tool_result_without_raw_result_payload() -> None:
+    display = project_wire_sse_event_to_display(
+        {
+            "event": "ToolResultDelta",
+            "data": (
+                '{"session_id":"session-1","agent_id":"agent-1",'
+                '"call_id":"call-1","tool_name":"bash_run",'
+                '"result":null,"display_result":"command succeeded",'
+                '"is_error":false}'
+            ),
+        },
+        source_event_id="live:event-2",
+        current_run_id="run-live",
+        created_at=datetime(2026, 1, 2, 3, 4, 6, tzinfo=UTC),
+    )
+
+    assert display is not None
+    assert display.display_kind == "tool_result"
+    assert display.payload == {
+        "agent_id": "agent-1",
+        "call_id": "call-1",
+        "tool_name": "bash_run",
+        "display_result": "command succeeded",
+        "is_error": False,
+    }
+    assert "result" not in display.payload
+
+
+def test_live_turn_end_uses_turn_id_as_run_id() -> None:
+    display = project_wire_sse_event_to_display(
+        {
+            "event": "TurnEnd",
+            "data": '{"turn_id":"turn-1","completion_status":"completed"}',
+        },
+        source_event_id="live:event-3",
+        current_run_id=None,
+        created_at=datetime(2026, 1, 2, 3, 4, 7, tzinfo=UTC),
+    )
+
+    assert display is not None
+    assert display.run_id == "turn-1"
+    assert display.display_kind == "final_result"
+    assert display.payload == {
+        "turn_id": "turn-1",
+        "completion_status": "completed",
+    }

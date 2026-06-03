@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
+import json
 from typing import Literal, cast
 
 from coding_agent.runtime_store import JSONObject, JSONValue, RuntimeEventRecord
@@ -160,6 +161,33 @@ def project_runtime_event_to_display(
             return None
 
 
+def project_wire_sse_event_to_display(
+    event: Mapping[str, str],
+    *,
+    source_event_id: str,
+    current_run_id: str | None,
+    created_at: datetime | None = None,
+) -> DisplayEvent | None:
+    event_name = event.get("event")
+    if not event_name or event_name == "ping":
+        return None
+    payload = _wire_sse_payload(event)
+    run_id = _wire_sse_run_id(payload, current_run_id=current_run_id)
+    if run_id is None:
+        return None
+    event_record = RuntimeEventRecord(
+        event_id=source_event_id,
+        run_id=run_id,
+        event_kind=f"wire.{event_name}",
+        payload={
+            "message_type": event_name,
+            "message": payload,
+        },
+        created_at=_wire_sse_created_at(payload, fallback=created_at),
+    )
+    return project_runtime_event_to_display(event_record)
+
+
 def _display_event(
     event: RuntimeEventRecord,
     display_kind: DisplayEventKind,
@@ -180,6 +208,47 @@ def _runtime_event_message(payload: JSONObject) -> Mapping[str, JSONValue]:
     if isinstance(message, Mapping):
         return cast(Mapping[str, JSONValue], message)
     return payload
+
+
+def _wire_sse_payload(event: Mapping[str, str]) -> JSONObject:
+    raw_data = event.get("data")
+    if raw_data is None or raw_data == "":
+        return {}
+    try:
+        decoded = json.loads(raw_data)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(decoded, Mapping):
+        return {}
+    return _compact_payload(decoded)
+
+
+def _wire_sse_run_id(
+    payload: Mapping[str, JSONValue],
+    *,
+    current_run_id: str | None,
+) -> str | None:
+    for key in ("run_id", "turn_id"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    if current_run_id is not None and current_run_id.strip():
+        return current_run_id
+    return None
+
+
+def _wire_sse_created_at(
+    payload: Mapping[str, JSONValue],
+    *,
+    fallback: datetime | None,
+) -> datetime:
+    timestamp = payload.get("timestamp")
+    if isinstance(timestamp, str) and timestamp.strip():
+        try:
+            return datetime.fromisoformat(timestamp)
+        except ValueError:
+            pass
+    return fallback if fallback is not None else datetime.now(UTC)
 
 
 def _compact_payload(payload: Mapping[str, object]) -> JSONObject:

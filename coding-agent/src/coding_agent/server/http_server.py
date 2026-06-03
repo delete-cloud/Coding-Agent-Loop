@@ -10,7 +10,7 @@ import re
 import socket
 import time
 import uuid
-from collections.abc import AsyncIterator, Iterable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -82,7 +82,7 @@ from coding_agent.runtime_store import (
     RunMessageSnapshotRecord,
     RuntimeEventRecord,
 )
-from coding_agent.events import DisplayEvent
+from coding_agent.events import DisplayEvent, project_wire_sse_event_to_display
 from coding_agent.scheduled_runs import (
     PGScheduledRunStore,
     ProactiveSignalRecord,
@@ -2147,6 +2147,79 @@ async def _cleanup_event_queue_on_disconnect(
         )
 
 
+def _display_event_sse_response(record: DisplayEvent) -> dict[str, str]:
+    return {
+        "event": record.display_kind,
+        "data": json.dumps(
+            {
+                "source_event_id": record.source_event_id,
+                "run_id": record.run_id,
+                "sequence": record.sequence,
+                "display_kind": record.display_kind,
+                "payload": record.payload,
+                "created_at": record.created_at.isoformat(),
+            }
+        ),
+    }
+
+
+def _legacy_event_stream_transform(event: dict[str, str]) -> dict[str, str] | None:
+    return event
+
+
+def _display_event_stream_transform(
+    session: Session,
+    event: dict[str, str],
+) -> dict[str, str] | None:
+    display_event = project_wire_sse_event_to_display(
+        event,
+        source_event_id=f"live:{session.id}:{uuid.uuid4().hex}",
+        current_run_id=session.current_turn_id,
+    )
+    if display_event is None:
+        return None
+    return _display_event_sse_response(display_event)
+
+
+async def _owned_session_event_generator(
+    session_id: str,
+    queue: asyncio.Queue[dict[str, str]],
+    transform_event: Callable[[dict[str, str]], dict[str, str] | None],
+) -> AsyncIterator[dict[str, str]]:
+    try:
+        while True:
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                try:
+                    await session_manager.verify_event_stream_ownership(session_id)
+                except SessionOwnershipConflictError:
+                    break
+                outbound_event = transform_event(event)
+                if outbound_event is not None:
+                    yield outbound_event
+                if event.get("event") == "SessionClosed":
+                    break
+            except asyncio.TimeoutError:
+                if not await session_manager.has_session_async(session_id):
+                    break
+                try:
+                    await session_manager.verify_event_stream_ownership(session_id)
+                except SessionOwnershipConflictError:
+                    break
+                try:
+                    if not await session_manager.has_event_queue_async(
+                        session_id, queue
+                    ):
+                        break
+                except KeyError:
+                    break
+                yield {"event": "ping", "data": ""}
+    except asyncio.CancelledError:
+        raise
+    finally:
+        await _cleanup_event_queue_on_disconnect(session_id, queue)
+
+
 async def _cleanup_idle_sessions() -> None:
     """Background task to clean up idle sessions."""
     while True:
@@ -2907,42 +2980,49 @@ async def get_events(
     except SessionOwnershipConflictError as exc:
         raise _owner_conflict_http_exception(exc, session_id=session_id) from exc
 
-    async def event_generator() -> AsyncIterator[dict[str, str]]:
-        """Generate events from queue."""
-        try:
-            while True:
-                try:
-                    event = await asyncio.wait_for(queue.get(), timeout=30.0)
-                    try:
-                        await session_manager.verify_event_stream_ownership(session_id)
-                    except SessionOwnershipConflictError:
-                        break
-                    yield event
-                    if event.get("event") == "SessionClosed":
-                        break
-                except asyncio.TimeoutError:
-                    if not await session_manager.has_session_async(session_id):
-                        break
-                    try:
-                        await session_manager.verify_event_stream_ownership(session_id)
-                    except SessionOwnershipConflictError:
-                        break
-                    try:
-                        if not await session_manager.has_event_queue_async(
-                            session_id, queue
-                        ):
-                            break
-                    except KeyError:
-                        break
-                    # Send keepalive
-                    yield {"event": "ping", "data": ""}
-        except asyncio.CancelledError:
-            # Client disconnected
-            raise
-        finally:
-            await _cleanup_event_queue_on_disconnect(session_id, queue)
+    return EventSourceResponse(
+        _owned_session_event_generator(
+            session_id,
+            queue,
+            _legacy_event_stream_transform,
+        )
+    )
 
-    return EventSourceResponse(event_generator())
+
+@app.get("/sessions/{session_id}/display-events")
+@limiter.limit(RateLimits.EVENTS)
+async def get_session_display_events(
+    request: Request,
+    session_id: str,
+    api_key: str | None = Depends(verify_api_key),
+) -> EventSourceResponse:
+    """Persistent SSE stream of projected user-facing display events."""
+    del request, api_key
+    try:
+        session = await session_manager.get_session_async(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
+
+    try:
+        await session_manager.authorize_event_stream(session_id)
+    except SessionOwnershipConflictError as exc:
+        raise _owner_conflict_http_exception(exc, session_id=session_id) from exc
+
+    queue: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=100)
+    try:
+        await session_manager.register_owned_event_queue_async(session_id, queue)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
+    except SessionOwnershipConflictError as exc:
+        raise _owner_conflict_http_exception(exc, session_id=session_id) from exc
+
+    return EventSourceResponse(
+        _owned_session_event_generator(
+            session_id,
+            queue,
+            lambda event: _display_event_stream_transform(session, event),
+        )
+    )
 
 
 @app.post("/sessions/{session_id}/cancel", response_model=CancelSessionResponse)
