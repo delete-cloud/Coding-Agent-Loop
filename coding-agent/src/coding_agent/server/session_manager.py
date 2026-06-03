@@ -42,7 +42,7 @@ from agentkit.storage.protocols import TapeDebugStore, TapeInfo, TapeSearchResul
 from agentkit.tape.extract import TurnTrace, extract_turns
 from agentkit.tape.tape import Tape
 from agentkit.tools import FatalToolExecutionError
-from agentkit.tape.models import Anchor, Entry
+from agentkit.tape.models import Anchor
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.agent_observability import (
     AgentObservationRecorder,
@@ -82,7 +82,11 @@ from coding_agent.executors import (
 )
 from coding_agent.events import DisplayEvent, RuntimeEventReplayService
 from coding_agent.runs import (
+    CHECKPOINT_SESSION_CONFIG_KEY,
     CloudWorkspaceRef,
+    CheckpointRestoredRuntime,
+    CheckpointRestoreService,
+    CheckpointSessionConfig,
     DefaultRunCoordinator,
     LocalDaemonExecutorRef,
     LocalPathWorkspaceRef,
@@ -100,6 +104,7 @@ from coding_agent.runs import (
     RunTarget,
     run_target_from_dict,
     run_target_from_execution_binding,
+    serialize_checkpoint_session_config,
 )
 from coding_agent.wire.consumer import LocalWireConsumer
 from coding_agent.wire.local import LocalWire
@@ -138,7 +143,7 @@ from coding_agent.server.stores.workspace_store import (
 
 logger = logging.getLogger(__name__)
 
-_CHECKPOINT_SESSION_CONFIG_KEY = "session_restart_config"
+_CHECKPOINT_SESSION_CONFIG_KEY = CHECKPOINT_SESSION_CONFIG_KEY
 _DEFAULT_EXECUTION_BINDING = object()
 T = TypeVar("T")
 
@@ -1011,15 +1016,6 @@ class Session:
         return session
 
 
-@dataclass(frozen=True)
-class _CheckpointSessionConfig:
-    provider_name: str | None
-    model_name: str | None
-    base_url: str | None
-    max_steps: int
-    approval_policy: ApprovalPolicy
-
-
 def _required_session_str(data: dict[str, Any], key: str) -> str:
     value = data.get(key)
     if not isinstance(value, str):
@@ -1032,72 +1028,6 @@ def _required_session_int(data: dict[str, Any], key: str) -> int:
     if not isinstance(value, int):
         raise TypeError(f"session metadata is missing {key}")
     return value
-
-
-def _serialize_checkpoint_session_config(session: Session) -> dict[str, Any]:
-    return {
-        "provider_name": session.provider_name,
-        "model_name": session.model_name,
-        "base_url": session.base_url,
-        "max_steps": session.max_steps,
-        "approval_policy": session.approval_policy.value,
-    }
-
-
-def _checkpoint_session_config_from_extra(
-    session: Session, extra: dict[str, Any]
-) -> _CheckpointSessionConfig:
-    raw = extra.get(_CHECKPOINT_SESSION_CONFIG_KEY)
-    if raw is None:
-        return _CheckpointSessionConfig(
-            provider_name=session.provider_name,
-            model_name=session.model_name,
-            base_url=session.base_url,
-            max_steps=session.max_steps,
-            approval_policy=session.approval_policy,
-        )
-    if not isinstance(raw, dict):
-        raise TypeError("checkpoint session config must be an object")
-
-    required_keys = {
-        "provider_name",
-        "model_name",
-        "base_url",
-        "max_steps",
-        "approval_policy",
-    }
-    missing_keys = sorted(required_keys - raw.keys())
-    if missing_keys:
-        missing = ", ".join(missing_keys)
-        raise TypeError(f"checkpoint session config is missing {missing}")
-
-    provider_name = raw.get("provider_name")
-    if provider_name is not None and not isinstance(provider_name, str):
-        raise TypeError("checkpoint session config has invalid provider_name")
-
-    model_name = raw.get("model_name")
-    if model_name is not None and not isinstance(model_name, str):
-        raise TypeError("checkpoint session config has invalid model_name")
-
-    base_url = raw.get("base_url")
-    if base_url is not None and not isinstance(base_url, str):
-        raise TypeError("checkpoint session config has invalid base_url")
-
-    max_steps = raw.get("max_steps")
-    if not isinstance(max_steps, int):
-        raise TypeError("checkpoint session config has invalid max_steps")
-
-    approval_policy_raw = raw.get("approval_policy")
-    if not isinstance(approval_policy_raw, str):
-        raise TypeError("checkpoint session config has invalid approval_policy")
-
-    return _CheckpointSessionConfig(
-        provider_name=provider_name,
-        model_name=model_name,
-        base_url=base_url,
-        max_steps=max_steps,
-        approval_policy=ApprovalPolicy(approval_policy_raw),
-    )
 
 
 def _load_pg_storage_types() -> tuple[Any, Any, Any]:
@@ -2927,7 +2857,7 @@ class SessionManager:
         *,
         target: RunTarget | None = None,
         restored_tape: Tape,
-        restored_config: _CheckpointSessionConfig,
+        restored_config: CheckpointSessionConfig,
         plugin_states: Mapping[str, Any],
     ) -> tuple[Any, Any, PipelineAdapter]:
         runtime_target = session.default_run_target if target is None else target
@@ -2983,7 +2913,7 @@ class SessionManager:
         session: Session,
         *,
         restored_tape: Tape,
-        restored_config: _CheckpointSessionConfig,
+        restored_config: CheckpointSessionConfig,
         plugin_states: Mapping[str, Any],
     ) -> tuple[Any, Any, PipelineAdapter]:
         if not self._is_local_daemon_run_target(session.default_run_target):
@@ -3025,62 +2955,36 @@ class SessionManager:
             cast(PipelineAdapter, binding.adapter),
         )
 
+    def _checkpoint_restore_service(self) -> CheckpointRestoreService:
+        async def prepare_runtime(
+            *,
+            session: Session,
+            restored_tape: Tape,
+            restored_config: CheckpointSessionConfig,
+            plugin_states: Mapping[str, Any],
+        ) -> CheckpointRestoredRuntime:
+            pipeline, ctx, adapter = await self._build_restored_session_runtime(
+                session,
+                restored_tape=restored_tape,
+                restored_config=restored_config,
+                plugin_states=plugin_states,
+            )
+            return CheckpointRestoredRuntime(
+                pipeline=pipeline,
+                ctx=ctx,
+                adapter=adapter,
+            )
+
+        return CheckpointRestoreService(
+            checkpoint_service=self._checkpoint_service,
+            tape_store=self._tape_store,
+            prepare_runtime=prepare_runtime,
+            close_runtime=self._close_runtime,
+            persist_session=self._persist_session_async,
+        )
+
     async def _restore_checkpoint(self, session: Session, checkpoint_id: str) -> None:
-        snapshot = await self._checkpoint_service.restore(checkpoint_id)
-        meta = snapshot.meta
-        if session.tape_id is None:
-            raise ValueError("session has no stable tape id")
-        if meta.tape_id != session.tape_id:
-            raise ValueError(
-                f"Checkpoint {checkpoint_id} belongs to tape {meta.tape_id}, not session tape {session.tape_id}"
-            )
-        if meta.entry_count != len(snapshot.tape_entries):
-            raise ValueError(
-                "checkpoint entry_count does not match snapshot tape_entries length"
-            )
-        if meta.window_start > meta.entry_count:
-            raise ValueError("checkpoint window_start must be <= entry_count")
-
-        restored_tape = Tape(
-            entries=[Entry.from_dict(entry) for entry in snapshot.tape_entries],
-            tape_id=session.tape_id,
-            _window_start=meta.window_start,
-        )
-
-        restored_config = _checkpoint_session_config_from_extra(session, snapshot.extra)
-        previous_provider_name = session.provider_name
-        previous_model_name = session.model_name
-        previous_base_url = session.base_url
-        pipeline, ctx, adapter = await self._build_restored_session_runtime(
-            session,
-            restored_tape=restored_tape,
-            restored_config=restored_config,
-            plugin_states=snapshot.plugin_states,
-        )
-
-        await self._close_runtime(session)
-        await self._tape_store.truncate(session.tape_id, meta.entry_count)
-        session.tape_id = ctx.tape.tape_id
-        session.provider_name = restored_config.provider_name
-        session.model_name = restored_config.model_name
-        session.base_url = restored_config.base_url
-        session.max_steps = restored_config.max_steps
-        session.approval_policy = restored_config.approval_policy
-        if (
-            previous_provider_name != restored_config.provider_name
-            or previous_model_name != restored_config.model_name
-            or previous_base_url != restored_config.base_url
-        ):
-            session.provider = None
-        session.runtime_pipeline = pipeline
-        session.runtime_ctx = ctx
-        session.runtime_adapter = adapter
-        await self._persist_session_async(session)
-
-        checkpoints = await self._checkpoint_service.list(ctx.tape.tape_id)
-        for checkpoint_meta in checkpoints:
-            if checkpoint_meta.entry_count > meta.entry_count:
-                await self._checkpoint_service.delete(checkpoint_meta.checkpoint_id)
+        await self._checkpoint_restore_service().restore(session, checkpoint_id)
 
     def _persist_session(self, session: Session) -> None:
         self._session_cache[session.id] = session
@@ -4159,7 +4063,7 @@ class SessionManager:
                     f"'{_CHECKPOINT_SESSION_CONFIG_KEY}' is a reserved checkpoint metadata key and cannot be provided via extra"
                 )
             payload[_CHECKPOINT_SESSION_CONFIG_KEY] = (
-                _serialize_checkpoint_session_config(session)
+                serialize_checkpoint_session_config(session)
             )
             checkpoint = await self._checkpoint_service.capture(
                 ctx, label=label, extra=payload

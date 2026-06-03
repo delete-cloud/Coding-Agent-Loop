@@ -8,6 +8,15 @@ from .coordinator import (
     RuntimeExecution,
     RuntimeRunExecutor,
 )
+from .checkpoint_restore import (
+    CHECKPOINT_SESSION_CONFIG_KEY,
+    CheckpointRestoreService,
+    CheckpointRestoreSession,
+    CheckpointRestoredRuntime,
+    CheckpointSessionConfig,
+    checkpoint_session_config_from_extra,
+    serialize_checkpoint_session_config,
+)
 from .lifecycle import (
     RuntimeMessageSnapshotSaver,
     RuntimeObservationCompleter,
@@ -79,6 +88,11 @@ from .target import (
 
 __all__ = [
     "CloudWorkspaceRef",
+    "CHECKPOINT_SESSION_CONFIG_KEY",
+    "CheckpointRestoreService",
+    "CheckpointRestoreSession",
+    "CheckpointRestoredRuntime",
+    "CheckpointSessionConfig",
     "DefaultRunCoordinator",
     "ExecutionBindingRunTargetError",
     "ExecutorRef",
@@ -146,4 +160,6 @@ __all__ = [
     "run_target_from_execution_binding",
     "workspace_ref_from_dict",
     "workspace_ref_to_dict",
+    "checkpoint_session_config_from_extra",
+    "serialize_checkpoint_session_config",
 ]

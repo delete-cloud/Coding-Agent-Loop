@@ -196,8 +196,12 @@ This ADR does not implement that path.
     pre-published decision handoff, wait-response projection, timeout
     resolution, and wait cleanup are delegated to `ApprovalRequestService`
     instead of living inside `SessionManager` approval callbacks.
-  - Remaining: `SessionManager` still owns checkpoint restore preparation
-    details and some runtime close/error policy. These should move behind
+  - Completed: checkpoint restore snapshot validation, tape reconstruction,
+    session config rewind, tape truncation, runtime assignment, session
+    persistence, and future-checkpoint pruning are delegated to
+    `CheckpointRestoreService`.
+  - Remaining: `SessionManager` still owns restored runtime construction
+    callbacks and some runtime close/error policy. These should move behind
     narrower RunService/EventStore/Executor lifecycle boundaries before this
     item is considered complete.
 - [x] Demote `coding_agent run` to an inline testkit/devkit compatibility path.
@@ -245,13 +249,13 @@ This ADR does not implement that path.
     applied-decision session mutation are delegated to `ApprovalDecisionService`.
   - Completed: approval request waiting/session setup is delegated to
     `ApprovalRequestService`.
-  - Remaining: checkpoint restore service ownership still needs a narrower
-    boundary.
+  - Completed: checkpoint restore orchestration is delegated to
+    `CheckpointRestoreService`.
 
 ## Remaining Implementation Gaps
 
-- Extract remaining checkpoint restore ownership from `SessionManager` into a
-  narrower runtime/executor service boundary.
+- Move restored runtime construction callbacks and runtime close/error policy
+  out of `SessionManager` into narrower runtime/executor lifecycle boundaries.
 - Make sandbox policy the default executor environment wrapper rather than a
   mixed local/cloud environment concern.
 - Add daemon-backed client surfaces for the local product path. REPL/TUI/CLI
