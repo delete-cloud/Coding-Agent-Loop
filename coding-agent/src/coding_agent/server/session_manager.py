@@ -85,6 +85,7 @@ from coding_agent.runs import (
     RuntimeReplacementService,
     RuntimeResumeContext as SessionResumeContext,
     RuntimeResumeOrchestrationService,
+    RuntimeTurnAdmissionService,
     RuntimeWireEventRecorder,
     RunTarget,
     SessionRuntimeHandle,
@@ -817,6 +818,12 @@ class SessionManager:
             persist_session=self._persist_session_async,
             session_has_task=lambda session, task: session.task is task,
             lock=lambda: self._lock,
+        )
+        self._runtime_turn_admission = RuntimeTurnAdmissionService(
+            turn_lock_for=self._turn_lock_for,
+            workspace_export_in_progress=self._workspace_export_in_progress,
+            assert_owner=self._assert_owner,
+            load_session=self.get_session_async,
         )
         self._runtime_closer = RuntimeCloser()
         self._runtime_agent_factory_service = RuntimeAgentFactoryService(
@@ -1719,17 +1726,10 @@ class SessionManager:
         self._session_workspace_export_counts[session_id] = count - 1
 
     async def prepare_session_turn(self, session_id: str) -> Session:
-        turn_lock = self._turn_lock_for(session_id)
-        if turn_lock.locked():
-            raise RuntimeError("turn already in progress")
-        if self._workspace_export_in_progress(session_id):
-            raise RuntimeError("turn already in progress")
-
-        session = await self.get_session_async(session_id)
-        await self._assert_owner(session_id)
-        if session.turn_in_progress or (session.task and not session.task.done()):
-            raise RuntimeError("turn already in progress")
-        return session
+        return cast(
+            Session,
+            await self._runtime_turn_admission.prepare_session_turn(session_id),
+        )
 
     async def _assert_owner(self, session_id: str) -> None:
         if self._owner_store is None:
@@ -2463,23 +2463,21 @@ class SessionManager:
         run_id_override: str | None = None,
         resume_context: SessionResumeContext | None = None,
     ) -> None:
-        turn_lock = self._turn_lock_for(session_id)
-        if turn_lock.locked():
-            raise RuntimeError("turn already in progress")
-
-        async with turn_lock:
-            if self._workspace_export_in_progress(session_id):
-                raise RuntimeError("turn already in progress")
-            await self._assert_owner(session_id)
-            session = await self.get_session_async(session_id)
+        async def run_admitted_turn(session: object) -> None:
+            admitted_session = cast(Session, session)
             run_id = run_id_override or uuid.uuid4().hex
             await self._runtime_turn_service.run(
-                session,
+                admitted_session,
                 prompt=prompt,
                 run_id=run_id,
                 resume_context=resume_context,
                 current_task=asyncio.current_task(),
             )
+
+        await self._runtime_turn_admission.run_exclusive(
+            session_id,
+            run_admitted_turn,
+        )
 
     async def submit_approval_response(
         self,

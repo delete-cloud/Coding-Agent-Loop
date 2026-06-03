@@ -341,6 +341,11 @@ This ADR does not implement that path.
     `SessionManager._observe_cancelled_turn()`.
   - Completed: runtime task cancellation/waiting for close and shutdown paths is
     delegated to `RuntimeTaskStopper` instead of inline `SessionManager` logic.
+  - Completed: local runtime turn admission, including turn-lock checks,
+    workspace-export guards, owner assertion, session loading, and prepare-time
+    active-turn checks, is delegated to `RuntimeTurnAdmissionService` instead
+    of living inline in `SessionManager.prepare_session_turn()` and
+    `SessionManager.run_agent()`.
   - Completed: runtime control service construction for persistence, recovery,
     query, resume, attached-executor, cancel, and task-stopper services is
     delegated to `RuntimeControlServices` instead of `SessionManager` private
