@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from inspect import isawaitable
+from types import TracebackType
 from typing import Any, Protocol, cast
 
 from coding_agent.adapter_types import StopReason, TurnOutcome
@@ -120,6 +121,37 @@ class RuntimeTask(Protocol):
     def done(self) -> bool: ...
 
     def __await__(self) -> Any: ...
+
+
+class RuntimeTurnAdmissionLock(Protocol):
+    def locked(self) -> bool: ...
+
+    async def __aenter__(self) -> object: ...
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool | None: ...
+
+
+class RuntimeTurnAdmissionSession(Protocol):
+    turn_in_progress: bool
+    task: RuntimeTask | None
+
+
+RuntimeTurnLockProvider = Callable[[str], RuntimeTurnAdmissionLock]
+RuntimeWorkspaceExportGuard = Callable[[str], bool]
+RuntimeOwnerAsserter = Callable[[str], Awaitable[None]]
+RuntimeTurnAdmissionSessionLoader = Callable[
+    [str],
+    Awaitable[RuntimeTurnAdmissionSession],
+]
+RuntimeTurnAdmissionBody = Callable[
+    [RuntimeTurnAdmissionSession],
+    Awaitable[Any],
+]
 
 
 class RuntimeHandleSession(Protocol):
@@ -255,6 +287,48 @@ class RuntimeTaskStopper:
             raise RuntimeError(
                 f"Session task for {session_id} did not stop after cancellation"
             )
+
+
+@dataclass(frozen=True)
+class RuntimeTurnAdmissionService:
+    turn_lock_for: RuntimeTurnLockProvider
+    workspace_export_in_progress: RuntimeWorkspaceExportGuard
+    assert_owner: RuntimeOwnerAsserter
+    load_session: RuntimeTurnAdmissionSessionLoader
+
+    async def prepare_session_turn(
+        self,
+        session_id: str,
+    ) -> RuntimeTurnAdmissionSession:
+        lock = self.turn_lock_for(session_id)
+        if lock.locked():
+            raise RuntimeError("turn already in progress")
+        if self.workspace_export_in_progress(session_id):
+            raise RuntimeError("turn already in progress")
+
+        session = await self.load_session(session_id)
+        await self.assert_owner(session_id)
+        if session.turn_in_progress or (
+            session.task is not None and not session.task.done()
+        ):
+            raise RuntimeError("turn already in progress")
+        return session
+
+    async def run_exclusive(
+        self,
+        session_id: str,
+        body: RuntimeTurnAdmissionBody,
+    ) -> Any:
+        lock = self.turn_lock_for(session_id)
+        if lock.locked():
+            raise RuntimeError("turn already in progress")
+
+        async with lock:
+            if self.workspace_export_in_progress(session_id):
+                raise RuntimeError("turn already in progress")
+            await self.assert_owner(session_id)
+            session = await self.load_session(session_id)
+            return await body(session)
 
 
 @dataclass(frozen=True)
@@ -768,6 +842,12 @@ __all__ = [
     "RuntimeObservationStarter",
     "RuntimeSubagentMessagePublisherBinder",
     "RuntimeTurnBinding",
+    "RuntimeTurnAdmissionBody",
+    "RuntimeTurnAdmissionLock",
+    "RuntimeTurnAdmissionService",
+    "RuntimeTurnAdmissionSession",
+    "RuntimeTurnAdmissionSessionLoader",
+    "RuntimeTurnLockProvider",
     "RuntimeTurnController",
     "RuntimeTurnErrorAction",
     "RuntimeTurnErrorHandler",
