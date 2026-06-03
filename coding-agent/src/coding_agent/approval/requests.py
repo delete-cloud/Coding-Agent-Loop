@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -26,10 +25,13 @@ class ApprovalRequestSession(
     id: str
     current_turn_id: str | None
     approval_coordinator: ApprovalCoordinator
-    pending_approval: dict[str, Any] | None
-    approval_event: asyncio.Event
-    approval_response: dict[str, Any] | None
     last_activity: datetime
+
+    def begin_approval_request(self, request: ApprovalRequest) -> None: ...
+
+    def expose_approval_response(self, response_projection: dict[str, Any]) -> None: ...
+
+    def cleanup_approval_wait_projection(self, *, signal_event: bool) -> None: ...
 
 
 PersistApprovalRequestSession = Callable[
@@ -77,10 +79,7 @@ class ApprovalRequestService:
         session: ApprovalRequestSession,
         request: ApprovalRequest,
     ) -> ApprovalResponse | None:
-        session.approval_coordinator.add_request(request)
-        session.pending_approval = session.approval_coordinator.projection()
-        session.approval_event.clear()
-        session.approval_response = None
+        session.begin_approval_request(request)
         await self.persist_session(session)
         await self.interactions.create(session, request)
 
@@ -105,9 +104,9 @@ class ApprovalRequestService:
         expose_response: bool,
     ) -> None:
         if expose_response:
-            session.approval_response = approval_wait_response_projection(response)
-            session.approval_event.set()
-            session.pending_approval = session.approval_coordinator.projection()
+            session.expose_approval_response(
+                approval_wait_response_projection(response)
+            )
             await self.persist_session(session)
         await self.interactions.resolve(
             session,
@@ -140,10 +139,7 @@ class ApprovalRequestService:
         *,
         signal_event: bool,
     ) -> None:
-        session.pending_approval = session.approval_coordinator.projection()
-        session.approval_response = None
-        if signal_event:
-            session.approval_event.set()
+        session.cleanup_approval_wait_projection(signal_event=signal_event)
         await self.persist_session(session)
 
 

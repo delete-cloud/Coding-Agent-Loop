@@ -872,6 +872,29 @@ class Session:
     def broadcast_event_nowait(self, event: dict[str, Any]) -> EventBroadcastResult:
         return self.runtime_handle.broadcast_event_nowait(event)
 
+    def clear_approval_runtime_state(self) -> None:
+        self.runtime_handle.clear_approval_runtime_state()
+
+    def begin_approval_request(self, request: ApprovalRequest) -> None:
+        self.runtime_handle.begin_approval_request(request)
+
+    def update_pending_approval_projection(
+        self,
+        *,
+        signal_event: bool = False,
+    ) -> None:
+        self.runtime_handle.update_pending_approval_projection(
+            signal_event=signal_event,
+        )
+
+    def expose_approval_response(self, response_projection: dict[str, Any]) -> None:
+        self.runtime_handle.expose_approval_response(response_projection)
+
+    def cleanup_approval_wait_projection(self, *, signal_event: bool) -> None:
+        self.runtime_handle.cleanup_approval_wait_projection(
+            signal_event=signal_event,
+        )
+
     def as_dict(self) -> dict[str, Any]:
         workspace_id = (
             self.execution_binding.workspace_id
@@ -945,8 +968,7 @@ class Session:
     def from_store_data(cls, data: dict[str, Any]) -> Session:
         session = SessionRecord.from_store_data(data).to_session()
         session.turn_in_progress = False
-        session.pending_approval = None
-        session.approval_response = None
+        session.clear_approval_runtime_state()
         return session
 
 

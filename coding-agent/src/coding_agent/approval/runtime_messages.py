@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -60,10 +59,15 @@ class ApprovalDecisionSession(Protocol):
     approval_coordinator: ApprovalCoordinator
     runtime_message_bus: RuntimeMessageBus
     approval_decision_cursor: RuntimeMessageCursor
-    pending_approval: dict[str, Any] | None
-    approval_event: asyncio.Event
-    approval_response: dict[str, Any] | None
     last_activity: datetime
+
+    def update_pending_approval_projection(
+        self,
+        *,
+        signal_event: bool = False,
+    ) -> None: ...
+
+    def expose_approval_response(self, response_projection: dict[str, Any]) -> None: ...
 
 
 PersistApprovalDecisionSession = Callable[
@@ -176,8 +180,7 @@ class ApprovalDecisionService:
         if result.applied_request_ids or not result.deferred_message_ids:
             session.approval_decision_cursor = result.cursor
         if result.applied_request_ids:
-            session.pending_approval = session.approval_coordinator.projection()
-            session.approval_event.set()
+            session.update_pending_approval_projection(signal_event=True)
         return result
 
     async def published_decision(
@@ -229,9 +232,9 @@ class ApprovalDecisionService:
             return None
 
         session.last_activity = self.now()
-        session.pending_approval = session.approval_coordinator.projection()
-        session.approval_response = approval_response_projection(decision.response)
-        session.approval_event.set()
+        session.expose_approval_response(
+            approval_response_projection(decision.response)
+        )
         await self.persist_session(session)
         await self.interactions.resolve(
             session,
@@ -320,11 +323,9 @@ class ApprovalDecisionService:
         session.last_activity = self.now()
 
         if success:
-            session.pending_approval = session.approval_coordinator.projection()
-            session.approval_response = approval_response_projection(
-                published_decision.response
+            session.expose_approval_response(
+                approval_response_projection(published_decision.response)
             )
-            session.approval_event.set()
             await self.persist_session(session)
             await self.interactions.resolve(
                 session,
