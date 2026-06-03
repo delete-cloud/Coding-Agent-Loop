@@ -82,6 +82,14 @@ from .runtime_events import (
     runtime_event_correlation_from_run,
     with_runtime_event_correlation,
 )
+from .resume import (
+    DEFAULT_RESUME_PROMPT,
+    MessageSnapshotLoader,
+    RuntimeResumeContext,
+    RuntimeResumeService,
+    RuntimeResumeSession,
+    TapeEntryLoader,
+)
 from .session_runtime import (
     EventBroadcastResult,
     RuntimeBindingSnapshot,
@@ -121,6 +129,7 @@ __all__ = [
     "CheckpointSessionConfig",
     "CheckpointLister",
     "DefaultRunCoordinator",
+    "DEFAULT_RESUME_PROMPT",
     "ExecutionBindingRunTargetError",
     "EventBroadcastResult",
     "ExecutorRef",
@@ -132,6 +141,7 @@ __all__ = [
     "LocalDaemonExecutorRef",
     "LocalPathWorkspaceRef",
     "ManagedPoolExecutorRef",
+    "MessageSnapshotLoader",
     "RunCoordinator",
     "RunCoordinatorError",
     "RunExecutor",
@@ -153,6 +163,9 @@ __all__ = [
     "RuntimeQueryService",
     "RuntimeQuerySession",
     "RuntimeQueryStore",
+    "RuntimeResumeContext",
+    "RuntimeResumeService",
+    "RuntimeResumeSession",
     "RuntimeCloser",
     "RuntimeHandleSession",
     "RuntimeRootRunIdentityBinder",
@@ -192,6 +205,7 @@ __all__ = [
     "RuntimeWireEventSession",
     "RuntimeWireEventStore",
     "SnapshotWorkspaceRef",
+    "TapeEntryLoader",
     "WorkspaceRef",
     "executor_ref_from_dict",
     "executor_ref_to_dict",
