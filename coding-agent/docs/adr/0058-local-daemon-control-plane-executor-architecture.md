@@ -325,6 +325,9 @@ This ADR does not implement that path.
   - Completed: runtime agent factory selection and default application factory
     lazy loading are delegated to `RuntimeAgentFactoryService` instead of a
     `SessionManager` helper method.
+  - Completed: runtime preparation `RunRequest` construction is delegated to
+    `RuntimePreparationRequestService` instead of a `SessionManager` helper
+    method.
   - Completed: runtime run lifecycle and latest message snapshot persistence
     consume narrower `RuntimeRunLifecycleStore` and `RuntimeCheckpointStore`
     contracts through `RuntimeRunPersistenceService`.

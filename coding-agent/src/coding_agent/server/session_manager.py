@@ -77,7 +77,6 @@ from coding_agent.runs import (
     LocalDaemonExecutorRef,
     LocalPathWorkspaceRef,
     RunCoordinator,
-    RunRequest,
     RuntimeAttachedExecutorService,
     RuntimeAgentFactoryService,
     RuntimeBindingSnapshot,
@@ -86,6 +85,7 @@ from coding_agent.runs import (
     RuntimeContextBindingService,
     RuntimeRunMetadataService,
     RuntimeObservationService,
+    RuntimePreparationRequestService,
     RuntimeQueryService,
     RuntimeResumeContext as SessionResumeContext,
     RuntimeResumeService,
@@ -793,6 +793,7 @@ class SessionManager:
         self._runtime_agent_factory_service = RuntimeAgentFactoryService(
             create_agent=self._create_agent,
         )
+        self._runtime_preparation_request_service = RuntimePreparationRequestService()
         self._runtime_context_binding_service = RuntimeContextBindingService(
             publish_subagent_message=self.publish_subagent_message,
         )
@@ -810,7 +811,9 @@ class SessionManager:
             bind_subagent_message_publisher=(
                 self._runtime_context_binding_service.bind_subagent_message_publisher
             ),
-            runtime_preparation_request=self._runtime_preparation_request,
+            runtime_preparation_request=(
+                self._runtime_preparation_request_service.request_for_session
+            ),
             adapter_factory=lambda pipeline, ctx, consumer: PipelineAdapter(
                 pipeline=pipeline,
                 ctx=ctx,
@@ -2126,7 +2129,9 @@ class SessionManager:
                 ctx=ctx,
                 consumer=consumer,
             ),
-            runtime_preparation_request=self._runtime_preparation_request,
+            runtime_preparation_request=(
+                self._runtime_preparation_request_service.request_for_session
+            ),
         )
 
         async def prepare_runtime(
@@ -2775,21 +2780,6 @@ class SessionManager:
         if target is None:
             return False
         return isinstance(target.executor, LocalDaemonExecutorRef)
-
-    def _runtime_preparation_request(
-        self,
-        session: Session,
-        *,
-        purpose: str = "runtime_preparation",
-    ) -> RunRequest:
-        if session.default_run_target is None:
-            raise RuntimeError("session is missing default_run_target")
-        return RunRequest(
-            session_id=session.id,
-            run_id=f"runtime-prepare-{uuid.uuid4().hex}",
-            target=session.default_run_target,
-            metadata={"purpose": purpose},
-        )
 
     async def _build_session_runtime(
         self,

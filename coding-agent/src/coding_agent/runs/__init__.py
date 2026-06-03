@@ -85,6 +85,10 @@ from .persistence import (
     RuntimeMessageSnapshotSession,
     RuntimeRunPersistenceService,
 )
+from .preparation_request import (
+    RuntimePreparationRequestService,
+    RuntimePreparationRequestSession,
+)
 from .query import (
     CheckpointLister,
     RuntimeQueryService,
@@ -195,6 +199,8 @@ __all__ = [
     "RuntimeObservationSession",
     "RuntimeObservationCompleter",
     "RuntimeObservationStarter",
+    "RuntimePreparationRequestService",
+    "RuntimePreparationRequestSession",
     "RuntimeQueryService",
     "RuntimeQuerySession",
     "RuntimeQueryStore",
