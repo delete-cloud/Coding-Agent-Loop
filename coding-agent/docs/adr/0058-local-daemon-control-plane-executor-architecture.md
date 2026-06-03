@@ -302,6 +302,9 @@ This ADR does not implement that path.
   - Completed: runtime wire event serialization, correlation enrichment, and
     append behavior are delegated to `RuntimeWireEventRecorder` instead of
     `SessionManager` helper methods.
+  - Completed: runtime run, interaction, message snapshot, event replay, and
+    resume metadata query behavior are delegated to `RuntimeQueryService`
+    instead of `SessionManager` helper methods.
   - Completed: runtime run lifecycle and latest message snapshot persistence
     consume narrower `RuntimeRunLifecycleStore` and `RuntimeCheckpointStore`
     contracts through `RuntimeRunPersistenceService`.
