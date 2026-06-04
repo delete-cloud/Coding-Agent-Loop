@@ -158,6 +158,19 @@ class FakeManager:
         self.calls.append(("close", None))
 
 
+def _expected_mode_state() -> dict[str, Any]:
+    return {
+        "currentModeId": "default",
+        "availableModes": [
+            {
+                "id": "default",
+                "name": "Default",
+                "description": "Standard Coding Agent behavior.",
+            }
+        ],
+    }
+
+
 @pytest.mark.asyncio
 async def test_initialize_returns_protocol_version_and_minimal_capabilities() -> None:
     server = AcpServer(FakeManager())
@@ -346,7 +359,11 @@ async def test_session_new_creates_local_session_from_absolute_cwd(
         }
     )
 
-    assert response == {"jsonrpc": "2.0", "id": 2, "result": {"sessionId": "sess-1"}}
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {"sessionId": "sess-1", "modes": _expected_mode_state()},
+    }
     assert manager.calls == [
         (
             "create_session",
@@ -391,7 +408,11 @@ async def test_session_new_passes_stdio_mcp_servers_to_session_manager(
         }
     )
 
-    assert response == {"jsonrpc": "2.0", "id": 2, "result": {"sessionId": "sess-1"}}
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {"sessionId": "sess-1", "modes": _expected_mode_state()},
+    }
     assert manager.calls[0] == (
         "create_session",
         {
@@ -437,7 +458,11 @@ async def test_session_new_passes_additional_directories_to_session_manager(
         }
     )
 
-    assert response == {"jsonrpc": "2.0", "id": 2, "result": {"sessionId": "sess-1"}}
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {"sessionId": "sess-1", "modes": _expected_mode_state()},
+    }
     assert manager.calls[0][1]["additional_directories"] == [str(extra)]
 
 
@@ -607,7 +632,11 @@ async def test_session_load_updates_mcp_servers_from_params(tmp_path: Path) -> N
         }
     )
 
-    assert response == {"jsonrpc": "2.0", "id": 7, "result": {}}
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "result": {"modes": _expected_mode_state()},
+    }
     assert (
         "update_session_mcp_servers",
         {
@@ -647,7 +676,11 @@ async def test_session_load_updates_additional_directories_from_params(
         }
     )
 
-    assert response == {"jsonrpc": "2.0", "id": 7, "result": {}}
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "result": {"modes": _expected_mode_state()},
+    }
     assert (
         "update_session_additional_directories",
         {"session_id": "sess-1", "additional_directories": [str(extra)]},
@@ -685,7 +718,11 @@ async def test_session_resume_updates_session_params_without_replay(
         }
     )
 
-    assert response == {"jsonrpc": "2.0", "id": 7, "result": {}}
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "result": {"modes": _expected_mode_state()},
+    }
     assert (
         "update_session_mcp_servers",
         {
@@ -725,7 +762,11 @@ async def test_session_resume_allows_omitted_mcp_servers(tmp_path: Path) -> None
         }
     )
 
-    assert response == {"jsonrpc": "2.0", "id": 7, "result": {}}
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "result": {"modes": _expected_mode_state()},
+    }
     assert (
         "update_session_mcp_servers",
         {"session_id": "sess-1", "mcp_servers": {}},
@@ -842,6 +883,45 @@ async def test_session_close_calls_session_manager_close() -> None:
 
 
 @pytest.mark.asyncio
+async def test_session_set_mode_accepts_default_mode() -> None:
+    manager = FakeManager()
+    server = AcpServer(manager)
+
+    response = await server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "session/set_mode",
+            "params": {"sessionId": "sess-1", "modeId": "default"},
+        }
+    )
+
+    assert response == {"jsonrpc": "2.0", "id": 11, "result": {}}
+    assert ("get_session_async", "sess-1") in manager.calls
+
+
+@pytest.mark.asyncio
+async def test_session_set_mode_rejects_unknown_mode() -> None:
+    response = await AcpServer(FakeManager()).handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "session/set_mode",
+            "params": {"sessionId": "sess-1", "modeId": "plan"},
+        }
+    )
+
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 11,
+        "error": {
+            "code": -32602,
+            "message": "session/set_mode params.modeId must be default",
+        },
+    }
+
+
+@pytest.mark.asyncio
 async def test_session_load_replays_display_events_before_response(
     tmp_path: Path,
 ) -> None:
@@ -885,7 +965,11 @@ async def test_session_load_replays_display_events_before_response(
         }
     )
 
-    assert response == {"jsonrpc": "2.0", "id": 7, "result": {}}
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "result": {"modes": _expected_mode_state()},
+    }
     assert notifications == [
         {
             "jsonrpc": "2.0",
@@ -989,7 +1073,11 @@ async def test_session_load_replays_all_runs_in_started_order(tmp_path: Path) ->
         }
     )
 
-    assert response == {"jsonrpc": "2.0", "id": 8, "result": {}}
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 8,
+        "result": {"modes": _expected_mode_state()},
+    }
     assert [
         notification["params"]["update"]["content"]["text"]
         for notification in notifications
@@ -1018,7 +1106,11 @@ async def test_session_load_without_runs_returns_empty_object_without_replay(
         }
     )
 
-    assert response == {"jsonrpc": "2.0", "id": 8, "result": {}}
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 8,
+        "result": {"modes": _expected_mode_state()},
+    }
     assert notifications == []
     assert ("replay_display_events",) not in [
         (name,) for name, _payload in manager.calls
@@ -1304,7 +1396,7 @@ async def test_stdio_session_load_writes_replay_updates_before_response(
 
     assert stdout == [
         '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"loaded answer"}}}}\n',
-        '{"jsonrpc":"2.0","id":1,"result":{}}\n',
+        '{"jsonrpc":"2.0","id":1,"result":{"modes":{"currentModeId":"default","availableModes":[{"id":"default","name":"Default","description":"Standard Coding Agent behavior."}]}}}\n',
     ]
 
 

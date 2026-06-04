@@ -22,6 +22,19 @@ from coding_agent.wire.protocol import (
 )
 
 
+def _expected_mode_state() -> dict[str, Any]:
+    return {
+        "currentModeId": "default",
+        "availableModes": [
+            {
+                "id": "default",
+                "name": "Default",
+                "description": "Standard Coding Agent behavior.",
+            }
+        ],
+    }
+
+
 class AcpCompatClient:
     def __init__(self, server: AcpServer) -> None:
         self._stdin = _BlockingLineInput()
@@ -251,7 +264,10 @@ async def test_external_client_harness_exercises_session_lifecycle(
                 ],
             },
         )
-        assert session_new["result"] == {"sessionId": "sess-compat"}
+        assert session_new["result"] == {
+            "sessionId": "sess-compat",
+            "modes": _expected_mode_state(),
+        }
 
         prompt_id = client.send_request(
             "session/prompt",
@@ -288,17 +304,27 @@ async def test_external_client_harness_exercises_session_lifecycle(
         assert await client.wait_for_response(load_id) == {
             "jsonrpc": "2.0",
             "id": 5,
-            "result": {},
+            "result": {"modes": _expected_mode_state()},
         }
 
         resumed = await client.request(
             "session/resume",
             {"sessionId": "sess-compat", "cwd": str(tmp_path)},
         )
-        assert resumed == {"jsonrpc": "2.0", "id": 6, "result": {}}
+        assert resumed == {
+            "jsonrpc": "2.0",
+            "id": 6,
+            "result": {"modes": _expected_mode_state()},
+        }
+
+        mode = await client.request(
+            "session/set_mode",
+            {"sessionId": "sess-compat", "modeId": "default"},
+        )
+        assert mode == {"jsonrpc": "2.0", "id": 7, "result": {}}
 
         closed = await client.request("session/close", {"sessionId": "sess-compat"})
-        assert closed == {"jsonrpc": "2.0", "id": 7, "result": {}}
+        assert closed == {"jsonrpc": "2.0", "id": 8, "result": {}}
     finally:
         await client.close()
 
