@@ -14,6 +14,7 @@ from typing import get_args
 import click
 
 from coding_agent.app import create_agent, create_child_pipeline  # noqa: F401
+from coding_agent.cli.acp_command import acp
 from coding_agent.cli.kb_commands import kb
 from coding_agent.cli.oauth_commands import oauth_cli
 from coding_agent.cli.postmortem_commands import postmortem
@@ -699,6 +700,7 @@ main.add_command(serve)
 main.add_command(remote)
 main.add_command(attach)
 main.add_command(verify)
+main.add_command(acp)
 
 
 if __name__ == "__main__":

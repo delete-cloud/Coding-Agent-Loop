@@ -40,6 +40,7 @@ def test_module_help_lists_release_entrypoint_commands_without_credentials() -> 
     assert completed.returncode == 0
     assert "Coding Agent CLI" in completed.stdout
     for command in (
+        "acp",
         "daemon",
         "run",
         "repl",
@@ -56,6 +57,7 @@ def test_subcommand_help_is_available_without_provider_credentials() -> None:
     runner = CliRunner(env=_click_credential_free_env())
 
     for command in (
+        "acp",
         "daemon",
         "run",
         "repl",
@@ -81,6 +83,67 @@ def test_daemon_help_lists_daemon_backed_run_client() -> None:
     assert "Start local daemon control plane" in result.output
     assert "run" in result.output
     assert "tui" in result.output
+
+
+def test_acp_help_is_stdio_agent_surface() -> None:
+    runner = CliRunner(env=_click_credential_free_env())
+
+    result = runner.invoke(main, ["acp", "--help"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert "Run Coding Agent as an ACP stdio agent" in result.output
+    assert "--approval" in result.output
+
+
+def test_acp_command_uses_shared_provider_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from coding_agent.cli import acp_command
+
+    calls: list[dict[str, object]] = []
+
+    async def fake_run_acp_stdio(ctx, approval_policy: str, max_steps: int) -> None:
+        calls.append(
+            {
+                "shared_cli_args": ctx.find_root().obj["shared_cli_args"],
+                "approval_policy": approval_policy,
+                "max_steps": max_steps,
+            }
+        )
+
+    monkeypatch.setattr(acp_command, "_run_acp_stdio", fake_run_acp_stdio)
+    runner = CliRunner(env=_click_credential_free_env())
+
+    result = runner.invoke(
+        main,
+        [
+            "--provider",
+            "codex",
+            "--model",
+            "gpt-5.5",
+            "--base-url",
+            "https://example.invalid/v1",
+            "acp",
+            "--approval",
+            "yolo",
+            "--max-steps",
+            "4",
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        {
+            "shared_cli_args": {
+                "provider": "codex",
+                "model": "gpt-5.5",
+                "base_url": "https://example.invalid/v1",
+            },
+            "approval_policy": "yolo",
+            "max_steps": 4,
+        }
+    ]
 
 
 def test_daemon_run_help_is_daemon_backed_client_surface() -> None:
