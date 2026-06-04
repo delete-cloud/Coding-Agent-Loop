@@ -183,6 +183,7 @@ async def test_initialize_returns_protocol_version_and_minimal_capabilities() ->
                 "sessionCapabilities": {
                     "close": {},
                     "list": {},
+                    "resume": {},
                     "additionalDirectories": {},
                 },
             },
@@ -236,6 +237,7 @@ async def test_initialize_advertises_session_lifecycle_capabilities() -> None:
     assert capabilities["sessionCapabilities"] == {
         "close": {},
         "list": {},
+        "resume": {},
         "additionalDirectories": {},
     }
 
@@ -605,7 +607,7 @@ async def test_session_load_updates_mcp_servers_from_params(tmp_path: Path) -> N
         }
     )
 
-    assert response == {"jsonrpc": "2.0", "id": 7, "result": None}
+    assert response == {"jsonrpc": "2.0", "id": 7, "result": {}}
     assert (
         "update_session_mcp_servers",
         {
@@ -645,11 +647,114 @@ async def test_session_load_updates_additional_directories_from_params(
         }
     )
 
-    assert response == {"jsonrpc": "2.0", "id": 7, "result": None}
+    assert response == {"jsonrpc": "2.0", "id": 7, "result": {}}
     assert (
         "update_session_additional_directories",
         {"session_id": "sess-1", "additional_directories": [str(extra)]},
     ) in manager.calls
+
+
+@pytest.mark.asyncio
+async def test_session_resume_updates_session_params_without_replay(
+    tmp_path: Path,
+) -> None:
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    manager = FakeManager(repo_path=tmp_path)
+    notifications: list[dict[str, Any]] = []
+    server = AcpServer(manager, emit=notifications.append)
+
+    response = await server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "session/resume",
+            "params": {
+                "sessionId": "sess-1",
+                "cwd": str(tmp_path),
+                "mcpServers": [
+                    {
+                        "name": "toolbox",
+                        "command": "python",
+                        "args": ["server.py"],
+                        "env": [{"name": "EXPLICIT_OK", "value": "yes"}],
+                    }
+                ],
+                "additionalDirectories": [str(extra)],
+            },
+        }
+    )
+
+    assert response == {"jsonrpc": "2.0", "id": 7, "result": {}}
+    assert (
+        "update_session_mcp_servers",
+        {
+            "session_id": "sess-1",
+            "mcp_servers": {
+                "toolbox": {
+                    "command": "python",
+                    "args": ["server.py"],
+                    "env": {"EXPLICIT_OK": "yes"},
+                    "inherit_env": False,
+                }
+            },
+        },
+    ) in manager.calls
+    assert (
+        "update_session_additional_directories",
+        {"session_id": "sess-1", "additional_directories": [str(extra)]},
+    ) in manager.calls
+    assert ("list_runtime_runs", "sess-1") not in manager.calls
+    assert notifications == []
+
+
+@pytest.mark.asyncio
+async def test_session_resume_allows_omitted_mcp_servers(tmp_path: Path) -> None:
+    manager = FakeManager(repo_path=tmp_path)
+    server = AcpServer(manager)
+
+    response = await server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "session/resume",
+            "params": {
+                "sessionId": "sess-1",
+                "cwd": str(tmp_path),
+            },
+        }
+    )
+
+    assert response == {"jsonrpc": "2.0", "id": 7, "result": {}}
+    assert (
+        "update_session_mcp_servers",
+        {"session_id": "sess-1", "mcp_servers": {}},
+    ) in manager.calls
+    assert (
+        "update_session_additional_directories",
+        {"session_id": "sess-1", "additional_directories": []},
+    ) in manager.calls
+
+
+@pytest.mark.asyncio
+async def test_session_resume_rejects_relative_cwd(tmp_path: Path) -> None:
+    response = await AcpServer(FakeManager(repo_path=tmp_path)).handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "session/resume",
+            "params": {"sessionId": "sess-1", "cwd": "relative/path"},
+        }
+    )
+
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "error": {
+            "code": -32602,
+            "message": "session/resume params.cwd must be absolute",
+        },
+    }
 
 
 @pytest.mark.asyncio
@@ -780,7 +885,7 @@ async def test_session_load_replays_display_events_before_response(
         }
     )
 
-    assert response == {"jsonrpc": "2.0", "id": 7, "result": None}
+    assert response == {"jsonrpc": "2.0", "id": 7, "result": {}}
     assert notifications == [
         {
             "jsonrpc": "2.0",
@@ -884,7 +989,7 @@ async def test_session_load_replays_all_runs_in_started_order(tmp_path: Path) ->
         }
     )
 
-    assert response == {"jsonrpc": "2.0", "id": 8, "result": None}
+    assert response == {"jsonrpc": "2.0", "id": 8, "result": {}}
     assert [
         notification["params"]["update"]["content"]["text"]
         for notification in notifications
@@ -892,7 +997,7 @@ async def test_session_load_replays_all_runs_in_started_order(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_session_load_without_runs_returns_null_without_replay(
+async def test_session_load_without_runs_returns_empty_object_without_replay(
     tmp_path: Path,
 ) -> None:
     manager = FakeManager()
@@ -913,7 +1018,7 @@ async def test_session_load_without_runs_returns_null_without_replay(
         }
     )
 
-    assert response == {"jsonrpc": "2.0", "id": 8, "result": None}
+    assert response == {"jsonrpc": "2.0", "id": 8, "result": {}}
     assert notifications == []
     assert ("replay_display_events",) not in [
         (name,) for name, _payload in manager.calls
@@ -1199,7 +1304,7 @@ async def test_stdio_session_load_writes_replay_updates_before_response(
 
     assert stdout == [
         '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"loaded answer"}}}}\n',
-        '{"jsonrpc":"2.0","id":1,"result":null}\n',
+        '{"jsonrpc":"2.0","id":1,"result":{}}\n',
     ]
 
 

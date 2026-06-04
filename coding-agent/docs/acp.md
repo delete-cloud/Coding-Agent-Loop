@@ -21,6 +21,7 @@ The adapter currently supports:
 - `session/prompt`
 - `session/cancel`
 - `session/load`
+- `session/resume`
 - `session/list`
 - `session/close`
 - agent-originated `session/request_permission`
@@ -30,6 +31,7 @@ The initialization response advertises:
 - `loadSession: true`
 - `sessionCapabilities.close`
 - `sessionCapabilities.list`
+- `sessionCapabilities.resume`
 - `sessionCapabilities.additionalDirectories`
 - `mcpCapabilities.stdio: true`
 - `mcpCapabilities.http: false`
@@ -62,9 +64,10 @@ Example:
 
 ## Additional directories
 
-ACP `additionalDirectories` are supported on `session/new` and `session/load`.
-Every directory must be an absolute path. The list is stored as per-session
-metadata and treated as the complete additional-root set for the session.
+ACP `additionalDirectories` are supported on `session/new`, `session/load`, and
+`session/resume`. Every directory must be an absolute path. The list is stored as
+per-session metadata and treated as the complete additional-root set for the
+session.
 
 Additional directories are activated for local file tools, `file_patch`,
 `bash_run`, and native/Docker/Podman sandbox runners. Relative paths still
@@ -83,6 +86,8 @@ tools.
 
 The `mcpServers` field is required by ACP on both `session/new` and
 `session/load`; use an empty array when no MCP servers are requested.
+`session/resume` accepts the same MCP server shape but treats omitted
+`mcpServers` as an empty server set.
 
 Only stdio servers are supported:
 
@@ -121,11 +126,15 @@ approval responses:
 - `reject-once`
 - `cancelled`
 
-## Load, list, and close
+## Load, resume, list, and close
 
 `session/load` is restore-and-replay only. It loads an existing session, applies
 the supplied MCP server set, replays durable display events as `session/update`
-notifications, and returns `null`. It does not start a new model turn.
+notifications, and returns `{}`. It does not start a new model turn.
+
+`session/resume` re-attaches to an existing session without replaying previous
+messages. It applies the supplied MCP server set and additional directories, then
+returns `{}`. It does not start a new model turn.
 
 `session/list` returns known sessions with `sessionId`, `cwd`, `title`,
 `updatedAt`, and `additionalDirectories`. Cursor pagination is not implemented;

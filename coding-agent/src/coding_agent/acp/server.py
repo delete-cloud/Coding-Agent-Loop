@@ -157,7 +157,10 @@ class AcpServer:
             return await self._session_new(params)
         if method == "session/load":
             await self._session_load(params)
-            return None
+            return {}
+        if method == "session/resume":
+            await self._session_resume(params)
+            return {}
         if method == "session/list":
             return await self._session_list(params)
         if method == "session/close":
@@ -185,6 +188,7 @@ class AcpServer:
                 "sessionCapabilities": {
                     "close": {},
                     "list": {},
+                    "resume": {},
                     "additionalDirectories": {},
                 },
             },
@@ -317,6 +321,38 @@ class AcpServer:
                         },
                     }
                 )
+
+    async def _session_resume(self, params: JSONObject) -> None:
+        session_id = params.get("sessionId")
+        if not isinstance(session_id, str) or not session_id:
+            raise JsonRpcError(
+                -32602, "session/resume params.sessionId must be a string"
+            )
+        cwd = params.get("cwd")
+        if not isinstance(cwd, str) or not cwd:
+            raise JsonRpcError(-32602, "session/resume params.cwd must be a string")
+        repo_path = Path(cwd)
+        if not repo_path.is_absolute():
+            raise JsonRpcError(-32602, "session/resume params.cwd must be absolute")
+        mcp_servers = _parse_mcp_servers(
+            params,
+            method="session/resume",
+            required=False,
+        )
+        additional_directories = _parse_additional_directories(
+            params,
+            method="session/resume",
+        )
+
+        await self._session_manager.get_session_async(session_id)
+        await self._session_manager.update_session_mcp_servers(
+            session_id,
+            mcp_servers,
+        )
+        await self._session_manager.update_session_additional_directories(
+            session_id,
+            additional_directories,
+        )
 
     async def _session_prompt(self, params: JSONObject) -> JSONObject:
         session_id = params.get("sessionId")
@@ -632,8 +668,11 @@ def _parse_mcp_servers(
     params: JSONObject,
     *,
     method: str,
+    required: bool = True,
 ) -> dict[str, dict[str, Any]]:
     raw_servers = params.get("mcpServers")
+    if raw_servers is None and not required:
+        return {}
     if not isinstance(raw_servers, list):
         raise JsonRpcError(-32602, f"{method} params.mcpServers must be an array")
 
