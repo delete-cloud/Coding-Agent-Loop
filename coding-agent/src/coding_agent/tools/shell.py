@@ -157,14 +157,60 @@ def _resolve_workspace_root(
     return Path(str(workspace_root)).expanduser().resolve()
 
 
+def _resolve_additional_workspace_roots(
+    __pipeline_ctx__: object | None,
+    shell_config: dict[str, object],
+) -> tuple[Path, ...]:
+    raw_pipeline_config = (
+        getattr(__pipeline_ctx__, "config", {}) if __pipeline_ctx__ else {}
+    )
+    if not isinstance(raw_pipeline_config, dict):
+        raise ValueError("pipeline context config must be a dict")
+    pipeline_config = cast(dict[str, object], raw_pipeline_config)
+    roots = pipeline_config.get("additional_workspace_roots")
+    if roots is None:
+        roots = shell_config.get("additional_workspace_roots", ())
+    if roots is None:
+        return ()
+    if not isinstance(roots, (list, tuple)):
+        raise ValueError("additional_workspace_roots must be a list")
+    resolved_roots: list[Path] = []
+    for root in roots:
+        if not isinstance(root, (str, Path)):
+            raise ValueError(
+                "additional_workspace_roots entries must be strings or paths"
+            )
+        resolved_roots.append(Path(str(root)).expanduser().resolve())
+    return tuple(resolved_roots)
+
+
+def _path_under_any_root(
+    path: Path,
+    workspace_root: Path,
+    additional_roots: tuple[Path, ...],
+) -> bool:
+    for root in (workspace_root, *additional_roots):
+        try:
+            path.relative_to(root)
+        except ValueError:
+            continue
+        return True
+    return False
+
+
 def _sandbox_config(*, cwd: str | None, __pipeline_ctx__: object | None) -> object:
     shell_config = _pipeline_shell_config(__pipeline_ctx__)
     workspace_root = _resolve_workspace_root(cwd, __pipeline_ctx__, shell_config)
+    additional_roots = _resolve_additional_workspace_roots(
+        __pipeline_ctx__,
+        shell_config,
+    )
     mode_value = _sandbox_mode(shell_config)
     sandbox_module = _load_sandbox_module()
     return sandbox_module.SandboxConfig(
         mode=mode_value,
         workspace_root=workspace_root,
+        additional_roots=additional_roots,
         limits=sandbox_module.SandboxLimits(
             cpu_limit_seconds=_optional_int(shell_config.get("cpu_limit_seconds")),
             memory_limit_mb=_optional_int(shell_config.get("memory_limit_mb")),
@@ -221,28 +267,32 @@ def _validated_execution_cwd(
     if cwd is None:
         return None
     workspace_root = _resolve_workspace_root(cwd, __pipeline_ctx__, shell_config)
+    additional_roots = _resolve_additional_workspace_roots(
+        __pipeline_ctx__,
+        shell_config,
+    )
     resolved_cwd = Path(cwd).expanduser().resolve()
-    try:
-        resolved_cwd.relative_to(workspace_root)
-    except ValueError as exc:
+    if not _path_under_any_root(resolved_cwd, workspace_root, additional_roots):
         raise ValueError(
             "Working directory is outside sandbox workspace: "
             f"{resolved_cwd}. Use a path under workspace root: {workspace_root}"
-        ) from exc
+        )
     return str(resolved_cwd)
 
 
-def _validate_no_path_escape(args: list[str], workspace_root: Path) -> None:
+def _validate_no_path_escape(
+    args: list[str],
+    workspace_root: Path,
+    additional_roots: tuple[Path, ...] = (),
+) -> None:
     for arg in args[1:]:
         for match in re.findall(r"(?<![A-Za-z0-9_.-])/[A-Za-z0-9_./-]+", arg):
             candidate = Path(match).expanduser().resolve()
-            try:
-                candidate.relative_to(workspace_root)
-            except ValueError as exc:
+            if not _path_under_any_root(candidate, workspace_root, additional_roots):
                 raise ValueError(
                     "Path is outside sandbox workspace: "
                     f"{candidate}. Use a path under workspace root: {workspace_root}"
-                ) from exc
+                )
 
 
 @tool(
@@ -273,18 +323,28 @@ def bash_run(
             workspace_root = _resolve_workspace_root(
                 cwd, __pipeline_ctx__, shell_config
             )
+            additional_roots = _resolve_additional_workspace_roots(
+                __pipeline_ctx__,
+                shell_config,
+            )
             if mode_value != "none":
                 sandbox_module = _load_sandbox_module()
-                sandbox_module._validate_cwd(Path(changed_dir), workspace_root)
+                sandbox_module._validate_cwd(
+                    Path(changed_dir),
+                    workspace_root,
+                    additional_roots=additional_roots,
+                )
             else:
-                try:
-                    Path(changed_dir).relative_to(workspace_root)
-                except ValueError as exc:
+                if not _path_under_any_root(
+                    Path(changed_dir),
+                    workspace_root,
+                    additional_roots,
+                ):
                     raise ValueError(
                         "Directory is outside sandbox workspace: "
                         f"{changed_dir}. Use a path under workspace root: "
                         f"{workspace_root}"
-                    ) from exc
+                    )
             return f"Changed directory to {changed_dir}"
 
         exported = _apply_export(command)
@@ -299,7 +359,11 @@ def bash_run(
             workspace_root = _resolve_workspace_root(
                 execution_cwd or cwd, __pipeline_ctx__, shell_config
             )
-            _validate_no_path_escape(args, workspace_root)
+            additional_roots = _resolve_additional_workspace_roots(
+                __pipeline_ctx__,
+                shell_config,
+            )
+            _validate_no_path_escape(args, workspace_root, additional_roots)
             result = subprocess.run(
                 args,
                 shell=False,

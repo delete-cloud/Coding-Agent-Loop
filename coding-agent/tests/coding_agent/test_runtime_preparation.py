@@ -49,6 +49,7 @@ class FakeRuntimeSession:
         self.runtime_message_bus = object()
         self.default_run_target: RunTarget | None = None
         self.mcp_servers: dict[str, dict[str, object]] = {}
+        self.additional_directories: list[str] = []
         self.runtime_pipeline: object | None = None
         self.runtime_ctx: object | None = None
         self.runtime_adapter: FakeRuntimeAdapter | None = None
@@ -199,6 +200,7 @@ async def test_runtime_preparation_service_builds_local_daemon_runtime(
     assert created["session_id_override"] == "session-1"
     assert created["run_id_override"] == "run-1"
     assert created["mcp_servers_override"] == {}
+    assert created["additional_workspace_roots_override"] == []
     assert created["api_key"] is None
     assert restored == ["tape-old"]
     assert persisted == ["tape-new"]
@@ -280,6 +282,33 @@ async def test_runtime_preparation_service_passes_session_mcp_servers(
             "inherit_env": False,
         }
     }
+
+
+@pytest.mark.asyncio
+async def test_runtime_preparation_service_passes_additional_workspace_roots(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    session = FakeRuntimeSession()
+    session.additional_directories = [str(extra)]
+    created: dict[str, object] = {}
+
+    await _service(
+        created=created,
+        persisted=[],
+        restored=[],
+        consumer=object(),
+        adapter=FakeRuntimeAdapter(),
+    ).prepare_runtime(
+        session,
+        consumer=object(),
+        request=_request(workspace),
+    )
+
+    assert created["additional_workspace_roots_override"] == [str(extra)]
 
 
 @pytest.mark.asyncio

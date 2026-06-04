@@ -733,10 +733,14 @@ def test_pg_session_metadata_store_waits_for_loop_start_before_returning() -> No
 
     with (
         patch(
-            "coding_agent.server.stores.session_store.asyncio.new_event_loop", side_effect=FakeLoop
+            "coding_agent.server.stores.session_store.asyncio.new_event_loop",
+            side_effect=FakeLoop,
         ),
         patch("coding_agent.server.stores.session_store.asyncio.set_event_loop"),
-        patch("coding_agent.server.stores.session_store.threading.Thread", side_effect=FakeThread),
+        patch(
+            "coding_agent.server.stores.session_store.threading.Thread",
+            side_effect=FakeThread,
+        ),
     ):
         store = PGSessionMetadataStore(pool=FakePool())
 
@@ -1068,9 +1072,13 @@ def test_pg_session_metadata_store_close_test_does_not_start_real_thread() -> No
 
     with (
         patch(
-            "coding_agent.server.stores.session_store.asyncio.new_event_loop", side_effect=FakeLoop
+            "coding_agent.server.stores.session_store.asyncio.new_event_loop",
+            side_effect=FakeLoop,
         ),
-        patch("coding_agent.server.stores.session_store.threading.Thread", side_effect=FakeThread),
+        patch(
+            "coding_agent.server.stores.session_store.threading.Thread",
+            side_effect=FakeThread,
+        ),
     ):
         with pytest.raises(
             RuntimeError, match="postgres session metadata loop thread failed to start"
@@ -1494,6 +1502,7 @@ def test_session_record_round_trips_existing_store_payload() -> None:
         model_name="gpt-4o",
         base_url="https://api.example.test",
         max_steps=12,
+        additional_directories=["/repo-extra"],
         mcp_servers={
             "filesystem": {
                 "command": "npx",
@@ -1516,6 +1525,7 @@ def test_session_record_round_trips_existing_store_payload() -> None:
     assert reloaded.model_name == "gpt-4o"
     assert reloaded.base_url == "https://api.example.test"
     assert reloaded.max_steps == 12
+    assert reloaded.additional_directories == ["/repo-extra"]
     assert reloaded.mcp_servers == {
         "filesystem": {
             "command": "npx",
@@ -1547,6 +1557,39 @@ def test_session_record_defaults_missing_mcp_servers_to_empty() -> None:
 
     assert record.mcp_servers == {}
     assert reloaded.mcp_servers == {}
+
+
+def test_session_record_defaults_missing_additional_directories_to_empty() -> None:
+    session = Session(
+        id="record-session",
+        created_at=datetime.now(UTC),
+        last_activity=datetime.now(UTC),
+        approval_store=ApprovalStore(),
+    )
+    payload = session.to_store_data()
+    payload.pop("additional_directories", None)
+
+    record = SessionRecord.from_store_data(payload)
+    reloaded = record.to_session()
+
+    assert record.additional_directories == []
+    assert reloaded.additional_directories == []
+
+
+def test_session_record_rejects_relative_additional_directories() -> None:
+    session = Session(
+        id="record-session",
+        created_at=datetime.now(UTC),
+        last_activity=datetime.now(UTC),
+        approval_store=ApprovalStore(),
+    )
+    payload = session.to_store_data()
+    payload["additional_directories"] = ["relative/path"]
+
+    with pytest.raises(
+        TypeError, match="session metadata has invalid additional_directories"
+    ):
+        SessionRecord.from_store_data(payload)
 
 
 def test_session_as_dict_excludes_mcp_servers() -> None:

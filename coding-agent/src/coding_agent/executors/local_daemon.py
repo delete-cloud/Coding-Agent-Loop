@@ -45,6 +45,7 @@ class LocalDaemonRuntimeSession(Protocol):
     max_steps: int | None
     approval_policy: ApprovalPolicy
     provider: object | None
+    additional_directories: list[str]
     tape_id: str | None
     runtime_message_bus: object
     runtime_pipeline: object | None
@@ -154,6 +155,9 @@ class LocalDaemonSessionRuntimeProvider:
                 run_id_override=request.run_id,
                 api_key=None,
                 mcp_servers_override=dict(getattr(session, "mcp_servers", {})),
+                additional_workspace_roots_override=list(
+                    getattr(session, "additional_directories", [])
+                ),
                 tape=await self.restore_tape(session.tape_id),
             )
             session.tape_id = ctx.tape.tape_id

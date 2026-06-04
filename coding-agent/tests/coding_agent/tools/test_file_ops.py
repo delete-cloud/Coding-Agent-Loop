@@ -48,6 +48,32 @@ class TestFileOps:
         assert "outside workspace" in result.lower()
         assert str(tmp_path) in result
 
+    def test_file_read_allows_absolute_path_under_additional_root(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        extra = tmp_path / "extra"
+        extra.mkdir()
+        target = extra / "note.txt"
+        target.write_text("from extra")
+        configure_workspace(workspace, additional_roots=[extra])
+
+        result = file_read(path=str(target))
+
+        assert result == "from extra"
+
+    def test_file_write_allows_absolute_path_under_additional_root(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        extra = tmp_path / "extra"
+        extra.mkdir()
+        target = extra / "out.txt"
+        configure_workspace(workspace, additional_roots=[extra])
+
+        result = file_write(path=str(target), content="written")
+
+        assert result == f"Written 7 bytes to {target}"
+        assert target.read_text() == "written"
+
     def test_glob_files_rejects_escape_directory(self, tmp_path):
         configure_workspace(tmp_path)
 

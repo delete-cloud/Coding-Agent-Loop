@@ -124,8 +124,25 @@ def _apply_hunks_to_lines(
 
 def build_file_patch_tool(
     workspace_root: Path | str | None,
+    *,
+    additional_roots: list[Path | str] | tuple[Path | str, ...] = (),
 ) -> Callable[[str, str], str]:
     root = None if workspace_root is None else Path(workspace_root).resolve()
+    resolved_additional_roots = tuple(
+        Path(extra).expanduser().resolve() for extra in additional_roots
+    )
+
+    def _matching_root(path: Path) -> Path | None:
+        if root is None:
+            return None
+        roots = (root, *resolved_additional_roots)
+        for candidate_root in roots:
+            try:
+                path.relative_to(candidate_root)
+            except ValueError:
+                continue
+            return candidate_root
+        return None
 
     def _resolve(path: str) -> Path:
         candidate = Path(path).expanduser()
@@ -136,10 +153,8 @@ def build_file_patch_tool(
             if candidate.is_absolute()
             else (root / candidate).resolve()
         )
-        try:
-            resolved.relative_to(root)
-        except ValueError as exc:
-            raise ValueError(f"Path is outside workspace root: {path}") from exc
+        if _matching_root(resolved) is None:
+            raise ValueError(f"Path is outside workspace root: {path}")
         return resolved
 
     @tool(
@@ -155,8 +170,9 @@ def build_file_patch_tool(
                 )
             if not target.is_file():
                 return json.dumps({"success": False, "error": f"Not a file: {path}"})
-            if root is not None:
-                edit_decision = validate_safe_edit_path(root, path)
+            edit_root = _matching_root(target)
+            if edit_root is not None:
+                edit_decision = validate_safe_edit_path(edit_root, target)
                 if not edit_decision.allowed:
                     return json.dumps(
                         {
