@@ -1223,6 +1223,47 @@ async def test_stdio_processes_cancel_while_prompt_is_running() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stdio_processes_close_while_prompt_is_running() -> None:
+    wire = LocalWire("sess-1")
+    manager = FakeManager(wire)
+    prompt_started = asyncio.Event()
+    close_seen = asyncio.Event()
+
+    async def run_agent(session_id: str, prompt: str) -> None:
+        manager.calls.append(
+            ("run_agent", {"session_id": session_id, "prompt": prompt})
+        )
+        prompt_started.set()
+        await close_seen.wait()
+        await wire.send(
+            TurnEnd(
+                session_id=session_id,
+                turn_id="turn-1",
+                completion_status=CompletionStatus.COMPLETED,
+            )
+        )
+
+    async def close_session(session_id: str) -> None:
+        await prompt_started.wait()
+        manager.calls.append(("close_session", session_id))
+        close_seen.set()
+
+    manager.run_agent = run_agent  # type: ignore[method-assign]
+    manager.close_session = close_session  # type: ignore[method-assign]
+    stdin = [
+        '{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"sess-1","prompt":[{"type":"text","text":"wait"}]}}\n',
+        '{"jsonrpc":"2.0","id":2,"method":"session/close","params":{"sessionId":"sess-1"}}\n',
+    ]
+    stdout: list[str] = []
+
+    await run_stdio(AcpServer(manager), stdin=stdin, stdout=stdout.append)
+
+    assert ("close_session", "sess-1") in manager.calls
+    assert '{"jsonrpc":"2.0","id":2,"result":{}}\n' in stdout
+    assert stdout[-1] == '{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}\n'
+
+
+@pytest.mark.asyncio
 async def test_stdio_text_stream_reading_does_not_block_prompt_task() -> None:
     wire = LocalWire("sess-1")
     manager = FakeManager(wire)

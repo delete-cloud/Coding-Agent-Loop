@@ -42,6 +42,11 @@ def prompt_blocks_to_text(prompt: object) -> str:
             parts.append(text)
             continue
         if block_type == "resource_link":
+            name = block.get("name")
+            if not isinstance(name, str) or not name:
+                raise ValueError(
+                    f"prompt resource_link block {index} must include non-empty name"
+                )
             uri = block.get("uri")
             if not isinstance(uri, str) or not uri:
                 raise ValueError(
