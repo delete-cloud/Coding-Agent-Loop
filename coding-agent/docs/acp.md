@@ -22,6 +22,7 @@ The adapter currently supports:
 - `session/cancel`
 - `session/load`
 - `session/resume`
+- `session/set_mode`
 - `session/list`
 - `session/close`
 - agent-originated `session/request_permission`
@@ -135,6 +136,9 @@ notifications, and returns `{}`. It does not start a new model turn.
 `session/resume` re-attaches to an existing session without replaying previous
 messages. It applies the supplied MCP server set and additional directories, then
 returns `{}`. It does not start a new model turn.
+
+Session responses include a single ACP mode, `default`, representing standard
+Coding Agent behavior. `session/set_mode` accepts `default` and returns `{}`.
 
 `session/list` returns known sessions with `sessionId`, `cwd`, `title`,
 `updatedAt`, and `additionalDirectories`. Cursor pagination is not implemented;
