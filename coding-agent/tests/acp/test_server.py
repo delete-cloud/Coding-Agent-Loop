@@ -163,7 +163,12 @@ async def test_initialize_returns_protocol_version_and_minimal_capabilities() ->
     server = AcpServer(FakeManager())
 
     response = await server.handle_message(
-        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"protocolVersion": 1},
+        }
     )
 
     assert response == {
@@ -196,7 +201,12 @@ async def test_initialize_advertises_load_session() -> None:
     server = AcpServer(FakeManager())
 
     response = await server.handle_message(
-        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"protocolVersion": 1},
+        }
     )
 
     assert response is not None
@@ -211,7 +221,12 @@ async def test_initialize_advertises_session_lifecycle_capabilities() -> None:
     server = AcpServer(FakeManager())
 
     response = await server.handle_message(
-        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"protocolVersion": 1},
+        }
     )
 
     assert response is not None
@@ -230,7 +245,12 @@ async def test_initialize_advertises_additional_directories_capability() -> None
     server = AcpServer(FakeManager())
 
     response = await server.handle_message(
-        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"protocolVersion": 1},
+        }
     )
 
     assert response is not None
@@ -241,11 +261,53 @@ async def test_initialize_advertises_additional_directories_capability() -> None
 
 
 @pytest.mark.asyncio
+async def test_initialize_rejects_missing_protocol_version() -> None:
+    response = await AcpServer(FakeManager()).handle_message(
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+    )
+
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "error": {
+            "code": -32602,
+            "message": "initialize params.protocolVersion must be 1",
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_initialize_rejects_unsupported_protocol_version() -> None:
+    response = await AcpServer(FakeManager()).handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"protocolVersion": 2},
+        }
+    )
+
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "error": {
+            "code": -32602,
+            "message": "initialize params.protocolVersion must be 1",
+        },
+    }
+
+
+@pytest.mark.asyncio
 async def test_initialize_advertises_stdio_mcp_capability() -> None:
     server = AcpServer(FakeManager())
 
     response = await server.handle_message(
-        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"protocolVersion": 1},
+        }
     )
 
     assert response is not None
@@ -379,6 +441,27 @@ async def test_session_new_passes_additional_directories_to_session_manager(
 
 
 @pytest.mark.asyncio
+async def test_session_new_rejects_missing_mcp_servers(tmp_path: Path) -> None:
+    response = await AcpServer(FakeManager()).handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "session/new",
+            "params": {"cwd": str(tmp_path)},
+        }
+    )
+
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "error": {
+            "code": -32602,
+            "message": "session params.mcpServers must be an array",
+        },
+    }
+
+
+@pytest.mark.asyncio
 async def test_session_new_rejects_relative_additional_directory(
     tmp_path: Path,
 ) -> None:
@@ -505,6 +588,27 @@ async def test_session_load_updates_additional_directories_from_params(
         "update_session_additional_directories",
         {"session_id": "sess-1", "additional_directories": [str(extra)]},
     ) in manager.calls
+
+
+@pytest.mark.asyncio
+async def test_session_load_rejects_missing_mcp_servers(tmp_path: Path) -> None:
+    response = await AcpServer(FakeManager(repo_path=tmp_path)).handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "session/load",
+            "params": {"sessionId": "sess-1", "cwd": str(tmp_path)},
+        }
+    )
+
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "error": {
+            "code": -32602,
+            "message": "session params.mcpServers must be an array",
+        },
+    }
 
 
 @pytest.mark.asyncio
@@ -1000,7 +1104,7 @@ async def test_stdio_server_writes_jsonrpc_to_stdout_only() -> None:
     stdout: list[str] = []
     stderr: list[str] = []
     stdin = [
-        '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n',
+        '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}\n',
         '{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[]}}\n',
     ]
 
