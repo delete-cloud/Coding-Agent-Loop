@@ -1219,7 +1219,43 @@ async def test_stdio_processes_cancel_while_prompt_is_running() -> None:
     await run_stdio(AcpServer(manager), stdin=stdin, stdout=stdout.append)
 
     assert ("cancel_session_turn", "sess-1") in manager.calls
-    assert stdout == ['{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}\n']
+    assert stdout == ['{"jsonrpc":"2.0","id":1,"result":{"stopReason":"cancelled"}}\n']
+
+
+@pytest.mark.asyncio
+async def test_stdio_cancel_returns_cancelled_when_prompt_task_is_cancelled() -> None:
+    manager = FakeManager()
+    prompt_started = asyncio.Event()
+    cancel_seen = asyncio.Event()
+
+    async def run_agent(session_id: str, prompt: str) -> None:
+        manager.calls.append(
+            ("run_agent", {"session_id": session_id, "prompt": prompt})
+        )
+        prompt_started.set()
+        await cancel_seen.wait()
+        raise asyncio.CancelledError
+
+    async def cancel_session_turn(session_id: str) -> Any:
+        await prompt_started.wait()
+        manager.calls.append(("cancel_session_turn", session_id))
+        cancel_seen.set()
+        return SimpleNamespace(
+            session_id=session_id, turn_id="turn-1", status="cancelling"
+        )
+
+    manager.run_agent = run_agent  # type: ignore[method-assign]
+    manager.cancel_session_turn = cancel_session_turn  # type: ignore[method-assign]
+    stdin = [
+        '{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"sess-1","prompt":[{"type":"text","text":"wait"}]}}\n',
+        '{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"sess-1"}}\n',
+    ]
+    stdout: list[str] = []
+
+    await run_stdio(AcpServer(manager), stdin=stdin, stdout=stdout.append)
+
+    assert ("cancel_session_turn", "sess-1") in manager.calls
+    assert stdout == ['{"jsonrpc":"2.0","id":1,"result":{"stopReason":"cancelled"}}\n']
 
 
 @pytest.mark.asyncio

@@ -97,6 +97,8 @@ class AcpServer:
         self._model_name = model_name
         self._base_url = base_url
         self._max_steps = max_steps
+        self._active_prompt_sessions: set[str] = set()
+        self._cancelled_prompt_sessions: set[str] = set()
 
     def set_emit(self, emit: AcpEmitter) -> None:
         self._emit = emit
@@ -328,6 +330,8 @@ class AcpServer:
             raise JsonRpcError(-32602, str(exc)) from exc
 
         session = await self._session_manager.get_session_async(session_id)
+        self._cancelled_prompt_sessions.discard(session_id)
+        self._active_prompt_sessions.add(session_id)
         task = asyncio.create_task(self._session_manager.run_agent(session_id, prompt))
         try:
             while True:
@@ -342,11 +346,17 @@ class AcpServer:
                         await message_task
                     except asyncio.CancelledError:
                         pass
+                    if self._consume_prompt_cancel(session_id):
+                        await _await_cancelled_prompt_task(task)
+                        return {"stopReason": "cancelled"}
                     await task
                     raise JsonRpcError(-32603, "Prompt turn ended without TurnEnd")
 
                 message = message_task.result()
                 if isinstance(message, TurnEnd) and not message.agent_id:
+                    if self._consume_prompt_cancel(session_id):
+                        await _await_cancelled_prompt_task(task)
+                        return {"stopReason": "cancelled"}
                     await task
                     return {"stopReason": acp_stop_reason(message)}
 
@@ -371,6 +381,8 @@ class AcpServer:
                     if pending_task is not task:
                         pending_task.cancel()
         finally:
+            self._active_prompt_sessions.discard(session_id)
+            self._cancelled_prompt_sessions.discard(session_id)
             if not task.done():
                 task.cancel()
                 try:
@@ -384,7 +396,15 @@ class AcpServer:
             raise JsonRpcError(
                 -32602, "session/cancel params.sessionId must be a string"
             )
+        if session_id in self._active_prompt_sessions:
+            self._cancelled_prompt_sessions.add(session_id)
         await self._session_manager.cancel_session_turn(session_id)
+
+    def _consume_prompt_cancel(self, session_id: str) -> bool:
+        if session_id not in self._cancelled_prompt_sessions:
+            return False
+        self._cancelled_prompt_sessions.discard(session_id)
+        return True
 
     async def handle_approval_request(
         self,
@@ -424,6 +444,17 @@ class AcpServer:
         result = self._emit(message)
         if isinstance(result, Awaitable):
             await result
+
+
+async def _await_cancelled_prompt_task(task: asyncio.Task[object]) -> None:
+    try:
+        await task
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        # ACP cancellation is the boundary: report stopReason=cancelled even when
+        # the interrupted runtime surfaces an implementation-specific exception.
+        return
 
 
 async def run_stdio(
