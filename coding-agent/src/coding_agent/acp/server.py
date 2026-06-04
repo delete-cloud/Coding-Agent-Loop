@@ -189,7 +189,7 @@ class AcpServer:
             "protocolVersion": 1,
             "agentCapabilities": {
                 "loadSession": True,
-                "mcpCapabilities": {"stdio": True, "http": False, "sse": False},
+                "mcpCapabilities": {"http": False, "sse": False},
                 "promptCapabilities": {},
                 "sessionCapabilities": {
                     "close": {},

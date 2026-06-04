@@ -191,7 +191,7 @@ async def test_initialize_returns_protocol_version_and_minimal_capabilities() ->
             "protocolVersion": 1,
             "agentCapabilities": {
                 "loadSession": True,
-                "mcpCapabilities": {"stdio": True, "http": False, "sse": False},
+                "mcpCapabilities": {"http": False, "sse": False},
                 "promptCapabilities": {},
                 "sessionCapabilities": {
                     "close": {},
@@ -313,7 +313,7 @@ async def test_initialize_rejects_unsupported_protocol_version() -> None:
 
 
 @pytest.mark.asyncio
-async def test_initialize_advertises_stdio_mcp_capability() -> None:
+async def test_initialize_advertises_official_mcp_capability_fields() -> None:
     server = AcpServer(FakeManager())
 
     response = await server.handle_message(
@@ -330,7 +330,6 @@ async def test_initialize_advertises_stdio_mcp_capability() -> None:
     assert isinstance(result, dict)
     capabilities = result["agentCapabilities"]
     assert capabilities["mcpCapabilities"] == {
-        "stdio": True,
         "http": False,
         "sse": False,
     }
