@@ -74,6 +74,8 @@ class LocalCliSessionManager(Protocol):
 
     async def run_agent(self, session_id: str, prompt: str) -> None: ...
 
+    async def cancel_session_turn(self, session_id: str) -> Any: ...
+
     async def resume_session(self, session_id: str, **kwargs: Any) -> Any: ...
 
     def attach_runtime(
@@ -139,6 +141,9 @@ class ServerBackedLocalCliSessionManager:
 
     async def run_agent(self, session_id: str, prompt: str) -> None:
         await self._delegate.run_agent(session_id, prompt)
+
+    async def cancel_session_turn(self, session_id: str) -> Any:
+        return await self._delegate.cancel_session_turn(session_id)
 
     async def resume_session(self, session_id: str, **kwargs: Any) -> Any:
         return await self._delegate.resume_session(session_id, **kwargs)
