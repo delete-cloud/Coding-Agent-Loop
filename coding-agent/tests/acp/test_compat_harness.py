@@ -230,7 +230,7 @@ async def test_external_client_harness_exercises_session_lifecycle(
     manager = HarnessManager(tmp_path)
     client = AcpCompatClient(AcpServer(manager))
     try:
-        initialize = await client.request("initialize", {})
+        initialize = await client.request("initialize", {"protocolVersion": 1})
         assert initialize["result"]["agentCapabilities"]["mcpCapabilities"] == {
             "stdio": True,
             "http": False,

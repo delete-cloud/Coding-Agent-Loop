@@ -38,10 +38,13 @@ The initialization response advertises:
 HTTP and SSE MCP transports are rejected because the runtime MCP plugin only
 supports stdio subprocess servers.
 
+`initialize` requires `protocolVersion: 1` in the request params. Requests with a
+missing or unsupported protocol version are rejected with JSON-RPC invalid params.
+
 ## Session creation
 
-`session/new` requires an absolute `cwd`. The cwd becomes the Coding Agent repo
-path and the default local workspace root.
+`session/new` requires an absolute `cwd` and an `mcpServers` array. The cwd
+becomes the Coding Agent repo path and the default local workspace root.
 
 Example:
 
@@ -77,6 +80,9 @@ to `MCPPlugin` when the agent pipeline is built. `session/load` updates the
 stored server set before replaying session events; if the set changes, the
 current runtime adapter is closed so the next turn rebuilds with the updated
 tools.
+
+The `mcpServers` field is required by ACP on both `session/new` and
+`session/load`; use an empty array when no MCP servers are requested.
 
 Only stdio servers are supported:
 

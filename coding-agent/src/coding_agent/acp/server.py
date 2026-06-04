@@ -150,7 +150,7 @@ class AcpServer:
 
     async def _dispatch(self, method: str, params: JSONObject) -> object:
         if method == "initialize":
-            return self._initialize()
+            return self._initialize(params)
         if method == "session/new":
             return await self._session_new(params)
         if method == "session/load":
@@ -168,7 +168,12 @@ class AcpServer:
             return None
         raise JsonRpcError(-32601, f"Method not found: {method}")
 
-    def _initialize(self) -> JSONObject:
+    def _initialize(self, params: JSONObject) -> JSONObject:
+        if params.get("protocolVersion") != 1:
+            raise JsonRpcError(
+                -32602,
+                "initialize params.protocolVersion must be 1",
+            )
         return {
             "protocolVersion": 1,
             "agentCapabilities": {
@@ -597,7 +602,7 @@ def _parse_mcp_servers(
     *,
     method: str,
 ) -> dict[str, dict[str, Any]]:
-    raw_servers = params.get("mcpServers", [])
+    raw_servers = params.get("mcpServers")
     if not isinstance(raw_servers, list):
         raise JsonRpcError(-32602, f"{method} params.mcpServers must be an array")
 
