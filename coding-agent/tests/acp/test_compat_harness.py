@@ -288,11 +288,17 @@ async def test_external_client_harness_exercises_session_lifecycle(
         assert await client.wait_for_response(load_id) == {
             "jsonrpc": "2.0",
             "id": 5,
-            "result": None,
+            "result": {},
         }
 
+        resumed = await client.request(
+            "session/resume",
+            {"sessionId": "sess-compat", "cwd": str(tmp_path)},
+        )
+        assert resumed == {"jsonrpc": "2.0", "id": 6, "result": {}}
+
         closed = await client.request("session/close", {"sessionId": "sess-compat"})
-        assert closed == {"jsonrpc": "2.0", "id": 6, "result": {}}
+        assert closed == {"jsonrpc": "2.0", "id": 7, "result": {}}
     finally:
         await client.close()
 
@@ -316,6 +322,14 @@ async def test_external_client_harness_exercises_session_lifecycle(
                 }
             },
         },
+    ) in manager.calls
+    assert (
+        "update_session_mcp_servers",
+        {"session_id": "sess-compat", "mcp_servers": {}},
+    ) in manager.calls
+    assert (
+        "update_session_additional_directories",
+        {"session_id": "sess-compat", "additional_directories": []},
     ) in manager.calls
     assert ("close_session", "sess-compat") in manager.calls
 
