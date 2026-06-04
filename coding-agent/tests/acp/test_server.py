@@ -43,6 +43,7 @@ class FakeManager:
                 created_at=datetime(2026, 1, 1, tzinfo=UTC),
             )
         ]
+        self.additional_directories: list[str] = []
 
     async def create_session(self, **kwargs: Any) -> str:
         self.calls.append(("create_session", kwargs))
@@ -54,6 +55,7 @@ class FakeManager:
             id=session_id,
             wire=self.wire,
             repo_path=self.repo_path,
+            additional_directories=list(self.additional_directories),
             last_activity=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
             default_run_target=None,
         )
@@ -173,7 +175,11 @@ async def test_initialize_returns_protocol_version_and_minimal_capabilities() ->
                 "loadSession": True,
                 "mcpCapabilities": {"stdio": True, "http": False, "sse": False},
                 "promptCapabilities": {},
-                "sessionCapabilities": {"close": {}, "list": {}},
+                "sessionCapabilities": {
+                    "close": {},
+                    "list": {},
+                    "additionalDirectories": {},
+                },
             },
             "agentInfo": {
                 "name": "coding-agent",
@@ -212,7 +218,26 @@ async def test_initialize_advertises_session_lifecycle_capabilities() -> None:
     result = response["result"]
     assert isinstance(result, dict)
     capabilities = result["agentCapabilities"]
-    assert capabilities["sessionCapabilities"] == {"close": {}, "list": {}}
+    assert capabilities["sessionCapabilities"] == {
+        "close": {},
+        "list": {},
+        "additionalDirectories": {},
+    }
+
+
+@pytest.mark.asyncio
+async def test_initialize_advertises_additional_directories_capability() -> None:
+    server = AcpServer(FakeManager())
+
+    response = await server.handle_message(
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+    )
+
+    assert response is not None
+    result = response["result"]
+    assert isinstance(result, dict)
+    capabilities = result["agentCapabilities"]
+    assert capabilities["sessionCapabilities"]["additionalDirectories"] == {}
 
 
 @pytest.mark.asyncio
@@ -487,6 +512,9 @@ async def test_session_list_returns_session_info_and_filters_by_cwd(
     tmp_path: Path,
 ) -> None:
     manager = FakeManager(repo_path=tmp_path)
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    manager.additional_directories = [str(extra)]
     server = AcpServer(manager)
 
     response = await server.handle_message(
@@ -508,12 +536,14 @@ async def test_session_list_returns_session_info_and_filters_by_cwd(
                     "cwd": str(tmp_path),
                     "title": None,
                     "updatedAt": "2026-01-02T03:04:05+00:00",
+                    "additionalDirectories": [str(extra)],
                 },
                 {
                     "sessionId": "sess-2",
                     "cwd": str(tmp_path),
                     "title": None,
                     "updatedAt": "2026-01-02T03:04:05+00:00",
+                    "additionalDirectories": [str(extra)],
                 },
             ],
             "nextCursor": None,
@@ -1021,9 +1051,9 @@ async def test_stdio_session_list_and_close(tmp_path: Path) -> None:
     assert stdout == [
         '{"jsonrpc":"2.0","id":1,"result":{"sessions":[{"sessionId":"sess-1","cwd":"'
         + str(tmp_path)
-        + '","title":null,"updatedAt":"2026-01-02T03:04:05+00:00"},{"sessionId":"sess-2","cwd":"'
+        + '","title":null,"updatedAt":"2026-01-02T03:04:05+00:00","additionalDirectories":[]},{"sessionId":"sess-2","cwd":"'
         + str(tmp_path)
-        + '","title":null,"updatedAt":"2026-01-02T03:04:05+00:00"}],"nextCursor":null}}\n',
+        + '","title":null,"updatedAt":"2026-01-02T03:04:05+00:00","additionalDirectories":[]}],"nextCursor":null}}\n',
         '{"jsonrpc":"2.0","id":2,"result":{}}\n',
     ]
     assert ("close_session", "sess-1") in manager.calls

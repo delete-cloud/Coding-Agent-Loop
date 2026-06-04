@@ -175,7 +175,11 @@ class AcpServer:
                 "loadSession": True,
                 "mcpCapabilities": {"stdio": True, "http": False, "sse": False},
                 "promptCapabilities": {},
-                "sessionCapabilities": {"close": {}, "list": {}},
+                "sessionCapabilities": {
+                    "close": {},
+                    "list": {},
+                    "additionalDirectories": {},
+                },
             },
             "agentInfo": {
                 "name": "coding-agent",
@@ -242,6 +246,7 @@ class AcpServer:
                     "cwd": cwd,
                     "title": None,
                     "updatedAt": _session_updated_at(updated_at),
+                    "additionalDirectories": _session_additional_directories(session),
                 }
             )
         return {"sessions": sessions, "nextCursor": None}
@@ -576,6 +581,15 @@ def _session_updated_at(value: object) -> str | None:
     if callable(isoformat):
         return str(isoformat())
     return None
+
+
+def _session_additional_directories(session: object) -> list[str]:
+    value = getattr(session, "additional_directories", [])
+    if not isinstance(value, list) or not all(
+        isinstance(directory, str) for directory in value
+    ):
+        raise JsonRpcError(-32603, "Session has invalid additional_directories")
+    return list(value)
 
 
 def _parse_mcp_servers(
