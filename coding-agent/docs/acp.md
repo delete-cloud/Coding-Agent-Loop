@@ -89,7 +89,6 @@ Only stdio servers are supported:
 ```json
 {
   "name": "filesystem",
-  "transport": "stdio",
   "command": "npx",
   "args": ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"],
   "env": [{"name": "EXPLICIT_OK", "value": "yes"}]

@@ -380,7 +380,6 @@ async def test_session_new_passes_stdio_mcp_servers_to_session_manager(
                 "mcpServers": [
                     {
                         "name": "filesystem",
-                        "transport": "stdio",
                         "command": "npx",
                         "args": ["-y", "@modelcontextprotocol/server-filesystem"],
                         "env": [{"name": "ROOT", "value": str(tmp_path)}],
@@ -489,7 +488,7 @@ async def test_session_new_rejects_relative_additional_directory(
 
 
 @pytest.mark.asyncio
-async def test_session_new_rejects_unsupported_mcp_transport(tmp_path: Path) -> None:
+async def test_session_new_rejects_unsupported_mcp_server_type(tmp_path: Path) -> None:
     response = await AcpServer(FakeManager()).handle_message(
         {
             "jsonrpc": "2.0",
@@ -500,8 +499,9 @@ async def test_session_new_rejects_unsupported_mcp_transport(tmp_path: Path) -> 
                 "mcpServers": [
                     {
                         "name": "remote",
-                        "transport": "sse",
+                        "type": "sse",
                         "url": "https://example.invalid/sse",
+                        "headers": [],
                     }
                 ],
             },
@@ -513,7 +513,69 @@ async def test_session_new_rejects_unsupported_mcp_transport(tmp_path: Path) -> 
         "id": 2,
         "error": {
             "code": -32602,
-            "message": "session mcpServers[0].transport must be stdio",
+            "message": "session mcpServers[0].type must be stdio",
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_session_new_rejects_stdio_mcp_server_without_args(
+    tmp_path: Path,
+) -> None:
+    response = await AcpServer(FakeManager()).handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "session/new",
+            "params": {
+                "cwd": str(tmp_path),
+                "mcpServers": [
+                    {
+                        "name": "filesystem",
+                        "command": "npx",
+                        "env": [],
+                    }
+                ],
+            },
+        }
+    )
+
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "error": {
+            "code": -32602,
+            "message": "session mcpServers[0].args must be a string array",
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_session_new_rejects_stdio_mcp_server_without_env(tmp_path: Path) -> None:
+    response = await AcpServer(FakeManager()).handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "session/new",
+            "params": {
+                "cwd": str(tmp_path),
+                "mcpServers": [
+                    {
+                        "name": "filesystem",
+                        "command": "npx",
+                        "args": [],
+                    }
+                ],
+            },
+        }
+    )
+
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "error": {
+            "code": -32602,
+            "message": "session mcpServers[0].env must be an array",
         },
     }
 
@@ -534,9 +596,9 @@ async def test_session_load_updates_mcp_servers_from_params(tmp_path: Path) -> N
                 "mcpServers": [
                     {
                         "name": "toolbox",
-                        "transport": "stdio",
                         "command": "python",
                         "args": ["server.py"],
+                        "env": [],
                     }
                 ],
             },
