@@ -170,6 +170,8 @@ class AcpServer:
         if method == "session/set_mode":
             await self._session_set_mode(params)
             return {}
+        if method == "session/set_config_option":
+            return await self._session_set_config_option(params)
         if method == "session/prompt":
             return await self._session_prompt(params)
         if method == "session/cancel":
@@ -371,6 +373,32 @@ class AcpServer:
                 f"session/set_mode params.modeId must be {ACP_DEFAULT_MODE_ID}",
             )
         await self._session_manager.get_session_async(session_id)
+
+    async def _session_set_config_option(self, params: JSONObject) -> JSONObject:
+        session_id = params.get("sessionId")
+        if not isinstance(session_id, str) or not session_id:
+            raise JsonRpcError(
+                -32602,
+                "session/set_config_option params.sessionId must be a string",
+            )
+        config_id = params.get("configId")
+        if not isinstance(config_id, str) or not config_id:
+            raise JsonRpcError(
+                -32602,
+                "session/set_config_option params.configId must be a string",
+            )
+        value = params.get("value")
+        if not isinstance(value, str):
+            raise JsonRpcError(
+                -32602,
+                "session/set_config_option params.value must be a string",
+            )
+
+        await self._session_manager.get_session_async(session_id)
+        raise JsonRpcError(
+            -32602,
+            "session/set_config_option params.configId is not supported",
+        )
 
     async def _session_prompt(self, params: JSONObject) -> JSONObject:
         session_id = params.get("sessionId")
