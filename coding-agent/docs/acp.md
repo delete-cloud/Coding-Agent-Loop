@@ -17,6 +17,8 @@ to stdout. Diagnostics go to stderr.
 The adapter currently supports:
 
 - `initialize`
+- `authenticate` (explicitly rejected because no auth methods are advertised)
+- `logout` (explicitly rejected because authentication is disabled)
 - `session/new`
 - `session/prompt`
 - `session/cancel`
@@ -37,6 +39,7 @@ The initialization response advertises:
 - `sessionCapabilities.additionalDirectories`
 - `mcpCapabilities.http: false`
 - `mcpCapabilities.sse: false`
+- `authMethods: []`
 
 Stdio MCP server definitions are accepted as the baseline ACP MCP server form.
 HTTP and SSE MCP transports are rejected because the runtime MCP plugin only
@@ -46,6 +49,9 @@ there.
 
 `initialize` requires `protocolVersion: 1` in the request params. Requests with a
 missing or unsupported protocol version are rejected with JSON-RPC invalid params.
+The adapter does not provide authentication. `authenticate` validates
+`methodId` and rejects every method as unsupported; `logout` rejects because
+authentication is disabled.
 
 ## Session creation
 

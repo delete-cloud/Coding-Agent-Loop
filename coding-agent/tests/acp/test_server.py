@@ -313,6 +313,69 @@ async def test_initialize_rejects_unsupported_protocol_version() -> None:
 
 
 @pytest.mark.asyncio
+async def test_authenticate_rejects_missing_method_id() -> None:
+    response = await AcpServer(FakeManager()).handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "authenticate",
+            "params": {},
+        }
+    )
+
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "error": {
+            "code": -32602,
+            "message": "authenticate params.methodId must be a string",
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_authenticate_rejects_unsupported_method() -> None:
+    response = await AcpServer(FakeManager()).handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "authenticate",
+            "params": {"methodId": "oauth"},
+        }
+    )
+
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "error": {
+            "code": -32602,
+            "message": "authenticate params.methodId is not supported",
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_logout_rejects_when_authentication_is_disabled() -> None:
+    response = await AcpServer(FakeManager()).handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "logout",
+            "params": {},
+        }
+    )
+
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "error": {
+            "code": -32602,
+            "message": "logout is not supported because authentication is disabled",
+        },
+    }
+
+
+@pytest.mark.asyncio
 async def test_initialize_advertises_official_mcp_capability_fields() -> None:
     server = AcpServer(FakeManager())
 

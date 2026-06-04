@@ -154,6 +154,10 @@ class AcpServer:
     async def _dispatch(self, method: str, params: JSONObject) -> object:
         if method == "initialize":
             return self._initialize(params)
+        if method == "authenticate":
+            return self._authenticate(params)
+        if method == "logout":
+            return self._logout(params)
         if method == "session/new":
             return await self._session_new(params)
         if method == "session/load":
@@ -205,6 +209,21 @@ class AcpServer:
             },
             "authMethods": [],
         }
+
+    def _authenticate(self, params: JSONObject) -> JSONObject:
+        method_id = params.get("methodId")
+        if not isinstance(method_id, str) or not method_id:
+            raise JsonRpcError(
+                -32602,
+                "authenticate params.methodId must be a string",
+            )
+        raise JsonRpcError(-32602, "authenticate params.methodId is not supported")
+
+    def _logout(self, params: JSONObject) -> JSONObject:
+        raise JsonRpcError(
+            -32602,
+            "logout is not supported because authentication is disabled",
+        )
 
     async def _session_new(self, params: JSONObject) -> JSONObject:
         cwd = params.get("cwd")
