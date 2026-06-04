@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
 from queue import Queue
 from types import SimpleNamespace
@@ -10,6 +11,7 @@ import pytest
 
 from coding_agent.acp.server import AcpServer, run_stdio
 from coding_agent.approval import ApprovalPolicy
+from coding_agent.events import DisplayEvent
 from coding_agent.wire.local import LocalWire
 from coding_agent.wire.protocol import (
     ApprovalRequest,
@@ -25,6 +27,19 @@ class FakeManager:
         self.wire = wire or LocalWire("sess-1")
         self.calls: list[tuple[str, Any]] = []
         self.raise_active_turn = False
+        self.runtime_runs: list[Any] = [
+            SimpleNamespace(run_id="run-1", started_at=datetime(2026, 1, 1, tzinfo=UTC))
+        ]
+        self.display_events: list[DisplayEvent] = [
+            DisplayEvent(
+                source_event_id="event-1",
+                run_id="run-1",
+                sequence=1,
+                display_kind="assistant_text_delta",
+                payload={"content": "loaded answer", "role": "assistant"},
+                created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+        ]
 
     async def create_session(self, **kwargs: Any) -> str:
         self.calls.append(("create_session", kwargs))
@@ -75,6 +90,25 @@ class FakeManager:
         )
         return SimpleNamespace(request_id=request_id, approved=approved)
 
+    async def list_runtime_runs(self, session_id: str) -> list[Any]:
+        self.calls.append(("list_runtime_runs", session_id))
+        return list(self.runtime_runs)
+
+    async def replay_display_events(
+        self,
+        run_id: str,
+        *,
+        last_event_id: str | None = None,
+        limit: int = 1000,
+    ) -> list[DisplayEvent]:
+        self.calls.append(
+            (
+                "replay_display_events",
+                {"run_id": run_id, "last_event_id": last_event_id, "limit": limit},
+            )
+        )
+        return list(self.display_events)
+
     async def close(self) -> None:
         self.calls.append(("close", None))
 
@@ -93,6 +127,7 @@ async def test_initialize_returns_protocol_version_and_minimal_capabilities() ->
         "result": {
             "protocolVersion": 1,
             "agentCapabilities": {
+                "loadSession": True,
                 "promptCapabilities": {},
                 "sessionCapabilities": {},
             },
@@ -104,6 +139,21 @@ async def test_initialize_returns_protocol_version_and_minimal_capabilities() ->
             "authMethods": [],
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_initialize_advertises_load_session() -> None:
+    server = AcpServer(FakeManager())
+
+    response = await server.handle_message(
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+    )
+
+    assert response is not None
+    result = response["result"]
+    assert isinstance(result, dict)
+    capabilities = result["agentCapabilities"]
+    assert capabilities["loadSession"] is True
 
 
 @pytest.mark.asyncio
@@ -143,6 +193,182 @@ async def test_session_new_creates_local_session_from_absolute_cwd(
                 "max_steps": 7,
             },
         )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_session_load_replays_display_events_before_response(
+    tmp_path: Path,
+) -> None:
+    manager = FakeManager()
+    manager.display_events = [
+        DisplayEvent(
+            source_event_id="event-1",
+            run_id="run-1",
+            sequence=1,
+            display_kind="assistant_text_delta",
+            payload={"content": "first", "role": "assistant"},
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        ),
+        DisplayEvent(
+            source_event_id="event-2",
+            run_id="run-1",
+            sequence=2,
+            display_kind="tool_result",
+            payload={
+                "call_id": "call-1",
+                "tool_name": "bash_run",
+                "display_result": "ok",
+                "is_error": False,
+            },
+            created_at=datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC),
+        ),
+    ]
+    notifications: list[dict[str, Any]] = []
+    server = AcpServer(manager, emit=notifications.append)
+
+    response = await server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "session/load",
+            "params": {
+                "sessionId": "sess-1",
+                "cwd": str(tmp_path),
+                "mcpServers": [],
+            },
+        }
+    )
+
+    assert response == {"jsonrpc": "2.0", "id": 7, "result": None}
+    assert notifications == [
+        {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "sess-1",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "first"},
+                },
+            },
+        },
+        {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "sess-1",
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call-1",
+                    "status": "completed",
+                    "content": [
+                        {
+                            "type": "content",
+                            "content": {"type": "text", "text": "ok"},
+                        }
+                    ],
+                },
+            },
+        },
+    ]
+    assert manager.calls[:3] == [
+        ("get_session_async", "sess-1"),
+        ("list_runtime_runs", "sess-1"),
+        (
+            "replay_display_events",
+            {"run_id": "run-1", "last_event_id": None, "limit": 1000},
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_session_load_replays_all_runs_in_started_order(tmp_path: Path) -> None:
+    manager = FakeManager()
+    manager.runtime_runs = [
+        SimpleNamespace(
+            run_id="run-2",
+            started_at=datetime(2026, 1, 1, 0, 1, tzinfo=UTC),
+        ),
+        SimpleNamespace(
+            run_id="run-1",
+            started_at=datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
+        ),
+    ]
+
+    async def replay_display_events(
+        run_id: str,
+        *,
+        last_event_id: str | None = None,
+        limit: int = 1000,
+    ) -> list[DisplayEvent]:
+        manager.calls.append(
+            (
+                "replay_display_events",
+                {"run_id": run_id, "last_event_id": last_event_id, "limit": limit},
+            )
+        )
+        return [
+            DisplayEvent(
+                source_event_id=f"{run_id}-event-1",
+                run_id=run_id,
+                sequence=1,
+                display_kind="assistant_text_delta",
+                payload={"content": run_id, "role": "assistant"},
+                created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+        ]
+
+    manager.replay_display_events = replay_display_events  # type: ignore[method-assign]
+    notifications: list[dict[str, Any]] = []
+    server = AcpServer(manager, emit=notifications.append)
+
+    response = await server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "session/load",
+            "params": {
+                "sessionId": "sess-1",
+                "cwd": str(tmp_path),
+                "mcpServers": [],
+            },
+        }
+    )
+
+    assert response == {"jsonrpc": "2.0", "id": 8, "result": None}
+    assert [
+        notification["params"]["update"]["content"]["text"]
+        for notification in notifications
+    ] == ["run-1", "run-2"]
+
+
+@pytest.mark.asyncio
+async def test_session_load_without_runs_returns_null_without_replay(
+    tmp_path: Path,
+) -> None:
+    manager = FakeManager()
+    manager.runtime_runs = []
+    notifications: list[dict[str, Any]] = []
+    server = AcpServer(manager, emit=notifications.append)
+
+    response = await server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "session/load",
+            "params": {
+                "sessionId": "sess-1",
+                "cwd": str(tmp_path),
+                "mcpServers": [],
+            },
+        }
+    )
+
+    assert response == {"jsonrpc": "2.0", "id": 8, "result": None}
+    assert notifications == []
+    assert ("replay_display_events",) not in [
+        (name,) for name, _payload in manager.calls
     ]
 
 
@@ -407,6 +633,26 @@ async def test_stdio_server_writes_jsonrpc_to_stdout_only() -> None:
     assert all(line.startswith('{"jsonrpc":"2.0"') for line in stdout)
     assert all(line.endswith("\n") for line in stdout)
     assert stderr == []
+
+
+@pytest.mark.asyncio
+async def test_stdio_session_load_writes_replay_updates_before_response(
+    tmp_path: Path,
+) -> None:
+    manager = FakeManager()
+    stdout: list[str] = []
+    stdin = [
+        '{"jsonrpc":"2.0","id":1,"method":"session/load","params":{"sessionId":"sess-1","cwd":"'
+        + str(tmp_path)
+        + '","mcpServers":[]}}\n',
+    ]
+
+    await run_stdio(AcpServer(manager), stdin=stdin, stdout=stdout.append)
+
+    assert stdout == [
+        '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"loaded answer"}}}}\n',
+        '{"jsonrpc":"2.0","id":1,"result":null}\n',
+    ]
 
 
 @pytest.mark.asyncio

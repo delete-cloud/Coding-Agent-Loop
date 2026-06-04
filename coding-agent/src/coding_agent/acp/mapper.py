@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
+from coding_agent.events import DisplayEvent
 from coding_agent.wire.protocol import (
     ApprovalRequest,
     CompletionStatus,
@@ -99,6 +100,85 @@ def wire_message_to_session_update(message: WireMessage) -> dict[str, Any] | Non
 
     if isinstance(message, TurnStatusDelta | TurnEnd):
         return None
+
+    return None
+
+
+def display_event_to_session_update(event: DisplayEvent) -> dict[str, Any] | None:
+    payload = event.payload
+    if event.display_kind == "assistant_text_delta":
+        content = payload.get("content")
+        if not isinstance(content, str):
+            return None
+        return {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": content},
+        }
+
+    if event.display_kind == "thinking_delta":
+        text = payload.get("text")
+        if not isinstance(text, str):
+            return None
+        return {
+            "sessionUpdate": "agent_thought_chunk",
+            "content": {"type": "text", "text": text},
+        }
+
+    if event.display_kind == "tool_call":
+        call_id = payload.get("call_id")
+        tool_name = payload.get("tool_name")
+        arguments = payload.get("arguments")
+        if not isinstance(call_id, str) or not isinstance(tool_name, str):
+            return None
+        if not isinstance(arguments, dict):
+            arguments = {}
+        return {
+            "sessionUpdate": "tool_call",
+            "toolCallId": call_id,
+            "title": tool_name,
+            "kind": _tool_kind(tool_name),
+            "status": "pending",
+            "rawInput": dict(arguments),
+        }
+
+    if event.display_kind == "tool_result":
+        call_id = payload.get("call_id")
+        if not isinstance(call_id, str):
+            return None
+        display_result = payload.get("display_result")
+        if not isinstance(display_result, str):
+            display_result = ""
+        status = "failed" if payload.get("is_error") is True else "completed"
+        return {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": call_id,
+            "status": status,
+            "content": [
+                {
+                    "type": "content",
+                    "content": {"type": "text", "text": display_result},
+                }
+            ],
+        }
+
+    if event.display_kind == "approval_result":
+        request_id = payload.get("request_id")
+        if not isinstance(request_id, str):
+            return None
+        status = "completed" if payload.get("approved") is True else "failed"
+        feedback = payload.get("feedback")
+        text = feedback if isinstance(feedback, str) else ""
+        return {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": request_id,
+            "status": status,
+            "content": [
+                {
+                    "type": "content",
+                    "content": {"type": "text", "text": text},
+                }
+            ],
+        }
 
     return None
 
