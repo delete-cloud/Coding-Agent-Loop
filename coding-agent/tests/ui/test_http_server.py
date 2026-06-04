@@ -6,6 +6,7 @@ import asyncio
 import importlib
 import json
 import re
+import shutil
 import subprocess
 import sys
 import types
@@ -1300,7 +1301,9 @@ class TestSessionCreation:
         session = session_manager.get_session(response.json()["session_id"])
         assert isinstance(session.default_run_target.workspace, CloudWorkspaceRef)
         assert session.default_run_target.workspace.workspace_provider == "docker"
-        assert session.default_run_target.workspace.provider_instance_id == "docker-host-a"
+        assert (
+            session.default_run_target.workspace.provider_instance_id == "docker-host-a"
+        )
 
     @pytest.mark.parametrize("field", ["workspace_provider", "provider_instance_id"])
     async def test_http_create_session_rejects_blank_workspace_provider_metadata(
@@ -5151,10 +5154,12 @@ class TestRemoteResultPublicationContract:
     ) -> None:
         session = register_session(
             "result-agentkit-reducer",
-            default_run_target=_cloud_run_target(CloudWorkspaceRef(
-                workspace_url="docker://agent-ws-result/workspace",
-                workspace_id="ws-agentkit-result",
-            )),
+            default_run_target=_cloud_run_target(
+                CloudWorkspaceRef(
+                    workspace_url="docker://agent-ws-result/workspace",
+                    workspace_id="ws-agentkit-result",
+                )
+            ),
             provider_name="openai",
             model_name="result-model",
         )
@@ -5196,10 +5201,12 @@ class TestRemoteResultPublicationContract:
     ) -> None:
         session = register_session(
             "result-runtime-tape",
-            default_run_target=_cloud_run_target(CloudWorkspaceRef(
-                workspace_url="docker://agent-ws-result/workspace",
-                workspace_id="ws-runtime-result",
-            )),
+            default_run_target=_cloud_run_target(
+                CloudWorkspaceRef(
+                    workspace_url="docker://agent-ws-result/workspace",
+                    workspace_id="ws-runtime-result",
+                )
+            ),
             provider_name="openai",
             model_name="result-model",
         )
@@ -5248,10 +5255,12 @@ class TestRemoteResultPublicationContract:
     ) -> None:
         session = register_session(
             "result-persisted-tape",
-            default_run_target=_cloud_run_target(CloudWorkspaceRef(
-                workspace_url="docker://agent-ws-result/workspace",
-                workspace_id="ws-persisted-result",
-            )),
+            default_run_target=_cloud_run_target(
+                CloudWorkspaceRef(
+                    workspace_url="docker://agent-ws-result/workspace",
+                    workspace_id="ws-persisted-result",
+                )
+            ),
             provider_name="openai",
             model_name="result-model",
             tape_id="persisted-tape",
@@ -5282,15 +5291,117 @@ class TestRemoteResultPublicationContract:
         assert data["final_answer"] == "Persisted answer."
         assert data["verification_summary"] is None
 
+    async def test_session_result_restores_from_persisted_runtime_events_when_tape_is_empty(
+        self, client: AsyncClient
+    ) -> None:
+        session_id = "result-runtime-events"
+        run_id = "run-runtime-events"
+        register_session(
+            session_id,
+            default_run_target=_local_run_target(Path.cwd()),
+            provider_name="openai",
+            model_name="result-model",
+            tape_id="empty-runtime-events-tape",
+        )
+        run = AgentRunRecord(
+            run_id=run_id,
+            session_id=session_id,
+            tape_id="empty-runtime-events-tape",
+            parent_run_id=None,
+            agent_id=None,
+            status="completed",
+            started_at=datetime(2026, 1, 2, 3, 4, 5),
+            ended_at=datetime(2026, 1, 2, 3, 6, 0),
+            metadata={"provider_name": "test-provider"},
+            result={"stop_reason": "no_tool_calls"},
+            error=None,
+        )
+        session_manager.configure_runtime_store(
+            FakeRuntimeReplayStore(
+                run=run,
+                events=[
+                    RuntimeEventRecord(
+                        sequence=1,
+                        event_id="event-tool",
+                        run_id=run_id,
+                        event_kind="wire.ToolCallDelta",
+                        payload={
+                            "message_type": "ToolCallDelta",
+                            "message": {
+                                "call_id": "call-1",
+                                "tool_name": "shell_command",
+                                "arguments": {
+                                    "command": "uv run pytest tests/foo.py -q"
+                                },
+                            },
+                        },
+                        created_at=datetime(2026, 1, 2, 3, 5, 0),
+                    ),
+                    RuntimeEventRecord(
+                        sequence=2,
+                        event_id="event-text-1",
+                        run_id=run_id,
+                        event_kind="wire.StreamDelta",
+                        payload={
+                            "message_type": "StreamDelta",
+                            "message": {
+                                "content": "Fixed ",
+                                "role": "assistant",
+                            },
+                        },
+                        created_at=datetime(2026, 1, 2, 3, 5, 1),
+                    ),
+                    RuntimeEventRecord(
+                        sequence=3,
+                        event_id="event-text-2",
+                        run_id=run_id,
+                        event_kind="wire.StreamDelta",
+                        payload={
+                            "message_type": "StreamDelta",
+                            "message": {
+                                "content": "after restart.",
+                                "role": "assistant",
+                            },
+                        },
+                        created_at=datetime(2026, 1, 2, 3, 5, 2),
+                    ),
+                    RuntimeEventRecord(
+                        sequence=4,
+                        event_id="event-end",
+                        run_id=run_id,
+                        event_kind="wire.TurnEnd",
+                        payload={
+                            "message_type": "TurnEnd",
+                            "message": {"completion_status": "completed"},
+                        },
+                        created_at=datetime(2026, 1, 2, 3, 5, 3),
+                    ),
+                ],
+            )
+        )
+
+        response = await client.get(f"/sessions/{session_id}/result")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["turn_id"] == run_id
+        assert data["final_answer"] == "Fixed after restart."
+        assert (
+            data["verification_summary"]
+            == "Tool activity: shell_command: uv run pytest tests/foo.py -q"
+        )
+
     async def test_session_result_includes_recorded_failure_details(
         self, client: AsyncClient
     ) -> None:
         session = register_session(
             "result-failed-session",
-            default_run_target=_cloud_run_target(CloudWorkspaceRef(
-                workspace_url="docker://agent-ws-result/workspace",
-                workspace_id="ws-failed-result",
-            )),
+            default_run_target=_cloud_run_target(
+                CloudWorkspaceRef(
+                    workspace_url="docker://agent-ws-result/workspace",
+                    workspace_id="ws-failed-result",
+                )
+            ),
         )
         session.turn_status = "failed"
         session.last_failure_details = "HTTP session turn failed: model timeout"
@@ -5308,10 +5419,12 @@ class TestRemoteResultPublicationContract:
     ) -> None:
         session = register_session(
             "result-failed-default-details",
-            default_run_target=_cloud_run_target(CloudWorkspaceRef(
-                workspace_url="docker://agent-ws-result/workspace",
-                workspace_id="ws-failed-default-result",
-            )),
+            default_run_target=_cloud_run_target(
+                CloudWorkspaceRef(
+                    workspace_url="docker://agent-ws-result/workspace",
+                    workspace_id="ws-failed-default-result",
+                )
+            ),
         )
         session.turn_status = "failed"
         session.last_failure_details = None
@@ -5354,7 +5467,11 @@ class TestRemoteResultPublicationContract:
             "turn_status": "idle",
             "turn_id": None,
             "workspace_id": "ws-result",
-            "origin": {"channel": "http", "placement_kind": "cloud_workspace", "executor_kind": "local_daemon"},
+            "origin": {
+                "channel": "http",
+                "placement_kind": "cloud_workspace",
+                "executor_kind": "local_daemon",
+            },
             "provider_name": "openai",
             "model_name": "result-model",
             "final_answer": None,
@@ -6160,6 +6277,119 @@ class TestRemoteWorkspaceRetentionContract:
             "additions": 2,
             "deletions": 1,
         }
+
+    async def test_workspace_diff_returns_local_path_git_changes(
+        self, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        git_bin = shutil.which("git")
+        assert git_bin is not None
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run([git_bin, "init"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(
+            [git_bin, "config", "user.email", "agent@example.com"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [git_bin, "config", "user.name", "Agent"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+        )
+        (repo / "README.md").write_text("old\n", encoding="utf-8")
+        subprocess.run([git_bin, "add", "README.md"], cwd=repo, check=True)
+        subprocess.run([git_bin, "commit", "-m", "initial"], cwd=repo, check=True)
+        workspace = tmp_path / "linked-worktree"
+        subprocess.run(
+            [git_bin, "worktree", "add", "--detach", str(workspace), "HEAD"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+        )
+        assert (workspace / ".git").is_file()
+        (workspace / "README.md").write_text("old\nnew\n", encoding="utf-8")
+        (workspace / "created.txt").write_text("created\n", encoding="utf-8")
+        session = register_session(
+            "local-diff-session",
+            default_run_target=_local_run_target(workspace),
+        )
+
+        response = await client.get(f"/sessions/{session.id}/workspace/diff")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "session_id": session.id,
+            "workspace_id": str(workspace.resolve()),
+            "files": [
+                {
+                    "path": "README.md",
+                    "status": "modified",
+                    "old_path": None,
+                    "additions": 1,
+                    "deletions": 0,
+                    "binary": False,
+                },
+                {
+                    "path": "created.txt",
+                    "status": "added",
+                    "old_path": None,
+                    "additions": 1,
+                    "deletions": 0,
+                    "binary": False,
+                },
+            ],
+            "additions": 2,
+            "deletions": 0,
+        }
+
+    async def test_workspace_patch_returns_local_path_git_patch(
+        self, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        git_bin = shutil.which("git")
+        assert git_bin is not None
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run([git_bin, "init"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(
+            [git_bin, "config", "user.email", "agent@example.com"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [git_bin, "config", "user.name", "Agent"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+        )
+        (repo / "README.md").write_text("old\n", encoding="utf-8")
+        subprocess.run([git_bin, "add", "README.md"], cwd=repo, check=True)
+        subprocess.run([git_bin, "commit", "-m", "initial"], cwd=repo, check=True)
+        workspace = tmp_path / "linked-worktree"
+        subprocess.run(
+            [git_bin, "worktree", "add", "--detach", str(workspace), "HEAD"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+        )
+        assert (workspace / ".git").is_file()
+        (workspace / "README.md").write_text("old\nnew\n", encoding="utf-8")
+        session = register_session(
+            "local-patch-session",
+            default_run_target=_local_run_target(workspace),
+        )
+
+        response = await client.get(f"/sessions/{session.id}/workspace/patch")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["session_id"] == session.id
+        assert data["workspace_id"] == str(workspace.resolve())
+        assert data["format"] == "unified_diff"
+        assert "diff --git a/README.md b/README.md" in data["patch"]
+        assert "+new" in data["patch"]
 
     async def test_workspace_patch_returns_provider_result(
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
@@ -7895,6 +8125,11 @@ class FakeRuntimeReplayStore:
             return self.run
         return None
 
+    async def list_agent_runs(self, session_id: str) -> list[AgentRunRecord]:
+        if session_id == self.run.session_id:
+            return [self.run]
+        return []
+
     async def load_message_snapshot(
         self,
         snapshot_id: str,
@@ -8302,9 +8537,9 @@ class TestRuntimeReplayEndpoints:
             ],
         }
         assert runtime_response.status_code == 200
-        assert runtime_response.json()["events"][1]["payload"]["message"][
-            "result"
-        ] == {"stdout": "SECRET=abc123"}
+        assert runtime_response.json()["events"][1]["payload"]["message"]["result"] == {
+            "stdout": "SECRET=abc123"
+        }
 
     async def test_get_runtime_run_returns_404_when_store_is_not_configured(
         self,

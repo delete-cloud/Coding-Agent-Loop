@@ -7,7 +7,9 @@ import json
 import logging
 import os
 import re
+import shutil
 import socket
+import subprocess
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping
@@ -26,9 +28,9 @@ from sse_starlette.sse import EventSourceResponse
 
 from agentkit.config.loader import load_config as load_agent_toml
 from agentkit.errors import ConfigError
-from agentkit.result.models import ArtifactRef
+from agentkit.result.models import ArtifactRef, TurnResult
 from agentkit.result.reducers import result_from_turn_trace
-from agentkit.tape.extract import TurnTrace, extract_turns
+from agentkit.tape.extract import ToolCallRecord, TurnTrace, extract_turns
 from agentkit.tape.tape import Tape
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.bee_launch import BeeLaunchRecord, PGBeeLaunchStore
@@ -49,7 +51,10 @@ from coding_agent.bee_workspace import (
 from coding_agent.environment import (
     WorkspaceArchiveManifest,
     WorkspaceBranchPublication,
+    WorkspaceDiff,
+    WorkspaceDiffFile,
     WorkspaceInventoryEntry,
+    WorkspacePatch,
     WorkspaceProviderCapabilities,
     cleanup_cloud_binding_from_config,
     cleanup_cloud_workspace_from_config,
@@ -175,6 +180,7 @@ from coding_agent.runs import (
     IsolationPolicy,
     LocalAttachedExecutorRef,
     ManagedPoolExecutorRef,
+    LocalPathWorkspaceRef,
     RunTarget,
     run_target_from_dict,
 )
@@ -696,7 +702,9 @@ def _session_uses_attached_executor(session: Any) -> bool:
     target = getattr(session, "default_run_target", None)
     if not isinstance(target, RunTarget):
         return False
-    return isinstance(target.executor, (ExternalWorkerExecutorRef, LocalAttachedExecutorRef))
+    return isinstance(
+        target.executor, (ExternalWorkerExecutorRef, LocalAttachedExecutorRef)
+    )
 
 
 def _storage_uses_pg_http_sessions(storage_config: dict[str, Any]) -> bool:
@@ -5692,6 +5700,79 @@ async def _session_result_latest_turn(session: Session) -> TurnTrace | None:
     return turns[-1]
 
 
+def _runtime_event_message(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    message = payload.get("message")
+    if isinstance(message, Mapping):
+        return cast(Mapping[str, Any], message)
+    return payload
+
+
+def _runtime_event_string(message: Mapping[str, Any], key: str) -> str:
+    value = message.get(key)
+    return value if isinstance(value, str) else ""
+
+
+def _runtime_event_arguments(message: Mapping[str, Any]) -> JSONObject:
+    arguments = message.get("arguments")
+    if isinstance(arguments, Mapping):
+        return cast(JSONObject, dict(arguments))
+    return {}
+
+
+async def _session_result_runtime_run_id(session: Session) -> str | None:
+    if session.current_turn_id is not None:
+        return session.current_turn_id
+    try:
+        runs = await session_manager.list_runtime_runs(session.id)
+    except RuntimeError:
+        return None
+    if not runs:
+        return None
+    latest = max(
+        runs,
+        key=lambda run: run.ended_at or run.started_at,
+    )
+    return latest.run_id
+
+
+async def _session_result_from_runtime_events(run_id: str) -> TurnResult | None:
+    _ = await session_manager.load_runtime_run(run_id)
+    events = await session_manager.replay_runtime_events(run_id, limit=1000)
+
+    content_parts: list[str] = []
+    tool_calls: dict[str, ToolCallRecord] = {}
+    anonymous_tool_calls: list[ToolCallRecord] = []
+    for event in events:
+        message = _runtime_event_message(event.payload)
+        if event.event_kind == "wire.StreamDelta":
+            if _runtime_event_string(message, "agent_id"):
+                continue
+            content = _runtime_event_string(message, "content")
+            if content:
+                content_parts.append(content)
+        elif event.event_kind == "wire.ToolCallDelta":
+            record = ToolCallRecord(
+                call_id=_runtime_event_string(message, "call_id"),
+                name=_runtime_event_string(message, "tool_name"),
+                arguments=_runtime_event_arguments(message),
+            )
+            if record.call_id:
+                tool_calls[record.call_id] = record
+            else:
+                anonymous_tool_calls.append(record)
+
+    final_output = "".join(content_parts) if content_parts else None
+    if final_output is None and not tool_calls and not anonymous_tool_calls:
+        return None
+    return result_from_turn_trace(
+        TurnTrace(
+            user_input="",
+            tool_calls=tuple([*tool_calls.values(), *anonymous_tool_calls]),
+            final_output=final_output,
+        )
+    )
+
+
 def _session_result_failure_details(session: Session) -> str | None:
     details = session.last_failure_details
     if details is not None:
@@ -5699,6 +5780,281 @@ def _session_result_failure_details(session: Session) -> str | None:
     if session.turn_status == "failed":
         return "Session turn failed; no failure details were recorded."
     return None
+
+
+def _session_local_workspace_root(session: Session) -> Path | None:
+    target = session.default_run_target
+    if target is None:
+        raise RuntimeError("session is missing default_run_target")
+    workspace = target.workspace
+    if not isinstance(workspace, LocalPathWorkspaceRef):
+        return None
+    root = Path(workspace.path).expanduser().resolve()
+    if not root.is_dir():
+        raise ValueError(f"local workspace does not exist: {root}")
+    if not (root / ".git").exists():
+        raise ValueError("local workspace diff requires a Git workspace")
+    return root
+
+
+def _run_local_workspace_git(
+    workspace_root: Path,
+    args: list[str],
+    operation: str,
+    *,
+    extra_env: Mapping[str, str] | None = None,
+) -> str:
+    git_binary = shutil.which("git")
+    if git_binary is None:
+        raise ValueError("git executable not found")
+    try:
+        result = subprocess.run(
+            [git_binary, *args],
+            cwd=workspace_root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={
+                **os.environ,
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CONFIG_SYSTEM": os.devnull,
+                "GIT_TERMINAL_PROMPT": "0",
+                **(extra_env or {}),
+            },
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.strip()
+        stdout = exc.stdout.strip()
+        detail = stderr or stdout or f"exit code {exc.returncode}"
+        raise ValueError(f"{operation} failed: {detail}") from exc
+    return result.stdout
+
+
+def _parse_local_git_name_status(
+    output: str,
+    numstat: Mapping[str, tuple[int | None, int | None, bool]],
+) -> list[WorkspaceDiffFile]:
+    tokens = [token for token in output.split("\0") if token]
+    files: list[WorkspaceDiffFile] = []
+    index = 0
+    while index < len(tokens):
+        status_and_path = tokens[index]
+        index += 1
+        status_parts = status_and_path.split("\t", 1)
+        if len(status_parts) == 2:
+            status_token, first_path = status_parts
+        else:
+            status_token = status_and_path
+            if index >= len(tokens):
+                raise ValueError("git diff name-status output is malformed")
+            first_path = tokens[index]
+            index += 1
+        status_code = status_token[:1]
+        old_path: str | None = None
+        if status_code in {"R", "C"}:
+            if index >= len(tokens):
+                raise ValueError("git diff name-status output is malformed")
+            old_path = first_path
+            path = tokens[index]
+            index += 1
+            status: Literal[
+                "added", "modified", "deleted", "renamed", "binary", "unknown"
+            ] = "renamed"
+        else:
+            path = first_path
+            status = _local_workspace_diff_status_from_git_status(status_code)
+
+        additions, deletions, binary = numstat.get(path, (None, None, False))
+        files.append(
+            WorkspaceDiffFile(
+                path=path,
+                status=status,
+                old_path=old_path,
+                additions=additions,
+                deletions=deletions,
+                binary=binary,
+            )
+        )
+    return files
+
+
+def _local_workspace_diff_status_from_git_status(
+    status_code: str,
+) -> Literal["added", "modified", "deleted", "renamed", "binary", "unknown"]:
+    if status_code == "A":
+        return "added"
+    if status_code == "M":
+        return "modified"
+    if status_code == "D":
+        return "deleted"
+    return "unknown"
+
+
+def _parse_local_git_numstat(
+    output: str,
+) -> dict[str, tuple[int | None, int | None, bool]]:
+    result: dict[str, tuple[int | None, int | None, bool]] = {}
+    tokens = output.split("\0")
+    index = 0
+    while index < len(tokens):
+        record = tokens[index]
+        index += 1
+        if not record:
+            continue
+        parts = record.split("\t", 2)
+        if len(parts) != 3:
+            raise ValueError("git diff numstat output is malformed")
+        raw_additions, raw_deletions, raw_path = parts
+        if raw_path:
+            path = raw_path
+        else:
+            if index + 1 >= len(tokens):
+                raise ValueError("git diff numstat output is malformed")
+            _old_path = tokens[index]
+            path = tokens[index + 1]
+            index += 2
+        if raw_additions == "-" or raw_deletions == "-":
+            result[path] = (None, None, True)
+            continue
+        result[path] = (int(raw_additions), int(raw_deletions), False)
+    return result
+
+
+def _local_workspace_untracked_paths(workspace_root: Path) -> list[str]:
+    output = _run_local_workspace_git(
+        workspace_root,
+        ["ls-files", "--others", "--exclude-standard", "-z"],
+        "git ls-files --others",
+    )
+    return [path for path in output.split("\0") if path]
+
+
+def _local_workspace_untracked_file(
+    workspace_root: Path,
+    relative_path: str,
+) -> WorkspaceDiffFile:
+    path = (workspace_root / relative_path).resolve()
+    try:
+        _ = path.relative_to(workspace_root)
+    except ValueError as exc:
+        raise ValueError(f"untracked path escapes workspace: {relative_path}") from exc
+    if not path.is_file():
+        return WorkspaceDiffFile(path=relative_path, status="unknown", binary=False)
+    data = path.read_bytes()
+    if b"\0" in data:
+        return WorkspaceDiffFile(
+            path=relative_path,
+            status="added",
+            additions=None,
+            deletions=None,
+            binary=True,
+        )
+    text = data.decode("utf-8", errors="replace")
+    additions = 0 if text == "" else len(text.splitlines())
+    return WorkspaceDiffFile(
+        path=relative_path,
+        status="added",
+        additions=additions,
+        deletions=0,
+        binary=False,
+    )
+
+
+def _local_workspace_untracked_patch(workspace_root: Path, relative_path: str) -> str:
+    path = (workspace_root / relative_path).resolve()
+    try:
+        _ = path.relative_to(workspace_root)
+    except ValueError as exc:
+        raise ValueError(f"untracked path escapes workspace: {relative_path}") from exc
+    if not path.is_file():
+        return ""
+    data = path.read_bytes()
+    if b"\0" in data:
+        return f"diff --git a/{relative_path} b/{relative_path}\nnew file mode 100644\nBinary files /dev/null and b/{relative_path} differ\n"
+    text = data.decode("utf-8", errors="replace")
+    lines = text.splitlines(keepends=True)
+    patch_lines = [
+        f"diff --git a/{relative_path} b/{relative_path}\n",
+        "new file mode 100644\n",
+        "index 0000000..0000000\n",
+        "--- /dev/null\n",
+        f"+++ b/{relative_path}\n",
+        f"@@ -0,0 +1,{len(lines)} @@\n",
+    ]
+    patch_lines.extend(f"+{line}" for line in lines)
+    if lines and not lines[-1].endswith("\n"):
+        patch_lines.append("\n\\ No newline at end of file\n")
+    return "".join(patch_lines)
+
+
+def _local_workspace_diff(workspace_root: Path) -> WorkspaceDiff:
+    name_status_output = _run_local_workspace_git(
+        workspace_root,
+        [
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--name-status",
+            "--find-renames",
+            "-z",
+            "HEAD",
+            "--",
+        ],
+        "git diff --name-status",
+    )
+    numstat_output = _run_local_workspace_git(
+        workspace_root,
+        [
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--numstat",
+            "--find-renames",
+            "-z",
+            "HEAD",
+            "--",
+        ],
+        "git diff --numstat",
+    )
+    numstat = _parse_local_git_numstat(numstat_output)
+    files = _parse_local_git_name_status(name_status_output, numstat)
+    for untracked_path in _local_workspace_untracked_paths(workspace_root):
+        file = _local_workspace_untracked_file(workspace_root, untracked_path)
+        files.append(file)
+        numstat[file.path] = (file.additions, file.deletions, file.binary)
+    additions = sum(item[0] for item in numstat.values() if item[0] is not None)
+    deletions = sum(item[1] for item in numstat.values() if item[1] is not None)
+    return WorkspaceDiff(
+        workspace_id=str(workspace_root),
+        files=files,
+        additions=additions,
+        deletions=deletions,
+    )
+
+
+def _local_workspace_patch(workspace_root: Path) -> WorkspacePatch:
+    patch = _run_local_workspace_git(
+        workspace_root,
+        [
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--binary",
+            "HEAD",
+            "--",
+        ],
+        "git diff",
+    )
+    untracked_patch = "".join(
+        _local_workspace_untracked_patch(workspace_root, path)
+        for path in _local_workspace_untracked_paths(workspace_root)
+    )
+    return WorkspacePatch(
+        workspace_id=str(workspace_root),
+        format="unified_diff",
+        patch=patch + untracked_patch,
+    )
 
 
 @app.get("/sessions/{session_id}/result", response_model=SessionResultResponse)
@@ -5712,7 +6068,16 @@ async def get_session_result(
     session = await _get_visible_session(session_id, auth_context)
     summary = session.as_dict()
     latest_turn = await _session_result_latest_turn(session)
-    turn_result = None if latest_turn is None else result_from_turn_trace(latest_turn)
+    result_turn_id = session.current_turn_id
+    if latest_turn is None:
+        result_turn_id = await _session_result_runtime_run_id(session)
+        turn_result = (
+            None
+            if result_turn_id is None
+            else await _session_result_from_runtime_events(result_turn_id)
+        )
+    else:
+        turn_result = result_from_turn_trace(latest_turn)
     verification_summary = (
         None
         if turn_result is None or turn_result.verification_summary is None
@@ -5722,7 +6087,7 @@ async def get_session_result(
         session_id=session.id,
         status=summary["status"],
         turn_status=summary["turn_status"],
-        turn_id=session.current_turn_id,
+        turn_id=result_turn_id,
         workspace_id=summary["workspace_id"],
         origin=session.origin,
         provider_name=session.provider_name,
@@ -5744,15 +6109,19 @@ async def get_session_workspace_diff(
     auth_context: AuthContext | None = Depends(auth_context_from_headers),
 ) -> WorkspaceDiffResponse:
     del request
-    _ = await _get_visible_session(session_id, auth_context)
+    session = await _get_visible_session(session_id, auth_context)
     try:
-        diff = await session_manager.export_workspace_archive(
-            session_id,
-            lambda binding: workspace_diff_from_config(
-                _load_cloud_workspace_config(),
-                binding.workspace_id,
-            ),
-        )
+        local_workspace_root = _session_local_workspace_root(session)
+        if local_workspace_root is not None:
+            diff = await asyncio.to_thread(_local_workspace_diff, local_workspace_root)
+        else:
+            diff = await session_manager.export_workspace_archive(
+                session_id,
+                lambda binding: workspace_diff_from_config(
+                    _load_cloud_workspace_config(),
+                    binding.workspace_id,
+                ),
+            )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
     except SessionOwnershipConflictError as exc:
@@ -5794,15 +6163,21 @@ async def get_session_workspace_patch(
     auth_context: AuthContext | None = Depends(auth_context_from_headers),
 ) -> WorkspacePatchResponse:
     del request
-    _ = await _get_visible_session(session_id, auth_context)
+    session = await _get_visible_session(session_id, auth_context)
     try:
-        patch = await session_manager.export_workspace_archive(
-            session_id,
-            lambda binding: workspace_patch_from_config(
-                _load_cloud_workspace_config(),
-                binding.workspace_id,
-            ),
-        )
+        local_workspace_root = _session_local_workspace_root(session)
+        if local_workspace_root is not None:
+            patch = await asyncio.to_thread(
+                _local_workspace_patch, local_workspace_root
+            )
+        else:
+            patch = await session_manager.export_workspace_archive(
+                session_id,
+                lambda binding: workspace_patch_from_config(
+                    _load_cloud_workspace_config(),
+                    binding.workspace_id,
+                ),
+            )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
     except SessionOwnershipConflictError as exc:
