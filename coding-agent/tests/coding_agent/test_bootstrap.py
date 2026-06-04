@@ -320,6 +320,44 @@ enabled = ["storage", "core_tools"]
 
         assert pipeline._registry.plugin_ids() == ["storage", "core_tools"]
 
+    def test_create_agent_uses_mcp_servers_override(self, tmp_path):
+        config_path = tmp_path / "agent.toml"
+        config_path.write_text(
+            """
+[agent]
+name = "test-agent"
+model = "claude-sonnet-4-20250514"
+provider = "anthropic"
+
+[agent.plugins]
+enabled = ["mcp"]
+
+[mcp.servers.from_toml]
+command = "toml-server"
+args = ["--toml"]
+""".strip()
+        )
+
+        pipeline, ctx = create_agent(
+            config_path=config_path,
+            data_dir=tmp_path / "data",
+            api_key="sk-test",
+            mcp_servers_override={
+                "from_acp": {
+                    "command": "acp-server",
+                    "args": ["--stdio"],
+                    "env": {"TOKEN": "redacted"},
+                }
+            },
+        )
+
+        mcp_plugin = pipeline._registry.get("mcp")
+        assert ctx.config["mcp_plugin"] is mcp_plugin
+        assert [cfg.name for cfg in mcp_plugin._server_configs] == ["from_acp"]
+        assert mcp_plugin._server_configs[0].command == "acp-server"
+        assert mcp_plugin._server_configs[0].args == ["--stdio"]
+        assert mcp_plugin._server_configs[0].env == {"TOKEN": "redacted"}
+
     def test_create_agent_applies_runtime_overrides(self, tmp_path):
         config_path = (
             Path(__file__).parent.parent.parent / "src" / "coding_agent" / "agent.toml"

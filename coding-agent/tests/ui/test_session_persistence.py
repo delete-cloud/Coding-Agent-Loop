@@ -1494,6 +1494,14 @@ def test_session_record_round_trips_existing_store_payload() -> None:
         model_name="gpt-4o",
         base_url="https://api.example.test",
         max_steps=12,
+        mcp_servers={
+            "filesystem": {
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-filesystem"],
+                "env": {"ROOT": "/repo"},
+                "inherit_env": False,
+            }
+        },
         tape_id="tape-123",
         last_failure_details="previous failure",
     )
@@ -1508,12 +1516,56 @@ def test_session_record_round_trips_existing_store_payload() -> None:
     assert reloaded.model_name == "gpt-4o"
     assert reloaded.base_url == "https://api.example.test"
     assert reloaded.max_steps == 12
+    assert reloaded.mcp_servers == {
+        "filesystem": {
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-filesystem"],
+            "env": {"ROOT": "/repo"},
+            "inherit_env": False,
+        }
+    }
     assert reloaded.tape_id == "tape-123"
     assert reloaded.last_failure_details == "previous failure"
     assert reloaded.default_run_target == session.default_run_target
     assert isinstance(reloaded.runtime_handle, SessionRuntimeHandle)
     assert reloaded.runtime_ctx is None
     assert reloaded.event_queues == []
+
+
+def test_session_record_defaults_missing_mcp_servers_to_empty() -> None:
+    session = Session(
+        id="record-session",
+        created_at=datetime.now(UTC),
+        last_activity=datetime.now(UTC),
+        approval_store=ApprovalStore(),
+    )
+    payload = session.to_store_data()
+    payload.pop("mcp_servers", None)
+
+    record = SessionRecord.from_store_data(payload)
+    reloaded = record.to_session()
+
+    assert record.mcp_servers == {}
+    assert reloaded.mcp_servers == {}
+
+
+def test_session_as_dict_excludes_mcp_servers() -> None:
+    session = Session(
+        id="record-session",
+        created_at=datetime.now(UTC),
+        last_activity=datetime.now(UTC),
+        approval_store=ApprovalStore(),
+        mcp_servers={
+            "filesystem": {
+                "command": "npx",
+                "args": ["server"],
+                "env": {"TOKEN": "secret"},
+                "inherit_env": False,
+            }
+        },
+    )
+
+    assert "mcp_servers" not in session.as_dict()
 
 
 def test_session_record_persists_default_run_target() -> None:

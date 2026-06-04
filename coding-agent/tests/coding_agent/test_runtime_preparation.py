@@ -48,6 +48,7 @@ class FakeRuntimeSession:
         self.tape_id: str | None = "tape-old"
         self.runtime_message_bus = object()
         self.default_run_target: RunTarget | None = None
+        self.mcp_servers: dict[str, dict[str, object]] = {}
         self.runtime_pipeline: object | None = None
         self.runtime_ctx: object | None = None
         self.runtime_adapter: FakeRuntimeAdapter | None = None
@@ -197,6 +198,7 @@ async def test_runtime_preparation_service_builds_local_daemon_runtime(
     assert created["approval_mode_override"] == "interactive"
     assert created["session_id_override"] == "session-1"
     assert created["run_id_override"] == "run-1"
+    assert created["mcp_servers_override"] == {}
     assert created["api_key"] is None
     assert restored == ["tape-old"]
     assert persisted == ["tape-new"]
@@ -239,6 +241,45 @@ async def test_runtime_preparation_service_builds_runtime_through_executor(
     assert restored == ["tape-old"]
     assert runtime.adapter is adapter
     assert adapter.initialized is True
+
+
+@pytest.mark.asyncio
+async def test_runtime_preparation_service_passes_session_mcp_servers(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    session = FakeRuntimeSession()
+    session.mcp_servers = {
+        "toolbox": {
+            "command": "python",
+            "args": ["server.py"],
+            "env": {"A": "B"},
+            "inherit_env": False,
+        }
+    }
+    created: dict[str, object] = {}
+
+    await _service(
+        created=created,
+        persisted=[],
+        restored=[],
+        consumer=object(),
+        adapter=FakeRuntimeAdapter(),
+    ).prepare_runtime(
+        session,
+        consumer=object(),
+        request=_request(workspace),
+    )
+
+    assert created["mcp_servers_override"] == {
+        "toolbox": {
+            "command": "python",
+            "args": ["server.py"],
+            "env": {"A": "B"},
+            "inherit_env": False,
+        }
+    }
 
 
 @pytest.mark.asyncio

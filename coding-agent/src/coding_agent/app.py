@@ -174,6 +174,7 @@ def create_child_pipeline(
     parent_run_id_override: str | None = None,
     context_budget: ContextBudget | None = None,
     trace_metadata: Mapping[str, Any] | None = None,
+    mcp_servers_override: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[Any, Any]:
     if config_path is None:
         config_path = Path(__file__).parent / "agent.toml"
@@ -252,6 +253,7 @@ def create_child_pipeline(
 
     def _create_child_with_environment(**kwargs: Any) -> tuple[Any, PipelineContext]:
         kwargs.setdefault("environment", environment)
+        kwargs.setdefault("mcp_servers_override", mcp_servers_override)
         return create_child_pipeline(**kwargs)
 
     plugin_factories: dict[str, Any] = {
@@ -324,7 +326,11 @@ def create_child_pipeline(
                 extra_dirs=skills_cfg.get("extra_dirs", []),
             ),
             "mcp": lambda: MCPPlugin(
-                servers=mcp_cfg.get("servers", {}),
+                servers=(
+                    mcp_servers_override
+                    if mcp_servers_override is not None
+                    else mcp_cfg.get("servers", {})
+                ),
             ),
             "kb": lambda: KBPlugin(
                 db_path=data_dir / kb_cfg.get("db_path", "kb"),
@@ -453,6 +459,7 @@ def create_agent(
     parent_run_id_override: str | None = None,
     context_budget: ContextBudget | None = None,
     trace_metadata: Mapping[str, Any] | None = None,
+    mcp_servers_override: dict[str, dict[str, Any]] | None = None,
     tape: Tape | None = None,
 ) -> tuple[Any, Any]:
     return create_child_pipeline(
@@ -475,4 +482,5 @@ def create_agent(
         parent_run_id_override=parent_run_id_override,
         context_budget=context_budget,
         trace_metadata=trace_metadata,
+        mcp_servers_override=mcp_servers_override,
     )

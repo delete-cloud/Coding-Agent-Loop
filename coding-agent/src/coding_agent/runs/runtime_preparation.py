@@ -198,6 +198,7 @@ class LocalDaemonRuntimePreparationService:
             approval_mode_override=self._approval_mode(resolved_approval_policy),
             session_id_override=session.id,
             api_key=None,
+            mcp_servers_override=dict(getattr(session, "mcp_servers", {})),
             tape=await self.restore_tape(session.tape_id),
         )
         ctx.config["wire_consumer"] = consumer

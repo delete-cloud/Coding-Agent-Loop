@@ -26,7 +26,6 @@ plugin registers but exposes zero tools and logs a warning.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -52,6 +51,7 @@ class MCPServerConfig:
     command: str
     args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
+    inherit_env: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +73,10 @@ class _MCPConnection:
     # ------------------------------------------------------------------
 
     def start(self) -> None:
-        env = {**os.environ, **self.cfg.env}
+        if self.cfg.inherit_env:
+            env = {**os.environ, **self.cfg.env}
+        else:
+            env = {"PATH": os.environ.get("PATH", ""), **self.cfg.env}
         cmd = [self.cfg.command, *self.cfg.args]
         try:
             self._proc = subprocess.Popen(
@@ -252,21 +255,27 @@ class MCPPlugin:
                          }
         """
         self._server_configs: list[MCPServerConfig] = []
+        # name → connection
+        self._connections: dict[str, _MCPConnection] = {}
+        # tool_name → (server_name, raw_name) for routing
+        self._tool_index: dict[str, tuple[str, str]] = {}
+        self._tool_schemas: list[ToolSchema] = []
+
         for name, raw in (servers or {}).items():
+            inherit_env = raw.get("inherit_env", True)
+            if not isinstance(inherit_env, bool):
+                raise ValueError(
+                    f"MCPPlugin: server '{name}' inherit_env must be a boolean"
+                )
             self._server_configs.append(
                 MCPServerConfig(
                     name=name,
                     command=raw.get("command", ""),
                     args=raw.get("args", []),
                     env=raw.get("env", {}),
+                    inherit_env=inherit_env,
                 )
             )
-
-        # name → connection
-        self._connections: dict[str, _MCPConnection] = {}
-        # tool_name → (server_name, raw_name) for routing
-        self._tool_index: dict[str, tuple[str, str]] = {}
-        self._tool_schemas: list[ToolSchema] = []
 
     # ------------------------------------------------------------------ #
     # Plugin protocol

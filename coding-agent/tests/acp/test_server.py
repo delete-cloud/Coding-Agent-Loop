@@ -84,6 +84,18 @@ class FakeManager:
     async def close_session(self, session_id: str) -> None:
         self.calls.append(("close_session", session_id))
 
+    async def update_session_mcp_servers(
+        self,
+        session_id: str,
+        mcp_servers: dict[str, dict[str, Any]],
+    ) -> None:
+        self.calls.append(
+            (
+                "update_session_mcp_servers",
+                {"session_id": session_id, "mcp_servers": mcp_servers},
+            )
+        )
+
     async def submit_approval_response(
         self,
         session_id: str,
@@ -144,6 +156,7 @@ async def test_initialize_returns_protocol_version_and_minimal_capabilities() ->
             "protocolVersion": 1,
             "agentCapabilities": {
                 "loadSession": True,
+                "mcpCapabilities": {"stdio": True, "http": False, "sse": False},
                 "promptCapabilities": {},
                 "sessionCapabilities": {"close": {}, "list": {}},
             },
@@ -188,6 +201,21 @@ async def test_initialize_advertises_session_lifecycle_capabilities() -> None:
 
 
 @pytest.mark.asyncio
+async def test_initialize_advertises_stdio_mcp_capability() -> None:
+    server = AcpServer(FakeManager())
+
+    response = await server.handle_message(
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+    )
+
+    assert response is not None
+    result = response["result"]
+    assert isinstance(result, dict)
+    capabilities = result["agentCapabilities"]
+    assert capabilities["mcpCapabilities"] == {"stdio": True, "http": False, "sse": False}
+
+
+@pytest.mark.asyncio
 async def test_session_new_creates_local_session_from_absolute_cwd(
     tmp_path: Path,
 ) -> None:
@@ -222,9 +250,132 @@ async def test_session_new_creates_local_session_from_absolute_cwd(
                 "model_name": "gpt-5.5",
                 "base_url": "https://example.invalid/v1",
                 "max_steps": 7,
+                "mcp_servers": {},
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_session_new_passes_stdio_mcp_servers_to_session_manager(
+    tmp_path: Path,
+) -> None:
+    manager = FakeManager()
+    server = AcpServer(manager)
+
+    response = await server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "session/new",
+            "params": {
+                "cwd": str(tmp_path),
+                "mcpServers": [
+                    {
+                        "name": "filesystem",
+                        "transport": "stdio",
+                        "command": "npx",
+                        "args": ["-y", "@modelcontextprotocol/server-filesystem"],
+                        "env": [{"name": "ROOT", "value": str(tmp_path)}],
+                    }
+                ],
+            },
+        }
+    )
+
+    assert response == {"jsonrpc": "2.0", "id": 2, "result": {"sessionId": "sess-1"}}
+    assert manager.calls[0] == (
+        "create_session",
+        {
+            "repo_path": tmp_path,
+            "origin": {"entrypoint": "acp", "mode": "stdio"},
+            "approval_policy": ApprovalPolicy.AUTO,
+            "provider_name": None,
+            "model_name": None,
+            "base_url": None,
+            "max_steps": 30,
+                "mcp_servers": {
+                    "filesystem": {
+                        "command": "npx",
+                        "args": ["-y", "@modelcontextprotocol/server-filesystem"],
+                        "env": {"ROOT": str(tmp_path)},
+                        "inherit_env": False,
+                    }
+                },
+            },
+    )
+
+
+@pytest.mark.asyncio
+async def test_session_new_rejects_unsupported_mcp_transport(tmp_path: Path) -> None:
+    response = await AcpServer(FakeManager()).handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "session/new",
+            "params": {
+                "cwd": str(tmp_path),
+                "mcpServers": [
+                    {
+                        "name": "remote",
+                        "transport": "sse",
+                        "url": "https://example.invalid/sse",
+                    }
+                ],
+            },
+        }
+    )
+
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "error": {
+            "code": -32602,
+            "message": "session mcpServers[0].transport must be stdio",
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_session_load_updates_mcp_servers_from_params(tmp_path: Path) -> None:
+    manager = FakeManager(repo_path=tmp_path)
+    server = AcpServer(manager)
+
+    response = await server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "session/load",
+            "params": {
+                "sessionId": "sess-1",
+                "cwd": str(tmp_path),
+                "mcpServers": [
+                    {
+                        "name": "toolbox",
+                        "transport": "stdio",
+                        "command": "python",
+                        "args": ["server.py"],
+                    }
+                ],
+            },
+        }
+    )
+
+    assert response == {"jsonrpc": "2.0", "id": 7, "result": None}
+    assert (
+        "update_session_mcp_servers",
+        {
+            "session_id": "sess-1",
+            "mcp_servers": {
+                "toolbox": {
+                    "command": "python",
+                    "args": ["server.py"],
+                    "env": {},
+                    "inherit_env": False,
+                }
+            },
+        },
+    ) in manager.calls
 
 
 @pytest.mark.asyncio
@@ -361,8 +512,12 @@ async def test_session_load_replays_display_events_before_response(
             },
         },
     ]
-    assert manager.calls[:3] == [
+    assert manager.calls[:4] == [
         ("get_session_async", "sess-1"),
+        (
+            "update_session_mcp_servers",
+            {"session_id": "sess-1", "mcp_servers": {}},
+        ),
         ("list_runtime_runs", "sess-1"),
         (
             "replay_display_events",
