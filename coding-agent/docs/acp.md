@@ -108,6 +108,10 @@ commands from seeing unrelated host secrets. MCP servers configured in
 messages as ACP `session/update` notifications and returns a `stopReason` when
 the root turn ends.
 
+Prompt content supports ACP baseline text blocks and resource links. Resource
+links must include both `name` and `uri`; the adapter passes the URI into the
+agent prompt text.
+
 If the turn needs tool approval, Coding Agent sends an agent-originated
 `session/request_permission` JSON-RPC request to the ACP client. The client must
 respond on the same stdio connection. Supported outcomes map to Coding Agent

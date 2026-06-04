@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from coding_agent.acp.mapper import (
     acp_stop_reason,
     prompt_blocks_to_text,
@@ -23,6 +25,30 @@ def test_prompt_blocks_to_text_accepts_text_blocks() -> None:
     )
 
     assert prompt == "first\n\nsecond"
+
+
+def test_prompt_blocks_to_text_accepts_resource_links() -> None:
+    prompt = prompt_blocks_to_text(
+        [
+            {
+                "type": "resource_link",
+                "name": "README.md",
+                "uri": "file:///repo/README.md",
+            }
+        ]
+    )
+
+    assert prompt == "file:///repo/README.md"
+
+
+def test_prompt_blocks_to_text_rejects_resource_link_without_name() -> None:
+    with pytest.raises(
+        ValueError,
+        match="prompt resource_link block 0 must include non-empty name",
+    ):
+        prompt_blocks_to_text(
+            [{"type": "resource_link", "uri": "file:///repo/README.md"}]
+        )
 
 
 def test_wire_mapper_converts_agent_message_chunk() -> None:
