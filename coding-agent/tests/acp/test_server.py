@@ -11,7 +11,13 @@ import pytest
 from coding_agent.acp.server import AcpServer, run_stdio
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.wire.local import LocalWire
-from coding_agent.wire.protocol import CompletionStatus, StreamDelta, TurnEnd
+from coding_agent.wire.protocol import (
+    ApprovalRequest,
+    CompletionStatus,
+    StreamDelta,
+    ToolCallDelta,
+    TurnEnd,
+)
 
 
 class FakeManager:
@@ -46,6 +52,28 @@ class FakeManager:
         return SimpleNamespace(
             session_id=session_id, turn_id="turn-1", status="cancelling"
         )
+
+    async def submit_approval_response(
+        self,
+        session_id: str,
+        request_id: str,
+        approved: bool,
+        feedback: str | None = None,
+        scope: str = "once",
+    ) -> Any:
+        self.calls.append(
+            (
+                "submit_approval_response",
+                {
+                    "session_id": session_id,
+                    "request_id": request_id,
+                    "approved": approved,
+                    "feedback": feedback,
+                    "scope": scope,
+                },
+            )
+        )
+        return SimpleNamespace(request_id=request_id, approved=approved)
 
     async def close(self) -> None:
         self.calls.append(("close", None))
@@ -198,6 +226,167 @@ async def test_session_cancel_calls_session_manager_cancel() -> None:
 
 
 @pytest.mark.asyncio
+async def test_permission_request_calls_client_and_submits_allow_once() -> None:
+    wire = LocalWire("sess-1")
+    manager = FakeManager(wire)
+    client_calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def call_client(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        client_calls.append((method, params))
+        return {"outcome": {"outcome": "selected", "optionId": "allow-once"}}
+
+    async def run_agent(session_id: str, prompt: str) -> None:
+        await wire.send(
+            ApprovalRequest(
+                session_id=session_id,
+                request_id="approval-1",
+                tool_call=ToolCallDelta(
+                    session_id=session_id,
+                    tool_name="bash_run",
+                    arguments={"cmd": "pwd"},
+                    call_id="tool-1",
+                ),
+            )
+        )
+        await wire.send(
+            TurnEnd(
+                session_id=session_id,
+                turn_id="turn-1",
+                completion_status=CompletionStatus.COMPLETED,
+            )
+        )
+
+    manager.run_agent = run_agent  # type: ignore[method-assign]
+    server = AcpServer(manager, call_client=call_client)
+
+    response = await server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "session/prompt",
+            "params": {
+                "sessionId": "sess-1",
+                "prompt": [{"type": "text", "text": "needs approval"}],
+            },
+        }
+    )
+
+    assert response == {"jsonrpc": "2.0", "id": 6, "result": {"stopReason": "end_turn"}}
+    assert client_calls == [
+        (
+            "session/request_permission",
+            {
+                "sessionId": "sess-1",
+                "toolCall": {
+                    "toolCallId": "tool-1",
+                    "title": "bash_run",
+                    "kind": "execute",
+                    "status": "pending",
+                    "rawInput": {"cmd": "pwd"},
+                },
+                "options": [
+                    {
+                        "optionId": "allow-once",
+                        "name": "Allow once",
+                        "kind": "allow_once",
+                    },
+                    {
+                        "optionId": "allow-session",
+                        "name": "Allow for this session",
+                        "kind": "allow_always",
+                    },
+                    {
+                        "optionId": "reject-once",
+                        "name": "Reject",
+                        "kind": "reject_once",
+                    },
+                ],
+            },
+        )
+    ]
+    assert (
+        "submit_approval_response",
+        {
+            "session_id": "sess-1",
+            "request_id": "approval-1",
+            "approved": True,
+            "feedback": None,
+            "scope": "once",
+        },
+    ) in manager.calls
+
+
+@pytest.mark.asyncio
+async def test_permission_request_submits_session_scope_for_allow_session() -> None:
+    manager = FakeManager()
+
+    async def call_client(_method: str, _params: dict[str, Any]) -> dict[str, Any]:
+        return {"outcome": {"outcome": "selected", "optionId": "allow-session"}}
+
+    server = AcpServer(manager, call_client=call_client)
+
+    await server.handle_approval_request(
+        "sess-1",
+        ApprovalRequest(
+            session_id="sess-1",
+            request_id="approval-1",
+            tool_call=ToolCallDelta(
+                session_id="sess-1",
+                tool_name="file_write",
+                arguments={"path": "a.txt"},
+                call_id="tool-1",
+            ),
+        ),
+    )
+
+    assert (
+        "submit_approval_response",
+        {
+            "session_id": "sess-1",
+            "request_id": "approval-1",
+            "approved": True,
+            "feedback": None,
+            "scope": "session",
+        },
+    ) in manager.calls
+
+
+@pytest.mark.asyncio
+async def test_permission_request_submits_denial_for_cancelled_outcome() -> None:
+    manager = FakeManager()
+
+    async def call_client(_method: str, _params: dict[str, Any]) -> dict[str, Any]:
+        return {"outcome": {"outcome": "cancelled"}}
+
+    server = AcpServer(manager, call_client=call_client)
+
+    await server.handle_approval_request(
+        "sess-1",
+        ApprovalRequest(
+            session_id="sess-1",
+            request_id="approval-1",
+            tool_call=ToolCallDelta(
+                session_id="sess-1",
+                tool_name="bash_run",
+                arguments={},
+                call_id="tool-1",
+            ),
+        ),
+    )
+
+    assert (
+        "submit_approval_response",
+        {
+            "session_id": "sess-1",
+            "request_id": "approval-1",
+            "approved": False,
+            "feedback": "Permission request cancelled by ACP client",
+            "scope": "once",
+        },
+    ) in manager.calls
+
+
+@pytest.mark.asyncio
 async def test_stdio_server_writes_jsonrpc_to_stdout_only() -> None:
     manager = FakeManager()
     stdout: list[str] = []
@@ -330,3 +519,85 @@ class BlockingLineInput:
 
     def close(self) -> None:
         self._lines.put("")
+
+
+@pytest.mark.asyncio
+async def test_stdio_resolves_agent_originated_permission_response() -> None:
+    wire = LocalWire("sess-1")
+    manager = FakeManager(wire)
+    stdin = BlockingLineInput()
+    stdout: list[str] = []
+
+    async def run_agent(session_id: str, prompt: str) -> None:
+        await wire.send(
+            ApprovalRequest(
+                session_id=session_id,
+                request_id="approval-1",
+                tool_call=ToolCallDelta(
+                    session_id=session_id,
+                    tool_name="bash_run",
+                    arguments={"cmd": "pwd"},
+                    call_id="tool-1",
+                ),
+            )
+        )
+        while not any(call[0] == "submit_approval_response" for call in manager.calls):
+            await asyncio.sleep(0)
+        await wire.send(
+            TurnEnd(
+                session_id=session_id,
+                turn_id="turn-1",
+                completion_status=CompletionStatus.COMPLETED,
+            )
+        )
+
+    manager.run_agent = run_agent  # type: ignore[method-assign]
+    task = asyncio.create_task(
+        run_stdio(AcpServer(manager), stdin=stdin, stdout=stdout.append)
+    )
+
+    stdin.put(
+        '{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"sess-1","prompt":[{"type":"text","text":"approve"}]}}\n'
+    )
+    while not stdout:
+        await asyncio.sleep(0)
+    permission_request = stdout[0]
+    assert '"method":"session/request_permission"' in permission_request
+    assert '"id":"coding-agent-acp-1"' in permission_request
+
+    stdin.put(
+        '{"jsonrpc":"2.0","id":"coding-agent-acp-1","result":{"outcome":{"outcome":"selected","optionId":"allow-once"}}}\n'
+    )
+    stdin.close()
+    await asyncio.wait_for(task, timeout=1)
+
+    assert stdout[-1] == '{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}\n'
+    assert any(
+        call
+        == (
+            "submit_approval_response",
+            {
+                "session_id": "sess-1",
+                "request_id": "approval-1",
+                "approved": True,
+                "feedback": None,
+                "scope": "once",
+            },
+        )
+        for call in manager.calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_stdio_routes_unknown_agent_response_to_stderr() -> None:
+    manager = FakeManager()
+    stderr: list[str] = []
+    stdin = [
+        '{"jsonrpc":"2.0","id":"missing","result":{}}\n',
+    ]
+
+    await run_stdio(
+        AcpServer(manager), stdin=stdin, stdout=lambda _line: None, stderr=stderr.append
+    )
+
+    assert stderr == ["ACP response for unknown request id: missing\n"]
