@@ -922,6 +922,56 @@ async def test_session_set_mode_rejects_unknown_mode() -> None:
 
 
 @pytest.mark.asyncio
+async def test_session_set_config_option_rejects_unknown_config() -> None:
+    manager = FakeManager()
+    server = AcpServer(manager)
+
+    response = await server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 12,
+            "method": "session/set_config_option",
+            "params": {
+                "sessionId": "sess-1",
+                "configId": "model",
+                "value": "gpt-5.5",
+            },
+        }
+    )
+
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 12,
+        "error": {
+            "code": -32602,
+            "message": "session/set_config_option params.configId is not supported",
+        },
+    }
+    assert ("get_session_async", "sess-1") in manager.calls
+
+
+@pytest.mark.asyncio
+async def test_session_set_config_option_rejects_missing_value() -> None:
+    response = await AcpServer(FakeManager()).handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 12,
+            "method": "session/set_config_option",
+            "params": {"sessionId": "sess-1", "configId": "model"},
+        }
+    )
+
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 12,
+        "error": {
+            "code": -32602,
+            "message": "session/set_config_option params.value must be a string",
+        },
+    }
+
+
+@pytest.mark.asyncio
 async def test_session_load_replays_display_events_before_response(
     tmp_path: Path,
 ) -> None:
