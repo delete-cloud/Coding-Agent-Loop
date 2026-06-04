@@ -158,6 +158,121 @@ def test_create_local_daemon_session_sends_local_run_target(
     ]
 
 
+def test_create_local_daemon_session_sends_runtime_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from coding_agent.remote.client import (
+        RemoteEndpoint,
+        create_local_daemon_session,
+    )
+
+    calls: list[dict[str, object] | None] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"session_id": "sess-local"}
+
+    class FakeClient:
+        def __init__(
+            self,
+            *,
+            base_url: str,
+            headers: dict[str, str] | None = None,
+            timeout: float,
+        ) -> None:
+            del base_url, headers, timeout
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def post(
+            self, path: str, json: dict[str, object] | None = None
+        ) -> FakeResponse:
+            assert path == "/sessions"
+            calls.append(json)
+            return FakeResponse()
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+
+    session_id = create_local_daemon_session(
+        RemoteEndpoint("local-daemon", "http://127.0.0.1:8080", None),
+        repo_path=tmp_path,
+        approval_policy="auto",
+        provider_name="codex",
+        model_name="gpt-5.5",
+        base_url="https://chatgpt.com/backend-api/codex",
+    )
+
+    assert session_id == "sess-local"
+    assert calls[0] is not None
+    assert calls[0]["provider"] == "codex"
+    assert calls[0]["model"] == "gpt-5.5"
+    assert calls[0]["base_url"] == "https://chatgpt.com/backend-api/codex"
+
+
+def test_create_local_daemon_session_reports_non_json_response(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from coding_agent.remote.client import (
+        RemoteEndpoint,
+        create_local_daemon_session,
+    )
+
+    class FakeResponse:
+        headers = {"content-type": "text/plain"}
+        text = "Hello Kubernetes bootcamp!"
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> object:
+            raise json.JSONDecodeError("Expecting value", self.text, 0)
+
+    class FakeClient:
+        def __init__(
+            self,
+            *,
+            base_url: str,
+            headers: dict[str, str] | None = None,
+            timeout: float,
+        ) -> None:
+            del base_url, headers, timeout
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def post(
+            self, path: str, json: dict[str, object] | None = None
+        ) -> FakeResponse:
+            del path, json
+            return FakeResponse()
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+
+    with pytest.raises(click.ClickException) as exc_info:
+        create_local_daemon_session(
+            RemoteEndpoint("local-daemon", "http://127.0.0.1:8080", None),
+            repo_path=tmp_path,
+            approval_policy="auto",
+        )
+
+    message = str(exc_info.value)
+    assert "create local daemon session returned non-JSON response" in message
+    assert "content-type=text/plain" in message
+    assert "Hello Kubernetes bootcamp!" in message
+
+
 def _run_git(repo_path: Path, args: list[str]) -> str:
     result = subprocess.run(
         ["git", "-C", str(repo_path), *args],
@@ -370,6 +485,73 @@ def test_daemon_run_uses_local_http_control_plane_client(
             "headers": {},
         },
     )
+
+
+def test_daemon_run_sends_env_provider_model_to_local_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object | None] = {}
+
+    def fake_create_local_daemon_session(
+        endpoint,
+        *,
+        repo_path,
+        approval_policy,
+        provider_name=None,
+        model_name=None,
+        base_url=None,
+    ):
+        del endpoint, repo_path, approval_policy
+        captured["provider_name"] = provider_name
+        captured["model_name"] = model_name
+        captured["base_url"] = base_url
+        return "sess-local"
+
+    def fake_stream_prompt_or_run_request(
+        *,
+        base_url: str,
+        session_id: str,
+        prompt: str,
+        headers: dict[str, str],
+    ) -> int:
+        del base_url, session_id, prompt, headers
+        return 0
+
+    monkeypatch.setenv("AGENT_PROVIDER", "codex")
+    monkeypatch.setenv("AGENT_MODEL", "gpt-5.5")
+    monkeypatch.setattr(
+        "coding_agent.remote.client.create_local_daemon_session",
+        fake_create_local_daemon_session,
+    )
+    monkeypatch.setattr(
+        "coding_agent.remote.client.stream_prompt_or_run_request",
+        fake_stream_prompt_or_run_request,
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        main,
+        [
+            "daemon",
+            "run",
+            "--url",
+            "http://127.0.0.1:8765",
+            "--repo",
+            str(tmp_path),
+            "--goal",
+            "hello daemon",
+            "--keep-session",
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert captured == {
+        "provider_name": "codex",
+        "model_name": "gpt-5.5",
+        "base_url": None,
+    }
 
 
 def test_daemon_run_cleanup_session_deletes_after_stream_failure(
@@ -1027,6 +1209,7 @@ async def test_attached_executor_client_creates_local_attached_session(
         }
     ]
 
+
 @pytest.mark.asyncio
 async def test_attached_executor_client_claims_via_executor_endpoint(
     tmp_path: Path,
@@ -1385,9 +1568,7 @@ def test_remote_attach_uses_display_event_stream(monkeypatch, capsys) -> None:
     )
 
     assert status == 0
-    assert calls == [
-        ("http://agent.example", "GET", "/sessions/sess-1/display-events")
-    ]
+    assert calls == [("http://agent.example", "GET", "/sessions/sess-1/display-events")]
     assert capsys.readouterr().out == "hello\n"
 
 

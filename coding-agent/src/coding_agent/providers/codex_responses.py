@@ -186,7 +186,10 @@ class CodexResponsesProvider:
                 yield TextEvent(text=delta)
             return
 
-        if kind in ("response.reasoning_text.delta", "response.reasoning_summary_text.delta"):
+        if kind in (
+            "response.reasoning_text.delta",
+            "response.reasoning_summary_text.delta",
+        ):
             delta = _str(payload.get("delta"))
             if delta:
                 yield ThinkingEvent(text=delta)
@@ -199,10 +202,14 @@ class CodexResponsesProvider:
             return
 
         if kind == "response.failed":
-            raise RuntimeError(_response_error_message(payload, "Codex response failed"))
+            raise RuntimeError(
+                _response_error_message(payload, "Codex response failed")
+            )
 
         if kind == "response.incomplete":
-            raise RuntimeError(_response_error_message(payload, "Codex response incomplete"))
+            raise RuntimeError(
+                _response_error_message(payload, "Codex response incomplete")
+            )
 
         if kind == "response.completed":
             response = payload.get("response")
@@ -224,7 +231,9 @@ class CodexResponsesProvider:
     ) -> dict[str, Any]:
         instructions, input_items = _convert_messages(messages)
         if not instructions:
-            raise ValueError("Codex Responses requests require a system instruction message")
+            raise ValueError(
+                "Codex Responses requests require a system instruction message"
+            )
 
         body: dict[str, Any] = {
             "model": self._model,
@@ -247,11 +256,15 @@ class CodexResponsesProvider:
     async def __aenter__(self) -> CodexResponsesProvider:
         return self
 
-    async def __aexit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+    async def __aexit__(
+        self, exc_type: object, exc_val: object, exc_tb: object
+    ) -> None:
         await self.close()
 
 
-def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+def _convert_messages(
+    messages: list[dict[str, Any]],
+) -> tuple[str, list[dict[str, Any]]]:
     instructions: list[str] = []
     input_items: list[dict[str, Any]] = []
 
@@ -274,7 +287,9 @@ def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[st
         if role == "tool":
             call_id = _str(message.get("tool_call_id"))
             if not call_id:
-                raise ValueError("tool messages require tool_call_id for Codex Responses")
+                raise ValueError(
+                    "tool messages require tool_call_id for Codex Responses"
+                )
             input_items.append(
                 {
                     "type": "function_call_output",
@@ -287,10 +302,11 @@ def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[st
 
 
 def _message_item(role: str, text: str) -> dict[str, Any]:
+    content_type = "output_text" if role == "assistant" else "input_text"
     return {
         "type": "message",
         "role": role,
-        "content": [{"type": "input_text", "text": text}],
+        "content": [{"type": content_type, "text": text}],
     }
 
 
@@ -316,7 +332,9 @@ def _message_tool_calls(message: dict[str, Any]) -> list[dict[str, Any]]:
                 "type": "function_call",
                 "call_id": call_id,
                 "name": name,
-                "arguments": arguments if isinstance(arguments, str) else json.dumps(arguments),
+                "arguments": arguments
+                if isinstance(arguments, str)
+                else json.dumps(arguments),
             }
         )
     return calls
@@ -328,7 +346,9 @@ def _convert_tools(tools: list[Any] | None) -> list[dict[str, Any]]:
 
     converted: list[dict[str, Any]] = []
     for tool in tools:
-        tool_dict = tool.to_openai_format() if hasattr(tool, "to_openai_format") else tool
+        tool_dict = (
+            tool.to_openai_format() if hasattr(tool, "to_openai_format") else tool
+        )
         if not isinstance(tool_dict, dict) or tool_dict.get("type") != "function":
             continue
         function = tool_dict.get("function")

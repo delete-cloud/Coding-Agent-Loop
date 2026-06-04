@@ -13,6 +13,31 @@ DAEMON_APPROVAL_CHOICES = click.Choice(APPROVAL_POLICIES)
 DAEMON_REPL_EXIT_COMMANDS = frozenset({"/exit", "/quit"})
 
 
+def _shared_cli_arg(ctx: click.Context, name: str) -> str | None:
+    root_obj = ctx.find_root().obj
+    if not isinstance(root_obj, dict):
+        return None
+    shared_args = root_obj.get("shared_cli_args")
+    if not isinstance(shared_args, dict):
+        return None
+    value = shared_args.get(name)
+    return value if isinstance(value, str) and value else None
+
+
+def _daemon_runtime_overrides(ctx: click.Context) -> dict[str, str]:
+    overrides: dict[str, str] = {}
+    provider = _shared_cli_arg(ctx, "provider") or os.environ.get("AGENT_PROVIDER")
+    model = _shared_cli_arg(ctx, "model") or os.environ.get("AGENT_MODEL")
+    base_url = _shared_cli_arg(ctx, "base_url") or os.environ.get("AGENT_BASE_URL")
+    if provider:
+        overrides["provider_name"] = provider
+    if model:
+        overrides["model_name"] = model
+    if base_url:
+        overrides["base_url"] = base_url
+    return overrides
+
+
 def _load_server_cli_settings(config_path: Path | None) -> dict[str, Any]:
     if config_path is None:
         return {}
@@ -151,7 +176,9 @@ def daemon(
     show_default=True,
     help="Keep the created daemon session after the prompt finishes.",
 )
+@click.pass_context
 def daemon_run(
+    ctx: click.Context,
     goal: str,
     repo: str,
     url: str,
@@ -171,6 +198,7 @@ def daemon_run(
         url=url,
         token=token,
         approval_policy=approval_policy,
+        runtime_overrides=_daemon_runtime_overrides(ctx),
     )
     click.echo(f"Created daemon-backed local session {session_id} at {endpoint.url}")
     headers = auth_headers(endpoint)
@@ -215,7 +243,9 @@ def daemon_run(
     show_default=True,
     help="Keep the created daemon session after the REPL exits.",
 )
+@click.pass_context
 def daemon_repl(
+    ctx: click.Context,
     repo: str,
     url: str,
     approval_policy: str,
@@ -234,6 +264,7 @@ def daemon_repl(
         url=url,
         token=token,
         approval_policy=approval_policy,
+        runtime_overrides=_daemon_runtime_overrides(ctx),
     )
     click.echo(
         f"Created daemon-backed local REPL session {session_id} at {endpoint.url}"
@@ -289,14 +320,18 @@ def daemon_repl(
 )
 @click.option("--token", default=None, help="Bearer token for the daemon.")
 @click.option("--model", "model_name", default="gpt-4", help="Model label for the TUI.")
-@click.option("--max-steps", default=30, show_default=True, help="Max steps to display.")
+@click.option(
+    "--max-steps", default=30, show_default=True, help="Max steps to display."
+)
 @click.option(
     "--keep-session/--cleanup-session",
     default=True,
     show_default=True,
     help="Keep the created daemon session after the TUI run finishes.",
 )
+@click.pass_context
 def daemon_tui(
+    ctx: click.Context,
     goal: str,
     repo: str,
     url: str,
@@ -321,6 +356,7 @@ def daemon_tui(
             url=url,
             token=token,
             approval_policy=approval_policy,
+            runtime_overrides=_daemon_runtime_overrides(ctx),
         )
         click.echo(
             f"Created daemon-backed local TUI session {session_id} at {endpoint.url}"
@@ -351,6 +387,7 @@ def _create_daemon_local_session(
     url: str,
     token: str | None,
     approval_policy: str,
+    runtime_overrides: dict[str, str] | None = None,
 ):
     from coding_agent.remote.client import (
         RemoteEndpoint,
@@ -371,5 +408,6 @@ def _create_daemon_local_session(
         endpoint,
         repo_path=repo_path,
         approval_policy=approval_policy,
+        **(runtime_overrides or {}),
     )
     return endpoint, session_id
