@@ -27,6 +27,10 @@ Podman sandbox runners can bind or allow those roots.
 the set changes, the current runtime adapter is closed so the next turn rebuilds
 with the updated access boundary.
 
+The ACP initialization response advertises
+`sessionCapabilities.additionalDirectories`, and `session/list` returns each
+session's `additionalDirectories` so clients can discover the active root set.
+
 ## Alternatives Rejected
 
 - Parse and ignore `additionalDirectories` — rejected because ACP clients would
@@ -40,6 +44,8 @@ with the updated access boundary.
 
 - [x] ACP `session/new` validates and passes absolute `additionalDirectories`.
 - [x] ACP `session/load` updates the complete additional-root set.
+- [x] ACP `initialize` advertises `sessionCapabilities.additionalDirectories`.
+- [x] ACP `session/list` returns per-session `additionalDirectories`.
 - [x] Session records persist and restore additional directories.
 - [x] Runtime creation passes additional roots to `create_agent`.
 - [x] Local file tools allow absolute paths under additional roots and reject
