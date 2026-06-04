@@ -76,6 +76,15 @@ class LocalCliSessionManager(Protocol):
 
     async def cancel_session_turn(self, session_id: str) -> Any: ...
 
+    async def submit_approval_response(
+        self,
+        session_id: str,
+        request_id: str,
+        approved: bool,
+        feedback: str | None = None,
+        scope: str = "once",
+    ) -> Any: ...
+
     async def resume_session(self, session_id: str, **kwargs: Any) -> Any: ...
 
     def attach_runtime(
@@ -144,6 +153,22 @@ class ServerBackedLocalCliSessionManager:
 
     async def cancel_session_turn(self, session_id: str) -> Any:
         return await self._delegate.cancel_session_turn(session_id)
+
+    async def submit_approval_response(
+        self,
+        session_id: str,
+        request_id: str,
+        approved: bool,
+        feedback: str | None = None,
+        scope: str = "once",
+    ) -> Any:
+        return await self._delegate.submit_approval_response(
+            session_id=session_id,
+            request_id=request_id,
+            approved=approved,
+            feedback=feedback,
+            scope=scope,
+        )
 
     async def resume_session(self, session_id: str, **kwargs: Any) -> Any:
         return await self._delegate.resume_session(session_id, **kwargs)

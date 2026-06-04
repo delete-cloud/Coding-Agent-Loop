@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from coding_agent.wire.protocol import (
+    ApprovalRequest,
     CompletionStatus,
     StreamDelta,
     ThinkingDelta,
@@ -100,6 +101,86 @@ def wire_message_to_session_update(message: WireMessage) -> dict[str, Any] | Non
         return None
 
     return None
+
+
+def approval_request_to_permission_params(
+    session_id: str,
+    request: ApprovalRequest,
+) -> dict[str, Any]:
+    tool_call = request.tool_call
+    if tool_call is None:
+        tool_call_id = request.request_id
+        title = request.tool or "Tool approval"
+        raw_input = dict(request.args)
+    else:
+        tool_call_id = tool_call.call_id
+        title = tool_call.tool_name
+        raw_input = dict(tool_call.arguments)
+
+    return {
+        "sessionId": session_id,
+        "toolCall": {
+            "toolCallId": tool_call_id,
+            "title": title,
+            "kind": _tool_kind(title),
+            "status": "pending",
+            "rawInput": raw_input,
+        },
+        "options": [
+            {
+                "optionId": "allow-once",
+                "name": "Allow once",
+                "kind": "allow_once",
+            },
+            {
+                "optionId": "allow-session",
+                "name": "Allow for this session",
+                "kind": "allow_always",
+            },
+            {
+                "optionId": "reject-once",
+                "name": "Reject",
+                "kind": "reject_once",
+            },
+        ],
+    }
+
+
+def permission_outcome_to_approval(
+    result: object,
+) -> tuple[bool, str | None, str]:
+    if not isinstance(result, dict):
+        raise ValueError("permission response result must be an object")
+    outcome = result.get("outcome")
+    if not isinstance(outcome, dict):
+        raise ValueError("permission response outcome must be an object")
+
+    outcome_type = outcome.get("outcome")
+    if outcome_type == "cancelled":
+        return False, "Permission request cancelled by ACP client", "once"
+    if outcome_type != "selected":
+        raise ValueError(f"unsupported permission outcome: {outcome_type!r}")
+
+    option_id = outcome.get("optionId")
+    if option_id == "allow-once":
+        return True, None, "once"
+    if option_id == "allow-session":
+        return True, None, "session"
+    if option_id == "reject-once":
+        return False, None, "once"
+    raise ValueError(f"unsupported permission optionId: {option_id!r}")
+
+
+def _tool_kind(tool_name: str) -> str:
+    if tool_name in {"file_read", "repo_list"}:
+        return "read"
+    if tool_name in {"file_write", "apply_patch"}:
+        return "edit"
+    if tool_name in {"bash_run", "shell", "exec"}:
+        return "execute"
+    if "search" in tool_name:
+        return "search"
+    return "other"
 
 
 def acp_stop_reason(message: TurnEnd) -> AcpStopReason:

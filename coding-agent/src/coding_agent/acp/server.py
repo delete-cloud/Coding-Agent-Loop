@@ -7,13 +7,19 @@ from pathlib import Path
 import sys
 from typing import Any, Protocol, TextIO
 
-from coding_agent.acp.mapper import acp_stop_reason, prompt_blocks_to_text
-from coding_agent.acp.mapper import wire_message_to_session_update
+from coding_agent.acp.mapper import (
+    acp_stop_reason,
+    approval_request_to_permission_params,
+    permission_outcome_to_approval,
+    prompt_blocks_to_text,
+    wire_message_to_session_update,
+)
 from coding_agent.approval import ApprovalPolicy
-from coding_agent.wire.protocol import TurnEnd
+from coding_agent.wire.protocol import ApprovalRequest, TurnEnd
 
 JSONObject = dict[str, Any]
 AcpEmitter = Callable[[JSONObject], None | Awaitable[None]]
+AcpClientCaller = Callable[[str, JSONObject], Awaitable[JSONObject]]
 LineWriter = Callable[[str], None]
 
 
@@ -25,6 +31,15 @@ class AcpSessionManager(Protocol):
     async def run_agent(self, session_id: str, prompt: str) -> None: ...
 
     async def cancel_session_turn(self, session_id: str) -> Any: ...
+
+    async def submit_approval_response(
+        self,
+        session_id: str,
+        request_id: str,
+        approved: bool,
+        feedback: str | None = None,
+        scope: str = "once",
+    ) -> Any: ...
 
 
 class JsonRpcError(Exception):
@@ -40,6 +55,7 @@ class AcpServer:
         session_manager: AcpSessionManager,
         *,
         emit: AcpEmitter | None = None,
+        call_client: AcpClientCaller | None = None,
         approval_policy: ApprovalPolicy = ApprovalPolicy.AUTO,
         provider_name: str | None = None,
         model_name: str | None = None,
@@ -48,6 +64,7 @@ class AcpServer:
     ) -> None:
         self._session_manager = session_manager
         self._emit = emit
+        self._call_client = call_client
         self._approval_policy = approval_policy
         self._provider_name = provider_name
         self._model_name = model_name
@@ -56,6 +73,9 @@ class AcpServer:
 
     def set_emit(self, emit: AcpEmitter) -> None:
         self._emit = emit
+
+    def set_call_client(self, call_client: AcpClientCaller) -> None:
+        self._call_client = call_client
 
     async def handle_message(self, message: object) -> JSONObject | None:
         request_id: object | None = None
@@ -181,6 +201,10 @@ class AcpServer:
                     await task
                     return {"stopReason": acp_stop_reason(message)}
 
+                if isinstance(message, ApprovalRequest):
+                    await self.handle_approval_request(session_id, message)
+                    continue
+
                 update = wire_message_to_session_update(message)
                 if update is not None:
                     await self._emit_notification(
@@ -213,6 +237,38 @@ class AcpServer:
             )
         await self._session_manager.cancel_session_turn(session_id)
 
+    async def handle_approval_request(
+        self,
+        session_id: str,
+        request: ApprovalRequest,
+    ) -> None:
+        if self._call_client is None:
+            raise JsonRpcError(-32603, "ACP client call handler is not configured")
+
+        permission_result = await self._call_client(
+            "session/request_permission",
+            approval_request_to_permission_params(session_id, request),
+        )
+        try:
+            approved, feedback, scope = permission_outcome_to_approval(
+                permission_result
+            )
+        except ValueError as exc:
+            raise JsonRpcError(-32602, str(exc)) from exc
+
+        submitted = await self._session_manager.submit_approval_response(
+            session_id=session_id,
+            request_id=request.request_id,
+            approved=approved,
+            feedback=feedback,
+            scope=scope,
+        )
+        if submitted is None:
+            raise JsonRpcError(
+                -32603,
+                f"Approval request not found: {request.request_id}",
+            )
+
     async def _emit_notification(self, message: JSONObject) -> None:
         if self._emit is None:
             return
@@ -233,6 +289,8 @@ async def run_stdio(
     write_stderr = _stream_writer(sys.stderr) if stderr is None else stderr
     write_lock = asyncio.Lock()
     pending: set[asyncio.Task[None]] = set()
+    pending_client_responses: dict[object, asyncio.Future[JSONObject]] = {}
+    next_client_request_id = 1
 
     async def write_message(message: JSONObject) -> None:
         line = json.dumps(message, separators=(",", ":")) + "\n"
@@ -242,7 +300,28 @@ async def run_stdio(
     async def emit(message: JSONObject) -> None:
         await write_message(message)
 
+    async def call_client(method: str, params: JSONObject) -> JSONObject:
+        nonlocal next_client_request_id
+        request_id = f"coding-agent-acp-{next_client_request_id}"
+        next_client_request_id += 1
+        loop = asyncio.get_running_loop()
+        response_future: asyncio.Future[JSONObject] = loop.create_future()
+        pending_client_responses[request_id] = response_future
+        await write_message(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": method,
+                "params": params,
+            }
+        )
+        try:
+            return await response_future
+        finally:
+            pending_client_responses.pop(request_id, None)
+
     server.set_emit(emit)
+    server.set_call_client(call_client)
 
     async def process_line(raw_line: str) -> None:
         line = raw_line.rstrip("\n")
@@ -259,6 +338,29 @@ async def run_stdio(
                 }
             )
             write_stderr(f"ACP parse error: {exc}\n")
+            return
+        if _is_jsonrpc_response(request):
+            request_id = request.get("id")
+            response_future = pending_client_responses.pop(request_id, None)
+            if response_future is None:
+                write_stderr(f"ACP response for unknown request id: {request_id}\n")
+                return
+            if "error" in request:
+                error = request["error"]
+                message = (
+                    error.get("message")
+                    if isinstance(error, dict)
+                    else "ACP client request failed"
+                )
+                response_future.set_exception(RuntimeError(str(message)))
+                return
+            result = request.get("result")
+            if not isinstance(result, dict):
+                response_future.set_exception(
+                    RuntimeError("ACP client response result must be an object")
+                )
+                return
+            response_future.set_result(result)
             return
         response = await server.handle_message(request)
         if response is not None:
@@ -293,3 +395,9 @@ async def _iter_stdin_lines(input_lines: Iterable[str] | TextIO) -> AsyncIterato
 
     for line in input_lines:
         yield line
+
+
+def _is_jsonrpc_response(message: object) -> bool:
+    if not isinstance(message, dict):
+        return False
+    return "method" not in message and ("result" in message or "error" in message)
