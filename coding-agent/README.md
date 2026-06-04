@@ -147,6 +147,19 @@ The HTTP app uses the same pipeline stack as REPL and compatibility one-shot
 mode through the `coding_agent.app.create_agent()` factory and
 `PipelineAdapter`.
 
+### ACP Stdio Agent
+
+```bash
+uv run python -m coding_agent \
+  --provider codex \
+  --model gpt-5.5 \
+  acp --approval auto --max-steps 30
+```
+
+The ACP entrypoint speaks JSON-RPC 2.0 over stdio for external ACP hosts. See
+[docs/acp.md](docs/acp.md) for supported methods, MCP server parameter
+handling, approval routing, and compatibility harness commands.
+
 ## Providers And Environment
 
 Common environment variables:
