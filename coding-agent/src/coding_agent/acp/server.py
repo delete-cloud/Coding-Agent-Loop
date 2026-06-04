@@ -655,8 +655,15 @@ def _parse_mcp_servers(
                 -32602,
                 f"{method} mcpServers[{index}].name must be unique",
             )
-        transport = raw_server.get("transport", "stdio")
-        if transport != "stdio":
+        server_type = raw_server.get("type")
+        if server_type is not None:
+            if server_type != "stdio":
+                raise JsonRpcError(
+                    -32602,
+                    f"{method} mcpServers[{index}].type must be stdio",
+                )
+        transport = raw_server.get("transport")
+        if transport is not None and transport != "stdio":
             raise JsonRpcError(
                 -32602,
                 f"{method} mcpServers[{index}].transport must be stdio",
@@ -667,7 +674,7 @@ def _parse_mcp_servers(
                 -32602,
                 f"{method} mcpServers[{index}].command must be a string",
             )
-        args_raw = raw_server.get("args", [])
+        args_raw = raw_server.get("args")
         if not isinstance(args_raw, list) or not all(
             isinstance(arg, str) for arg in args_raw
         ):
@@ -678,9 +685,7 @@ def _parse_mcp_servers(
         servers[name] = {
             "command": command,
             "args": list(args_raw),
-            "env": _parse_mcp_env(
-                raw_server.get("env", []), method=method, index=index
-            ),
+            "env": _parse_mcp_env(raw_server.get("env"), method=method, index=index),
             "inherit_env": False,
         }
     return servers

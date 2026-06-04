@@ -244,7 +244,6 @@ async def test_external_client_harness_exercises_session_lifecycle(
                 "mcpServers": [
                     {
                         "name": "toolbox",
-                        "transport": "stdio",
                         "command": "python",
                         "args": ["server.py"],
                         "env": [{"name": "EXPLICIT_OK", "value": "yes"}],
