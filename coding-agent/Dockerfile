@@ -25,6 +25,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH="/app/src" \
     AGENT_DATA_DIR="/var/lib/coding-agent/data"
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin coding-agent \
     && mkdir -p /app /workspace /var/lib/coding-agent/data \
     && chown -R coding-agent:coding-agent /app /workspace /var/lib/coding-agent
