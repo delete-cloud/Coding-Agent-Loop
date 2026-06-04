@@ -23,6 +23,7 @@ The adapter currently supports:
 - `session/load`
 - `session/resume`
 - `session/set_mode`
+- `session/set_config_option`
 - `session/list`
 - `session/close`
 - agent-originated `session/request_permission`
@@ -34,12 +35,14 @@ The initialization response advertises:
 - `sessionCapabilities.list`
 - `sessionCapabilities.resume`
 - `sessionCapabilities.additionalDirectories`
-- `mcpCapabilities.stdio: true`
 - `mcpCapabilities.http: false`
 - `mcpCapabilities.sse: false`
 
+Stdio MCP server definitions are accepted as the baseline ACP MCP server form.
 HTTP and SSE MCP transports are rejected because the runtime MCP plugin only
-supports stdio subprocess servers.
+supports stdio subprocess servers. Stdio is not advertised as an
+`mcpCapabilities` field because the ACP schema only defines `http` and `sse`
+there.
 
 `initialize` requires `protocolVersion: 1` in the request params. Requests with a
 missing or unsupported protocol version are rejected with JSON-RPC invalid params.
