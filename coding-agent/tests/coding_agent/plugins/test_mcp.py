@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import pytest
 
 from coding_agent.plugins.mcp import MCPPlugin, MCPServerConfig, _MCPConnection
 
@@ -39,6 +42,37 @@ def _make_connection(server_name: str, tool_names: list[str]) -> _MCPConnection:
             for tool_name in tool_names
         ],
     )
+
+
+def test_connection_uses_explicit_env_when_inherit_env_is_false(monkeypatch) -> None:
+    monkeypatch.setenv("SHOULD_NOT_LEAK_SECRET", "secret")
+    popen = MagicMock()
+    popen.return_value.stdin = MagicMock()
+    popen.return_value.stdout = MagicMock()
+    popen.return_value.stderr = MagicMock()
+    monkeypatch.setattr("coding_agent.plugins.mcp.subprocess.Popen", popen)
+    conn = _MCPConnection(
+        MCPServerConfig(
+            name="acp",
+            command="server",
+            env={"EXPLICIT_OK": "yes"},
+            inherit_env=False,
+        )
+    )
+    conn._initialize = MagicMock()  # type: ignore[method-assign]
+    conn._discover_tools = MagicMock()  # type: ignore[method-assign]
+
+    conn.start()
+
+    env = popen.call_args.kwargs["env"]
+    assert env["EXPLICIT_OK"] == "yes"
+    assert "PATH" in env
+    assert "SHOULD_NOT_LEAK_SECRET" not in env
+
+
+def test_plugin_rejects_non_boolean_inherit_env() -> None:
+    with pytest.raises(ValueError, match="inherit_env must be a boolean"):
+        MCPPlugin(servers={"bad": {"command": "server", "inherit_env": "false"}})
 
 
 def test_mount_reports_server_status_and_tool_count() -> None:

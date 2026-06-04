@@ -303,6 +303,7 @@ class SessionRecord:
     model_name: str | None
     base_url: str | None
     max_steps: int
+    mcp_servers: dict[str, dict[str, Any]]
     tape_id: str | None
     last_failure_details: str | None
 
@@ -321,6 +322,7 @@ class SessionRecord:
             "model_name": self.model_name,
             "base_url": self.base_url,
             "max_steps": self.max_steps,
+            "mcp_servers": dict(self.mcp_servers),
             "tape_id": self.tape_id,
             "last_failure_details": self.last_failure_details,
         }
@@ -360,6 +362,12 @@ class SessionRecord:
             last_failure_details_raw, str
         ):
             raise TypeError("session metadata has invalid last_failure_details")
+        mcp_servers_raw = data.get("mcp_servers", {})
+        if not isinstance(mcp_servers_raw, dict):
+            raise TypeError("session metadata has invalid mcp_servers")
+        mcp_servers = _session_mcp_servers_from_store(
+            cast(dict[str, Any], mcp_servers_raw)
+        )
         default_run_target_raw = data.get("default_run_target")
         if default_run_target_raw is None:
             legacy_target_raw = data.get("execution_binding")
@@ -393,6 +401,7 @@ class SessionRecord:
             model_name=model_name_raw,
             base_url=base_url_raw,
             max_steps=_required_session_int(data, "max_steps"),
+            mcp_servers=mcp_servers,
             tape_id=tape_id_raw,
             last_failure_details=last_failure_details_raw,
         )
@@ -411,6 +420,7 @@ class SessionRecord:
             model_name=self.model_name,
             base_url=self.base_url,
             max_steps=self.max_steps,
+            mcp_servers=dict(self.mcp_servers),
             tape_id=self.tape_id,
             last_failure_details=self.last_failure_details,
         )
@@ -437,6 +447,7 @@ class Session:
     model_name: str | None = None
     base_url: str | None = None
     max_steps: int = 30
+    mcp_servers: dict[str, dict[str, Any]] = field(default_factory=dict)
     runtime_handle: SessionRuntimeHandle = field(init=False, repr=False)
     task: asyncio.Task[Any] | None = None
     turn_in_progress: bool = False
@@ -643,6 +654,7 @@ class Session:
             model_name=self.model_name,
             base_url=self.base_url,
             max_steps=self.max_steps,
+            mcp_servers=dict(self.mcp_servers),
             tape_id=self.tape_id,
             last_failure_details=self.last_failure_details,
         )
@@ -667,6 +679,41 @@ def _required_session_int(data: dict[str, Any], key: str) -> int:
     if not isinstance(value, int):
         raise TypeError(f"session metadata is missing {key}")
     return value
+
+
+def _session_mcp_servers_from_store(
+    servers: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    normalized: dict[str, dict[str, Any]] = {}
+    for name, raw in servers.items():
+        if not isinstance(name, str) or not name:
+            raise TypeError("session metadata has invalid mcp server name")
+        if not isinstance(raw, dict):
+            raise TypeError(f"session metadata has invalid mcp server: {name}")
+        command = raw.get("command")
+        if not isinstance(command, str) or not command:
+            raise TypeError(f"session metadata has invalid mcp command: {name}")
+        args = raw.get("args", [])
+        if not isinstance(args, list) or not all(
+            isinstance(arg, str) for arg in args
+        ):
+            raise TypeError(f"session metadata has invalid mcp args: {name}")
+        env = raw.get("env", {})
+        if not isinstance(env, dict) or not all(
+            isinstance(key, str) and isinstance(value, str)
+            for key, value in env.items()
+        ):
+            raise TypeError(f"session metadata has invalid mcp env: {name}")
+        inherit_env = raw.get("inherit_env", False)
+        if not isinstance(inherit_env, bool):
+            raise TypeError(f"session metadata has invalid mcp inherit_env: {name}")
+        normalized[name] = {
+            "command": command,
+            "args": list(args),
+            "env": dict(env),
+            "inherit_env": inherit_env,
+        }
+    return normalized
 
 
 def _load_pg_storage_types() -> tuple[Any, Any, Any]:
@@ -2187,6 +2234,7 @@ class SessionManager:
         enable_parallel: bool = True,
         max_parallel: int = 5,
         default_run_target: RunTarget | None = None,
+        mcp_servers: dict[str, dict[str, Any]] | None = None,
     ) -> str:
         """Create a new agent session.
 
@@ -2202,6 +2250,7 @@ class SessionManager:
             max_parallel: Maximum number of parallel tool executions
             default_run_target: Explicit placement target. If omitted, a local
                 daemon target is derived from repo_path or the current directory.
+            mcp_servers: Per-session stdio MCP servers supplied by protocol clients.
 
         Returns:
             The session ID
@@ -2223,6 +2272,7 @@ class SessionManager:
 
         resolved_repo_path = repo_path.resolve() if repo_path is not None else None
         target = default_run_target or _local_default_run_target(resolved_repo_path)
+        resolved_mcp_servers = _session_mcp_servers_from_store(mcp_servers or {})
 
         session = Session(
             id=session_id,
@@ -2238,6 +2288,7 @@ class SessionManager:
             model_name=model_name,
             base_url=base_url,
             max_steps=max_steps,
+            mcp_servers=resolved_mcp_servers,
             task=None,
         )
 
@@ -2271,6 +2322,20 @@ class SessionManager:
 
         logger.info(f"Created session: {session_id}")
         return session_id
+
+    async def update_session_mcp_servers(
+        self,
+        session_id: str,
+        mcp_servers: dict[str, dict[str, Any]],
+    ) -> None:
+        session = await self.get_session_async(session_id)
+        resolved_mcp_servers = _session_mcp_servers_from_store(mcp_servers)
+        if session.mcp_servers == resolved_mcp_servers:
+            return
+        await self._runtime_closer.close(session)
+        session.mcp_servers = resolved_mcp_servers
+        async with self._lock:
+            await self._persist_session_async(session)
 
     def get_session(self, session_id: str) -> Session:
         """Get a session by ID.

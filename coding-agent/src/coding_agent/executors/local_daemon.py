@@ -153,6 +153,7 @@ class LocalDaemonSessionRuntimeProvider:
                 session_id_override=session.id,
                 run_id_override=request.run_id,
                 api_key=None,
+                mcp_servers_override=dict(getattr(session, "mcp_servers", {})),
                 tape=await self.restore_tape(session.tape_id),
             )
             session.tape_id = ctx.tape.tape_id

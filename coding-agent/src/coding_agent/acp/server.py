@@ -56,6 +56,12 @@ class AcpSessionManager(Protocol):
 
     async def close_session(self, session_id: str) -> None: ...
 
+    async def update_session_mcp_servers(
+        self,
+        session_id: str,
+        mcp_servers: dict[str, dict[str, Any]],
+    ) -> None: ...
+
 
 class JsonRpcError(Exception):
     def __init__(self, code: int, message: str) -> None:
@@ -161,6 +167,7 @@ class AcpServer:
             "protocolVersion": 1,
             "agentCapabilities": {
                 "loadSession": True,
+                "mcpCapabilities": {"stdio": True, "http": False, "sse": False},
                 "promptCapabilities": {},
                 "sessionCapabilities": {"close": {}, "list": {}},
             },
@@ -179,6 +186,7 @@ class AcpServer:
         repo_path = Path(cwd)
         if not repo_path.is_absolute():
             raise JsonRpcError(-32602, "session/new params.cwd must be absolute")
+        mcp_servers = _parse_mcp_servers(params, method="session")
 
         session_id = await self._session_manager.create_session(
             repo_path=repo_path,
@@ -188,6 +196,7 @@ class AcpServer:
             model_name=self._model_name,
             base_url=self._base_url,
             max_steps=self._max_steps,
+            mcp_servers=mcp_servers,
         )
         return {"sessionId": session_id}
 
@@ -247,8 +256,13 @@ class AcpServer:
         repo_path = Path(cwd)
         if not repo_path.is_absolute():
             raise JsonRpcError(-32602, "session/load params.cwd must be absolute")
+        mcp_servers = _parse_mcp_servers(params, method="session")
 
         await self._session_manager.get_session_async(session_id)
+        await self._session_manager.update_session_mcp_servers(
+            session_id,
+            mcp_servers,
+        )
         runs = await self._session_manager.list_runtime_runs(session_id)
         for run in _sort_runtime_runs(runs):
             run_id = getattr(run, "run_id", None)
@@ -543,3 +557,109 @@ def _session_updated_at(value: object) -> str | None:
     if callable(isoformat):
         return str(isoformat())
     return None
+
+
+def _parse_mcp_servers(
+    params: JSONObject,
+    *,
+    method: str,
+) -> dict[str, dict[str, Any]]:
+    raw_servers = params.get("mcpServers", [])
+    if not isinstance(raw_servers, list):
+        raise JsonRpcError(-32602, f"{method} params.mcpServers must be an array")
+
+    servers: dict[str, dict[str, Any]] = {}
+    for index, raw_server in enumerate(raw_servers):
+        if not isinstance(raw_server, dict):
+            raise JsonRpcError(
+                -32602,
+                f"{method} mcpServers[{index}] must be an object",
+            )
+        name = raw_server.get("name")
+        if not isinstance(name, str) or not name:
+            raise JsonRpcError(
+                -32602,
+                f"{method} mcpServers[{index}].name must be a string",
+            )
+        if name in servers:
+            raise JsonRpcError(
+                -32602,
+                f"{method} mcpServers[{index}].name must be unique",
+            )
+        transport = raw_server.get("transport", "stdio")
+        if transport != "stdio":
+            raise JsonRpcError(
+                -32602,
+                f"{method} mcpServers[{index}].transport must be stdio",
+            )
+        command = raw_server.get("command")
+        if not isinstance(command, str) or not command:
+            raise JsonRpcError(
+                -32602,
+                f"{method} mcpServers[{index}].command must be a string",
+            )
+        args_raw = raw_server.get("args", [])
+        if not isinstance(args_raw, list) or not all(
+            isinstance(arg, str) for arg in args_raw
+        ):
+            raise JsonRpcError(
+                -32602,
+                f"{method} mcpServers[{index}].args must be a string array",
+            )
+        servers[name] = {
+            "command": command,
+            "args": list(args_raw),
+            "env": _parse_mcp_env(raw_server.get("env", []), method=method, index=index),
+            "inherit_env": False,
+        }
+    return servers
+
+
+def _parse_mcp_env(
+    raw_env: object,
+    *,
+    method: str,
+    index: int,
+) -> dict[str, str]:
+    if isinstance(raw_env, dict):
+        if not all(
+            isinstance(key, str) and isinstance(value, str)
+            for key, value in raw_env.items()
+        ):
+            raise JsonRpcError(
+                -32602,
+                f"{method} mcpServers[{index}].env must contain string values",
+            )
+        return dict(raw_env)
+    if not isinstance(raw_env, list):
+        raise JsonRpcError(
+            -32602,
+            f"{method} mcpServers[{index}].env must be an array",
+        )
+
+    env: dict[str, str] = {}
+    for env_index, raw_var in enumerate(raw_env):
+        if not isinstance(raw_var, dict):
+            raise JsonRpcError(
+                -32602,
+                f"{method} mcpServers[{index}].env[{env_index}] must be an object",
+            )
+        name = raw_var.get("name")
+        value = raw_var.get("value")
+        if not isinstance(name, str) or not name:
+            raise JsonRpcError(
+                -32602,
+                f"{method} mcpServers[{index}].env[{env_index}].name must be a string",
+            )
+        if not isinstance(value, str):
+            raise JsonRpcError(
+                -32602,
+                f"{method} mcpServers[{index}].env[{env_index}].value must be a string",
+            )
+        if name in env:
+            raise JsonRpcError(
+                -32602,
+                f"{method} mcpServers[{index}].env[{env_index}].name must be unique",
+            )
+        env[name] = value
+    return env

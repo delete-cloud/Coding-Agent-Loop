@@ -59,6 +59,12 @@ class LocalCliSessionManager(Protocol):
 
     async def close_session(self, session_id: str) -> None: ...
 
+    async def update_session_mcp_servers(
+        self,
+        session_id: str,
+        mcp_servers: dict[str, dict[str, Any]],
+    ) -> None: ...
+
     async def list_runtime_runs(self, session_id: str) -> Any: ...
 
     async def list_checkpoints(self, session_id: str) -> Any: ...
@@ -139,6 +145,13 @@ class ServerBackedLocalCliSessionManager:
 
     async def close_session(self, session_id: str) -> None:
         await self._delegate.close_session(session_id)
+
+    async def update_session_mcp_servers(
+        self,
+        session_id: str,
+        mcp_servers: dict[str, dict[str, Any]],
+    ) -> None:
+        await self._delegate.update_session_mcp_servers(session_id, mcp_servers)
 
     async def list_runtime_runs(self, session_id: str) -> Any:
         return await self._delegate.list_runtime_runs(session_id)
