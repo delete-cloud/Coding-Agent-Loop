@@ -175,7 +175,7 @@ def create_remote_session(
         ) as client:
             response = client.post("/sessions", json=payload)
             _raise_remote_http_error(response, "create remote session")
-            data = cast(object, response.json())
+            data = _response_json(response, "create remote session")
     except httpx.RequestError as exc:
         raise click.ClickException(f"Failed to create remote session: {exc}") from exc
     if not isinstance(data, Mapping):
@@ -192,6 +192,9 @@ def create_local_daemon_session(
     *,
     repo_path: Path,
     approval_policy: str = "auto",
+    provider_name: str | None = None,
+    model_name: str | None = None,
+    base_url: str | None = None,
 ) -> str:
     if approval_policy not in APPROVAL_POLICIES:
         raise click.ClickException(f"Unsupported approval policy: {approval_policy}")
@@ -208,6 +211,12 @@ def create_local_daemon_session(
         },
         "approval_policy": approval_policy,
     }
+    if provider_name is not None:
+        payload["provider"] = provider_name
+    if model_name is not None:
+        payload["model"] = model_name
+    if base_url is not None:
+        payload["base_url"] = base_url
     try:
         with httpx.Client(
             base_url=endpoint.url,
@@ -216,13 +225,15 @@ def create_local_daemon_session(
         ) as client:
             response = client.post("/sessions", json=payload)
             _raise_remote_http_error(response, "create local daemon session")
-            data = cast(object, response.json())
+            data = _response_json(response, "create local daemon session")
     except httpx.RequestError as exc:
         raise click.ClickException(
             f"Failed to create local daemon session: {exc}"
         ) from exc
     if not isinstance(data, Mapping):
-        raise click.ClickException("Local daemon session response must be a JSON object")
+        raise click.ClickException(
+            "Local daemon session response must be a JSON object"
+        )
     data = cast(Mapping[str, object], data)
     session_id = data.get("session_id")
     if not isinstance(session_id, str) or not session_id:
@@ -295,8 +306,7 @@ def list_remote_run_display_events(
     if not isinstance(events, list):
         raise click.ClickException("Remote run display events response missing events")
     return [
-        dict(_expect_mapping(item, "Remote run display event entry"))
-        for item in events
+        dict(_expect_mapping(item, "Remote run display event entry")) for item in events
     ]
 
 
@@ -647,7 +657,7 @@ def _get_remote_json(
         ) as client:
             response = client.get(path)
             _raise_remote_http_error(response, action)
-            data = cast(object, response.json())
+            data = _response_json(response, action)
     except httpx.RequestError as exc:
         raise click.ClickException(f"Failed to {action}: {exc}") from exc
     return dict(_expect_mapping(data, f"Remote {action} response"))
@@ -670,7 +680,7 @@ def _post_remote_json(
                 client.post(path, json=json) if json is not None else client.post(path)
             )
             _raise_remote_http_error(response, action)
-            data = cast(object, response.json())
+            data = _response_json(response, action)
     except httpx.RequestError as exc:
         raise click.ClickException(f"Failed to {action}: {exc}") from exc
     return dict(_expect_mapping(data, f"Remote {action} response"))
@@ -680,6 +690,23 @@ def _expect_mapping(value: object, description: str) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         raise click.ClickException(f"{description} must be a JSON object")
     return cast(Mapping[str, object], value)
+
+
+def _response_json(response: httpx.Response, action: str) -> object:
+    try:
+        return cast(object, response.json())
+    except ValueError as exc:
+        content_type = response.headers.get("content-type", "unknown")
+        preview = response.text.strip().replace("\n", "\\n")
+        if len(preview) > 200:
+            preview = f"{preview[:200]}..."
+        detail = f"content-type={content_type}"
+        if preview:
+            detail = f"{detail}, body={preview!r}"
+        raise click.ClickException(
+            f"{action} returned non-JSON response ({detail}). "
+            "Check that the URL points to a Coding Agent server."
+        ) from exc
 
 
 def delete_remote_session(
@@ -897,7 +924,9 @@ def _handle_prompt_like_sse_event_with_consumer(
     if legacy_event == "ApprovalRequest":
         request = _wire_message_from_payload(legacy_event, payload, session_id)
         if not isinstance(request, ApprovalRequest):
-            raise click.ClickException("Remote approval event was not an approval request")
+            raise click.ClickException(
+                "Remote approval event was not an approval request"
+            )
         response = asyncio.run(display_consumer.request_approval(request))
         _submit_approval(
             base_url=base_url,
@@ -917,7 +946,9 @@ def _handle_prompt_like_sse_event_with_consumer(
         return None, False
     asyncio.run(display_consumer.emit(message))
     if isinstance(message, TurnEnd):
-        return (0 if message.completion_status is CompletionStatus.COMPLETED else 1), False
+        return (
+            0 if message.completion_status is CompletionStatus.COMPLETED else 1
+        ), False
     return None, False
 
 

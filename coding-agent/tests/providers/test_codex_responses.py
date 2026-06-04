@@ -169,6 +169,54 @@ async def test_stream_converts_function_call_output_item_done() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stream_converts_assistant_history_as_output_text() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        body = sse_event(
+            "response.completed",
+            {"type": "response.completed", "response": {"id": "resp_1"}},
+        )
+        return httpx.Response(200, text=body, request=request)
+
+    provider = provider_with_handler(handler)
+
+    events = [
+        event
+        async for event in provider.stream(
+            [
+                {"role": "system", "content": "You are concise."},
+                {"role": "user", "content": "你是谁"},
+                {"role": "assistant", "content": "我是一个 AI 编程助手。"},
+                {"role": "user", "content": "你能看到上个请求吗"},
+            ]
+        )
+    ]
+
+    body = captured["body"]
+    assert isinstance(body, dict)
+    assert body["input"] == [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "你是谁"}],
+        },
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "我是一个 AI 编程助手。"}],
+        },
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "你能看到上个请求吗"}],
+        },
+    ]
+    assert events == [DoneEvent()]
+
+
+@pytest.mark.asyncio
 async def test_stream_refreshes_token_once_on_unauthorized() -> None:
     seen_auth: list[str] = []
     token_source = MemoryTokenSource("old-token")
