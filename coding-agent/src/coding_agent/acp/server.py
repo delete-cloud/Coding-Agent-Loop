@@ -52,6 +52,10 @@ class AcpSessionManager(Protocol):
 
     async def list_runtime_runs(self, session_id: str) -> list[Any]: ...
 
+    async def list_sessions_async(self) -> list[str]: ...
+
+    async def close_session(self, session_id: str) -> None: ...
+
 
 class JsonRpcError(Exception):
     def __init__(self, code: int, message: str) -> None:
@@ -140,6 +144,11 @@ class AcpServer:
         if method == "session/load":
             await self._session_load(params)
             return None
+        if method == "session/list":
+            return await self._session_list(params)
+        if method == "session/close":
+            await self._session_close(params)
+            return {}
         if method == "session/prompt":
             return await self._session_prompt(params)
         if method == "session/cancel":
@@ -153,7 +162,7 @@ class AcpServer:
             "agentCapabilities": {
                 "loadSession": True,
                 "promptCapabilities": {},
-                "sessionCapabilities": {},
+                "sessionCapabilities": {"close": {}, "list": {}},
             },
             "agentInfo": {
                 "name": "coding-agent",
@@ -181,6 +190,52 @@ class AcpServer:
             max_steps=self._max_steps,
         )
         return {"sessionId": session_id}
+
+    async def _session_list(self, params: JSONObject) -> JSONObject:
+        cursor = params.get("cursor")
+        if cursor is not None:
+            raise JsonRpcError(-32602, "session/list cursor is not supported")
+        cwd_filter = params.get("cwd")
+        if cwd_filter is not None:
+            if not isinstance(cwd_filter, str) or not cwd_filter:
+                raise JsonRpcError(-32602, "session/list params.cwd must be a string")
+            cwd_path = Path(cwd_filter)
+            if not cwd_path.is_absolute():
+                raise JsonRpcError(-32602, "session/list params.cwd must be absolute")
+            cwd_filter = str(cwd_path)
+
+        sessions: list[JSONObject] = []
+        for session_id in await self._session_manager.list_sessions_async():
+            try:
+                session = await self._session_manager.get_session_async(session_id)
+            except KeyError:
+                continue
+            cwd = _session_cwd(session)
+            if cwd is None:
+                continue
+            if cwd_filter is not None and cwd != cwd_filter:
+                continue
+            updated_at = getattr(session, "last_activity", None)
+            sessions.append(
+                {
+                    "sessionId": session_id,
+                    "cwd": cwd,
+                    "title": None,
+                    "updatedAt": _session_updated_at(updated_at),
+                }
+            )
+        return {"sessions": sessions, "nextCursor": None}
+
+    async def _session_close(self, params: JSONObject) -> None:
+        session_id = params.get("sessionId")
+        if not isinstance(session_id, str) or not session_id:
+            raise JsonRpcError(
+                -32602, "session/close params.sessionId must be a string"
+            )
+        try:
+            await self._session_manager.close_session(session_id)
+        except KeyError as exc:
+            raise JsonRpcError(-32602, str(exc)) from exc
 
     async def _session_load(self, params: JSONObject) -> None:
         session_id = params.get("sessionId")
@@ -469,3 +524,22 @@ def _sortable_started_at(value: object) -> str:
     if callable(isoformat):
         return str(isoformat())
     return ""
+
+
+def _session_cwd(session: object) -> str | None:
+    repo_path = getattr(session, "repo_path", None)
+    if isinstance(repo_path, Path):
+        return str(repo_path)
+    target = getattr(session, "default_run_target", None)
+    workspace = getattr(target, "workspace", None)
+    path = getattr(workspace, "path", None)
+    if isinstance(path, str) and path:
+        return path
+    return None
+
+
+def _session_updated_at(value: object) -> str | None:
+    isoformat = getattr(value, "isoformat", None)
+    if callable(isoformat):
+        return str(isoformat())
+    return None

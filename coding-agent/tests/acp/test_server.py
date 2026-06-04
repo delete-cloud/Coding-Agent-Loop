@@ -23,8 +23,11 @@ from coding_agent.wire.protocol import (
 
 
 class FakeManager:
-    def __init__(self, wire: LocalWire | None = None) -> None:
+    def __init__(
+        self, wire: LocalWire | None = None, repo_path: Path | None = None
+    ) -> None:
         self.wire = wire or LocalWire("sess-1")
+        self.repo_path = repo_path or Path("/tmp")
         self.calls: list[tuple[str, Any]] = []
         self.raise_active_turn = False
         self.runtime_runs: list[Any] = [
@@ -47,7 +50,17 @@ class FakeManager:
 
     async def get_session_async(self, session_id: str) -> Any:
         self.calls.append(("get_session_async", session_id))
-        return SimpleNamespace(wire=self.wire)
+        return SimpleNamespace(
+            id=session_id,
+            wire=self.wire,
+            repo_path=self.repo_path,
+            last_activity=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+            default_run_target=None,
+        )
+
+    async def list_sessions_async(self) -> list[str]:
+        self.calls.append(("list_sessions_async", None))
+        return ["sess-1", "sess-2"]
 
     async def run_agent(self, session_id: str, prompt: str) -> None:
         self.calls.append(("run_agent", {"session_id": session_id, "prompt": prompt}))
@@ -67,6 +80,9 @@ class FakeManager:
         return SimpleNamespace(
             session_id=session_id, turn_id="turn-1", status="cancelling"
         )
+
+    async def close_session(self, session_id: str) -> None:
+        self.calls.append(("close_session", session_id))
 
     async def submit_approval_response(
         self,
@@ -129,7 +145,7 @@ async def test_initialize_returns_protocol_version_and_minimal_capabilities() ->
             "agentCapabilities": {
                 "loadSession": True,
                 "promptCapabilities": {},
-                "sessionCapabilities": {},
+                "sessionCapabilities": {"close": {}, "list": {}},
             },
             "agentInfo": {
                 "name": "coding-agent",
@@ -154,6 +170,21 @@ async def test_initialize_advertises_load_session() -> None:
     assert isinstance(result, dict)
     capabilities = result["agentCapabilities"]
     assert capabilities["loadSession"] is True
+
+
+@pytest.mark.asyncio
+async def test_initialize_advertises_session_lifecycle_capabilities() -> None:
+    server = AcpServer(FakeManager())
+
+    response = await server.handle_message(
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+    )
+
+    assert response is not None
+    result = response["result"]
+    assert isinstance(result, dict)
+    capabilities = result["agentCapabilities"]
+    assert capabilities["sessionCapabilities"] == {"close": {}, "list": {}}
 
 
 @pytest.mark.asyncio
@@ -194,6 +225,64 @@ async def test_session_new_creates_local_session_from_absolute_cwd(
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_session_list_returns_session_info_and_filters_by_cwd(
+    tmp_path: Path,
+) -> None:
+    manager = FakeManager(repo_path=tmp_path)
+    server = AcpServer(manager)
+
+    response = await server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "session/list",
+            "params": {"cwd": str(tmp_path)},
+        }
+    )
+
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 9,
+        "result": {
+            "sessions": [
+                {
+                    "sessionId": "sess-1",
+                    "cwd": str(tmp_path),
+                    "title": None,
+                    "updatedAt": "2026-01-02T03:04:05+00:00",
+                },
+                {
+                    "sessionId": "sess-2",
+                    "cwd": str(tmp_path),
+                    "title": None,
+                    "updatedAt": "2026-01-02T03:04:05+00:00",
+                },
+            ],
+            "nextCursor": None,
+        },
+    }
+    assert ("list_sessions_async", None) in manager.calls
+
+
+@pytest.mark.asyncio
+async def test_session_close_calls_session_manager_close() -> None:
+    manager = FakeManager()
+    server = AcpServer(manager)
+
+    response = await server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "session/close",
+            "params": {"sessionId": "sess-1"},
+        }
+    )
+
+    assert response == {"jsonrpc": "2.0", "id": 10, "result": {}}
+    assert ("close_session", "sess-1") in manager.calls
 
 
 @pytest.mark.asyncio
@@ -653,6 +742,28 @@ async def test_stdio_session_load_writes_replay_updates_before_response(
         '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"loaded answer"}}}}\n',
         '{"jsonrpc":"2.0","id":1,"result":null}\n',
     ]
+
+
+@pytest.mark.asyncio
+async def test_stdio_session_list_and_close(tmp_path: Path) -> None:
+    manager = FakeManager(repo_path=tmp_path)
+    stdout: list[str] = []
+    stdin = [
+        '{"jsonrpc":"2.0","id":1,"method":"session/list","params":{}}\n',
+        '{"jsonrpc":"2.0","id":2,"method":"session/close","params":{"sessionId":"sess-1"}}\n',
+    ]
+
+    await run_stdio(AcpServer(manager), stdin=stdin, stdout=stdout.append)
+
+    assert stdout == [
+        '{"jsonrpc":"2.0","id":1,"result":{"sessions":[{"sessionId":"sess-1","cwd":"'
+        + str(tmp_path)
+        + '","title":null,"updatedAt":"2026-01-02T03:04:05+00:00"},{"sessionId":"sess-2","cwd":"'
+        + str(tmp_path)
+        + '","title":null,"updatedAt":"2026-01-02T03:04:05+00:00"}],"nextCursor":null}}\n',
+        '{"jsonrpc":"2.0","id":2,"result":{}}\n',
+    ]
+    assert ("close_session", "sess-1") in manager.calls
 
 
 @pytest.mark.asyncio
