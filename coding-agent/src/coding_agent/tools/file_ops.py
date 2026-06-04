@@ -10,8 +10,9 @@ from typing import Any, Callable
 from agentkit.tools import tool
 
 _workspace_root: Path | None = None
+_additional_workspace_roots: tuple[Path, ...] = ()
 _FILE_TOOL_CACHE: dict[
-    Path | None,
+    tuple[Path | None, tuple[Path, ...]],
     tuple[
         Callable[[str], str | dict[str, Any]],
         Callable[[str, str], str],
@@ -25,9 +26,14 @@ _STRUCTURED_RESULTS: ContextVar[bool] = ContextVar(
 )
 
 
-def configure_workspace(root: Path | str | None) -> None:
-    global _workspace_root
+def configure_workspace(
+    root: Path | str | None,
+    *,
+    additional_roots: list[Path | str] | tuple[Path | str, ...] = (),
+) -> None:
+    global _workspace_root, _additional_workspace_roots
     _workspace_root = None if root is None else Path(root).resolve()
+    _additional_workspace_roots = _resolve_additional_roots(additional_roots)
 
 
 @contextmanager
@@ -63,6 +69,41 @@ def _grep_search_payload(output: str) -> dict[str, Any]:
     }
 
 
+def _resolve_additional_roots(
+    additional_roots: list[Path | str] | tuple[Path | str, ...],
+) -> tuple[Path, ...]:
+    return tuple(Path(root).expanduser().resolve() for root in additional_roots)
+
+
+def _path_under_root(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _path_under_any_workspace_root(
+    path: Path,
+    root: Path,
+    additional_roots: tuple[Path, ...],
+) -> bool:
+    return _path_under_root(path, root) or any(
+        _path_under_root(path, additional_root) for additional_root in additional_roots
+    )
+
+
+def _workspace_error(path: str, root: Path, additional_roots: tuple[Path, ...]) -> str:
+    message = (
+        f"Path is outside workspace root: {path}. "
+        f"Use a path under workspace root: {root}"
+    )
+    if additional_roots:
+        extras = ", ".join(str(extra) for extra in additional_roots)
+        message += f" or additional workspace roots: {extras}"
+    return message
+
+
 def _resolve_workspace_path(path: str) -> Path:
     candidate = Path(path).expanduser()
     if _workspace_root is None:
@@ -74,19 +115,22 @@ def _resolve_workspace_path(path: str) -> Path:
         else (_workspace_root / candidate).resolve()
     )
 
-    try:
-        resolved.relative_to(_workspace_root)
-    except ValueError as exc:
+    if not _path_under_any_workspace_root(
+        resolved,
+        _workspace_root,
+        _additional_workspace_roots,
+    ):
         raise ValueError(
-            f"Path is outside workspace root: {path}. "
-            f"Use a path under workspace root: {_workspace_root}"
-        ) from exc
+            _workspace_error(path, _workspace_root, _additional_workspace_roots)
+        )
 
     return resolved
 
 
 def build_file_tools(
     workspace_root: Path | str | None,
+    *,
+    additional_roots: list[Path | str] | tuple[Path | str, ...] = (),
 ) -> tuple[
     Callable[[str], str | dict[str, Any]],
     Callable[[str, str], str],
@@ -95,8 +139,10 @@ def build_file_tools(
     Callable[[str, str, str], str | dict[str, Any]],
 ]:
     root = None if workspace_root is None else Path(workspace_root).resolve()
+    resolved_additional_roots = _resolve_additional_roots(additional_roots)
 
-    cached = _FILE_TOOL_CACHE.get(root)
+    cache_key = (root, resolved_additional_roots)
+    cached = _FILE_TOOL_CACHE.get(cache_key)
     if cached is not None:
         return cached
 
@@ -111,13 +157,10 @@ def build_file_tools(
             else (root / candidate).resolve()
         )
 
-        try:
-            resolved.relative_to(root)
-        except ValueError as exc:
-            raise ValueError(
-                f"Path is outside workspace root: {path}. "
-                f"Use a path under workspace root: {root}"
-            ) from exc
+        if not _path_under_any_workspace_root(
+            resolved, root, resolved_additional_roots
+        ):
+            raise ValueError(_workspace_error(path, root, resolved_additional_roots))
 
         return resolved
 
@@ -221,7 +264,7 @@ def build_file_tools(
         bound_glob_files,
         bound_grep_search,
     )
-    _FILE_TOOL_CACHE[root] = tools
+    _FILE_TOOL_CACHE[cache_key] = tools
     return tools
 
 
@@ -232,7 +275,10 @@ def build_file_tools(
     )
 )
 def file_read(path: str) -> str | dict[str, Any]:
-    return build_file_tools(_workspace_root)[0](path)
+    return build_file_tools(
+        _workspace_root,
+        additional_roots=_additional_workspace_roots,
+    )[0](path)
 
 
 @tool(
@@ -242,21 +288,33 @@ def file_read(path: str) -> str | dict[str, Any]:
     )
 )
 def file_write(path: str, content: str) -> str:
-    return build_file_tools(_workspace_root)[1](path, content)
+    return build_file_tools(
+        _workspace_root,
+        additional_roots=_additional_workspace_roots,
+    )[1](path, content)
 
 
 @tool(description="Replace exact string in a file under the workspace root.")
 def file_replace(path: str, old: str, new: str) -> str:
-    return build_file_tools(_workspace_root)[2](path, old, new)
+    return build_file_tools(
+        _workspace_root,
+        additional_roots=_additional_workspace_roots,
+    )[2](path, old, new)
 
 
 @tool(description="Search under the workspace root for files matching a glob pattern.")
 def glob_files(pattern: str, directory: str = ".") -> str:
-    return build_file_tools(_workspace_root)[3](pattern, directory)
+    return build_file_tools(
+        _workspace_root,
+        additional_roots=_additional_workspace_roots,
+    )[3](pattern, directory)
 
 
 @tool(description="Search file contents under the workspace root for a regex pattern.")
 def grep_search(
     pattern: str, directory: str = ".", include: str = ""
 ) -> str | dict[str, Any]:
-    return build_file_tools(_workspace_root)[4](pattern, directory, include)
+    return build_file_tools(
+        _workspace_root,
+        additional_roots=_additional_workspace_roots,
+    )[4](pattern, directory, include)

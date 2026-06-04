@@ -304,6 +304,7 @@ class SessionRecord:
     base_url: str | None
     max_steps: int
     mcp_servers: dict[str, dict[str, Any]]
+    additional_directories: list[str]
     tape_id: str | None
     last_failure_details: str | None
 
@@ -323,6 +324,7 @@ class SessionRecord:
             "base_url": self.base_url,
             "max_steps": self.max_steps,
             "mcp_servers": dict(self.mcp_servers),
+            "additional_directories": list(self.additional_directories),
             "tape_id": self.tape_id,
             "last_failure_details": self.last_failure_details,
         }
@@ -368,6 +370,9 @@ class SessionRecord:
         mcp_servers = _session_mcp_servers_from_store(
             cast(dict[str, Any], mcp_servers_raw)
         )
+        additional_directories = _session_additional_directories_from_store(
+            data.get("additional_directories", [])
+        )
         default_run_target_raw = data.get("default_run_target")
         if default_run_target_raw is None:
             legacy_target_raw = data.get("execution_binding")
@@ -402,6 +407,7 @@ class SessionRecord:
             base_url=base_url_raw,
             max_steps=_required_session_int(data, "max_steps"),
             mcp_servers=mcp_servers,
+            additional_directories=additional_directories,
             tape_id=tape_id_raw,
             last_failure_details=last_failure_details_raw,
         )
@@ -421,6 +427,7 @@ class SessionRecord:
             base_url=self.base_url,
             max_steps=self.max_steps,
             mcp_servers=dict(self.mcp_servers),
+            additional_directories=list(self.additional_directories),
             tape_id=self.tape_id,
             last_failure_details=self.last_failure_details,
         )
@@ -448,6 +455,7 @@ class Session:
     base_url: str | None = None
     max_steps: int = 30
     mcp_servers: dict[str, dict[str, Any]] = field(default_factory=dict)
+    additional_directories: list[str] = field(default_factory=list)
     runtime_handle: SessionRuntimeHandle = field(init=False, repr=False)
     task: asyncio.Task[Any] | None = None
     turn_in_progress: bool = False
@@ -596,9 +604,7 @@ class Session:
             raise RuntimeError("session is missing default_run_target")
         workspace = target.workspace
         workspace_id = (
-            workspace.workspace_id
-            if isinstance(workspace, CloudWorkspaceRef)
-            else None
+            workspace.workspace_id if isinstance(workspace, CloudWorkspaceRef) else None
         )
         pending_approval = self.pending_approval is not None
         turn_running = self.turn_in_progress or (
@@ -655,6 +661,7 @@ class Session:
             base_url=self.base_url,
             max_steps=self.max_steps,
             mcp_servers=dict(self.mcp_servers),
+            additional_directories=list(self.additional_directories),
             tape_id=self.tape_id,
             last_failure_details=self.last_failure_details,
         )
@@ -694,9 +701,7 @@ def _session_mcp_servers_from_store(
         if not isinstance(command, str) or not command:
             raise TypeError(f"session metadata has invalid mcp command: {name}")
         args = raw.get("args", [])
-        if not isinstance(args, list) or not all(
-            isinstance(arg, str) for arg in args
-        ):
+        if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
             raise TypeError(f"session metadata has invalid mcp args: {name}")
         env = raw.get("env", {})
         if not isinstance(env, dict) or not all(
@@ -713,6 +718,20 @@ def _session_mcp_servers_from_store(
             "env": dict(env),
             "inherit_env": inherit_env,
         }
+    return normalized
+
+
+def _session_additional_directories_from_store(value: object) -> list[str]:
+    if not isinstance(value, list):
+        raise TypeError("session metadata has invalid additional_directories")
+    normalized: list[str] = []
+    for entry in value:
+        if not isinstance(entry, str) or not entry:
+            raise TypeError("session metadata has invalid additional_directories")
+        path = Path(entry).expanduser()
+        if not path.is_absolute():
+            raise TypeError("session metadata has invalid additional_directories")
+        normalized.append(str(path.resolve()))
     return normalized
 
 
@@ -756,7 +775,9 @@ class SessionManager:
         checkpoint_store: CheckpointStore | None = None,
         checkpoint_service: CheckpointService | None = None,
         create_agent_fn: Callable[..., tuple[Any, Any]] | None = None,
-        cloud_workspace_client_factory: Callable[[CloudWorkspaceRef], CloudWorkspaceClient]
+        cloud_workspace_client_factory: Callable[
+            [CloudWorkspaceRef], CloudWorkspaceClient
+        ]
         | None = None,
         provisioned_cloud_binding_cleanup: (
             Callable[[CloudWorkspaceRef], None] | None
@@ -2235,6 +2256,7 @@ class SessionManager:
         max_parallel: int = 5,
         default_run_target: RunTarget | None = None,
         mcp_servers: dict[str, dict[str, Any]] | None = None,
+        additional_directories: list[str] | None = None,
     ) -> str:
         """Create a new agent session.
 
@@ -2251,6 +2273,7 @@ class SessionManager:
             default_run_target: Explicit placement target. If omitted, a local
                 daemon target is derived from repo_path or the current directory.
             mcp_servers: Per-session stdio MCP servers supplied by protocol clients.
+            additional_directories: Extra absolute workspace roots supplied by ACP.
 
         Returns:
             The session ID
@@ -2273,6 +2296,9 @@ class SessionManager:
         resolved_repo_path = repo_path.resolve() if repo_path is not None else None
         target = default_run_target or _local_default_run_target(resolved_repo_path)
         resolved_mcp_servers = _session_mcp_servers_from_store(mcp_servers or {})
+        resolved_additional_directories = _session_additional_directories_from_store(
+            additional_directories or []
+        )
 
         session = Session(
             id=session_id,
@@ -2289,6 +2315,7 @@ class SessionManager:
             base_url=base_url,
             max_steps=max_steps,
             mcp_servers=resolved_mcp_servers,
+            additional_directories=resolved_additional_directories,
             task=None,
         )
 
@@ -2334,6 +2361,22 @@ class SessionManager:
             return
         await self._runtime_closer.close(session)
         session.mcp_servers = resolved_mcp_servers
+        async with self._lock:
+            await self._persist_session_async(session)
+
+    async def update_session_additional_directories(
+        self,
+        session_id: str,
+        additional_directories: list[str],
+    ) -> None:
+        session = await self.get_session_async(session_id)
+        resolved_additional_directories = _session_additional_directories_from_store(
+            additional_directories
+        )
+        if session.additional_directories == resolved_additional_directories:
+            return
+        await self._runtime_closer.close(session)
+        session.additional_directories = resolved_additional_directories
         async with self._lock:
             await self._persist_session_async(session)
 

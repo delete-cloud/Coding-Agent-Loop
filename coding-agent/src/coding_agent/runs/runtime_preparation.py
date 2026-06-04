@@ -199,6 +199,9 @@ class LocalDaemonRuntimePreparationService:
             session_id_override=session.id,
             api_key=None,
             mcp_servers_override=dict(getattr(session, "mcp_servers", {})),
+            additional_workspace_roots_override=list(
+                getattr(session, "additional_directories", [])
+            ),
             tape=await self.restore_tape(session.tape_id),
         )
         ctx.config["wire_consumer"] = consumer

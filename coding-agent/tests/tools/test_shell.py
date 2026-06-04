@@ -174,6 +174,55 @@ class TestShellTool:
         assert str(workspace).lower() in blocked_text
         assert "secret" not in blocked_text
 
+    def test_none_sandbox_allows_absolute_path_under_additional_root(
+        self, tmp_path: Path
+    ):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        extra = tmp_path / "extra"
+        extra.mkdir()
+        target = extra / "note.txt"
+        target.write_text("from extra")
+
+        pipeline_ctx = SimpleNamespace(
+            config={
+                "workspace_root": str(workspace),
+                "additional_workspace_roots": [str(extra)],
+                "shell": {"sandbox_mode": "none"},
+            }
+        )
+
+        result = bash_run(
+            command=f"cat {target}",
+            cwd=str(workspace),
+            __pipeline_ctx__=pipeline_ctx,
+        )
+
+        assert _as_text(result) == "from extra"
+
+    def test_none_sandbox_allows_cwd_under_additional_root(self, tmp_path: Path):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        extra = tmp_path / "extra"
+        extra.mkdir()
+        (extra / "note.txt").write_text("from extra")
+
+        pipeline_ctx = SimpleNamespace(
+            config={
+                "workspace_root": str(workspace),
+                "additional_workspace_roots": [str(extra)],
+                "shell": {"sandbox_mode": "none"},
+            }
+        )
+
+        result = bash_run(
+            command="cat note.txt",
+            cwd=str(extra),
+            __pipeline_ctx__=pipeline_ctx,
+        )
+
+        assert _as_text(result) == "from extra"
+
     def test_none_sandbox_allows_relative_paths_with_slashes(self, tmp_path: Path):
         workspace = tmp_path / "workspace"
         workspace.mkdir()
@@ -382,6 +431,44 @@ class TestShellTool:
         assert "-e" in captured_command
         assert "SAFE_VAR=ok" in captured_command
 
+    def test_docker_sandbox_mounts_additional_roots(self, monkeypatch, tmp_path: Path):
+        sandbox_module = importlib.import_module("coding_agent.tools.sandbox")
+        workspace = tmp_path / "workspace"
+        extra = tmp_path / "extra"
+        workspace.mkdir()
+        extra.mkdir()
+        runner = sandbox_module.DockerSandboxRunner(
+            sandbox_module.SandboxConfig(
+                mode="docker",
+                workspace_root=workspace,
+                additional_roots=(extra,),
+            )
+        )
+
+        monkeypatch.setattr(sandbox_module, "which", lambda _: "/usr/bin/docker")
+        captured_command: list[str] = []
+
+        def fake_run(command, **kwargs):
+            nonlocal captured_command
+            captured_command = command
+            return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+        monkeypatch.setattr(sandbox_module.subprocess, "run", fake_run)
+        result = runner.run(
+            sandbox_module.SandboxRequest(
+                args=["cat", str(extra / "note.txt")],
+                cwd=extra,
+                env=None,
+                timeout_seconds=1,
+            )
+        )
+
+        assert result.returncode == 0
+        root = str(extra.resolve())
+        assert any(
+            f"type=bind,src={root},dst={root}" in part for part in captured_command
+        )
+
     def test_docker_sandbox_rejects_unsafe_env_names(self, monkeypatch, tmp_path: Path):
         sandbox_module = importlib.import_module("coding_agent.tools.sandbox")
         workspace = tmp_path / "workspace"
@@ -487,8 +574,10 @@ class TestMacosSeatbeltSandbox:
             workspace_root=workspace,
             limits=sandbox_module.SandboxLimits(),
         )
-        return sandbox_module, workspace, sandbox_module.MacosSeatbeltSandboxRunner(
-            config
+        return (
+            sandbox_module,
+            workspace,
+            sandbox_module.MacosSeatbeltSandboxRunner(config),
         )
 
     def test_macos_native_builds_sandbox_exec_profile_with_workspace_rw_and_network_deny(
@@ -496,9 +585,7 @@ class TestMacosSeatbeltSandbox:
     ):
         sandbox_module, workspace, runner = self._runner(tmp_path)
         monkeypatch.setattr(sandbox_module.platform, "system", lambda: "Darwin")
-        monkeypatch.setattr(
-            sandbox_module, "which", lambda _: "/usr/bin/sandbox-exec"
-        )
+        monkeypatch.setattr(sandbox_module, "which", lambda _: "/usr/bin/sandbox-exec")
 
         captured: dict[str, object] = {}
 
@@ -526,6 +613,49 @@ class TestMacosSeatbeltSandbox:
         assert f'(subpath "{workspace.resolve()}")' in profile
         # network is denied: no network-allow rule is emitted
         assert "allow network" not in profile
+
+    def test_macos_native_profile_includes_additional_roots(
+        self, monkeypatch, tmp_path: Path
+    ):
+        sandbox_module = importlib.import_module("coding_agent.tools.sandbox")
+        workspace = tmp_path / "workspace"
+        extra = tmp_path / "extra"
+        workspace.mkdir()
+        extra.mkdir()
+        runner = sandbox_module.MacosSeatbeltSandboxRunner(
+            sandbox_module.SandboxConfig(
+                mode="native",
+                workspace_root=workspace,
+                additional_roots=(extra,),
+            )
+        )
+        monkeypatch.setattr(
+            sandbox_module,
+            "which",
+            lambda _: "/usr/bin/sandbox-exec",
+        )
+
+        captured: dict[str, object] = {}
+
+        def fake_run(command, **kwargs):
+            captured["command"] = command
+            return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+        monkeypatch.setattr(sandbox_module.subprocess, "run", fake_run)
+        result = runner.run(
+            sandbox_module.SandboxRequest(
+                args=["echo", "hi"],
+                cwd=extra,
+                env=None,
+                timeout_seconds=1,
+            )
+        )
+
+        assert result.returncode == 0
+        command = cast(list[str], captured["command"])
+        profile = command[command.index("-p") + 1]
+        assert f'(subpath "{workspace.resolve()}")' in profile
+        assert f'(subpath "{extra.resolve()}")' in profile
 
     def test_macos_native_fails_closed_when_sandbox_exec_missing(
         self, monkeypatch, tmp_path: Path
@@ -560,7 +690,11 @@ class TestLinuxNativeSandbox:
             workspace_root=workspace,
             limits=sandbox_module.SandboxLimits(),
         )
-        return sandbox_module, workspace, sandbox_module.LinuxNativeSandboxRunner(config)
+        return (
+            sandbox_module,
+            workspace,
+            sandbox_module.LinuxNativeSandboxRunner(config),
+        )
 
     def test_linux_native_command_includes_network_off_workspace_bind_and_cwd(
         self, monkeypatch, tmp_path: Path
@@ -604,6 +738,48 @@ class TestLinuxNativeSandbox:
             {"HOME", "LANG", "LC_ALL", "LC_CTYPE", "PATH", "TERM", "TZ"}
         )
 
+    def test_linux_native_binds_additional_roots(self, monkeypatch, tmp_path: Path):
+        sandbox_module = importlib.import_module("coding_agent.tools.sandbox")
+        workspace = tmp_path / "workspace"
+        extra = tmp_path / "extra"
+        workspace.mkdir()
+        extra.mkdir()
+        runner = sandbox_module.LinuxNativeSandboxRunner(
+            sandbox_module.SandboxConfig(
+                mode="native",
+                workspace_root=workspace,
+                additional_roots=(extra,),
+            )
+        )
+        monkeypatch.setattr(sandbox_module, "which", lambda _: "/usr/bin/bwrap")
+        captured: dict[str, object] = {}
+
+        def fake_run(command, **kwargs):
+            captured["command"] = command
+            return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+        monkeypatch.setattr(sandbox_module.subprocess, "run", fake_run)
+        result = runner.run(
+            sandbox_module.SandboxRequest(
+                args=["cat", str(extra / "note.txt")],
+                cwd=extra,
+                env=None,
+                timeout_seconds=1,
+            )
+        )
+
+        assert result.returncode == 0
+        command = cast(list[str], captured["command"])
+        root = str(extra.resolve())
+        bind_indexes = [
+            index for index, value in enumerate(command) if value == "--bind"
+        ]
+        assert any(
+            command[index + 1 : index + 3] == [root, root] for index in bind_indexes
+        )
+        chdir_idx = command.index("--chdir")
+        assert command[chdir_idx + 1] == root
+
     def test_linux_native_fails_closed_when_bwrap_missing(
         self, monkeypatch, tmp_path: Path
     ):
@@ -628,9 +804,7 @@ class TestLinuxNativeSandbox:
 class TestNativeSandboxEnv:
     """ADR-0060: native sandboxes must not inherit the host environment."""
 
-    def test_native_env_excludes_host_secrets_when_no_env_supplied(
-        self, monkeypatch
-    ):
+    def test_native_env_excludes_host_secrets_when_no_env_supplied(self, monkeypatch):
         sandbox_module = importlib.import_module("coding_agent.tools.sandbox")
         monkeypatch.setenv("HOST_SECRET", "leak-me")
         monkeypatch.setenv("PATH", "/usr/bin")
@@ -702,10 +876,46 @@ class TestPodmanSandbox:
         assert "--security-opt" in command
         assert command[command.index("--security-opt") + 1] == "no-new-privileges"
         root = str(workspace.resolve())
-        assert any(
-            f"type=bind,src={root},dst={root}" in part for part in command
-        )
+        assert any(f"type=bind,src={root},dst={root}" in part for part in command)
         assert command[-2:] == ["echo", "hi"]
+
+    def test_podman_runner_mounts_additional_roots(self, monkeypatch, tmp_path: Path):
+        sandbox_module = importlib.import_module("coding_agent.tools.sandbox")
+        workspace = tmp_path / "workspace"
+        extra = tmp_path / "extra"
+        workspace.mkdir()
+        extra.mkdir()
+        runner = sandbox_module.PodmanSandboxRunner(
+            sandbox_module.SandboxConfig(
+                mode="podman",
+                workspace_root=workspace,
+                additional_roots=(extra,),
+            )
+        )
+
+        monkeypatch.setattr(sandbox_module, "which", lambda _: "/usr/bin/podman")
+        captured_command: list[str] = []
+
+        def fake_run(command, **kwargs):
+            nonlocal captured_command
+            captured_command = command
+            return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+        monkeypatch.setattr(sandbox_module.subprocess, "run", fake_run)
+        result = runner.run(
+            sandbox_module.SandboxRequest(
+                args=["cat", str(extra / "note.txt")],
+                cwd=extra,
+                env=None,
+                timeout_seconds=1,
+            )
+        )
+
+        assert result.returncode == 0
+        root = str(extra.resolve())
+        assert any(
+            f"type=bind,src={root},dst={root}" in part for part in captured_command
+        )
 
     def test_podman_forwards_explicit_env_only(self, monkeypatch, tmp_path: Path):
         sandbox_module = importlib.import_module("coding_agent.tools.sandbox")
@@ -778,9 +988,7 @@ class TestPodmanSandbox:
             sandbox_module.SandboxConfig(mode="podman", workspace_root=workspace)
         )
         monkeypatch.setattr(sandbox_module, "which", lambda _: None)
-        with pytest.raises(
-            sandbox_module.SandboxUnavailableError, match="(?i)podman"
-        ):
+        with pytest.raises(sandbox_module.SandboxUnavailableError, match="(?i)podman"):
             runner.run(
                 sandbox_module.SandboxRequest(
                     args=["echo", "hi"], cwd=workspace, env=None, timeout_seconds=1

@@ -21,6 +21,7 @@ from agentkit.tape.tape import Tape
 from coding_agent.agent_identity import legacy_agent_id_str
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.environment import LocalEnvironment
+from coding_agent.environment.additional_roots import with_additional_workspace_roots
 from coding_agent.plugins.approval import ApprovalPlugin
 from coding_agent.plugins.core_tools import CoreToolsPlugin
 from coding_agent.plugins.doom_detector import DoomDetectorPlugin
@@ -75,6 +76,14 @@ def _run_trace_metadata(
 def _environment_tool_config(environment: Environment) -> dict[str, Any]:
     config = environment.tool_config()
     return dict(config)
+
+
+def _resolve_additional_workspace_roots(
+    roots: list[str] | None,
+) -> tuple[Path, ...]:
+    if roots is None:
+        return ()
+    return tuple(Path(root).expanduser().resolve() for root in roots)
 
 
 def _merge_shell_config(
@@ -175,6 +184,7 @@ def create_child_pipeline(
     context_budget: ContextBudget | None = None,
     trace_metadata: Mapping[str, Any] | None = None,
     mcp_servers_override: dict[str, dict[str, Any]] | None = None,
+    additional_workspace_roots_override: list[str] | None = None,
 ) -> tuple[Any, Any]:
     if config_path is None:
         config_path = Path(__file__).parent / "agent.toml"
@@ -183,6 +193,13 @@ def create_child_pipeline(
 
     if environment is None:
         environment = LocalEnvironment(workspace_root or Path.cwd())
+    resolved_additional_workspace_roots = _resolve_additional_workspace_roots(
+        additional_workspace_roots_override
+    )
+    environment = with_additional_workspace_roots(
+        environment,
+        resolved_additional_workspace_roots,
+    )
     local_workspace_root = _local_workspace_root(environment)
     environment_config = _environment_tool_config(environment)
 
@@ -254,6 +271,10 @@ def create_child_pipeline(
     def _create_child_with_environment(**kwargs: Any) -> tuple[Any, PipelineContext]:
         kwargs.setdefault("environment", environment)
         kwargs.setdefault("mcp_servers_override", mcp_servers_override)
+        kwargs.setdefault(
+            "additional_workspace_roots_override",
+            [str(root) for root in resolved_additional_workspace_roots],
+        )
         return create_child_pipeline(**kwargs)
 
     plugin_factories: dict[str, Any] = {
@@ -417,6 +438,10 @@ def create_child_pipeline(
     }
     if "isolation_policy" in environment_config:
         ctx_config["isolation_policy"] = environment_config["isolation_policy"]
+    if resolved_additional_workspace_roots:
+        ctx_config["additional_workspace_roots"] = [
+            str(root) for root in resolved_additional_workspace_roots
+        ]
     if observation_sink is not None:
         ctx_config["observation_sink"] = observation_sink
     if local_workspace_root is not None:
@@ -460,6 +485,7 @@ def create_agent(
     context_budget: ContextBudget | None = None,
     trace_metadata: Mapping[str, Any] | None = None,
     mcp_servers_override: dict[str, dict[str, Any]] | None = None,
+    additional_workspace_roots_override: list[str] | None = None,
     tape: Tape | None = None,
 ) -> tuple[Any, Any]:
     return create_child_pipeline(
@@ -483,4 +509,5 @@ def create_agent(
         context_budget=context_budget,
         trace_metadata=trace_metadata,
         mcp_servers_override=mcp_servers_override,
+        additional_workspace_roots_override=additional_workspace_roots_override,
     )

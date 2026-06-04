@@ -127,3 +127,19 @@ def test_file_patch_rejects_safe_edit_policy_denial(tmp_path: Path) -> None:
     assert payload["dry_run"] is True
     assert payload["reason"] == "binary_file"
     assert target.read_bytes() == b"\x00binary"
+
+
+def test_file_patch_applies_safe_edit_policy_to_absolute_paths(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "binary.bin"
+    target.write_bytes(b"\x00binary")
+    patch_tool = build_file_patch_tool(tmp_path)
+    patch = "@@ -1,1 +1,1 @@\n-binary\n+text\n"
+
+    payload = json.loads(patch_tool(str(target), patch, dry_run=True))
+
+    assert payload["success"] is False
+    assert payload["dry_run"] is True
+    assert payload["reason"] == "binary_file"
+    assert target.read_bytes() == b"\x00binary"

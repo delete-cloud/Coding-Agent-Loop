@@ -37,6 +37,7 @@ class SandboxLimits:
 class SandboxConfig:
     mode: SandboxMode
     workspace_root: Path
+    additional_roots: tuple[Path, ...] = ()
     limits: SandboxLimits = field(default_factory=SandboxLimits)
     docker_image: str = "python:3.11-slim"
 
@@ -77,9 +78,7 @@ def _resolve_native(config: SandboxConfig) -> SandboxRunner:
         return MacosSeatbeltSandboxRunner(config)
     if system == "Linux":
         return LinuxNativeSandboxRunner(config)
-    raise SandboxUnavailableError(
-        f"native sandbox mode is not supported on {system}"
-    )
+    raise SandboxUnavailableError(f"native sandbox mode is not supported on {system}")
 
 
 class NoneSandboxRunner:
@@ -87,9 +86,17 @@ class NoneSandboxRunner:
         self._config: SandboxConfig = config
 
     def run(self, request: SandboxRequest) -> subprocess.CompletedProcess[str]:
-        cwd = _validate_cwd(request.cwd, self._config.workspace_root)
+        cwd = _validate_cwd(
+            request.cwd,
+            self._config.workspace_root,
+            additional_roots=self._config.additional_roots,
+        )
         _validate_none_mode_limits(self._config.limits)
-        _validate_none_mode_command_paths(request.args, self._config.workspace_root)
+        _validate_none_mode_command_paths(
+            request.args,
+            self._config.workspace_root,
+            additional_roots=self._config.additional_roots,
+        )
         preexec_fn = _resource_limit_preexec(self._config.limits)
         return subprocess.run(
             request.args,
@@ -119,7 +126,11 @@ class MacosSeatbeltSandboxRunner:
         if which("sandbox-exec") is None:
             raise SandboxUnavailableError("sandbox-exec binary not found on PATH")
 
-        cwd = _validate_cwd(request.cwd, self._config.workspace_root)
+        cwd = _validate_cwd(
+            request.cwd,
+            self._config.workspace_root,
+            additional_roots=self._config.additional_roots,
+        )
         _validate_none_mode_limits(self._config.limits)
         profile = self._profile()
         command = ["sandbox-exec", "-p", profile, *request.args]
@@ -135,7 +146,10 @@ class MacosSeatbeltSandboxRunner:
         )
 
     def _profile(self) -> str:
-        workspace = self._config.workspace_root.resolve()
+        writable_roots = [
+            self._config.workspace_root.resolve(),
+            *(root.resolve() for root in self._config.additional_roots),
+        ]
         return "\n".join(
             [
                 "(version 1)",
@@ -146,7 +160,7 @@ class MacosSeatbeltSandboxRunner:
                 "(allow sysctl-read)",
                 "(allow file-read*)",
                 "(allow file-write*",
-                f'    (subpath "{workspace}")',
+                *[f'    (subpath "{root}")' for root in writable_roots],
                 '    (subpath "/dev/null")',
                 '    (subpath "/dev/stdout")',
                 '    (subpath "/dev/stderr")',
@@ -169,11 +183,13 @@ class LinuxNativeSandboxRunner:
 
     def run(self, request: SandboxRequest) -> subprocess.CompletedProcess[str]:
         if which("bwrap") is None:
-            raise SandboxUnavailableError(
-                "bubblewrap (bwrap) binary not found on PATH"
-            )
+            raise SandboxUnavailableError("bubblewrap (bwrap) binary not found on PATH")
 
-        cwd = _validate_cwd(request.cwd, self._config.workspace_root)
+        cwd = _validate_cwd(
+            request.cwd,
+            self._config.workspace_root,
+            additional_roots=self._config.additional_roots,
+        )
         command = self._bwrap_command(request, cwd)
         return subprocess.run(
             command,
@@ -205,10 +221,11 @@ class LinuxNativeSandboxRunner:
             "--bind",
             workspace,
             workspace,
-            "--chdir",
-            str(cwd),
-            "--",
         ]
+        for root in self._config.additional_roots:
+            resolved = str(root.resolve())
+            command.extend(["--bind", resolved, resolved])
+        command.extend(["--chdir", str(cwd), "--"])
         command.extend(request.args)
         return command
 
@@ -228,7 +245,11 @@ class NsjailSandboxRunner:
         if which("nsjail") is None:
             raise SandboxUnavailableError("nsjail binary not found on PATH")
 
-        cwd = _validate_cwd(request.cwd, self._config.workspace_root)
+        cwd = _validate_cwd(
+            request.cwd,
+            self._config.workspace_root,
+            additional_roots=self._config.additional_roots,
+        )
         command = self._nsjail_command(request, cwd)
         return subprocess.run(
             command,
@@ -271,7 +292,11 @@ class DockerSandboxRunner:
         if which("docker") is None:
             raise SandboxUnavailableError("docker binary not found on PATH")
 
-        cwd = _validate_cwd(request.cwd, self._config.workspace_root)
+        cwd = _validate_cwd(
+            request.cwd,
+            self._config.workspace_root,
+            additional_roots=self._config.additional_roots,
+        )
         command = self._docker_command(request, cwd)
         return subprocess.run(
             command,
@@ -294,6 +319,9 @@ class DockerSandboxRunner:
             "--mount",
             f"type=bind,src={self._config.workspace_root},dst={self._config.workspace_root}",
         ]
+        for root in self._config.additional_roots:
+            resolved = root.resolve()
+            command.extend(["--mount", f"type=bind,src={resolved},dst={resolved}"])
         if self._config.limits.cpu_limit_seconds is not None:
             command.extend(["--ulimit", f"cpu={self._config.limits.cpu_limit_seconds}"])
         if self._config.limits.memory_limit_mb is not None:
@@ -321,7 +349,11 @@ class PodmanSandboxRunner:
         if which("podman") is None:
             raise SandboxUnavailableError("podman binary not found on PATH")
 
-        cwd = _validate_cwd(request.cwd, self._config.workspace_root)
+        cwd = _validate_cwd(
+            request.cwd,
+            self._config.workspace_root,
+            additional_roots=self._config.additional_roots,
+        )
         command = self._podman_command(request, cwd)
         return subprocess.run(
             command,
@@ -347,6 +379,9 @@ class PodmanSandboxRunner:
             "--mount",
             f"type=bind,src={workspace},dst={workspace}",
         ]
+        for root in self._config.additional_roots:
+            resolved = root.resolve()
+            command.extend(["--mount", f"type=bind,src={resolved},dst={resolved}"])
         if self._config.limits.cpu_limit_seconds is not None:
             command.extend(["--ulimit", f"cpu={self._config.limits.cpu_limit_seconds}"])
         if self._config.limits.memory_limit_mb is not None:
@@ -382,18 +417,31 @@ def _native_sandbox_env(env: dict[str, str] | None) -> dict[str, str]:
     return {key: os.environ[key] for key in _NATIVE_ENV_KEYS if key in os.environ}
 
 
-def _validate_cwd(cwd: Path, workspace_root: Path) -> Path:
+def _validate_cwd(
+    cwd: Path,
+    workspace_root: Path,
+    *,
+    additional_roots: tuple[Path, ...] = (),
+) -> Path:
     resolved_cwd = cwd.resolve()
-    resolved_root = workspace_root.resolve()
-    try:
-        _ = resolved_cwd.relative_to(resolved_root)
-    except ValueError as exc:
+    roots = (workspace_root.resolve(), *(root.resolve() for root in additional_roots))
+    if not _path_under_any_root(resolved_cwd, roots):
         raise SandboxError(
             f"Working directory is outside sandbox workspace: {resolved_cwd}"
-        ) from exc
+        )
     if not resolved_cwd.is_dir():
         raise SandboxError(f"Working directory does not exist: {resolved_cwd}")
     return resolved_cwd
+
+
+def _path_under_any_root(path: Path, roots: tuple[Path, ...]) -> bool:
+    for root in roots:
+        try:
+            path.relative_to(root)
+        except ValueError:
+            continue
+        return True
+    return False
 
 
 def _resource_limit_preexec(limits: SandboxLimits):
@@ -450,15 +498,17 @@ def _validate_none_mode_limits(limits: SandboxLimits) -> None:
         )
 
 
-def _validate_none_mode_command_paths(args: list[str], workspace_root: Path) -> None:
+def _validate_none_mode_command_paths(
+    args: list[str],
+    workspace_root: Path,
+    *,
+    additional_roots: tuple[Path, ...] = (),
+) -> None:
+    roots = (workspace_root.resolve(), *(root.resolve() for root in additional_roots))
     for candidate in _absolute_path_candidates(args):
         resolved = Path(candidate).expanduser().resolve(strict=False)
-        try:
-            _ = resolved.relative_to(workspace_root)
-        except ValueError as exc:
-            raise SandboxError(
-                f"Command path escapes sandbox workspace: {resolved}"
-            ) from exc
+        if not _path_under_any_root(resolved, roots):
+            raise SandboxError(f"Command path escapes sandbox workspace: {resolved}")
 
 
 def _validated_env_items(env: dict[str, str] | None) -> list[tuple[str, str]]:

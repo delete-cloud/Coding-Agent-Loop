@@ -62,6 +62,12 @@ class AcpSessionManager(Protocol):
         mcp_servers: dict[str, dict[str, Any]],
     ) -> None: ...
 
+    async def update_session_additional_directories(
+        self,
+        session_id: str,
+        additional_directories: list[str],
+    ) -> None: ...
+
 
 class JsonRpcError(Exception):
     def __init__(self, code: int, message: str) -> None:
@@ -187,6 +193,10 @@ class AcpServer:
         if not repo_path.is_absolute():
             raise JsonRpcError(-32602, "session/new params.cwd must be absolute")
         mcp_servers = _parse_mcp_servers(params, method="session")
+        additional_directories = _parse_additional_directories(
+            params,
+            method="session",
+        )
 
         session_id = await self._session_manager.create_session(
             repo_path=repo_path,
@@ -197,6 +207,7 @@ class AcpServer:
             base_url=self._base_url,
             max_steps=self._max_steps,
             mcp_servers=mcp_servers,
+            additional_directories=additional_directories,
         )
         return {"sessionId": session_id}
 
@@ -257,11 +268,19 @@ class AcpServer:
         if not repo_path.is_absolute():
             raise JsonRpcError(-32602, "session/load params.cwd must be absolute")
         mcp_servers = _parse_mcp_servers(params, method="session")
+        additional_directories = _parse_additional_directories(
+            params,
+            method="session",
+        )
 
         await self._session_manager.get_session_async(session_id)
         await self._session_manager.update_session_mcp_servers(
             session_id,
             mcp_servers,
+        )
+        await self._session_manager.update_session_additional_directories(
+            session_id,
+            additional_directories,
         )
         runs = await self._session_manager.list_runtime_runs(session_id)
         for run in _sort_runtime_runs(runs):
@@ -609,10 +628,41 @@ def _parse_mcp_servers(
         servers[name] = {
             "command": command,
             "args": list(args_raw),
-            "env": _parse_mcp_env(raw_server.get("env", []), method=method, index=index),
+            "env": _parse_mcp_env(
+                raw_server.get("env", []), method=method, index=index
+            ),
             "inherit_env": False,
         }
     return servers
+
+
+def _parse_additional_directories(
+    params: JSONObject,
+    *,
+    method: str,
+) -> list[str]:
+    raw_directories = params.get("additionalDirectories", [])
+    if not isinstance(raw_directories, list):
+        raise JsonRpcError(
+            -32602,
+            f"{method} params.additionalDirectories must be an array",
+        )
+
+    directories: list[str] = []
+    for index, raw_directory in enumerate(raw_directories):
+        if not isinstance(raw_directory, str) or not raw_directory:
+            raise JsonRpcError(
+                -32602,
+                f"{method} additionalDirectories[{index}] must be a string",
+            )
+        directory = Path(raw_directory).expanduser()
+        if not directory.is_absolute():
+            raise JsonRpcError(
+                -32602,
+                f"{method} additionalDirectories[{index}] must be absolute",
+            )
+        directories.append(str(directory.resolve()))
+    return directories
 
 
 def _parse_mcp_env(

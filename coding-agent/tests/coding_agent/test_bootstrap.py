@@ -358,6 +358,42 @@ args = ["--toml"]
         assert mcp_plugin._server_configs[0].args == ["--stdio"]
         assert mcp_plugin._server_configs[0].env == {"TOKEN": "redacted"}
 
+    def test_create_agent_uses_additional_workspace_roots_override(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        extra = tmp_path / "extra"
+        extra.mkdir()
+        (extra / "note.txt").write_text("from extra")
+        config_path = tmp_path / "agent.toml"
+        config_path.write_text(
+            """
+[agent]
+name = "test-agent"
+model = "claude-sonnet-4-20250514"
+provider = "anthropic"
+
+[agent.plugins]
+enabled = ["storage", "core_tools"]
+""".strip()
+        )
+
+        pipeline, ctx = create_agent(
+            config_path=config_path,
+            data_dir=tmp_path / "data",
+            api_key="sk-test",
+            workspace_root=workspace,
+            additional_workspace_roots_override=[str(extra)],
+        )
+
+        assert ctx.config["additional_workspace_roots"] == [str(extra.resolve())]
+        core_tools = pipeline._registry.get("core_tools")
+        result = core_tools.execute_tool(
+            name="file_read",
+            arguments={"path": str(extra / "note.txt")},
+            ctx=ctx,
+        )
+        assert result == "from extra"
+
     def test_create_agent_applies_runtime_overrides(self, tmp_path):
         config_path = (
             Path(__file__).parent.parent.parent / "src" / "coding_agent" / "agent.toml"

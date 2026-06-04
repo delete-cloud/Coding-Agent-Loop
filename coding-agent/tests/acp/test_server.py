@@ -96,6 +96,21 @@ class FakeManager:
             )
         )
 
+    async def update_session_additional_directories(
+        self,
+        session_id: str,
+        additional_directories: list[str],
+    ) -> None:
+        self.calls.append(
+            (
+                "update_session_additional_directories",
+                {
+                    "session_id": session_id,
+                    "additional_directories": additional_directories,
+                },
+            )
+        )
+
     async def submit_approval_response(
         self,
         session_id: str,
@@ -212,7 +227,11 @@ async def test_initialize_advertises_stdio_mcp_capability() -> None:
     result = response["result"]
     assert isinstance(result, dict)
     capabilities = result["agentCapabilities"]
-    assert capabilities["mcpCapabilities"] == {"stdio": True, "http": False, "sse": False}
+    assert capabilities["mcpCapabilities"] == {
+        "stdio": True,
+        "http": False,
+        "sse": False,
+    }
 
 
 @pytest.mark.asyncio
@@ -251,6 +270,7 @@ async def test_session_new_creates_local_session_from_absolute_cwd(
                 "base_url": "https://example.invalid/v1",
                 "max_steps": 7,
                 "mcp_servers": {},
+                "additional_directories": [],
             },
         )
     ]
@@ -294,16 +314,70 @@ async def test_session_new_passes_stdio_mcp_servers_to_session_manager(
             "model_name": None,
             "base_url": None,
             "max_steps": 30,
-                "mcp_servers": {
-                    "filesystem": {
-                        "command": "npx",
-                        "args": ["-y", "@modelcontextprotocol/server-filesystem"],
-                        "env": {"ROOT": str(tmp_path)},
-                        "inherit_env": False,
-                    }
-                },
+            "mcp_servers": {
+                "filesystem": {
+                    "command": "npx",
+                    "args": ["-y", "@modelcontextprotocol/server-filesystem"],
+                    "env": {"ROOT": str(tmp_path)},
+                    "inherit_env": False,
+                }
             },
+            "additional_directories": [],
+        },
     )
+
+
+@pytest.mark.asyncio
+async def test_session_new_passes_additional_directories_to_session_manager(
+    tmp_path: Path,
+) -> None:
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    manager = FakeManager()
+    server = AcpServer(manager)
+
+    response = await server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "session/new",
+            "params": {
+                "cwd": str(tmp_path),
+                "mcpServers": [],
+                "additionalDirectories": [str(extra)],
+            },
+        }
+    )
+
+    assert response == {"jsonrpc": "2.0", "id": 2, "result": {"sessionId": "sess-1"}}
+    assert manager.calls[0][1]["additional_directories"] == [str(extra)]
+
+
+@pytest.mark.asyncio
+async def test_session_new_rejects_relative_additional_directory(
+    tmp_path: Path,
+) -> None:
+    response = await AcpServer(FakeManager()).handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "session/new",
+            "params": {
+                "cwd": str(tmp_path),
+                "mcpServers": [],
+                "additionalDirectories": ["relative/path"],
+            },
+        }
+    )
+
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "error": {
+            "code": -32602,
+            "message": "session additionalDirectories[0] must be absolute",
+        },
+    }
 
 
 @pytest.mark.asyncio
@@ -375,6 +449,36 @@ async def test_session_load_updates_mcp_servers_from_params(tmp_path: Path) -> N
                 }
             },
         },
+    ) in manager.calls
+
+
+@pytest.mark.asyncio
+async def test_session_load_updates_additional_directories_from_params(
+    tmp_path: Path,
+) -> None:
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    manager = FakeManager(repo_path=tmp_path)
+    server = AcpServer(manager)
+
+    response = await server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "session/load",
+            "params": {
+                "sessionId": "sess-1",
+                "cwd": str(tmp_path),
+                "mcpServers": [],
+                "additionalDirectories": [str(extra)],
+            },
+        }
+    )
+
+    assert response == {"jsonrpc": "2.0", "id": 7, "result": None}
+    assert (
+        "update_session_additional_directories",
+        {"session_id": "sess-1", "additional_directories": [str(extra)]},
     ) in manager.calls
 
 
@@ -512,11 +616,15 @@ async def test_session_load_replays_display_events_before_response(
             },
         },
     ]
-    assert manager.calls[:4] == [
+    assert manager.calls[:5] == [
         ("get_session_async", "sess-1"),
         (
             "update_session_mcp_servers",
             {"session_id": "sess-1", "mcp_servers": {}},
+        ),
+        (
+            "update_session_additional_directories",
+            {"session_id": "sess-1", "additional_directories": []},
         ),
         ("list_runtime_runs", "sess-1"),
         (

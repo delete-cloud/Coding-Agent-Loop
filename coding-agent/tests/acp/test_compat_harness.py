@@ -142,6 +142,21 @@ class HarnessManager:
             )
         )
 
+    async def update_session_additional_directories(
+        self,
+        session_id: str,
+        additional_directories: list[str],
+    ) -> None:
+        self.calls.append(
+            (
+                "update_session_additional_directories",
+                {
+                    "session_id": session_id,
+                    "additional_directories": additional_directories,
+                },
+            )
+        )
+
     async def run_agent(self, session_id: str, prompt: str) -> None:
         self.calls.append(("run_agent", {"session_id": session_id, "prompt": prompt}))
         await self.wire.send(StreamDelta(session_id=session_id, content="compat"))
@@ -292,6 +307,7 @@ async def test_external_client_harness_exercises_session_lifecycle(
             "model_name": None,
             "base_url": None,
             "max_steps": 30,
+            "additional_directories": [],
             "mcp_servers": {
                 "toolbox": {
                     "command": "python",
