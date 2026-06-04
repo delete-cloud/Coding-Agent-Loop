@@ -10,6 +10,7 @@ from typing import Any, Protocol, TextIO
 from coding_agent.acp.mapper import (
     acp_stop_reason,
     approval_request_to_permission_params,
+    display_event_to_session_update,
     permission_outcome_to_approval,
     prompt_blocks_to_text,
     wire_message_to_session_update,
@@ -40,6 +41,16 @@ class AcpSessionManager(Protocol):
         feedback: str | None = None,
         scope: str = "once",
     ) -> Any: ...
+
+    async def replay_display_events(
+        self,
+        run_id: str,
+        *,
+        last_event_id: str | None = None,
+        limit: int = 1000,
+    ) -> list[Any]: ...
+
+    async def list_runtime_runs(self, session_id: str) -> list[Any]: ...
 
 
 class JsonRpcError(Exception):
@@ -126,6 +137,9 @@ class AcpServer:
             return self._initialize()
         if method == "session/new":
             return await self._session_new(params)
+        if method == "session/load":
+            await self._session_load(params)
+            return None
         if method == "session/prompt":
             return await self._session_prompt(params)
         if method == "session/cancel":
@@ -137,6 +151,7 @@ class AcpServer:
         return {
             "protocolVersion": 1,
             "agentCapabilities": {
+                "loadSession": True,
                 "promptCapabilities": {},
                 "sessionCapabilities": {},
             },
@@ -166,6 +181,42 @@ class AcpServer:
             max_steps=self._max_steps,
         )
         return {"sessionId": session_id}
+
+    async def _session_load(self, params: JSONObject) -> None:
+        session_id = params.get("sessionId")
+        if not isinstance(session_id, str) or not session_id:
+            raise JsonRpcError(-32602, "session/load params.sessionId must be a string")
+        cwd = params.get("cwd")
+        if not isinstance(cwd, str) or not cwd:
+            raise JsonRpcError(-32602, "session/load params.cwd must be a string")
+        repo_path = Path(cwd)
+        if not repo_path.is_absolute():
+            raise JsonRpcError(-32602, "session/load params.cwd must be absolute")
+
+        await self._session_manager.get_session_async(session_id)
+        runs = await self._session_manager.list_runtime_runs(session_id)
+        for run in _sort_runtime_runs(runs):
+            run_id = getattr(run, "run_id", None)
+            if not isinstance(run_id, str) or not run_id:
+                continue
+            display_events = await self._session_manager.replay_display_events(
+                run_id,
+                limit=1000,
+            )
+            for event in display_events:
+                update = display_event_to_session_update(event)
+                if update is None:
+                    continue
+                await self._emit_notification(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "sessionId": session_id,
+                            "update": update,
+                        },
+                    }
+                )
 
     async def _session_prompt(self, params: JSONObject) -> JSONObject:
         session_id = params.get("sessionId")
@@ -401,3 +452,20 @@ def _is_jsonrpc_response(message: object) -> bool:
     if not isinstance(message, dict):
         return False
     return "method" not in message and ("result" in message or "error" in message)
+
+
+def _sort_runtime_runs(runs: Iterable[Any]) -> list[Any]:
+    return sorted(
+        runs,
+        key=lambda run: (
+            _sortable_started_at(getattr(run, "started_at", None)),
+            getattr(run, "run_id", ""),
+        ),
+    )
+
+
+def _sortable_started_at(value: object) -> str:
+    isoformat = getattr(value, "isoformat", None)
+    if callable(isoformat):
+        return str(isoformat())
+    return ""

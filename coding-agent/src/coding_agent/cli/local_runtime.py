@@ -57,9 +57,19 @@ class LocalCliSessionManager(Protocol):
 
     async def list_sessions_async(self) -> list[str]: ...
 
+    async def list_runtime_runs(self, session_id: str) -> Any: ...
+
     async def list_checkpoints(self, session_id: str) -> Any: ...
 
     async def session_resume_metadata(self, session_id: str) -> dict[str, object]: ...
+
+    async def replay_display_events(
+        self,
+        run_id: str,
+        *,
+        last_event_id: str | None = None,
+        limit: int = 1000,
+    ) -> Any: ...
 
     async def ensure_session_runtime(self, session_id: str) -> Any: ...
 
@@ -125,11 +135,27 @@ class ServerBackedLocalCliSessionManager:
     async def list_sessions_async(self) -> list[str]:
         return await self._delegate.list_sessions_async()
 
+    async def list_runtime_runs(self, session_id: str) -> Any:
+        return await self._delegate.list_runtime_runs(session_id)
+
     async def list_checkpoints(self, session_id: str) -> Any:
         return await self._delegate.list_checkpoints(session_id)
 
     async def session_resume_metadata(self, session_id: str) -> dict[str, object]:
         return await self._delegate.session_resume_metadata(session_id)
+
+    async def replay_display_events(
+        self,
+        run_id: str,
+        *,
+        last_event_id: str | None = None,
+        limit: int = 1000,
+    ) -> Any:
+        return await self._delegate.replay_display_events(
+            run_id,
+            last_event_id=last_event_id,
+            limit=limit,
+        )
 
     async def ensure_session_runtime(self, session_id: str) -> Any:
         return await self._delegate.ensure_session_runtime(session_id)
