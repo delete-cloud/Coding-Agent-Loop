@@ -823,8 +823,34 @@ class SQLiteLocalDurableStore:
                     "checkpoint target belongs to another session"
                 )
             connection.execute(
-                "DELETE FROM tape_entries WHERE tape_id = ? AND seq >= ?",
-                (meta.tape_id, meta.entry_count),
+                "DELETE FROM tape_entries WHERE tape_id = ?",
+                (meta.tape_id,),
+            )
+            now = datetime.now(UTC).isoformat()
+            values: list[tuple[object, ...]] = []
+            for seq, entry in enumerate(snapshot.tape_entries):
+                _require_json_object("tape entry", entry)
+                values.append(
+                    (
+                        meta.tape_id,
+                        seq,
+                        json.dumps(entry, sort_keys=True),
+                        _optional_entry_str(entry, "kind"),
+                        _entry_nested_str(entry, "run_id"),
+                        _entry_nested_str(entry, "tool_call_id"),
+                        _entry_anchor_type(entry),
+                        now,
+                    )
+                )
+            connection.executemany(
+                """
+                INSERT INTO tape_entries (
+                    tape_id, seq, entry_json, kind, run_id, tool_call_id,
+                    anchor_type, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                values,
             )
             connection.execute(
                 """
