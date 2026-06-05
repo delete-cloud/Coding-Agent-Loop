@@ -1980,6 +1980,35 @@ max_turns = 17
         finally:
             asyncio.run(manager.close())
 
+    def test_build_session_manager_enables_pg_durable_fencing_for_full_pg_storage(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "coding_agent.server.http_server._load_storage_config",
+            lambda: {
+                "http_session_backend": "pg",
+                "tape_backend": "pg",
+                "checkpoint_backend": "pg",
+                "runtime_backend": "pg",
+                "dsn": "postgresql://example",
+                "owner_id": "pod-a",
+                "fencing_token": 9,
+                "owner_lease_seconds": 40.0,
+            },
+        )
+
+        manager = _build_session_manager()
+        try:
+            assert manager._pg_durable_store is not None
+            assert type(manager._tape_store).__name__ == "FencedPGTapeStore"
+            assert (
+                type(manager._checkpoint_service._store).__name__
+                == "FencedPGCheckpointStore"
+            )
+            assert type(manager._runtime_store).__name__ == "FencedPGRuntimeStore"
+        finally:
+            asyncio.run(manager.close())
+
     @pytest.mark.parametrize("fencing_token", [None, 0, -1, "9"])
     def test_build_session_manager_requires_explicit_positive_fencing_token_for_pg_http_sessions(
         self, monkeypatch, fencing_token

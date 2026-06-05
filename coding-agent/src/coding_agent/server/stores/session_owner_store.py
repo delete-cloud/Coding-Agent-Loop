@@ -108,6 +108,26 @@ class SessionOwnerStoreProtocol(Protocol):
 
 
 class SessionOwnerStore:
+    _SELECT_FOR_UPDATE_SQL = """
+    SELECT owner_id, lease_expires_at, fencing_token
+    FROM session_owners
+    WHERE session_id = $1
+    FOR UPDATE
+    """
+    _INSERT_AUTHORITY_SQL = """
+    INSERT INTO session_owners (session_id, owner_id, lease_expires_at, fencing_token)
+    VALUES ($1, $2, NOW() + make_interval(secs => $3), $4)
+    ON CONFLICT (session_id) DO NOTHING
+    """
+    _UPDATE_AUTHORITY_SQL = """
+    UPDATE session_owners
+    SET owner_id = $2,
+        lease_expires_at = NOW() + make_interval(secs => $3),
+        fencing_token = $4,
+        updated_at = NOW()
+    WHERE session_id = $1
+    """
+
     def __init__(
         self,
         *,
@@ -119,6 +139,7 @@ class SessionOwnerStore:
                 raise ValueError("SessionOwnerStore requires pg_pool or pg_store")
             pg_store = PGSessionOwnerStore(pool=pg_pool)
         self._pg: SessionOwnerBackend = pg_store
+        self._pg_pool = pg_pool
 
     async def acquire(
         self,
@@ -180,6 +201,90 @@ class SessionOwnerStore:
             lease_expires_at=lease_expires_at,
             fencing_token=fencing_token,
         )
+
+    async def acquire_authority(
+        self,
+        session_id: str,
+        owner_id: str,
+        lease_seconds: float = 30.0,
+    ) -> OwnerAuthority:
+        if self._pg_pool is None:
+            raise TypeError("postgres owner authority requires pg_pool")
+        if not session_id:
+            raise ValueError("session_id must be non-empty")
+        if not owner_id:
+            raise ValueError("owner_id must be non-empty")
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
+        pool = await self._pg_pool.get_pool()
+        _ = await pool.execute(PGSessionOwnerStore._CREATE_TABLE_SQL)
+        connection = await self._pg_pool.acquire()
+        try:
+            _ = await connection.execute("BEGIN")
+            _ = await connection.execute(
+                self._INSERT_AUTHORITY_SQL,
+                session_id,
+                owner_id,
+                lease_seconds,
+                1,
+            )
+            row = await connection.fetchrow(self._SELECT_FOR_UPDATE_SQL, session_id)
+            if row is None:
+                raise RuntimeError("postgres owner insert returned no lockable row")
+            row_dict = dict(row)
+            current_owner_id = row_dict.get("owner_id")
+            lease_expires_at = row_dict.get("lease_expires_at")
+            current_epoch = row_dict.get("fencing_token")
+            if not isinstance(current_owner_id, str):
+                raise TypeError("postgres owner row missing string owner_id")
+            if not isinstance(lease_expires_at, datetime):
+                raise TypeError("postgres owner row missing datetime lease_expires_at")
+            if not isinstance(current_epoch, int):
+                raise TypeError("postgres owner row missing int fencing_token")
+            now = datetime.now(
+                lease_expires_at.tzinfo if lease_expires_at.tzinfo else UTC
+            )
+            if lease_expires_at > now:
+                if current_owner_id != owner_id:
+                    raise SessionOwnershipConflictError(
+                        "stale owner or fencing token rejected"
+                    )
+                epoch = current_epoch
+            else:
+                epoch = current_epoch + 1
+                _ = await connection.execute(
+                    self._UPDATE_AUTHORITY_SQL,
+                    session_id,
+                    owner_id,
+                    lease_seconds,
+                    epoch,
+                )
+            _ = await connection.execute("COMMIT")
+            return OwnerAuthority(session_id=session_id, owner_id=owner_id, epoch=epoch)
+        except BaseException:
+            try:
+                _ = await connection.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+        finally:
+            await self._pg_pool.release(connection)
+
+    async def renew_authority(
+        self,
+        authority: OwnerAuthority,
+        lease_seconds: float = 30.0,
+    ) -> OwnerAuthority:
+        renewed = await self.renew(
+            authority.session_id,
+            authority.owner_id,
+            lease_seconds=lease_seconds,
+            new_fencing_token=authority.epoch,
+            current_fencing_token=authority.epoch,
+        )
+        if not renewed:
+            raise SessionOwnershipConflictError("stale owner or fencing token rejected")
+        return authority
 
 
 class SQLiteSessionOwnerStore:
