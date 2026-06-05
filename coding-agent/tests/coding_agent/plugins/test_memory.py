@@ -8,7 +8,6 @@ from agentkit.runtime.hook_runtime import HookRuntime
 from agentkit.runtime.hookspecs import HOOK_SPECS
 from coding_agent.plugins.memory import MemoryPlugin
 from coding_agent.plugins.storage import StoragePlugin
-from coding_agent.plugins.topic import TopicPlugin
 from agentkit.directive.types import MemoryRecord
 from agentkit.tape.tape import Tape
 from agentkit.tape.models import Entry
@@ -364,50 +363,20 @@ class TestMemoryPluginSessionEvents:
         assert plugin._memories[0]["summary"] == "Topic topic-1 completed"
         assert plugin._memories[0]["tags"] == ["src/auth.py"]
 
-    def test_topic_end_event_uses_emitted_summary_from_topic_plugin(self):
+    def test_topic_end_event_uses_emitted_summary(self):
         registry = PluginRegistry(specs=HOOK_SPECS)
-        topic = TopicPlugin(overlap_threshold=0.2, min_entries_before_detect=2)
         memory = MemoryPlugin()
-        registry.register(topic)
         registry.register(memory)
         runtime = HookRuntime(registry, specs=HOOK_SPECS)
-
-        tape = Tape()
-
-        class FakeCtx:
-            def __init__(self, tape):
-                self.tape = tape
-                self.plugin_states = {}
-
-        ctx = FakeCtx(tape)
-
-        tape.append(
-            Entry(kind="message", payload={"role": "user", "content": "fix auth"})
+        runtime.notify(
+            "on_session_event",
+            event_type="topic_end",
+            payload={
+                "topic_id": "topic-1",
+                "files": ["src/auth.py"],
+                "summary": "Topic involved files: src/auth.py",
+            },
         )
-        tape.append(
-            Entry(
-                kind="tool_call",
-                payload={"name": "file_read", "arguments": {"path": "src/auth.py"}},
-            )
-        )
-        tape.append(
-            Entry(kind="message", payload={"role": "assistant", "content": "done"})
-        )
-        topic.on_checkpoint(ctx=ctx, runtime=runtime)
-
-        tape.append(
-            Entry(kind="message", payload={"role": "user", "content": "fix ui"})
-        )
-        tape.append(
-            Entry(
-                kind="tool_call",
-                payload={"name": "file_read", "arguments": {"path": "src/ui/app.tsx"}},
-            )
-        )
-        tape.append(
-            Entry(kind="message", payload={"role": "assistant", "content": "done"})
-        )
-        topic.on_checkpoint(ctx=ctx, runtime=runtime)
 
         assert len(memory._memories) == 1
         assert memory._memories[0]["summary"] == "Topic involved files: src/auth.py"

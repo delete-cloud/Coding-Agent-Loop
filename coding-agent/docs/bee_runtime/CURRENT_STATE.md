@@ -18,7 +18,6 @@ Relevant files:
 - `src/coding_agent/topic_lifecycle.py`
 - `src/coding_agent/topic_recall.py`
 - `src/coding_agent/topic_provenance.py`
-- `src/coding_agent/plugins/topic.py`
 - `tests/coding_agent/test_topic_lifecycle.py`
 - `tests/coding_agent/test_topic_layer_smoke.py`
 - `docs/adr/0039-topic-layer-tape-view-boundaries.md`
@@ -32,18 +31,17 @@ Current behavior:
 - `ContextPack` integration can carry `source_topic_ids` and `source_entry_ranges`.
 - Prometheus must not use `topic_id` labels.
 
-Compatibility and privacy caveat:
+Compatibility and privacy status:
 
-- The legacy `TopicPlugin` still exists in `src/coding_agent/plugins/topic.py`.
-- It detects topic shifts from recent file overlap and writes `topic_start` / `topic_end` anchors plus `topic_start` / `topic_end` session events.
-- Its `topic_start` path can store a truncated first user message in anchor payload `content` and event `label`.
-- ADR-0039 already identifies this as a compatibility/privacy risk. G97 must inspect, migrate, bypass, or explicitly supersede this plugin path before adding Bee-specific topic anchors so Bee work does not create conflicting anchors or repeat raw-message exposure.
+- The legacy file-overlap `TopicPlugin` has been removed from the default application path.
+- That removal also removes the default inferred producer of `topic_start` and `topic_end` session events. Bee and scheduled work should bind to durable Topic records and product anchors instead of relying on those legacy inferred events.
+- Bee-specific anchors should continue to use safe product metadata through durable Topic helpers and should not reintroduce raw prompt/message/content/command output in anchors or events.
 
 Bee implications:
 
 - A Bee workflow should bind to one Topic.
 - Bee task/node provenance can reference `topic_id` in durable product records and console routes, but not in Prometheus labels.
-- Bee-specific anchors should be additive product anchors on the Topic tape range only after resolving the legacy `TopicPlugin` compatibility boundary. They must carry safe bounded metadata only.
+- Bee-specific anchors should be additive product anchors on the Topic tape range. They must carry safe bounded metadata only.
 
 ## Existing Scheduled Run Foundation
 
@@ -214,7 +212,6 @@ Production files:
 
 - `src/coding_agent/bee_runtime.py` or `src/coding_agent/bee.py`
 - `src/coding_agent/topic_lifecycle.py`
-- `src/coding_agent/plugins/topic.py`
 - `src/coding_agent/scheduled_runs.py`
 - `src/coding_agent/observability.py`
 - `src/coding_agent/ui/developer_console.py`

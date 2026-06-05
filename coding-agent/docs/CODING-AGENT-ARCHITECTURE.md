@@ -11,7 +11,7 @@
 - **Wire protocol** — Typed dataclasses (`StreamDelta`, `ToolCallDelta`, `TurnEnd`, etc.) decouple agent logic from presentation
 - **Pluggable providers** — Anthropic, OpenAI-compatible, GitHub Copilot, and Kimi-family backends
 - **Rich TUI** — Scrollback-based streaming renderer using `prompt_toolkit` + `rich`
-- **14 plugins** — All domain behavior injected via agentkit's hook system, including skills and MCP integration
+- **13 plugins** — All domain behavior injected via agentkit's hook system, including skills and MCP integration
 
 ### Relationship to AgentKit
 
@@ -53,7 +53,7 @@ The application follows a strict layered dependency graph. Each layer depends on
 │  wire/protocol.py · wire/local.py               │
 ├─────────────────────────────────────────────────┤
 │             Plugin Layer                         │
-│  14 plugins implementing agentkit hooks          │
+│  13 plugins implementing agentkit hooks          │
 ├─────────────────────────────────────────────────┤
 │            Provider Layer                        │
 │  base.py · anthropic.py · openai_compat.py      │
@@ -119,7 +119,7 @@ src/coding_agent/
 │
 ├── metrics.py               # Application metrics
 │
-├── plugins/                 # AgentKit hook implementations (14 plugins)
+├── plugins/                 # AgentKit hook implementations (13 plugins)
 │   ├── approval.py          #   approve_tool_call → Approve/Reject/AskUser
 │   ├── core_tools.py        #   get_tools + execute_tool → ToolRegistry
 │   ├── doom_detector.py     #   on_checkpoint → doom loop detection
@@ -132,8 +132,7 @@ src/coding_agent/
 │   ├── shell_session.py     #   mount + on_checkpoint → shell state
 │   ├── skills.py            #   build_context + execute_tool → skill discovery/activation
 │   ├── storage.py           #   provide_storage → JSONL TapeStore
-│   ├── summarizer.py        #   resolve_context_window → compression
-│   └── topic.py             #   on_checkpoint → topic boundary detection
+│   └── summarizer.py        #   resolve_context_window → compression
 │
 ├── providers/               # LLM provider implementations
 │   ├── base.py              #   ChatProvider protocol, StreamEvent, ToolCall
@@ -224,7 +223,7 @@ def create_agent(...) -> tuple[Pipeline, PipelineContext]:
     # 2. Create PluginRegistry with agentkit HOOK_SPECS
     registry = PluginRegistry(specs=HOOK_SPECS)
 
-    # 3. Register all 14 plugins via factory lambdas
+    # 3. Register plugins via factory lambdas
     plugin_factories = {
         "llm_provider": lambda: LLMProviderPlugin(...),
         "storage":      lambda: StoragePlugin(...),
@@ -235,7 +234,6 @@ def create_agent(...) -> tuple[Pipeline, PipelineContext]:
         "shell_session": lambda: shell_session,
         "doom_detector": lambda: DoomDetectorPlugin(...),
         "parallel_executor": lambda: ParallelExecutorPlugin(...),
-        "topic":        lambda: TopicPlugin(...),
         "session_metrics": lambda: SessionMetricsPlugin(),
         "skills":       lambda: SkillsPlugin(...),
         "mcp":          lambda: MCPPlugin(...),
@@ -383,7 +381,7 @@ The `request_approval` flow:
 
 ### Plugin Registration
 
-All 14 plugins implement the agentkit `Plugin` protocol: a `hooks()` method returning `dict[str, Callable]`, and a `state_key` class attribute.
+All plugins implement the agentkit `Plugin` protocol: a `hooks()` method returning `dict[str, Callable]`, and a `state_key` class attribute.
 
 ```python
 class SomePlugin:
@@ -409,7 +407,6 @@ Plugins are registered in `create_agent()` via factory lambdas, supporting defer
 | **MCPPlugin** | `mcp` | `mount`, `get_proxy_tools`, `execute_proxy_tool`, `on_checkpoint` | Starts MCP servers and exposes their tools through `search_tools`/`call_tool` |
 | **DoomDetectorPlugin** | `doom_detector` | `on_checkpoint` | Detects N consecutive identical tool calls |
 | **ParallelExecutorPlugin** | `parallel_executor` | `execute_tools_batch` | Dependency-aware parallel tool execution |
-| **TopicPlugin** | `topic` | `on_checkpoint`, `on_session_event`, `mount` | File-overlap-based topic boundary detection |
 | **SessionMetricsPlugin** | `session_metrics` | `on_checkpoint`, `on_session_event` | Per-turn and per-topic performance metrics |
 | **ShellSessionPlugin** | `shell_session` | `mount`, `on_checkpoint` | Persistent CWD + env tracking across tool calls |
 | **KBPlugin** | `kb` | `build_context` | KB chunk injection |
@@ -444,7 +441,6 @@ Pipeline.run_turn()
     │       │       └── execute_tools_batch → ParallelExecutorPlugin
     │       │
     │       └── on_checkpoint ──→ DoomDetectorPlugin
-    │                           → TopicPlugin
     │                           → SessionMetricsPlugin
     │                           → MemoryPlugin
     │                           → ShellSessionPlugin
@@ -942,15 +938,9 @@ If the tape has `topic_finalized` anchors and exceeds `max_entries`, fold at the
 **Strategy 2 — Entry-Count Truncation:**
 Fallback when no topic boundaries exist. Keeps the last `keep_recent` entries verbatim, summarizes the rest into an anchor.
 
-### Topic Detection
+### Topic Lifecycle
 
-`TopicPlugin` detects topic shifts by monitoring file-path overlap between turns:
-
-1. Extract file paths from tool call arguments
-2. Compare with current topic's file set
-3. If overlap ratio < `overlap_threshold` (default: 0.2) → new topic
-4. Insert `topic_start` anchor + emit `on_session_event`
-5. Previous topic gets `fold_boundary` anchor (used by summarizer)
+Coding Agent product topics are explicit durable tape ranges managed by `TopicLifecycle` and `PGTopicStore`. The legacy file-overlap `TopicPlugin` is no longer part of the default application plugin set. Product topic lifecycle writes safe product anchors and durable records instead of inferring topic switches from raw tool-call file overlap.
 
 ### Memory Grounding
 
@@ -997,7 +987,6 @@ __main__.py
 │   ├── memory.py → agentkit (MemoryRecord, Tape, Entry)
 │   ├── doom_detector.py → (no external deps)
 │   ├── parallel_executor.py → (asyncio only)
-│   ├── topic.py → agentkit (Tape, Entry)
 │   ├── metrics.py → (stdlib only)
 │   └── shell_session.py → (stdlib only)
 │
@@ -1071,7 +1060,6 @@ InteractiveSession._process_message("fix the bug in main.py")
                     │
                     ├── [on_checkpoint]
                     │       ├── DoomDetectorPlugin: check for loops
-                    │       ├── TopicPlugin: detect topic shift
                     │       ├── SessionMetricsPlugin: update counters
                     │       └── MemoryPlugin: cache file tags
                     │

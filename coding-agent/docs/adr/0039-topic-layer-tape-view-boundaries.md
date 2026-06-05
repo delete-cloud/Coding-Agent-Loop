@@ -3,6 +3,13 @@
 **Status**: Accepted
 **Date**: 2026-05-21
 
+**Supersession note (2026-06-05)**: The legacy file-overlap `TopicPlugin`
+referenced below has since been removed from the default Coding Agent
+application path. Durable Topic lifecycle now uses `TopicLifecycle` and
+product-layer stores; `topic_start`/`topic_end` encoded anchors remain
+supported, but inferred `topic_start`/`topic_end` session events are no longer
+emitted by default.
+
 ## Context
 
 The repository already has durable sessions, durable runs, stable tape timelines, context packs, memory evidence, evaluation fixtures, action safety records, observability, developer console pages, dogfood evidence, and workspace providers. G77 also found an older `TopicPlugin` in Coding Agent that detects file-overlap topic shifts, writes `topic_start` and `topic_end` anchors, and emits session events, but it does not provide durable topic records, searchable topic ranges, recall links, topic status, topic cost aggregates, or safe console-ready topic views.

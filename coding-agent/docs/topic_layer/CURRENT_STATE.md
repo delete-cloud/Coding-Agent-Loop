@@ -6,7 +6,7 @@ G77 inspected the existing Tape, Run, Context, Memory, Evaluation, Developer Con
 
 - AgentKit already has generic tape entries, anchors, tape views, and optional debug queries. It does not have a first-class Topic store or Topic API.
 - Current anchor types include `topic_start` and `topic_end`; deserialization accepts legacy `topic_initial` and `topic_finalized` by mapping them to those existing anchor names.
-- Coding Agent already has a plugin-local `TopicPlugin` that detects file-overlap topic shifts and writes `topic_start`/`topic_end` anchors. It is not a durable Topic layer.
+- Coding Agent no longer wires the legacy plugin-local `TopicPlugin`. Product topics are explicit durable `TopicRecord` ranges managed through `TopicLifecycle`.
 - Coding Agent sessions own stable tape timelines. Runs are durable execution records that may reference a tape. A future Topic should be a range on a tape, not a replacement for Session, Run, or Tape.
 - ContextPack and memory evidence already carry provenance-friendly fields, but they do not yet model topic ranges, recalled topics, or topic-derived summary evidence.
 - Developer Console already has pages that can be extended with Topic list/detail views and Topic filters. It renders safe summaries rather than raw prompts, command output, stdout, stderr, or secrets.
@@ -86,30 +86,17 @@ The durable identity model is session/run/tape-based:
 
 ADR-0029 defines durable runtime identity around `session_id`, `run_id`/`turn_id`, and `tape_id`. Topic must not be modeled as a Session or Run. It should be a business context/range on the stable tape and should be allowed to reference runs that fall inside that range.
 
-## Existing Coding Agent Topic Plugin
+## Removed Legacy Topic Plugin
 
-`src/coding_agent/plugins/topic.py` defines `TopicPlugin`, which is already wired into the Coding Agent app plugin set from `src/coding_agent/app.py`.
+The old `src/coding_agent/plugins/topic.py` file-overlap detector has been removed from the default application path. It was plugin-local state, not a durable Topic model, and it could write truncated user message content into `topic_start` anchor payloads and session event labels.
 
-Current behavior:
+Current Topic work should use `src/coding_agent/topic_lifecycle.py` and `src/coding_agent/topic_store.py` instead:
 
-- Plugin state key: `topic`
-- Hooks: `on_checkpoint`, `on_session_event`, and `mount`
-- Maintains in-memory `_current_topic_id`, `_current_topic_files`, and `_topic_count`
-- Starts a topic when checkpointing sees enough tape activity and no topic is open
-- Ends and starts a new topic when recent file overlap falls below the configured threshold
-- Writes `topic_start` and `topic_end` anchors to the tape
-- Emits `topic_start` and `topic_end` session events through `runtime.notify(...)`
-
-Current limitations and risks:
-
-- Topic ids are generated as short random `topic-*` ids and are not durable records.
-- Open/finalized/aborted status is not persisted.
-- Anchor sequence ranges are not indexed as topic ranges.
-- Recall links, topic summaries, topic cost aggregates, and topic-level provenance do not exist.
-- `topic_start` anchor payload currently stores a truncated first user message as `payload.content`, and the emitted `topic_start` event uses the same text as `label`. This is existing raw user-message content storage/exposure risk and must be corrected or bypassed before any new console/API surface renders topic anchors or event payload values.
-- `topic_end` anchors are structural boundaries with `meta.skip = True`, and `Anchor.fold_boundary` treats `topic_end` as a fold boundary.
-
-G79-G84 should reuse, migrate, or deliberately supersede this plugin-local lifecycle behavior instead of adding a parallel topic detector with conflicting anchors.
+- Product lifecycle anchors use safe bounded metadata.
+- Durable records carry open/finalized/aborted status and tape sequence ranges.
+- Recall links, topic summaries, topic cost aggregates, and topic-level provenance live in product-layer stores and helpers.
+- Encoded `topic_start` and `topic_end` anchor types remain supported for compatibility with generic tape anchors and `TopicLifecycle`.
+- The old plugin was also the default producer of `topic_start` and `topic_end` session events. Removing it means memory compaction and plugin-local per-topic metrics no longer trigger automatically from inferred file-overlap topics; they only run when an explicit product path emits those events.
 
 ## Context Pack And Retrieval Provenance
 
@@ -135,7 +122,7 @@ Future Topic integration can add topic metadata to context pack items through JS
 - working memories
 - topic file tags used for scoped recall
 
-The memory plugin already reacts to a `topic_end` session event and can compact working memory into an evidence-backed long-term memory. This is not a durable Topic model; it is plugin-local behavior and should be treated as prior topic-adjacent behavior.
+The memory plugin still reacts to explicit `topic_end` session events and can compact working memory into an evidence-backed long-term memory. This event handling is topic-adjacent plugin behavior, not the durable Topic model itself, and there is no longer a default file-overlap plugin that emits those events automatically.
 
 Memory evidence is normalized into dictionaries with:
 
@@ -211,7 +198,7 @@ Future topic views can optionally show workspace references by joining through r
 Likely production files for G79-G83:
 
 - `src/coding_agent/topic_store.py` or equivalent product-layer module for durable Topic records.
-- `src/coding_agent/plugins/topic.py` for migration from plugin-local topic detection to durable Topic lifecycle anchors, including removal or sanitization of raw user-message snippets in topic anchors/events.
+- `src/coding_agent/topic_lifecycle.py` for durable Topic lifecycle anchors.
 - `src/coding_agent/ui/session_manager.py` for app-owned wiring and safe methods that create/finalize/abort/list topics.
 - `src/coding_agent/ui/http_server.py` for Topic API/console routes and safe summaries.
 - `src/coding_agent/ui/developer_console.py` for Topic dataclasses and renderers.

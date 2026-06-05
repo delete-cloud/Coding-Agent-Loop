@@ -152,8 +152,49 @@ class TestBootstrap:
         assert "memory" in plugin_ids
         assert "doom_detector" in plugin_ids
         assert "parallel_executor" in plugin_ids
+        assert "topic" not in plugin_ids
         assert "session_metrics" in plugin_ids
         assert "kb" not in plugin_ids
+
+    def test_default_plugin_set_excludes_legacy_topic_plugin(self, tmp_path):
+        config_path = tmp_path / "agent.toml"
+        config_path.write_text(
+            """
+[agent]
+name = "test-agent"
+model = "claude-sonnet-4-20250514"
+provider = "anthropic"
+""".strip()
+        )
+
+        pipeline, _ = create_agent(
+            config_path=config_path,
+            data_dir=tmp_path / "data",
+            api_key="sk-test",
+        )
+
+        assert "topic" not in pipeline._registry.plugin_ids()
+
+    def test_explicit_legacy_topic_plugin_config_fails_closed(self, tmp_path):
+        config_path = tmp_path / "agent.toml"
+        config_path.write_text(
+            """
+[agent]
+name = "test-agent"
+model = "claude-sonnet-4-20250514"
+provider = "anthropic"
+
+[agent.plugins]
+enabled = ["topic"]
+""".strip()
+        )
+
+        with pytest.raises(ValueError, match="unsupported plugin in config: topic"):
+            create_agent(
+                config_path=config_path,
+                data_dir=tmp_path / "data",
+                api_key="sk-test",
+            )
 
     def test_kb_plugin_requires_explicit_enablement(self, tmp_path):
         config_path = tmp_path / "agent.toml"

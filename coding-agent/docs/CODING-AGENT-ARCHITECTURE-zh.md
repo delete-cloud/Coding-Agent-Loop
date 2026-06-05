@@ -53,7 +53,7 @@ AgentKit 提供**机制**（流水线执行、钩子分发、对话 Tape）。Co
 │  wire/protocol.py · wire/local.py               │
 ├─────────────────────────────────────────────────┤
 │             插件层                               │
-│  实现 agentkit 钩子的 14 个插件                  │
+│  实现 agentkit 钩子的 13 个插件                  │
 ├─────────────────────────────────────────────────┤
 │            Provider 层                           │
 │  base.py · anthropic.py · openai_compat.py      │
@@ -119,7 +119,7 @@ src/coding_agent/
 │
 ├── metrics.py               # 应用指标
 │
-├── plugins/                 # AgentKit 钩子实现（14 个插件）
+├── plugins/                 # AgentKit 钩子实现（13 个插件）
 │   ├── approval.py          #   approve_tool_call → Approve/Reject/AskUser
 │   ├── core_tools.py        #   get_tools + execute_tool → ToolRegistry
 │   ├── doom_detector.py     #   on_checkpoint → Doom 循环检测
@@ -131,8 +131,7 @@ src/coding_agent/
 │   ├── shell_session.py     #   mount + on_checkpoint → Shell 状态
 │   ├── skills.py            #   build_context + execute_tool → 技能发现与激活
 │   ├── storage.py           #   provide_storage → JSONL TapeStore
-│   ├── summarizer.py        #   resolve_context_window → 压缩
-│   └── topic.py             #   on_checkpoint → 主题边界检测
+│   └── summarizer.py        #   resolve_context_window → 压缩
 │
 ├── providers/               # LLM Provider 实现
 │   ├── base.py              #   ChatProvider 协议，StreamEvent，ToolCall
@@ -234,7 +233,6 @@ def create_agent(...) -> tuple[Pipeline, PipelineContext]:
         "shell_session":     lambda: shell_session,
         "doom_detector":     lambda: DoomDetectorPlugin(...),
         "parallel_executor": lambda: ParallelExecutorPlugin(...),
-        "topic":             lambda: TopicPlugin(...),
         "session_metrics":   lambda: SessionMetricsPlugin(),
         "skills":            lambda: SkillsPlugin(...),
         "mcp":               lambda: MCPPlugin(...),
@@ -381,7 +379,7 @@ class LocalWire:
 
 ### 插件注册
 
-所有 14 个插件均实现 agentkit 的 `Plugin` 协议：一个返回 `dict[str, Callable]` 的 `hooks()` 方法，以及一个 `state_key` 类属性。
+所有插件均实现 agentkit 的 `Plugin` 协议：一个返回 `dict[str, Callable]` 的 `hooks()` 方法，以及一个 `state_key` 类属性。
 
 ```python
 class SomePlugin:
@@ -407,7 +405,6 @@ class SomePlugin:
 | **MCPPlugin** | `mcp` | `mount`、`get_proxy_tools`、`execute_proxy_tool`、`on_checkpoint` | 启动 MCP 服务，并通过 `search_tools`/`call_tool` 暴露其工具 |
 | **DoomDetectorPlugin** | `doom_detector` | `on_checkpoint` | 检测 N 次连续相同工具调用 |
 | **ParallelExecutorPlugin** | `parallel_executor` | `execute_tools_batch` | 依赖感知的并行工具执行 |
-| **TopicPlugin** | `topic` | `on_checkpoint`、`on_session_event`、`mount` | 基于文件重叠的主题边界检测 |
 | **SessionMetricsPlugin** | `session_metrics` | `on_checkpoint`、`on_session_event` | 按轮次和主题统计性能指标 |
 | **ShellSessionPlugin** | `shell_session` | `mount`、`on_checkpoint` | 跨工具调用的持久化 CWD + 环境变量追踪 |
 | **KBPlugin** | `kb` | `build_context` | KB 片段注入 |
@@ -442,7 +439,6 @@ Pipeline.run_turn()
     │       │       └── execute_tools_batch → ParallelExecutorPlugin
     │       │
     │       └── on_checkpoint ──→ DoomDetectorPlugin
-    │                           → TopicPlugin
     │                           → SessionMetricsPlugin
     │                           → MemoryPlugin
     │                           → ShellSessionPlugin
@@ -909,15 +905,9 @@ elif provider in ("kimi-code", "kimi-code-anthropic") and no api_key:
 **策略 2 — 条目数截断：**
 无主题边界时的回退方案。保留最近 `keep_recent` 条条目的原文，其余压缩为一个锚点。
 
-### 主题检测
+### 主题生命周期
 
-`TopicPlugin` 通过监控轮次间文件路径的重叠来检测主题切换：
-
-1. 从工具调用参数中提取文件路径
-2. 与当前主题的文件集合比较
-3. 若重叠率 < `overlap_threshold`（默认：0.2）→ 新主题
-4. 插入 `topic_start` 锚点 + 触发 `on_session_event`
-5. 上一个主题获得 `fold_boundary` 锚点（供摘要器使用）
+Coding Agent 产品 Topic 是由 `TopicLifecycle` 和 `PGTopicStore` 管理的显式持久化 tape 范围。旧的基于文件重叠推断主题切换的 `TopicPlugin` 不再属于默认应用插件集合。产品级 Topic 生命周期写入安全的产品锚点和持久化记录，而不是从原始工具调用文件重叠中推断主题。
 
 ### 记忆 Grounding
 
@@ -964,7 +954,6 @@ __main__.py
 │   ├── memory.py → agentkit（MemoryRecord, Tape, Entry）
 │   ├── doom_detector.py →（无外部依赖）
 │   ├── parallel_executor.py →（仅 asyncio）
-│   ├── topic.py → agentkit（Tape, Entry）
 │   ├── metrics.py →（仅标准库）
 │   └── shell_session.py →（仅标准库）
 │
@@ -1038,7 +1027,6 @@ InteractiveSession._process_message("fix the bug in main.py")
                     │
                     ├── [on_checkpoint]
                     │       ├── DoomDetectorPlugin：检查循环
-                    │       ├── TopicPlugin：检测主题切换
                     │       ├── SessionMetricsPlugin：更新计数器
                     │       └── MemoryPlugin：缓存文件标签
                     │
