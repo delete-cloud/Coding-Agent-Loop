@@ -7,6 +7,7 @@ from typing import Any, cast
 
 from agentkit.storage.checkpoint_fs import FSCheckpointStore
 from agentkit.storage.sqlite import SQLiteCheckpointStore, SQLiteTapeStore
+from coding_agent.local_storage import local_sqlite_path
 
 
 @dataclass(frozen=True)
@@ -36,13 +37,13 @@ async def migrate_legacy_storage_to_sqlite(
     return LegacySQLiteMigrationReport(
         tapes=await migrate_jsonl_tapes_to_sqlite(
             tapes_dir or resolved_data_dir / "tapes",
-            tape_sqlite_path or resolved_data_dir / "tape.sqlite3",
+            tape_sqlite_path or local_sqlite_path(resolved_data_dir),
             replace=replace_tapes,
             dry_run=dry_run,
         ),
         checkpoints=await migrate_fs_checkpoints_to_sqlite(
             checkpoints_dir or resolved_data_dir / "checkpoints",
-            checkpoint_sqlite_path or resolved_data_dir / "checkpoints.sqlite3",
+            checkpoint_sqlite_path or local_sqlite_path(resolved_data_dir),
             dry_run=dry_run,
         ),
     )

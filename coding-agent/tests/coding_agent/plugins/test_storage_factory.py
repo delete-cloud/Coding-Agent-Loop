@@ -7,12 +7,12 @@ from agentkit.storage.pg import PGPool
 
 
 class TestStoragePluginFactory:
-    def test_default_backend_is_jsonl(self, tmp_path: Path):
+    def test_default_backend_is_sqlite(self, tmp_path: Path):
         from coding_agent.plugins.storage import StoragePlugin
 
         plugin = StoragePlugin(data_dir=tmp_path)
 
-        assert plugin._backend == "jsonl"
+        assert plugin._backend == "sqlite"
 
     def test_jsonl_backend_creates_jsonl_store(self, tmp_path: Path):
         from coding_agent.plugins.storage import JSONLTapeStore, StoragePlugin
@@ -80,6 +80,31 @@ class TestStoragePluginFactory:
         store = plugin._create_session_store()
 
         assert isinstance(store, FileSessionStore)
+
+    def test_sqlite_backend_defaults_to_local_sqlite_file(self, tmp_path: Path):
+        from agentkit.storage.sqlite import SQLiteTapeStore
+        from coding_agent.plugins.storage import StoragePlugin
+
+        plugin = StoragePlugin(data_dir=tmp_path, backend="sqlite")
+        store = plugin._create_tape_store()
+
+        assert isinstance(store, SQLiteTapeStore)
+        assert store._path == tmp_path / "local.sqlite3"
+
+    def test_sqlite_backend_uses_storage_paths_local(self, tmp_path: Path):
+        from agentkit.storage.sqlite import SQLiteTapeStore
+        from coding_agent.plugins.storage import StoragePlugin
+
+        custom_path = tmp_path / "custom" / "bundle.sqlite3"
+        plugin = StoragePlugin(
+            data_dir=tmp_path,
+            backend="sqlite",
+            config={"paths": {"local": str(custom_path)}},
+        )
+        store = plugin._create_tape_store()
+
+        assert isinstance(store, SQLiteTapeStore)
+        assert store._path == custom_path
 
     def test_provide_storage_uses_factory(self, tmp_path: Path):
         from agentkit.tape.store import ForkTapeStore

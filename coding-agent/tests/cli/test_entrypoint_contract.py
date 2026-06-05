@@ -26,6 +26,20 @@ _CREDENTIAL_ENV_KEYS = (
 )
 
 
+def _local_sqlite_storage_config(data_dir: Path) -> dict[str, object]:
+    local_db = data_dir / "local.sqlite3"
+    return {
+        "http_session_backend": "sqlite",
+        "http_session_path": str(local_db),
+        "tape_backend": "sqlite",
+        "tape_path": str(local_db),
+        "checkpoint_backend": "sqlite",
+        "checkpoint_path": str(local_db),
+        "runtime_backend": "sqlite",
+        "runtime_path": str(local_db),
+    }
+
+
 def test_module_help_lists_release_entrypoint_commands_without_credentials() -> None:
     completed = subprocess.run(
         [sys.executable, "-m", "coding_agent", "--help"],
@@ -148,10 +162,12 @@ def test_acp_command_uses_shared_provider_model(
 
 def test_acp_stdio_disables_agentkit_tracing(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     from coding_agent.cli import acp_command
 
     calls: list[tuple[str, object]] = []
+    monkeypatch.setenv("AGENT_DATA_DIR", str(tmp_path))
 
     class FakeManager:
         async def start_owner_lease_renewal(self) -> None:
@@ -176,6 +192,7 @@ def test_acp_stdio_disables_agentkit_tracing(
                 {
                     "storage_config": storage_config,
                     "owner_store_type": type(owner_store).__name__,
+                    "owner_store_path": str(owner_store._path),
                     "owner_id": owner_id,
                     "fencing_token_type": type(fencing_token).__name__,
                 },
@@ -205,13 +222,9 @@ def test_acp_stdio_disables_agentkit_tracing(
     assert calls[1] == (
         "create_manager",
         {
-            "storage_config": {
-                "http_session_backend": "fs",
-                "tape_backend": "sqlite",
-                "checkpoint_backend": "sqlite",
-                "runtime_backend": "sqlite",
-            },
+            "storage_config": _local_sqlite_storage_config(tmp_path),
             "owner_store_type": "SQLiteSessionOwnerStore",
+            "owner_store_path": str(tmp_path / "local.sqlite3"),
             "owner_id": calls[1][1]["owner_id"],
             "fencing_token_type": "int",
         },
@@ -354,12 +367,7 @@ def test_run_command_uses_managed_session(
         "init",
         {
             "args": (),
-            "kwargs": {
-                "storage_config": {
-                    "http_session_backend": "fs",
-                    "runtime_backend": "jsonl",
-                }
-            },
+            "kwargs": {"storage_config": _local_sqlite_storage_config(Path("./data"))},
         },
     )
     assert calls == [
@@ -539,12 +547,7 @@ def test_resume_command_uses_managed_session(
         "init",
         {
             "args": (),
-            "kwargs": {
-                "storage_config": {
-                    "http_session_backend": "fs",
-                    "runtime_backend": "jsonl",
-                }
-            },
+            "kwargs": {"storage_config": _local_sqlite_storage_config(Path("./data"))},
         },
     )
     assert calls == [
@@ -643,12 +646,7 @@ def test_local_sessions_list_reports_resume_context(
         "init",
         {
             "args": (),
-            "kwargs": {
-                "storage_config": {
-                    "http_session_backend": "fs",
-                    "runtime_backend": "jsonl",
-                }
-            },
+            "kwargs": {"storage_config": _local_sqlite_storage_config(Path("./data"))},
         },
     )
 
@@ -785,12 +783,7 @@ def test_local_sessions_checkpoints_lists_newest_first(
         "init",
         {
             "args": (),
-            "kwargs": {
-                "storage_config": {
-                    "http_session_backend": "fs",
-                    "runtime_backend": "jsonl",
-                }
-            },
+            "kwargs": {"storage_config": _local_sqlite_storage_config(Path("./data"))},
         },
     )
 

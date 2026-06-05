@@ -615,7 +615,7 @@ def create_session_store(
         resolved_path = (
             Path(file_path)
             if file_path is not None
-            else Path(os.environ.get("AGENT_DATA_DIR", "./data")) / "sessions.sqlite3"
+            else Path(os.environ.get("AGENT_DATA_DIR", "./data")) / "local.sqlite3"
         )
         return SQLiteSessionStore(resolved_path)
 

@@ -227,9 +227,8 @@ async def test_migrate_legacy_storage_to_sqlite_uses_default_paths(
     assert report.tapes.migrated == 1
     assert report.checkpoints.scanned == 1
     assert report.checkpoints.migrated == 1
-    assert await SQLiteTapeStore(tmp_path / "tape.sqlite3").load("tape-1") == [
+    local_sqlite = tmp_path / "local.sqlite3"
+    assert await SQLiteTapeStore(local_sqlite).load("tape-1") == [
         {"kind": "message", "payload": {"content": "source"}}
     ]
-    assert (
-        await SQLiteCheckpointStore(tmp_path / "checkpoints.sqlite3").load("cp-1")
-    ) is not None
+    assert await SQLiteCheckpointStore(local_sqlite).load("cp-1") is not None

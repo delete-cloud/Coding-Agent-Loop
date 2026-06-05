@@ -48,6 +48,10 @@ from coding_agent.approval import (
 )
 from coding_agent.approval.store import ApprovalStore
 from coding_agent.core import config as core_config
+from coding_agent.local_storage import (
+    local_sqlite_storage_config,
+    with_local_sqlite_bundle_paths,
+)
 from coding_agent.plugins.storage import JSONLTapeStore
 from coding_agent.providers.base import ToolSchema
 from coding_agent.runtime_store import (
@@ -792,10 +796,14 @@ class SessionManager:
         run_coordinator: RunCoordinator | None = None,
         local_daemon_executor: LocalDaemonExecutor | None = None,
     ):
-        self._storage_config = storage_config or {}
+        data_dir = Path(os.environ.get("AGENT_DATA_DIR", "./data"))
+        self._storage_config = (
+            with_local_sqlite_bundle_paths(dict(storage_config), data_dir)
+            if storage_config
+            else local_sqlite_storage_config(data_dir)
+        )
         self._pg_pool = pg_pool
         self._owns_pg_pool = False
-        data_dir = Path(os.environ.get("AGENT_DATA_DIR", "./data"))
         self._store = store or self._create_http_session_store()
         self._session_cache: dict[str, Session] = {}
         self._approval_stores: dict[str, ApprovalStore] = {}
@@ -1603,7 +1611,7 @@ class SessionManager:
             path = (
                 Path(path_obj)
                 if isinstance(path_obj, str) and path_obj.strip()
-                else data_dir / "tape.sqlite3"
+                else data_dir / "local.sqlite3"
             )
             return SQLiteTapeStore(path)
         return JSONLTapeStore(data_dir / "tapes")
@@ -1626,7 +1634,7 @@ class SessionManager:
             path = (
                 Path(path_obj)
                 if isinstance(path_obj, str) and path_obj.strip()
-                else data_dir / "checkpoints.sqlite3"
+                else data_dir / "local.sqlite3"
             )
             return SQLiteCheckpointStore(path)
         return FSCheckpointStore(data_dir / "checkpoints")
@@ -1655,8 +1663,7 @@ class SessionManager:
             path = (
                 Path(path_obj)
                 if isinstance(path_obj, str) and path_obj.strip()
-                else Path(os.environ.get("AGENT_DATA_DIR", "./data"))
-                / "runtime.sqlite3"
+                else Path(os.environ.get("AGENT_DATA_DIR", "./data")) / "local.sqlite3"
             )
             return SQLiteRuntimeStore(path)
         raise ValueError(f"unsupported storage.runtime_backend: {backend}")
