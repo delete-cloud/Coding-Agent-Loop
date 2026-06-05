@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import os
+from pathlib import Path
+import time
+import uuid
 
 import click
 
+from agentkit.tracing import configure_tracing
 from coding_agent.acp import AcpServer, run_stdio
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.cli.local_runtime import create_local_cli_session_manager
+from coding_agent.server.stores.session_owner_store import SQLiteSessionOwnerStore
 
 
 def _shared_cli_arg(ctx: click.Context, name: str) -> str | None:
@@ -40,11 +46,18 @@ async def _run_acp_stdio(
     approval_policy: str,
     max_steps: int,
 ) -> None:
+    configure_tracing(enabled=False)
+    data_dir = Path(os.environ.get("AGENT_DATA_DIR", "./data"))
     manager = create_local_cli_session_manager(
         storage_config={
             "http_session_backend": "fs",
-            "runtime_backend": "jsonl",
-        }
+            "tape_backend": "sqlite",
+            "checkpoint_backend": "sqlite",
+            "runtime_backend": "sqlite",
+        },
+        owner_store=SQLiteSessionOwnerStore(data_dir / "session_owners.sqlite3"),
+        owner_id=f"acp-stdio:{uuid.uuid4().hex}",
+        fencing_token=time.time_ns(),
     )
     try:
         server = AcpServer(

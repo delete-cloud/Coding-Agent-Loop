@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from pathlib import Path
+import sqlite3
+import threading
 from typing import Protocol
 
 from agentkit.storage.pg import PGPool, PGSessionOwnerStore
@@ -166,3 +169,218 @@ class SessionOwnerStore:
             lease_expires_at=lease_expires_at,
             fencing_token=fencing_token,
         )
+
+
+class SQLiteSessionOwnerStore:
+    _CREATE_SCHEMA_SQL = """
+    CREATE TABLE IF NOT EXISTS session_owners (
+        session_id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        lease_expires_at TEXT NOT NULL,
+        fencing_token INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._lock = threading.Lock()
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        with self._connect() as connection:
+            connection.execute(self._CREATE_SCHEMA_SQL)
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self._path, timeout=5.0)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout = 5000")
+        return connection
+
+    async def acquire(
+        self,
+        session_id: str,
+        owner_id: str,
+        lease_seconds: float = 30.0,
+        fencing_token: int = 1,
+    ) -> bool:
+        _require_owner_input(
+            session_id=session_id,
+            owner_id=owner_id,
+            lease_seconds=lease_seconds,
+            fencing_token=fencing_token,
+        )
+        now = datetime.now(UTC)
+        expires_at = now + timedelta(seconds=lease_seconds)
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT lease_expires_at, fencing_token
+                FROM session_owners
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            ).fetchone()
+            if row is not None:
+                current_expiry = _datetime_from_sqlite_text(row["lease_expires_at"])
+                if current_expiry > now:
+                    return False
+                current_token = _required_sqlite_int(row, "fencing_token")
+                if fencing_token <= current_token:
+                    return False
+            connection.execute(
+                """
+                INSERT INTO session_owners (
+                    session_id, owner_id, lease_expires_at, fencing_token,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id)
+                DO UPDATE SET
+                    owner_id = excluded.owner_id,
+                    lease_expires_at = excluded.lease_expires_at,
+                    fencing_token = excluded.fencing_token,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    session_id,
+                    owner_id,
+                    _datetime_to_sqlite_text(expires_at),
+                    fencing_token,
+                    _datetime_to_sqlite_text(now),
+                    _datetime_to_sqlite_text(now),
+                ),
+            )
+        return True
+
+    async def renew(
+        self,
+        session_id: str,
+        owner_id: str,
+        lease_seconds: float = 30.0,
+        new_fencing_token: int = 2,
+        current_fencing_token: int = 1,
+    ) -> bool:
+        _require_owner_input(
+            session_id=session_id,
+            owner_id=owner_id,
+            lease_seconds=lease_seconds,
+            fencing_token=new_fencing_token,
+        )
+        if current_fencing_token <= 0:
+            raise ValueError("current_fencing_token must be positive")
+        now = datetime.now(UTC)
+        expires_at = now + timedelta(seconds=lease_seconds)
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                """
+                UPDATE session_owners
+                SET lease_expires_at = ?,
+                    fencing_token = ?,
+                    updated_at = ?
+                WHERE session_id = ?
+                  AND owner_id = ?
+                  AND lease_expires_at > ?
+                  AND fencing_token = ?
+                """,
+                (
+                    _datetime_to_sqlite_text(expires_at),
+                    new_fencing_token,
+                    _datetime_to_sqlite_text(now),
+                    session_id,
+                    owner_id,
+                    _datetime_to_sqlite_text(now),
+                    current_fencing_token,
+                ),
+            )
+        return cursor.rowcount == 1
+
+    async def release(
+        self,
+        session_id: str,
+        owner_id: str,
+        fencing_token: int,
+    ) -> bool:
+        _require_owner_input(
+            session_id=session_id,
+            owner_id=owner_id,
+            lease_seconds=1.0,
+            fencing_token=fencing_token,
+        )
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                """
+                DELETE FROM session_owners
+                WHERE session_id = ?
+                  AND owner_id = ?
+                  AND fencing_token = ?
+                """,
+                (session_id, owner_id, fencing_token),
+            )
+        return cursor.rowcount == 1
+
+    async def get_owner(self, session_id: str) -> SessionOwnerRecord | None:
+        if not session_id.strip():
+            raise ValueError("session_id must be non-empty")
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT owner_id, lease_expires_at, fencing_token
+                FROM session_owners
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return SessionOwnerRecord(
+            owner_id=_required_sqlite_str(row, "owner_id"),
+            lease_expires_at=_datetime_from_sqlite_text(row["lease_expires_at"]),
+            fencing_token=_required_sqlite_int(row, "fencing_token"),
+        )
+
+
+def _require_owner_input(
+    *,
+    session_id: str,
+    owner_id: str,
+    lease_seconds: float,
+    fencing_token: int,
+) -> None:
+    if not session_id.strip():
+        raise ValueError("session_id must be non-empty")
+    if not owner_id.strip():
+        raise ValueError("owner_id must be non-empty")
+    if lease_seconds <= 0:
+        raise ValueError("lease_seconds must be positive")
+    if fencing_token <= 0:
+        raise ValueError("fencing_token must be positive")
+
+
+def _datetime_to_sqlite_text(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat()
+
+
+def _datetime_from_sqlite_text(value: object) -> datetime:
+    if not isinstance(value, str):
+        raise TypeError("sqlite session owner datetime must be text")
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _required_sqlite_str(row: sqlite3.Row, key: str) -> str:
+    value = row[key]
+    if not isinstance(value, str):
+        raise TypeError(f"sqlite session owner row missing string {key}")
+    return value
+
+
+def _required_sqlite_int(row: sqlite3.Row, key: str) -> int:
+    value = row[key]
+    if not isinstance(value, int):
+        raise TypeError(f"sqlite session owner row missing int {key}")
+    return value

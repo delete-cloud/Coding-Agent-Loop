@@ -12,6 +12,7 @@ import pytest
 from coding_agent.acp.server import AcpServer, run_stdio
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.events import DisplayEvent
+from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictError
 from coding_agent.wire.local import LocalWire
 from coding_agent.wire.protocol import (
     ApprovalRequest,
@@ -44,6 +45,7 @@ class FakeManager:
             )
         ]
         self.additional_directories: list[str] = []
+        self.raise_owner_conflict = False
 
     async def create_session(self, **kwargs: Any) -> str:
         self.calls.append(("create_session", kwargs))
@@ -59,6 +61,11 @@ class FakeManager:
             last_activity=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
             default_run_target=None,
         )
+
+    async def acquire_session_owner(self, session_id: str) -> None:
+        self.calls.append(("acquire_session_owner", session_id))
+        if self.raise_owner_conflict:
+            raise SessionOwnershipConflictError("stale owner or fencing token rejected")
 
     async def list_sessions_async(self) -> list[str]:
         self.calls.append(("list_sessions_async", None))
@@ -750,6 +757,40 @@ async def test_session_load_updates_additional_directories_from_params(
 
 
 @pytest.mark.asyncio
+async def test_session_load_rejects_owner_conflict_before_param_updates(
+    tmp_path: Path,
+) -> None:
+    manager = FakeManager(repo_path=tmp_path)
+    manager.raise_owner_conflict = True
+    server = AcpServer(manager)
+
+    response = await server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "session/load",
+            "params": {
+                "sessionId": "sess-1",
+                "cwd": str(tmp_path),
+                "mcpServers": [],
+            },
+        }
+    )
+
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "error": {
+            "code": -32000,
+            "message": "stale owner or fencing token rejected",
+        },
+    }
+    assert ("get_session_async", "sess-1") in manager.calls
+    assert ("acquire_session_owner", "sess-1") in manager.calls
+    assert not any(call[0].startswith("update_session_") for call in manager.calls)
+
+
+@pytest.mark.asyncio
 async def test_session_resume_updates_session_params_without_replay(
     tmp_path: Path,
 ) -> None:
@@ -1113,8 +1154,9 @@ async def test_session_load_replays_display_events_before_response(
             },
         },
     ]
-    assert manager.calls[:5] == [
+    assert manager.calls[:6] == [
         ("get_session_async", "sess-1"),
+        ("acquire_session_owner", "sess-1"),
         (
             "update_session_mcp_servers",
             {"session_id": "sess-1", "mcp_servers": {}},
@@ -1605,6 +1647,47 @@ async def test_stdio_server_writes_jsonrpc_to_stdout_only() -> None:
     assert all(line.startswith('{"jsonrpc":"2.0"') for line in stdout)
     assert all(line.endswith("\n") for line in stdout)
     assert stderr == []
+
+
+@pytest.mark.asyncio
+async def test_stdio_server_drops_configured_tracing_logs_from_stdout(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from agentkit.runtime.pipeline import logger as pipeline_logger
+    from agentkit.tracing import configure_tracing
+
+    manager = FakeManager()
+    stdout: list[str] = []
+    stderr: list[str] = []
+    stdin = [
+        '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}\n',
+    ]
+
+    configure_tracing(enabled=True)
+    try:
+        await run_stdio(
+            AcpServer(manager),
+            stdin=stdin,
+            stdout=stdout.append,
+            stderr=stderr.append,
+        )
+        pipeline_logger.info("stage_start", stage="after_stdio", entry_count=1)
+    finally:
+        configure_tracing(enabled=False)
+
+    assert stdout == [
+        '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,'
+        '"agentCapabilities":{"loadSession":true,'
+        '"mcpCapabilities":{"http":false,"sse":false},'
+        '"promptCapabilities":{},'
+        '"sessionCapabilities":{"close":{},"list":{},"resume":{},'
+        '"additionalDirectories":{}}},'
+        '"agentInfo":{"name":"coding-agent","title":"Coding Agent",'
+        '"version":"0.1.0"},"authMethods":[]}}\n'
+    ]
+    assert stderr == []
+    captured = capsys.readouterr()
+    assert captured.out == ""
 
 
 @pytest.mark.asyncio

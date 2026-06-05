@@ -19,9 +19,29 @@ class FakeManagedSession:
 class FakeDelegate:
     def __init__(self) -> None:
         self.persisted = []
+        self.additional_directory_updates = []
+        self.owner_acquires = []
+        self.release_owned_sessions_called = False
+        self.close_called = False
 
     def _persist_session(self, session) -> None:
         self.persisted.append(session)
+
+    async def acquire_session_owner(self, session_id: str) -> None:
+        self.owner_acquires.append(session_id)
+
+    async def update_session_additional_directories(
+        self,
+        session_id: str,
+        additional_directories: list[str],
+    ) -> None:
+        self.additional_directory_updates.append((session_id, additional_directories))
+
+    async def release_owned_sessions(self) -> None:
+        self.release_owned_sessions_called = True
+
+    async def close(self) -> None:
+        self.close_called = True
 
 
 def test_server_backed_local_cli_attach_runtime_uses_session_binding_delegate() -> None:
@@ -43,3 +63,39 @@ def test_server_backed_local_cli_attach_runtime_uses_session_binding_delegate() 
     assert session.attached == (pipeline, ctx, adapter)
     assert session.tape_id == "repl-tape"
     assert delegate.persisted == [session]
+
+
+async def test_server_backed_local_cli_delegates_additional_directory_updates() -> None:
+    manager = object.__new__(ServerBackedLocalCliSessionManager)
+    delegate = FakeDelegate()
+    manager._delegate = delegate
+
+    await manager.update_session_additional_directories(
+        "session-1",
+        ["/workspace/extra"],
+    )
+
+    assert delegate.additional_directory_updates == [
+        ("session-1", ["/workspace/extra"])
+    ]
+
+
+async def test_server_backed_local_cli_delegates_owner_acquire() -> None:
+    manager = object.__new__(ServerBackedLocalCliSessionManager)
+    delegate = FakeDelegate()
+    manager._delegate = delegate
+
+    await manager.acquire_session_owner("session-1")
+
+    assert delegate.owner_acquires == ["session-1"]
+
+
+async def test_server_backed_local_cli_releases_owner_leases_before_close() -> None:
+    manager = object.__new__(ServerBackedLocalCliSessionManager)
+    delegate = FakeDelegate()
+    manager._delegate = delegate
+
+    await manager.close()
+
+    assert delegate.release_owned_sessions_called is True
+    assert delegate.close_called is True

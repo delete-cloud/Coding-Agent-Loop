@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 import pytest
 
 from coding_agent.server.stores.session_owner_store import (
     SessionOwnerRecord,
+    SQLiteSessionOwnerStore,
     SessionOwnerStore,
 )
 
@@ -115,4 +118,119 @@ async def test_session_owner_get_owner_returns_typed_record(
         owner_id="owner-a",
         lease_expires_at=owner.lease_expires_at,
         fencing_token=1,
+    )
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_owner_store_acquire_renew_release_and_takeover(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteSessionOwnerStore(tmp_path / "owners.sqlite3")
+
+    assert await store.acquire("s1", "owner-a", lease_seconds=30.0, fencing_token=1)
+    assert not await store.acquire(
+        "s1",
+        "owner-b",
+        lease_seconds=30.0,
+        fencing_token=2,
+    )
+
+    renewed = await store.renew(
+        "s1",
+        "owner-a",
+        lease_seconds=30.0,
+        new_fencing_token=2,
+        current_fencing_token=1,
+    )
+    owner = await store.get_owner("s1")
+
+    assert renewed is True
+    assert owner is not None
+    assert owner.owner_id == "owner-a"
+    assert owner.fencing_token == 2
+
+    assert await store.release("s1", "owner-a", fencing_token=2)
+    assert await store.get_owner("s1") is None
+
+    assert await store.acquire(
+        "s1",
+        "owner-dead",
+        lease_seconds=0.001,
+        fencing_token=3,
+    )
+    await asyncio.sleep(0.01)
+
+    assert await store.acquire("s1", "owner-b", lease_seconds=30.0, fencing_token=4)
+    taken = await store.get_owner("s1")
+
+    assert taken == SessionOwnerRecord(
+        owner_id="owner-b",
+        lease_expires_at=taken.lease_expires_at,
+        fencing_token=4,
+    )
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_owner_store_rejects_stale_owner(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteSessionOwnerStore(tmp_path / "owners.sqlite3")
+    assert await store.acquire("s1", "owner-a", lease_seconds=30.0, fencing_token=1)
+
+    assert not await store.renew(
+        "s1",
+        "owner-a",
+        lease_seconds=30.0,
+        new_fencing_token=2,
+        current_fencing_token=99,
+    )
+    assert not await store.release("s1", "owner-b", fencing_token=1)
+
+    owner = await store.get_owner("s1")
+
+    assert owner == SessionOwnerRecord(
+        owner_id="owner-a",
+        lease_expires_at=owner.lease_expires_at,
+        fencing_token=1,
+    )
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_owner_store_rejects_non_increasing_takeover_token(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteSessionOwnerStore(tmp_path / "owners.sqlite3")
+    assert await store.acquire(
+        "s1",
+        "owner-dead",
+        lease_seconds=0.001,
+        fencing_token=10,
+    )
+    await asyncio.sleep(0.01)
+
+    assert not await store.acquire(
+        "s1",
+        "owner-lower",
+        lease_seconds=30.0,
+        fencing_token=7,
+    )
+
+    owner = await store.get_owner("s1")
+    assert owner == SessionOwnerRecord(
+        owner_id="owner-dead",
+        lease_expires_at=owner.lease_expires_at,
+        fencing_token=10,
+    )
+
+    assert await store.acquire(
+        "s1",
+        "owner-next",
+        lease_seconds=30.0,
+        fencing_token=11,
+    )
+    taken = await store.get_owner("s1")
+    assert taken == SessionOwnerRecord(
+        owner_id="owner-next",
+        lease_expires_at=taken.lease_expires_at,
+        fencing_token=11,
     )

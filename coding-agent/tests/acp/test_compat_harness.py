@@ -143,6 +143,9 @@ class HarnessManager:
             default_run_target=None,
         )
 
+    async def acquire_session_owner(self, session_id: str) -> None:
+        self.calls.append(("acquire_session_owner", session_id))
+
     async def update_session_mcp_servers(
         self,
         session_id: str,

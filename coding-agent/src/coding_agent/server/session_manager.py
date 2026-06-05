@@ -2356,6 +2356,7 @@ class SessionManager:
         mcp_servers: dict[str, dict[str, Any]],
     ) -> None:
         session = await self.get_session_async(session_id)
+        await self._assert_owner(session_id)
         resolved_mcp_servers = _session_mcp_servers_from_store(mcp_servers)
         if session.mcp_servers == resolved_mcp_servers:
             return
@@ -2370,6 +2371,7 @@ class SessionManager:
         additional_directories: list[str],
     ) -> None:
         session = await self.get_session_async(session_id)
+        await self._assert_owner(session_id)
         resolved_additional_directories = _session_additional_directories_from_store(
             additional_directories
         )
@@ -2401,6 +2403,9 @@ class SessionManager:
         return self._hydrate_session(
             Session.from_store_data(cast(dict[str, Any], loaded))
         )
+
+    async def acquire_session_owner(self, session_id: str) -> None:
+        await self._acquire_owner_for_session(session_id)
 
     def has_session(self, session_id: str) -> bool:
         """Check if a session exists.

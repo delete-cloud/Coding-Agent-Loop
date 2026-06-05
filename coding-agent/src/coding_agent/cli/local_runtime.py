@@ -55,6 +55,8 @@ class LocalCliSessionManager(Protocol):
 
     async def get_session_async(self, session_id: str) -> Any: ...
 
+    async def acquire_session_owner(self, session_id: str) -> None: ...
+
     async def list_sessions_async(self) -> list[str]: ...
 
     async def close_session(self, session_id: str) -> None: ...
@@ -127,9 +129,17 @@ class ServerBackedLocalCliSessionManager:
             "runtime_backend": "jsonl",
         }
     )
+    owner_store: Any | None = None
+    owner_id: str | None = None
+    fencing_token: int | None = None
 
     def __post_init__(self) -> None:
-        self._delegate = SessionManager(storage_config=dict(self.storage_config))
+        self._delegate = SessionManager(
+            storage_config=dict(self.storage_config),
+            owner_store=self.owner_store,
+            owner_id=self.owner_id,
+            fencing_token=self.fencing_token,
+        )
 
     async def create_session(self, **kwargs: Any) -> str:
         return await self._delegate.create_session(**kwargs)
@@ -139,6 +149,9 @@ class ServerBackedLocalCliSessionManager:
 
     async def get_session_async(self, session_id: str) -> Any:
         return await self._delegate.get_session_async(session_id)
+
+    async def acquire_session_owner(self, session_id: str) -> None:
+        await self._delegate.acquire_session_owner(session_id)
 
     async def list_sessions_async(self) -> list[str]:
         return await self._delegate.list_sessions_async()
@@ -152,6 +165,16 @@ class ServerBackedLocalCliSessionManager:
         mcp_servers: dict[str, dict[str, Any]],
     ) -> None:
         await self._delegate.update_session_mcp_servers(session_id, mcp_servers)
+
+    async def update_session_additional_directories(
+        self,
+        session_id: str,
+        additional_directories: list[str],
+    ) -> None:
+        await self._delegate.update_session_additional_directories(
+            session_id,
+            additional_directories,
+        )
 
     async def list_runtime_runs(self, session_id: str) -> Any:
         return await self._delegate.list_runtime_runs(session_id)
@@ -234,12 +257,16 @@ class ServerBackedLocalCliSessionManager:
         self._delegate._persist_session(managed_session)
 
     async def close(self) -> None:
+        await self._delegate.release_owned_sessions()
         await self._delegate.close()
 
 
 def create_local_cli_session_manager(
     *,
     storage_config: dict[str, object] | None = None,
+    owner_store: Any | None = None,
+    owner_id: str | None = None,
+    fencing_token: int | None = None,
 ) -> LocalCliSessionManager:
     """Create the local REPL session manager.
 
@@ -248,9 +275,17 @@ def create_local_cli_session_manager(
     importing server/control-plane types directly.
     """
 
+    kwargs = {
+        "owner_store": owner_store,
+        "owner_id": owner_id,
+        "fencing_token": fencing_token,
+    }
     if storage_config is None:
-        return ServerBackedLocalCliSessionManager()
-    return ServerBackedLocalCliSessionManager(storage_config=storage_config)
+        return ServerBackedLocalCliSessionManager(**kwargs)
+    return ServerBackedLocalCliSessionManager(
+        storage_config=storage_config,
+        **kwargs,
+    )
 
 
 __all__ = [
