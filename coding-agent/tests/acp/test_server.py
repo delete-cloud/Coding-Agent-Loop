@@ -1266,6 +1266,63 @@ async def test_session_prompt_streams_agent_message_chunk_and_returns_end_turn()
 
 
 @pytest.mark.asyncio
+async def test_session_prompt_drains_error_chunks_before_error_response() -> None:
+    class ErrorFirstManager(FakeManager):
+        async def run_agent(self, session_id: str, prompt: str) -> None:
+            self.calls.append(
+                ("run_agent", {"session_id": session_id, "prompt": prompt})
+            )
+            await self.wire.send(
+                TurnEnd(
+                    session_id=session_id,
+                    turn_id="turn-1",
+                    completion_status=CompletionStatus.ERROR,
+                )
+            )
+            await self.wire.send(
+                StreamDelta(session_id=session_id, content="Error: provider failed")
+            )
+            await self.wire.send(
+                TurnEnd(
+                    session_id=session_id,
+                    turn_id="turn-1",
+                    completion_status=CompletionStatus.ERROR,
+                )
+            )
+
+    manager = ErrorFirstManager()
+    notifications: list[dict[str, Any]] = []
+    server = AcpServer(manager, emit=notifications.append)
+
+    response = await server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 13,
+            "method": "session/prompt",
+            "params": {
+                "sessionId": "sess-1",
+                "prompt": [{"type": "text", "text": "hello"}],
+            },
+        }
+    )
+
+    assert notifications == [
+        {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "sess-1",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "Error: provider failed"},
+                },
+            },
+        }
+    ]
+    assert response == {"jsonrpc": "2.0", "id": 13, "result": {"stopReason": "refusal"}}
+
+
+@pytest.mark.asyncio
 async def test_session_prompt_rejects_active_turn() -> None:
     manager = FakeManager()
     manager.raise_active_turn = True
@@ -1464,6 +1521,64 @@ async def test_permission_request_submits_denial_for_cancelled_outcome() -> None
             "request_id": "approval-1",
             "approved": False,
             "feedback": "Permission request cancelled by ACP client",
+            "scope": "once",
+        },
+    ) in manager.calls
+
+
+@pytest.mark.asyncio
+async def test_permission_request_ignores_stale_approval_response() -> None:
+    class StaleApprovalManager(FakeManager):
+        async def submit_approval_response(
+            self,
+            session_id: str,
+            request_id: str,
+            approved: bool,
+            feedback: str | None = None,
+            scope: str = "once",
+        ) -> Any:
+            self.calls.append(
+                (
+                    "submit_approval_response",
+                    {
+                        "session_id": session_id,
+                        "request_id": request_id,
+                        "approved": approved,
+                        "feedback": feedback,
+                        "scope": scope,
+                    },
+                )
+            )
+            return None
+
+    manager = StaleApprovalManager()
+
+    async def call_client(_method: str, _params: dict[str, Any]) -> dict[str, Any]:
+        return {"outcome": {"outcome": "selected", "optionId": "allow-once"}}
+
+    server = AcpServer(manager, call_client=call_client)
+
+    await server.handle_approval_request(
+        "sess-1",
+        ApprovalRequest(
+            session_id="sess-1",
+            request_id="approval-stale",
+            tool_call=ToolCallDelta(
+                session_id="sess-1",
+                tool_name="bash_run",
+                arguments={},
+                call_id="tool-1",
+            ),
+        ),
+    )
+
+    assert (
+        "submit_approval_response",
+        {
+            "session_id": "sess-1",
+            "request_id": "approval-stale",
+            "approved": True,
+            "feedback": None,
             "scope": "once",
         },
     ) in manager.calls

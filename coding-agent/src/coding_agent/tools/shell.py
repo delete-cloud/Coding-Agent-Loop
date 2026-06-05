@@ -309,8 +309,8 @@ def bash_run(
     env: dict[str, str] | None = None,
     __pipeline_ctx__: object | None = None,
 ) -> str | dict[str, str | int]:
+    timeout_seconds = _positive_int(timeout, name="timeout")
     try:
-        timeout_seconds = _positive_int(timeout, name="timeout")
         shell_config = _pipeline_shell_config(__pipeline_ctx__)
         mode_value = _sandbox_mode(shell_config)
         execution_cwd = _validated_execution_cwd(
