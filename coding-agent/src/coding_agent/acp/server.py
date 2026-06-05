@@ -459,6 +459,7 @@ class AcpServer:
                         await _await_cancelled_prompt_task(task)
                         return {"stopReason": "cancelled"}
                     await task
+                    await self._drain_pending_session_updates(session_id, session)
                     return {"stopReason": acp_stop_reason(message)}
 
                 if isinstance(message, ApprovalRequest):
@@ -507,6 +508,36 @@ class AcpServer:
         self._cancelled_prompt_sessions.discard(session_id)
         return True
 
+    async def _drain_pending_session_updates(
+        self,
+        session_id: str,
+        session: object,
+    ) -> None:
+        wire = getattr(session, "wire", None)
+        consume_outgoing = getattr(wire, "consume_outgoing", None)
+        if not callable(consume_outgoing):
+            return
+
+        while True:
+            message = consume_outgoing()
+            if message is None:
+                return
+            if isinstance(message, ApprovalRequest):
+                continue
+            update = wire_message_to_session_update(message)
+            if update is None:
+                continue
+            await self._emit_notification(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": session_id,
+                        "update": update,
+                    },
+                }
+            )
+
     async def handle_approval_request(
         self,
         session_id: str,
@@ -534,10 +565,7 @@ class AcpServer:
             scope=scope,
         )
         if submitted is None:
-            raise JsonRpcError(
-                -32603,
-                f"Approval request not found: {request.request_id}",
-            )
+            return
 
     async def _emit_notification(self, message: JSONObject) -> None:
         if self._emit is None:

@@ -19,3 +19,7 @@ class TestShellTool:
         result = bash_run(command="echo hello && rm -rf /tmp/nope")
         assert isinstance(result, str)
         assert "unsupported shell syntax" in result.lower()
+
+    def test_invalid_timeout_raises_tool_validation_error(self):
+        with pytest.raises(ValueError, match="timeout must be a positive integer"):
+            bash_run(command="echo hello", timeout="10s")  # type: ignore[arg-type]
