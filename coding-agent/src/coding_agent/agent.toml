@@ -22,16 +22,15 @@ enabled = [
 ]
 
 [storage]
-tape_backend = "jsonl"
-http_session_backend = "memory"
-checkpoint_backend = "fs"
-runtime_backend = "none"
+tape_backend = "sqlite"
+http_session_backend = "sqlite"
+checkpoint_backend = "sqlite"
+runtime_backend = "sqlite"
 doc_backend = "lancedb"
 
 [storage.paths]
-tapes = "./data/tapes"
+local = "./data/local.sqlite3"
 docs = "./data/docs"
-sessions = "./data/sessions"
 
 [approval]
 policy = "auto"

@@ -19,6 +19,7 @@ from agentkit.storage.protocols import SessionStore, TapeStore
 from agentkit.storage.session import FileSessionStore
 from agentkit.storage.sqlite import SQLiteTapeStore
 from agentkit.tape.store import ForkTapeStore
+from coding_agent.local_storage import local_sqlite_path_from_storage_config
 
 
 def _load_pg_types() -> tuple[Any, Any, Any, Any]:
@@ -193,7 +194,7 @@ class StoragePlugin:
         self._data_dir = resolved_data_dir
         self._config = config or {}
         self._backend = (
-            (backend or self._config.get("tape_backend", "jsonl")).strip().lower()
+            (backend or self._config.get("tape_backend", "sqlite")).strip().lower()
         )
         self._pg_pool = pg_pool
         self._fork_store: ForkTapeStore | None = None
@@ -253,7 +254,7 @@ class StoragePlugin:
             resolved_path = (
                 Path(path)
                 if isinstance(path, str) and path.strip()
-                else self._data_dir / "tape.sqlite3"
+                else local_sqlite_path_from_storage_config(self._config, self._data_dir)
             )
             self._sqlite_store = SQLiteTapeStore(resolved_path)
         return self._sqlite_store

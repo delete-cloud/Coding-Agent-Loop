@@ -31,6 +31,7 @@ from coding_agent.cli.local_runtime import (
     local_cli_session_origin,
 )
 from coding_agent.storage_migration import migrate_legacy_storage_to_sqlite
+from coding_agent.local_storage import local_sqlite_storage_config
 from coding_agent.ui.headless import HeadlessConsumer
 from coding_agent.ui.rich_tui import CodingAgentTUI
 from coding_agent.wire.protocol import TurnEnd, WireMessage
@@ -395,13 +396,13 @@ def storage() -> None:
     "--tape-sqlite",
     type=click.Path(path_type=Path, dir_okay=False),
     default=None,
-    help="SQLite tape database path. Defaults to DATA_DIR/tape.sqlite3.",
+    help="SQLite tape database path. Defaults to DATA_DIR/local.sqlite3.",
 )
 @click.option(
     "--checkpoint-sqlite",
     type=click.Path(path_type=Path, dir_okay=False),
     default=None,
-    help="SQLite checkpoint database path. Defaults to DATA_DIR/checkpoints.sqlite3.",
+    help="SQLite checkpoint database path. Defaults to DATA_DIR/local.sqlite3.",
 )
 @click.option(
     "--replace-tapes",
@@ -665,10 +666,7 @@ def _approval_policy_from_config(value: str) -> ApprovalPolicy:
 
 def _local_session_manager() -> LocalCliSessionManager:
     return create_local_cli_session_manager(
-        storage_config={
-            "http_session_backend": "fs",
-            "runtime_backend": "jsonl",
-        }
+        storage_config=local_sqlite_storage_config()
     )
 
 

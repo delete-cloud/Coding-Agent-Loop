@@ -62,7 +62,7 @@ from coding_agent.runs import (
     RunTarget,
 )
 from coding_agent.wire.local import LocalWire
-from coding_agent.server.session_manager import Session
+from coding_agent.server.session_manager import Session, SessionManager
 from coding_agent.server.stores.workspace_store import JSONValue, WorkspaceRecord
 from coding_agent.server.stores.session_owner_store import SessionOwnerRecord
 from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictError
@@ -95,6 +95,7 @@ from coding_agent.wire.protocol import (
     TurnStatusDelta,
     TurnEnd,
 )
+from coding_agent.local_storage import local_sqlite_storage_config
 
 
 def _local_run_target(path: Path | str) -> RunTarget:
@@ -7860,7 +7861,9 @@ def test_http_server_import_falls_back_when_agent_toml_is_unreadable(
             http_server = importlib.import_module("coding_agent.server.http_server")
 
         assert http_server._load_storage_config() == {}
-        assert http_server.session_manager._storage_config == {}
+        assert (
+            http_server.session_manager._storage_config == local_sqlite_storage_config()
+        )
     finally:
         if original_module is None:
             monkeypatch.delitem(
@@ -7870,6 +7873,43 @@ def test_http_server_import_falls_back_when_agent_toml_is_unreadable(
             sys.modules["coding_agent.server.http_server"] = original_module
         if server_module is not None and original_parent_attr is not None:
             setattr(server_module, "http_server", original_parent_attr)
+
+
+def test_agent_toml_storage_paths_local_drives_sqlite_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_path = tmp_path / "custom-local.sqlite3"
+    config_path = tmp_path / "agent.toml"
+    config_path.write_text(
+        _minimal_agent_toml(
+            f"""
+
+[storage]
+http_session_backend = "sqlite"
+tape_backend = "sqlite"
+checkpoint_backend = "sqlite"
+runtime_backend = "sqlite"
+
+[storage.paths]
+local = "{local_path}"
+"""
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODING_AGENT_SERVER_CONFIG", str(config_path))
+
+    storage_config = http_server._load_storage_config()
+    manager = SessionManager(storage_config=storage_config)
+
+    try:
+        assert storage_config["paths"]["local"] == str(local_path)
+        assert manager._store._path == local_path
+        assert manager._tape_store._path == local_path
+        assert manager._checkpoint_service._store._path == local_path
+        assert manager._runtime_store._path == local_path
+    finally:
+        asyncio.run(manager.close())
 
 
 def test_http_server_import_raises_on_invalid_agent_toml(monkeypatch) -> None:

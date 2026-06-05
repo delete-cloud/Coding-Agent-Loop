@@ -10,6 +10,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.core.config import Config
+from coding_agent.local_storage import local_sqlite_storage_config
 from coding_agent.server.session_manager import SessionManager
 
 logger = logging.getLogger(__name__)
@@ -130,10 +131,7 @@ class ServerBackedLocalCliSessionManager:
     """Local CLI runtime adapter backed by the existing session service."""
 
     storage_config: dict[str, object] = field(
-        default_factory=lambda: {
-            "http_session_backend": "fs",
-            "runtime_backend": "jsonl",
-        }
+        default_factory=local_sqlite_storage_config
     )
     owner_store: Any | None = None
     owner_id: str | None = None

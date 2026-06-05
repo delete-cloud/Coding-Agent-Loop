@@ -567,7 +567,9 @@ def test_session_manager_uses_pg_backends_when_storage_config_requests_pg() -> N
 def test_session_manager_disables_runtime_store_by_default() -> None:
     manager = SessionManager()
 
-    assert manager._runtime_store is None
+    from coding_agent.runtime_store import SQLiteRuntimeStore
+
+    assert isinstance(manager._runtime_store, SQLiteRuntimeStore)
     assert (
         SessionManager(storage_config={"runtime_backend": "none"})._runtime_store
         is None
@@ -576,6 +578,72 @@ def test_session_manager_disables_runtime_store_by_default() -> None:
         SessionManager(storage_config={"runtime_backend": " disabled "})._runtime_store
         is None
     )
+
+
+def test_session_manager_uses_single_local_sqlite_bundle_by_default(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from agentkit.storage.sqlite import SQLiteCheckpointStore, SQLiteTapeStore
+    from coding_agent.runtime_store import SQLiteRuntimeStore
+    from coding_agent.server.stores.session_store import SQLiteSessionStore
+
+    monkeypatch.setenv("AGENT_DATA_DIR", str(tmp_path))
+
+    manager = SessionManager()
+
+    assert isinstance(manager._store, SQLiteSessionStore)
+    assert isinstance(manager._tape_store, SQLiteTapeStore)
+    assert isinstance(manager._checkpoint_service._store, SQLiteCheckpointStore)
+    assert isinstance(manager._runtime_store, SQLiteRuntimeStore)
+    assert manager._store._path == tmp_path / "local.sqlite3"
+    assert manager._tape_store._path == tmp_path / "local.sqlite3"
+    assert manager._checkpoint_service._store._path == tmp_path / "local.sqlite3"
+    assert manager._runtime_store._path == tmp_path / "local.sqlite3"
+
+
+def test_session_manager_uses_storage_paths_local_for_sqlite_bundle(
+    tmp_path,
+) -> None:
+    custom_path = tmp_path / "custom" / "bundle.sqlite3"
+
+    manager = SessionManager(
+        storage_config={
+            "http_session_backend": "sqlite",
+            "tape_backend": "sqlite",
+            "checkpoint_backend": "sqlite",
+            "runtime_backend": "sqlite",
+            "paths": {"local": str(custom_path)},
+        }
+    )
+
+    assert manager._store._path == custom_path
+    assert manager._tape_store._path == custom_path
+    assert manager._checkpoint_service._store._path == custom_path
+    assert manager._runtime_store._path == custom_path
+
+
+def test_session_manager_explicit_sqlite_paths_override_storage_paths_local(
+    tmp_path,
+) -> None:
+    local_path = tmp_path / "bundle.sqlite3"
+    explicit_tape_path = tmp_path / "explicit-tape.sqlite3"
+
+    manager = SessionManager(
+        storage_config={
+            "http_session_backend": "sqlite",
+            "tape_backend": "sqlite",
+            "tape_path": str(explicit_tape_path),
+            "checkpoint_backend": "sqlite",
+            "runtime_backend": "sqlite",
+            "paths": {"local": str(local_path)},
+        }
+    )
+
+    assert manager._store._path == local_path
+    assert manager._tape_store._path == explicit_tape_path
+    assert manager._checkpoint_service._store._path == local_path
+    assert manager._runtime_store._path == local_path
 
 
 def test_session_manager_creates_pg_runtime_store_when_storage_config_requests_pg() -> (
