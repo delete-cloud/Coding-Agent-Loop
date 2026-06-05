@@ -36,7 +36,6 @@ from coding_agent.plugins.shell_session import ShellSessionPlugin
 from coding_agent.plugins.skills import SkillsPlugin
 from coding_agent.plugins.storage import StoragePlugin
 from coding_agent.plugins.summarizer import SummarizerPlugin
-from coding_agent.plugins.topic import TopicPlugin
 from coding_agent.subagents.coordinator import ChildWorkerCoordinator
 from coding_agent.tools.web_search import create_web_search_backend
 
@@ -258,7 +257,6 @@ def create_child_pipeline(
     sum_cfg = cfg.extra.get("summarizer", {})
     parallel_cfg = cfg.extra.get("parallel", {})
     doom_cfg = cfg.extra.get("doom_detector", {})
-    topic_cfg = cfg.extra.get("topic", {})
     skills_cfg = cfg.extra.get("skills", {})
     mcp_cfg = cfg.extra.get("mcp", {})
     storage_cfg = cfg.extra.get("storage", {})
@@ -336,10 +334,6 @@ def create_child_pipeline(
             "parallel_executor": lambda: ParallelExecutorPlugin(
                 execute_fn=_execute_tool_async,
                 max_concurrency=int(parallel_cfg.get("max_concurrency", 5)),
-            ),
-            "topic": lambda: TopicPlugin(
-                overlap_threshold=float(topic_cfg.get("overlap_threshold", 0.2)),
-                min_entries_before_detect=int(topic_cfg.get("min_entries", 4)),
             ),
             "session_metrics": lambda: SessionMetricsPlugin(),
             "skills": lambda: SkillsPlugin(

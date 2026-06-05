@@ -3,6 +3,11 @@
 **Status**: Accepted
 **Date**: 2026-05-22
 
+**Supersession note (2026-06-05)**: The legacy file-overlap `TopicPlugin`
+mentioned below has since been removed from the default Coding Agent
+application path. Bee work should bind to durable Topic records and safe product
+anchors through `TopicLifecycle`, not legacy inferred topic session events.
+
 ## Context
 
 The repository now has durable sessions and runs, context packs, action safety, workspace providers, observability, Developer Console pages, topic ranges, and topic-aware scheduled/proactive launch preparation. The next capability is a generic Bee-style workflow template and task manifest runtime.

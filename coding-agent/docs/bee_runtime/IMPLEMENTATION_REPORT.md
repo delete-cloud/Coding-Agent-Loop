@@ -62,4 +62,4 @@ Additional phase verification is recorded in `docs/bee_runtime/GOAL_PROGRESS.md`
 - Bee launch metadata is not yet wired to automatically create durable runs. That must be done through existing session/runtime paths in a future phase.
 - No external executor adapter exists by design.
 - No homelab-specific templates exist by design.
-- Legacy `TopicPlugin` remains a compatibility boundary; Bee anchors deliberately avoid its `topic_start` / `topic_end` encoded anchor types.
+- The legacy file-overlap `TopicPlugin` has been removed; Bee anchors continue to avoid raw prompt/message/content/command output and use safe product metadata.
