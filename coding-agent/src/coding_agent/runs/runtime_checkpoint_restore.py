@@ -16,6 +16,7 @@ from coding_agent.runs.checkpoint_restore import (
     CheckpointSessionConfig,
     CloseCheckpointRuntime,
     PersistCheckpointSession,
+    RestoreDurableCheckpointState,
 )
 from coding_agent.runs.checkpoint_runtime import (
     CheckpointRuntimeAdapterFactory,
@@ -72,6 +73,7 @@ class RuntimeCheckpointRestoreService:
     runtime_preparation_request: RuntimePreparationRequestFactory
     close_runtime: CloseCheckpointRuntime
     persist_session: PersistCheckpointSession
+    restore_durable_state: RestoreDurableCheckpointState | None = None
 
     async def restore(
         self,
@@ -84,6 +86,7 @@ class RuntimeCheckpointRestoreService:
             prepare_runtime=self._prepare_runtime,
             close_runtime=self.close_runtime,
             persist_session=self.persist_session,
+            restore_durable_state=self.restore_durable_state,
         ).restore(session, checkpoint_id)
 
     async def _prepare_runtime(

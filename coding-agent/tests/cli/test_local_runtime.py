@@ -4,6 +4,7 @@ import asyncio
 from types import SimpleNamespace
 
 from coding_agent.cli.local_runtime import ServerBackedLocalCliSessionManager
+from coding_agent.local_storage import local_sqlite_storage_config
 
 
 class FakeManagedSession:
@@ -27,7 +28,7 @@ class FakeDelegate:
         self.release_owned_sessions_called = False
         self.close_called = False
 
-    def _persist_session(self, session) -> None:
+    async def _persist_session_async(self, session) -> None:
         self.persisted.append(session)
 
     async def acquire_session_owner(self, session_id: str) -> None:
@@ -51,7 +52,9 @@ class FakeDelegate:
         self.close_called = True
 
 
-def test_server_backed_local_cli_attach_runtime_uses_session_binding_delegate() -> None:
+async def test_server_backed_local_cli_attach_runtime_uses_session_binding_delegate() -> (
+    None
+):
     manager = object.__new__(ServerBackedLocalCliSessionManager)
     delegate = FakeDelegate()
     manager._delegate = delegate
@@ -60,7 +63,7 @@ def test_server_backed_local_cli_attach_runtime_uses_session_binding_delegate() 
     ctx = SimpleNamespace(tape=SimpleNamespace(tape_id="repl-tape"))
     adapter = object()
 
-    manager.attach_runtime(
+    await manager.attach_runtime(
         session,
         pipeline=pipeline,
         pipeline_ctx=ctx,
@@ -125,3 +128,40 @@ async def test_server_backed_local_cli_renews_owner_leases_until_close() -> None
     assert manager._owner_renew_task is None
     assert delegate.release_owned_sessions_called is True
     assert delegate.close_called is True
+
+
+async def test_server_backed_local_cli_default_sqlite_owner_starts_renewal(
+    tmp_path,
+) -> None:
+    manager = ServerBackedLocalCliSessionManager(
+        storage_config=local_sqlite_storage_config(tmp_path),
+        owner_renew_interval_seconds=0.001,
+    )
+
+    await manager.start_owner_lease_renewal()
+    try:
+        assert manager.owner_store is not None
+        assert manager._owner_renew_task is not None
+    finally:
+        await manager.close()
+
+
+async def test_server_backed_local_cli_default_owner_id_is_process_unique(
+    tmp_path,
+) -> None:
+    first = ServerBackedLocalCliSessionManager(
+        storage_config=local_sqlite_storage_config(tmp_path),
+    )
+    second = ServerBackedLocalCliSessionManager(
+        storage_config=local_sqlite_storage_config(tmp_path),
+    )
+
+    try:
+        assert isinstance(first.owner_id, str)
+        assert isinstance(second.owner_id, str)
+        assert first.owner_id.startswith("local-cli:")
+        assert second.owner_id.startswith("local-cli:")
+        assert first.owner_id != second.owner_id
+    finally:
+        await first.close()
+        await second.close()

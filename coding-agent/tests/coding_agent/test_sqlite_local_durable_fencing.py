@@ -1,0 +1,737 @@
+from __future__ import annotations
+
+import asyncio
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import pytest
+
+from agentkit.checkpoint.models import CheckpointMeta, CheckpointSnapshot
+from agentkit.checkpoint import CheckpointService
+from coding_agent.local_durable_store import SQLiteLocalDurableStore
+from coding_agent.local_storage import local_sqlite_path
+from coding_agent.runtime_store import AgentRunRecord, RuntimeEventRecord
+from coding_agent.server.session_manager import SessionManager
+from coding_agent.server.stores.session_owner_store import (
+    SQLiteSessionOwnerStore,
+    SessionOwnershipConflictError,
+)
+from coding_agent.server.stores.session_store import InMemorySessionStore
+from coding_agent.server.stores.session_store import SQLiteSessionStore
+
+
+class FakeCheckpointStore:
+    async def save(self, snapshot: CheckpointSnapshot) -> None:
+        del snapshot
+
+    async def load(self, checkpoint_id: str) -> CheckpointSnapshot | None:
+        del checkpoint_id
+        return None
+
+    async def list_by_tape(self, tape_id: str) -> list[CheckpointMeta]:
+        del tape_id
+        return []
+
+    async def delete(self, checkpoint_id: str) -> None:
+        del checkpoint_id
+
+
+@pytest.mark.asyncio
+async def test_sqlite_owner_authority_renew_does_not_advance_epoch(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteSessionOwnerStore(tmp_path / "local.sqlite3")
+
+    authority = await store.acquire_authority(
+        "session-a",
+        "owner-a",
+        lease_seconds=30.0,
+    )
+    renewed = await store.renew_authority(authority, lease_seconds=30.0)
+
+    owner = await store.get_owner("session-a")
+    assert renewed == authority
+    assert owner is not None
+    assert owner.owner_id == "owner-a"
+    assert owner.fencing_token == authority.epoch == 1
+
+
+@pytest.mark.asyncio
+async def test_sqlite_owner_authority_takeover_advances_epoch_in_database(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteSessionOwnerStore(tmp_path / "local.sqlite3")
+
+    dead = await store.acquire_authority(
+        "session-a",
+        "owner-dead",
+        lease_seconds=0.001,
+    )
+    await asyncio.sleep(0.01)
+
+    taken = await store.acquire_authority(
+        "session-a",
+        "owner-b",
+        lease_seconds=30.0,
+    )
+
+    assert dead.epoch == 1
+    assert taken.owner_id == "owner-b"
+    assert taken.epoch == 2
+
+
+@pytest.mark.asyncio
+async def test_sqlite_owner_authority_same_owner_expired_reacquire_advances_epoch(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteSessionOwnerStore(tmp_path / "local.sqlite3")
+
+    stale = await store.acquire_authority(
+        "session-a",
+        "owner-a",
+        lease_seconds=0.001,
+    )
+    await asyncio.sleep(0.01)
+    reacquired = await store.acquire_authority(
+        "session-a",
+        "owner-a",
+        lease_seconds=30.0,
+    )
+
+    assert stale.epoch == 1
+    assert reacquired.epoch == 2
+
+
+@pytest.mark.asyncio
+async def test_session_manager_uses_sqlite_owner_authority_epochs(
+    tmp_path: Path,
+) -> None:
+    owner_store = SQLiteSessionOwnerStore(tmp_path / "local.sqlite3")
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=999,
+    )
+
+    session_id = await manager.create_session()
+    owner = await owner_store.get_owner(session_id)
+
+    assert owner is not None
+    assert owner.owner_id == "owner-a"
+    assert owner.fencing_token == 1
+
+    await manager.renew_owner_leases()
+    renewed = await owner_store.get_owner(session_id)
+
+    assert renewed is not None
+    assert renewed.owner_id == "owner-a"
+    assert renewed.fencing_token == 1
+
+    await manager.release_owned_sessions()
+    assert await owner_store.get_owner(session_id) is None
+
+
+@pytest.mark.asyncio
+async def test_session_manager_default_sqlite_bundle_uses_protected_session_save(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENT_DATA_DIR", str(tmp_path))
+    sqlite_path = local_sqlite_path(tmp_path)
+    owner_store = SQLiteSessionOwnerStore(sqlite_path)
+    manager = SessionManager(
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=999,
+    )
+
+    session_id = await manager.create_session()
+
+    owner = await owner_store.get_owner(session_id)
+    payload = SQLiteSessionStore(sqlite_path).load(session_id)
+
+    assert owner is not None
+    assert owner.fencing_token == 1
+    assert payload is not None
+    assert payload["id"] == session_id
+    assert payload["tape_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_session_manager_default_sqlite_bundle_fences_session_delete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENT_DATA_DIR", str(tmp_path))
+    sqlite_path = local_sqlite_path(tmp_path)
+    owner_store = SQLiteSessionOwnerStore(sqlite_path)
+    manager = SessionManager(
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=999,
+    )
+    session_id = await manager.create_session()
+    assert await owner_store.release(session_id, "owner-a", 1) is True
+    await owner_store.acquire_authority(session_id, "owner-b", lease_seconds=30.0)
+
+    with pytest.raises(SessionOwnershipConflictError):
+        await manager.remove_session_async(session_id)
+
+    assert SQLiteSessionStore(sqlite_path).load(session_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_session_manager_default_sqlite_bundle_create_rollback_deletes_before_owner_release(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENT_DATA_DIR", str(tmp_path))
+    sqlite_path = local_sqlite_path(tmp_path)
+    owner_store = SQLiteSessionOwnerStore(sqlite_path)
+    session_store = SQLiteSessionStore(sqlite_path)
+    manager = SessionManager(
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=999,
+    )
+    release_observations: list[tuple[str, bool]] = []
+    original_release = manager._release_owner_lease_for_session
+
+    async def fail_workspace_persist(session) -> None:
+        raise RuntimeError(f"workspace persist failed: {session.id}")
+
+    async def observe_release(session_id: str) -> None:
+        release_observations.append(
+            (session_id, session_store.load(session_id) is None)
+        )
+        await original_release(session_id)
+
+    monkeypatch.setattr(
+        manager,
+        "_persist_workspace_record_for_session",
+        fail_workspace_persist,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_release_owner_lease_for_session",
+        observe_release,
+    )
+
+    with pytest.raises(RuntimeError, match="workspace persist failed"):
+        await manager.create_session()
+
+    assert release_observations
+    session_id, session_deleted_before_release = release_observations[0]
+    assert session_deleted_before_release is True
+    assert session_store.load(session_id) is None
+    assert await owner_store.get_owner(session_id) is None
+
+
+@pytest.mark.asyncio
+async def test_session_manager_default_sqlite_bundle_rejects_sync_mutations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENT_DATA_DIR", str(tmp_path))
+    owner_store = SQLiteSessionOwnerStore(local_sqlite_path(tmp_path))
+    manager = SessionManager(
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=999,
+    )
+    session_id = await manager.create_session()
+    session = await manager.get_session_async(session_id)
+
+    with pytest.raises(RuntimeError, match="synchronous session persistence"):
+        manager._persist_session(session)
+    with pytest.raises(RuntimeError, match="synchronous session removal"):
+        manager.remove_session(session_id)
+    with pytest.raises(RuntimeError, match="synchronous session clearing"):
+        manager.clear_sessions()
+
+
+@pytest.mark.asyncio
+async def test_session_manager_default_sqlite_bundle_fences_tape_save(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENT_DATA_DIR", str(tmp_path))
+    sqlite_path = local_sqlite_path(tmp_path)
+    owner_store = SQLiteSessionOwnerStore(sqlite_path)
+    manager = SessionManager(
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=999,
+    )
+    session_id = await manager.create_session()
+    session = await manager.get_session_async(session_id)
+    session.tape_id = "tape-a"
+    await manager._persist_session_async(session)
+
+    await manager._tape_store.save(
+        "tape-a",
+        [{"kind": "message", "payload": {"text": "before takeover"}}],
+    )
+
+    assert await owner_store.release("session-missing", "owner-a", 1) is False
+    assert await owner_store.release(session_id, "owner-a", 1) is True
+    await owner_store.acquire_authority(session_id, "owner-b", lease_seconds=30.0)
+
+    with pytest.raises(SessionOwnershipConflictError):
+        await manager._tape_store.save(
+            "tape-a",
+            [{"kind": "message", "payload": {"text": "stale owner"}}],
+        )
+
+    assert await manager._tape_store.load("tape-a") == [
+        {"kind": "message", "payload": {"text": "before takeover"}}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_session_manager_default_sqlite_bundle_fences_runtime_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENT_DATA_DIR", str(tmp_path))
+    sqlite_path = local_sqlite_path(tmp_path)
+    owner_store = SQLiteSessionOwnerStore(sqlite_path)
+    manager = SessionManager(
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=999,
+    )
+    session_id = await manager.create_session()
+    session = await manager.get_session_async(session_id)
+    session.tape_id = "tape-a"
+    await manager._persist_session_async(session)
+
+    started_at = datetime.now(UTC)
+    await manager._runtime_store.create_agent_run(
+        AgentRunRecord(
+            run_id="run-a",
+            session_id=session_id,
+            tape_id="tape-a",
+            parent_run_id=None,
+            agent_id="agent-a",
+            status="running",
+            started_at=started_at,
+        )
+    )
+    await manager._runtime_store.append_runtime_event(
+        RuntimeEventRecord(
+            event_id="event-before",
+            run_id="run-a",
+            event_kind="progress",
+            payload={"step": "before"},
+            created_at=started_at,
+        )
+    )
+
+    assert await owner_store.release(session_id, "owner-a", 1) is True
+    await owner_store.acquire_authority(session_id, "owner-b", lease_seconds=30.0)
+
+    with pytest.raises(SessionOwnershipConflictError):
+        await manager._runtime_store.append_runtime_event(
+            RuntimeEventRecord(
+                event_id="event-after",
+                run_id="run-a",
+                event_kind="progress",
+                payload={"step": "after"},
+                created_at=started_at + timedelta(seconds=1),
+            )
+        )
+
+    assert [
+        event.event_id
+        for event in await manager._runtime_store.replay_runtime_events("run-a")
+    ] == ["event-before"]
+
+
+@pytest.mark.asyncio
+async def test_session_manager_default_sqlite_bundle_fences_runtime_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENT_DATA_DIR", str(tmp_path))
+    sqlite_path = local_sqlite_path(tmp_path)
+    owner_store = SQLiteSessionOwnerStore(sqlite_path)
+    manager = SessionManager(
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=999,
+    )
+    session_id = await manager.create_session()
+    session = await manager.get_session_async(session_id)
+    session.tape_id = "tape-a"
+    await manager._persist_session_async(session)
+    await manager._runtime_store.create_agent_run(
+        AgentRunRecord(
+            run_id="run-a",
+            session_id=session_id,
+            tape_id="tape-a",
+            parent_run_id=None,
+            agent_id=None,
+            status="requested",
+            started_at=datetime.now(UTC),
+            metadata={
+                "executor_ref_kind": "external_worker",
+                "executor_kind": "test-worker",
+            },
+        )
+    )
+
+    assert await owner_store.release(session_id, "owner-a", 1) is True
+    await owner_store.acquire_authority(session_id, "owner-b", lease_seconds=30.0)
+
+    assert (
+        await manager._runtime_store.claim_external_worker_run(
+            session_id=None,
+            executor_kind="test-worker",
+            claim_metadata={"worker_id": "worker-a"},
+        )
+        is None
+    )
+    assert (
+        await manager._runtime_store.claim_external_worker_run(
+            session_id=session_id,
+            executor_kind="test-worker",
+            claim_metadata={"worker_id": "worker-a"},
+        )
+        is None
+    )
+
+    run = await manager._runtime_store.load_agent_run("run-a")
+    assert run is not None
+    assert run.status == "requested"
+
+
+@pytest.mark.asyncio
+async def test_session_manager_default_sqlite_bundle_fences_checkpoint_save(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENT_DATA_DIR", str(tmp_path))
+    sqlite_path = local_sqlite_path(tmp_path)
+    owner_store = SQLiteSessionOwnerStore(sqlite_path)
+    manager = SessionManager(
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=999,
+    )
+    session_id = await manager.create_session()
+    session = await manager.get_session_async(session_id)
+    session.tape_id = "tape-a"
+    await manager._persist_session_async(session)
+    created_at = datetime.now(UTC)
+
+    checkpoint = CheckpointSnapshot(
+        meta=CheckpointMeta(
+            checkpoint_id="checkpoint-a",
+            tape_id="tape-a",
+            session_id=session_id,
+            entry_count=0,
+            window_start=0,
+            created_at=created_at,
+            label="before",
+        ),
+        tape_entries=(),
+        plugin_states={},
+    )
+    await manager._checkpoint_service._store.save(checkpoint)
+
+    assert await owner_store.release(session_id, "owner-a", 1) is True
+    await owner_store.acquire_authority(session_id, "owner-b", lease_seconds=30.0)
+
+    with pytest.raises(SessionOwnershipConflictError):
+        await manager._checkpoint_service._store.save(
+            CheckpointSnapshot(
+                meta=CheckpointMeta(
+                    checkpoint_id="checkpoint-a",
+                    tape_id="tape-a",
+                    session_id=session_id,
+                    entry_count=1,
+                    window_start=0,
+                    created_at=created_at + timedelta(seconds=1),
+                    label="after",
+                ),
+                tape_entries=({"kind": "message"},),
+                plugin_states={},
+            )
+        )
+
+    loaded = await manager._checkpoint_service._store.load("checkpoint-a")
+    assert loaded is not None
+    assert loaded.meta.entry_count == 0
+    assert loaded.meta.label == "before"
+
+
+@pytest.mark.asyncio
+async def test_sqlite_local_durable_store_rejects_stale_epoch_for_session_metadata(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteLocalDurableStore(tmp_path / "local.sqlite3")
+    stale = await store.acquire_owner("session-a", "owner-a", lease_seconds=0.001)
+    await asyncio.sleep(0.01)
+    current = await store.acquire_owner("session-a", "owner-b", lease_seconds=30.0)
+
+    with pytest.raises(SessionOwnershipConflictError):
+        await store.save_session(
+            stale, {"id": "session-a", "session_id": "session-a", "tape_id": "tape-a"}
+        )
+
+    await store.save_session(
+        current,
+        {"id": "session-a", "session_id": "session-a", "tape_id": "tape-a"},
+    )
+    assert store.load_session("session-a") == {
+        "id": "session-a",
+        "session_id": "session-a",
+        "tape_id": "tape-a",
+    }
+
+
+@pytest.mark.asyncio
+async def test_sqlite_local_durable_store_rejects_session_payload_id_mismatch(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteLocalDurableStore(tmp_path / "local.sqlite3")
+    owner_a = await store.acquire_owner("session-a", "owner-a")
+
+    with pytest.raises(SessionOwnershipConflictError):
+        await store.save_session(
+            owner_a,
+            {"id": "session-b", "session_id": "session-a", "tape_id": "tape-a"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_sqlite_local_durable_store_rejects_cross_session_tape_write(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteLocalDurableStore(tmp_path / "local.sqlite3")
+    owner_a = await store.acquire_owner("session-a", "owner-a")
+    owner_b = await store.acquire_owner("session-b", "owner-b")
+
+    await store.save_session(
+        owner_a,
+        {"id": "session-a", "session_id": "session-a", "tape_id": "tape-a"},
+    )
+    await store.save_session(
+        owner_b,
+        {"id": "session-b", "session_id": "session-b", "tape_id": "tape-b"},
+    )
+    await store.append_tape_entries(
+        owner_a,
+        "tape-a",
+        [{"kind": "message", "payload": {"text": "owned by session-a"}}],
+    )
+
+    with pytest.raises(SessionOwnershipConflictError):
+        await store.append_tape_entries(
+            owner_b,
+            "tape-a",
+            [{"kind": "message", "payload": {"text": "wrong owner"}}],
+        )
+
+    assert await store.load_tape("tape-a") == [
+        {"kind": "message", "payload": {"text": "owned by session-a"}}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sqlite_local_durable_store_rejects_cross_session_runtime_write(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteLocalDurableStore(tmp_path / "local.sqlite3")
+    owner_a = await store.acquire_owner("session-a", "owner-a")
+    owner_b = await store.acquire_owner("session-b", "owner-b")
+    started_at = datetime.now(UTC)
+
+    run = AgentRunRecord(
+        run_id="run-a",
+        session_id="session-a",
+        tape_id="tape-a",
+        parent_run_id=None,
+        agent_id="agent-a",
+        status="running",
+        started_at=started_at,
+    )
+    await store.create_agent_run(owner_a, run)
+
+    with pytest.raises(SessionOwnershipConflictError):
+        await store.append_runtime_event(
+            owner_b,
+            RuntimeEventRecord(
+                event_id="event-wrong-owner",
+                run_id="run-a",
+                event_kind="progress",
+                payload={"step": "wrong-owner"},
+                created_at=started_at,
+            ),
+        )
+
+    await store.append_runtime_event(
+        owner_a,
+        RuntimeEventRecord(
+            event_id="event-owner-a",
+            run_id="run-a",
+            event_kind="progress",
+            payload={"step": "owner-a"},
+            created_at=started_at + timedelta(seconds=1),
+        ),
+    )
+    assert [event.event_id for event in await store.replay_runtime_events("run-a")] == [
+        "event-owner-a"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sqlite_local_durable_store_rejects_checkpoint_rebind(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteLocalDurableStore(tmp_path / "local.sqlite3")
+    owner_a = await store.acquire_owner("session-a", "owner-a")
+    owner_b = await store.acquire_owner("session-b", "owner-b")
+    created_at = datetime.now(UTC)
+
+    await store.save_session(
+        owner_a,
+        {"id": "session-a", "session_id": "session-a", "tape_id": "tape-a"},
+    )
+    await store.save_session(
+        owner_b,
+        {"id": "session-b", "session_id": "session-b", "tape_id": "tape-b"},
+    )
+    await store.save_checkpoint(
+        owner_a,
+        CheckpointSnapshot(
+            meta=CheckpointMeta(
+                checkpoint_id="checkpoint-a",
+                tape_id="tape-a",
+                session_id="session-a",
+                entry_count=0,
+                window_start=0,
+                created_at=created_at,
+                label="owned",
+            ),
+            tape_entries=(),
+            plugin_states={},
+        ),
+    )
+
+    with pytest.raises(SessionOwnershipConflictError):
+        await store.save_checkpoint(
+            owner_b,
+            CheckpointSnapshot(
+                meta=CheckpointMeta(
+                    checkpoint_id="checkpoint-a",
+                    tape_id="tape-b",
+                    session_id="session-b",
+                    entry_count=0,
+                    window_start=0,
+                    created_at=created_at,
+                    label="rebind",
+                ),
+                tape_entries=(),
+                plugin_states={},
+            ),
+        )
+
+    checkpoint = await store.load_checkpoint("checkpoint-a")
+    assert checkpoint is not None
+    assert checkpoint.meta.session_id == "session-a"
+    assert checkpoint.meta.tape_id == "tape-a"
+
+
+@pytest.mark.asyncio
+async def test_sqlite_local_durable_store_restores_checkpoint_state_atomically(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteLocalDurableStore(tmp_path / "local.sqlite3")
+    owner = await store.acquire_owner("session-a", "owner-a")
+    created_at = datetime.now(UTC)
+    await store.save_session(
+        owner,
+        {"id": "session-a", "session_id": "session-a", "tape_id": "tape-a"},
+    )
+    await store.append_tape_entries(
+        owner,
+        "tape-a",
+        [
+            {"kind": "message", "payload": {"text": "keep"}},
+            {"kind": "message", "payload": {"text": "drop"}},
+        ],
+    )
+    await store.save_checkpoint(
+        owner,
+        CheckpointSnapshot(
+            meta=CheckpointMeta(
+                checkpoint_id="checkpoint-keep",
+                tape_id="tape-a",
+                session_id="session-a",
+                entry_count=1,
+                window_start=0,
+                created_at=created_at,
+                label="keep",
+            ),
+            tape_entries=({"kind": "message", "payload": {"text": "keep"}},),
+            plugin_states={},
+        ),
+    )
+    await store.save_checkpoint(
+        owner,
+        CheckpointSnapshot(
+            meta=CheckpointMeta(
+                checkpoint_id="checkpoint-drop",
+                tape_id="tape-a",
+                session_id="session-a",
+                entry_count=2,
+                window_start=0,
+                created_at=created_at + timedelta(seconds=1),
+                label="drop",
+            ),
+            tape_entries=(
+                {"kind": "message", "payload": {"text": "keep"}},
+                {"kind": "message", "payload": {"text": "drop"}},
+            ),
+            plugin_states={},
+        ),
+    )
+
+    await store.restore_checkpoint_state(
+        owner,
+        CheckpointSnapshot(
+            meta=CheckpointMeta(
+                checkpoint_id="checkpoint-keep",
+                tape_id="tape-a",
+                session_id="session-a",
+                entry_count=1,
+                window_start=0,
+                created_at=created_at,
+                label="keep",
+            ),
+            tape_entries=({"kind": "message", "payload": {"text": "keep"}},),
+            plugin_states={},
+        ),
+        {
+            "id": "session-a",
+            "session_id": "session-a",
+            "tape_id": "tape-a",
+            "provider_name": "restored-provider",
+        },
+    )
+
+    assert await store.load_tape("tape-a") == [
+        {"kind": "message", "payload": {"text": "keep"}}
+    ]
+    assert store.load_session("session-a") == {
+        "id": "session-a",
+        "session_id": "session-a",
+        "tape_id": "tape-a",
+        "provider_name": "restored-provider",
+    }
+    assert await store.load_checkpoint("checkpoint-keep") is not None
+    assert await store.load_checkpoint("checkpoint-drop") is None

@@ -8,6 +8,10 @@ from typing import Any
 LOCAL_SQLITE_FILENAME = "local.sqlite3"
 
 
+def normalize_storage_path(path: str) -> Path:
+    return Path(os.path.abspath(os.path.expanduser(path)))
+
+
 def local_data_dir() -> Path:
     return Path(os.environ.get("AGENT_DATA_DIR", "./data"))
 
@@ -42,6 +46,20 @@ def local_sqlite_path_from_storage_config(
         local_path = paths.get("local")
         if isinstance(local_path, str) and local_path.strip():
             return Path(local_path)
+    explicit_paths = [
+        storage_config.get(path_key)
+        for path_key in (
+            "http_session_path",
+            "tape_path",
+            "checkpoint_path",
+            "runtime_path",
+        )
+    ]
+    if all(isinstance(path, str) and path.strip() for path in explicit_paths):
+        resolved_paths = [normalize_storage_path(str(path)) for path in explicit_paths]
+        first = resolved_paths[0]
+        if all(path == first for path in resolved_paths):
+            return first
     return local_sqlite_path(data_dir)
 
 

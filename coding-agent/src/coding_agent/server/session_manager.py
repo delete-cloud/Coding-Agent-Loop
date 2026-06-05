@@ -50,7 +50,15 @@ from coding_agent.approval.store import ApprovalStore
 from coding_agent.core import config as core_config
 from coding_agent.local_storage import (
     local_sqlite_storage_config,
+    local_sqlite_path_from_storage_config,
+    normalize_storage_path,
     with_local_sqlite_bundle_paths,
+)
+from coding_agent.local_durable_store import (
+    FencedSQLiteCheckpointStore,
+    FencedSQLiteRuntimeStore,
+    FencedSQLiteTapeStore,
+    SQLiteLocalDurableStore,
 )
 from coding_agent.plugins.storage import JSONLTapeStore
 from coding_agent.providers.base import ToolSchema
@@ -127,6 +135,7 @@ from coding_agent.server.stores.session_store import (
     SessionStore,
     create_session_store,
 )
+from coding_agent.server.stores.session_owner_store import OwnerAuthority
 from coding_agent.server.stores.session_owner_store import SessionOwnerStoreProtocol
 from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictError
 from coding_agent.server.stores.session_owner_store import (
@@ -804,6 +813,15 @@ class SessionManager:
         )
         self._pg_pool = pg_pool
         self._owns_pg_pool = False
+        self._local_durable_store = self._create_local_durable_store(
+            data_dir=data_dir,
+            store=store,
+            tape_store=tape_store,
+            checkpoint_store=checkpoint_store,
+            checkpoint_service=checkpoint_service,
+            runtime_store=runtime_store,
+            owner_store=owner_store,
+        )
         self._store = store or self._create_http_session_store()
         self._session_cache: dict[str, Session] = {}
         self._approval_stores: dict[str, ApprovalStore] = {}
@@ -812,6 +830,15 @@ class SessionManager:
         self._session_turn_locks: dict[str, asyncio.Lock] = {}
         self._session_workspace_export_counts: dict[str, int] = {}
         self._tape_store = tape_store or self._create_tape_store(data_dir)
+        if self._local_durable_store is not None and tape_store is None:
+            self._tape_store = FencedSQLiteTapeStore(
+                durable_store=self._local_durable_store,
+                path=local_sqlite_path_from_storage_config(
+                    self._storage_config,
+                    data_dir,
+                ),
+                authority_for_session=self._owner_authority_for_session,
+            )
         self._agent_observation_store = observation_store or JsonlAgentObservationStore(
             data_dir / "observability"
         )
@@ -822,6 +849,19 @@ class SessionManager:
         resolved_checkpoint_store = checkpoint_store or self._create_checkpoint_store(
             data_dir
         )
+        if (
+            self._local_durable_store is not None
+            and checkpoint_store is None
+            and checkpoint_service is None
+        ):
+            resolved_checkpoint_store = FencedSQLiteCheckpointStore(
+                durable_store=self._local_durable_store,
+                path=local_sqlite_path_from_storage_config(
+                    self._storage_config,
+                    data_dir,
+                ),
+                authority_for_session=self._owner_authority_for_session,
+            )
         self._checkpoint_service = checkpoint_service or CheckpointService(
             resolved_checkpoint_store
         )
@@ -841,6 +881,16 @@ class SessionManager:
         self._runtime_store = (
             runtime_store if runtime_store is not None else self._create_runtime_store()
         )
+        if self._local_durable_store is not None and runtime_store is None:
+            self._runtime_store = FencedSQLiteRuntimeStore(
+                durable_store=self._local_durable_store,
+                path=local_sqlite_path_from_storage_config(
+                    self._storage_config,
+                    data_dir,
+                ),
+                authority_for_session=self._owner_authority_for_session,
+                authorities=lambda: dict(self._owner_authorities),
+            )
 
         async def runtime_session_is_recoverable(session_id: str) -> bool:
             if self._owner_store is None:
@@ -967,6 +1017,11 @@ class SessionManager:
             ),
             close_runtime=self._runtime_closer.close,
             persist_session=self._persist_session_async,
+            restore_durable_state=(
+                self._restore_checkpoint_durable_state
+                if self._local_durable_store is not None
+                else None
+            ),
         )
         self._runtime_checkpoint_restore_orchestration = (
             RuntimeCheckpointRestoreOrchestrationService(
@@ -1118,6 +1173,60 @@ class SessionManager:
         self._owner_id = owner_id
         self._fencing_token = fencing_token
         self._owner_lease_seconds = owner_lease_seconds
+        self._owner_authorities: dict[str, OwnerAuthority] = {}
+
+    def _create_local_durable_store(
+        self,
+        *,
+        data_dir: Path,
+        store: SessionStore | None,
+        tape_store: TapeStore | None,
+        checkpoint_store: CheckpointStore | None,
+        checkpoint_service: CheckpointService | None,
+        runtime_store: RuntimeStore | None,
+        owner_store: SessionOwnerStoreProtocol | None,
+    ) -> SQLiteLocalDurableStore | None:
+        if owner_store is None or not callable(
+            getattr(owner_store, "acquire_authority", None)
+        ):
+            return None
+        if any(
+            value is not None
+            for value in (
+                store,
+                tape_store,
+                checkpoint_store,
+                checkpoint_service,
+                runtime_store,
+            )
+        ):
+            return None
+        config = self._storage_config
+        sqlite_backend_keys = (
+            "http_session_backend",
+            "tape_backend",
+            "checkpoint_backend",
+            "runtime_backend",
+        )
+        if any(
+            str(config.get(key, "")).lower() != "sqlite" for key in sqlite_backend_keys
+        ):
+            return None
+        local_path = normalize_storage_path(
+            str(local_sqlite_path_from_storage_config(config, data_dir))
+        )
+        path_keys = (
+            "http_session_path",
+            "tape_path",
+            "checkpoint_path",
+            "runtime_path",
+        )
+        configured_paths = [
+            normalize_storage_path(str(config.get(key, ""))) for key in path_keys
+        ]
+        if any(path != local_path for path in configured_paths):
+            return None
+        return SQLiteLocalDurableStore(local_path)
 
     def configure_workspace_metadata_store(
         self,
@@ -1824,7 +1933,7 @@ class SessionManager:
     async def _assert_owner(self, session_id: str) -> None:
         if self._owner_store is None:
             return
-        if self._owner_id is None or self._fencing_token is None:
+        if self._owner_id is None:
             raise SessionOwnershipConflictError("stale owner or fencing token rejected")
 
         owner = await self._owner_store.get_owner(session_id)
@@ -1841,12 +1950,33 @@ class SessionManager:
 
         current_owner_id = owner.owner_id
         current_fencing_token = owner.fencing_token
+        authority = self._owner_authorities.get(session_id)
+        if authority is not None:
+            if (
+                current_owner_id != authority.owner_id
+                or current_fencing_token != authority.epoch
+            ):
+                raise SessionOwnershipConflictError(
+                    "stale owner or fencing token rejected"
+                )
+            return
+
+        if self._fencing_token is None:
+            raise SessionOwnershipConflictError("stale owner or fencing token rejected")
 
         if (
             current_owner_id != self._owner_id
             or current_fencing_token != self._fencing_token
         ):
             raise SessionOwnershipConflictError("stale owner or fencing token rejected")
+
+    def _owner_authority_for_session(self, session_id: str) -> OwnerAuthority:
+        authority = self._owner_authorities.get(session_id)
+        if authority is None:
+            raise SessionOwnershipConflictError(
+                "durable mutation requires owner authority"
+            )
+        return authority
 
     async def authorize_event_stream(self, session_id: str) -> None:
         await self._assert_owner(session_id)
@@ -1864,10 +1994,19 @@ class SessionManager:
 
     async def _persist_session_async(self, session: Session) -> None:
         self._session_cache[session.id] = session
+        payload = cast(dict[str, Any], session.to_store_data())
+        if self._local_durable_store is not None:
+            authority = self._owner_authorities.get(session.id)
+            if authority is None:
+                raise SessionOwnershipConflictError(
+                    "session metadata mutation requires owner authority"
+                )
+            await self._local_durable_store.save_session(authority, payload)
+            return
         await self._run_store_io(
             self._store.save,
             session.id,
-            cast(dict[str, Any], session.to_store_data()),
+            payload,
         )
 
     async def _persist_workspace_record_for_session(self, session: Session) -> None:
@@ -1925,7 +2064,20 @@ class SessionManager:
     async def _acquire_owner_for_session(self, session_id: str) -> None:
         if self._owner_store is None:
             return
-        if self._owner_id is None or self._fencing_token is None:
+        if self._owner_id is None:
+            raise SessionOwnershipConflictError("stale owner or fencing token rejected")
+        acquire_authority = getattr(self._owner_store, "acquire_authority", None)
+        if callable(acquire_authority):
+            authority = await acquire_authority(
+                session_id,
+                self._owner_id,
+                lease_seconds=self._owner_lease_seconds,
+            )
+            if not isinstance(authority, OwnerAuthority):
+                raise TypeError("acquire_authority must return OwnerAuthority")
+            self._owner_authorities[session_id] = authority
+            return
+        if self._fencing_token is None:
             raise SessionOwnershipConflictError("stale owner or fencing token rejected")
         acquired = await self._owner_store.acquire(
             session_id,
@@ -1939,11 +2091,19 @@ class SessionManager:
     async def _holds_owner_lease(self, session_id: str) -> bool:
         if self._owner_store is None:
             return False
-        if self._owner_id is None or self._fencing_token is None:
+        if self._owner_id is None:
             raise SessionOwnershipConflictError("stale owner or fencing token rejected")
         owner = await self._owner_store.get_owner(session_id)
         if owner is None:
             return False
+        authority = self._owner_authorities.get(session_id)
+        if authority is not None:
+            return (
+                owner.owner_id == authority.owner_id
+                and owner.fencing_token == authority.epoch
+            )
+        if self._fencing_token is None:
+            raise SessionOwnershipConflictError("stale owner or fencing token rejected")
         return (
             owner.owner_id == self._owner_id
             and owner.fencing_token == self._fencing_token
@@ -1952,11 +2112,20 @@ class SessionManager:
     async def _holds_active_owner_lease(self, session_id: str) -> bool:
         if self._owner_store is None:
             return False
-        if self._owner_id is None or self._fencing_token is None:
+        if self._owner_id is None:
             raise SessionOwnershipConflictError("stale owner or fencing token rejected")
         owner = await self._owner_store.get_owner(session_id)
         if owner is None:
             return False
+        authority = self._owner_authorities.get(session_id)
+        if authority is not None:
+            return (
+                owner.owner_id == authority.owner_id
+                and owner.fencing_token == authority.epoch
+                and owner.lease_expires_at > datetime.now(UTC)
+            )
+        if self._fencing_token is None:
+            raise SessionOwnershipConflictError("stale owner or fencing token rejected")
         return (
             owner.owner_id == self._owner_id
             and owner.fencing_token == self._fencing_token
@@ -1966,7 +2135,7 @@ class SessionManager:
     async def release_owned_sessions(self) -> None:
         if self._owner_store is None:
             return
-        if self._owner_id is None or self._fencing_token is None:
+        if self._owner_id is None:
             raise SessionOwnershipConflictError("stale owner or fencing token rejected")
         for session_id in await self.list_sessions_async():
             await self._release_owner_lease_for_session(session_id)
@@ -1974,22 +2143,28 @@ class SessionManager:
     async def _release_owner_lease_for_session(self, session_id: str) -> None:
         if self._owner_store is None:
             return
-        if self._owner_id is None or self._fencing_token is None:
+        if self._owner_id is None:
             raise SessionOwnershipConflictError("stale owner or fencing token rejected")
         if not await self._holds_owner_lease(session_id):
             return
+        authority = self._owner_authorities.get(session_id)
+        fencing_token = (
+            authority.epoch if authority is not None else self._fencing_token
+        )
+        if fencing_token is None:
+            raise SessionOwnershipConflictError("stale owner or fencing token rejected")
         try:
             released = await self._owner_store.release(
                 session_id,
                 self._owner_id,
-                self._fencing_token,
+                fencing_token,
             )
         except Exception:
             logger.warning(
                 "Failed to release owner lease for session %s owned by %s with fencing token %s",
                 session_id,
                 self._owner_id,
-                self._fencing_token,
+                fencing_token,
                 exc_info=True,
             )
             return
@@ -1998,14 +2173,16 @@ class SessionManager:
                 "Failed to release owner lease for session %s owned by %s with fencing token %s",
                 session_id,
                 self._owner_id,
-                self._fencing_token,
+                fencing_token,
             )
+            return
+        self._owner_authorities.pop(session_id, None)
 
     async def renew_owner_leases(self) -> list[str]:
         lost_active_sessions: list[str] = []
         if self._owner_store is None:
             return lost_active_sessions
-        if self._owner_id is None or self._fencing_token is None:
+        if self._owner_id is None:
             raise SessionOwnershipConflictError("stale owner or fencing token rejected")
         now = datetime.now(UTC)
         for session_id in await self.list_sessions_async():
@@ -2014,28 +2191,58 @@ class SessionManager:
                 if await self._cancel_active_turn_after_owner_loss(session_id):
                     lost_active_sessions.append(session_id)
                 continue
-            if (
-                owner.owner_id != self._owner_id
-                or owner.fencing_token != self._fencing_token
-                or owner.lease_expires_at <= now
-            ):
+            authority = self._owner_authorities.get(session_id)
+            if authority is not None:
+                owns_session = (
+                    owner.owner_id == authority.owner_id
+                    and owner.fencing_token == authority.epoch
+                    and owner.lease_expires_at > now
+                )
+                log_token = authority.epoch
+            else:
+                if self._fencing_token is None:
+                    raise SessionOwnershipConflictError(
+                        "stale owner or fencing token rejected"
+                    )
+                owns_session = (
+                    owner.owner_id == self._owner_id
+                    and owner.fencing_token == self._fencing_token
+                    and owner.lease_expires_at > now
+                )
+                log_token = self._fencing_token
+            if not owns_session:
                 if await self._cancel_active_turn_after_owner_loss(session_id):
                     lost_active_sessions.append(session_id)
                 continue
             try:
-                renewed = await self._owner_store.renew(
-                    session_id,
-                    self._owner_id,
-                    lease_seconds=self._owner_lease_seconds,
-                    new_fencing_token=self._fencing_token,
-                    current_fencing_token=self._fencing_token,
-                )
+                renew_authority = getattr(self._owner_store, "renew_authority", None)
+                if authority is not None and callable(renew_authority):
+                    renewed_authority = await renew_authority(
+                        authority,
+                        lease_seconds=self._owner_lease_seconds,
+                    )
+                    if not isinstance(renewed_authority, OwnerAuthority):
+                        raise TypeError("renew_authority must return OwnerAuthority")
+                    self._owner_authorities[session_id] = renewed_authority
+                    renewed = True
+                else:
+                    if self._fencing_token is None:
+                        raise SessionOwnershipConflictError(
+                            "stale owner or fencing token rejected"
+                        )
+                    renewed = await self._owner_store.renew(
+                        session_id,
+                        self._owner_id,
+                        lease_seconds=self._owner_lease_seconds,
+                        new_fencing_token=self._fencing_token,
+                        current_fencing_token=self._fencing_token,
+                    )
             except Exception:
                 logger.warning(
                     "Failed to renew owner lease for session %s owned by %s with fencing token %s",
                     session_id,
                     self._owner_id,
-                    self._fencing_token,
+                    log_token,
                     exc_info=True,
                 )
                 continue
@@ -2044,7 +2251,7 @@ class SessionManager:
                     "Failed to renew owner lease for session %s owned by %s with fencing token %s",
                     session_id,
                     self._owner_id,
-                    self._fencing_token,
+                    log_token,
                 )
                 if await self._cancel_active_turn_after_owner_loss(session_id):
                     lost_active_sessions.append(session_id)
@@ -2070,7 +2277,7 @@ class SessionManager:
     async def backfill_owner_leases(self) -> None:
         if self._owner_store is None:
             return
-        if self._owner_id is None or self._fencing_token is None:
+        if self._owner_id is None:
             raise SessionOwnershipConflictError("stale owner or fencing token rejected")
 
         now = datetime.now(UTC)
@@ -2079,12 +2286,32 @@ class SessionManager:
                 owner = await self._owner_store.get_owner(session_id)
                 if owner is not None and owner.lease_expires_at > now:
                     continue
-                acquired = await self._owner_store.acquire(
-                    session_id,
-                    self._owner_id,
-                    lease_seconds=self._owner_lease_seconds,
-                    fencing_token=self._fencing_token,
+                acquire_authority = getattr(
+                    self._owner_store, "acquire_authority", None
                 )
+                if callable(acquire_authority):
+                    authority = await acquire_authority(
+                        session_id,
+                        self._owner_id,
+                        lease_seconds=self._owner_lease_seconds,
+                    )
+                    if not isinstance(authority, OwnerAuthority):
+                        raise TypeError("acquire_authority must return OwnerAuthority")
+                    self._owner_authorities[session_id] = authority
+                    acquired = True
+                    log_token = authority.epoch
+                else:
+                    if self._fencing_token is None:
+                        raise SessionOwnershipConflictError(
+                            "stale owner or fencing token rejected"
+                        )
+                    acquired = await self._owner_store.acquire(
+                        session_id,
+                        self._owner_id,
+                        lease_seconds=self._owner_lease_seconds,
+                        fencing_token=self._fencing_token,
+                    )
+                    log_token = self._fencing_token
             except Exception:
                 logger.warning(
                     "Failed to backfill owner lease for session %s owned by %s with fencing token %s",
@@ -2099,7 +2326,7 @@ class SessionManager:
                     "Failed to backfill owner lease for session %s owned by %s with fencing token %s",
                     session_id,
                     self._owner_id,
-                    self._fencing_token,
+                    log_token,
                 )
 
     async def get_session_async(self, session_id: str) -> Session:
@@ -2183,10 +2410,40 @@ class SessionManager:
         await self._runtime_closer.close(session)
         await self._finalize_provisioned_cloud_workspace_on_close(session)
         self._session_cache.pop(session_id, None)
-        await self._run_store_io(self._store.delete, session_id)
+        if self._local_durable_store is not None:
+            authority = self._owner_authority_for_session(session_id)
+            await self._local_durable_store.delete_session(authority)
+        else:
+            await self._run_store_io(self._store.delete, session_id)
         await self._release_owner_lease_for_session(session_id)
         self._approval_stores.pop(session_id, None)
         self._session_turn_locks.pop(session_id, None)
+
+    async def _rollback_partially_created_session(self, session_id: str) -> None:
+        self._session_cache.pop(session_id, None)
+        try:
+            if self._local_durable_store is not None:
+                authority = self._owner_authority_for_session(session_id)
+                await self._local_durable_store.delete_session(authority)
+            else:
+                await self._run_store_io(self._store.delete, session_id)
+        except asyncio.CancelledError:
+            pass
+        except BaseException:
+            logger.exception(
+                "Failed to delete partially created session during rollback: %s",
+                session_id,
+            )
+        try:
+            await self._release_owner_lease_for_session(session_id)
+        except asyncio.CancelledError:
+            pass
+        except BaseException:
+            logger.exception(
+                "Failed to release partially created owner lease during rollback: %s",
+                session_id,
+            )
+        self._approval_stores.pop(session_id, None)
 
     async def remove_session_async(self, session_id: str) -> None:
         async with self._lock:
@@ -2255,7 +2512,27 @@ class SessionManager:
     async def _restore_checkpoint(self, session: Session, checkpoint_id: str) -> None:
         await self._runtime_checkpoint_restore_service.restore(session, checkpoint_id)
 
+    async def _restore_checkpoint_durable_state(
+        self,
+        session: Any,
+        snapshot: Any,
+    ) -> None:
+        typed_session = cast(Session, session)
+        if self._local_durable_store is None:
+            await self._persist_session_async(typed_session)
+            return
+        authority = self._owner_authority_for_session(typed_session.id)
+        await self._local_durable_store.restore_checkpoint_state(
+            authority,
+            snapshot,
+            cast(dict[str, Any], typed_session.to_store_data()),
+        )
+
     def _persist_session(self, session: Session) -> None:
+        if self._local_durable_store is not None:
+            raise RuntimeError(
+                "synchronous session persistence is unavailable for fenced local SQLite"
+            )
         self._session_cache[session.id] = session
         self._store.save(session.id, cast(dict[str, Any], session.to_store_data()))
 
@@ -2353,30 +2630,11 @@ class SessionManager:
 
         async with self._lock:
             try:
+                await self._acquire_owner_for_session(session_id)
                 await self._persist_session_async(session)
                 await self._persist_workspace_record_for_session(session)
-                await self._acquire_owner_for_session(session_id)
             except BaseException:
-                self._session_cache.pop(session_id, None)
-                try:
-                    await self._release_owner_lease_for_session(session_id)
-                except asyncio.CancelledError:
-                    pass
-                except BaseException:
-                    logger.exception(
-                        "Failed to release partially created owner lease during rollback: %s",
-                        session_id,
-                    )
-                try:
-                    await self._run_store_io(self._store.delete, session_id)
-                except asyncio.CancelledError:
-                    pass
-                except BaseException:
-                    logger.exception(
-                        "Failed to delete partially created session during rollback: %s",
-                        session_id,
-                    )
-                self._approval_stores.pop(session_id, None)
+                await self._rollback_partially_created_session(session_id)
                 raise
 
         logger.info(f"Created session: {session_id}")
@@ -2453,11 +2711,19 @@ class SessionManager:
         return self._store.load(session_id) is not None
 
     def register_session(self, session: Session) -> None:
+        if self._local_durable_store is not None:
+            raise RuntimeError(
+                "synchronous session registration is unavailable for fenced local SQLite"
+            )
         self._runtime_closer.close_sync_safe(session)
         self._approval_stores[session.id] = session.approval_store
         self._persist_session(session)
 
     def remove_session(self, session_id: str) -> None:
+        if self._local_durable_store is not None:
+            raise RuntimeError(
+                "synchronous session removal is unavailable for fenced local SQLite"
+            )
         if not self.has_session(session_id):
             raise KeyError(f"Session not found: {session_id}")
         session = self.get_session(session_id)
@@ -2469,6 +2735,10 @@ class SessionManager:
         self._session_turn_locks.pop(session_id, None)
 
     def clear_sessions(self) -> None:
+        if self._local_durable_store is not None:
+            raise RuntimeError(
+                "synchronous session clearing is unavailable for fenced local SQLite"
+            )
         cleared_session_ids = set(self._session_cache)
         for session in list(self._session_cache.values()):
             self._runtime_closer.close_sync_safe(session)

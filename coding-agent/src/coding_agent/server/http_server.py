@@ -87,6 +87,8 @@ from coding_agent.runtime_store import (
     RunMessageSnapshotRecord,
     RuntimeEventRecord,
 )
+from coding_agent.local_storage import local_sqlite_path_from_storage_config
+from coding_agent.local_storage import normalize_storage_path
 from coding_agent.events import DisplayEvent, DisplayEventStreamProjector
 from coding_agent.scheduled_runs import (
     PGScheduledRunStore,
@@ -242,6 +244,7 @@ from coding_agent.server.schemas import (
 )
 from coding_agent.server.session_manager import Session, SessionManager
 from coding_agent.server.stores.session_owner_store import (
+    SQLiteSessionOwnerStore,
     SessionOwnershipConflictError,
     SessionOwnershipConflictReason,
     SessionOwnerStore,
@@ -722,6 +725,33 @@ def _storage_uses_pg_http_sessions(storage_config: dict[str, Any]) -> bool:
     return tape_backend == "pg"
 
 
+def _storage_uses_local_sqlite_bundle(storage_config: dict[str, Any]) -> bool:
+    backend_keys = (
+        "http_session_backend",
+        "tape_backend",
+        "checkpoint_backend",
+        "runtime_backend",
+    )
+    if any(
+        str(storage_config.get(key, "")).strip().lower() != "sqlite"
+        for key in backend_keys
+    ):
+        return False
+    local_path = normalize_storage_path(
+        str(local_sqlite_path_from_storage_config(storage_config))
+    )
+    path_keys = (
+        "http_session_path",
+        "tape_path",
+        "checkpoint_path",
+        "runtime_path",
+    )
+    return all(
+        normalize_storage_path(str(storage_config.get(key, ""))) == local_path
+        for key in path_keys
+    )
+
+
 def _configured_owner_id(storage_config: dict[str, Any]) -> str:
     owner_id = storage_config.get("owner_id")
     if isinstance(owner_id, str) and owner_id.strip():
@@ -760,8 +790,25 @@ def _build_session_manager() -> SessionManager:
     except Exception:
         logger.exception("Production config validation failed")
         raise
+    uses_local_sqlite_bundle = _storage_uses_local_sqlite_bundle(storage_config)
     manager = SessionManager(
         storage_config=storage_config,
+        owner_store=(
+            SQLiteSessionOwnerStore(
+                local_sqlite_path_from_storage_config(storage_config)
+            )
+            if uses_local_sqlite_bundle
+            else None
+        ),
+        owner_id=(
+            _configured_owner_id(storage_config) if uses_local_sqlite_bundle else None
+        ),
+        fencing_token=1 if uses_local_sqlite_bundle else None,
+        owner_lease_seconds=(
+            _configured_owner_lease_seconds(storage_config)
+            if uses_local_sqlite_bundle
+            else 30.0
+        ),
         cloud_workspace_client_factory=(
             cloud_client_factory_from_config(_load_cloud_workspace_config())
             if _load_cloud_workspace_config().get("enabled") is True
