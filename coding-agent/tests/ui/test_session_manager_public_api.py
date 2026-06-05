@@ -36,6 +36,7 @@ from coding_agent.wire.protocol import (
     TurnEnd,
 )
 from coding_agent.server.session_manager import MockProvider, Session, SessionManager
+from coding_agent.server.stores.session_owner_store import SQLiteSessionOwnerStore
 from coding_agent.server.stores.session_store import (
     InMemorySessionStore,
     PGSessionMetadataStore,
@@ -621,6 +622,38 @@ def test_session_manager_uses_storage_paths_local_for_sqlite_bundle(
     assert manager._tape_store._path == custom_path
     assert manager._checkpoint_service._store._path == custom_path
     assert manager._runtime_store._path == custom_path
+
+
+def test_session_manager_uses_equivalent_explicit_sqlite_paths_as_bundle(
+    tmp_path,
+) -> None:
+    custom_path = tmp_path / "custom" / "bundle.sqlite3"
+    equivalent_path = tmp_path / "custom" / "nested" / ".." / "bundle.sqlite3"
+
+    storage_config = {
+        "http_session_backend": "sqlite",
+        "http_session_path": str(custom_path),
+        "tape_backend": "sqlite",
+        "tape_path": str(equivalent_path),
+        "checkpoint_backend": "sqlite",
+        "checkpoint_path": str(custom_path.resolve()),
+        "runtime_backend": "sqlite",
+        "runtime_path": str(equivalent_path),
+    }
+
+    manager = SessionManager(
+        storage_config=storage_config,
+        owner_store=SQLiteSessionOwnerStore(custom_path),
+        owner_id="test-owner",
+        fencing_token=1,
+    )
+
+    resolved_path = custom_path.resolve()
+    assert manager._store._path.resolve() == resolved_path
+    assert manager._local_durable_store is not None
+    assert manager._tape_store._delegate._path.resolve() == resolved_path
+    assert manager._checkpoint_service._store._delegate._path.resolve() == resolved_path
+    assert manager._runtime_store._delegate._path.resolve() == resolved_path
 
 
 def test_session_manager_explicit_sqlite_paths_override_storage_paths_local(

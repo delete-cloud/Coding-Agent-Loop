@@ -7,11 +7,14 @@ from dataclasses import dataclass, field
 import importlib
 import logging
 from typing import Any, Protocol, runtime_checkable
+from uuid import uuid4
 
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.core.config import Config
 from coding_agent.local_storage import local_sqlite_storage_config
+from coding_agent.local_storage import local_sqlite_path_from_storage_config
 from coding_agent.server.session_manager import SessionManager
+from coding_agent.server.stores.session_owner_store import SQLiteSessionOwnerStore
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +117,7 @@ class LocalCliSessionManager(Protocol):
 
     async def resume_session(self, session_id: str, **kwargs: Any) -> Any: ...
 
-    def attach_runtime(
+    async def attach_runtime(
         self,
         managed_session: LocalCliManagedSession,
         *,
@@ -146,11 +149,25 @@ class ServerBackedLocalCliSessionManager:
     def __post_init__(self) -> None:
         if self.owner_renew_interval_seconds <= 0:
             raise ValueError("owner_renew_interval_seconds must be positive")
+        owner_store = self.owner_store
+        owner_id = self.owner_id
+        fencing_token = self.fencing_token
+        if owner_store is None:
+            owner_store = SQLiteSessionOwnerStore(
+                local_sqlite_path_from_storage_config(
+                    dict(self.storage_config),
+                )
+            )
+            owner_id = owner_id or f"local-cli:{uuid4().hex}"
+            fencing_token = fencing_token or 1
+        self.owner_store = owner_store
+        self.owner_id = owner_id
+        self.fencing_token = fencing_token
         self._delegate = SessionManager(
             storage_config=dict(self.storage_config),
-            owner_store=self.owner_store,
-            owner_id=self.owner_id,
-            fencing_token=self.fencing_token,
+            owner_store=owner_store,
+            owner_id=owner_id,
+            fencing_token=fencing_token,
         )
 
     async def create_session(self, **kwargs: Any) -> str:
@@ -269,7 +286,7 @@ class ServerBackedLocalCliSessionManager:
     async def resume_session(self, session_id: str, **kwargs: Any) -> Any:
         return await self._delegate.resume_session(session_id, **kwargs)
 
-    def attach_runtime(
+    async def attach_runtime(
         self,
         managed_session: LocalCliManagedSession,
         *,
@@ -283,7 +300,7 @@ class ServerBackedLocalCliSessionManager:
             adapter=pipeline_adapter,
         )
         managed_session.tape_id = pipeline_ctx.tape.tape_id
-        self._delegate._persist_session(managed_session)
+        await self._delegate._persist_session_async(managed_session)
 
     async def close(self) -> None:
         if self._owner_renew_task is not None:

@@ -2002,22 +2002,84 @@ max_turns = 17
         with pytest.raises(ValueError, match="storage.fencing_token"):
             _build_session_manager()
 
-    def test_build_session_manager_does_not_enable_owner_store_for_non_pg_http_sessions(
+    def test_build_session_manager_enables_owner_store_for_local_sqlite_bundle(
+        self, monkeypatch, tmp_path
+    ):
+        local_path = tmp_path / "local.sqlite3"
+        monkeypatch.setattr(
+            "coding_agent.server.http_server._load_storage_config",
+            lambda: {
+                "http_session_backend": "sqlite",
+                "http_session_path": str(local_path),
+                "tape_backend": "sqlite",
+                "tape_path": str(local_path),
+                "checkpoint_backend": "sqlite",
+                "checkpoint_path": str(local_path),
+                "runtime_backend": "sqlite",
+                "runtime_path": str(local_path),
+                "owner_id": "server-a",
+                "owner_lease_seconds": 40.0,
+            },
+        )
+
+        manager = _build_session_manager()
+        try:
+            assert manager._owner_store is not None
+            assert type(manager._owner_store).__name__ == "SQLiteSessionOwnerStore"
+            assert manager._owner_id == "server-a"
+            assert manager.owner_lease_seconds == 40.0
+            assert manager._local_durable_store is not None
+        finally:
+            asyncio.run(manager.close())
+
+    def test_build_session_manager_enables_owner_store_for_equivalent_local_sqlite_bundle_paths(
+        self, monkeypatch, tmp_path
+    ):
+        local_path = tmp_path / "local.sqlite3"
+        equivalent_parent = tmp_path / "nested" / ".." / "local.sqlite3"
+        monkeypatch.setattr(
+            "coding_agent.server.http_server._load_storage_config",
+            lambda: {
+                "http_session_backend": "sqlite",
+                "http_session_path": str(local_path),
+                "tape_backend": "sqlite",
+                "tape_path": str(equivalent_parent),
+                "checkpoint_backend": "sqlite",
+                "checkpoint_path": str(local_path.resolve()),
+                "runtime_backend": "sqlite",
+                "runtime_path": str(equivalent_parent),
+                "owner_id": "server-a",
+                "owner_lease_seconds": 40.0,
+            },
+        )
+
+        manager = _build_session_manager()
+        try:
+            assert manager._owner_store is not None
+            assert type(manager._owner_store).__name__ == "SQLiteSessionOwnerStore"
+            assert manager._local_durable_store is not None
+        finally:
+            asyncio.run(manager.close())
+
+    def test_build_session_manager_does_not_enable_owner_store_for_non_bundle_storage(
         self, monkeypatch
     ):
         monkeypatch.setattr(
             "coding_agent.server.http_server._load_storage_config",
             lambda: {
                 "http_session_backend": "redis",
-                "tape_backend": "pg",
-                "checkpoint_backend": "pg",
-                "dsn": "postgresql://example",
+                "tape_backend": "jsonl",
+                "checkpoint_backend": "fs",
+                "runtime_backend": "jsonl",
             },
         )
 
         manager = _build_session_manager()
 
-        assert manager._owner_store is None
+        try:
+            assert manager._owner_store is None
+        finally:
+            asyncio.run(manager.close())
 
     async def test_renew_owner_leases_exits_when_owner_leases_are_not_configured(
         self, monkeypatch

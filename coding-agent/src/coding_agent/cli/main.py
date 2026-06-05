@@ -476,6 +476,8 @@ async def _resume_managed_session(
                 raise click.UsageError("Pass --session <id> or --last.")
             resolved_session_id = await _latest_managed_session_id(session_manager)
         session = await session_manager.get_session_async(resolved_session_id)
+        await session_manager.acquire_session_owner(resolved_session_id)
+        await session_manager.start_owner_lease_renewal()
         consumer = HeadlessConsumer(auto_approve=config.approval_mode == "yolo")
         task = asyncio.create_task(
             session_manager.resume_session(
@@ -612,6 +614,7 @@ async def _run_managed_one_shot(config: Config, goal: str, consumer) -> None:
             base_url=config.base_url,
             max_steps=config.max_steps,
         )
+        await session_manager.start_owner_lease_renewal()
         session = await session_manager.get_session_async(session_id)
         task = asyncio.create_task(session_manager.run_agent(session_id, goal))
         await _stream_managed_session_wire(session.wire, task, consumer)

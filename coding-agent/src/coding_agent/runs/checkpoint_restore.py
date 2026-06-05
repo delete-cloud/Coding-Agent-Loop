@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from agentkit.checkpoint import CheckpointService
+from agentkit.checkpoint.models import CheckpointSnapshot
 from agentkit.storage.protocols import TapeStore
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
@@ -55,6 +56,10 @@ PrepareCheckpointRuntime = Callable[
 ]
 CloseCheckpointRuntime = Callable[[CheckpointRestoreSession], Awaitable[None]]
 PersistCheckpointSession = Callable[[CheckpointRestoreSession], Awaitable[None]]
+RestoreDurableCheckpointState = Callable[
+    [CheckpointRestoreSession, CheckpointSnapshot],
+    Awaitable[None],
+]
 
 
 def serialize_checkpoint_session_config(
@@ -133,6 +138,7 @@ class CheckpointRestoreService:
     prepare_runtime: PrepareCheckpointRuntime
     close_runtime: CloseCheckpointRuntime
     persist_session: PersistCheckpointSession
+    restore_durable_state: RestoreDurableCheckpointState | None = None
 
     async def restore(
         self,
@@ -173,7 +179,6 @@ class CheckpointRestoreService:
         previous_base_url = session.base_url
 
         await self.close_runtime(session)
-        await self.tape_store.truncate(session.tape_id, meta.entry_count)
         session.tape_id = runtime.ctx.tape.tape_id
         session.provider_name = restored_config.provider_name
         session.model_name = restored_config.model_name
@@ -191,8 +196,12 @@ class CheckpointRestoreService:
             ctx=runtime.ctx,
             adapter=runtime.adapter,
         )
-        await self.persist_session(session)
+        if self.restore_durable_state is not None:
+            await self.restore_durable_state(session, snapshot)
+            return
 
+        await self.tape_store.truncate(session.tape_id, meta.entry_count)
+        await self.persist_session(session)
         checkpoints = await self.checkpoint_service.list(runtime.ctx.tape.tape_id)
         for checkpoint_meta in checkpoints:
             if checkpoint_meta.entry_count > meta.entry_count:
@@ -205,6 +214,7 @@ __all__ = [
     "CheckpointRestoreSession",
     "CheckpointRestoredRuntime",
     "CheckpointSessionConfig",
+    "RestoreDurableCheckpointState",
     "checkpoint_session_config_from_extra",
     "serialize_checkpoint_session_config",
 ]

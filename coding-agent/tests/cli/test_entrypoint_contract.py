@@ -337,6 +337,9 @@ def test_run_command_uses_managed_session(
         async def run_agent(self, session_id: str, prompt: str) -> None:
             calls.append(("run_agent", {"session_id": session_id, "prompt": prompt}))
 
+        async def start_owner_lease_renewal(self) -> None:
+            calls.append(("start_owner_lease_renewal", None))
+
         async def close(self) -> None:
             calls.append(("close", None))
 
@@ -388,6 +391,7 @@ def test_run_command_uses_managed_session(
                 "max_steps": 3,
             },
         ),
+        ("start_owner_lease_renewal", None),
         ("get_session_async", "session-managed"),
         (
             "run_agent",
@@ -518,9 +522,15 @@ def test_resume_command_uses_managed_session(
             calls.append(("get_session_async", session_id))
             return SimpleNamespace(wire=wire)
 
+        async def acquire_session_owner(self, session_id: str) -> None:
+            calls.append(("acquire_session_owner", session_id))
+
         async def resume_session(self, session_id: str, **kwargs):
             calls.append(("resume_session", {"session_id": session_id, **kwargs}))
             return SimpleNamespace(run_id="run-resumed")
+
+        async def start_owner_lease_renewal(self) -> None:
+            calls.append(("start_owner_lease_renewal", None))
 
         async def close(self) -> None:
             calls.append(("close", None))
@@ -553,6 +563,8 @@ def test_resume_command_uses_managed_session(
     assert calls == [
         calls[0],
         ("get_session_async", "session-managed"),
+        ("acquire_session_owner", "session-managed"),
+        ("start_owner_lease_renewal", None),
         (
             "resume_session",
             {

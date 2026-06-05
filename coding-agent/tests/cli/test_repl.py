@@ -1334,6 +1334,13 @@ class TestReplInitialization:
                 self.build_calls: list[str] = []
                 self.persisted_models: list[str] = []
                 self.closed_adapters: list[object] = []
+                self._runtime_maintenance_admission = (
+                    session_manager_module.RuntimeMaintenanceAdmissionService(
+                        turn_lock_for=self._turn_lock_for,
+                        assert_owner=self._assert_owner,
+                        load_session=self.get_session_async,
+                    )
+                )
                 self._runtime_closer = SimpleNamespace(
                     close_adapter=self.close_runtime_adapter
                 )
@@ -1418,6 +1425,9 @@ class TestReplInitialization:
             return "session-init"
 
         class FakeSessionManager:
+            def __init__(self) -> None:
+                self.renewal_started = False
+
             async def create_session(self, **kwargs):
                 return await fake_create_session(**kwargs)
 
@@ -1430,7 +1440,7 @@ class TestReplInitialization:
                     tape_id=None,
                 )
 
-            def attach_runtime(
+            async def attach_runtime(
                 self,
                 managed_session,
                 *,
@@ -1443,6 +1453,9 @@ class TestReplInitialization:
                 managed_session.runtime_adapter = pipeline_adapter
                 managed_session.tape_id = pipeline_ctx.tape.tape_id
                 assert managed_session.tape_id == "repl-init-tape"
+
+            async def start_owner_lease_renewal(self) -> None:
+                self.renewal_started = True
 
         fake_pipeline = object()
         fake_ctx = SimpleNamespace(
@@ -1488,6 +1501,7 @@ class TestReplInitialization:
             "mode": "interactive",
         }
         assert session._pipeline_ctx is fake_ctx
+        assert fake_session_manager.renewal_started is True
 
     @pytest.mark.asyncio
     async def test_session_new_hook_creates_repl_origin_session(self, monkeypatch):
@@ -1558,7 +1572,7 @@ class TestReplInitialization:
             def register_session(self, managed_session):
                 raise AssertionError("initialize should not re-register live runtime")
 
-            def attach_runtime(
+            async def attach_runtime(
                 self,
                 managed_session,
                 *,
@@ -1570,6 +1584,9 @@ class TestReplInitialization:
                 managed_session.runtime_ctx = pipeline_ctx
                 managed_session.runtime_adapter = pipeline_adapter
                 managed_session.tape_id = pipeline_ctx.tape.tape_id
+                return None
+
+            async def start_owner_lease_renewal(self) -> None:
                 return None
 
         fake_pipeline = object()

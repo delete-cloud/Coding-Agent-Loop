@@ -38,6 +38,17 @@ class SessionOwnerRecord:
     fencing_token: int
 
 
+@dataclass(frozen=True)
+class OwnerAuthority:
+    session_id: str
+    owner_id: str
+    epoch: int
+
+    @property
+    def fencing_token(self) -> int:
+        return self.epoch
+
+
 class SessionOwnerBackend(Protocol):
     async def acquire(
         self,
@@ -345,6 +356,107 @@ class SQLiteSessionOwnerStore:
             lease_expires_at=_datetime_from_sqlite_text(row["lease_expires_at"]),
             fencing_token=_required_sqlite_int(row, "fencing_token"),
         )
+
+    async def acquire_authority(
+        self,
+        session_id: str,
+        owner_id: str,
+        lease_seconds: float = 30.0,
+    ) -> OwnerAuthority:
+        _require_owner_input(
+            session_id=session_id,
+            owner_id=owner_id,
+            lease_seconds=lease_seconds,
+            fencing_token=1,
+        )
+        now = datetime.now(UTC)
+        expires_at = now + timedelta(seconds=lease_seconds)
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT owner_id, lease_expires_at, fencing_token
+                FROM session_owners
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            ).fetchone()
+            if row is None:
+                epoch = 1
+            else:
+                current_owner_id = _required_sqlite_str(row, "owner_id")
+                current_expiry = _datetime_from_sqlite_text(row["lease_expires_at"])
+                current_epoch = _required_sqlite_int(row, "fencing_token")
+                if current_expiry > now and current_owner_id != owner_id:
+                    raise SessionOwnershipConflictError(
+                        "stale owner or fencing token rejected"
+                    )
+                if current_expiry > now:
+                    epoch = current_epoch
+                else:
+                    epoch = current_epoch + 1
+            connection.execute(
+                """
+                INSERT INTO session_owners (
+                    session_id, owner_id, lease_expires_at, fencing_token,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id)
+                DO UPDATE SET
+                    owner_id = excluded.owner_id,
+                    lease_expires_at = excluded.lease_expires_at,
+                    fencing_token = excluded.fencing_token,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    session_id,
+                    owner_id,
+                    _datetime_to_sqlite_text(expires_at),
+                    epoch,
+                    _datetime_to_sqlite_text(now),
+                    _datetime_to_sqlite_text(now),
+                ),
+            )
+        return OwnerAuthority(session_id=session_id, owner_id=owner_id, epoch=epoch)
+
+    async def renew_authority(
+        self,
+        authority: OwnerAuthority,
+        lease_seconds: float = 30.0,
+    ) -> OwnerAuthority:
+        _require_owner_input(
+            session_id=authority.session_id,
+            owner_id=authority.owner_id,
+            lease_seconds=lease_seconds,
+            fencing_token=authority.epoch,
+        )
+        now = datetime.now(UTC)
+        expires_at = now + timedelta(seconds=lease_seconds)
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                """
+                UPDATE session_owners
+                SET lease_expires_at = ?,
+                    updated_at = ?
+                WHERE session_id = ?
+                  AND owner_id = ?
+                  AND lease_expires_at > ?
+                  AND fencing_token = ?
+                """,
+                (
+                    _datetime_to_sqlite_text(expires_at),
+                    _datetime_to_sqlite_text(now),
+                    authority.session_id,
+                    authority.owner_id,
+                    _datetime_to_sqlite_text(now),
+                    authority.epoch,
+                ),
+            )
+        if cursor.rowcount != 1:
+            raise SessionOwnershipConflictError("stale owner or fencing token rejected")
+        return authority
 
 
 def _require_owner_input(
