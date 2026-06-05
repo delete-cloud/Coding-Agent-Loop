@@ -11,7 +11,9 @@ import types
 from unittest.mock import patch
 from datetime import UTC, datetime
 from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictError
-from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictReason
+from coding_agent.server.stores.session_owner_store import (
+    SessionOwnershipConflictReason,
+)
 
 from coding_agent.server.stores.session_owner_store import (
     SessionOwnerRecord,
@@ -497,7 +499,9 @@ async def test_create_session_acquires_owner_when_owner_store_is_configured() ->
 
 
 @pytest.mark.asyncio
-async def test_create_session_rolls_back_persisted_session_when_owner_acquire_fails() -> None:
+async def test_create_session_rolls_back_persisted_session_when_owner_acquire_fails() -> (
+    None
+):
     owner_store = FakeOwnerStore()
     store = InMemorySessionStore()
     manager = SessionManager(
@@ -589,7 +593,9 @@ async def test_create_session_does_not_log_rollback_delete_cancellation(caplog) 
         await manager.create_session()
 
     assert manager._session_cache == {}
-    assert "Failed to delete partially created session during rollback" not in caplog.text
+    assert (
+        "Failed to delete partially created session during rollback" not in caplog.text
+    )
 
 
 @pytest.mark.asyncio
@@ -729,7 +735,38 @@ async def test_renew_owner_leases_skips_expired_owner_leases(caplog) -> None:
 
 
 @pytest.mark.asyncio
-async def test_backfill_owner_leases_claims_legacy_sessions_without_owner_rows() -> None:
+async def test_renew_owner_leases_cancels_active_turn_after_owner_loss() -> None:
+    owner_store = RecordingOwnerStore()
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        checkpoint_service=CheckpointService(FakeCheckpointStore()),
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=7,
+    )
+    session_id = await manager.create_session()
+    session = manager.get_session(session_id)
+    task = asyncio.create_task(asyncio.sleep(60))
+    session.task = task
+    session.turn_in_progress = True
+    owner_store._owners[session_id] = SessionOwnerRecord(
+        owner_id="owner-b",
+        lease_expires_at=datetime.now(UTC) + timedelta(seconds=30),
+        fencing_token=8,
+    )
+
+    lost_sessions = await manager.renew_owner_leases()
+
+    assert lost_sessions == [session_id]
+    assert session.as_dict()["turn_status"] == "cancelling"
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_backfill_owner_leases_claims_legacy_sessions_without_owner_rows() -> (
+    None
+):
     owner_store = RecordingOwnerStore()
     store = InMemorySessionStore()
     store.save("legacy-session", {"id": "legacy-session"})
@@ -872,7 +909,9 @@ async def test_release_owned_sessions_logs_and_continues_after_release_exception
         owner_store.release_calls.append(session_id)
         if session_id == first_session_id:
             raise RuntimeError("release failed")
-        return await FakeOwnerStore.release(owner_store, session_id, owner_id, fencing_token)
+        return await FakeOwnerStore.release(
+            owner_store, session_id, owner_id, fencing_token
+        )
 
     owner_store.release = release_with_failure
 
@@ -885,7 +924,9 @@ async def test_release_owned_sessions_logs_and_continues_after_release_exception
 
 
 @pytest.mark.asyncio
-async def test_renew_owner_leases_logs_and_continues_after_renew_exception(caplog) -> None:
+async def test_renew_owner_leases_logs_and_continues_after_renew_exception(
+    caplog,
+) -> None:
     owner_store = RecordingOwnerStore()
     manager = SessionManager(
         store=InMemorySessionStore(),

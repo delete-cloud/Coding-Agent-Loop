@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 import importlib
+import logging
 from typing import Any, Protocol, runtime_checkable
 
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.core.config import Config
 from coding_agent.server.session_manager import SessionManager
+
+logger = logging.getLogger(__name__)
 
 
 def local_cli_session_origin(*, entrypoint: str, mode: str) -> dict[str, str]:
@@ -54,6 +58,10 @@ class LocalCliSessionManager(Protocol):
     def get_session(self, session_id: str) -> Any: ...
 
     async def get_session_async(self, session_id: str) -> Any: ...
+
+    async def acquire_session_owner(self, session_id: str) -> None: ...
+
+    async def start_owner_lease_renewal(self) -> None: ...
 
     async def list_sessions_async(self) -> list[str]: ...
 
@@ -127,9 +135,25 @@ class ServerBackedLocalCliSessionManager:
             "runtime_backend": "jsonl",
         }
     )
+    owner_store: Any | None = None
+    owner_id: str | None = None
+    fencing_token: int | None = None
+    owner_renew_interval_seconds: float = 10.0
+    _owner_renew_task: asyncio.Task[None] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
-        self._delegate = SessionManager(storage_config=dict(self.storage_config))
+        if self.owner_renew_interval_seconds <= 0:
+            raise ValueError("owner_renew_interval_seconds must be positive")
+        self._delegate = SessionManager(
+            storage_config=dict(self.storage_config),
+            owner_store=self.owner_store,
+            owner_id=self.owner_id,
+            fencing_token=self.fencing_token,
+        )
 
     async def create_session(self, **kwargs: Any) -> str:
         return await self._delegate.create_session(**kwargs)
@@ -139,6 +163,26 @@ class ServerBackedLocalCliSessionManager:
 
     async def get_session_async(self, session_id: str) -> Any:
         return await self._delegate.get_session_async(session_id)
+
+    async def acquire_session_owner(self, session_id: str) -> None:
+        await self._delegate.acquire_session_owner(session_id)
+
+    async def start_owner_lease_renewal(self) -> None:
+        if self.owner_store is None:
+            return
+        if self._owner_renew_task is not None:
+            return
+        self._owner_renew_task = asyncio.create_task(self._renew_owner_leases_loop())
+
+    async def _renew_owner_leases_loop(self) -> None:
+        while True:
+            try:
+                await self._delegate.renew_owner_leases()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Error renewing local CLI owner leases")
+            await asyncio.sleep(self.owner_renew_interval_seconds)
 
     async def list_sessions_async(self) -> list[str]:
         return await self._delegate.list_sessions_async()
@@ -152,6 +196,16 @@ class ServerBackedLocalCliSessionManager:
         mcp_servers: dict[str, dict[str, Any]],
     ) -> None:
         await self._delegate.update_session_mcp_servers(session_id, mcp_servers)
+
+    async def update_session_additional_directories(
+        self,
+        session_id: str,
+        additional_directories: list[str],
+    ) -> None:
+        await self._delegate.update_session_additional_directories(
+            session_id,
+            additional_directories,
+        )
 
     async def list_runtime_runs(self, session_id: str) -> Any:
         return await self._delegate.list_runtime_runs(session_id)
@@ -234,12 +288,23 @@ class ServerBackedLocalCliSessionManager:
         self._delegate._persist_session(managed_session)
 
     async def close(self) -> None:
+        if self._owner_renew_task is not None:
+            self._owner_renew_task.cancel()
+            try:
+                await self._owner_renew_task
+            except asyncio.CancelledError:
+                pass
+            self._owner_renew_task = None
+        await self._delegate.release_owned_sessions()
         await self._delegate.close()
 
 
 def create_local_cli_session_manager(
     *,
     storage_config: dict[str, object] | None = None,
+    owner_store: Any | None = None,
+    owner_id: str | None = None,
+    fencing_token: int | None = None,
 ) -> LocalCliSessionManager:
     """Create the local REPL session manager.
 
@@ -248,9 +313,17 @@ def create_local_cli_session_manager(
     importing server/control-plane types directly.
     """
 
+    kwargs = {
+        "owner_store": owner_store,
+        "owner_id": owner_id,
+        "fencing_token": fencing_token,
+    }
     if storage_config is None:
-        return ServerBackedLocalCliSessionManager()
-    return ServerBackedLocalCliSessionManager(storage_config=storage_config)
+        return ServerBackedLocalCliSessionManager(**kwargs)
+    return ServerBackedLocalCliSessionManager(
+        storage_config=storage_config,
+        **kwargs,
+    )
 
 
 __all__ = [

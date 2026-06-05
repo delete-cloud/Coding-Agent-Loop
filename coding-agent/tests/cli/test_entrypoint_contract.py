@@ -146,6 +146,82 @@ def test_acp_command_uses_shared_provider_model(
     ]
 
 
+def test_acp_stdio_disables_agentkit_tracing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from coding_agent.cli import acp_command
+
+    calls: list[tuple[str, object]] = []
+
+    class FakeManager:
+        async def start_owner_lease_renewal(self) -> None:
+            calls.append(("start_owner_lease_renewal", None))
+
+        async def close(self) -> None:
+            calls.append(("close", None))
+
+    def fake_configure_tracing(*, enabled: bool | None = None, level: str = "INFO"):
+        calls.append(("configure_tracing", {"enabled": enabled, "level": level}))
+
+    def fake_create_local_cli_session_manager(
+        *,
+        storage_config,
+        owner_store,
+        owner_id,
+        fencing_token,
+    ):
+        calls.append(
+            (
+                "create_manager",
+                {
+                    "storage_config": storage_config,
+                    "owner_store_type": type(owner_store).__name__,
+                    "owner_id": owner_id,
+                    "fencing_token_type": type(fencing_token).__name__,
+                },
+            )
+        )
+        return FakeManager()
+
+    async def fake_run_stdio(server):
+        calls.append(("run_stdio", type(server).__name__))
+
+    monkeypatch.setattr(acp_command, "configure_tracing", fake_configure_tracing)
+    monkeypatch.setattr(
+        acp_command,
+        "create_local_cli_session_manager",
+        fake_create_local_cli_session_manager,
+    )
+    monkeypatch.setattr(acp_command, "run_stdio", fake_run_stdio)
+
+    result = CliRunner(env=_click_credential_free_env()).invoke(
+        main,
+        ["acp"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert calls[0] == ("configure_tracing", {"enabled": False, "level": "INFO"})
+    assert calls[1] == (
+        "create_manager",
+        {
+            "storage_config": {
+                "http_session_backend": "fs",
+                "tape_backend": "sqlite",
+                "checkpoint_backend": "sqlite",
+                "runtime_backend": "sqlite",
+            },
+            "owner_store_type": "SQLiteSessionOwnerStore",
+            "owner_id": calls[1][1]["owner_id"],
+            "fencing_token_type": "int",
+        },
+    )
+    assert str(calls[1][1]["owner_id"]).startswith("acp-stdio:")
+    assert ("start_owner_lease_renewal", None) in calls
+    assert ("run_stdio", "AcpServer") in calls
+    assert calls[-1] == ("close", None)
+
+
 def test_daemon_run_help_is_daemon_backed_client_surface() -> None:
     runner = CliRunner(env=_click_credential_free_env())
 

@@ -16,6 +16,7 @@ from coding_agent.acp.mapper import (
     wire_message_to_session_update,
 )
 from coding_agent.approval import ApprovalPolicy
+from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictError
 from coding_agent.wire.protocol import ApprovalRequest, TurnEnd
 
 JSONObject = dict[str, Any]
@@ -29,6 +30,8 @@ class AcpSessionManager(Protocol):
     async def create_session(self, **kwargs: Any) -> str: ...
 
     async def get_session_async(self, session_id: str) -> Any: ...
+
+    async def acquire_session_owner(self, session_id: str) -> None: ...
 
     async def run_agent(self, session_id: str, prompt: str) -> None: ...
 
@@ -135,6 +138,14 @@ class AcpServer:
                 "jsonrpc": "2.0",
                 "id": request_id,
                 "error": {"code": exc.code, "message": exc.message},
+            }
+        except SessionOwnershipConflictError as exc:
+            if isinstance(message, dict) and "id" not in message:
+                return None
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {"code": -32000, "message": str(exc)},
             }
         except RuntimeError as exc:
             if str(exc) == "turn already in progress":
@@ -315,6 +326,7 @@ class AcpServer:
         )
 
         await self._session_manager.get_session_async(session_id)
+        await self._session_manager.acquire_session_owner(session_id)
         await self._session_manager.update_session_mcp_servers(
             session_id,
             mcp_servers,
@@ -370,6 +382,7 @@ class AcpServer:
         )
 
         await self._session_manager.get_session_async(session_id)
+        await self._session_manager.acquire_session_owner(session_id)
         await self._session_manager.update_session_mcp_servers(
             session_id,
             mcp_servers,
