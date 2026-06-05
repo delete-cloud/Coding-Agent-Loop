@@ -60,6 +60,12 @@ from coding_agent.local_durable_store import (
     FencedSQLiteTapeStore,
     SQLiteLocalDurableStore,
 )
+from coding_agent.pg_durable_store import (
+    FencedPGCheckpointStore,
+    FencedPGRuntimeStore,
+    FencedPGTapeStore,
+    PGDurableStore,
+)
 from coding_agent.plugins.storage import JSONLTapeStore
 from coding_agent.providers.base import ToolSchema
 from coding_agent.runtime_store import (
@@ -813,6 +819,12 @@ class SessionManager:
         )
         self._pg_pool = pg_pool
         self._owns_pg_pool = False
+        self._custom_store_supplied = store is not None
+        self._custom_tape_store_supplied = tape_store is not None
+        self._custom_checkpoint_store_supplied = (
+            checkpoint_store is not None or checkpoint_service is not None
+        )
+        self._custom_runtime_store_supplied = runtime_store is not None
         self._local_durable_store = self._create_local_durable_store(
             data_dir=data_dir,
             store=store,
@@ -822,6 +834,7 @@ class SessionManager:
             runtime_store=runtime_store,
             owner_store=owner_store,
         )
+        self._pg_durable_store: PGDurableStore | None = None
         self._store = store or self._create_http_session_store()
         self._session_cache: dict[str, Session] = {}
         self._approval_stores: dict[str, ApprovalStore] = {}
@@ -1017,11 +1030,7 @@ class SessionManager:
             ),
             close_runtime=self._runtime_closer.close,
             persist_session=self._persist_session_async,
-            restore_durable_state=(
-                self._restore_checkpoint_durable_state
-                if self._local_durable_store is not None
-                else None
-            ),
+            restore_durable_state=self._restore_checkpoint_durable_state,
         )
         self._runtime_checkpoint_restore_orchestration = (
             RuntimeCheckpointRestoreOrchestrationService(
@@ -1174,6 +1183,7 @@ class SessionManager:
         self._fencing_token = fencing_token
         self._owner_lease_seconds = owner_lease_seconds
         self._owner_authorities: dict[str, OwnerAuthority] = {}
+        self._configure_pg_durable_store_if_available()
 
     def _create_local_durable_store(
         self,
@@ -1227,6 +1237,55 @@ class SessionManager:
         if any(path != local_path for path in configured_paths):
             return None
         return SQLiteLocalDurableStore(local_path)
+
+    def _configure_pg_durable_store_if_available(self) -> None:
+        if self._pg_durable_store is not None:
+            return
+        if self._local_durable_store is not None:
+            return
+        if self._owner_store is None or not callable(
+            getattr(self._owner_store, "acquire_authority", None)
+        ):
+            return
+        if (
+            self._custom_store_supplied
+            or self._custom_tape_store_supplied
+            or self._custom_checkpoint_store_supplied
+            or self._custom_runtime_store_supplied
+        ):
+            return
+        pg_backend_keys = (
+            "http_session_backend",
+            "tape_backend",
+            "checkpoint_backend",
+            "runtime_backend",
+        )
+        if any(
+            str(self._storage_config.get(key, "")).strip().lower() != "pg"
+            for key in pg_backend_keys
+        ):
+            return
+        pg_pool = self._get_pg_pool()
+        durable_store = PGDurableStore(pool=pg_pool)
+        self._pg_durable_store = durable_store
+        self._tape_store = FencedPGTapeStore(
+            durable_store=durable_store,
+            pool=pg_pool,
+            authority_for_session=self._owner_authority_for_session,
+        )
+        self._checkpoint_service = CheckpointService(
+            FencedPGCheckpointStore(
+                durable_store=durable_store,
+                pool=pg_pool,
+                authority_for_session=self._owner_authority_for_session,
+            )
+        )
+        self._runtime_store = FencedPGRuntimeStore(
+            durable_store=durable_store,
+            pool=pg_pool,
+            authority_for_session=self._owner_authority_for_session,
+            authorities=lambda: dict(self._owner_authorities),
+        )
 
     def configure_workspace_metadata_store(
         self,
@@ -2003,6 +2062,14 @@ class SessionManager:
                 )
             await self._local_durable_store.save_session(authority, payload)
             return
+        if self._pg_durable_store is not None:
+            authority = self._owner_authorities.get(session.id)
+            if authority is None:
+                raise SessionOwnershipConflictError(
+                    "session metadata mutation requires owner authority"
+                )
+            await self._pg_durable_store.save_session(authority, payload)
+            return
         await self._run_store_io(
             self._store.save,
             session.id,
@@ -2413,6 +2480,9 @@ class SessionManager:
         if self._local_durable_store is not None:
             authority = self._owner_authority_for_session(session_id)
             await self._local_durable_store.delete_session(authority)
+        elif self._pg_durable_store is not None:
+            authority = self._owner_authority_for_session(session_id)
+            await self._pg_durable_store.delete_session(authority)
         else:
             await self._run_store_io(self._store.delete, session_id)
         await self._release_owner_lease_for_session(session_id)
@@ -2425,6 +2495,9 @@ class SessionManager:
             if self._local_durable_store is not None:
                 authority = self._owner_authority_for_session(session_id)
                 await self._local_durable_store.delete_session(authority)
+            elif self._pg_durable_store is not None:
+                authority = self._owner_authority_for_session(session_id)
+                await self._pg_durable_store.delete_session(authority)
             else:
                 await self._run_store_io(self._store.delete, session_id)
         except asyncio.CancelledError:
@@ -2518,20 +2591,40 @@ class SessionManager:
         snapshot: Any,
     ) -> None:
         typed_session = cast(Session, session)
-        if self._local_durable_store is None:
+        if self._local_durable_store is None and self._pg_durable_store is None:
+            if typed_session.tape_id is None:
+                raise ValueError("session has no stable tape id")
+            await self._tape_store.truncate(
+                typed_session.tape_id,
+                snapshot.meta.entry_count,
+            )
             await self._persist_session_async(typed_session)
+            checkpoints = await self._checkpoint_service.list(typed_session.tape_id)
+            for checkpoint_meta in checkpoints:
+                if checkpoint_meta.entry_count > snapshot.meta.entry_count:
+                    await self._checkpoint_service.delete(checkpoint_meta.checkpoint_id)
             return
         authority = self._owner_authority_for_session(typed_session.id)
-        await self._local_durable_store.restore_checkpoint_state(
+        payload = cast(dict[str, Any], typed_session.to_store_data())
+        if self._local_durable_store is not None:
+            await self._local_durable_store.restore_checkpoint_state(
+                authority,
+                snapshot,
+                payload,
+            )
+            return
+        if self._pg_durable_store is None:
+            raise RuntimeError("durable checkpoint restore store is not configured")
+        await self._pg_durable_store.restore_checkpoint_state(
             authority,
             snapshot,
-            cast(dict[str, Any], typed_session.to_store_data()),
+            payload,
         )
 
     def _persist_session(self, session: Session) -> None:
-        if self._local_durable_store is not None:
+        if self._local_durable_store is not None or self._pg_durable_store is not None:
             raise RuntimeError(
-                "synchronous session persistence is unavailable for fenced local SQLite"
+                "synchronous session persistence is unavailable for fenced durable storage"
             )
         self._session_cache[session.id] = session
         self._store.save(session.id, cast(dict[str, Any], session.to_store_data()))
@@ -2711,18 +2804,18 @@ class SessionManager:
         return self._store.load(session_id) is not None
 
     def register_session(self, session: Session) -> None:
-        if self._local_durable_store is not None:
+        if self._local_durable_store is not None or self._pg_durable_store is not None:
             raise RuntimeError(
-                "synchronous session registration is unavailable for fenced local SQLite"
+                "synchronous session registration is unavailable for fenced durable storage"
             )
         self._runtime_closer.close_sync_safe(session)
         self._approval_stores[session.id] = session.approval_store
         self._persist_session(session)
 
     def remove_session(self, session_id: str) -> None:
-        if self._local_durable_store is not None:
+        if self._local_durable_store is not None or self._pg_durable_store is not None:
             raise RuntimeError(
-                "synchronous session removal is unavailable for fenced local SQLite"
+                "synchronous session removal is unavailable for fenced durable storage"
             )
         if not self.has_session(session_id):
             raise KeyError(f"Session not found: {session_id}")
@@ -2735,9 +2828,9 @@ class SessionManager:
         self._session_turn_locks.pop(session_id, None)
 
     def clear_sessions(self) -> None:
-        if self._local_durable_store is not None:
+        if self._local_durable_store is not None or self._pg_durable_store is not None:
             raise RuntimeError(
-                "synchronous session clearing is unavailable for fenced local SQLite"
+                "synchronous session clearing is unavailable for fenced durable storage"
             )
         cleared_session_ids = set(self._session_cache)
         for session in list(self._session_cache.values()):
