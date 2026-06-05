@@ -700,6 +700,15 @@ async def test_sqlite_local_durable_store_restores_checkpoint_state_atomically(
             plugin_states={},
         ),
     )
+    await store.truncate_tape(owner, "tape-a", 0)
+    await store.append_tape_entries(
+        owner,
+        "tape-a",
+        [
+            {"kind": "message", "payload": {"text": "wrong-prefix"}},
+            {"kind": "message", "payload": {"text": "drop"}},
+        ],
+    )
 
     await store.restore_checkpoint_state(
         owner,
