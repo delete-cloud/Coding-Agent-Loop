@@ -1,7 +1,12 @@
 # ADR-0067: Use SQLite-first durable tape and runtime stores for local ACP
 
-**Status**: Proposed
+**Status**: Superseded
 **Date**: 2026-06-05
+
+Superseded by ADR-0068. ADR-0067 captured the first local ACP SQLite
+durability slice, but its filesystem session metadata, multi-database local
+bundle, caller-provided fencing token, and boundary-only `_assert_owner` model
+are no longer the target architecture for transactional durable fencing.
 
 ## Context
 
