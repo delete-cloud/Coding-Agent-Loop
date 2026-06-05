@@ -1994,21 +1994,26 @@ class SessionManager:
                 self._fencing_token,
             )
 
-    async def renew_owner_leases(self) -> None:
+    async def renew_owner_leases(self) -> list[str]:
+        lost_active_sessions: list[str] = []
         if self._owner_store is None:
-            return
+            return lost_active_sessions
         if self._owner_id is None or self._fencing_token is None:
             raise SessionOwnershipConflictError("stale owner or fencing token rejected")
         now = datetime.now(UTC)
         for session_id in await self.list_sessions_async():
             owner = await self._owner_store.get_owner(session_id)
             if owner is None:
+                if await self._cancel_active_turn_after_owner_loss(session_id):
+                    lost_active_sessions.append(session_id)
                 continue
             if (
                 owner.owner_id != self._owner_id
                 or owner.fencing_token != self._fencing_token
                 or owner.lease_expires_at <= now
             ):
+                if await self._cancel_active_turn_after_owner_loss(session_id):
+                    lost_active_sessions.append(session_id)
                 continue
             try:
                 renewed = await self._owner_store.renew(
@@ -2034,6 +2039,26 @@ class SessionManager:
                     self._owner_id,
                     self._fencing_token,
                 )
+                if await self._cancel_active_turn_after_owner_loss(session_id):
+                    lost_active_sessions.append(session_id)
+        return lost_active_sessions
+
+    async def _cancel_active_turn_after_owner_loss(self, session_id: str) -> bool:
+        async with self._lock:
+            session = self._session_cache.get(session_id)
+            if session is None:
+                return False
+            if session.task is None or session.task.done():
+                return False
+            logger.warning(
+                "Cancelling active turn for session %s after owner lease loss",
+                session_id,
+            )
+            await self._runtime_cancel_orchestration.cancel(
+                session,
+                task=session.task,
+            )
+            return True
 
     async def backfill_owner_leases(self) -> None:
         if self._owner_store is None:
@@ -2356,6 +2381,7 @@ class SessionManager:
         mcp_servers: dict[str, dict[str, Any]],
     ) -> None:
         session = await self.get_session_async(session_id)
+        await self._assert_owner(session_id)
         resolved_mcp_servers = _session_mcp_servers_from_store(mcp_servers)
         if session.mcp_servers == resolved_mcp_servers:
             return
@@ -2370,6 +2396,7 @@ class SessionManager:
         additional_directories: list[str],
     ) -> None:
         session = await self.get_session_async(session_id)
+        await self._assert_owner(session_id)
         resolved_additional_directories = _session_additional_directories_from_store(
             additional_directories
         )
@@ -2401,6 +2428,9 @@ class SessionManager:
         return self._hydrate_session(
             Session.from_store_data(cast(dict[str, Any], loaded))
         )
+
+    async def acquire_session_owner(self, session_id: str) -> None:
+        await self._acquire_owner_for_session(session_id)
 
     def has_session(self, session_id: str) -> bool:
         """Check if a session exists.
