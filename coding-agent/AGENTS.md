@@ -46,6 +46,7 @@ uv run ruff format src/
 - If you change CLI/entrypoint behavior, run `tests/cli/`.
 - Use `README.md` as the default source of truth for workflows unless a more specific doc under `docs/` overrides it.
 - Do not add thin wrapper functions around existing functions unless the wrapper adds real value beyond renaming.
+- **Decision transparency**: At every decision point (choosing an approach, selecting a trade-off, deferring scope, picking a design pattern, interpreting ambiguous requirements), explicitly output the decision and its rationale before proceeding. This is not about seeking permission — it is about making the reasoning visible so that course corrections are cheap. A one-line statement of what was decided and why is sufficient.
 
 ## Postmortem Usage Rules
 
