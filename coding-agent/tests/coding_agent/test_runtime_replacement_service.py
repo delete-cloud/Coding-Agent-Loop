@@ -21,7 +21,9 @@ class FakeSession:
     def __init__(self) -> None:
         self.id = "session-1"
         self.provider = object()
+        self.provider_name = "old-provider"
         self.model_name = "old-model"
+        self.base_url = "https://old.example.com"
         self.tape_id = "old-tape"
         self.pipeline = "old-pipeline"
         self.ctx = FakeContext(FakeTape("old-tape"))
@@ -61,9 +63,13 @@ async def test_runtime_replacement_service_replaces_runtime_and_closes_old() -> 
         runtime_session: FakeSession,
         *,
         model_name: str,
+        provider_name: str | None = None,
+        base_url: str | None = None,
     ) -> tuple[object, FakeContext, object]:
         assert runtime_session is session
         assert model_name == "new-model"
+        assert provider_name is None
+        assert base_url is None
         return "new-pipeline", FakeContext(FakeTape("new-tape")), "new-adapter"
 
     async def persist_session(runtime_session: FakeSession) -> None:
@@ -107,8 +113,10 @@ async def test_runtime_replacement_service_rolls_back_when_persist_fails() -> No
         runtime_session: FakeSession,
         *,
         model_name: str,
+        provider_name: str | None = None,
+        base_url: str | None = None,
     ) -> tuple[object, FakeContext, object]:
-        del runtime_session, model_name
+        del runtime_session, model_name, provider_name, base_url
         return "new-pipeline", FakeContext(FakeTape("new-tape")), "new-adapter"
 
     async def persist_session(runtime_session: FakeSession) -> None:
@@ -129,7 +137,9 @@ async def test_runtime_replacement_service_rolls_back_when_persist_fails() -> No
         )
 
     assert session.provider is old_provider
+    assert session.provider_name == "old-provider"
     assert session.model_name == "old-model"
+    assert session.base_url == "https://old.example.com"
     assert session.tape_id == "old-tape"
     assert session.pipeline == "old-pipeline"
     assert session.adapter == "old-adapter"
@@ -144,8 +154,10 @@ async def test_runtime_replacement_service_ignores_old_adapter_close_failure() -
         runtime_session: FakeSession,
         *,
         model_name: str,
+        provider_name: str | None = None,
+        base_url: str | None = None,
     ) -> tuple[object, FakeContext, object]:
-        del runtime_session, model_name
+        del runtime_session, model_name, provider_name, base_url
         return "new-pipeline", FakeContext(FakeTape("new-tape")), "new-adapter"
 
     async def persist_session(runtime_session: FakeSession) -> None:

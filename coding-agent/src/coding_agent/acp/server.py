@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+from dataclasses import dataclass
 import json
 from pathlib import Path
 import sys
@@ -24,6 +25,32 @@ AcpEmitter = Callable[[JSONObject], None | Awaitable[None]]
 AcpClientCaller = Callable[[str, JSONObject], Awaitable[JSONObject]]
 LineWriter = Callable[[str], None]
 ACP_DEFAULT_MODE_ID = "default"
+
+
+@dataclass(frozen=True)
+class AcpMode:
+    """A named provider/model preset exposed as an ACP session mode."""
+
+    id: str
+    name: str
+    description: str = ""
+    provider: str | None = None
+    model: str | None = None
+    base_url: str | None = None
+
+
+def default_acp_modes() -> list[AcpMode]:
+    """Return the default single-mode configuration.
+
+    Override by passing custom modes to AcpServer or via ACP_TOML config.
+    """
+    return [
+        AcpMode(
+            id=ACP_DEFAULT_MODE_ID,
+            name="Default",
+            description="Standard Coding Agent behavior.",
+        ),
+    ]
 
 
 class AcpSessionManager(Protocol):
@@ -72,6 +99,15 @@ class AcpSessionManager(Protocol):
         additional_directories: list[str],
     ) -> None: ...
 
+    async def replace_session_runtime_config(
+        self,
+        session_id: str,
+        *,
+        model_name: str | None = None,
+        provider_name: str | None = None,
+        base_url: str | None = None,
+    ) -> Any: ...
+
 
 class JsonRpcError(Exception):
     def __init__(self, code: int, message: str) -> None:
@@ -92,6 +128,7 @@ class AcpServer:
         model_name: str | None = None,
         base_url: str | None = None,
         max_steps: int = 30,
+        modes: list[AcpMode] | None = None,
     ) -> None:
         self._session_manager = session_manager
         self._emit = emit
@@ -101,6 +138,9 @@ class AcpServer:
         self._model_name = model_name
         self._base_url = base_url
         self._max_steps = max_steps
+        self._modes = (
+            modes if modes is not None else default_acp_modes()
+        )
         self._active_prompt_sessions: set[str] = set()
         self._cancelled_prompt_sessions: set[str] = set()
 
@@ -173,10 +213,10 @@ class AcpServer:
             return await self._session_new(params)
         if method == "session/load":
             await self._session_load(params)
-            return {"modes": _session_mode_state()}
+            return {"modes": _session_mode_state(self._modes)}
         if method == "session/resume":
             await self._session_resume(params)
-            return {"modes": _session_mode_state()}
+            return {"modes": _session_mode_state(self._modes)}
         if method == "session/list":
             return await self._session_list(params)
         if method == "session/close":
@@ -213,6 +253,7 @@ class AcpServer:
                     "additionalDirectories": {},
                 },
             },
+            "modes": _session_mode_state(self._modes),
             "agentInfo": {
                 "name": "coding-agent",
                 "title": "Coding Agent",
@@ -260,7 +301,7 @@ class AcpServer:
             mcp_servers=mcp_servers,
             additional_directories=additional_directories,
         )
-        return {"sessionId": session_id, "modes": _session_mode_state()}
+        return {"sessionId": session_id, "modes": _session_mode_state(self._modes)}
 
     async def _session_list(self, params: JSONObject) -> JSONObject:
         cursor = params.get("cursor")
@@ -399,12 +440,32 @@ class AcpServer:
                 -32602, "session/set_mode params.sessionId must be a string"
             )
         mode_id = params.get("modeId")
-        if mode_id != ACP_DEFAULT_MODE_ID:
+        if not isinstance(mode_id, str) or not mode_id:
+            raise JsonRpcError(
+                -32602, "session/set_mode params.modeId must be a string"
+            )
+
+        mode = next((m for m in self._modes if m.id == mode_id), None)
+        if mode is None:
             raise JsonRpcError(
                 -32602,
-                f"session/set_mode params.modeId must be {ACP_DEFAULT_MODE_ID}",
+                f"session/set_mode unknown modeId: {mode_id}",
             )
+
         await self._session_manager.get_session_async(session_id)
+        try:
+            await self._session_manager.replace_session_runtime_config(
+                session_id,
+                model_name=mode.model,
+                provider_name=mode.provider,
+                base_url=mode.base_url,
+            )
+        except RuntimeError as exc:
+            if str(exc) == "turn already in progress":
+                raise JsonRpcError(-32000, "Turn already in progress") from exc
+            raise JsonRpcError(-32603, str(exc)) from exc
+        except ValueError as exc:
+            raise JsonRpcError(-32603, str(exc)) from exc
 
     async def _session_set_config_option(self, params: JSONObject) -> JSONObject:
         session_id = params.get("sessionId")
@@ -770,16 +831,19 @@ def _session_additional_directories(session: object) -> list[str]:
     return list(value)
 
 
-def _session_mode_state() -> JSONObject:
+def _session_mode_state(modes: Iterable[AcpMode] | None = None) -> JSONObject:
+    available = [
+        {
+            "id": m.id,
+            "name": m.name,
+            "description": m.description or f"Provider: {m.provider or 'any'}, Model: {m.model or 'any'}",
+        }
+        for m in (modes or default_acp_modes())
+    ]
+    default_id = available[0]["id"] if available else ACP_DEFAULT_MODE_ID
     return {
-        "currentModeId": ACP_DEFAULT_MODE_ID,
-        "availableModes": [
-            {
-                "id": ACP_DEFAULT_MODE_ID,
-                "name": "Default",
-                "description": "Standard Coding Agent behavior.",
-            }
-        ],
+        "currentModeId": default_id,
+        "availableModes": available,
     }
 
 

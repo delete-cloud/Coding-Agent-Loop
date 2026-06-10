@@ -59,6 +59,25 @@ class CreateSessionRequest(BaseModel):
     max_steps: int | None = Field(None, ge=0)
 
 
+class RuntimeConfigUpdateRequest(BaseModel):
+    """Request schema for updating session runtime config."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    model: str | None = Field(None, min_length=1, max_length=200)
+    provider: ProviderName | None = None
+    base_url: str | None = Field(None, min_length=1, max_length=500)
+
+
+class RuntimeConfigUpdateResponse(BaseModel):
+    """Response schema for runtime config update."""
+
+    session_id: str
+    provider_name: str | None
+    model_name: str | None
+    base_url: str | None
+
+
 class ApproveRequest(BaseModel):
     """Request schema for approval response."""
 

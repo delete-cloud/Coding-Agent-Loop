@@ -3243,13 +3243,22 @@ class SessionManager:
         self,
         session_id: str,
         *,
-        model_name: str,
+        model_name: str | None = None,
+        provider_name: str | None = None,
+        base_url: str | None = None,
     ) -> Session:
         async def replace_admitted_runtime(session: object) -> Session:
             admitted_session = cast(Session, session)
+            resolved_model = (
+                model_name if model_name is not None else admitted_session.model_name
+            )
+            if not resolved_model:
+                raise RuntimeError("session is missing model_name, cannot replace runtime")
             return await self._runtime_replacement_service.replace_runtime_config(
                 admitted_session,
-                model_name=model_name,
+                model_name=resolved_model,
+                provider_name=provider_name,
+                base_url=base_url,
                 build_runtime=self._build_session_runtime,
                 persist_session=self._persist_session_async,
             )

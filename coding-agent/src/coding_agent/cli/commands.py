@@ -107,27 +107,40 @@ async def cmd_plan(args: list[str], context: dict[str, Any]) -> None:
         print_pt("No active plan. Use todo_write to create one.", output=_out())
 
 
-@command("model", "Show or change model")
+@command("model", "Show or change model. Syntax: [provider:]model")
 async def cmd_model(args: list[str], context: dict[str, Any]) -> None:
     if args:
-        new_model = args[0]
-        if len(new_model) < 2 or len(new_model) > 100:
+        raw = args[0]
+        if len(raw) < 2 or len(raw) > 100:
             print_html(
-                f"<ansired>Invalid model name: {_h(new_model)}</ansired>",
+                f"<ansired>Invalid model name: {_h(raw)}</ansired>",
                 output=_out(),
             )
             return
+        # Parse optional "provider:model" syntax
+        provider_override: str | None = None
+        model_name = raw
+        if ":" in raw:
+            provider_override, _, model_name = raw.partition(":")
+            if not provider_override or not model_name:
+                print_html(
+                    f"<ansired>Invalid syntax. Use [provider:]model. Got: {_h(raw)}</ansired>",
+                    output=_out(),
+                )
+                return
+            context["provider_override"] = provider_override
+
+        context["model"] = model_name
         on_model_change = cast(
-            Callable[[str], Coroutine[Any, Any, None]] | None,
+            Callable[[str, str | None], Coroutine[Any, Any, None]] | None,
             context.get("on_model_change"),
         )
         if callable(on_model_change):
-            await on_model_change(new_model)
-        else:
-            context["model"] = new_model
+            await on_model_change(model_name, provider_override)
         output = _out()
+        label = f"{provider_override}:{model_name}" if provider_override else model_name
         print_html(
-            f"Model changed to: <ansicyan><b>{_h(new_model)}</b></ansicyan>",
+            f"Model changed to: <ansicyan><b>{_h(label)}</b></ansicyan>",
             output=output,
         )
         print_html(
@@ -136,8 +149,10 @@ async def cmd_model(args: list[str], context: dict[str, Any]) -> None:
         )
     else:
         current = context.get("model", "unknown")
+        provider_current = context.get("provider", None)
+        label = f"{provider_current}:{current}" if provider_current else current
         print_html(
-            f"Current model: <ansicyan><b>{_h(current)}</b></ansicyan>",
+            f"Current model: <ansicyan><b>{_h(label)}</b></ansicyan>",
             output=_out(),
         )
 

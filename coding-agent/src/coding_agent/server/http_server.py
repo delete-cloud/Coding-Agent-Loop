@@ -206,6 +206,8 @@ from coding_agent.server.schemas import (
     ReadinessResponse,
     ResolveInteractionRequest,
     ResumeSessionRequest,
+    RuntimeConfigUpdateRequest,
+    RuntimeConfigUpdateResponse,
     RuntimeEventResponse,
     RuntimeEventsResponse,
     RuntimeInteractionListResponse,
@@ -2472,6 +2474,64 @@ async def create_session(
 
     logger.info(f"Created session: {session_id}")
     return SessionResponse(session_id=session_id)
+
+
+@app.patch("/sessions/{session_id}/runtime-config", response_model=RuntimeConfigUpdateResponse)
+@limiter.limit(RateLimits.CREATE_SESSION)
+async def update_runtime_config(
+    request: Request,
+    session_id: str,
+    body: RuntimeConfigUpdateRequest,
+    api_key: str | None = Depends(verify_api_key),
+) -> RuntimeConfigUpdateResponse:
+    """Update the session runtime provider/model/base_url config in-place.
+
+    Applies changes next turn. The session's tape and history are preserved.
+    Returns 409 if a turn is currently in progress.
+    Returns 400 if no config fields are provided.
+    """
+    if body.model is None and body.provider is None and body.base_url is None:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one of model, provider, or base_url must be provided",
+        )
+
+    try:
+        session = await session_manager.get_session_async(session_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if getattr(session, "turn_in_progress", False):
+        raise HTTPException(status_code=409, detail="Turn already in progress")
+
+    try:
+        updated_session = await session_manager.replace_session_runtime_config(
+            session_id,
+            model_name=body.model,
+            provider_name=body.provider,
+            base_url=body.base_url,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Session not found") from exc
+    except RuntimeError as exc:
+        if str(exc) == "turn already in progress":
+            raise HTTPException(
+                status_code=409, detail="Turn already in progress"
+            ) from exc
+        raise HTTPException(
+            status_code=500, detail=_http_exception_detail(exc)
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500, detail=_http_exception_detail(exc)
+        ) from exc
+
+    return RuntimeConfigUpdateResponse(
+        session_id=session_id,
+        provider_name=getattr(updated_session, "provider_name", None),
+        model_name=getattr(updated_session, "model_name", None),
+        base_url=getattr(updated_session, "base_url", None),
+    )
 
 
 @app.post("/sessions/{session_id}/prompt")

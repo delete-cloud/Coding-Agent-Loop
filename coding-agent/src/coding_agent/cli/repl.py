@@ -210,6 +210,8 @@ class InteractiveSession:
             "kimi-code",
             "kimi-code-anthropic",
             "deepseek",
+            "stepfun",
+            "codex",
         }
         if provider_name not in allowed_providers:
             raise RuntimeError(
@@ -253,6 +255,7 @@ class InteractiveSession:
         self._sync_config_from_managed_session(managed_session)
         self.context["session_id"] = managed_session.id
         self.context["model"] = self.config.model
+        self.context["provider"] = self.config.provider
         self._pipeline = managed_session.runtime_pipeline
         self._pipeline_ctx = managed_session.runtime_ctx
         self._pipeline_adapter = managed_session.runtime_adapter
@@ -262,19 +265,31 @@ class InteractiveSession:
             self._pipeline_ctx.config["wire_consumer"] = self._consumer
         self._refresh_command_context_from_pipeline_ctx(managed_session.runtime_ctx)
 
-    async def _change_model_for_next_turn(self, model_name: str) -> None:
-        if self.config.model == model_name:
+    async def _change_model_for_next_turn(
+        self,
+        model_name: str,
+        provider_name: str | None = None,
+    ) -> None:
+        if self.config.model == model_name and (
+            provider_name is None or self.config.provider == provider_name
+        ):
             return
         old_model_name = self.config.model
+        old_provider = self.config.provider
         session_id = self.context.get("session_id")
         if not isinstance(session_id, str):
             self.config.model = model_name
             self.context["model"] = model_name
+            if provider_name is not None:
+                self.config.provider = provider_name
+                self.context["provider"] = provider_name
             try:
                 self._setup_agent()
             except Exception:
                 self.config.model = old_model_name
+                self.config.provider = old_provider
                 self.context["model"] = old_model_name
+                self.context["provider"] = old_provider
                 raise
             return
 
@@ -283,16 +298,20 @@ class InteractiveSession:
                 await self._session_manager.replace_session_runtime_config(
                     session_id,
                     model_name=model_name,
+                    provider_name=provider_name,
                 )
             )
         except Exception:
             self.config.model = old_model_name
+            self.config.provider = old_provider
             self.context["model"] = old_model_name
+            self.context["provider"] = old_provider
             raise
 
         self._sync_config_from_managed_session(managed_session)
         self.context["session_id"] = managed_session.id
         self.context["model"] = self.config.model
+        self.context["provider"] = self.config.provider
         self._pipeline = managed_session.runtime_pipeline
         self._pipeline_ctx = managed_session.runtime_ctx
         self._pipeline_adapter = managed_session.runtime_adapter
