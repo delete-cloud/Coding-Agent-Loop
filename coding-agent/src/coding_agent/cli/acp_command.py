@@ -31,19 +31,43 @@ def _shared_cli_arg(ctx: click.Context, name: str) -> str | None:
 
 
 def _parse_acp_mode(mode_str: str) -> AcpMode:
-    """Parse a mode string in format 'id:name[:provider[:model[:base_url]]]'."""
+    """Parse a mode string in format 'id:name[:provider[:model[:base_url]]]'.
+
+    When the 5th field matches thinking on/off tokens, it is treated as a
+    thinking override rather than a base_url.  e.g.  'ds:DeepSeek:deepseek:ds-chat::on:high'
+    (empty base_url before the thinking flag).
+    """
     if not mode_str:
         raise click.BadParameter("--acp-mode value must not be empty")
-    parts = mode_str.split(":", 4)
+    parts = mode_str.split(":", 6)
     mode_id = parts[0]
     if not mode_id:
         raise click.BadParameter(
             f"--acp-mode '{mode_str}' has empty mode id"
         )
-    name = parts[1] if len(parts) > 1 else mode_id
-    provider = parts[2] if len(parts) > 2 else None
-    model = parts[3] if len(parts) > 3 else None
-    base_url = parts[4] if len(parts) > 4 else None
+    name = parts[1] if len(parts) > 1 and parts[1] else mode_id
+    provider = parts[2] if len(parts) > 2 and parts[2] else None
+    model = parts[3] if len(parts) > 3 and parts[3] else None
+
+    # Distinguish base_url from thinking shorthand by scanning for the first
+    # field that matches thinking on/off tokens. Everything before that is
+    # conventional fields; everything from that point is thinking config.
+    THINKING_TOKENS = frozenset({"on", "off", "true", "false", "0", "1"})
+    base_url: str | None = None
+    thinking: dict[str, Any] | None = None
+
+    # Try parts[4] as base_url first. If parts[5] exists and looks like
+    # a thinking token, treat parts[4] as a possibly-empty base_url and
+    # parts[5:] as thinking shorthand.
+    if len(parts) > 5 and parts[5].lower() in THINKING_TOKENS:
+        base_url = parts[4] if len(parts) > 4 and parts[4] else None
+        thinking = _parse_thinking_fields(parts[5].lower(), parts[6:])
+    elif len(parts) > 4 and parts[4] and parts[4].lower() in THINKING_TOKENS:
+        # parts[4] is a thinking token, not base_url
+        thinking = _parse_thinking_fields(parts[4].lower(), parts[5:])
+    elif len(parts) > 4 and parts[4]:
+        base_url = parts[4]
+
     return AcpMode(
         id=mode_id,
         name=name,
@@ -51,7 +75,21 @@ def _parse_acp_mode(mode_str: str) -> AcpMode:
         provider=provider,
         model=model,
         base_url=base_url,
+        thinking=thinking,
     )
+
+
+def _parse_thinking_fields(enabled_str: str, rest: list[str]) -> dict[str, Any]:
+    thinking: dict[str, Any] = {}
+    if enabled_str in ("on", "true", "1"):
+        thinking["enabled"] = True
+    else:
+        thinking["enabled"] = False
+    if rest:
+        raw_effort = rest[0].lower()
+        if raw_effort in ("low", "medium", "high"):
+            thinking["effort"] = raw_effort
+    return thinking
 
 
 @click.command("acp")

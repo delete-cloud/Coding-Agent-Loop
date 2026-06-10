@@ -59,6 +59,15 @@ class CreateSessionRequest(BaseModel):
     max_steps: int | None = Field(None, ge=0)
 
 
+class ThinkingConfigSchema(BaseModel):
+    """Thinking/reasoning configuration for provider API calls."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    effort: str = Field("medium", pattern="^(low|medium|high)$")
+
+
 class RuntimeConfigUpdateRequest(BaseModel):
     """Request schema for updating session runtime config."""
 
@@ -67,6 +76,7 @@ class RuntimeConfigUpdateRequest(BaseModel):
     model: str | None = Field(None, min_length=1, max_length=200)
     provider: ProviderName | None = None
     base_url: str | None = Field(None, min_length=1, max_length=500)
+    thinking: ThinkingConfigSchema | None = None
 
 
 class RuntimeConfigUpdateResponse(BaseModel):

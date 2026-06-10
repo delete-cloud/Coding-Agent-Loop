@@ -206,6 +206,9 @@ class LocalDaemonRuntimePreparationService:
         )
         ctx.config["wire_consumer"] = consumer
         ctx.config["agent_id"] = ""
+        ctx.config["thinking_config"] = getattr(
+            session, "thinking_config", {"enabled": True, "effort": "medium"}
+        )
         self.bind_subagent_message_publisher(ctx)
 
         provider_model_name = getattr(session.provider, "model_name", None)

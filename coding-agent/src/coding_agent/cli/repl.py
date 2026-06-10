@@ -59,8 +59,7 @@ class InteractiveSession:
         self.context: dict[str, Any] = {
             "should_exit": False,
             "model": config.model,
-            "thinking_enabled": True,
-            "thinking_effort": "medium",
+            "thinking_config": {"enabled": True, "effort": "medium"},
             "session_manager": self._session_manager,
         }
         self.input_handler = InputHandler()
@@ -73,8 +72,12 @@ class InteractiveSession:
         self._approval_memory = _InteractiveApprovalMemory()
         self._consumer = RichConsumer(
             self._renderer,
-            thinking_enabled=lambda: bool(self.context.get("thinking_enabled", True)),
-            thinking_effort=lambda: str(self.context.get("thinking_effort", "medium")),
+            thinking_enabled=lambda: bool(
+                self.context.get("thinking_config", {}).get("enabled", True)
+            ),
+            thinking_effort=lambda: str(
+                self.context.get("thinking_config", {}).get("effort", "medium")
+            ),
             on_status=self._handle_status_update,
             approval_memory=self._approval_memory,
         )
@@ -143,6 +146,9 @@ class InteractiveSession:
         self._pipeline = runtime.pipeline
         self._pipeline_ctx = runtime.pipeline_ctx
         self._pipeline_adapter = runtime.pipeline_adapter
+        # Wire REPL's mutable thinking_config into the pipeline so provider
+        # reads it dynamically each turn without needing a rebuild.
+        self._pipeline_ctx.config["thinking_config"] = self.context["thinking_config"]
         self._refresh_command_context_from_pipeline_ctx(runtime.pipeline_ctx)
 
     def _approval_policy(self) -> ApprovalPolicy:
@@ -263,6 +269,7 @@ class InteractiveSession:
             self._pipeline_adapter.set_consumer(self._consumer)
         if self._pipeline_ctx is not None:
             self._pipeline_ctx.config["wire_consumer"] = self._consumer
+            self._pipeline_ctx.config["thinking_config"] = self.context["thinking_config"]
         self._refresh_command_context_from_pipeline_ctx(managed_session.runtime_ctx)
 
     async def _change_model_for_next_turn(
@@ -319,6 +326,7 @@ class InteractiveSession:
             self._pipeline_adapter.set_consumer(self._consumer)
         if self._pipeline_ctx is not None:
             self._pipeline_ctx.config["wire_consumer"] = self._consumer
+            self._pipeline_ctx.config["thinking_config"] = self.context["thinking_config"]
         self._refresh_command_context_from_pipeline_ctx(managed_session.runtime_ctx)
 
     async def _restore_checkpoint(self, checkpoint_id: str) -> None:

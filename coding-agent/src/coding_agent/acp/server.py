@@ -37,6 +37,12 @@ class AcpMode:
     provider: str | None = None
     model: str | None = None
     base_url: str | None = None
+    thinking: dict[str, Any] | None = None
+    """Optional thinking config dict applied to session on mode switch.
+
+    Format: {"enabled": True, "effort": "medium"}.
+    Applied directly to session.thinking_config (mutable dict reference).
+    """
 
 
 def default_acp_modes() -> list[AcpMode]:
@@ -452,20 +458,33 @@ class AcpServer:
                 f"session/set_mode unknown modeId: {mode_id}",
             )
 
-        await self._session_manager.get_session_async(session_id)
-        try:
-            await self._session_manager.replace_session_runtime_config(
-                session_id,
-                model_name=mode.model,
-                provider_name=mode.provider,
-                base_url=mode.base_url,
-            )
-        except RuntimeError as exc:
-            if str(exc) == "turn already in progress":
-                raise JsonRpcError(-32000, "Turn already in progress") from exc
-            raise JsonRpcError(-32603, str(exc)) from exc
-        except ValueError as exc:
-            raise JsonRpcError(-32603, str(exc)) from exc
+        session = await self._session_manager.get_session_async(session_id)
+
+        # Apply thinking config directly to session's mutable dict reference.
+        # No pipeline rebuild needed for thinking-only changes.
+        if mode.thinking is not None:
+            session.thinking_config.update(mode.thinking)
+
+        # Rebuild runtime if model/provider/base_url differ from default.
+        runtime_change = (
+            mode.model is not None
+            or mode.provider is not None
+            or mode.base_url is not None
+        )
+        if runtime_change:
+            try:
+                await self._session_manager.replace_session_runtime_config(
+                    session_id,
+                    model_name=mode.model,
+                    provider_name=mode.provider,
+                    base_url=mode.base_url,
+                )
+            except RuntimeError as exc:
+                if str(exc) == "turn already in progress":
+                    raise JsonRpcError(-32000, "Turn already in progress") from exc
+                raise JsonRpcError(-32603, str(exc)) from exc
+            except ValueError as exc:
+                raise JsonRpcError(-32603, str(exc)) from exc
 
     async def _session_set_config_option(self, params: JSONObject) -> JSONObject:
         session_id = params.get("sessionId")

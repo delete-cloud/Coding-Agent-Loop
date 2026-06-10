@@ -243,9 +243,13 @@ async def cmd_thinking(args: list[str], context: dict[str, Any]) -> None:
     output = _out()
     valid_efforts = ("low", "medium", "high")
 
+    thinking_config: dict[str, Any] = context.setdefault(
+        "thinking_config", {"enabled": True, "effort": "medium"}
+    )
+
     if not args:
-        enabled = context.get("thinking_enabled", True)
-        effort = context.get("thinking_effort", "medium")
+        enabled = thinking_config.get("enabled", True)
+        effort = thinking_config.get("effort", "medium")
         state = "on" if enabled else "off"
         print_html(
             f"Thinking: <ansicyan><b>{_h(state)}</b></ansicyan>  "
@@ -257,15 +261,15 @@ async def cmd_thinking(args: list[str], context: dict[str, Any]) -> None:
     subcmd = args[0].lower()
 
     if subcmd == "on":
-        context["thinking_enabled"] = True
+        thinking_config["enabled"] = True
         print_html("Thinking <ansigreen><b>enabled</b></ansigreen>.", output=output)
     elif subcmd == "off":
-        context["thinking_enabled"] = False
+        thinking_config["enabled"] = False
         print_html("Thinking <ansired><b>disabled</b></ansired>.", output=output)
     elif subcmd == "effort":
         if len(args) >= 2 and args[1].lower() in valid_efforts:
             level = args[1].lower()
-            context["thinking_effort"] = level
+            thinking_config["effort"] = level
             print_html(
                 f"Thinking effort set to <ansicyan><b>{_h(level)}</b></ansicyan>.",
                 output=output,

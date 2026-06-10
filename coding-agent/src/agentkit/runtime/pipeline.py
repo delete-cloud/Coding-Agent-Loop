@@ -683,7 +683,9 @@ class Pipeline:
                 ),
             ) as llm_span:
                 async for event in ctx.llm_provider.stream(
-                    ctx.messages, tools=tool_dicts
+                    ctx.messages,
+                    tools=tool_dicts,
+                    thinking_config=ctx.config.get("thinking_config"),
                 ):
                     if isinstance(event, ThinkingEvent):
                         if ctx.on_event:

@@ -214,7 +214,16 @@ class AnthropicProvider:
             api_kwargs["system"] = system_prompt
         if tools:
             api_kwargs["tools"] = self._convert_tools(tools)
-        if self._thinking is not None:
+
+        # Per-turn thinking config: mutable dict reference from ctx.config.
+        # Falls back to construction-time thinking if no per-turn config provided.
+        thinking_config = kwargs.get("thinking_config")
+        if thinking_config and thinking_config.get("enabled"):
+            effort = thinking_config.get("effort", "medium")
+            budget_map = {"low": 4000, "medium": 16000, "high": 32000}
+            budget = budget_map.get(effort, 16000)
+            api_kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        elif self._thinking is not None:
             api_kwargs["thinking"] = self._thinking
 
         last_exception: Exception | None = None
