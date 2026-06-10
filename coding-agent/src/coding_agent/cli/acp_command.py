@@ -32,8 +32,14 @@ def _shared_cli_arg(ctx: click.Context, name: str) -> str | None:
 
 def _parse_acp_mode(mode_str: str) -> AcpMode:
     """Parse a mode string in format 'id:name[:provider[:model[:base_url]]]'."""
+    if not mode_str:
+        raise click.BadParameter("--acp-mode value must not be empty")
     parts = mode_str.split(":", 4)
     mode_id = parts[0]
+    if not mode_id:
+        raise click.BadParameter(
+            f"--acp-mode '{mode_str}' has empty mode id"
+        )
     name = parts[1] if len(parts) > 1 else mode_id
     provider = parts[2] if len(parts) > 2 else None
     model = parts[3] if len(parts) > 3 else None

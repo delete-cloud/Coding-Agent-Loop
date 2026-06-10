@@ -464,6 +464,8 @@ class AcpServer:
             if str(exc) == "turn already in progress":
                 raise JsonRpcError(-32000, "Turn already in progress") from exc
             raise JsonRpcError(-32603, str(exc)) from exc
+        except ValueError as exc:
+            raise JsonRpcError(-32603, str(exc)) from exc
 
     async def _session_set_config_option(self, params: JSONObject) -> JSONObject:
         session_id = params.get("sessionId")
