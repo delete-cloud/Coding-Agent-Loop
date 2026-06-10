@@ -472,6 +472,9 @@ class Session:
     provider_name: str | None = None
     model_name: str | None = None
     base_url: str | None = None
+    thinking_config: dict[str, Any] = field(
+        default_factory=lambda: {"enabled": True, "effort": "medium"}
+    )
     max_steps: int = 30
     mcp_servers: dict[str, dict[str, Any]] = field(default_factory=dict)
     additional_directories: list[str] = field(default_factory=list)

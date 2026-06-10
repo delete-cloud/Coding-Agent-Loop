@@ -119,6 +119,15 @@ class OpenAICompatProvider:
         if tools:
             openai_tools = self._convert_tools(tools)
 
+        # Per-turn thinking config: mutable dict reference from ctx.config.
+        # Maps effort levels to OpenAI reasoning_effort parameter.
+        thinking_config = kwargs.pop("thinking_config", None)
+        extra_kwargs: dict[str, Any] = {}
+        if thinking_config and thinking_config.get("enabled"):
+            effort = thinking_config.get("effort", "medium")
+            extra_kwargs["reasoning_effort"] = effort
+        extra_kwargs.update(kwargs)
+
         last_exception: Exception | None = None
 
         for attempt in range(self._max_retries + 1):
@@ -131,7 +140,7 @@ class OpenAICompatProvider:
                     stream_options={"include_usage": True},
                     temperature=self._temperature,
                     max_tokens=self._max_tokens,
-                    **kwargs,
+                    **extra_kwargs,
                 )
 
                 accumulating_calls: dict[int, dict[str, Any]] = {}

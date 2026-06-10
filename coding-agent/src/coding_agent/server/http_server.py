@@ -208,6 +208,7 @@ from coding_agent.server.schemas import (
     ResumeSessionRequest,
     RuntimeConfigUpdateRequest,
     RuntimeConfigUpdateResponse,
+    ThinkingConfigSchema,
     RuntimeEventResponse,
     RuntimeEventsResponse,
     RuntimeInteractionListResponse,
@@ -2484,16 +2485,16 @@ async def update_runtime_config(
     body: RuntimeConfigUpdateRequest,
     api_key: str | None = Depends(verify_api_key),
 ) -> RuntimeConfigUpdateResponse:
-    """Update the session runtime provider/model/base_url config in-place.
+    """Update the session runtime provider/model/base_url/thinking config in-place.
 
     Applies changes next turn. The session's tape and history are preserved.
     Returns 409 if a turn is currently in progress.
     Returns 400 if no config fields are provided.
     """
-    if body.model is None and body.provider is None and body.base_url is None:
+    if body.model is None and body.provider is None and body.base_url is None and body.thinking is None:
         raise HTTPException(
             status_code=400,
-            detail="At least one of model, provider, or base_url must be provided",
+            detail="At least one of model, provider, base_url, or thinking must be provided",
         )
 
     try:
@@ -2504,13 +2505,24 @@ async def update_runtime_config(
     if getattr(session, "turn_in_progress", False):
         raise HTTPException(status_code=409, detail="Turn already in progress")
 
+    # Apply thinking config directly on session's mutable dict reference.
+    # No pipeline rebuild needed — provider reads it per-turn from ctx.config.
+    thinking_only = body.model is None and body.provider is None and body.base_url is None
+    thinking_dirty = body.thinking is not None
+    if thinking_dirty:
+        session.thinking_config["enabled"] = body.thinking.enabled
+        session.thinking_config["effort"] = body.thinking.effort
+
     try:
-        updated_session = await session_manager.replace_session_runtime_config(
-            session_id,
-            model_name=body.model,
-            provider_name=body.provider,
-            base_url=body.base_url,
-        )
+        if thinking_only:
+            updated_session = session
+        else:
+            updated_session = await session_manager.replace_session_runtime_config(
+                session_id,
+                model_name=body.model,
+                provider_name=body.provider,
+                base_url=body.base_url,
+            )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Session not found") from exc
     except RuntimeError as exc:
