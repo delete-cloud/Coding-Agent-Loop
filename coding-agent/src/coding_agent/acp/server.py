@@ -458,12 +458,11 @@ class AcpServer:
                 f"session/set_mode unknown modeId: {mode_id}",
             )
 
-        await self._session_manager.get_session_async(session_id)
+        session = await self._session_manager.get_session_async(session_id)
 
         # Apply thinking config directly to session's mutable dict reference.
         # No pipeline rebuild needed for thinking-only changes.
         if mode.thinking is not None:
-            session = await self._session_manager.get_session_async(session_id)
             session.thinking_config.update(mode.thinking)
 
         # Rebuild runtime if model/provider/base_url differ from default.
