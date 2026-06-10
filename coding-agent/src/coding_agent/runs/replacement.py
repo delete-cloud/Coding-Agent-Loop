@@ -14,7 +14,9 @@ logger = logging.getLogger(__name__)
 class RuntimeReplacementSession(Protocol):
     id: str
     provider: object | None
+    provider_name: str | None
     model_name: str | None
+    base_url: str | None
     tape_id: str | None
 
     def runtime_binding_snapshot(self) -> RuntimeBindingSnapshot: ...
@@ -43,6 +45,8 @@ class RuntimeReplacementBuilder(Protocol):
         session: RuntimeReplacementSession,
         *,
         model_name: str,
+        provider_name: str | None = None,
+        base_url: str | None = None,
     ) -> Awaitable[tuple[object, object, object]]: ...
 
 
@@ -55,18 +59,31 @@ class RuntimeReplacementService:
         session: RuntimeReplacementSession,
         *,
         model_name: str,
+        provider_name: str | None = None,
+        base_url: str | None = None,
         build_runtime: RuntimeReplacementBuilder,
         persist_session: RuntimeReplacementPersister,
     ) -> RuntimeReplacementSession:
         old_provider = session.provider
+        old_provider_name = session.provider_name
         old_model_name = session.model_name
+        old_base_url = session.base_url
         old_tape_id = session.tape_id
         old_runtime_binding = session.runtime_binding_snapshot()
 
-        pipeline, ctx, adapter = await build_runtime(session, model_name=model_name)
+        pipeline, ctx, adapter = await build_runtime(
+            session,
+            model_name=model_name,
+            provider_name=provider_name,
+            base_url=base_url,
+        )
 
         session.provider = None
         session.model_name = model_name
+        if provider_name is not None:
+            session.provider_name = provider_name
+        if base_url is not None:
+            session.base_url = base_url
         session.attach_runtime_binding(
             pipeline=pipeline,
             ctx=ctx,
@@ -77,7 +94,9 @@ class RuntimeReplacementService:
             await persist_session(session)
         except Exception:
             session.provider = old_provider
+            session.provider_name = old_provider_name
             session.model_name = old_model_name
+            session.base_url = old_base_url
             session.restore_runtime_binding(old_runtime_binding)
             session.tape_id = old_tape_id
             await self.close_runtime_adapter(adapter)

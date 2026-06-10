@@ -98,6 +98,8 @@ class LocalCliSessionManager(Protocol):
         session_id: str,
         *,
         model_name: str,
+        provider_name: str | None = None,
+        base_url: str | None = None,
     ) -> Any: ...
 
     async def restore_checkpoint(self, session_id: str, checkpoint_id: str) -> None: ...
@@ -252,10 +254,14 @@ class ServerBackedLocalCliSessionManager:
         session_id: str,
         *,
         model_name: str,
+        provider_name: str | None = None,
+        base_url: str | None = None,
     ) -> Any:
         return await self._delegate.replace_session_runtime_config(
             session_id,
             model_name=model_name,
+            provider_name=provider_name,
+            base_url=base_url,
         )
 
     async def restore_checkpoint(self, session_id: str, checkpoint_id: str) -> None:
