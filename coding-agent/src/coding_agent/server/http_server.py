@@ -177,6 +177,7 @@ from coding_agent.server.developer_console import (
     safe_text_value,
 )
 from coding_agent.runs import (
+    UNSET,
     CloudWorkspaceRef,
     ExternalWorkerExecutorRef,
     IsolationPolicy,
@@ -2487,11 +2488,16 @@ async def update_runtime_config(
 ) -> RuntimeConfigUpdateResponse:
     """Update the session runtime provider/model/base_url/thinking config in-place.
 
+    Field semantics are three-state: omitted = leave unchanged, explicit
+    null = reset to default (base_url only; null model/provider/thinking
+    are rejected with 422), value = set.
+
     Applies changes next turn. The session's tape and history are preserved.
     Returns 409 if a turn is currently in progress.
     Returns 400 if no config fields are provided.
     """
-    if body.model is None and body.provider is None and body.base_url is None and body.thinking is None:
+    provided = body.model_fields_set
+    if not provided:
         raise HTTPException(
             status_code=400,
             detail="At least one of model, provider, base_url, or thinking must be provided",
@@ -2507,9 +2513,8 @@ async def update_runtime_config(
 
     # Apply thinking config directly on session's mutable dict reference.
     # No pipeline rebuild needed — provider reads it per-turn from ctx.config.
-    thinking_only = body.model is None and body.provider is None and body.base_url is None
-    thinking_dirty = body.thinking is not None
-    if thinking_dirty:
+    thinking_only = not (provided & {"model", "provider", "base_url"})
+    if body.thinking is not None:
         session.thinking_config["enabled"] = body.thinking.enabled
         session.thinking_config["effort"] = body.thinking.effort
 
@@ -2521,7 +2526,7 @@ async def update_runtime_config(
                 session_id,
                 model_name=body.model,
                 provider_name=body.provider,
-                base_url=body.base_url,
+                base_url=body.base_url if "base_url" in provided else UNSET,
             )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Session not found") from exc
