@@ -1230,7 +1230,10 @@ class TestReplInitialization:
                 session_id: str,
                 *,
                 model_name: str,
+                provider_name: str | None = None,
+                base_url: object = None,
             ):
+                del provider_name, base_url
                 self.replace_calls.append((session_id, model_name))
                 raise RuntimeError("new runtime failed")
 
@@ -1361,7 +1364,15 @@ class TestReplInitialization:
                 assert session_id == "session-a"
                 return managed_session
 
-            async def _build_session_runtime(self, session, *, model_name: str):
+            async def _build_session_runtime(
+                self,
+                session,
+                *,
+                model_name: str,
+                provider_name: str | None = None,
+                base_url: object = None,
+            ):
+                del provider_name, base_url
                 assert session is managed_session
                 self.build_calls.append(model_name)
                 return replacement_pipeline, replacement_ctx, replacement_adapter
