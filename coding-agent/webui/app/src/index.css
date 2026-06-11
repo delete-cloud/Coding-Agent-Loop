@@ -24,3 +24,53 @@ body {
   background: var(--color-surface-0);
   color: var(--color-fg);
 }
+
+.prose-webui > :first-child {
+  margin-top: 0;
+}
+.prose-webui > :last-child {
+  margin-bottom: 0;
+}
+.prose-webui p,
+.prose-webui ul,
+.prose-webui ol,
+.prose-webui pre,
+.prose-webui blockquote {
+  margin: 0.55rem 0;
+}
+.prose-webui ul,
+.prose-webui ol {
+  padding-left: 1.25rem;
+}
+.prose-webui ul {
+  list-style: disc;
+}
+.prose-webui ol {
+  list-style: decimal;
+}
+.prose-webui a {
+  color: var(--color-accent);
+  text-decoration: underline;
+}
+.prose-webui code {
+  border-radius: 0.25rem;
+  background: var(--color-surface-0);
+  padding: 0.1rem 0.25rem;
+  font-size: 0.86em;
+}
+.prose-webui pre {
+  overflow: auto;
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+  background: var(--color-surface-0);
+  padding: 0.75rem;
+}
+.prose-webui pre code {
+  background: transparent;
+  padding: 0;
+}
+.prose-webui blockquote {
+  border-left: 3px solid var(--color-border-active);
+  padding-left: 0.75rem;
+  color: var(--color-muted);
+}

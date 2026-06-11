@@ -121,6 +121,48 @@ export type DisplayStreamEvent =
 export type ApprovalPolicy = "auto" | "interactive" | "yolo";
 export type ApprovalScope = "once" | "session";
 
+export interface SessionSummary {
+  session_id: string;
+  id: string;
+  status: "created" | "running" | "waiting_approval" | "completed" | "failed" | "closed";
+  turn_status: "idle" | "running" | "cancelling" | "cancelled" | "failed";
+  turn_id: string | null;
+  created_at: string;
+  updated_at: string;
+  last_activity: string;
+  turn_in_progress: boolean;
+  pending_approval: boolean;
+  provider_name: string | null;
+  model_name: string | null;
+  base_url: string | null;
+  max_steps: number;
+  origin: Record<string, string> | null;
+  default_run_target: Record<string, unknown>;
+  workspace_id: string | null;
+  resumable: boolean;
+  last_run_id: string | null;
+  last_run_status: string | null;
+  last_interrupted_run_id: string | null;
+  resume_from_event_id: string | null;
+  checkpoint_count: number;
+  latest_checkpoint_id: string | null;
+  latest_checkpoint_label: string | null;
+}
+
+export interface RuntimeRun {
+  run_id: string;
+  session_id: string;
+  tape_id: string | null;
+  parent_run_id: string | null;
+  agent_id: string | null;
+  status: string;
+  started_at: string;
+  ended_at: string | null;
+  metadata: Record<string, unknown>;
+  result: Record<string, unknown>;
+  error: string | null;
+}
+
 export interface SessionResult {
   session_id: string;
   status: string;
@@ -139,7 +181,15 @@ export interface DiffFile {
 }
 export interface WorkspaceDiff {
   session_id: string;
+  workspace_id?: string | null;
   files: DiffFile[];
   additions: number;
   deletions: number;
+}
+
+export interface WorkspacePatch {
+  session_id: string;
+  workspace_id?: string | null;
+  format: "unified_diff";
+  patch: string;
 }

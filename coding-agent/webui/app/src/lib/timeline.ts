@@ -164,6 +164,13 @@ export function applyEvent(
   }
 }
 
+export function replayEvents(
+  items: TimelineItem[],
+  events: DisplayStreamEvent[],
+): TimelineItem[] {
+  return events.reduce(applyEvent, items);
+}
+
 // True when this event closes the root turn (stream should end).
 export function isRootTurnEnd(ev: DisplayStreamEvent): boolean {
   const envelope = ev.data as DisplayEventEnvelope<FinalResultPayload>;
