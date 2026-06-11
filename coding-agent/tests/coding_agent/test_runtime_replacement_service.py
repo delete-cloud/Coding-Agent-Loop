@@ -4,7 +4,11 @@ from dataclasses import dataclass
 
 import pytest
 
-from coding_agent.runs import RuntimeBindingSnapshot, RuntimeReplacementService
+from coding_agent.runs import (
+    UNSET,
+    RuntimeBindingSnapshot,
+    RuntimeReplacementService,
+)
 
 
 @dataclass
@@ -64,12 +68,12 @@ async def test_runtime_replacement_service_replaces_runtime_and_closes_old() -> 
         *,
         model_name: str,
         provider_name: str | None = None,
-        base_url: str | None = None,
+        base_url: object = UNSET,
     ) -> tuple[object, FakeContext, object]:
         assert runtime_session is session
         assert model_name == "new-model"
         assert provider_name is None
-        assert base_url is None
+        assert base_url is UNSET
         return "new-pipeline", FakeContext(FakeTape("new-tape")), "new-adapter"
 
     async def persist_session(runtime_session: FakeSession) -> None:
@@ -96,11 +100,83 @@ async def test_runtime_replacement_service_replaces_runtime_and_closes_old() -> 
     assert result is session
     assert session.provider is None
     assert session.model_name == "new-model"
+    assert session.base_url == "https://old.example.com"
     assert session.tape_id == "new-tape"
     assert session.pipeline == "new-pipeline"
     assert session.adapter == "new-adapter"
     assert persisted == [("new-model", "new-tape", None)]
     assert closed == ["old-adapter"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_replacement_service_clears_base_url_with_explicit_none() -> None:
+    session = FakeSession()
+    seen_base_urls: list[object] = []
+
+    async def build_runtime(
+        runtime_session: FakeSession,
+        *,
+        model_name: str,
+        provider_name: str | None = None,
+        base_url: object = UNSET,
+    ) -> tuple[object, FakeContext, object]:
+        del runtime_session, model_name, provider_name
+        seen_base_urls.append(base_url)
+        return "new-pipeline", FakeContext(FakeTape("new-tape")), "new-adapter"
+
+    async def persist_session(runtime_session: FakeSession) -> None:
+        del runtime_session
+
+    async def close_adapter(adapter: object | None) -> None:
+        del adapter
+
+    await RuntimeReplacementService(
+        close_runtime_adapter=close_adapter,
+    ).replace_runtime_config(
+        session,
+        model_name="new-model",
+        base_url=None,
+        build_runtime=build_runtime,
+        persist_session=persist_session,
+    )
+
+    assert seen_base_urls == [None]
+    assert session.base_url is None
+
+
+@pytest.mark.asyncio
+async def test_runtime_replacement_service_restores_base_url_when_clear_fails() -> None:
+    session = FakeSession()
+
+    async def build_runtime(
+        runtime_session: FakeSession,
+        *,
+        model_name: str,
+        provider_name: str | None = None,
+        base_url: object = UNSET,
+    ) -> tuple[object, FakeContext, object]:
+        del runtime_session, model_name, provider_name, base_url
+        return "new-pipeline", FakeContext(FakeTape("new-tape")), "new-adapter"
+
+    async def persist_session(runtime_session: FakeSession) -> None:
+        del runtime_session
+        raise RuntimeError("persist failed")
+
+    async def close_adapter(adapter: object | None) -> None:
+        del adapter
+
+    with pytest.raises(RuntimeError, match="persist failed"):
+        await RuntimeReplacementService(
+            close_runtime_adapter=close_adapter,
+        ).replace_runtime_config(
+            session,
+            model_name="new-model",
+            base_url=None,
+            build_runtime=build_runtime,
+            persist_session=persist_session,
+        )
+
+    assert session.base_url == "https://old.example.com"
 
 
 @pytest.mark.asyncio

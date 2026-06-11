@@ -169,10 +169,12 @@ from .recovery import (
     RuntimeRunSessionLister,
 )
 from .replacement import (
+    UNSET,
     RuntimeReplacementBuilder,
     RuntimeReplacementPersister,
     RuntimeReplacementService,
     RuntimeReplacementSession,
+    UnsetType,
 )
 from .runtime_events import (
     RuntimeWireEventRecorder,
@@ -232,6 +234,8 @@ from .target import (
 )
 
 __all__ = [
+    "UNSET",
+    "UnsetType",
     "CloudWorkspaceRef",
     "ATTACHED_EXECUTOR_REF_KINDS",
     "CHECKPOINT_SESSION_CONFIG_KEY",

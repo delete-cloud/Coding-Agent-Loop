@@ -5,7 +5,14 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+)
 
 from coding_agent.core.config import ProviderName
 
@@ -69,7 +76,12 @@ class ThinkingConfigSchema(BaseModel):
 
 
 class RuntimeConfigUpdateRequest(BaseModel):
-    """Request schema for updating session runtime config."""
+    """Request schema for updating session runtime config.
+
+    Field semantics are three-state: omitted = leave unchanged, explicit
+    null = reset to default (base_url only), value = set. model/provider/
+    thinking have no meaningful reset target, so explicit null is rejected.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -77,6 +89,15 @@ class RuntimeConfigUpdateRequest(BaseModel):
     provider: ProviderName | None = None
     base_url: str | None = Field(None, min_length=1, max_length=500)
     thinking: ThinkingConfigSchema | None = None
+
+    @field_validator("model", "provider", "thinking")
+    @classmethod
+    def _reject_explicit_null(cls, value: Any, info: ValidationInfo) -> Any:
+        if value is None:
+            raise ValueError(
+                f"{info.field_name} may not be null; omit the field to leave it unchanged"
+            )
+        return value
 
 
 class RuntimeConfigUpdateResponse(BaseModel):

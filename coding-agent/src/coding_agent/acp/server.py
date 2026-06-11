@@ -17,6 +17,7 @@ from coding_agent.acp.mapper import (
     wire_message_to_session_update,
 )
 from coding_agent.approval import ApprovalPolicy
+from coding_agent.runs import UNSET, UnsetType
 from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictError
 from coding_agent.wire.protocol import ApprovalRequest, TurnEnd
 
@@ -29,7 +30,13 @@ ACP_DEFAULT_MODE_ID = "default"
 
 @dataclass(frozen=True)
 class AcpMode:
-    """A named provider/model preset exposed as an ACP session mode."""
+    """A named provider/model preset exposed as an ACP session mode.
+
+    Modes are declarative: when a mode names a provider, it fully describes
+    that provider's config — an omitted base_url means the provider default,
+    not the session's previous value. Modes that omit both provider and
+    base_url (model-only modes) keep the session's current endpoint.
+    """
 
     id: str
     name: str
@@ -111,7 +118,7 @@ class AcpSessionManager(Protocol):
         *,
         model_name: str | None = None,
         provider_name: str | None = None,
-        base_url: str | None = None,
+        base_url: str | None | UnsetType = UNSET,
     ) -> Any: ...
 
 
@@ -472,12 +479,22 @@ class AcpServer:
             or mode.base_url is not None
         )
         if runtime_change:
+            # base_url follows the provider declaration: a mode that names a
+            # provider fully describes that provider's config, so an omitted
+            # base_url resets to the provider default. Model-only modes keep
+            # the session's current endpoint.
+            if mode.base_url is not None:
+                base_url: str | None | UnsetType = mode.base_url
+            elif mode.provider is not None:
+                base_url = None
+            else:
+                base_url = UNSET
             try:
                 await self._session_manager.replace_session_runtime_config(
                     session_id,
                     model_name=mode.model,
                     provider_name=mode.provider,
-                    base_url=mode.base_url,
+                    base_url=base_url,
                 )
             except RuntimeError as exc:
                 if str(exc) == "turn already in progress":

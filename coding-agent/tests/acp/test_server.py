@@ -9,7 +9,8 @@ from typing import Any
 
 import pytest
 
-from coding_agent.acp.server import AcpServer, run_stdio
+from coding_agent.acp.server import AcpMode, AcpServer, run_stdio
+from coding_agent.runs import UNSET
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.events import DisplayEvent
 from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictError
@@ -66,6 +67,27 @@ class FakeManager:
         self.calls.append(("acquire_session_owner", session_id))
         if self.raise_owner_conflict:
             raise SessionOwnershipConflictError("stale owner or fencing token rejected")
+
+    async def replace_session_runtime_config(
+        self,
+        session_id: str,
+        *,
+        model_name: str | None = None,
+        provider_name: str | None = None,
+        base_url: object = None,
+    ) -> Any:
+        self.calls.append(
+            (
+                "replace_session_runtime_config",
+                {
+                    "session_id": session_id,
+                    "model_name": model_name,
+                    "provider_name": provider_name,
+                    "base_url": base_url,
+                },
+            )
+        )
+        return SimpleNamespace(id=session_id)
 
     async def list_sessions_async(self) -> list[str]:
         self.calls.append(("list_sessions_async", None))
@@ -206,6 +228,16 @@ async def test_initialize_returns_protocol_version_and_minimal_capabilities() ->
                     "resume": {},
                     "additionalDirectories": {},
                 },
+            },
+            "modes": {
+                "currentModeId": "default",
+                "availableModes": [
+                    {
+                        "id": "default",
+                        "name": "Default",
+                        "description": "Standard Coding Agent behavior.",
+                    }
+                ],
             },
             "agentInfo": {
                 "name": "coding-agent",
@@ -1019,9 +1051,76 @@ async def test_session_set_mode_rejects_unknown_mode() -> None:
         "id": 11,
         "error": {
             "code": -32602,
-            "message": "session/set_mode params.modeId must be default",
+            "message": "session/set_mode unknown modeId: plan",
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_session_set_mode_provider_mode_resets_base_url() -> None:
+    manager = FakeManager()
+    server = AcpServer(
+        manager,
+        modes=[
+            AcpMode(id="default", name="Default"),
+            AcpMode(
+                id="claude",
+                name="Claude",
+                provider="anthropic",
+                model="claude-sonnet-4-6",
+            ),
+        ],
+    )
+
+    response = await server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 12,
+            "method": "session/set_mode",
+            "params": {"sessionId": "sess-1", "modeId": "claude"},
+        }
+    )
+
+    assert response == {"jsonrpc": "2.0", "id": 12, "result": {}}
+    call = next(
+        kwargs
+        for name, kwargs in manager.calls
+        if name == "replace_session_runtime_config"
+    )
+    assert call["provider_name"] == "anthropic"
+    assert call["model_name"] == "claude-sonnet-4-6"
+    assert call["base_url"] is None
+
+
+@pytest.mark.asyncio
+async def test_session_set_mode_model_only_mode_keeps_base_url() -> None:
+    manager = FakeManager()
+    server = AcpServer(
+        manager,
+        modes=[
+            AcpMode(id="default", name="Default"),
+            AcpMode(id="fast", name="Fast", model="gpt-4o-mini"),
+        ],
+    )
+
+    response = await server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 13,
+            "method": "session/set_mode",
+            "params": {"sessionId": "sess-1", "modeId": "fast"},
+        }
+    )
+
+    assert response == {"jsonrpc": "2.0", "id": 13, "result": {}}
+    call = next(
+        kwargs
+        for name, kwargs in manager.calls
+        if name == "replace_session_runtime_config"
+    )
+    assert call["provider_name"] is None
+    assert call["model_name"] == "gpt-4o-mini"
+    assert call["base_url"] is UNSET
 
 
 @pytest.mark.asyncio
@@ -1682,6 +1781,9 @@ async def test_stdio_server_drops_configured_tracing_logs_from_stdout(
         '"promptCapabilities":{},'
         '"sessionCapabilities":{"close":{},"list":{},"resume":{},'
         '"additionalDirectories":{}}},'
+        '"modes":{"currentModeId":"default","availableModes":'
+        '[{"id":"default","name":"Default",'
+        '"description":"Standard Coding Agent behavior."}]},'
         '"agentInfo":{"name":"coding-agent","title":"Coding Agent",'
         '"version":"0.1.0"},"authMethods":[]}}\n'
     ]

@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.core.config import Config
+from coding_agent.runs import UNSET, UnsetType
 from coding_agent.local_storage import local_sqlite_storage_config
 from coding_agent.local_storage import local_sqlite_path_from_storage_config
 from coding_agent.server.session_manager import SessionManager
@@ -99,7 +100,7 @@ class LocalCliSessionManager(Protocol):
         *,
         model_name: str,
         provider_name: str | None = None,
-        base_url: str | None = None,
+        base_url: str | None | UnsetType = UNSET,
     ) -> Any: ...
 
     async def restore_checkpoint(self, session_id: str, checkpoint_id: str) -> None: ...
@@ -255,7 +256,7 @@ class ServerBackedLocalCliSessionManager:
         *,
         model_name: str,
         provider_name: str | None = None,
-        base_url: str | None = None,
+        base_url: str | None | UnsetType = UNSET,
     ) -> Any:
         return await self._delegate.replace_session_runtime_config(
             session_id,

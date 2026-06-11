@@ -20,6 +20,7 @@ from coding_agent.executors.local_daemon import (
 )
 from coding_agent.runs.coordinator import RunRequest
 from coding_agent.runs.environment import RuntimeEnvironmentResolverService
+from coding_agent.runs.replacement import UNSET, UnsetType
 from coding_agent.runs.target import (
     LocalDaemonExecutorRef,
     LocalPathWorkspaceRef,
@@ -111,7 +112,7 @@ class LocalDaemonRuntimePreparationService:
         *,
         model_name: str | None = None,
         provider_name: str | None = None,
-        base_url: str | None = None,
+        base_url: str | None | UnsetType = UNSET,
         max_steps: int | None = None,
         approval_policy: ApprovalPolicy | None = None,
     ) -> RuntimeBuildResult:
@@ -163,7 +164,7 @@ class LocalDaemonRuntimePreparationService:
         target: RunTarget | None = None,
         model_name: str | None = None,
         provider_name: str | None = None,
-        base_url: str | None = None,
+        base_url: str | None | UnsetType = UNSET,
         max_steps: int | None = None,
         approval_policy: ApprovalPolicy | None = None,
     ) -> RuntimeBuildResult:
@@ -176,7 +177,9 @@ class LocalDaemonRuntimePreparationService:
             session.provider_name if provider_name is None else provider_name
         )
         resolved_model_name = session.model_name if model_name is None else model_name
-        resolved_base_url = session.base_url if base_url is None else base_url
+        resolved_base_url = (
+            session.base_url if isinstance(base_url, UnsetType) else base_url
+        )
         resolved_max_steps = session.max_steps if max_steps is None else max_steps
         resolved_approval_policy = (
             session.approval_policy if approval_policy is None else approval_policy
