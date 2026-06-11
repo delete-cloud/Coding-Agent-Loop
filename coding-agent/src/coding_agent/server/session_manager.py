@@ -84,6 +84,8 @@ from coding_agent.executors import (
 )
 from coding_agent.events import DisplayEvent
 from coding_agent.runs import (
+    UNSET,
+    UnsetType,
     DefaultRunCoordinator,
     EventBroadcastResult,
     LocalDaemonExecutorRef,
@@ -3219,7 +3221,7 @@ class SessionManager:
         *,
         model_name: str | None = None,
         provider_name: str | None = None,
-        base_url: str | None = None,
+        base_url: str | None | UnsetType = UNSET,
         max_steps: int | None = None,
         approval_policy: ApprovalPolicy | None = None,
     ) -> tuple[Any, Any, PipelineAdapter]:
@@ -3248,7 +3250,7 @@ class SessionManager:
         *,
         model_name: str | None = None,
         provider_name: str | None = None,
-        base_url: str | None = None,
+        base_url: str | None | UnsetType = UNSET,
     ) -> Session:
         async def replace_admitted_runtime(session: object) -> Session:
             admitted_session = cast(Session, session)

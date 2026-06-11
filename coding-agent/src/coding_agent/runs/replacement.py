@@ -11,6 +11,20 @@ from .session_runtime import RuntimeBindingSnapshot
 logger = logging.getLogger(__name__)
 
 
+class UnsetType:
+    """Sentinel distinguishing "field not provided" from an explicit None.
+
+    For base_url: UNSET keeps the session's current value, None resets it
+    to the provider default, and a string sets it.
+    """
+
+    def __repr__(self) -> str:
+        return "UNSET"
+
+
+UNSET = UnsetType()
+
+
 class RuntimeReplacementSession(Protocol):
     id: str
     provider: object | None
@@ -46,7 +60,7 @@ class RuntimeReplacementBuilder(Protocol):
         *,
         model_name: str,
         provider_name: str | None = None,
-        base_url: str | None = None,
+        base_url: str | None | UnsetType = UNSET,
     ) -> Awaitable[tuple[object, object, object]]: ...
 
 
@@ -60,7 +74,7 @@ class RuntimeReplacementService:
         *,
         model_name: str,
         provider_name: str | None = None,
-        base_url: str | None = None,
+        base_url: str | None | UnsetType = UNSET,
         build_runtime: RuntimeReplacementBuilder,
         persist_session: RuntimeReplacementPersister,
     ) -> RuntimeReplacementSession:
@@ -82,7 +96,7 @@ class RuntimeReplacementService:
         session.model_name = model_name
         if provider_name is not None:
             session.provider_name = provider_name
-        if base_url is not None:
+        if not isinstance(base_url, UnsetType):
             session.base_url = base_url
         session.attach_runtime_binding(
             pipeline=pipeline,
@@ -114,8 +128,10 @@ class RuntimeReplacementService:
 
 
 __all__ = [
+    "UNSET",
     "RuntimeReplacementBuilder",
     "RuntimeReplacementPersister",
     "RuntimeReplacementService",
     "RuntimeReplacementSession",
+    "UnsetType",
 ]
