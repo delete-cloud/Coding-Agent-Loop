@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
 import type { TimelineItem } from "../lib/timeline";
 
 interface Props {
@@ -56,9 +57,7 @@ function Item({
             Agent
           </div>
           <Agent id={item.agentId} />
-          <div className="text-sm leading-relaxed whitespace-pre-wrap">
-            {item.text}
-          </div>
+          <MarkdownText text={item.text} />
         </div>
       );
     case "thinking":
@@ -112,6 +111,14 @@ function Item({
         </div>
       );
   }
+}
+
+function MarkdownText({ text }: { text: string }) {
+  return (
+    <div className="prose-webui text-sm leading-relaxed">
+      <ReactMarkdown>{text}</ReactMarkdown>
+    </div>
+  );
 }
 
 function ApprovalCard({
