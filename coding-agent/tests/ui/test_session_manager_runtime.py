@@ -346,6 +346,17 @@ class FakeRuntimeStore:
         raise KeyError(f"agent interaction not found: {interaction_id}")
 
 
+async def _wait_for_runtime_interaction(
+    runtime_store: FakeRuntimeStore,
+) -> AgentInteractionRecord:
+    async def wait_until_registered() -> AgentInteractionRecord:
+        while not runtime_store.interactions:
+            await asyncio.sleep(0)
+        return runtime_store.interactions[0]
+
+    return await asyncio.wait_for(wait_until_registered(), timeout=1)
+
+
 class RecordingRunCoordinator:
     def __init__(self) -> None:
         self.requests: list[RunRequest] = []
@@ -1985,13 +1996,9 @@ async def test_wait_for_http_approval_persists_runtime_approval_interaction() ->
     wait_task = asyncio.create_task(
         manager.wait_for_http_approval(session_id, req, timeout_seconds=5)
     )
-    for _ in range(50):
-        if runtime_store.interactions:
-            break
-        await asyncio.sleep(0)
 
+    pending = await _wait_for_runtime_interaction(runtime_store)
     assert len(runtime_store.interactions) == 1
-    pending = runtime_store.interactions[0]
     assert pending.interaction_id == "run-approval:approval:req-runtime-interaction"
     assert pending.run_id == "run-approval"
     assert pending.interaction_kind == "approval"
