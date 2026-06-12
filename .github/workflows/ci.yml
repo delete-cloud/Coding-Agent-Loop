@@ -39,8 +39,13 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install system test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+
       - name: Install dependencies
-        run: uv sync --all-extras --dev
+        run: uv sync --locked --all-extras --dev
 
       - name: Test
         run: uv run pytest tests/ -q -ra

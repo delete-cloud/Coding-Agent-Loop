@@ -36,6 +36,8 @@ same checks run as required PR status checks.
 # Release Review Checklist
 
 - Verify `CI / test` exists and runs `uv run pytest tests/ -q -ra`.
+- Verify the workflow installs Linux system dependencies required by the default
+  native sandbox, including `bubblewrap`.
 - Verify PR evidence was produced after the final commit or amend.
 - Verify no direct push to `main` is needed for the change.
 - Verify repository settings require pull requests and the CI status check.

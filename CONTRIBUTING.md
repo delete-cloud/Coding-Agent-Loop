@@ -10,13 +10,17 @@ runs:
 
 ```bash
 cd coding-agent
-uv sync --all-extras --dev
+uv sync --locked --all-extras --dev
 uv run pytest tests/ -q -ra
 ```
 
 Ruff checks are still useful local targeted checks for files changed by a PR.
 They are not yet a repository-wide required check because the current tree has
 pre-existing lint and format debt outside this gate.
+
+Linux environments that run the full suite need `bubblewrap` on `PATH` because
+the default shell sandbox resolves `sandbox_mode = "native"` to the Linux
+native backend.
 
 Commit messages and pull request descriptions should report verification from a
 clean tree that matches the committed content. If a command was run before a
