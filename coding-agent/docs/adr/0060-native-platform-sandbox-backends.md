@@ -89,6 +89,13 @@ Implemented. The user-visible `sandbox_mode` values are now converged to
 Native sandbox resolution fails closed when the required platform backend is
 unavailable, and the default remains `none`.
 
+The default switch is staged behind a structured retry signal: when
+`structured_results` is enabled, `bash_run` classifies native sandbox failures
+as `sandbox_denied` or `sandbox_unavailable` with
+`retry_hint = "request_unfenced_retry"`. This lets the model distinguish a
+recoverable sandbox boundary from an ordinary command failure and request an
+approved unfenced retry before `native` becomes the default.
+
 Verification is captured by `tests/tools/test_shell.py` and the acceptance
 criteria below.
 
@@ -129,6 +136,8 @@ criteria below.
   `test_podman_runner_fails_closed_when_binary_missing`
 - [x] `test_nsjail_mode_is_rejected_by_validation`
 - [x] `test_existing_none_and_docker_modes_unchanged`
+- [x] `test_structured_result_marks_sandbox_denied`
+- [x] `test_structured_result_marks_sandbox_unavailable`
 - [x] `uv run pytest tests/tools/test_shell.py -k "native or podman or nsjail or sandbox" -v`
 - [x] `uv run ruff check src/coding_agent/tools/sandbox.py src/coding_agent/tools/shell.py`
 

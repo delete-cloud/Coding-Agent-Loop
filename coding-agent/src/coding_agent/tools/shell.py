@@ -49,6 +49,21 @@ def _structured_shell_result(
     }
 
 
+def _structured_shell_error(
+    message: str,
+    *,
+    error_type: str,
+    exit_code: int = 126,
+) -> dict[str, str | int]:
+    return {
+        "stdout": "",
+        "stderr": message,
+        "exit_code": exit_code,
+        "error_type": error_type,
+        "retry_hint": "request_unfenced_retry",
+    }
+
+
 @lru_cache(maxsize=1)
 def _default_shell_config() -> dict[str, object]:
     config_path = Path(__file__).resolve().parent.parent / "agent.toml"
@@ -396,9 +411,28 @@ def bash_run(
         if result.returncode != 0:
             output += f"\nExit code: {result.returncode}"
         return output.strip() or "(no output)"
-    except subprocess.TimeoutExpired:
-        return f"Error: command timed out after {timeout_seconds}s"
     except Exception as e:
+        if isinstance(e, subprocess.TimeoutExpired):
+            return f"Error: command timed out after {timeout_seconds}s"
+        if "sandbox_module" in locals():
+            sandbox_unavailable_error = getattr(
+                sandbox_module, "SandboxUnavailableError", ()
+            )
+            sandbox_error = getattr(sandbox_module, "SandboxError", ())
+            if isinstance(e, sandbox_unavailable_error):
+                if _structured_results_enabled():
+                    return _structured_shell_error(
+                        str(e),
+                        error_type="sandbox_unavailable",
+                    )
+                return f"Error: {e}"
+            if isinstance(e, sandbox_error):
+                if _structured_results_enabled():
+                    return _structured_shell_error(
+                        str(e),
+                        error_type="sandbox_denied",
+                    )
+                return f"Error: {e}"
         return f"Error: {e}"
 
 
