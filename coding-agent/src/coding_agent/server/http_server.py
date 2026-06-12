@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.params import Depends as DependsParam
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from slowapi.errors import RateLimitExceeded
 from sse_starlette.sse import EventSourceResponse
@@ -1576,6 +1577,14 @@ def _auth_context_can_access_session(
     return _session_owner_label(session) == auth_context.owner_label
 
 
+def _normalize_direct_auth_context(
+    auth_context: AuthContext | DependsParam | None,
+) -> AuthContext | None:
+    if isinstance(auth_context, DependsParam):
+        return None
+    return auth_context
+
+
 def _require_admin_context(auth_context: AuthContext | None) -> None:
     if auth_context is None:
         return
@@ -3106,6 +3115,7 @@ async def get_events(
 ) -> EventSourceResponse:
     """Persistent SSE event stream (fan-out supported)."""
     del request, api_key
+    auth_context = _normalize_direct_auth_context(auth_context)
     _ = await _get_visible_session(session_id, auth_context)
 
     try:
@@ -3140,6 +3150,7 @@ async def get_session_display_events(
 ) -> EventSourceResponse:
     """Persistent SSE stream of projected user-facing display events."""
     del request, api_key
+    auth_context = _normalize_direct_auth_context(auth_context)
     session = await _get_visible_session(session_id, auth_context)
 
     try:
@@ -3561,7 +3572,7 @@ async def _get_visible_session(
     try:
         session = await session_manager.get_session_async(session_id)
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail="Session not found") from exc
+        raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
 
     if not _auth_context_can_access_session(auth_context, session):
         raise HTTPException(status_code=404, detail="Session not found")
