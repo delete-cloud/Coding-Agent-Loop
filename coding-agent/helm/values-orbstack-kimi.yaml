@@ -1,0 +1,24 @@
+image:
+  repository: coding-agent
+  tag: local
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8080
+
+agent:
+  config:
+    provider: kimi-code
+    model: kimi-for-coding
+  secretEnv:
+    - name: KIMI_CODE_API_KEY
+      secretName: coding-agent-kimi
+      secretKey: KIMI_CODE_API_KEY
+
+redis:
+  enabled: false
+
+sandbox:
+  sidecar:
+    enabled: false
