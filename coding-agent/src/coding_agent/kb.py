@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import sys
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -139,6 +139,18 @@ def _path_target_within_repo(path: Path, repo_root: Path) -> bool:
     return True
 
 
+def _path_string_under_root(path: str, root: Path) -> bool:
+    root_path = Path(os.path.abspath(root))
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = Path(os.path.abspath(candidate))
+    try:
+        candidate.relative_to(root_path)
+    except ValueError:
+        return False
+    return True
+
+
 def _language_for_path(path: Path) -> str:
     suffix = Path(path).suffix.lower()
     if suffix in _LANGUAGE_BY_SUFFIX:
@@ -158,6 +170,14 @@ def _source_id(
         raise ValueError("source_kind must be non-empty")
     source_key = repo_path if repo_path is not None else source
     return hashlib.sha256(f"{source_kind}:{source_key}".encode("utf-8")).hexdigest()
+
+
+def _chunk_id(*, source_id: str, chunk_index: int) -> str:
+    return hashlib.sha256(f"{source_id}:{chunk_index}".encode("utf-8")).hexdigest()[:32]
+
+
+def _sql_quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
 
 
 def _line_range_for_span(text: str, start: int, end: int) -> tuple[int, int]:
@@ -564,6 +584,59 @@ class KB:
     def has_table(self, table_name: str = "chunks") -> bool:
         return table_name in self._table_names()
 
+    def _rows_for_source(self, source: str) -> list[dict[str, Any]]:
+        if not self.has_table():
+            return []
+        table = self._get_table()
+        return [
+            row for row in table.to_arrow().to_pylist() if row.get("source") == source
+        ]
+
+    def _delete_source_rows_except(
+        self,
+        source: str,
+        keep_ids: set[str],
+    ) -> None:
+        table = self._get_table()
+        source_clause = f"source = {_sql_quote(source)}"
+        if keep_ids:
+            keep_clause = ", ".join(
+                _sql_quote(chunk_id) for chunk_id in sorted(keep_ids)
+            )
+            table.delete(f"{source_clause} AND id NOT IN ({keep_clause})")
+        else:
+            table.delete(source_clause)
+
+    def _delete_missing_sources_for_root(
+        self,
+        root: Path,
+        existing_sources: set[str],
+    ) -> None:
+        if not self.has_table():
+            return
+        root = Path(root)
+        for row in self._get_table().to_arrow().to_pylist():
+            source = row.get("source")
+            if not isinstance(source, str) or source in existing_sources:
+                continue
+            if not _path_string_under_root(source, root):
+                continue
+            metadata_raw = row.get("metadata")
+            if not isinstance(metadata_raw, str):
+                continue
+            try:
+                metadata = json.loads(metadata_raw)
+            except json.JSONDecodeError:
+                continue
+            if metadata.get("source_kind") != "repo_file":
+                continue
+            repo_path = metadata.get("repo_path")
+            if not isinstance(repo_path, str):
+                continue
+            if (root / repo_path).exists():
+                continue
+            self._delete_source_rows_except(source, set())
+
     async def index_file(
         self,
         path: Path,
@@ -590,30 +663,42 @@ class KB:
             source=source,
         )
 
-        table = self._get_table()
-
         # Split content into chunks
         chunk_spans = self._chunk_text_with_spans(content)
         chunks = [chunk for chunk, _start, _end in chunk_spans]
 
         if not chunks or all(not c.strip() for c in chunks):
+            if self.has_table():
+                self._delete_source_rows_except(source, set())
             return
+
+        chunk_ids = {
+            _chunk_id(source_id=source_id, chunk_index=index)
+            for index in range(len(chunks))
+        }
+        existing_rows = self._rows_for_source(source)
+        existing_ids = {
+            row["id"] for row in existing_rows if isinstance(row.get("id"), str)
+        }
+        if existing_rows and existing_ids == chunk_ids:
+            for row in existing_rows:
+                metadata_raw = row.get("metadata")
+                if not isinstance(metadata_raw, str):
+                    continue
+                try:
+                    metadata = json.loads(metadata_raw)
+                except json.JSONDecodeError:
+                    continue
+                if metadata.get("document_sha256") == document_sha256:
+                    return
 
         # Generate embeddings
         embeddings = await self._embed(chunks)
-
-        # Prepare data for insertion
-        import json
 
         data = []
         for i, ((chunk_content, start, end), embedding) in enumerate(
             zip(chunk_spans, embeddings, strict=True)
         ):
-            # Generate deterministic ID based on content hash
-            content_hash = hashlib.sha256(
-                f"{source}:{i}:{chunk_content}".encode()
-            ).hexdigest()
-            chunk_id = f"{uuid.uuid4().hex[:8]}_{content_hash[:16]}"
             line_start, line_end = _line_range_for_span(content, start, end)
 
             metadata = {
@@ -634,7 +719,7 @@ class KB:
 
             data.append(
                 {
-                    "id": chunk_id,
+                    "id": _chunk_id(source_id=source_id, chunk_index=i),
                     "content": chunk_content,
                     "source": source,
                     "metadata": json.dumps(metadata),
@@ -642,8 +727,14 @@ class KB:
                 }
             )
 
-        # Insert into LanceDB
-        table.add(data)
+        table = self._get_table()
+        (
+            table.merge_insert("id")
+            .when_matched_update_all()
+            .when_not_matched_insert_all()
+            .execute(data)
+        )
+        self._delete_source_rows_except(source, chunk_ids)
 
     async def index_test_failure(
         self,
@@ -710,6 +801,7 @@ class KB:
         root: Path,
         pattern: str = "**/*",
         show_progress: bool = True,
+        prune: bool = False,
     ) -> None:
         """Index all text files in a directory.
 
@@ -717,6 +809,7 @@ class KB:
             root: Root directory to scan for files.
             pattern: File glob pattern (default: all files).
             show_progress: Whether to show progress bar (default: True).
+            prune: Whether to delete indexed chunks for files missing under root.
         """
         root = Path(root)
         # Collect all files to index
@@ -727,6 +820,8 @@ class KB:
         ]
 
         if not files:
+            if prune:
+                self._delete_missing_sources_for_root(root, set())
             return
 
         # Check if we should show progress (not in non-TTY environment)
@@ -734,14 +829,18 @@ class KB:
 
         if not show_progress:
             # Original implementation without progress
+            indexed_sources: set[str] = set()
             for path in files:
                 try:
                     if not _path_target_within_repo(path, root):
                         continue
                     content = path.read_text(encoding="utf-8")
                     await self.index_file(path, content, repo_root=root)
+                    indexed_sources.add(str(path))
                 except (IOError, UnicodeDecodeError, ValueError):
                     continue
+            if prune:
+                self._delete_missing_sources_for_root(root, indexed_sources)
             return
 
         # With progress bar
@@ -758,6 +857,7 @@ class KB:
         )
 
         errors = []
+        indexed_sources: set[str] = set()
         with progress:
             task = progress.add_task(
                 f"Indexing {root.name}...",
@@ -773,10 +873,14 @@ class KB:
                         continue
                     content = path.read_text(encoding="utf-8")
                     await self.index_file(path, content, repo_root=root)
+                    indexed_sources.add(str(path))
                 except (IOError, UnicodeDecodeError, ValueError) as e:
                     errors.append((path, e))
                 finally:
                     progress.advance(task)
+
+        if prune:
+            self._delete_missing_sources_for_root(root, indexed_sources)
 
         # Summary
         if errors:

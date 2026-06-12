@@ -42,24 +42,18 @@ def kb():
     default=None,
     help="LanceDB database path (default: from agent.toml [kb].db_path)",
 )
-def kb_index(path: Path, db_path: str | None):
+@click.option(
+    "--prune",
+    is_flag=True,
+    help="Delete indexed chunks for files under PATH that no longer exist.",
+)
+def kb_index(path: Path, db_path: str | None, prune: bool):
     import asyncio
 
     from coding_agent.kb import KB
 
     config_path = _PACKAGE_ROOT / "agent.toml"
     resolved_db, kb_cfg = _load_kb_cli_settings(config_path, db_path)
-
-    probe_kb = KB(
-        db_path=resolved_db,
-        embedding_base_url=kb_cfg.get("embedding_base_url"),
-        embedding_dim=int(kb_cfg.get("embedding_dim", 1536)),
-    )
-    if probe_kb.has_table():
-        click.echo(
-            "Chunks table already exists. Skipping. (Phase 1 does not support incremental updates.)"
-        )
-        return
 
     raw_extensions = kb_cfg.get(
         "index_extensions",
@@ -78,7 +72,7 @@ def kb_index(path: Path, db_path: str | None):
         text_extensions={str(ext) for ext in raw_extensions},
     )
 
-    asyncio.run(kb_instance.index_directory(path, show_progress=False))
+    asyncio.run(kb_instance.index_directory(path, show_progress=False, prune=prune))
     click.echo("Done.")
 
 

@@ -41,7 +41,7 @@ class TestKBIndex:
         assert result.exit_code == 0
         assert "done" in result.output.lower() or "indexed" in result.output.lower()
 
-    def test_kb_index_skip_if_table_exists(self, tmp_path: Path, monkeypatch):
+    def test_kb_index_updates_existing_table(self, tmp_path: Path, monkeypatch):
         import asyncio
 
         from coding_agent import kb as kb_module
@@ -49,11 +49,12 @@ class TestKBIndex:
 
         doc = tmp_path / "docs"
         doc.mkdir()
-        (doc / "readme.md").write_text("# Test")
+        source_path = doc / "readme.md"
+        source_path.write_text("updated auth guide")
 
         db_path = tmp_path / "kb_db"
         kb = KB(db_path=db_path, embedding_dim=8, embedding_fn=_fake_embed)
-        asyncio.run(kb.index_file(Path("existing.md"), "existing content"))
+        asyncio.run(kb.index_file(source_path, "old auth guide", repo_root=doc))
 
         original_init = kb_module.KB.__init__
 
@@ -73,9 +74,58 @@ class TestKBIndex:
         )
 
         assert result.exit_code == 0
-        assert (
-            "already exists" in result.output.lower() or "skip" in result.output.lower()
+        rows = (
+            KB(db_path=db_path, embedding_dim=8, embedding_fn=_fake_embed)
+            ._get_table()
+            .to_arrow()
+            .to_pylist()
         )
+        assert [row["content"] for row in rows] == ["updated auth guide"]
+        assert "done" in result.output.lower()
+
+    def test_kb_index_prunes_deleted_files(self, tmp_path: Path, monkeypatch):
+        import asyncio
+
+        from coding_agent import kb as kb_module
+        from coding_agent.kb import KB
+
+        doc = tmp_path / "docs"
+        doc.mkdir()
+        keep_path = doc / "keep.md"
+        remove_path = doc / "remove.md"
+        keep_path.write_text("keep auth guide")
+        remove_path.write_text("remove auth guide")
+
+        db_path = tmp_path / "kb_db"
+        kb = KB(db_path=db_path, embedding_dim=8, embedding_fn=_fake_embed)
+        asyncio.run(kb.index_directory(doc, show_progress=False))
+        remove_path.unlink()
+
+        original_init = kb_module.KB.__init__
+
+        def patched_init(self_kb, *args, **kwargs):
+            kwargs["embedding_fn"] = _fake_embed
+            kwargs["embedding_dim"] = 8
+            kwargs.setdefault("text_extensions", {".md"})
+            original_init(self_kb, *args, **kwargs)
+
+        monkeypatch.setattr(kb_module.KB, "__init__", patched_init)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["kb", "index", str(doc), "--db-path", str(db_path), "--prune"],
+            catch_exceptions=False,
+        )
+
+        assert result.exit_code == 0
+        rows = (
+            KB(db_path=db_path, embedding_dim=8, embedding_fn=_fake_embed)
+            ._get_table()
+            .to_arrow()
+            .to_pylist()
+        )
+        assert {Path(row["source"]).name for row in rows} == {"keep.md"}
 
     def test_kb_index_missing_path_errors(self):
         runner = CliRunner()
@@ -138,10 +188,7 @@ class TestKBIndex:
         )
 
         assert result.exit_code == 0
-        assert captured_base_urls == [
-            "https://embed.example/v1",
-            "https://embed.example/v1",
-        ]
+        assert captured_base_urls == ["https://embed.example/v1"]
 
 
 class TestKBSearch:

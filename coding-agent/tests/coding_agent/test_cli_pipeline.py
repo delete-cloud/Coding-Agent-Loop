@@ -309,7 +309,8 @@ class TestKbCli:
         assert result.exit_code == 0
         assert "Done." in result.output
 
-    def test_kb_index_skips_when_table_exists(self, tmp_path: Path):
+    def test_kb_index_updates_when_table_exists(self, tmp_path: Path, monkeypatch):
+        from coding_agent import kb as kb_module
         from coding_agent.__main__ import main
         from coding_agent.kb import KB
 
@@ -320,6 +321,16 @@ class TestKbCli:
         kb = KB(db_path=tmp_path / "kb-db", embedding_dim=8, embedding_fn=_fake_embed)
         asyncio.run(kb.index_file(Path("existing.md"), "existing auth content"))
 
+        original_init = kb_module.KB.__init__
+
+        def patched_init(self_kb, *args, **kwargs):
+            kwargs["embedding_fn"] = _fake_embed
+            kwargs["embedding_dim"] = 8
+            kwargs.setdefault("text_extensions", {".md"})
+            original_init(self_kb, *args, **kwargs)
+
+        monkeypatch.setattr(kb_module.KB, "__init__", patched_init)
+
         runner = CliRunner()
         result = runner.invoke(
             main,
@@ -328,7 +339,17 @@ class TestKbCli:
         )
 
         assert result.exit_code == 0
-        assert "already exists" in result.output.lower()
+        assert "Done." in result.output
+        rows = (
+            KB(db_path=tmp_path / "kb-db", embedding_dim=8, embedding_fn=_fake_embed)
+            ._get_table()
+            .to_arrow()
+            .to_pylist()
+        )
+        assert {Path(row["source"]).name for row in rows} == {
+            "existing.md",
+            "readme.md",
+        }
 
     def test_kb_search_prints_results(self, tmp_path: Path, monkeypatch):
         from coding_agent import kb as kb_module
