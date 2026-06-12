@@ -350,6 +350,7 @@ def create_child_pipeline(
             "kb": lambda: KBPlugin(
                 db_path=data_dir / kb_cfg.get("db_path", "kb"),
                 embedding_model=kb_cfg.get("embedding_model", "text-embedding-3-small"),
+                embedding_base_url=kb_cfg.get("embedding_base_url"),
                 embedding_dim=int(kb_cfg.get("embedding_dim", 1536)),
                 chunk_size=int(kb_cfg.get("chunk_size", 1200)),
                 chunk_overlap=int(kb_cfg.get("chunk_overlap", 200)),

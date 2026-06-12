@@ -7,6 +7,7 @@ uv.lock
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
+.zed/
 .deepeval/
 .tmp-e2e-check/
 .tmp-storage-check/

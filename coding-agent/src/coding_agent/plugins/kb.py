@@ -39,6 +39,7 @@ class KBPlugin:
         *,
         db_path: Path,
         embedding_model: str = KB.DEFAULT_EMBEDDING_MODEL,
+        embedding_base_url: str | None = None,
         embedding_dim: int = KB.DEFAULT_EMBEDDING_DIM,
         chunk_size: int = KB.DEFAULT_CHUNK_SIZE,
         chunk_overlap: int = KB.DEFAULT_CHUNK_OVERLAP,
@@ -49,6 +50,7 @@ class KBPlugin:
     ) -> None:
         self._db_path = db_path
         self._embedding_model = embedding_model
+        self._embedding_base_url = embedding_base_url
         self._embedding_dim = embedding_dim
         self._chunk_size = chunk_size
         self._chunk_overlap = chunk_overlap
@@ -82,6 +84,7 @@ class KBPlugin:
         self._kb = KB(
             db_path=self._db_path,
             embedding_model=self._embedding_model,
+            embedding_base_url=self._embedding_base_url,
             embedding_dim=self._embedding_dim,
             chunk_size=self._chunk_size,
             chunk_overlap=self._chunk_overlap,

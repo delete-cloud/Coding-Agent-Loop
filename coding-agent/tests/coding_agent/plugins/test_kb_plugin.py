@@ -70,6 +70,7 @@ class TestKBPluginMount:
     def test_mount_creates_kb_instance(self, tmp_path: Path):
         plugin = KBPlugin(
             db_path=tmp_path / "kb_db",
+            embedding_base_url="https://embed.example/v1",
             embedding_dim=8,
             embedding_fn=_fake_embed,
         )
@@ -79,6 +80,7 @@ class TestKBPluginMount:
         assert "kb" in state
         assert "has_table" in state
         assert state["has_table"] is False
+        assert state["kb"].embedding_base_url == "https://embed.example/v1"
 
     def test_mount_detects_existing_table(self, tmp_path: Path):
         kb = KB(db_path=tmp_path / "kb_db", embedding_dim=8, embedding_fn=_fake_embed)

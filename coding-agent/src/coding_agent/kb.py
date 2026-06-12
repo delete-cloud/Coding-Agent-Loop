@@ -12,8 +12,17 @@ from pathlib import Path
 from typing import Any, Callable
 
 import lancedb
-import numpy as np
 import pyarrow as pa
+from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeRemainingColumn,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,17 +52,6 @@ _LANGUAGE_BY_SUFFIX = {
     ".yml": "yaml",
     ".zsh": "shell",
 }
-
-from rich.console import Console
-from rich.progress import (
-    Progress,
-    SpinnerColumn,
-    TextColumn,
-    BarColumn,
-    TaskProgressColumn,
-    TimeRemainingColumn,
-    MofNCompleteColumn,
-)
 
 
 @dataclass
@@ -355,6 +353,7 @@ class KB:
         self,
         db_path: Path | str,
         embedding_model: str = DEFAULT_EMBEDDING_MODEL,
+        embedding_base_url: str | None = None,
         embedding_dim: int = DEFAULT_EMBEDDING_DIM,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
@@ -366,6 +365,7 @@ class KB:
         Args:
             db_path: Path to the LanceDB database directory.
             embedding_model: OpenAI embedding model name.
+            embedding_base_url: Optional OpenAI-compatible embedding API base URL.
             embedding_dim: Dimension of embedding vectors.
             chunk_size: Number of tokens per chunk.
             chunk_overlap: Number of tokens to overlap between chunks.
@@ -374,6 +374,7 @@ class KB:
         """
         self.db_path = Path(db_path)
         self.embedding_model = embedding_model
+        self.embedding_base_url = embedding_base_url
         self.embedding_dim = embedding_dim
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
@@ -438,7 +439,10 @@ class KB:
                     "OPENAI_API_KEY environment variable is required "
                     "when not using a custom embedding function"
                 )
-            self._openai_client = AsyncOpenAI(api_key=api_key)
+            kwargs: dict[str, Any] = {"api_key": api_key}
+            if self.embedding_base_url is not None:
+                kwargs["base_url"] = self.embedding_base_url
+            self._openai_client = AsyncOpenAI(**kwargs)
         return self._openai_client
 
     def _get_openai_sync_client(self):
@@ -457,7 +461,10 @@ class KB:
                     "OPENAI_API_KEY environment variable is required "
                     "when not using a custom embedding function"
                 )
-            self._openai_sync_client = OpenAI(api_key=api_key)
+            kwargs: dict[str, Any] = {"api_key": api_key}
+            if self.embedding_base_url is not None:
+                kwargs["base_url"] = self.embedding_base_url
+            self._openai_sync_client = OpenAI(**kwargs)
         return self._openai_sync_client
 
     async def _embed(self, texts: list[str]) -> list[list[float]]:

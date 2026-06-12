@@ -83,6 +83,66 @@ class TestKBIndex:
 
         assert result.exit_code != 0
 
+    def test_kb_index_uses_configured_embedding_base_url(
+        self, tmp_path: Path, monkeypatch
+    ):
+        captured_base_urls: list[str | None] = []
+
+        from coding_agent import kb as kb_module
+
+        original_init = kb_module.KB.__init__
+        original_exists = Path.exists
+
+        def patched_init(self_kb, *args, **kwargs):
+            captured_base_urls.append(kwargs.get("embedding_base_url"))
+            kwargs["embedding_fn"] = _fake_embed
+            kwargs["embedding_dim"] = 8
+            kwargs.setdefault("text_extensions", {".md"})
+            original_init(self_kb, *args, **kwargs)
+
+        def patched_exists(path_obj: Path) -> bool:
+            if path_obj.name == "agent.toml" and path_obj.parent.name == "coding_agent":
+                return True
+            return original_exists(path_obj)
+
+        class FakeCfg:
+            def __init__(self) -> None:
+                self.extra = {
+                    "kb": {
+                        "db_path": "kb",
+                        "embedding_base_url": "https://embed.example/v1",
+                        "embedding_dim": 8,
+                        "index_extensions": [".md"],
+                    }
+                }
+
+        doc = tmp_path / "docs"
+        doc.mkdir()
+        (doc / "readme.md").write_text("# Test")
+
+        monkeypatch.setattr(kb_module.KB, "__init__", patched_init)
+        monkeypatch.setattr(Path, "exists", patched_exists)
+        monkeypatch.setenv("AGENT_DATA_DIR", str(tmp_path / "data"))
+
+        from agentkit.config import loader as config_loader
+
+        monkeypatch.setattr(
+            config_loader, "load_config", lambda *_args, **_kwargs: FakeCfg()
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["kb", "index", str(doc)],
+            catch_exceptions=False,
+        )
+
+        assert result.exit_code == 0
+        assert captured_base_urls == [
+            "https://embed.example/v1",
+            "https://embed.example/v1",
+        ]
+
 
 class TestKBSearch:
     def test_kb_search_returns_results(self, tmp_path: Path, monkeypatch):
@@ -146,6 +206,7 @@ class TestKBSearch:
         self, tmp_path: Path, monkeypatch
     ):
         captured_models: list[str] = []
+        captured_base_urls: list[str | None] = []
 
         from coding_agent import kb as kb_module
 
@@ -156,6 +217,7 @@ class TestKBSearch:
             model = kwargs.get("embedding_model")
             if isinstance(model, str):
                 captured_models.append(model)
+            captured_base_urls.append(kwargs.get("embedding_base_url"))
             kwargs["embedding_fn"] = _fake_embed
             kwargs["embedding_dim"] = 8
             original_init(self_kb, *args, **kwargs)
@@ -169,13 +231,15 @@ class TestKBSearch:
         monkeypatch.setattr(Path, "exists", patched_exists)
 
         class FakeCfg:
-            extra = {
-                "kb": {
-                    "db_path": "kb",
-                    "embedding_model": "text-embedding-3-large",
-                    "embedding_dim": 8,
+            def __init__(self) -> None:
+                self.extra = {
+                    "kb": {
+                        "db_path": "kb",
+                        "embedding_model": "text-embedding-3-large",
+                        "embedding_base_url": "https://embed.example/v1",
+                        "embedding_dim": 8,
+                    }
                 }
-            }
 
         monkeypatch.setenv("AGENT_DATA_DIR", str(tmp_path / "data"))
 
@@ -194,3 +258,4 @@ class TestKBSearch:
 
         assert result.exit_code == 0
         assert captured_models == ["text-embedding-3-large"]
+        assert captured_base_urls == ["https://embed.example/v1"]

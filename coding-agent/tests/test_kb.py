@@ -2,7 +2,9 @@
 
 import hashlib
 import json
+import sys
 import tempfile
+import types
 from pathlib import Path
 from typing import Any
 
@@ -132,6 +134,7 @@ class TestKBInitialization:
 
         assert kb.db_path == temp_db_path
         assert kb.embedding_model == "text-embedding-3-small"
+        assert kb.embedding_base_url is None
         assert kb.chunk_size == 1200
         assert kb.chunk_overlap == 200
         assert kb._embedding_fn is None
@@ -141,6 +144,7 @@ class TestKBInitialization:
         kb = KB(
             db_path=temp_db_path,
             embedding_model="text-embedding-3-large",
+            embedding_base_url="https://embed.example/v1",
             chunk_size=500,
             chunk_overlap=50,
             embedding_fn=mock_embedding_fn,
@@ -148,9 +152,43 @@ class TestKBInitialization:
 
         assert kb.db_path == temp_db_path
         assert kb.embedding_model == "text-embedding-3-large"
+        assert kb.embedding_base_url == "https://embed.example/v1"
         assert kb.chunk_size == 500
         assert kb.chunk_overlap == 50
         assert kb._embedding_fn is mock_embedding_fn
+
+    def test_openai_clients_use_embedding_base_url(self, temp_db_path, monkeypatch):
+        async_calls: list[dict[str, Any]] = []
+        sync_calls: list[dict[str, Any]] = []
+
+        class FakeAsyncOpenAI:
+            def __init__(self, **kwargs: Any) -> None:
+                async_calls.append(kwargs)
+
+        class FakeOpenAI:
+            def __init__(self, **kwargs: Any) -> None:
+                sync_calls.append(kwargs)
+
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        monkeypatch.setitem(
+            sys.modules,
+            "openai",
+            types.SimpleNamespace(AsyncOpenAI=FakeAsyncOpenAI, OpenAI=FakeOpenAI),
+        )
+        kb = KB(
+            db_path=temp_db_path,
+            embedding_base_url="https://embed.example/v1",
+        )
+
+        kb._get_openai_client()
+        kb._get_openai_sync_client()
+
+        assert async_calls == [
+            {"api_key": "sk-test", "base_url": "https://embed.example/v1"}
+        ]
+        assert sync_calls == [
+            {"api_key": "sk-test", "base_url": "https://embed.example/v1"}
+        ]
 
     def test_kb_creates_directory(self, temp_db_path):
         """Test that KB creates the database directory."""
@@ -415,7 +453,6 @@ class TestKBIndexing:
 
         # Get table to check IDs
         table = kb._get_table()
-        import pyarrow as pa
 
         first_count = len(table.to_arrow().to_pandas())
 
@@ -449,7 +486,6 @@ class TestKBIndexing:
 
         # Should have indexed the text files
         table = kb._get_table()
-        import pyarrow as pa
 
         df = table.to_arrow().to_pandas()
         sources = df["source"].tolist()
@@ -478,7 +514,6 @@ class TestKBIndexing:
             await kb.index_directory(root)
 
         table = kb._get_table()
-        import pyarrow as pa
 
         df = table.to_arrow().to_pandas()
         sources = df["source"].tolist()

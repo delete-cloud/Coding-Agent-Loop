@@ -211,6 +211,7 @@ enabled = ["storage", "core_tools", "kb"]
 [kb]
 db_path = "kb"
 embedding_model = "text-embedding-3-small"
+embedding_base_url = "https://embed.example/v1"
 embedding_dim = 1536
 chunk_size = 1200
 chunk_overlap = 200
@@ -226,6 +227,8 @@ index_extensions = [".md"]
         )
 
         assert "kb" in pipeline._registry.plugin_ids()
+        kb_plugin = pipeline._registry.get("kb")
+        assert kb_plugin._embedding_base_url == "https://embed.example/v1"
 
     def test_create_agent_does_not_inject_observation_sink_by_default(self, tmp_path):
         config_path = tmp_path / "agent.toml"

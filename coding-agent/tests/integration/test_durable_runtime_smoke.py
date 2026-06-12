@@ -434,6 +434,7 @@ async def test_smoke_approval_run_persists_request_decision_and_wire_event(
     assert interaction.response_payload["approved"] is True
     assert [event.event_kind for event in store.events if event.run_id == run_id] == [
         "wire.ApprovalRequest",
+        "wire.ApprovalResponse",
         "wire.TurnEnd",
     ]
     assert _statuses_for(store, run_id) == ["running", "completed"]
