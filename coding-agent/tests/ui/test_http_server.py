@@ -4363,6 +4363,48 @@ class TestEventsFanOut:
         assert exc_info.value.detail == "Session not found"
         assert session.event_queues == []
 
+    async def test_session_events_rejects_non_owner(self, client, monkeypatch):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+        session = session_manager.get_session(session_id)
+        session.origin = {"owner_label": "owner:a"}
+
+        class FakeEventSourceResponse:
+            def __init__(self, body_iterator):
+                self.body_iterator = body_iterator
+
+        monkeypatch.setattr(
+            "coding_agent.server.http_server.EventSourceResponse",
+            FakeEventSourceResponse,
+        )
+
+        request = Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": f"/sessions/{session_id}/events",
+                "headers": [],
+            }
+        )
+        auth_context = AuthContext(
+            scope="user",
+            token="token-b",
+            token_digest="digest-b",
+            owner_label="owner:b",
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await get_events(
+                request,
+                session_id,
+                None,
+                auth_context,
+            )
+
+        assert exc_info.value.status_code == 404
+        assert exc_info.value.detail == "Session not found"
+        assert session.event_queues == []
+
     async def test_session_display_events_redacts_live_tool_result_payload(
         self, client, monkeypatch
     ):
@@ -4516,7 +4558,7 @@ class TestEventsFanOut:
                 "headers": [],
             }
         )
-        response = await get_events(request, session_id, None)
+        response = await get_events(request, session_id, None, None)
         event_generator = cast(AsyncIterator[dict[str, str]], response.body_iterator)
         event = await anext(event_generator)
 
@@ -4583,7 +4625,7 @@ class TestEventsFanOut:
                 "headers": [],
             }
         )
-        response = await get_events(request, session_id, None)
+        response = await get_events(request, session_id, None, None)
         event_generator = cast(AsyncIterator[dict[str, str]], response.body_iterator)
 
         with pytest.raises(StopAsyncIteration):

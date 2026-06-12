@@ -3102,12 +3102,11 @@ async def get_events(
     request: Request,
     session_id: str,
     api_key: str | None = Depends(verify_api_key),
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
 ) -> EventSourceResponse:
     """Persistent SSE event stream (fan-out supported)."""
-    try:
-        await session_manager.get_session_async(session_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
+    del request, api_key
+    _ = await _get_visible_session(session_id, auth_context)
 
     try:
         await session_manager.authorize_event_stream(session_id)
