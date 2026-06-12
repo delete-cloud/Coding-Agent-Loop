@@ -18,6 +18,7 @@ from coding_agent.observability import (
     CompositeObservationSink,
     PrometheusMetricsObservationSink,
 )
+from coding_agent.topic_memory import MemoryReviewStore
 
 
 class NonLocalEnvironment:
@@ -233,6 +234,33 @@ search_corpora = ["sre", "notes"]
         assert kb_plugin._embedding_base_url == "https://embed.example/v1"
         assert kb_plugin._corpus == "sre"
         assert kb_plugin._search_corpora == ("sre", "notes")
+
+    def test_create_agent_installs_persistent_memory_review_store(self, tmp_path):
+        config_path = tmp_path / "agent.toml"
+        config_path.write_text(
+            """
+[agent]
+name = "test-agent"
+model = "claude-sonnet-4-20250514"
+provider = "anthropic"
+
+[agent.plugins]
+enabled = ["storage", "core_tools"]
+
+[kb]
+db_path = "custom-kb"
+""".strip()
+        )
+
+        _pipeline, ctx = create_agent(
+            config_path=config_path,
+            data_dir=tmp_path / "data",
+            api_key="sk-test",
+        )
+
+        store = ctx.config["memory_review_store"]
+        assert isinstance(store, MemoryReviewStore)
+        assert store.path == tmp_path / "data" / "custom-kb" / "reviewed_memory.jsonl"
 
     def test_create_agent_does_not_inject_observation_sink_by_default(self, tmp_path):
         config_path = tmp_path / "agent.toml"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 import pytest
@@ -39,6 +40,26 @@ def test_memory_review_accept_candidate_keeps_provenance() -> None:
     assert accepted.to_dict()["reference_mode"] == "reference_only"
     assert store.accept_candidate(candidate.candidate_id or "") == accepted
     assert store.accepted_memories() == (accepted,)
+
+
+def test_memory_review_store_persists_records_as_jsonl(tmp_path) -> None:
+    path = tmp_path / "kb" / "reviewed_memory.jsonl"
+    store = MemoryReviewStore(path)
+    candidate = _candidate("memory-one")
+    store.add_candidate(candidate)
+
+    accepted = store.accept_candidate(
+        candidate.candidate_id or "",
+        reason="Useful cross-topic reference",
+    )
+    loaded = MemoryReviewStore(path)
+
+    assert path.exists()
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0]) == accepted.to_dict()
+    assert loaded.load_memory(candidate.candidate_id or "") == accepted
+    assert loaded.accepted_memories() == (accepted,)
 
 
 def test_memory_review_reject_and_archive_are_idempotent() -> None:
