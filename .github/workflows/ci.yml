@@ -22,7 +22,7 @@ defaults:
 jobs:
   test:
     name: test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       CODING_AGENT_TEST_SHELL_SANDBOX_MODE: none
@@ -46,8 +46,30 @@ jobs:
         with:
           version: v4.2.0
 
+      - name: Install native Linux sandbox dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+
       - name: Install dependencies
         run: uv sync --locked --all-extras --dev
+
+      - name: Test Linux native sandbox
+        env:
+          CODING_AGENT_TEST_SHELL_SANDBOX_MODE: native
+          CI_EXPECT_BWRAP: "1"
+        run: |
+          apparmor_userns_path=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          original_apparmor_userns=""
+          if [[ -e "$apparmor_userns_path" ]]; then
+            original_apparmor_userns="$(cat "$apparmor_userns_path")"
+            trap 'sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns="$original_apparmor_userns"' EXIT
+            # GitHub-hosted Ubuntu 24.04 runners restrict unprivileged userns by
+            # default; enable it only for this live bwrap smoke/test step.
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --unshare-all --ro-bind / / /usr/bin/true
+          uv run pytest tests/tools/test_linux_native_sandbox_live.py -q -ra
 
       - name: Build runtime image
         run: docker build -t coding-agent:ci .
