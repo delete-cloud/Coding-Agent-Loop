@@ -272,6 +272,20 @@ def create_child_pipeline(
         isinstance(item, str) for item in kb_search_corpora
     ):
         raise ValueError("[kb].search_corpora must contain only strings")
+    if "min_score" in kb_cfg:
+        raise ValueError(
+            "[kb].min_score is not supported; KB score is LanceDB distance, "
+            "so use [kb].max_distance instead"
+        )
+    kb_max_distance = kb_cfg.get("max_distance")
+    if kb_max_distance is not None:
+        if not isinstance(kb_max_distance, int | float) or isinstance(
+            kb_max_distance, bool
+        ):
+            raise ValueError("[kb].max_distance must be a number")
+        kb_max_distance = float(kb_max_distance)
+        if kb_max_distance < 0:
+            raise ValueError("[kb].max_distance must be non-negative")
     kb_db_path = kb_cfg.get("db_path", "kb")
     if not isinstance(kb_db_path, str):
         raise ValueError("[kb].db_path must be a string")
@@ -372,6 +386,7 @@ def create_child_pipeline(
                 chunk_size=int(kb_cfg.get("chunk_size", 1200)),
                 chunk_overlap=int(kb_cfg.get("chunk_overlap", 200)),
                 top_k=int(kb_cfg.get("top_k", 5)),
+                max_distance=kb_max_distance,
                 index_extensions=kb_cfg.get(
                     "index_extensions",
                     [".md", ".txt", ".rst", ".yaml", ".yml", ".toml"],

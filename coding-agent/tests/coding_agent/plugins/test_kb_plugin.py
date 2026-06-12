@@ -8,7 +8,7 @@ import pytest
 from agentkit.observability import SpanRecord
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
-from coding_agent.kb import KB
+from coding_agent.kb import DocumentChunk, KB, KBSearchResult
 from coding_agent.plugins.kb import KBPlugin
 
 
@@ -268,6 +268,66 @@ class TestBuildContextSearch:
 
         assert len(result) == 1
         assert captured == [("sre",)]
+
+    def test_max_distance_filters_context_pack_results(self, tmp_path: Path):
+        db_path = tmp_path / "kb_db"
+        kb = KB(db_path=db_path, embedding_dim=8, embedding_fn=_fake_embed)
+        asyncio.run(kb.index_file(Path("src/auth.py"), "seed table"))
+        sink = RecordingObservationSink()
+        plugin = KBPlugin(
+            db_path=db_path,
+            embedding_dim=8,
+            top_k=5,
+            max_distance=0.25,
+            embedding_fn=_fake_embed,
+        )
+        plugin.do_mount(ctx=_MountContext(sink))
+        assert plugin._kb is not None
+        plugin._kb.search_sync = lambda query, k=5, *, corpora=None: [
+            KBSearchResult(
+                chunk=DocumentChunk(
+                    id="good",
+                    content="relevant auth runbook",
+                    source="src/auth.py",
+                    metadata={
+                        "source_kind": "repo_file",
+                        "source_id": "src/auth.py",
+                        "repo_path": "src/auth.py",
+                    },
+                ),
+                score=0.10,
+            ),
+            KBSearchResult(
+                chunk=DocumentChunk(
+                    id="bad",
+                    content="distant billing note",
+                    source="src/billing.py",
+                    metadata={
+                        "source_kind": "repo_file",
+                        "source_id": "src/billing.py",
+                        "repo_path": "src/billing.py",
+                    },
+                ),
+                score=0.75,
+            ),
+        ]
+        tape = Tape()
+        tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "user", "content": "How does auth work?"},
+            )
+        )
+
+        result = plugin.build_context(tape=tape)
+
+        assert len(result) == 1
+        assert "relevant auth runbook" in result[0]["content"]
+        assert "distant billing note" not in result[0]["content"]
+        search_span = _span_by_name(sink, "retrieval.kb.search")
+        assert search_span.attributes["retrieval.candidate_count"] == 2
+        assert search_span.attributes["retrieval.selected_count"] == 1
+        assert search_span.attributes["retrieval.max_distance"] == 0.25
 
     def test_retrieval_observability_emits_counts_without_sensitive_attributes(
         self, indexed_plugin: KBPlugin

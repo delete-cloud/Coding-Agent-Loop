@@ -217,6 +217,7 @@ embedding_dim = 1536
 chunk_size = 1200
 chunk_overlap = 200
 top_k = 5
+max_distance = 0.8
 index_extensions = [".md"]
 corpus = "sre"
 search_corpora = ["sre", "notes"]
@@ -232,6 +233,7 @@ search_corpora = ["sre", "notes"]
         assert "kb" in pipeline._registry.plugin_ids()
         kb_plugin = pipeline._registry.get("kb")
         assert kb_plugin._embedding_base_url == "https://embed.example/v1"
+        assert kb_plugin._max_distance == 0.8
         assert kb_plugin._corpus == "sre"
         assert kb_plugin._search_corpora == ("sre", "notes")
 
@@ -261,6 +263,30 @@ db_path = "custom-kb"
         store = ctx.config["memory_review_store"]
         assert isinstance(store, MemoryReviewStore)
         assert store.path == tmp_path / "data" / "custom-kb" / "reviewed_memory.jsonl"
+
+    def test_create_agent_rejects_kb_min_score_config(self, tmp_path):
+        config_path = tmp_path / "agent.toml"
+        config_path.write_text(
+            """
+[agent]
+name = "test-agent"
+model = "claude-sonnet-4-20250514"
+provider = "anthropic"
+
+[agent.plugins]
+enabled = ["storage", "core_tools", "kb"]
+
+[kb]
+min_score = 0.8
+""".strip()
+        )
+
+        with pytest.raises(ValueError, match="max_distance"):
+            create_agent(
+                config_path=config_path,
+                data_dir=tmp_path / "data",
+                api_key="sk-test",
+            )
 
     def test_create_agent_does_not_inject_observation_sink_by_default(self, tmp_path):
         config_path = tmp_path / "agent.toml"
