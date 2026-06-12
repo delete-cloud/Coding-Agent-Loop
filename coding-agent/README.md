@@ -238,6 +238,10 @@ uv run pytest tests/coding_agent/ -v
 uv run pytest tests/cli/ -v
 ```
 
+Changes to `main` must go through pull requests with the full CI gate passing.
+See [CONTRIBUTING.md](../CONTRIBUTING.md) for the required check and branch
+protection policy.
+
 ## License
 
 MIT

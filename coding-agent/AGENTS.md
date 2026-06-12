@@ -72,6 +72,8 @@ uv run ruff format src/
 
 ## Branch, Base, And Worktree Hygiene
 
+- Do not push directly to `main`. Land changes through a pull request with the
+  required CI status check passing.
 - When a new user request introduces a new feature direction, or clearly diverges from the current branch's purpose, stop and ask whether to continue on the current branch or switch to a new branch/worktree first.
 - Prefer a fresh branch/worktree for new feature work that is not a natural continuation of the current branch.
 - If the task is still in analysis/design/scoping, ask before starting implementation work on the wrong branch.

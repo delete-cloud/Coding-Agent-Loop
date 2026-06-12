@@ -615,3 +615,29 @@ patterns:
   - cancellation
   - docker
   - inspect
+- id: PM-0025
+  title: Keep main green with PR CI gates
+  path: patterns/PM-0025-keep-main-green-with-pr-ci-gates.md
+  severity: high
+  confidence: high
+  subsystems:
+  - ci
+  - release
+  related_files:
+  - ../.github/workflows/ci.yml
+  - ../CONTRIBUTING.md
+  - README.md
+  - AGENTS.md
+  - postmortem/index.yaml
+  related_commits: []
+  keywords:
+  - main
+  - green
+  - pull
+  - request
+  - ci
+  - branch
+  - protection
+  - direct
+  - push
+  - verification
