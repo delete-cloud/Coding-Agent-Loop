@@ -1,4 +1,3 @@
-import pytest
 from coding_agent.tools.shell import bash_run
 
 
@@ -20,6 +19,8 @@ class TestShellTool:
         assert isinstance(result, str)
         assert "unsupported shell syntax" in result.lower()
 
-    def test_invalid_timeout_raises_tool_validation_error(self):
-        with pytest.raises(ValueError, match="timeout must be a positive integer"):
-            bash_run(command="echo hello", timeout="10s")  # type: ignore[arg-type]
+    def test_invalid_timeout_returns_tool_validation_error(self):
+        result = bash_run(command="echo hello", timeout="10s")  # type: ignore[arg-type]
+        assert isinstance(result, str)
+        assert "error" in result.lower()
+        assert "timeout must be a positive integer" in result.lower()

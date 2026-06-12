@@ -397,12 +397,11 @@ class TestMemoryPersistence:
         self, tmp_path: Path
     ):
         storage = StoragePlugin(data_dir=tmp_path)
-        tape_store = storage._get_jsonl_store()
-        tape_store.append_memory_record(
+        storage.append_memory_record(
             "session-1",
             {"summary": "Persisted memory", "tags": ["src/auth.py"], "importance": 1.0},
         )
-        tape_store.append_memory_record(
+        storage.append_memory_record(
             "session-1",
             {
                 "summary": "Evidence memory",
@@ -454,8 +453,7 @@ class TestMemoryPersistence:
     @pytest.mark.asyncio
     async def test_mount_drops_invalid_persisted_evidence_ranges(self, tmp_path: Path):
         storage = StoragePlugin(data_dir=tmp_path)
-        tape_store = storage._get_jsonl_store()
-        tape_store.append_memory_record(
+        storage.append_memory_record(
             "session-1",
             {
                 "summary": "Malformed evidence memory",
