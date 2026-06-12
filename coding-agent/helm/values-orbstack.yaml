@@ -1,0 +1,12 @@
+image:
+  repository: coding-agent
+  tag: local
+  pullPolicy: IfNotPresent
+service:
+  type: ClusterIP
+  port: 8080
+redis:
+  enabled: false
+sandbox:
+  sidecar:
+    enabled: false

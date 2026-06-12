@@ -1,0 +1,150 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "coding-agent.fullname" . }}
+  labels:
+    {{- include "coding-agent.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "coding-agent.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "coding-agent.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: coding-agent
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            {{- toYaml .Values.command | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          {{- if .Values.agent.secretRef }}
+          envFrom:
+            {{- range .Values.agent.secretRef }}
+            - secretRef:
+                name: {{ . | quote }}
+            {{- end }}
+          {{- end }}
+          env:
+            - name: AGENT_DATA_DIR
+              value: {{ .Values.persistence.data.mountPath | quote }}
+            {{- if .Values.redis.enabled }}
+            - name: AGENT_SESSION_REDIS_URL
+              value: {{ default (printf "redis://127.0.0.1:%v/0" .Values.redis.sidecar.port) .Values.redis.url | quote }}
+            {{- end }}
+            {{- if .Values.sandbox.sidecar.enabled }}
+            - name: SANDBOX_NSJAIL_CONFIG_PATH
+              value: {{ .Values.sandbox.sidecar.configPath | quote }}
+            {{- end }}
+            {{- range .Values.agent.extraEnv }}
+            - name: {{ .name }}
+              value: {{ .value | quote }}
+            {{- end }}
+            {{- range .Values.agent.secretEnv }}
+            - name: {{ .name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .secretName | quote }}
+                  key: {{ .secretKey | quote }}
+            {{- end }}
+          volumeMounts:
+            - name: agent-config
+              mountPath: /app/src/coding_agent/agent.toml
+              subPath: agent.toml
+              readOnly: true
+            {{- if .Values.persistence.workspace.enabled }}
+            - name: workspace-storage
+              mountPath: {{ .Values.persistence.workspace.mountPath }}
+            {{- end }}
+            {{- if .Values.persistence.data.enabled }}
+            - name: data-storage
+              mountPath: {{ .Values.persistence.data.mountPath }}
+            {{- end }}
+            {{- if .Values.sandbox.sidecar.enabled }}
+            - name: sandbox-config
+              mountPath: /etc/nsjail
+              readOnly: true
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- if and .Values.redis.enabled .Values.redis.sidecar.enabled (eq .Values.redis.url "") }}
+        - name: redis
+          image: {{ .Values.redis.sidecar.image | quote }}
+          imagePullPolicy: IfNotPresent
+          args:
+            {{- toYaml .Values.redis.sidecar.args | nindent 12 }}
+          ports:
+            - name: redis
+              containerPort: {{ .Values.redis.sidecar.port }}
+              protocol: TCP
+          {{- with .Values.redis.sidecar.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- end }}
+        {{- if .Values.sandbox.sidecar.enabled }}
+        - name: sandbox
+          image: {{ .Values.sandbox.sidecar.image | quote }}
+          imagePullPolicy: IfNotPresent
+          command:
+            {{- toYaml .Values.sandbox.sidecar.command | nindent 12 }}
+          volumeMounts:
+            - name: sandbox-config
+              mountPath: /etc/nsjail
+              readOnly: true
+        {{- end }}
+      volumes:
+        - name: agent-config
+          configMap:
+            name: {{ include "coding-agent.fullname" . }}-agent-config
+        {{- if .Values.persistence.workspace.enabled }}
+        - name: workspace-storage
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-workspace" (include "coding-agent.fullname" .)) .Values.persistence.workspace.existingClaim }}
+        {{- end }}
+        {{- if .Values.persistence.data.enabled }}
+        - name: data-storage
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-data" (include "coding-agent.fullname" .)) .Values.persistence.data.existingClaim }}
+        {{- end }}
+        {{- if .Values.sandbox.sidecar.enabled }}
+        - name: sandbox-config
+          configMap:
+            name: {{ include "coding-agent.fullname" . }}-sandbox-config
+        {{- end }}

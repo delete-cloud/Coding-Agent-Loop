@@ -23,5 +23,4 @@ data/eval/golden/*
 !data/eval/golden/*.jsonl
 !data/eval/golden/*.yaml
 
-helm/
 .alma-snapshots
