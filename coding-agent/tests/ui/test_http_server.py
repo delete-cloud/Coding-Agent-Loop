@@ -20,7 +20,7 @@ from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
 from httpx import AsyncClient, ASGITransport
 from httpx_sse import aconnect_sse
 from starlette.requests import Request
@@ -253,6 +253,11 @@ admin_bearer_token = "admin-token"
     return config_path
 
 
+def _set_safe_production_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CODING_AGENT_BEARER_TOKEN", "secret-token")
+    monkeypatch.setenv("CODING_AGENT_CORS_ORIGINS", "https://agent.example.com")
+
+
 def test_http_server_loads_config_from_explicit_server_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -401,10 +406,100 @@ def test_http_server_explicit_server_config_missing_fails_closed(
         _ = http_server._load_server_config()
 
 
-def test_production_config_accepts_safe_docker_workspace_config(
+def test_cors_allowed_origins_default_to_development_wildcard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CODING_AGENT_CORS_ORIGINS", raising=False)
+
+    assert http_server._cors_allowed_origins() == ["*"]
+
+
+def test_cors_allowed_origins_parse_environment_whitelist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "CODING_AGENT_CORS_ORIGINS",
+        "https://agent.example.com, https://console.example.com",
+    )
+
+    assert http_server._cors_allowed_origins() == [
+        "https://agent.example.com",
+        "https://console.example.com",
+    ]
+
+
+def test_production_config_requires_cors_origin_whitelist(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("CODING_AGENT_BEARER_TOKEN", "secret-token")
+    monkeypatch.delenv("CODING_AGENT_CORS_ORIGINS", raising=False)
+
+    with pytest.raises(ValueError, match="CODING_AGENT_CORS_ORIGINS"):
+        http_server._validate_production_config(
+            {
+                "production": True,
+                "bearer_token_env": "CODING_AGENT_BEARER_TOKEN",
+            },
+            _safe_production_cloud_workspace_config(),
+        )
+
+
+def test_production_config_rejects_cors_wildcard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CODING_AGENT_BEARER_TOKEN", "secret-token")
+    monkeypatch.setenv("CODING_AGENT_CORS_ORIGINS", "*")
+
+    with pytest.raises(ValueError, match="must not include"):
+        http_server._validate_production_config(
+            {
+                "production": True,
+                "bearer_token_env": "CODING_AGENT_BEARER_TOKEN",
+            },
+            _safe_production_cloud_workspace_config(),
+        )
+
+
+def test_webui_static_mount_is_disabled_without_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("WEBUI_DIST_DIR", raising=False)
+    test_app = FastAPI()
+    before_routes = list(test_app.routes)
+
+    http_server._mount_webui_static(test_app, env={})
+
+    assert test_app.routes == before_routes
+
+
+def test_webui_static_mount_uses_configured_dist_dir(tmp_path: Path) -> None:
+    dist_dir = tmp_path / "dist"
+    dist_dir.mkdir()
+    (dist_dir / "index.html").write_text("<main>webui</main>", encoding="utf-8")
+    test_app = FastAPI()
+
+    http_server._mount_webui_static(
+        test_app,
+        env={"WEBUI_DIST_DIR": str(dist_dir)},
+    )
+
+    assert test_app.routes[-1].name == "webui"
+
+
+def test_webui_static_mount_fails_closed_for_missing_dist_dir(tmp_path: Path) -> None:
+    test_app = FastAPI()
+
+    with pytest.raises(RuntimeError, match="WEBUI_DIST_DIR"):
+        http_server._mount_webui_static(
+            test_app,
+            env={"WEBUI_DIST_DIR": str(tmp_path / "missing")},
+        )
+
+
+def test_production_config_accepts_safe_docker_workspace_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_safe_production_env(monkeypatch)
 
     http_server._validate_production_config(
         {
@@ -418,7 +513,7 @@ def test_production_config_accepts_safe_docker_workspace_config(
 def test_production_config_accepts_durable_remote_retention(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("CODING_AGENT_BEARER_TOKEN", "secret-token")
+    _set_safe_production_env(monkeypatch)
     cloud_workspace_config = _safe_production_cloud_workspace_config()
     cloud_workspace_config["provider_instance_id"] = "docker-host-a"
 
@@ -441,7 +536,7 @@ def test_production_config_accepts_durable_remote_retention(
 def test_production_config_accepts_server_configured_setup_commands(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("CODING_AGENT_BEARER_TOKEN", "secret-token")
+    _set_safe_production_env(monkeypatch)
     cloud_workspace_config = _safe_production_cloud_workspace_config()
     cloud_workspace_config["remote_phases"] = {
         "setup": {
@@ -543,7 +638,7 @@ def test_production_config_rejects_unsafe_remote_retention_config(
     remote_retention_config: dict[str, object],
     message: str,
 ) -> None:
-    monkeypatch.setenv("CODING_AGENT_BEARER_TOKEN", "secret-token")
+    _set_safe_production_env(monkeypatch)
     cloud_workspace_config = _safe_production_cloud_workspace_config()
     cloud_workspace_config.update(cloud_workspace_overrides)
 
@@ -715,10 +810,12 @@ def test_production_config_rejects_unsafe_remote_retention_config(
     ],
 )
 def test_production_config_rejects_unsafe_remote_workspace_config(
+    monkeypatch: pytest.MonkeyPatch,
     server_config: dict[str, object],
     cloud_workspace_overrides: dict[str, object],
     message: str,
 ) -> None:
+    monkeypatch.setenv("CODING_AGENT_CORS_ORIGINS", "https://agent.example.com")
     cloud_workspace_config = _safe_production_cloud_workspace_config()
     cloud_workspace_config.update(cloud_workspace_overrides)
 

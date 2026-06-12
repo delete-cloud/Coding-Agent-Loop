@@ -24,6 +24,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.params import Depends as DependsParam
 from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 from slowapi.errors import RateLimitExceeded
 from sse_starlette.sse import EventSourceResponse
 
@@ -291,6 +292,8 @@ SESSION_IDLE_TIMEOUT_MINUTES = 30
 WORKER_STALE_AFTER_SECONDS = 60
 WORKER_OFFLINE_AFTER_SECONDS = 300
 _SERVER_CONFIG_ENV = "CODING_AGENT_SERVER_CONFIG"
+_CORS_ORIGINS_ENV = "CODING_AGENT_CORS_ORIGINS"
+_WEBUI_DIST_DIR_ENV = "WEBUI_DIST_DIR"
 _GITHUB_API_BASE_URL = "https://api.github.com"
 _GITHUB_API_VERSION = "2022-11-28"
 _GITHUB_SCP_REMOTE_RE = re.compile(r"^git@github\.com:(?P<path>[^:]+)$")
@@ -382,6 +385,26 @@ def _load_remote_phases_config() -> dict[str, Any]:
 
 def _load_server_config() -> dict[str, Any]:
     return _load_agent_config_section("server")
+
+
+def _csv_env_values(name: str) -> list[str]:
+    raw_value = os.environ.get(name)
+    if raw_value is None or not raw_value.strip():
+        return []
+    return [part.strip() for part in raw_value.split(",") if part.strip()]
+
+
+def _cors_allowed_origins() -> list[str]:
+    configured_origins = _csv_env_values(_CORS_ORIGINS_ENV)
+    return configured_origins if configured_origins else ["*"]
+
+
+def _validate_production_cors_config() -> None:
+    configured_origins = _csv_env_values(_CORS_ORIGINS_ENV)
+    if not configured_origins:
+        raise ValueError(f"{_CORS_ORIGINS_ENV} is required in production")
+    if "*" in configured_origins:
+        raise ValueError(f"{_CORS_ORIGINS_ENV} must not include '*' in production")
 
 
 def _load_observability_config() -> dict[str, Any]:
@@ -629,6 +652,8 @@ def _validate_production_config(
             )
     elif not isinstance(bearer_token, str) or not bearer_token.strip():
         raise ValueError("server.bearer_token_env or server.bearer_token is required")
+
+    _validate_production_cors_config()
 
     if cloud_workspace_config.get("enabled") is not True:
         raise ValueError("production requires cloud_workspace.enabled=true")
@@ -1074,7 +1099,7 @@ app.state.limiter = limiter
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=_cors_allowed_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -6797,3 +6822,27 @@ async def wait_for_approval(
         }
         await _broadcast_event(session, timeout_event)
     return response
+
+
+def _mount_webui_static(
+    target_app: FastAPI,
+    *,
+    env: Mapping[str, str] = os.environ,
+) -> None:
+    configured_dir = env.get(_WEBUI_DIST_DIR_ENV)
+    if configured_dir is None or not configured_dir.strip():
+        return
+    webui_dist_dir = Path(configured_dir).expanduser().resolve()
+    if not webui_dist_dir.is_dir():
+        raise RuntimeError(
+            f"{_WEBUI_DIST_DIR_ENV} must point to an existing directory: "
+            f"{webui_dist_dir}"
+        )
+    target_app.mount(
+        "/",
+        StaticFiles(directory=str(webui_dist_dir), html=True),
+        name="webui",
+    )
+
+
+_mount_webui_static(app)

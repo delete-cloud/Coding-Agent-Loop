@@ -11,6 +11,7 @@ from coding_agent.remote.approval import APPROVAL_POLICIES
 
 DAEMON_APPROVAL_CHOICES = click.Choice(APPROVAL_POLICIES)
 DAEMON_REPL_EXIT_COMMANDS = frozenset({"/exit", "/quit"})
+_LOCAL_BIND_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
 def _shared_cli_arg(ctx: click.Context, name: str) -> str | None:
@@ -75,6 +76,53 @@ def _server_cli_port(server_config: dict[str, Any], port: int | None) -> int:
     return configured_port
 
 
+def _configured_server_token(server_config: dict[str, Any], key: str) -> str | None:
+    value = server_config.get(key)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _configured_server_env_token(
+    server_config: dict[str, Any],
+    key: str,
+) -> str | None:
+    env_name = _configured_server_token(server_config, key)
+    if env_name is None:
+        return None
+    value = os.environ.get(env_name)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _server_auth_configured(server_config: dict[str, Any]) -> bool:
+    return any(
+        token is not None
+        for token in (
+            _configured_server_token(server_config, "bearer_token"),
+            _configured_server_token(server_config, "admin_bearer_token"),
+            _configured_server_env_token(server_config, "bearer_token_env"),
+            _configured_server_env_token(server_config, "admin_bearer_token_env"),
+        )
+    )
+
+
+def _validate_public_bind_requires_auth(
+    *,
+    host: str,
+    server_config: dict[str, Any],
+) -> None:
+    if host.strip().lower() in _LOCAL_BIND_HOSTS:
+        return
+    if _server_auth_configured(server_config):
+        return
+    raise click.ClickException(
+        "refusing to listen on a non-localhost host without configured "
+        "server bearer auth"
+    )
+
+
 def _run_http_control_plane(
     *,
     config_path: Path | None,
@@ -91,6 +139,10 @@ def _run_http_control_plane(
         server_config = _load_server_cli_settings(config_path)
         resolved_host = _server_cli_host(server_config, host)
         resolved_port = _server_cli_port(server_config, port)
+        _validate_public_bind_requires_auth(
+            host=resolved_host,
+            server_config=server_config,
+        )
 
         from coding_agent.server.http_server import app
 

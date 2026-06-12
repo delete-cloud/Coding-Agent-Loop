@@ -446,6 +446,9 @@ def test_serve_config_sets_explicit_server_config(
                 'model = "test-model"',
                 'provider = "openai"',
                 "",
+                "[server]",
+                'bearer_token = "secret-token"',
+                "",
             ]
         ),
         encoding="utf-8",
@@ -1073,6 +1076,7 @@ def test_serve_config_uses_server_host_and_port_when_cli_omits_them(
                 "[server]",
                 'host = "0.0.0.0"',
                 "port = 9000",
+                'bearer_token = "secret-token"',
                 "",
             ]
         ),
@@ -1096,6 +1100,75 @@ def test_serve_config_uses_server_host_and_port_when_cli_omits_them(
 
     assert result.exit_code == 0
     assert captured == {"host": "0.0.0.0", "port": 9000}
+
+
+def test_serve_rejects_non_localhost_without_auth_config(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "server.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[agent]",
+                'name = "test-agent"',
+                'model = "test-model"',
+                'provider = "openai"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        main,
+        ["serve", "--config", str(config_path), "--host", "0.0.0.0"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 1
+    assert "refusing to listen on a non-localhost host" in result.output
+
+
+def test_serve_allows_non_localhost_with_auth_env_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "server.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[agent]",
+                'name = "test-agent"',
+                'model = "test-model"',
+                'provider = "openai"',
+                "",
+                "[server]",
+                'bearer_token_env = "CODING_AGENT_BEARER_TOKEN"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODING_AGENT_BEARER_TOKEN", "secret-token")
+    captured: dict[str, object] = {}
+
+    def fake_uvicorn_run(app: object, *, host: str, port: int) -> None:
+        del app
+        captured["host"] = host
+        captured["port"] = port
+
+    monkeypatch.setattr("uvicorn.run", fake_uvicorn_run)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        main,
+        ["serve", "--config", str(config_path), "--host", "0.0.0.0"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert captured == {"host": "0.0.0.0", "port": 8080}
 
 
 def test_serve_config_rejects_boolean_port(tmp_path: Path) -> None:

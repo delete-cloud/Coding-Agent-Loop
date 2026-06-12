@@ -1,5 +1,18 @@
 ARG PYTHON_BASE_IMAGE=python:3.12-slim
 
+FROM node:20-alpine AS webui-builder
+
+WORKDIR /app/webui/app
+
+RUN corepack enable
+
+COPY webui/app/package.json webui/app/pnpm-lock.yaml webui/app/pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
+
+COPY webui/app ./
+RUN pnpm build
+
+
 FROM ${PYTHON_BASE_IMAGE} AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -23,7 +36,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/app/.venv/bin:$PATH" \
     PYTHONPATH="/app/src" \
-    AGENT_DATA_DIR="/var/lib/coding-agent/data"
+    AGENT_DATA_DIR="/var/lib/coding-agent/data" \
+    WEBUI_DIST_DIR="/app/webui-dist"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git \
@@ -35,6 +49,7 @@ RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin coding-agent \
 
 COPY --chown=coding-agent:coding-agent --from=builder /app/.venv /app/.venv
 COPY --chown=coding-agent:coding-agent --from=builder /app/src /app/src
+COPY --chown=coding-agent:coding-agent --from=webui-builder /app/webui/app/dist /app/webui-dist
 
 WORKDIR /workspace
 USER coding-agent
