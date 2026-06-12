@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator
 from collections.abc import AsyncIterator
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
-from typing import Callable
 from typing import cast
 
 import pytest
@@ -17,11 +15,8 @@ from coding_agent.server.http_server import (
     _broadcast_event,
     app,
     get_events,
-    limiter,
     session_manager,
 )
-import coding_agent.server.http_server as http_server
-from coding_agent.local_storage import local_sqlite_storage_config
 from coding_agent.server.session_manager import SessionManager
 from coding_agent.server.stores.session_owner_store import SessionOwnerRecord
 from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictError
@@ -88,26 +83,9 @@ class FakeOwnerStore:
 
 
 @pytest.fixture(autouse=True)
-async def clear_sessions(tmp_path):
-    global session_manager
-    original_session_manager = session_manager
-    original_http_session_manager = http_server.session_manager
-    test_session_manager = SessionManager(
-        storage_config=local_sqlite_storage_config(tmp_path)
-    )
-    session_manager = test_session_manager
-    http_server.session_manager = test_session_manager
-
-    session_manager.clear_sessions()
-    limiter.reset()
-    try:
-        yield
-    finally:
-        SessionManager.clear_sessions(test_session_manager)
-        limiter.reset()
-        await SessionManager.close(test_session_manager)
-        session_manager = original_session_manager
-        http_server.session_manager = original_http_session_manager
+async def clear_sessions(isolated_http_session_manager: SessionManager):
+    del isolated_http_session_manager
+    yield
 
 
 @pytest.fixture
@@ -151,43 +129,6 @@ def _events_request(session_id: str) -> Request:
 class FakeEventSourceResponse:
     def __init__(self, body_iterator: AsyncIterator[dict[str, str]]):
         self.body_iterator = body_iterator
-
-
-@pytest.mark.asyncio
-async def test_clear_sessions_fixture_resets_limiter_in_teardown(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
-):
-    session_clear_calls = 0
-    limiter_reset_calls = 0
-
-    def fake_clear_sessions(self: SessionManager) -> None:
-        del self
-        nonlocal session_clear_calls
-        session_clear_calls += 1
-
-    def fake_limiter_reset() -> None:
-        nonlocal limiter_reset_calls
-        limiter_reset_calls += 1
-
-    monkeypatch.setattr(SessionManager, "clear_sessions", fake_clear_sessions)
-    monkeypatch.setattr(limiter, "reset", fake_limiter_reset)
-
-    fixture_factory = cast(
-        "Callable[[object], AsyncGenerator[None, None]]",
-        getattr(clear_sessions, "__wrapped__"),
-    )
-    fixture_gen = fixture_factory(tmp_path)
-    await anext(fixture_gen)
-
-    assert session_clear_calls == 1
-    assert limiter_reset_calls == 1
-
-    with pytest.raises(StopAsyncIteration):
-        await anext(fixture_gen)
-
-    assert session_clear_calls == 2
-    assert limiter_reset_calls == 2
 
 
 @pytest.mark.asyncio

@@ -19,7 +19,7 @@ import httpx
 import pytest
 from httpx_sse import aconnect_sse
 
-from coding_agent.server.session_manager import MockProvider, Session
+from coding_agent.server.session_manager import MockProvider, Session, SessionManager
 from coding_agent.server.http_server import (
     _broadcast_event,
     _wire_message_to_event,
@@ -181,11 +181,10 @@ class TestLiveServerReadinessProbe:
 
 
 @pytest.fixture(autouse=True)
-async def clear_sessions():
+async def clear_sessions(isolated_http_session_manager: SessionManager):
     """Clear all sessions before each test."""
-    session_manager.clear_sessions()
+    del isolated_http_session_manager
     yield
-    session_manager.clear_sessions()
 
 
 def register_session(
@@ -545,8 +544,13 @@ class TestApprovalFlowIntegration:
             from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
 
             from coding_agent.approval import ApprovalPolicy
-            from coding_agent.server.http_server import app, session_manager
+            import coding_agent.server.http_server as http_server
+            from coding_agent.server.http_server import app
+            from coding_agent.server.session_manager import SessionManager
             from coding_agent.server.session_manager import Session
+
+            session_manager = SessionManager(storage_config={"runtime_backend": "none"})
+            http_server.session_manager = session_manager
 
             class ScriptedApprovalProvider:
                 def __init__(self) -> None:

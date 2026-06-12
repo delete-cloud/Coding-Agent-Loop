@@ -38,7 +38,7 @@ from coding_agent.topic_store import (
 )
 from coding_agent.ui import http_server
 from coding_agent.server.http_server import app, session_manager
-from coding_agent.server.session_manager import Session
+from coding_agent.server.session_manager import Session, SessionManager
 from coding_agent.server.stores.workspace_store import WorkspaceRecord
 
 CONSOLE_ROUTES = (
@@ -540,18 +540,19 @@ class _ConsoleExecutorRunStore:
 
 
 @pytest.fixture(autouse=True)
-async def clear_console_state() -> AsyncIterator[None]:
+async def clear_console_state(
+    isolated_http_session_manager: SessionManager,
+) -> AsyncIterator[None]:
+    del isolated_http_session_manager
     session_manager.configure_runtime_store(None)
     session_manager.configure_workspace_metadata_store(None)
     original_tape_store = session_manager._tape_store
     reset_prometheus_metrics()
-    session_manager.clear_sessions()
     yield
     session_manager.configure_runtime_store(None)
     session_manager.configure_workspace_metadata_store(None)
     session_manager._tape_store = original_tape_store
     reset_prometheus_metrics()
-    session_manager.clear_sessions()
 
 
 def _register_console_session(
@@ -1330,7 +1331,7 @@ async def test_developer_console_e2e_smoke_covers_debug_chain(
         "/console/runs": ("run-alpha", "completed"),
         "/console/runs/run-alpha": (
             "Run Metadata",
-            "Runtime Events",
+            "Display Events",
             "Message Snapshot",
         ),
         "/console/interactions": ("interaction-pending", "interaction-approved"),
