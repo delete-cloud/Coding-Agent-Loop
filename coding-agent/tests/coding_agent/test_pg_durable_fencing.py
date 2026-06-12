@@ -26,6 +26,7 @@ from coding_agent.server.stores.session_owner_store import (
     SessionOwnerStore,
     SessionOwnershipConflictError,
 )
+from coding_agent.server.stores.session_store import InMemorySessionStore
 from coding_agent.server.stores.session_store import PGSessionMetadataStore
 
 
@@ -150,6 +151,32 @@ class FakePGPool:
 
     async def close(self) -> None:
         return None
+
+
+class FakePGTapeStore:
+    def __init__(self, *, pool: FakePGPool) -> None:
+        self.pool = pool
+
+    async def load(self, tape_id: str) -> list[dict[str, object]]:
+        del tape_id
+        return []
+
+    async def save(
+        self,
+        tape_id: str,
+        entries: list[dict[str, object]],
+    ) -> None:
+        del tape_id, entries
+
+
+class FakePGCheckpointStore:
+    def __init__(self, *, pool: FakePGPool) -> None:
+        self.pool = pool
+
+
+class FakePGRuntimeStore:
+    def __init__(self, *, pool: FakePGPool) -> None:
+        self.pool = pool
 
 
 @pytest.mark.asyncio
@@ -469,30 +496,9 @@ async def test_pg_durable_create_run_requires_stable_tape_binding() -> None:
     assert not pool.connection.calls
 
 
-def test_session_manager_enables_fenced_pg_wrappers_after_owner_store_config() -> None:
-    class FakePGTapeStore:
-        def __init__(self, *, pool: FakePGPool) -> None:
-            self.pool = pool
-
-        async def load(self, tape_id: str) -> list[dict[str, object]]:
-            del tape_id
-            return []
-
-        async def save(
-            self,
-            tape_id: str,
-            entries: list[dict[str, object]],
-        ) -> None:
-            del tape_id, entries
-
-    class FakePGCheckpointStore:
-        def __init__(self, *, pool: FakePGPool) -> None:
-            self.pool = pool
-
-    class FakePGRuntimeStore:
-        def __init__(self, *, pool: FakePGPool) -> None:
-            self.pool = pool
-
+def test_session_manager_enables_fenced_pg_wrappers_after_owner_store_config(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     pg_pool = FakePGPool()
     owner_store = SessionOwnerStore(pg_pool=cast(Any, pg_pool))
     with (
@@ -507,6 +513,7 @@ def test_session_manager_enables_fenced_pg_wrappers_after_owner_store_config() -
             "coding_agent.server.session_manager.PGRuntimeStore",
             FakePGRuntimeStore,
         ),
+        caplog.at_level("WARNING", logger="coding_agent.server.session_manager"),
     ):
         create_store.return_value = PGSessionMetadataStore(pool=cast(Any, pg_pool))
         manager = SessionManager(
@@ -527,6 +534,48 @@ def test_session_manager_enables_fenced_pg_wrappers_after_owner_store_config() -
     assert isinstance(manager._tape_store, FencedPGTapeStore)
     assert isinstance(manager._checkpoint_service._store, FencedPGCheckpointStore)
     assert isinstance(manager._runtime_store, FencedPGRuntimeStore)
+    assert "durable fencing disabled" not in caplog.text
+
+
+def test_session_manager_warns_when_custom_store_disables_pg_fencing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    pg_pool = FakePGPool()
+    owner_store = SessionOwnerStore(pg_pool=cast(Any, pg_pool))
+
+    with (
+        patch(
+            "coding_agent.server.session_manager._load_pg_storage_types",
+            return_value=(
+                lambda **_: pg_pool,
+                FakePGTapeStore,
+                FakePGCheckpointStore,
+            ),
+        ),
+        patch(
+            "coding_agent.server.session_manager.PGRuntimeStore",
+            FakePGRuntimeStore,
+        ),
+        caplog.at_level("WARNING", logger="coding_agent.server.session_manager"),
+    ):
+        manager = SessionManager(
+            storage_config={
+                "http_session_backend": "pg",
+                "tape_backend": "pg",
+                "checkpoint_backend": "pg",
+                "runtime_backend": "pg",
+                "dsn": "postgresql://example",
+            },
+            pg_pool=cast(Any, pg_pool),
+            store=InMemorySessionStore(),
+            owner_store=owner_store,
+            owner_id="server-a",
+            fencing_token=1,
+        )
+
+    assert manager._pg_durable_store is None
+    assert "durable fencing disabled: custom store supplied" in caplog.text
+    assert caplog.text.count("durable fencing disabled") == 1
 
 
 def _sql_label(query: str) -> str:

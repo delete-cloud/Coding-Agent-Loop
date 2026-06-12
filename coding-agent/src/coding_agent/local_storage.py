@@ -6,6 +6,18 @@ from typing import Any
 
 
 LOCAL_SQLITE_FILENAME = "local.sqlite3"
+DURABLE_STORAGE_BACKEND_PATH_KEYS = (
+    ("http_session_backend", "http_session_path"),
+    ("tape_backend", "tape_path"),
+    ("checkpoint_backend", "checkpoint_path"),
+    ("runtime_backend", "runtime_path"),
+)
+DURABLE_STORAGE_BACKEND_KEYS = tuple(
+    backend_key for backend_key, _ in DURABLE_STORAGE_BACKEND_PATH_KEYS
+)
+DURABLE_STORAGE_PATH_KEYS = tuple(
+    path_key for _, path_key in DURABLE_STORAGE_BACKEND_PATH_KEYS
+)
 
 
 def normalize_storage_path(path: str) -> Path:
@@ -47,13 +59,7 @@ def local_sqlite_path_from_storage_config(
         if isinstance(local_path, str) and local_path.strip():
             return Path(local_path)
     explicit_paths = [
-        storage_config.get(path_key)
-        for path_key in (
-            "http_session_path",
-            "tape_path",
-            "checkpoint_path",
-            "runtime_path",
-        )
+        storage_config.get(path_key) for path_key in DURABLE_STORAGE_PATH_KEYS
     ]
     if all(isinstance(path, str) and path.strip() for path in explicit_paths):
         resolved_paths = [normalize_storage_path(str(path)) for path in explicit_paths]
@@ -63,19 +69,45 @@ def local_sqlite_path_from_storage_config(
     return local_sqlite_path(data_dir)
 
 
+def durable_storage_backend_values(
+    storage_config: dict[str, Any],
+) -> dict[str, str]:
+    return {
+        key: str(storage_config.get(key, "")).strip().lower()
+        for key in DURABLE_STORAGE_BACKEND_KEYS
+    }
+
+
+def storage_has_any_sqlite_backend(storage_config: dict[str, Any]) -> bool:
+    return any(
+        value == "sqlite"
+        for value in durable_storage_backend_values(storage_config).values()
+    )
+
+
+def storage_uses_local_sqlite_bundle(
+    storage_config: dict[str, Any],
+    data_dir: Path | str | None = None,
+) -> bool:
+    backend_values = durable_storage_backend_values(storage_config)
+    if any(value != "sqlite" for value in backend_values.values()):
+        return False
+    local_path = normalize_storage_path(
+        str(local_sqlite_path_from_storage_config(storage_config, data_dir))
+    )
+    return all(
+        normalize_storage_path(str(storage_config.get(key, ""))) == local_path
+        for key in DURABLE_STORAGE_PATH_KEYS
+    )
+
+
 def with_local_sqlite_bundle_paths(
     storage_config: dict[str, Any],
     data_dir: Path | str | None = None,
 ) -> dict[str, Any]:
     config = dict(storage_config)
     local_path = str(local_sqlite_path_from_storage_config(config, data_dir))
-    backend_path_pairs = (
-        ("http_session_backend", "http_session_path"),
-        ("tape_backend", "tape_path"),
-        ("checkpoint_backend", "checkpoint_path"),
-        ("runtime_backend", "runtime_path"),
-    )
-    for backend_key, path_key in backend_path_pairs:
+    for backend_key, path_key in DURABLE_STORAGE_BACKEND_PATH_KEYS:
         backend = config.get(backend_key)
         if isinstance(backend, str) and backend.strip().lower() == "sqlite":
             configured_path = config.get(path_key)

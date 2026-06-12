@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol, TypeVar, cast
 
 from agentkit.environment import Environment
+from agentkit.errors import ConfigError
 from agentkit.storage.checkpoint_fs import FSCheckpointStore
 from agentkit.storage.pg import PGPool
 from agentkit.storage.sqlite import SQLiteCheckpointStore, SQLiteTapeStore
@@ -49,6 +50,9 @@ from coding_agent.approval import (
 from coding_agent.approval.store import ApprovalStore
 from coding_agent.core import config as core_config
 from coding_agent.local_storage import (
+    DURABLE_STORAGE_BACKEND_KEYS,
+    DURABLE_STORAGE_PATH_KEYS,
+    durable_storage_backend_values,
     local_sqlite_storage_config,
     local_sqlite_path_from_storage_config,
     normalize_storage_path,
@@ -161,6 +165,29 @@ if TYPE_CHECKING:
     from coding_agent.runs.turn_execution import RuntimeTurnService
 
 logger = logging.getLogger(__name__)
+
+
+def _custom_store_names(
+    *,
+    store: object | None,
+    tape_store: object | None,
+    checkpoint_store: object | None,
+    checkpoint_service: object | None,
+    runtime_store: object | None,
+) -> list[str]:
+    names: list[str] = []
+    if store is not None:
+        names.append("store")
+    if tape_store is not None:
+        names.append("tape_store")
+    if checkpoint_store is not None:
+        names.append("checkpoint_store")
+    if checkpoint_service is not None:
+        names.append("checkpoint_service")
+    if runtime_store is not None:
+        names.append("runtime_store")
+    return names
+
 
 T = TypeVar("T")
 
@@ -824,19 +851,15 @@ class SessionManager:
         )
         self._pg_pool = pg_pool
         self._owns_pg_pool = False
-        self._custom_store_supplied = store is not None
-        self._custom_tape_store_supplied = tape_store is not None
-        self._custom_checkpoint_store_supplied = (
-            checkpoint_store is not None or checkpoint_service is not None
-        )
-        self._custom_runtime_store_supplied = runtime_store is not None
-        self._local_durable_store = self._create_local_durable_store(
-            data_dir=data_dir,
+        self._custom_store_names = _custom_store_names(
             store=store,
             tape_store=tape_store,
             checkpoint_store=checkpoint_store,
             checkpoint_service=checkpoint_service,
             runtime_store=runtime_store,
+        )
+        self._local_durable_store = self._create_local_durable_store(
+            data_dir=data_dir,
             owner_store=owner_store,
         )
         self._pg_durable_store: PGDurableStore | None = None
@@ -1194,53 +1217,59 @@ class SessionManager:
         self,
         *,
         data_dir: Path,
-        store: SessionStore | None,
-        tape_store: TapeStore | None,
-        checkpoint_store: CheckpointStore | None,
-        checkpoint_service: CheckpointService | None,
-        runtime_store: RuntimeStore | None,
         owner_store: SessionOwnerStoreProtocol | None,
     ) -> SQLiteLocalDurableStore | None:
         if owner_store is None or not callable(
             getattr(owner_store, "acquire_authority", None)
         ):
             return None
-        if any(
-            value is not None
-            for value in (
-                store,
-                tape_store,
-                checkpoint_store,
-                checkpoint_service,
-                runtime_store,
-            )
-        ):
-            return None
         config = self._storage_config
-        sqlite_backend_keys = (
-            "http_session_backend",
-            "tape_backend",
-            "checkpoint_backend",
-            "runtime_backend",
-        )
-        if any(
-            str(config.get(key, "")).lower() != "sqlite" for key in sqlite_backend_keys
+        backend_values = durable_storage_backend_values(config)
+        if all(value == "pg" for value in backend_values.values()):
+            return None
+        sqlite_backend_keys = [
+            key for key, value in backend_values.items() if value == "sqlite"
+        ]
+        if sqlite_backend_keys and len(sqlite_backend_keys) != len(
+            DURABLE_STORAGE_BACKEND_KEYS
         ):
+            mismatches = ", ".join(
+                f"{key}={config.get(key)!r}"
+                for key, value in backend_values.items()
+                if value != "sqlite"
+            )
+            raise ConfigError(
+                "durable fencing requires all local sqlite backends when any "
+                f"local sqlite backend is configured; mismatched backends: {mismatches}"
+            )
+        if not sqlite_backend_keys:
+            return None
+        # Custom stores own their path semantics; validate sqlite paths only when
+        # SessionManager will create the local durable bundle itself.
+        if self._custom_store_names:
+            logger.warning(
+                "durable fencing disabled: custom %s supplied",
+                ", ".join(self._custom_store_names),
+            )
             return None
         local_path = normalize_storage_path(
             str(local_sqlite_path_from_storage_config(config, data_dir))
         )
-        path_keys = (
-            "http_session_path",
-            "tape_path",
-            "checkpoint_path",
-            "runtime_path",
-        )
-        configured_paths = [
-            normalize_storage_path(str(config.get(key, ""))) for key in path_keys
+        configured_paths = {
+            key: normalize_storage_path(str(config.get(key, "")))
+            for key in DURABLE_STORAGE_PATH_KEYS
+        }
+        path_mismatches = [
+            f"{key}={config.get(key)!r}"
+            for key, path in configured_paths.items()
+            if path != local_path
         ]
-        if any(path != local_path for path in configured_paths):
-            return None
+        if path_mismatches:
+            mismatch_text = ", ".join(path_mismatches)
+            raise ConfigError(
+                "durable fencing requires sqlite storage paths to share "
+                f"{local_path}; mismatched paths: {mismatch_text}"
+            )
         return SQLiteLocalDurableStore(local_path)
 
     def _configure_pg_durable_store_if_available(self) -> None:
@@ -1252,23 +1281,16 @@ class SessionManager:
             getattr(self._owner_store, "acquire_authority", None)
         ):
             return
-        if (
-            self._custom_store_supplied
-            or self._custom_tape_store_supplied
-            or self._custom_checkpoint_store_supplied
-            or self._custom_runtime_store_supplied
-        ):
-            return
-        pg_backend_keys = (
-            "http_session_backend",
-            "tape_backend",
-            "checkpoint_backend",
-            "runtime_backend",
-        )
         if any(
             str(self._storage_config.get(key, "")).strip().lower() != "pg"
-            for key in pg_backend_keys
+            for key in DURABLE_STORAGE_BACKEND_KEYS
         ):
+            return
+        if self._custom_store_names:
+            logger.warning(
+                "durable fencing disabled: custom %s supplied",
+                ", ".join(self._custom_store_names),
+            )
             return
         pg_pool = self._get_pg_pool()
         durable_store = PGDurableStore(pool=pg_pool)
@@ -3258,7 +3280,9 @@ class SessionManager:
                 model_name if model_name is not None else admitted_session.model_name
             )
             if not resolved_model:
-                raise RuntimeError("session is missing model_name, cannot replace runtime")
+                raise RuntimeError(
+                    "session is missing model_name, cannot replace runtime"
+                )
             return await self._runtime_replacement_service.replace_runtime_config(
                 admitted_session,
                 model_name=resolved_model,

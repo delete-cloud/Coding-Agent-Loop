@@ -38,7 +38,7 @@ def test_adr_0068_supersedes_adr_0067_without_conflicting_target_architecture() 
 
     assert "**Status**: Superseded" in old
     assert "Superseded by ADR-0068" in old
-    assert "**Status**: Proposed" in new
+    assert "**Status**: Accepted" in new
     assert "Supersedes ADR-0067" in new
 
     stale_target_phrases = [

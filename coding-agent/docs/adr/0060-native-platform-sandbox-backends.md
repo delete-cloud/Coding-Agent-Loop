@@ -82,6 +82,16 @@ The default config value stays `sandbox_mode = "none"` in this change.
 Switching the default to `native` is deferred to a separate, final PR after the
 native backends are implemented and verified, to keep blast radius minimal.
 
+## Implementation Status
+
+Implemented. The user-visible `sandbox_mode` values are now converged to
+`none`, `native`, `podman`, and `docker`; `nsjail` is rejected by validation.
+Native sandbox resolution fails closed when the required platform backend is
+unavailable, and the default remains `none`.
+
+Verification is captured by `tests/tools/test_shell.py` and the acceptance
+criteria below.
+
 ## Alternatives Rejected
 
 - Expose `landlock`, `bwrap`, and `seatbelt` as separate user-visible modes —

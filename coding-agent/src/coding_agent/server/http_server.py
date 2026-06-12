@@ -88,7 +88,8 @@ from coding_agent.runtime_store import (
     RuntimeEventRecord,
 )
 from coding_agent.local_storage import local_sqlite_path_from_storage_config
-from coding_agent.local_storage import normalize_storage_path
+from coding_agent.local_storage import local_sqlite_storage_config
+from coding_agent.local_storage import storage_has_any_sqlite_backend
 from coding_agent.events import DisplayEvent, DisplayEventStreamProjector
 from coding_agent.scheduled_runs import (
     PGScheduledRunStore,
@@ -209,7 +210,6 @@ from coding_agent.server.schemas import (
     ResumeSessionRequest,
     RuntimeConfigUpdateRequest,
     RuntimeConfigUpdateResponse,
-    ThinkingConfigSchema,
     RuntimeEventResponse,
     RuntimeEventsResponse,
     RuntimeInteractionListResponse,
@@ -729,33 +729,6 @@ def _storage_uses_pg_http_sessions(storage_config: dict[str, Any]) -> bool:
     return tape_backend == "pg"
 
 
-def _storage_uses_local_sqlite_bundle(storage_config: dict[str, Any]) -> bool:
-    backend_keys = (
-        "http_session_backend",
-        "tape_backend",
-        "checkpoint_backend",
-        "runtime_backend",
-    )
-    if any(
-        str(storage_config.get(key, "")).strip().lower() != "sqlite"
-        for key in backend_keys
-    ):
-        return False
-    local_path = normalize_storage_path(
-        str(local_sqlite_path_from_storage_config(storage_config))
-    )
-    path_keys = (
-        "http_session_path",
-        "tape_path",
-        "checkpoint_path",
-        "runtime_path",
-    )
-    return all(
-        normalize_storage_path(str(storage_config.get(key, ""))) == local_path
-        for key in path_keys
-    )
-
-
 def _configured_owner_id(storage_config: dict[str, Any]) -> str:
     owner_id = storage_config.get("owner_id")
     if isinstance(owner_id, str) and owner_id.strip():
@@ -783,6 +756,7 @@ def _configured_owner_lease_seconds(storage_config: dict[str, Any]) -> float:
 
 def _build_session_manager() -> SessionManager:
     storage_config = _load_storage_config()
+    effective_storage_config = storage_config or local_sqlite_storage_config()
     remote_retention_config = _load_remote_retention_config()
     try:
         _validate_production_config(
@@ -794,23 +768,25 @@ def _build_session_manager() -> SessionManager:
     except Exception:
         logger.exception("Production config validation failed")
         raise
-    uses_local_sqlite_bundle = _storage_uses_local_sqlite_bundle(storage_config)
+    has_local_sqlite_intent = storage_has_any_sqlite_backend(effective_storage_config)
     manager = SessionManager(
-        storage_config=storage_config,
+        storage_config=effective_storage_config,
         owner_store=(
             SQLiteSessionOwnerStore(
-                local_sqlite_path_from_storage_config(storage_config)
+                local_sqlite_path_from_storage_config(effective_storage_config)
             )
-            if uses_local_sqlite_bundle
+            if has_local_sqlite_intent
             else None
         ),
         owner_id=(
-            _configured_owner_id(storage_config) if uses_local_sqlite_bundle else None
+            _configured_owner_id(effective_storage_config)
+            if has_local_sqlite_intent
+            else None
         ),
-        fencing_token=1 if uses_local_sqlite_bundle else None,
+        fencing_token=1 if has_local_sqlite_intent else None,
         owner_lease_seconds=(
-            _configured_owner_lease_seconds(storage_config)
-            if uses_local_sqlite_bundle
+            _configured_owner_lease_seconds(effective_storage_config)
+            if has_local_sqlite_intent
             else 30.0
         ),
         cloud_workspace_client_factory=(
@@ -824,14 +800,14 @@ def _build_session_manager() -> SessionManager:
         manager.configure_workspace_metadata_store(
             PGWorkspaceMetadataStore(pool=manager.pg_pool)
         )
-    if not _storage_uses_pg_http_sessions(storage_config):
+    if not _storage_uses_pg_http_sessions(effective_storage_config):
         return manager
     owner_store = SessionOwnerStore(pg_pool=manager.pg_pool)
     manager.configure_owner_leases(
         owner_store=owner_store,
-        owner_id=_configured_owner_id(storage_config),
-        fencing_token=_configured_fencing_token(storage_config),
-        owner_lease_seconds=_configured_owner_lease_seconds(storage_config),
+        owner_id=_configured_owner_id(effective_storage_config),
+        fencing_token=_configured_fencing_token(effective_storage_config),
+        owner_lease_seconds=_configured_owner_lease_seconds(effective_storage_config),
     )
     return manager
 
@@ -2478,7 +2454,9 @@ async def create_session(
     return SessionResponse(session_id=session_id)
 
 
-@app.patch("/sessions/{session_id}/runtime-config", response_model=RuntimeConfigUpdateResponse)
+@app.patch(
+    "/sessions/{session_id}/runtime-config", response_model=RuntimeConfigUpdateResponse
+)
 @limiter.limit(RateLimits.CREATE_SESSION)
 async def update_runtime_config(
     request: Request,

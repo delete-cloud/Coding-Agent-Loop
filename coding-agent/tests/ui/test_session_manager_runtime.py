@@ -618,7 +618,11 @@ async def test_replay_display_events_scans_past_internal_runtime_events() -> Non
 
 @pytest.mark.asyncio
 async def test_replay_display_events_skips_storeless_runtime() -> None:
-    manager = SessionManager(store=InMemorySessionStore(), runtime_store=None)
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        storage_config={"runtime_backend": "none"},
+        runtime_store=None,
+    )
 
     with pytest.raises(RuntimeError, match="runtime store is not configured"):
         await manager.replay_display_events("run-display")
@@ -3084,7 +3088,9 @@ async def test_rehydrated_session_rebuilds_runtime_from_persisted_tape() -> None
         mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
         mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
         mp.setattr(rehydrated, "_restore_tape", fake_restore_tape)
-        original_restore_tape = rehydrated._local_daemon_runtime_preparation.restore_tape
+        original_restore_tape = (
+            rehydrated._local_daemon_runtime_preparation.restore_tape
+        )
         object.__setattr__(
             rehydrated._local_daemon_runtime_preparation,
             "restore_tape",
@@ -4385,9 +4391,7 @@ class FakeCloudClient:
 
 
 @pytest.mark.asyncio
-async def test_run_agent_does_not_bootstrap_managed_pool_runtime() -> (
-    None
-):
+async def test_run_agent_does_not_bootstrap_managed_pool_runtime() -> None:
     runtime_store = FakeRuntimeStore()
 
     def fake_create_agent(**kwargs):
@@ -4738,10 +4742,12 @@ async def test_close_session_logs_provisioned_cloud_cleanup_failure(
         provisioned_cloud_binding_cleanup=fail_cleanup,
     )
     session_id = await manager.create_session(
-        default_run_target=_cloud_run_target(CloudWorkspaceRef(
-            workspace_url="docker://agent-ws-fails/workspace",
-            workspace_id="ws-fails",
-        )),
+        default_run_target=_cloud_run_target(
+            CloudWorkspaceRef(
+                workspace_url="docker://agent-ws-fails/workspace",
+                workspace_id="ws-fails",
+            )
+        ),
         origin={
             "channel": "http",
             "placement_kind": "cloud_workspace",
@@ -4764,10 +4770,12 @@ async def test_close_session_keeps_explicit_cloud_binding_untouched() -> None:
         provisioned_cloud_binding_cleanup=cleaned.append,
     )
     session_id = await manager.create_session(
-        default_run_target=_cloud_run_target(CloudWorkspaceRef(
-            workspace_url="https://workspace.example.com",
-            workspace_id="ws-explicit",
-        )),
+        default_run_target=_cloud_run_target(
+            CloudWorkspaceRef(
+                workspace_url="https://workspace.example.com",
+                workspace_id="ws-explicit",
+            )
+        ),
         origin={"channel": "http", "placement_kind": "cloud_workspace"},
     )
 

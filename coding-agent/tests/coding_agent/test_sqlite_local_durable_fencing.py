@@ -8,8 +8,9 @@ import pytest
 
 from agentkit.checkpoint.models import CheckpointMeta, CheckpointSnapshot
 from agentkit.checkpoint import CheckpointService
+from agentkit.errors import ConfigError
 from coding_agent.local_durable_store import SQLiteLocalDurableStore
-from coding_agent.local_storage import local_sqlite_path
+from coding_agent.local_storage import local_sqlite_path, local_sqlite_storage_config
 from coding_agent.runtime_store import AgentRunRecord, RuntimeEventRecord
 from coding_agent.server.session_manager import SessionManager
 from coding_agent.server.stores.session_owner_store import (
@@ -34,6 +35,15 @@ class FakeCheckpointStore:
 
     async def delete(self, checkpoint_id: str) -> None:
         del checkpoint_id
+
+
+class FakeTapeStore:
+    async def save(self, tape_id: str, entries: list[dict[str, object]]) -> None:
+        del tape_id, entries
+
+    async def load(self, tape_id: str) -> list[dict[str, object]]:
+        del tape_id
+        return []
 
 
 @pytest.mark.asyncio
@@ -102,6 +112,112 @@ async def test_sqlite_owner_authority_same_owner_expired_reacquire_advances_epoc
     assert reacquired.epoch == 2
 
 
+def test_session_manager_partial_sqlite_backend_fails_loudly(
+    tmp_path: Path,
+) -> None:
+    config = local_sqlite_storage_config(tmp_path)
+    config["runtime_backend"] = "jsonl"
+    owner_store = SQLiteSessionOwnerStore(local_sqlite_path(tmp_path))
+
+    with pytest.raises(ConfigError) as exc_info:
+        SessionManager(
+            storage_config=config,
+            owner_store=owner_store,
+            owner_id="owner-a",
+            fencing_token=999,
+        )
+
+    message = str(exc_info.value)
+    assert "durable fencing requires all local sqlite backends" in message
+    assert "runtime_backend='jsonl'" in message
+
+
+def test_session_manager_sqlite_path_mismatch_fails_loudly(
+    tmp_path: Path,
+) -> None:
+    config = local_sqlite_storage_config(tmp_path)
+    config["runtime_path"] = str(tmp_path / "runtime.sqlite3")
+    owner_store = SQLiteSessionOwnerStore(local_sqlite_path(tmp_path))
+
+    with pytest.raises(ConfigError) as exc_info:
+        SessionManager(
+            storage_config=config,
+            owner_store=owner_store,
+            owner_id="owner-a",
+            fencing_token=999,
+        )
+
+    message = str(exc_info.value)
+    assert "durable fencing requires sqlite storage paths to share" in message
+    assert "runtime_path" in message
+    assert "runtime.sqlite3" in message
+
+
+def test_session_manager_custom_tape_store_warns_and_disables_local_fencing(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    owner_store = SQLiteSessionOwnerStore(local_sqlite_path(tmp_path))
+
+    with caplog.at_level("WARNING", logger="coding_agent.server.session_manager"):
+        manager = SessionManager(
+            storage_config=local_sqlite_storage_config(tmp_path),
+            tape_store=FakeTapeStore(),
+            owner_store=owner_store,
+            owner_id="owner-a",
+            fencing_token=999,
+        )
+
+    assert manager._local_durable_store is None
+    assert "durable fencing disabled: custom tape_store supplied" in caplog.text
+
+
+def test_session_manager_custom_tape_store_does_not_warn_for_non_sqlite_config(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    owner_store = SQLiteSessionOwnerStore(tmp_path / "owners.sqlite3")
+
+    with caplog.at_level("WARNING", logger="coding_agent.server.session_manager"):
+        manager = SessionManager(
+            storage_config={
+                "http_session_backend": "file",
+                "tape_backend": "jsonl",
+                "checkpoint_backend": "fs",
+                "runtime_backend": "jsonl",
+            },
+            tape_store=FakeTapeStore(),
+            owner_store=owner_store,
+            owner_id="owner-a",
+            fencing_token=999,
+        )
+
+    assert manager._local_durable_store is None
+    assert "durable fencing disabled" not in caplog.text
+
+
+def test_session_manager_partial_sqlite_with_custom_store_fails_loudly(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    config = local_sqlite_storage_config(tmp_path)
+    config["runtime_backend"] = "jsonl"
+    owner_store = SQLiteSessionOwnerStore(local_sqlite_path(tmp_path))
+
+    with caplog.at_level("WARNING", logger="coding_agent.server.session_manager"):
+        with pytest.raises(ConfigError) as exc_info:
+            SessionManager(
+                storage_config=config,
+                tape_store=FakeTapeStore(),
+                owner_store=owner_store,
+                owner_id="owner-a",
+                fencing_token=999,
+            )
+
+    assert "runtime_backend='jsonl'" in str(exc_info.value)
+    assert "durable fencing disabled" not in caplog.text
+
+
 @pytest.mark.asyncio
 async def test_session_manager_uses_sqlite_owner_authority_epochs(
     tmp_path: Path,
@@ -146,6 +262,8 @@ async def test_session_manager_default_sqlite_bundle_uses_protected_session_save
         owner_id="owner-a",
         fencing_token=999,
     )
+
+    assert manager._local_durable_store is not None
 
     session_id = await manager.create_session()
 
