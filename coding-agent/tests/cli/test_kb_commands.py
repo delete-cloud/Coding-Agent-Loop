@@ -190,6 +190,48 @@ class TestKBIndex:
         assert result.exit_code == 0
         assert captured_base_urls == ["https://embed.example/v1"]
 
+    def test_kb_index_uses_corpus_option(self, tmp_path: Path, monkeypatch):
+        from coding_agent import kb as kb_module
+        from coding_agent.kb import KB
+
+        doc = tmp_path / "docs"
+        doc.mkdir()
+        (doc / "readme.md").write_text("# SRE Runbook")
+        db_path = tmp_path / "kb_db"
+        original_init = kb_module.KB.__init__
+
+        def patched_init(self_kb, *args, **kwargs):
+            kwargs["embedding_fn"] = _fake_embed
+            kwargs["embedding_dim"] = 8
+            kwargs.setdefault("text_extensions", {".md"})
+            original_init(self_kb, *args, **kwargs)
+
+        monkeypatch.setattr(kb_module.KB, "__init__", patched_init)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "kb",
+                "index",
+                str(doc),
+                "--db-path",
+                str(db_path),
+                "--corpus",
+                "sre",
+            ],
+            catch_exceptions=False,
+        )
+
+        assert result.exit_code == 0
+        rows = (
+            KB(db_path=db_path, embedding_dim=8, embedding_fn=_fake_embed)
+            ._get_table()
+            .to_arrow()
+            .to_pylist()
+        )
+        assert {row["corpus"] for row in rows} == {"sre"}
+
 
 class TestKBSearch:
     def test_kb_search_returns_results(self, tmp_path: Path, monkeypatch):
@@ -306,3 +348,155 @@ class TestKBSearch:
         assert result.exit_code == 0
         assert captured_models == ["text-embedding-3-large"]
         assert captured_base_urls == ["https://embed.example/v1"]
+
+    def test_kb_search_filters_by_corpus_option(self, tmp_path: Path, monkeypatch):
+        import asyncio
+
+        from coding_agent import kb as kb_module
+        from coding_agent.kb import KB
+
+        db_path = tmp_path / "kb_db"
+        kb_sre = KB(
+            db_path=db_path,
+            embedding_dim=8,
+            embedding_fn=_fake_embed,
+            corpus="sre",
+        )
+        kb_notes = KB(
+            db_path=db_path,
+            embedding_dim=8,
+            embedding_fn=_fake_embed,
+            corpus="notes",
+        )
+        asyncio.run(kb_sre.index_file(Path("sre.md"), "SRE restore runbook"))
+        asyncio.run(kb_notes.index_file(Path("notes.md"), "Notes journal"))
+
+        original_init = kb_module.KB.__init__
+
+        def patched_init(self_kb, *args, **kwargs):
+            kwargs["embedding_fn"] = _fake_embed
+            kwargs["embedding_dim"] = 8
+            original_init(self_kb, *args, **kwargs)
+
+        monkeypatch.setattr(kb_module.KB, "__init__", patched_init)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "kb",
+                "search",
+                "restore",
+                "--db-path",
+                str(db_path),
+                "--corpus",
+                "sre",
+            ],
+            catch_exceptions=False,
+        )
+
+        assert result.exit_code == 0
+        assert "sre.md" in result.output
+        assert "notes.md" not in result.output
+
+    def test_kb_search_uses_configured_search_corpora(
+        self, tmp_path: Path, monkeypatch
+    ):
+        captured_corpora: list[tuple[str, ...] | None] = []
+
+        from coding_agent import kb as kb_module
+
+        original_init = kb_module.KB.__init__
+        original_exists = Path.exists
+
+        def patched_init(self_kb, *args, **kwargs):
+            kwargs["embedding_fn"] = _fake_embed
+            kwargs["embedding_dim"] = 8
+            original_init(self_kb, *args, **kwargs)
+
+            def fake_search_sync(query: str, *, k: int = 5, corpora=None):
+                del query, k
+                captured_corpora.append(corpora)
+                return []
+
+            self_kb.search_sync = fake_search_sync
+            self_kb.has_table = lambda: True
+
+        def patched_exists(path_obj: Path) -> bool:
+            if path_obj.name == "agent.toml" and path_obj.parent.name == "coding_agent":
+                return True
+            return original_exists(path_obj)
+
+        class FakeCfg:
+            def __init__(self) -> None:
+                self.extra = {
+                    "kb": {
+                        "db_path": "kb",
+                        "embedding_dim": 8,
+                        "search_corpora": ["sre", "notes"],
+                    }
+                }
+
+        monkeypatch.setattr(kb_module.KB, "__init__", patched_init)
+        monkeypatch.setattr(Path, "exists", patched_exists)
+        monkeypatch.setenv("AGENT_DATA_DIR", str(tmp_path / "data"))
+
+        from agentkit.config import loader as config_loader
+
+        monkeypatch.setattr(
+            config_loader,
+            "load_config",
+            lambda *_args, **_kwargs: FakeCfg(),
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["kb", "search", "restore"],
+            catch_exceptions=False,
+        )
+
+        assert result.exit_code == 0
+        assert captured_corpora == [("sre", "notes")]
+
+    def test_kb_corpora_lists_counts(self, tmp_path: Path, monkeypatch):
+        import asyncio
+
+        from coding_agent import kb as kb_module
+        from coding_agent.kb import KB
+
+        db_path = tmp_path / "kb_db"
+        kb_sre = KB(
+            db_path=db_path,
+            embedding_dim=8,
+            embedding_fn=_fake_embed,
+            corpus="sre",
+        )
+        kb_notes = KB(
+            db_path=db_path,
+            embedding_dim=8,
+            embedding_fn=_fake_embed,
+            corpus="notes",
+        )
+        asyncio.run(kb_sre.index_file(Path("sre.md"), "SRE restore runbook"))
+        asyncio.run(kb_notes.index_file(Path("notes.md"), "Notes journal"))
+
+        original_init = kb_module.KB.__init__
+
+        def patched_init(self_kb, *args, **kwargs):
+            kwargs["embedding_fn"] = _fake_embed
+            kwargs["embedding_dim"] = 8
+            original_init(self_kb, *args, **kwargs)
+
+        monkeypatch.setattr(kb_module.KB, "__init__", patched_init)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["kb", "corpora", "--db-path", str(db_path)],
+            catch_exceptions=False,
+        )
+
+        assert result.exit_code == 0
+        assert "notes\t1" in result.output
+        assert "sre\t1" in result.output

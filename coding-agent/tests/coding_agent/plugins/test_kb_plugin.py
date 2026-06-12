@@ -214,7 +214,8 @@ class TestBuildContextSearch:
         calls: list[str] = []
         original_search = indexed_plugin._kb.search_sync
 
-        def tracking_search(query: str, k: int = 5):
+        def tracking_search(query: str, k: int = 5, *, corpora=None):
+            del corpora
             calls.append(query)
             return original_search(query, k=k)
 
@@ -228,6 +229,45 @@ class TestBuildContextSearch:
         assert calls == ["How does auth work?", "What API endpoints exist?"]
         assert indexed_plugin._snapshot is not None
         assert indexed_plugin._snapshot.last_user_msg == "What API endpoints exist?"
+
+    def test_search_corpora_passed_to_kb_search(self, tmp_path: Path):
+        db_path = tmp_path / "kb_db"
+        kb = KB(
+            db_path=db_path,
+            embedding_dim=8,
+            embedding_fn=_fake_embed,
+            corpus="sre",
+        )
+        asyncio.run(kb.index_file(Path("sre.md"), "SRE restore runbook"))
+        plugin = KBPlugin(
+            db_path=db_path,
+            embedding_dim=8,
+            top_k=5,
+            search_corpora=["sre"],
+            embedding_fn=_fake_embed,
+        )
+        plugin.do_mount()
+        assert plugin._kb is not None
+        captured: list[tuple[str, ...] | None] = []
+        original_search = plugin._kb.search_sync
+
+        def tracking_search(query: str, k: int = 5, *, corpora=None):
+            captured.append(corpora)
+            return original_search(query, k=k, corpora=corpora)
+
+        plugin._kb.search_sync = tracking_search
+        tape = Tape()
+        tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "user", "content": "How do I restore?"},
+            )
+        )
+
+        result = plugin.build_context(tape=tape)
+
+        assert len(result) == 1
+        assert captured == [("sre",)]
 
     def test_retrieval_observability_emits_counts_without_sensitive_attributes(
         self, indexed_plugin: KBPlugin
