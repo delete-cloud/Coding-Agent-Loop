@@ -25,7 +25,7 @@ from coding_agent.environment import (
     LocalEnvironment,
     SandboxedEnvironment,
 )
-from coding_agent.events import DisplayEvent
+from coding_agent.events import DisplayEvent, project_runtime_events_to_display
 from coding_agent.executors import (
     LocalDaemonExecutor,
     LocalDaemonRuntimeBinding,
@@ -2034,6 +2034,21 @@ async def test_wait_for_http_approval_persists_runtime_approval_interaction() ->
         "scope": "session",
     }
     assert resolved.resolved_at is not None
+    approval_result_events = [
+        event
+        for event in runtime_store.events
+        if event.event_kind == "wire.ApprovalResponse"
+    ]
+    assert len(approval_result_events) == 1
+    display_events = project_runtime_events_to_display(approval_result_events)
+    assert len(display_events) == 1
+    assert display_events[0].display_kind == "approval_result"
+    assert display_events[0].payload == {
+        "agent_id": "",
+        "request_id": "req-runtime-interaction",
+        "approved": True,
+        "feedback": "approved",
+    }
 
 
 @pytest.mark.asyncio

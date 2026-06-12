@@ -3026,13 +3026,21 @@ class SessionManager:
         """
         await self._assert_owner(session_id)
         session = await self.get_session_async(session_id)
-        return await self._approval_decisions().submit(
+        response = await self._approval_decisions().submit(
             session,
             request_id,
             approved=approved,
             feedback=feedback,
             scope=scope,
         )
+        if response is not None:
+            await RuntimeWireEventRecorder(
+                self._runtime_store,
+                new_event_id=lambda run_id: (
+                    f"{run_id}:wire:approval-response:{request_id}"
+                ),
+            ).append_wire_event(session, response)
+        return response
 
     async def submit_approval(
         self,
