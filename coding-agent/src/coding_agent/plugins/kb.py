@@ -46,6 +46,8 @@ class KBPlugin:
         top_k: int = 5,
         index_extensions: list[str] | None = None,
         text_extensions: list[str] | set[str] | None = None,
+        corpus: str = "default",
+        search_corpora: list[str] | tuple[str, ...] | None = None,
         embedding_fn: Callable[[list[str]], list[list[float]]] | None = None,
     ) -> None:
         self._db_path = db_path
@@ -55,6 +57,16 @@ class KBPlugin:
         self._chunk_size = chunk_size
         self._chunk_overlap = chunk_overlap
         self._top_k = top_k
+        if not isinstance(corpus, str):
+            raise TypeError("corpus must be a string")
+        if search_corpora is not None and not all(
+            isinstance(item, str) for item in search_corpora
+        ):
+            raise TypeError("search_corpora must contain only strings")
+        self._corpus = corpus
+        self._search_corpora = (
+            tuple(search_corpora) if search_corpora is not None else None
+        )
         normalized_extensions = index_extensions
         if normalized_extensions is None and text_extensions is not None:
             normalized_extensions = list(text_extensions)
@@ -90,6 +102,7 @@ class KBPlugin:
             chunk_overlap=self._chunk_overlap,
             embedding_fn=self._embedding_fn,
             text_extensions=set(self._index_extensions),
+            corpus=self._corpus,
         )
         self._has_table = self._kb.has_table()
         logger.info(
@@ -125,7 +138,11 @@ class KBPlugin:
                 top_k=self._top_k,
             ),
         ) as span:
-            results = self._kb.search_sync(user_message, k=self._top_k)
+            results = self._kb.search_sync(
+                user_message,
+                k=self._top_k,
+                corpora=self._search_corpora,
+            )
             retrieval_attributes = _retrieval_result_attributes(
                 results,
                 cache_hit=False,

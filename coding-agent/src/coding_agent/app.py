@@ -261,6 +261,16 @@ def create_child_pipeline(
     mcp_cfg = cfg.extra.get("mcp", {})
     storage_cfg = cfg.extra.get("storage", {})
     kb_cfg = cfg.extra.get("kb", {})
+    kb_corpus = kb_cfg.get("corpus", "default")
+    if not isinstance(kb_corpus, str):
+        raise ValueError("[kb].corpus must be a string")
+    kb_search_corpora = kb_cfg.get("search_corpora")
+    if kb_search_corpora is not None and not isinstance(kb_search_corpora, list):
+        raise ValueError("[kb].search_corpora must be a list")
+    if kb_search_corpora is not None and not all(
+        isinstance(item, str) for item in kb_search_corpora
+    ):
+        raise ValueError("[kb].search_corpora must contain only strings")
     observability_cfg = cfg.extra.get("observability", {})
     if not isinstance(observability_cfg, dict):
         raise ValueError("[observability] config must be a table")
@@ -359,6 +369,8 @@ def create_child_pipeline(
                     "index_extensions",
                     [".md", ".txt", ".rst", ".yaml", ".yml", ".toml"],
                 ),
+                corpus=kb_corpus,
+                search_corpora=kb_search_corpora,
             ),
         }
     )

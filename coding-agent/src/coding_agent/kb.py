@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -26,7 +27,8 @@ from rich.progress import (
 
 logger = logging.getLogger(__name__)
 
-_METADATA_VERSION = 1
+_DEFAULT_CORPUS = "default"
+_METADATA_VERSION = 2
 _MAX_REPO_RETRIEVAL_FETCH_K = 5000
 _MAX_FAILURE_RETRIEVAL_FETCH_K = 5000
 _MAX_TEST_FAILURE_SNIPPET_CHARS = 4000
@@ -165,11 +167,15 @@ def _source_id(
     source_kind: str,
     repo_path: str | None,
     source: str,
+    corpus: str = _DEFAULT_CORPUS,
 ) -> str:
     if not source_kind.strip():
         raise ValueError("source_kind must be non-empty")
+    corpus = _normalize_corpus(corpus)
     source_key = repo_path if repo_path is not None else source
-    return hashlib.sha256(f"{source_kind}:{source_key}".encode("utf-8")).hexdigest()
+    return hashlib.sha256(
+        f"{corpus}:{source_kind}:{source_key}".encode("utf-8")
+    ).hexdigest()
 
 
 def _chunk_id(*, source_id: str, chunk_index: int) -> str:
@@ -178,6 +184,44 @@ def _chunk_id(*, source_id: str, chunk_index: int) -> str:
 
 def _sql_quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
+
+
+def _normalize_corpus(corpus: str) -> str:
+    if not isinstance(corpus, str):
+        raise TypeError("corpus must be a string")
+    normalized = corpus.strip()
+    if not normalized:
+        raise ValueError("corpus must be non-empty")
+    return normalized
+
+
+def _normalize_corpora(corpora: Sequence[str] | None) -> tuple[str, ...] | None:
+    if corpora is None:
+        return None
+    if isinstance(corpora, str):
+        raise TypeError("corpora must be a sequence of strings, not a string")
+    normalized = tuple(dict.fromkeys(_normalize_corpus(corpus) for corpus in corpora))
+    if not normalized:
+        raise ValueError("corpora must not be empty")
+    return normalized
+
+
+def _corpus_filter(corpora: Sequence[str] | None) -> str | None:
+    normalized = _normalize_corpora(corpora)
+    if normalized is None:
+        return None
+    if len(normalized) == 1:
+        return f"corpus = {_sql_quote(normalized[0])}"
+    quoted = ", ".join(_sql_quote(corpus) for corpus in normalized)
+    return f"corpus IN ({quoted})"
+
+
+def _single_corpus_filter(corpus: str, *, include_null_default: bool = False) -> str:
+    corpus = _normalize_corpus(corpus)
+    clause = f"corpus = {_sql_quote(corpus)}"
+    if include_null_default and corpus == _DEFAULT_CORPUS:
+        return f"({clause} OR corpus IS NULL)"
+    return clause
 
 
 def _line_range_for_span(text: str, start: int, end: int) -> tuple[int, int]:
@@ -265,9 +309,15 @@ def _repo_retrieval_results(
     return repo_results
 
 
-def _test_failure_source_id(command_label: str, test_node_id: str) -> str:
+def _test_failure_source_id(
+    command_label: str,
+    test_node_id: str,
+    *,
+    corpus: str = _DEFAULT_CORPUS,
+) -> str:
+    corpus = _normalize_corpus(corpus)
     return hashlib.sha256(
-        f"test_failure:{command_label}:{test_node_id}".encode("utf-8")
+        f"{corpus}:test_failure:{command_label}:{test_node_id}".encode("utf-8")
     ).hexdigest()
 
 
@@ -379,6 +429,7 @@ class KB:
         chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
         embedding_fn: Callable[[list[str]], list[list[float]]] | None = None,
         text_extensions: set[str] | None = None,
+        corpus: str = _DEFAULT_CORPUS,
     ):
         """Initialize the knowledge base.
 
@@ -391,6 +442,7 @@ class KB:
             chunk_overlap: Number of tokens to overlap between chunks.
             embedding_fn: Optional custom embedding function for testing.
                          If not provided, uses OpenAI API.
+            corpus: Corpus name assigned to newly indexed rows.
         """
         self.db_path = Path(db_path)
         self.embedding_model = embedding_model
@@ -399,6 +451,7 @@ class KB:
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self._embedding_fn = embedding_fn
+        self.corpus = _normalize_corpus(corpus)
         self._openai_client = None
         self._openai_sync_client = None
         self._text_extensions = text_extensions or {
@@ -566,6 +619,7 @@ class KB:
 
         if table_name in self._table_names():
             self._table = self._db.open_table(table_name)
+            self._ensure_table_schema(self._table)
         else:
             # Create table with schema
             schema = pa.schema(
@@ -574,6 +628,7 @@ class KB:
                     ("content", pa.string()),
                     ("source", pa.string()),
                     ("metadata", pa.string()),  # JSON string
+                    ("corpus", pa.string()),
                     ("vector", pa.list_(pa.float64(), self.embedding_dim)),
                 ]
             )
@@ -581,24 +636,59 @@ class KB:
 
         return self._table
 
+    def _ensure_table_schema(self, table: lancedb.table.Table) -> None:
+        if "corpus" in table.schema.names:
+            return
+        table.add_columns({"corpus": _sql_quote(_DEFAULT_CORPUS)})
+
     def has_table(self, table_name: str = "chunks") -> bool:
         return table_name in self._table_names()
 
-    def _rows_for_source(self, source: str) -> list[dict[str, Any]]:
+    def corpus_counts(self) -> dict[str, int]:
+        if not self.has_table():
+            return {}
+        rows = self._get_table().search().select(["corpus"]).to_list()
+        counts: dict[str, int] = {}
+        for row in rows:
+            corpus = row.get("corpus")
+            if not isinstance(corpus, str):
+                corpus = _DEFAULT_CORPUS
+            counts[corpus] = counts.get(corpus, 0) + 1
+        return counts
+
+    def _rows_for_source(
+        self,
+        source: str,
+        *,
+        corpus: str | None = None,
+    ) -> list[dict[str, Any]]:
         if not self.has_table():
             return []
         table = self._get_table()
-        return [
-            row for row in table.to_arrow().to_pylist() if row.get("source") == source
-        ]
+        row_corpus = self.corpus if corpus is None else _normalize_corpus(corpus)
+        return (
+            table.search()
+            .where(
+                f"source = {_sql_quote(source)} AND "
+                f"{_single_corpus_filter(row_corpus, include_null_default=True)}"
+            )
+            .select(["id", "source", "metadata", "corpus"])
+            .to_list()
+        )
 
     def _delete_source_rows_except(
         self,
         source: str,
         keep_ids: set[str],
+        *,
+        corpus: str | None = None,
     ) -> None:
         table = self._get_table()
-        source_clause = f"source = {_sql_quote(source)}"
+        row_corpus = self.corpus if corpus is None else _normalize_corpus(corpus)
+        source_clause = (
+            f"source = {_sql_quote(source)} AND "
+            f"{_single_corpus_filter(row_corpus, include_null_default=True)}"
+        )
         if keep_ids:
             keep_clause = ", ".join(
                 _sql_quote(chunk_id) for chunk_id in sorted(keep_ids)
@@ -611,11 +701,21 @@ class KB:
         self,
         root: Path,
         existing_sources: set[str],
+        *,
+        corpus: str | None = None,
     ) -> None:
         if not self.has_table():
             return
         root = Path(root)
-        for row in self._get_table().to_arrow().to_pylist():
+        row_corpus = self.corpus if corpus is None else _normalize_corpus(corpus)
+        rows = (
+            self._get_table()
+            .search()
+            .where(_single_corpus_filter(row_corpus, include_null_default=True))
+            .select(["source", "metadata", "corpus"])
+            .to_list()
+        )
+        for row in rows:
             source = row.get("source")
             if not isinstance(source, str) or source in existing_sources:
                 continue
@@ -635,7 +735,7 @@ class KB:
                 continue
             if (root / repo_path).exists():
                 continue
-            self._delete_source_rows_except(source, set())
+            self._delete_source_rows_except(source, set(), corpus=row_corpus)
 
     async def index_file(
         self,
@@ -661,6 +761,7 @@ class KB:
             source_kind=source_kind,
             repo_path=repo_path,
             source=source,
+            corpus=self.corpus,
         )
 
         # Split content into chunks
@@ -669,14 +770,14 @@ class KB:
 
         if not chunks or all(not c.strip() for c in chunks):
             if self.has_table():
-                self._delete_source_rows_except(source, set())
+                self._delete_source_rows_except(source, set(), corpus=self.corpus)
             return
 
         chunk_ids = {
             _chunk_id(source_id=source_id, chunk_index=index)
             for index in range(len(chunks))
         }
-        existing_rows = self._rows_for_source(source)
+        existing_rows = self._rows_for_source(source, corpus=self.corpus)
         existing_ids = {
             row["id"] for row in existing_rows if isinstance(row.get("id"), str)
         }
@@ -723,6 +824,7 @@ class KB:
                     "content": chunk_content,
                     "source": source,
                     "metadata": json.dumps(metadata),
+                    "corpus": self.corpus,
                     "vector": embedding,
                 }
             )
@@ -734,7 +836,7 @@ class KB:
             .when_not_matched_insert_all()
             .execute(data)
         )
-        self._delete_source_rows_except(source, chunk_ids)
+        self._delete_source_rows_except(source, chunk_ids, corpus=self.corpus)
 
     async def index_test_failure(
         self,
@@ -763,7 +865,11 @@ class KB:
 
         failure_sha256 = hashlib.sha256(failure_snippet.encode("utf-8")).hexdigest()
         snippet_sha256 = hashlib.sha256(snippet.encode("utf-8")).hexdigest()
-        source_id = _test_failure_source_id(command_label, test_node_id)
+        source_id = _test_failure_source_id(
+            command_label,
+            test_node_id,
+            corpus=self.corpus,
+        )
         chunk_id = f"failure_{source_id[:12]}_{snippet_sha256[:12]}"
         metadata = {
             "metadata_version": _METADATA_VERSION,
@@ -786,6 +892,7 @@ class KB:
             "content": snippet,
             "source": test_node_id,
             "metadata": json.dumps(metadata),
+            "corpus": self.corpus,
             "vector": embeddings[0],
         }
         table = self._get_table()
@@ -890,7 +997,13 @@ class KB:
         else:
             console.print(f"[green]✓[/green] Indexed {len(files)} files")
 
-    async def search(self, query: str, k: int = 5) -> list[KBSearchResult]:
+    async def search(
+        self,
+        query: str,
+        k: int = 5,
+        *,
+        corpora: Sequence[str] | None = None,
+    ) -> list[KBSearchResult]:
         """Search for relevant chunks using vector search.
 
         Args:
@@ -912,7 +1025,11 @@ class KB:
         # Perform vector search
         import json
 
-        results = table.search(query_vector).limit(k).to_list()
+        search = table.search(query_vector)
+        corpus_filter = _corpus_filter(corpora)
+        if corpus_filter is not None:
+            search = search.where(corpus_filter)
+        results = search.limit(k).to_list()
 
         return [
             KBSearchResult(
@@ -931,6 +1048,8 @@ class KB:
         self,
         query: str,
         k: int = 5,
+        *,
+        corpora: Sequence[str] | None = None,
     ) -> list[RepoRetrievalResult]:
         if not query.strip() or k <= 0:
             return []
@@ -945,9 +1064,13 @@ class KB:
         embeddings = await self._embed([query])
         query_vector = embeddings[0]
         fetch_k = _repo_retrieval_initial_fetch_k(k, _MAX_REPO_RETRIEVAL_FETCH_K)
+        corpus_filter = _corpus_filter(corpora)
 
         while True:
-            rows = table.search(query_vector).limit(fetch_k).to_list()
+            search = table.search(query_vector)
+            if corpus_filter is not None:
+                search = search.where(corpus_filter)
+            rows = search.limit(fetch_k).to_list()
             fetched = [_search_result_from_row(row) for row in rows]
             repo_results = _repo_retrieval_results(fetched, k=k)
             if (
@@ -962,6 +1085,8 @@ class KB:
         self,
         query: str,
         k: int = 5,
+        *,
+        corpora: Sequence[str] | None = None,
     ) -> list[TestFailureRetrievalResult]:
         if not query.strip() or k <= 0:
             return []
@@ -976,9 +1101,13 @@ class KB:
         embeddings = await self._embed([query])
         query_vector = embeddings[0]
         fetch_k = _repo_retrieval_initial_fetch_k(k, _MAX_FAILURE_RETRIEVAL_FETCH_K)
+        corpus_filter = _corpus_filter(corpora)
 
         while True:
-            rows = table.search(query_vector).limit(fetch_k).to_list()
+            search = table.search(query_vector)
+            if corpus_filter is not None:
+                search = search.where(corpus_filter)
+            rows = search.limit(fetch_k).to_list()
             fetched = [_search_result_from_row(row) for row in rows]
             failure_results = _failure_retrieval_results(fetched, k=k)
             if (
@@ -989,7 +1118,13 @@ class KB:
                 return failure_results
             fetch_k = min(fetch_k * 2, _MAX_FAILURE_RETRIEVAL_FETCH_K)
 
-    def search_sync(self, query: str, k: int = 5) -> list[KBSearchResult]:
+    def search_sync(
+        self,
+        query: str,
+        k: int = 5,
+        *,
+        corpora: Sequence[str] | None = None,
+    ) -> list[KBSearchResult]:
         if not query.strip():
             return []
 
@@ -1003,7 +1138,11 @@ class KB:
 
         import json
 
-        results = table.search(query_vector).limit(k).to_list()
+        search = table.search(query_vector)
+        corpus_filter = _corpus_filter(corpora)
+        if corpus_filter is not None:
+            search = search.where(corpus_filter)
+        results = search.limit(k).to_list()
 
         return [
             KBSearchResult(
@@ -1018,7 +1157,13 @@ class KB:
             for r in results
         ]
 
-    async def hybrid_search(self, query: str, k: int = 5) -> list[KBSearchResult]:
+    async def hybrid_search(
+        self,
+        query: str,
+        k: int = 5,
+        *,
+        corpora: Sequence[str] | None = None,
+    ) -> list[KBSearchResult]:
         """Search using hybrid approach: full-text + vector search.
 
         Performs both full-text search and vector search, then merges
@@ -1043,13 +1188,21 @@ class KB:
         # Perform both searches
         import json
 
+        corpus_filter = _corpus_filter(corpora)
+
         # Vector search
-        vector_results = table.search(query_vector).limit(k).to_list()
+        vector_search = table.search(query_vector)
+        if corpus_filter is not None:
+            vector_search = vector_search.where(corpus_filter)
+        vector_results = vector_search.limit(k).to_list()
 
         # Full-text search (using LanceDB's full-text search)
         fts_results: list[dict[str, Any]] = []
         try:
-            fts_results = table.search(query, query_type="fts").limit(k).to_list()
+            fts_search = table.search(query, query_type="fts")
+            if corpus_filter is not None:
+                fts_search = fts_search.where(corpus_filter)
+            fts_results = fts_search.limit(k).to_list()
         except (RuntimeError, NotImplementedError):
             # FTS might not be available or index not built, fall back to vector only
             logger.debug("Full-text search not available, using vector search only")

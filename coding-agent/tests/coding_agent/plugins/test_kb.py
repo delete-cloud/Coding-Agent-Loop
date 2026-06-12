@@ -119,7 +119,8 @@ class TestKBPlugin:
         calls = {"count": 0}
         original_search_sync = plugin._kb.search_sync
 
-        def counted_search_sync(query: str, k: int = 5):
+        def counted_search_sync(query: str, k: int = 5, *, corpora=None):
+            del corpora
             calls["count"] += 1
             return original_search_sync(query, k=k)
 

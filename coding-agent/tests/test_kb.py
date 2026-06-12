@@ -275,7 +275,7 @@ class TestKBIndexing:
         results = await kb.search("alpha", k=1)
         assert len(results) == 1
         metadata = results[0].chunk.metadata
-        assert metadata["metadata_version"] == 1
+        assert metadata["metadata_version"] == 2
         assert metadata["source_kind"] == "repo_file"
         assert metadata["repo_path"] == "src/app.py"
         assert metadata["language"] == "python"
@@ -366,6 +366,39 @@ class TestKBIndexing:
 
         rows = kb._get_table().to_arrow().to_pylist()
         assert {row["source"] for row in rows} == {str(first_keep), str(second_path)}
+
+    @pytest.mark.asyncio
+    async def test_index_directory_prune_does_not_delete_other_corpora(
+        self, tmp_path, mock_embedding_fn
+    ):
+        repo_root = tmp_path / "repo"
+        source_path = repo_root / "shared.md"
+        repo_root.mkdir()
+        source_path.write_text("shared content")
+        kb_sre = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_fn=mock_embedding_fn,
+            chunk_size=1000,
+            chunk_overlap=0,
+            corpus="sre",
+        )
+        kb_notes = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_fn=mock_embedding_fn,
+            chunk_size=1000,
+            chunk_overlap=0,
+            corpus="notes",
+        )
+        await kb_sre.index_directory(repo_root, show_progress=False)
+        await kb_notes.index_directory(repo_root, show_progress=False)
+
+        source_path.unlink()
+        await kb_sre.index_directory(repo_root, show_progress=False, prune=True)
+
+        rows = kb_sre._get_table().to_arrow().to_pylist()
+        assert {(row["corpus"], row["content"]) for row in rows} == {
+            ("notes", "shared content")
+        }
 
     @pytest.mark.asyncio
     async def test_index_directory_prunes_when_root_has_no_indexable_files(
@@ -655,6 +688,145 @@ class TestKBIndexing:
         assert rows[0]["content"] == "updated quoted path"
 
     @pytest.mark.asyncio
+    async def test_index_file_isolates_same_source_across_corpora(
+        self, tmp_path, mock_embedding_fn
+    ):
+        repo_root = tmp_path / "repo"
+        source_path = repo_root / "docs" / "guide.md"
+        source_path.parent.mkdir(parents=True)
+        kb_sre = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_fn=mock_embedding_fn,
+            chunk_size=1000,
+            chunk_overlap=0,
+            corpus="sre",
+        )
+        kb_notes = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_fn=mock_embedding_fn,
+            chunk_size=1000,
+            chunk_overlap=0,
+            corpus="notes",
+        )
+
+        await kb_sre.index_file(source_path, "sre restore guide", repo_root=repo_root)
+        await kb_notes.index_file(
+            source_path,
+            "notes restore guide",
+            repo_root=repo_root,
+        )
+        await kb_sre.index_file(
+            source_path,
+            "updated sre restore guide",
+            repo_root=repo_root,
+        )
+
+        rows = kb_sre._get_table().to_arrow().to_pylist()
+        assert {(row["corpus"], row["content"]) for row in rows} == {
+            ("sre", "updated sre restore guide"),
+            ("notes", "notes restore guide"),
+        }
+        source_ids = {
+            row["corpus"]: json.loads(row["metadata"])["source_id"] for row in rows
+        }
+        assert source_ids["sre"] != source_ids["notes"]
+
+    @pytest.mark.asyncio
+    async def test_search_filters_by_corpora(self, tmp_path):
+        def corpus_embed(texts: list[str]) -> list[list[float]]:
+            vectors: list[list[float]] = []
+            for text in texts:
+                lower = text.lower()
+                if "sre" in lower or "restore" in lower:
+                    vectors.append([1.0, 0.0])
+                elif "notes" in lower:
+                    vectors.append([0.0, 1.0])
+                else:
+                    vectors.append([0.5, 0.5])
+            return vectors
+
+        kb_sre = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_dim=2,
+            embedding_fn=corpus_embed,
+            corpus="sre",
+        )
+        kb_notes = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_dim=2,
+            embedding_fn=corpus_embed,
+            corpus="notes",
+        )
+        await kb_sre.index_file(Path("sre.md"), "sre restore runbook")
+        await kb_notes.index_file(Path("notes.md"), "notes daily journal")
+
+        kb_reader = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_dim=2,
+            embedding_fn=corpus_embed,
+        )
+        sre_results = await kb_reader.search("restore", k=5, corpora=["sre"])
+        notes_results = await kb_reader.search("restore", k=5, corpora=["notes"])
+        all_results = await kb_reader.search("restore", k=5)
+
+        assert {result.chunk.source for result in sre_results} == {"sre.md"}
+        assert {result.chunk.source for result in notes_results} == {"notes.md"}
+        assert {result.chunk.source for result in all_results} == {
+            "sre.md",
+            "notes.md",
+        }
+
+    def test_existing_table_without_corpus_column_migrates_to_default(self, tmp_path):
+        import lancedb
+
+        db_path = tmp_path / "kb_db"
+        db = lancedb.connect(str(db_path))
+        db.create_table(
+            "chunks",
+            data=[
+                {
+                    "id": "legacy",
+                    "content": "legacy content",
+                    "source": "legacy.md",
+                    "metadata": json.dumps({"metadata_version": 1}),
+                    "vector": [0.0] * 8,
+                }
+            ],
+        )
+
+        kb = KB(db_path=db_path, embedding_dim=8, embedding_fn=lambda texts: [])
+
+        assert kb.corpus_counts() == {"default": 1}
+        rows = kb._get_table().to_arrow().to_pylist()
+        assert rows[0]["corpus"] == "default"
+
+    @pytest.mark.asyncio
+    async def test_index_file_existing_row_lookup_does_not_materialize_vectors(
+        self, tmp_path, monkeypatch, mock_embedding_fn
+    ):
+        repo_root = tmp_path / "repo"
+        source_path = repo_root / "docs" / "guide.md"
+        source_path.parent.mkdir(parents=True)
+        content = "same document content"
+        kb = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_fn=mock_embedding_fn,
+            chunk_size=1000,
+            chunk_overlap=0,
+        )
+        await kb.index_file(source_path, content, repo_root=repo_root)
+        table = kb._get_table()
+
+        def fail_to_arrow():
+            raise AssertionError("source lookup must not materialize the whole table")
+
+        monkeypatch.setattr(table, "to_arrow", fail_to_arrow)
+
+        await kb.index_file(source_path, content, repo_root=repo_root)
+
+        assert mock_embedding_fn.call_count == 1
+
+    @pytest.mark.asyncio
     async def test_index_directory(self, temp_db_path, mock_embedding_fn):
         """Test indexing a directory of files."""
         kb = KB(
@@ -868,6 +1040,50 @@ class TestKBSearch:
         assert results[0].score <= results[1].score
 
     @pytest.mark.asyncio
+    async def test_repo_retrieval_filters_by_corpora(self, tmp_path):
+        first_root = tmp_path / "first"
+        second_root = tmp_path / "second"
+        first_path = first_root / "src" / "auth.py"
+        second_path = second_root / "src" / "auth.py"
+        first_path.parent.mkdir(parents=True)
+        second_path.parent.mkdir(parents=True)
+        first_path.write_text("sre auth runbook\n")
+        second_path.write_text("notes auth journal\n")
+        kb_sre = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_dim=4,
+            embedding_fn=_repo_retrieval_embed,
+            chunk_size=1000,
+            chunk_overlap=0,
+            corpus="sre",
+        )
+        kb_notes = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_dim=4,
+            embedding_fn=_repo_retrieval_embed,
+            chunk_size=1000,
+            chunk_overlap=0,
+            corpus="notes",
+        )
+        await kb_sre.index_directory(first_root, show_progress=False)
+        await kb_notes.index_directory(second_root, show_progress=False)
+
+        kb_reader = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_dim=4,
+            embedding_fn=_repo_retrieval_embed,
+        )
+        sre_results = await kb_reader.search_repo("auth", k=5, corpora=["sre"])
+        notes_results = await kb_reader.search_repo("auth", k=5, corpora=["notes"])
+
+        assert [result.chunk.content for result in sre_results] == [
+            "sre auth runbook\n"
+        ]
+        assert [result.chunk.content for result in notes_results] == [
+            "notes auth journal\n"
+        ]
+
+    @pytest.mark.asyncio
     async def test_repo_retrieval_skips_legacy_rows_without_repo_metadata(
         self, tmp_path
     ):
@@ -1066,6 +1282,56 @@ class TestKBSearch:
         assert results[0].score <= results[1].score
 
     @pytest.mark.asyncio
+    async def test_failure_retrieval_filters_by_corpora(self, tmp_path):
+        kb_sre = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_dim=4,
+            embedding_fn=_failure_retrieval_embed,
+            corpus="sre",
+        )
+        kb_notes = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_dim=4,
+            embedding_fn=_failure_retrieval_embed,
+            corpus="notes",
+        )
+        await kb_sre.index_test_failure(
+            command_label="uv run pytest tests/test_auth.py",
+            exit_code=1,
+            test_node_id="tests/test_auth.py::test_expired_token",
+            failure_snippet="expired token in sre auth test",
+        )
+        await kb_notes.index_test_failure(
+            command_label="uv run pytest tests/test_auth.py",
+            exit_code=1,
+            test_node_id="tests/test_auth.py::test_expired_token",
+            failure_snippet="expired token in notes auth test",
+        )
+
+        kb_reader = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_dim=4,
+            embedding_fn=_failure_retrieval_embed,
+        )
+        sre_results = await kb_reader.search_test_failures(
+            "expired auth",
+            k=5,
+            corpora=["sre"],
+        )
+        notes_results = await kb_reader.search_test_failures(
+            "expired auth",
+            k=5,
+            corpora=["notes"],
+        )
+
+        assert [result.chunk.content for result in sre_results] == [
+            "expired token in sre auth test"
+        ]
+        assert [result.chunk.content for result in notes_results] == [
+            "expired token in notes auth test"
+        ]
+
+    @pytest.mark.asyncio
     async def test_failure_retrieval_skips_non_failure_rows(self, tmp_path):
         def mixed_failure_embed(texts: list[str]) -> list[list[float]]:
             vectors: list[list[float]] = []
@@ -1173,6 +1439,44 @@ class TestKBHybridSearch:
 
         assert len(results) > 0
         assert all(isinstance(r, KBSearchResult) for r in results)
+
+    @pytest.mark.asyncio
+    async def test_hybrid_search_filters_by_corpora(self, tmp_path):
+        def hybrid_embed(texts: list[str]) -> list[list[float]]:
+            vectors: list[list[float]] = []
+            for text in texts:
+                lower = text.lower()
+                if "sre" in lower or "restore" in lower:
+                    vectors.append([1.0, 0.0])
+                elif "notes" in lower:
+                    vectors.append([0.0, 1.0])
+                else:
+                    vectors.append([0.5, 0.5])
+            return vectors
+
+        kb_sre = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_dim=2,
+            embedding_fn=hybrid_embed,
+            corpus="sre",
+        )
+        kb_notes = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_dim=2,
+            embedding_fn=hybrid_embed,
+            corpus="notes",
+        )
+        await kb_sre.index_file(Path("sre.md"), "sre restore runbook")
+        await kb_notes.index_file(Path("notes.md"), "notes daily journal")
+
+        kb_reader = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_dim=2,
+            embedding_fn=hybrid_embed,
+        )
+        results = await kb_reader.hybrid_search("restore", k=5, corpora=["sre"])
+
+        assert {result.chunk.source for result in results} == {"sre.md"}
 
     @pytest.mark.asyncio
     async def test_hybrid_search_empty_query(self, temp_db_path, mock_embedding_fn):
