@@ -1,0 +1,76 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "coding-agent.fullname" . }}-agent-config
+  labels:
+    {{- include "coding-agent.labels" . | nindent 4 }}
+data:
+  agent.toml: |
+    [agent]
+    name = "coding-agent"
+    model = {{ .Values.agent.config.model | quote }}
+    provider = {{ .Values.agent.config.provider | quote }}
+    system_prompt = """You are a skilled coding assistant. You help users write, debug, and improve code.
+    You have access to file operations, shell commands, and search tools.
+    Always explain your reasoning before making changes."""
+    max_turns = {{ .Values.agent.config.maxTurns }}
+
+    [server]
+    host = {{ .Values.server.host | quote }}
+    port = {{ .Values.server.port }}
+    {{- if .Values.server.auth.enabled }}
+    bearer_token_env = {{ required "server.auth.bearerTokenEnv is required when server.auth.enabled=true" .Values.server.auth.bearerTokenEnv | quote }}
+    {{- end }}
+
+    [agent.plugins]
+    enabled = [
+      "llm_provider",
+      "storage",
+      "core_tools",
+      "approval",
+      "doom_detector",
+      "parallel_executor",
+      "topic",
+      "summarizer",
+      "memory",
+      "session_metrics",
+      "shell_session",
+      "skills",
+    ]
+
+    [storage]
+    tape_backend = "sqlite"
+    http_session_backend = "sqlite"
+    checkpoint_backend = "sqlite"
+    runtime_backend = "sqlite"
+    doc_backend = "lancedb"
+
+    [storage.paths]
+    local = {{ printf "%s/local.sqlite3" .Values.persistence.data.mountPath | quote }}
+    docs = {{ printf "%s/docs" .Values.persistence.data.mountPath | quote }}
+
+    [approval]
+    policy = {{ .Values.agent.config.approvalPolicy | quote }}
+    blocked_tools = []
+
+    [subagent]
+    timeout = {{ .Values.agent.config.subagentTimeout }}
+
+    [shell]
+    sandbox_mode = {{ .Values.agent.config.shell.sandboxMode | quote }}
+    cpu_limit_seconds = {{ .Values.agent.config.shell.cpuLimitSeconds }}
+    {{- if .Values.agent.config.shell.memoryLimitMb }}
+    memory_limit_mb = {{ .Values.agent.config.shell.memoryLimitMb }}
+    {{- end }}
+    docker_image = {{ .Values.agent.config.shell.dockerImage | quote }}
+
+    [web_search]
+    backend = "mock"
+
+    [summarizer]
+    max_entries = 100
+    keep_recent = 20
+
+    [topic]
+    overlap_threshold = 0.2
+    min_entries_before_detect = 4
