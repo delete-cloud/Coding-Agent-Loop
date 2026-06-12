@@ -67,6 +67,24 @@ def _agent_toml(docs: list[dict[str, Any]]) -> dict[str, Any]:
     return tomllib.loads(config["data"]["agent.toml"])
 
 
+def _env_var(container: dict[str, Any], name: str) -> dict[str, Any]:
+    for item in container.get("env", []):
+        if item.get("name") == name:
+            return item
+    raise AssertionError(f"missing env var {name}")
+
+
+def _command_option(command: list[str], option: str) -> str:
+    try:
+        index = command.index(option)
+    except ValueError as exc:
+        raise AssertionError(f"missing command option {option}") from exc
+    try:
+        return command[index + 1]
+    except IndexError as exc:
+        raise AssertionError(f"missing value for command option {option}") from exc
+
+
 def _assert_storage(docs: list[dict[str, Any]], data_mount: str) -> None:
     storage = _agent_toml(docs)["storage"]
     expected = {
@@ -117,7 +135,46 @@ def test_helm_default_runtime_contract_is_runnable() -> None:
         "runAsUser": 10001,
     }
     assert main["ports"][0]["containerPort"] == 8080
-    assert main["command"][-2:] == ["--port", "8080"]
+    assert _command_option(main["command"], "--port") == "8080"
+    assert (
+        _command_option(main["command"], "--config")
+        == "/app/src/coding_agent/agent.toml"
+    )
+
+
+def test_helm_default_configures_http_auth() -> None:
+    docs = _render()
+    server = _agent_toml(docs)["server"]
+    assert server["bearer_token_env"] == "CODING_AGENT_API_KEY"
+
+    main = _container(docs)
+    assert (
+        _command_option(main["command"], "--config")
+        == "/app/src/coding_agent/agent.toml"
+    )
+
+    token_env = _env_var(main, "CODING_AGENT_API_KEY")
+    assert token_env["valueFrom"]["secretKeyRef"] == {
+        "name": "coding-agent-coding-agent-api-key",
+        "key": "api-key",
+    }
+
+
+@pytest.mark.parametrize(
+    "values_file",
+    [
+        "values-orbstack.yaml",
+        "values-orbstack-kimi.yaml",
+    ],
+)
+def test_helm_local_values_disable_http_auth_secret(values_file: str) -> None:
+    docs = _render("-f", str(CHART / values_file))
+    server = _agent_toml(docs)["server"]
+    assert "bearer_token_env" not in server
+
+    main = _container(docs)
+    with pytest.raises(AssertionError, match="missing env var CODING_AGENT_API_KEY"):
+        _env_var(main, "CODING_AGENT_API_KEY")
 
 
 def test_helm_service_port_override_keeps_app_port() -> None:
@@ -126,7 +183,11 @@ def test_helm_service_port_override_keeps_app_port() -> None:
 
     main = _container(docs)
     assert main["ports"][0]["containerPort"] == 8080
-    assert main["command"][-2:] == ["--port", "8080"]
+    assert _command_option(main["command"], "--port") == "8080"
+    assert (
+        _command_option(main["command"], "--config")
+        == "/app/src/coding_agent/agent.toml"
+    )
 
 
 def test_helm_workspace_mount_override_sets_working_dir() -> None:
@@ -137,3 +198,11 @@ def test_helm_workspace_mount_override_sets_working_dir() -> None:
 def test_helm_data_mount_override_updates_sqlite_bundle_path() -> None:
     docs = _render("--set", "persistence.data.mountPath=/data2")
     _assert_storage(docs, "/data2")
+
+
+def test_runtime_image_installs_native_linux_sandbox_binary() -> None:
+    dockerfile = (ROOT / "Dockerfile").read_text()
+    install_block = dockerfile.split("apt-get install", maxsplit=1)[1].split(
+        "&& rm", maxsplit=1
+    )[0]
+    assert "bubblewrap" in install_block

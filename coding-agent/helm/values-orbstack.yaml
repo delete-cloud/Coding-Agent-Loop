@@ -5,6 +5,9 @@ image:
 service:
   type: ClusterIP
   port: 8080
+server:
+  auth:
+    enabled: false
 redis:
   enabled: false
 sandbox:

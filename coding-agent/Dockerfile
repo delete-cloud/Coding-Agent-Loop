@@ -26,7 +26,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     AGENT_DATA_DIR="/var/lib/coding-agent/data"
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git \
+    && apt-get install -y --no-install-recommends bubblewrap git \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin coding-agent \

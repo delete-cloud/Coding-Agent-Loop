@@ -38,6 +38,8 @@ spec:
             - {{ .Values.server.host | quote }}
             - --port
             - {{ .Values.server.port | quote }}
+            - --config
+            - {{ .Values.server.configPath | quote }}
             {{- end }}
           {{- if .Values.persistence.workspace.enabled }}
           workingDir: {{ .Values.persistence.workspace.mountPath | quote }}
@@ -56,6 +58,13 @@ spec:
           env:
             - name: AGENT_DATA_DIR
               value: {{ .Values.persistence.data.mountPath | quote }}
+            {{- if .Values.server.auth.enabled }}
+            - name: {{ required "server.auth.bearerTokenEnv is required when server.auth.enabled=true" .Values.server.auth.bearerTokenEnv | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default (printf "%s-api-key" (include "coding-agent.fullname" .)) .Values.server.auth.secretName | quote }}
+                  key: {{ required "server.auth.secretKey is required when server.auth.enabled=true" .Values.server.auth.secretKey | quote }}
+            {{- end }}
             {{- if .Values.redis.enabled }}
             - name: AGENT_SESSION_REDIS_URL
               value: {{ default (printf "redis://127.0.0.1:%v/0" .Values.redis.sidecar.port) .Values.redis.url | quote }}
@@ -77,7 +86,7 @@ spec:
             {{- end }}
           volumeMounts:
             - name: agent-config
-              mountPath: /app/src/coding_agent/agent.toml
+              mountPath: {{ .Values.server.configPath | quote }}
               subPath: agent.toml
               readOnly: true
             {{- if .Values.persistence.workspace.enabled }}

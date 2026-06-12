@@ -7,6 +7,10 @@ service:
   type: ClusterIP
   port: 8080
 
+server:
+  auth:
+    enabled: false
+
 agent:
   config:
     provider: kimi-code

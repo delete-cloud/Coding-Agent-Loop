@@ -15,6 +15,13 @@ data:
     Always explain your reasoning before making changes."""
     max_turns = {{ .Values.agent.config.maxTurns }}
 
+    [server]
+    host = {{ .Values.server.host | quote }}
+    port = {{ .Values.server.port }}
+    {{- if .Values.server.auth.enabled }}
+    bearer_token_env = {{ required "server.auth.bearerTokenEnv is required when server.auth.enabled=true" .Values.server.auth.bearerTokenEnv | quote }}
+    {{- end }}
+
     [agent.plugins]
     enabled = [
       "llm_provider",
