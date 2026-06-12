@@ -49,5 +49,8 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked --all-extras --dev
 
+      - name: Build runtime image
+        run: docker build -t coding-agent:ci .
+
       - name: Test
         run: uv run pytest tests/ -q -ra
